@@ -1,4 +1,24 @@
 //! Persistent package/key revocation and publisher key-rotation policy.
+//!
+//! # Publisher trust model
+//!
+//! A `.rapp` publisher is trusted **only** when the owner of the device
+//! installed its Ed25519 public key into the publisher trust store held here
+//! ([`RevocationRegistry::trusted_keys`], persisted in the storage journal
+//! under kind `3`). The store is empty on a device whose owner never
+//! installed a root, and the OS grants itself none.
+//!
+//! WHY no public key is compiled into the OS: a trust root that ships inside
+//! the image is a root that trusts every package signed with the matching
+//! private key, on every device that ships it, and that private key is
+//! exactly the material an attacker wants. Trust has to come from an
+//! installation the device owner performed, and from nowhere else.
+//!
+//! WHY the store is not a grant of authority: a trusted publisher key still
+//! has to pass the Ed25519 signature check, the payload digest check, the
+//! capability policy and the revocation list. The trust store answers "does
+//! the owner of this device know this publisher", not "is this package
+//! acceptable".
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -57,6 +77,12 @@ pub struct RevocationRegistry {
     pub revoked_packages: BTreeMap<String, RevocationRecord>,
     pub revoked_keys: BTreeMap<[u8; 32], RevocationRecord>,
     pub rotated_keys: BTreeMap<String, [u8; 32]>,
+    /// Publisher public keys the owner of this device installed, each with the
+    /// publisher identity recorded alongside it.
+    ///
+    /// WHY this map is the only trust root: a key that is not in it is not
+    /// trusted, whatever else the image happens to contain. There is no
+    /// compiled-in public key and no built-in publisher.
     pub trusted_keys: BTreeMap<[u8; 32], String>,
 }
 
@@ -211,18 +237,26 @@ impl RevocationRegistry {
         true
     }
 
+    /// Restores the device's persisted revocation list and publisher trust
+    /// store.
+    ///
+    /// WHY this grants nothing: a root the OS installs for itself is a root
+    /// that trusts every package signed with it, on every device. The store
+    /// therefore holds exactly the roots the owner of the device installed,
+    /// and a device that never had one installed trusts no publisher at all.
     pub fn seed(&mut self) {
         if self.restore() {
             serial_println!("[REVOCATION] persistent CRL restored.");
         }
         if self.restore_trusted_keys() {
-            serial_println!("[TRUST] persistent publisher trust roots restored.");
-        }
-        if !self.is_key_revoked(&EMBEDDED_SYSTEM_KEY) && !self.trusted_keys.contains_key(&EMBEDDED_SYSTEM_KEY) {
-            let _ = self.grant_trust_root(EMBEDDED_SYSTEM_KEY, "platform");
-        }
-        if !self.is_key_revoked(&EMBEDDED_DEVELOPER_KEY) && !self.trusted_keys.contains_key(&EMBEDDED_DEVELOPER_KEY) {
-            let _ = self.grant_trust_root(EMBEDDED_DEVELOPER_KEY, "developer");
+            serial_println!(
+                "[TRUST] {} operator-installed publisher trust root(s) restored.",
+                self.trusted_keys.len()
+            );
+        } else {
+            serial_println!(
+                "[TRUST] No publisher trust root is installed on this device; every publisher is untrusted until the owner installs one."
+            );
         }
     }
 
@@ -295,10 +329,38 @@ impl RevocationRegistry {
         self.revoked_keys.contains_key(key)
     }
 
-    /// Registers a publisher public key in the device trust store.
-    /// Provisions a publisher trust root from a secure boot/provisioning path.
-    /// This method intentionally has no userspace syscall wrapper.
+    /// Installs a publisher public key into the device trust store, on behalf
+    /// of the owner of the device.
+    ///
+    /// WHY this is the only way a publisher becomes trusted: the OS ships no
+    /// public key of its own, so a trust root exists on a device only because
+    /// the owner installed it here. The record is journalled, so it survives a
+    /// reboot, and it is rolled back when the journal refuses the commit
+    /// rather than leaving behind a root the device cannot explain.
+    ///
+    /// WHY a platform identity is refused here: the console that reaches this
+    /// function is not an authenticated provisioning channel, so it must not
+    /// be able to mint device-wide administration (capability 18). Platform
+    /// authority has to come from a channel that can prove it is the
+    /// platform.
+    ///
+    /// This method intentionally has no userspace syscall wrapper: granting a
+    /// publisher root is the device owner's act, not an application authority.
     pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
+        if is_system_publisher_identity(publisher) {
+            return Err("platform publisher authority requires an authenticated provisioning channel");
+        }
+        self.install_root(key, publisher)
+    }
+
+    /// Journals a publisher public key into the device trust store.
+    ///
+    /// WHY this is separate from `trust_key`: `trust_key` is the entry point
+    /// an unprivileged console can reach, so it refuses platform identities,
+    /// while a key rotation has to be able to carry an identity that was
+    /// already authenticated when it was first installed. The state transition
+    /// and the journal commit are the same in both cases.
+    fn install_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
         let previous = self.trusted_keys.get(&key).cloned();
         self.grant_trust_root(key, publisher)?;
         if self.persist_trusted_keys().is_err() {
@@ -319,8 +381,11 @@ impl RevocationRegistry {
     /// record back whenever the journal refuses the commit. That is correct,
     /// but it also means the trust decision itself cannot be observed on a
     /// machine with no block device bound. The state transition therefore lives
-    /// here, where the invariant test can reach it, and no caller outside this
-    /// module can grant trust without journalling it.
+    /// here, where the invariant test can reach it.
+    ///
+    /// WHY this is not a second kind of trust root: it writes into the same
+    /// store `trust_key` writes into, so a key recorded here is trusted only
+    /// while the record survives, and it is withdrawn by the same CRL.
     pub(crate) fn grant_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
         if !self.trusted_keys.contains_key(&key) && self.trusted_keys.len() >= MAX_PERSISTED_RECORDS {
             return Err("publisher trust store is full");
@@ -329,60 +394,89 @@ impl RevocationRegistry {
         Ok(())
     }
 
-    /// Returns true only for an explicitly provisioned publisher key or embedded key (unless revoked).
+    /// Returns true only for a publisher public key the owner of this device
+    /// installed, and only while that key is not revoked.
+    ///
+    /// WHY there is no built-in root: a public key compiled into the OS is
+    /// shipped to every device and to everyone who reads the image, so any
+    /// package signed with the matching private key would be trusted
+    /// everywhere. Trust therefore comes only from the owner's own
+    /// installation record, and an unknown publisher is untrusted.
     pub fn is_key_trusted(&self, key: &[u8; 32]) -> bool {
         if self.is_key_revoked(key) {
             return false;
         }
-        self.trusted_keys.contains_key(key) || Self::is_embedded_key(key)
+        self.trusted_keys.contains_key(key)
     }
 
-    /// Returns true if the key is one of the built-in embedded publication keys.
-    pub fn is_embedded_key(key: &[u8; 32]) -> bool {
-        key == &EMBEDDED_DEVELOPER_KEY || key == &EMBEDDED_SYSTEM_KEY
-    }
-
-    /// Returns the canonical publisher identity for an embedded key.
-    pub fn embedded_publisher(key: &[u8; 32]) -> Option<&'static str> {
-        if key == &EMBEDDED_SYSTEM_KEY {
-            Some("platform")
-        } else if key == &EMBEDDED_DEVELOPER_KEY {
-            Some("developer")
-        } else {
-            None
+    /// Returns the publisher identity recorded with an installed trust root.
+    ///
+    /// WHY this exists: a caller that reports on a package needs to name the
+    /// publisher it actually verified against, and "the key was in the trust
+    /// store" is not that name. A key the owner never installed has no
+    /// publisher identity, and this returns `None` for it rather than a
+    /// placeholder.
+    pub fn trusted_publisher(&self, key: &[u8; 32]) -> Option<&str> {
+        if !self.is_key_trusted(key) {
+            return None;
         }
+        self.trusted_keys.get(key).map(|publisher| publisher.as_str())
     }
 
     /// Returns true if the key is trusted and belongs to an authorized system/platform publisher.
+    ///
+    /// WHY the publisher identity is read from the trust store and not from
+    /// the image: platform authority is a claim about the device, so it can
+    /// only be carried by a root the owner of the device installed under a
+    /// platform identity. There is no built-in platform publisher.
     pub fn is_system_publisher(&self, key: &[u8; 32]) -> bool {
         if !self.is_key_trusted(key) {
             return false;
         }
-        if let Some(publisher) = self.trusted_keys.get(key) {
-            return is_system_publisher_identity(publisher);
+        match self.trusted_keys.get(key) {
+            Some(publisher) => is_system_publisher_identity(publisher),
+            None => false,
         }
-        if let Some(publisher) = Self::embedded_publisher(key) {
-            return is_system_publisher_identity(publisher);
-        }
-        false
     }
 
+    /// Resolves the publisher identity a key rotation must carry forward.
+    ///
+    /// WHY the identity comes from the trust store and not from the proof:
+    /// the rotation proof signs the new key and the epoch, and it does not
+    /// sign the publisher name. A name taken from the proof would therefore
+    /// let any trusted publisher rename itself into the platform namespace
+    /// and mint capability 18 for its own successor key.
+    fn rotation_publisher(&self, old_key: &[u8; 32]) -> Result<String, &'static str> {
+        self.trusted_keys
+            .get(old_key)
+            .cloned()
+            .ok_or("Old key has no recorded publisher identity")
+    }
+
+    /// Applies a publisher key rotation.
+    ///
+    /// WHY the new key inherits the identity recorded for the old key: the
+    /// rotation proof signs the new key and the epoch, and it does not sign
+    /// the publisher name. A label taken from the proof would therefore let
+    /// any trusted publisher rename itself into the platform namespace and
+    /// mint capability 18 for its own successor key.
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
         if !proof.verify() { return Err("Invalid key rotation cryptographic proof"); }
         if !self.is_key_trusted(&proof.old_key) { return Err("Old key is not a trusted publisher root"); }
         if self.is_key_revoked(&proof.old_key) { return Err("Old key is revoked; cannot be rotated"); }
+        let publisher = self.rotation_publisher(&proof.old_key)?;
 
-        let previous_rotated = self.rotated_keys.get(&proof.publisher).copied();
+        let previous_rotated = self.rotated_keys.get(&publisher).copied();
         let previous_new_trust = self.trusted_keys.get(&proof.new_key).cloned();
         let previous_old_revocation = self.revoked_keys.get(&proof.old_key).cloned();
 
-        self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
-        if self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher).is_err()
-            || self.trust_key(proof.new_key, &proof.publisher).is_err()
+        self.rotated_keys.insert(publisher.clone(), proof.new_key);
+        if self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &publisher).is_err()
+            || self.install_root(proof.new_key, &publisher).is_err()
         {
             match previous_rotated {
-                Some(old) => { self.rotated_keys.insert(proof.publisher.clone(), old); }
-                None => { self.rotated_keys.remove(&proof.publisher); }
+                Some(old) => { self.rotated_keys.insert(publisher.clone(), old); }
+                None => { self.rotated_keys.remove(&publisher); }
             }
             match previous_new_trust {
                 Some(old) => { self.trusted_keys.insert(proof.new_key, old); }
@@ -395,7 +489,7 @@ impl RevocationRegistry {
             // WHY these two commits are best-effort and not reported: they run
             // only while already returning a failure, and if they fail too the
             // outcome is fail-closed — the journal keeps whatever the individual
-            // `revoke_key`/`trust_key` transactions had already undone, and the
+            // `revoke_key`/`install_root` transactions had already undone, and the
             // publisher is left with its previous root rather than with a
             // half-applied rotation. There is no state to fall back *to* that the
             // caller could act on, so the refusal below is the whole answer.
@@ -404,26 +498,12 @@ impl RevocationRegistry {
             return Err("failed to persist key rotation");
         }
 
-        serial_println!("[KEY ROTATION] Publisher '{}' rotated key successfully to epoch {}.", proof.publisher, proof.epoch);
+        serial_println!("[KEY ROTATION] Publisher '{}' rotated key successfully to epoch {}.", publisher, proof.epoch);
         Ok(())
     }
 }
 
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
-
-/// Canonical embedded developer publication key.
-/// High-entropy random public key point, non-derivable from repository source or seeds.
-pub const EMBEDDED_DEVELOPER_KEY: [u8; 32] = [
-    89, 3, 155, 219, 23, 85, 82, 199, 203, 4, 132, 41, 143, 207, 168, 154,
-    141, 199, 70, 223, 138, 174, 139, 219, 82, 103, 162, 56, 60, 53, 128, 98,
-];
-
-/// Canonical embedded system platform publication key.
-/// High-entropy random public key point, non-derivable from repository source or seeds.
-pub const EMBEDDED_SYSTEM_KEY: [u8; 32] = [
-    48, 194, 237, 209, 3, 219, 152, 203, 151, 81, 175, 228, 102, 192, 141, 43,
-    137, 37, 253, 54, 89, 66, 66, 69, 174, 149, 129, 148, 0, 56, 214, 194,
-];
 
 /// Publisher identities that may hold system platform authority.
 ///
@@ -623,28 +703,131 @@ mod tests {
             "a revoked key must not remain a system publisher");
     }
 
+    /// The OS ships no publisher trust root of its own: a key the owner never
+    /// installed is untrusted, and only the owner's installation record can
+    /// make one trusted.
+    ///
+    /// WHY this replaces a built-in root: a public key compiled into the image
+    /// is trusted by every device that ships it, and the matching private key
+    /// is exactly what an attacker would want. Trust has to be an act of the
+    /// device owner, not a property of the build.
+    ///
+    /// Pinning assertions: a fresh registry trusts nothing, `seed()` installs
+    /// nothing of its own, a key becomes trusted only after an explicit
+    /// installation, and revocation outranks that installation.
     #[test]
-    fn embedded_publication_keys_are_trusted_and_revocation_outranks_them() {
+    fn no_publisher_key_is_trusted_until_the_owner_installs_it() {
         let mut r = RevocationRegistry::new();
 
-        // 1. Embedded developer key is trusted by default but is not a platform publisher
-        assert!(r.is_key_trusted(&EMBEDDED_DEVELOPER_KEY));
-        assert!(!r.is_system_publisher(&EMBEDDED_DEVELOPER_KEY));
+        // 1. A device with no installed root trusts no publisher at all.
+        assert!(r.trusted_keys.is_empty(), "the trust store starts empty");
+        let unknown = [41u8; 32];
+        assert!(!r.is_key_trusted(&unknown),
+            "a key the owner never installed must not be trusted");
+        assert!(!r.is_system_publisher(&unknown),
+            "a key the owner never installed must not be a system publisher");
+        assert_eq!(r.trusted_publisher(&unknown), None,
+            "an uninstalled key must have no publisher identity");
 
-        // 2. Embedded system key is trusted and holds platform authority
-        assert!(r.is_key_trusted(&EMBEDDED_SYSTEM_KEY));
-        assert!(r.is_system_publisher(&EMBEDDED_SYSTEM_KEY));
+        // 2. Restoring the device state installs nothing by itself.
+        r.seed();
+        assert!(r.trusted_keys.is_empty(),
+            "seeding the registry must not install a trust root of its own");
+        assert!(!r.is_key_trusted(&unknown),
+            "seeding the registry must not make an unknown key trusted");
 
-        // 3. Revocation strictly outranks embedded trust
-        r.place_key_on_crl(&EMBEDDED_DEVELOPER_KEY, RevocationReason::KeyCompromised, 40, "root")
+        // 3. The owner's installation is what makes a publisher trusted.
+        r.grant_trust_root(unknown, "com.example.vendor").expect("the trust store has room");
+        assert!(r.is_key_trusted(&unknown));
+        assert_eq!(r.trusted_publisher(&unknown), Some("com.example.vendor"));
+        assert!(!r.is_system_publisher(&unknown),
+            "an ordinary publisher identity carries no platform authority");
+
+        // 4. Revocation strictly outranks the installation record.
+        r.place_key_on_crl(&unknown, RevocationReason::KeyCompromised, 40, "root")
             .expect("CRL has room");
-        assert!(r.is_key_revoked(&EMBEDDED_DEVELOPER_KEY));
-        assert!(!r.is_key_trusted(&EMBEDDED_DEVELOPER_KEY), "revoked embedded key must be untrusted");
+        assert!(r.is_key_revoked(&unknown));
+        assert!(!r.is_key_trusted(&unknown),
+            "a revoked publisher key must be untrusted");
+        assert_eq!(r.trusted_publisher(&unknown), None,
+            "a revoked publisher key must report no trusted identity");
+    }
 
-        r.place_key_on_crl(&EMBEDDED_SYSTEM_KEY, RevocationReason::KeyCompromised, 41, "root")
+    /// A publisher key the owner installed under a platform identity is the
+    /// only thing that can carry device-wide administration, and the
+    /// installation itself is what the owner did.
+    ///
+    /// Pinning assertions: the platform identity alone confers nothing, the
+    /// installed key does, and revocation removes it again.
+    #[test]
+    fn platform_authority_comes_only_from_an_installed_root() {
+        let mut r = RevocationRegistry::new();
+        let platform = [42u8; 32];
+
+        assert!(!r.is_system_publisher(&platform),
+            "a platform identity that was never installed grants nothing");
+
+        r.grant_trust_root(platform, "org.interos.platform").expect("the trust store has room");
+        assert!(r.is_system_publisher(&platform),
+            "an installed platform publisher must be recognised");
+
+        r.place_key_on_crl(&platform, RevocationReason::KeyCompromised, 41, "root")
             .expect("CRL has room");
-        assert!(r.is_key_revoked(&EMBEDDED_SYSTEM_KEY));
-        assert!(!r.is_key_trusted(&EMBEDDED_SYSTEM_KEY), "revoked embedded system key must be untrusted");
-        assert!(!r.is_system_publisher(&EMBEDDED_SYSTEM_KEY));
+        assert!(!r.is_system_publisher(&platform),
+            "a revoked key must not remain a system publisher");
+    }
+
+    /// The console that installs publisher roots is not an authenticated
+    /// provisioning channel, so it must not be able to mint device-wide
+    /// administration.
+    ///
+    /// Pinning assertion: the refusal names the policy rather than a storage
+    /// failure, and the refused installation leaves no trust record behind.
+    #[test]
+    fn a_console_installation_cannot_mint_platform_authority() {
+        let mut r = RevocationRegistry::new();
+        let key = [51u8; 32];
+
+        let err = r.trust_key(key, "org.interos.platform").unwrap_err();
+        assert_eq!(err, "platform publisher authority requires an authenticated provisioning channel",
+            "the refusal must name the policy, not a storage failure");
+        assert!(r.trusted_keys.is_empty(), "a refused installation must leave no trust record");
+        assert!(!r.is_key_trusted(&key));
+        assert!(!r.is_system_publisher(&key));
+
+        // An ordinary publisher identity is still installable this way.
+        let ordinary = [52u8; 32];
+        r.grant_trust_root(ordinary, "com.example.vendor").expect("the trust store has room");
+        assert!(r.is_key_trusted(&ordinary));
+    }
+
+    /// A key rotation carries the identity recorded for the key it replaces,
+    /// and cannot rename a publisher into the platform namespace.
+    ///
+    /// WHY the rotation proof cannot supply the name: it signs the new key
+    /// and the epoch, so the publisher name inside it is not authenticated.
+    ///
+    /// Pinning assertion: the identity resolved for the rotation is the one
+    /// the trust store recorded, whatever the proof claims.
+    #[test]
+    fn a_rotation_carries_the_recorded_identity_forward() {
+        let mut r = RevocationRegistry::new();
+        let old_key = [53u8; 32];
+        let new_key = [54u8; 32];
+        r.grant_trust_root(old_key, "com.example.vendor").expect("the trust store has room");
+
+        let proof = KeyRotationProof {
+            publisher: String::from("org.interos.platform"),
+            old_key,
+            new_key,
+            epoch: 9,
+            proof_signature: [0u8; 64],
+        };
+
+        assert_eq!(r.rotation_publisher(&proof.old_key).unwrap(), "com.example.vendor",
+            "a rotation must inherit the recorded identity, not the name in the proof");
+        assert_eq!(r.rotation_publisher(&[55u8; 32]).unwrap_err(),
+            "Old key has no recorded publisher identity",
+            "a key that was never installed has no identity to carry forward");
     }
 }

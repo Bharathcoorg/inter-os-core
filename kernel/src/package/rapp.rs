@@ -276,12 +276,25 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     if data.len()<payload_end || data.len()!=payload_end{return Err(RappError::PayloadOverflow)}
     let computed=Sha256::digest(&data[payload_offset..payload_end]);
     if computed!=digest{return Err(RappError::DigestMismatch)}
-    let reg=REVOCATION_REGISTRY.lock();
-    if reg.is_package_revoked(&package_id){return Err(RappError::PackageRevoked)}
-    if reg.is_key_revoked(&publisher_key){return Err(RappError::PublisherRevoked)}
-    if !reg.is_key_trusted(&publisher_key){return Err(RappError::PublisherUntrusted)}
-    drop(reg);
+    // WHY the registry lock is not held across the signature verification:
+    // the Ed25519 check is the most expensive step of this function and the
+    // registry lock is a spin lock, so holding it across the verification
+    // would serialise every package parse behind it.
+    {
+        let reg=REVOCATION_REGISTRY.lock();
+        if reg.is_package_revoked(&package_id){return Err(RappError::PackageRevoked)}
+        if reg.is_key_revoked(&publisher_key){return Err(RappError::PublisherRevoked)}
+    }
+    // WHY the signature is verified before the publisher is looked up: the
+    // trust store answers "does the owner of this device know this
+    // publisher", and that question only has a meaning for a package whose
+    // signature is authentic. Reporting "untrusted publisher" for a forged or
+    // tampered container would describe the wrong fault, and would hide that
+    // the container was never signed by anybody the device knows.
     verify_rapp_signature(data,&publisher_key,&signature,payload_offset,payload_len)?;
+    if !REVOCATION_REGISTRY.lock().is_key_trusted(&publisher_key){
+        return Err(RappError::PublisherUntrusted)
+    }
     let mut policy=PackagePolicy::from_rapp_capabilities(&capabilities);
     policy.dependencies=dependencies.clone();
     if !policy.validate(){return Err(RappError::InvalidDependency)}
@@ -291,10 +304,15 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
 /// Inspects the discrete trust state of a `.rapp` container.
 ///
 /// Returns a typed `TrustState` enum rather than a UI string:
-/// - `TrustState::Trusted`: Valid structure, authentic Ed25519 signature, trusted publisher key, valid payload digest.
-/// - `TrustState::Untrusted`: Container is structured properly but publisher key is not in the trust store.
+/// - `TrustState::Trusted`: Valid structure, authentic Ed25519 signature, publisher key installed by the owner of this device, valid payload digest.
+/// - `TrustState::Untrusted`: Container is structured properly and its signature is authentic, but the publisher key was never installed by the owner of this device.
 /// - `TrustState::Revoked`: Package ID or publisher key is recorded on the CRL.
 /// - `TrustState::Tampered`: Payload digest mismatch, invalid cryptographic signature, or corrupted container structure.
+///
+/// WHY the states are disjoint: a package is only ever reported as trusted
+/// when its signature verified against a key the device owner installed, and
+/// a container whose signature does not verify is reported as tampered rather
+/// than as an untrusted publisher.
 pub fn inspect_rapp_trust(data: &[u8]) -> TrustState {
     match parse_rapp(data) {
         Ok(manifest) => manifest.trust_state,
@@ -652,9 +670,81 @@ mod tests {
 
     #[test]
     fn parse_rapp_rejects_untrusted_publisher() {
-        let (pkg, _pub_key, _) = create_signed_test_package(&[1], 12);
+        // WHY no installation happens here: this is the shape of a package
+        // that arrives from somewhere the owner never trusted. The OS ships
+        // no publisher root of its own, so nothing but an explicit
+        // installation can make this key acceptable.
+        let (pkg, pub_key, _) = create_signed_test_package(&[1], 12);
+        assert!(
+            !REVOCATION_REGISTRY.lock().trusted_keys.contains_key(&pub_key),
+            "the test must start from a publisher the owner never installed"
+        );
         let res = parse_rapp(&pkg);
         assert_eq!(res.unwrap_err(), RappError::PublisherUntrusted);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Untrusted);
+    }
+
+    /// The publisher becomes acceptable only when the owner of the device
+    /// installs its public key into the trust store.
+    ///
+    /// WHY this is the whole trust model: the OS carries no public key of its
+    /// own, so the installation is the only thing that can turn an unknown
+    /// publisher into a trusted one.
+    #[test]
+    fn parse_rapp_accepts_an_operator_installed_publisher() {
+        let pkg_id = "org.interos.operator_installed";
+        let (pkg, pub_key, _) = create_signed_test_package_with_id(pkg_id, &[1, 24], 41);
+
+        // Before the installation the publisher is unknown and the package is
+        // refused with a truthful error.
+        assert_eq!(parse_rapp(&pkg).unwrap_err(), RappError::PublisherUntrusted);
+
+        // The owner installs the publisher public key.
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "com.example.vendor").unwrap();
+
+        let manifest = parse_rapp(&pkg).expect("a package from an installed publisher must parse");
+        assert_eq!(manifest.package_id, pkg_id);
+        assert_eq!(manifest.publisher_key, pub_key);
+        assert_eq!(manifest.trust_state, TrustState::Trusted);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Trusted);
+
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    /// A revoked publisher is refused even though the owner installed it.
+    ///
+    /// WHY this is asserted here and not only in the registry test: the
+    /// install record and the CRL are two different pieces of state, and the
+    /// package path has to intersect them.
+    #[test]
+    fn parse_rapp_rejects_a_revoked_operator_installed_publisher() {
+        let pkg_id = "org.interos.revoked_operator_publisher";
+        let (pkg, pub_key, _) = create_signed_test_package_with_id(pkg_id, &[1], 42);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "com.example.vendor").unwrap();
+        REVOCATION_REGISTRY.lock()
+            .place_key_on_crl(&pub_key, RevocationReason::KeyCompromised, 7, "owner")
+            .unwrap();
+
+        assert_eq!(parse_rapp(&pkg).unwrap_err(), RappError::PublisherRevoked);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Revoked);
+
+        REVOCATION_REGISTRY.lock().revoked_keys.remove(&pub_key);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    /// A container that does not verify is reported as tampered, not as an
+    /// untrusted publisher.
+    ///
+    /// WHY the order matters: "the publisher is unknown" is a statement about
+    /// the device, and reporting it for a forged container would describe a
+    /// fault that is not the one that occurred.
+    #[test]
+    fn parse_rapp_reports_tampering_before_an_untrusted_publisher() {
+        let (mut pkg, _pub_key, _) = create_signed_test_package(&[1], 43);
+        pkg[RAPP_SIGNATURE_OFFSET] ^= 0x5A;
+
+        assert_eq!(parse_rapp(&pkg).unwrap_err(), RappError::SignatureInvalid);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Tampered);
     }
 
     #[test]

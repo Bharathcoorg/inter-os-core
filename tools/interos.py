@@ -1400,6 +1400,15 @@ def cmd_run(args):
     log(f"Deploying {rapp_path.name} to InterOS Device Studio at {url}...")
     try:
         data = rapp_path.read_bytes()
+        # WHY the trust root is provisioned here: the guest OS trusts no
+        # publisher until the owner of the device installs one, and deploying
+        # an app to a local device is that owner's decision to trust the
+        # publisher of it.
+        trust_ok, trust_detail = _provision_guest_trust(data, "developer", port)
+        if not trust_ok:
+            log_error(f"The guest does not trust this publisher yet: {trust_detail}")
+            return 1
+        log(f"Publisher 'developer' trusted in the guest trust store: {trust_detail}")
         req = urllib.request.Request(
             url,
             data=data,
@@ -1491,6 +1500,34 @@ def cmd_uninstall(args):
         return 1
 
 
+def _provision_guest_trust(data, publisher, port):
+    """Installs a publisher's public key into the guest's publisher trust store.
+
+    WHY the guest needs this: the OS carries no publisher trust root of its
+    own, so a package whose publisher the owner never installed is refused by
+    the kernel. The owner of a local device is whoever drives the Studio
+    console, and asking to install a package is that owner's decision to
+    trust the publisher of it -- the same decision the `trust` command
+    records on its own.
+
+    Returns (ok, detail) so a caller can report what the guest said.
+    """
+    if len(data) < 0xB0 or data[:4] != b"RAPP":
+        return False, "Invalid RAPP package"
+    public_key = data[0x28:0x48].hex()
+    url = f"http://127.0.0.1:{port}/api/rapp/trust"
+    payload = json.dumps({"public_key": public_key, "publisher": publisher}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return False, str(e)
+    if result.get("success"):
+        return True, public_key
+    return False, result.get("message", result.get("error", "unknown error"))
+
+
 def cmd_install(args):
     pkg_path = Path(args.package_path)
     if not pkg_path.exists():
@@ -1507,8 +1544,15 @@ def cmd_install(args):
     if not _ensure_studio(port):
         return 1
     filename = pkg_path.name
-    log(f"Uploading verified package '{filename}' to InterOS Studio (port {port})...")
     data = pkg_path.read_bytes()
+    publisher = getattr(args, "publisher", "developer")
+    trust_ok, trust_detail = _provision_guest_trust(data, publisher, port)
+    if not trust_ok:
+        log_error(f"The guest does not trust this publisher yet: {trust_detail}")
+        log_error(f"Provision it with 'interos.py trust {filename}' and install again.")
+        return 1
+    log(f"Publisher '{publisher}' trusted in the guest trust store: {trust_detail}")
+    log(f"Uploading verified package '{filename}' to InterOS Studio (port {port})...")
     url = f"http://127.0.0.1:{port}/api/rapp/install"
     req = urllib.request.Request(
         url,
@@ -1534,28 +1578,16 @@ def cmd_trust(args):
         log_error(f"Package file not found: {pkg_path}")
         return 1
     data = pkg_path.read_bytes()
-    if len(data) < 0xB0 or data[:4] != b"RAPP":
-        log_error("Invalid RAPP package")
-        return 1
-    public_key = data[0x28:0x48].hex()
     publisher = getattr(args, "publisher", "developer")
     port = getattr(args, "port", 4300)
     if not _ensure_studio(port):
         return 1
-    url = f"http://127.0.0.1:{port}/api/rapp/trust"
-    payload = json.dumps({"public_key": public_key, "publisher": publisher}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if result.get("success"):
-            log_success(f"Publisher trust root provisioned in QEMU guest: {public_key}")
-            return 0
-        log_error(f"Guest trust provisioning failed: {result.get('message', result.get('error'))}")
-        return 1
-    except Exception as e:
-        log_error(f"Could not provision guest trust root: {e}")
-        return 1
+    ok, detail = _provision_guest_trust(data, publisher, port)
+    if ok:
+        log_success(f"Publisher trust root provisioned in QEMU guest: {detail}")
+        return 0
+    log_error(f"Guest trust provisioning failed: {detail}")
+    return 1
 
 
 # =============================================================================
@@ -1827,6 +1859,7 @@ def main():
     # install
     p_inst = subparsers.add_parser("install", help="Verify and install package onto emulator")
     p_inst.add_argument("package_path", help="Path to package")
+    p_inst.add_argument("--publisher", default="developer", help="Publisher label stored with the trust root")
     p_inst.add_argument("--port", type=int, default=4300, help="Studio port")
     p_inst.set_defaults(func=cmd_install)
 
