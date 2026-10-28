@@ -26,6 +26,18 @@ pub use crate::font::{BASELINE, CAP_TOP, GLYPH_H, GLYPH_W};
 
 use crate::font;
 
+/// The em, in pixels, that a run at `scale` is measured and drawn at.
+///
+/// WHY one function and not two numbers: a screen measured its labels with the
+/// outline face at the rung's em and drew them with a hardcoded one, so the
+/// face on the screen was about four per cent wider than the face the
+/// centring had been computed from, and every centred label sat a pixel or two
+/// right of its box. The measure path and the draw path have to name the same
+/// size, so they name it here.
+pub const fn run_em(scale: usize) -> u32 {
+    crate::outline_text::em_for_scale(scale)
+}
+
 /// Advance of one byte in device pixels at `scale`, ignoring weight.
 ///
 /// WHY a byte with no glyph still advances: it has to, or `measure` and the
@@ -41,7 +53,7 @@ use crate::font;
 #[inline]
 pub fn advance(c: u8, scale: usize) -> usize {
     if scale >= 2 {
-        let em = crate::outline_text::em_for_scale(scale);
+        let em = run_em(scale);
         let outline = interos_std::design::typeface::text_advance_px(&[c], em) as usize;
         if outline > 0 {
             return outline;
@@ -89,6 +101,53 @@ pub fn center_x(text: &[u8], scale: usize, available: usize) -> usize {
     } else {
         (available - w) / 2
     }
+}
+
+/// The width a run of `text` is painted at, in pixels.
+///
+/// WHY the painted width and not the measured advance: a bold run is dilated by
+/// one column when it is drawn, so it inks a pixel past its advance, and a
+/// label centred on the advance is half a pixel right of the box's centre.
+/// The bitmap face is not dilated, so the two agree at scale one.
+pub fn painted_width(text: &[u8], scale: usize, bold: bool) -> usize {
+    let measured = measure(text, scale);
+    if scale < 2 {
+        return measured;
+    }
+    let em = run_em(scale);
+    let outline = interos_std::design::typeface::text_advance_px(text, em) as usize
+        + usize::from(bold);
+    measured.max(outline)
+}
+
+/// Left edge that centres `text` horizontally within `available`, using the
+/// width the run is painted at rather than the width it is measured at.
+pub fn center_x_painted(text: &[u8], scale: usize, available: usize, bold: bool) -> usize {
+    let w = painted_width(text, scale, bold);
+    if w >= available {
+        0
+    } else {
+        (available - w) / 2
+    }
+}
+
+/// The top of the line box whose cap box is centred on `center_y`.
+///
+/// WHY the cap box and not the line box: a reader sees the cap box, and the
+/// line box carries the face's ascent and descent above and below it. Putting
+/// the line box's centre on a control's centre drops the glyphs by half the
+/// descent, which is what left the category chips sitting low in their pills.
+///
+/// WHY the two faces are handled apart: a run at scale two and above is drawn
+/// with the outline face, whose cap height the type scale names; a run at
+/// scale one is drawn with the bitmap face, whose cell carries its own cap box.
+pub fn cap_centred_top(scale: usize, center_y: usize) -> usize {
+    if scale < 2 {
+        return center_y.saturating_sub(font::CAP_TOP + font::CAP_HEIGHT / 2);
+    }
+    let cap = font::cap_for_scale(scale) as usize;
+    let baseline = center_y + cap / 2;
+    baseline.saturating_sub(font::ascent_for_scale(scale))
 }
 
 /// Turns a reverse-DNS package id into a title a person can read.

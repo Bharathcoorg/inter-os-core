@@ -12,7 +12,7 @@
 //! it goes. That is what makes the shell adapt to available apps instead of
 //! describing them.
 
-use crate::theme::{space, Theme, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::theme::{space, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// A rectangle in logical surface coordinates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -221,6 +221,46 @@ pub fn content_area(theme_pad: usize) -> Rect {
 /// A card centred inside `bounds`, inset by `space::MD` on every side.
 pub fn card(bounds: Rect) -> Rect {
     bounds.inset(space::MD)
+}
+
+/// Gap between the app drawer's category chips.
+const CHIP_GAP: usize = 10;
+
+/// Height of an app-drawer category chip.
+const CHIP_H: usize = 40;
+
+/// The app drawer's category-chip row: the band it occupies and the four pills in it.
+///
+/// WHY one function and not two: the band the shell repaints when the active
+/// tab changes and the pills the pixels are drawn into have to be the same
+/// numbers, and two hand-kept copies of them drift apart the first time the
+/// padding moves.
+///
+/// WHY the pills are computed and not typed in: four fixed rectangles leave a
+/// sliver on the right whenever the content width does not divide by four, and
+/// a label centred in a pill that is not where the pill was drawn reads as a
+/// label that is not centred.
+pub struct ChipRow {
+    /// The rows the row occupies, which is what the shell repaints on a tab change.
+    pub band: Rect,
+    /// The four pills, left to right.
+    pub chips: [Rect; 4],
+}
+
+/// The app drawer's category tabs, left to right.
+pub const APP_DRAWER_TAB_NAMES: [&[u8]; 4] = [b"All", b"Work", b"Personal", b"Tools"];
+
+/// The app drawer's category-chip row.
+pub fn app_drawer_chip_row() -> ChipRow {
+    let content = content_area(CONTENT_PADDING);
+    let band = Rect::new(content.x, 116, content.w, 44);
+    let chip_w = (band.w.saturating_sub(CHIP_GAP * 3)) / 4;
+    let chip_y = band.y + (band.h.saturating_sub(CHIP_H)) / 2;
+    let mut chips = [Rect::new(0, 0, 0, 0); 4];
+    for (i, chip) in chips.iter_mut().enumerate() {
+        *chip = Rect::new(band.x + i * (chip_w + CHIP_GAP), chip_y, chip_w, CHIP_H);
+    }
+    ChipRow { band, chips }
 }
 
 /// Picks foreground ink that stays legible on `bg`.

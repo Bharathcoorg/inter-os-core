@@ -89,7 +89,7 @@ struct Frame {
 fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
     let search = Rect::new(content.x, 56, content.w, 48);
-    let chips = Rect::new(content.x, 116, content.w, 44);
+    let chips = layout::app_drawer_chip_row().band;
     let dots = Rect::new(
         content.x,
         1095,
@@ -155,7 +155,7 @@ pub fn app_drawer_per_page(state: &LauncherState) -> usize {
 }
 
 /// Category tabs: All, Work, Personal, Tools.
-pub const APP_DRAWER_TAB_NAMES: [&[u8]; 4] = [b"All", b"Work", b"Personal", b"Tools"];
+pub use launcher::layout::APP_DRAWER_TAB_NAMES;
 
 fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
@@ -265,11 +265,11 @@ pub fn app_drawer_chip_at(x: usize, y: usize) -> Option<usize> {
     if !f.chips.contains(x, y) {
         return None;
     }
-    let gap = 10usize;
-    let chip_w = (f.chips.w.saturating_sub(gap * 3)) / 4;
-    for i in 0..4 {
-        let cx = f.chips.x + i * (chip_w + gap);
-        if (cx..cx + chip_w).contains(&x) {
+    // WHY the same rectangles the pixels are drawn into: a hit test that
+    // recomputes the chip columns is a second copy of the layout, and the copy
+    // that drifts is the one a person taps.
+    for (i, chip) in layout::app_drawer_chip_row().chips.iter().enumerate() {
+        if (chip.x..chip.x + chip.w).contains(&x) {
             return Some(i);
         }
     }
@@ -536,6 +536,10 @@ impl Run {
     ///
     /// WHY two widths: a tile fits its name to the cell less its padding and then
     /// centres the result across the whole cell, so the two are not the same number.
+    ///
+    /// WHY the painted width and not the measured advance: a bold run is dilated
+    /// by a column when it is drawn, so centring on the advance left every chip
+    /// label half a pixel right of the middle of its pill.
     fn centred(
         x: usize,
         y: usize,
@@ -546,7 +550,7 @@ impl Run {
         ink: u32,
     ) -> Run {
         let (buf, len) = text::ellipsize(bytes, scale, fit);
-        let inset = text::center_x(&buf[..len], scale, centre);
+        let inset = text::center_x_painted(&buf[..len], scale, centre, true);
         Run::placed(x + inset, y, scale, buf, len, ink)
     }
 
@@ -566,7 +570,7 @@ impl Run {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let inset = text::center_x(&buf[..len], scale, centre);
+        let inset = text::center_x_painted(&buf[..len], scale, centre, true);
         Run::placed(x + inset, y, scale, buf, len, ink)
     }
 
@@ -600,13 +604,12 @@ impl Run {
 
     fn placed_styled(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool) -> Run {
         let text = &buf[..len];
-        let em = if scale >= 3 {
-            34
-        } else if scale >= 2 {
-            26
-        } else {
-            launcher::outline_text::em_for_scale(scale)
-        };
+        // WHY the rung's own em and not a hardcoded one: the run is measured with
+        // the outline face at `text::run_em`, so drawing it at any other size put
+        // a wider face on the screen than the centring had been computed from --
+        // the chips sat a pixel or two right of the middle of their pills, and a
+        // title was drawn at the size of a section heading.
+        let em = text::run_em(scale);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
@@ -764,8 +767,9 @@ fn build(state: &LauncherState) -> Paint {
         .search
         .w
         .saturating_sub((search_x - f.search.x) + space::MD);
-    // Optical vertical centering: glyph center aligned exactly to search.center_y()
-    let search_y = f.search.center_y().saturating_sub(9);
+    // Centre the cap box in the field, not the line box, so the text sits on the
+    // same line as the magnifier that is centred on the field itself.
+    let search_y = text::cap_centred_top(type_scale::BODY, f.search.center_y());
     let search = Run::fitted(
         search_x,
         search_y,
@@ -776,10 +780,7 @@ fn build(state: &LauncherState) -> Paint {
     );
 
     // 4 Category Filter Chips: All, Work, Personal, Tools
-    let gap = 10usize;
-    let chip_w = (f.chips.w.saturating_sub(gap * 3)) / 4;
-    let chip_h = 40usize;
-    let chip_y = f.chips.y + (f.chips.h.saturating_sub(chip_h)) / 2;
+    let chip_row = layout::app_drawer_chip_row();
     let mut chips = [
         ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
         ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
@@ -787,16 +788,19 @@ fn build(state: &LauncherState) -> Paint {
         ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
     ];
     for (i, label_bytes) in APP_DRAWER_TAB_NAMES.iter().enumerate() {
-        let chip_x = f.chips.x + i * (chip_w + gap);
-        let chip_rect = Rect::new(chip_x, chip_y, chip_w, chip_h);
+        let chip_rect = chip_row.chips[i];
         let active = state.app_drawer_tab == i;
         let ink = if active {
             0xFFFFFFFF
         } else {
             theme.on_surface_variant
         };
-        // Optical vertical centering: glyph center aligned exactly to chip_rect.center_y()
-        let chip_label_y = chip_rect.center_y().saturating_sub(9);
+        // Centre the cap box in the pill, not the line box: the cap box is what a
+        // reader sees, and the line box carries the face's ascent and descent
+        // above and below it. The old code took half the cap height off the top
+        // of the run, which pushed the baseline down by twice that much and left
+        // every label sitting low in its pill.
+        let chip_label_y = text::cap_centred_top(type_scale::BODY, chip_rect.center_y());
         let label = Run::centred(
             chip_rect.x,
             chip_label_y,

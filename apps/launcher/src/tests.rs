@@ -991,3 +991,146 @@ fn a_label_inks_the_pixels_it_was_placed_at() {
     }
     assert!(inked > 20, "the label inked {} pixels", inked);
 }
+
+// ---------------------------------------------------------------------------
+// Centring a label on the face it is drawn with
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_run_is_measured_with_the_face_it_is_drawn_with() {
+    // WHY this is a test and not a convention: the app drawer measured its
+    // labels with the outline face at the rung's em and drew them at a
+    // hardcoded one, so the face on the screen was about four per cent wider
+    // than the face the centring had been computed from and every centred
+    // label sat to the right of the middle of its box.
+    for scale in 2..=6usize {
+        let em = tm::run_em(scale);
+        let drawn = interos_std::design::typeface::text_advance_px(b"Personal", em) as usize;
+        let measured = tm::measure(b"Personal", scale);
+        assert_eq!(
+            measured, drawn,
+            "scale {} measures {} but is drawn {} wide",
+            scale, measured, drawn
+        );
+    }
+}
+
+#[test]
+fn a_centred_label_is_centred_on_the_face_it_is_drawn_with() {
+    // WHY the painted width and not the measured advance: a bold run is dilated
+    // by a column when it is drawn, so it inks a pixel past its advance.
+    for scale in 2..=6usize {
+        let em = tm::run_em(scale);
+        let label = b"Personal";
+        let available = 152usize;
+        let drawn = interos_std::design::typeface::text_advance_px(label, em) as usize + 1;
+        assert_eq!(
+            tm::painted_width(label, scale, true),
+            drawn,
+            "scale {} paints a different width than it reports",
+            scale
+        );
+        let left = tm::center_x_painted(label, scale, available, true);
+        if drawn >= available {
+            // A label wider than its box has nothing to centre; the caller
+            // clamps to the left edge rather than underflowing.
+            assert_eq!(left, 0, "scale {} must clamp an over-wide label", scale);
+            continue;
+        }
+        let offset = (left + drawn / 2) as i64 - (available / 2) as i64;
+        assert!(
+            offset.abs() <= 1,
+            "scale {} leaves the label {}px off the middle of its box",
+            scale,
+            offset
+        );
+    }
+}
+
+#[test]
+fn a_cap_centred_label_sits_on_the_control_centre_line() {
+    // WHY the cap box: a reader sees the cap box, and the line box carries the
+    // face's ascent and descent above and below it.
+    for scale in 1..=6usize {
+        let centre = 138usize;
+        let top = tm::cap_centred_top(scale, centre);
+        let (cap_top, cap_bottom) = if scale < 2 {
+            // The bitmap face draws a 16x24 cell whose cap box is rows 3..19.
+            (top + crate::font::CAP_TOP, top + crate::font::BASELINE)
+        } else {
+            let baseline = top + crate::font::ascent_for_scale(scale);
+            (baseline - crate::font::cap_for_scale(scale) as usize, baseline)
+        };
+        let cap_centre = (cap_top + cap_bottom) / 2;
+        assert!(
+            cap_centre.abs_diff(centre) <= 1,
+            "scale {} centres its cap box on {}, not on {}",
+            scale,
+            cap_centre,
+            centre
+        );
+    }
+}
+
+#[test]
+fn a_category_chip_label_is_centred_in_its_pill() {
+    // WHY this test exists: the four category chips read as sitting low and a
+    // little to the right of the middle of their pills, which is exactly what
+    // a reader notices first on the screen.
+    let row = app_drawer_chip_row();
+    assert_eq!(row.chips.len(), APP_DRAWER_TAB_NAMES.len());
+    for (i, chip) in row.chips.iter().enumerate() {
+        let label = APP_DRAWER_TAB_NAMES[i];
+        let scale = type_scale::BODY;
+
+        let painted = tm::painted_width(label, scale, true);
+        let left = chip.x + tm::center_x_painted(label, scale, chip.w, true);
+        let offset = (left + painted / 2) as i64 - chip.center_x() as i64;
+        assert!(
+            offset.abs() <= 1,
+            "chip {} is {}px off the middle of its pill",
+            i,
+            offset
+        );
+
+        let top = tm::cap_centred_top(scale, chip.center_y());
+        let baseline = top + crate::font::ascent_for_scale(scale);
+        let cap_top = baseline - crate::font::cap_for_scale(scale) as usize;
+        let cap_centre = (cap_top + baseline) / 2;
+        assert!(
+            cap_centre.abs_diff(chip.center_y()) <= 1,
+            "chip {} centres its cap box on {}, not on {}",
+            i,
+            cap_centre,
+            chip.center_y()
+        );
+        assert!(
+            cap_top >= chip.y && baseline <= chip.y + chip.h,
+            "chip {} draws its label outside its pill",
+            i
+        );
+    }
+}
+
+#[test]
+fn the_category_chips_share_the_band_they_are_drawn_in() {
+    // WHY one band: the shell repaints the band on a tab change and the pixels
+    // are drawn into the pills, and two hand-kept copies of them drift.
+    let row = app_drawer_chip_row();
+    assert_eq!(row.chips[0].x, row.band.x);
+    assert_eq!(row.chips[0].y, row.band.y + (row.band.h - row.chips[0].h) / 2);
+    for i in 1..row.chips.len() {
+        assert_eq!(row.chips[i].w, row.chips[0].w, "the chips are not equal");
+        assert_eq!(row.chips[i].y, row.chips[0].y, "the chips are not on one row");
+        assert!(
+            row.chips[i].x > row.chips[i - 1].x + row.chips[i - 1].w,
+            "chip {} overlaps chip {}",
+            i,
+            i - 1
+        );
+    }
+    assert!(
+        row.chips[3].x + row.chips[3].w <= row.band.x + row.band.w,
+        "the last chip runs past the band"
+    );
+}
