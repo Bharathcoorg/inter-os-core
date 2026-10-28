@@ -98,12 +98,12 @@ pub enum ImageRefusal {
     UnsupportedSource,
     /// The body (or the declared length) exceeded the cap.
     TooLarge { bytes: usize, limit: usize },
-    /// The bytes are not one of the four supported formats.
+    /// The bytes are not one of the supported formats (PNG, JPEG, GIF, WebP, SVG, ICO).
     UnsupportedType,
     /// The header declared more pixels than the reader allows.
     DimensionsTooLarge { width: u32, height: u32, limit: u32 },
-    /// The header could not be read, or names a variant the decoder
-    /// does not implement (progressive JPEG, lossy WebP, 16-bit PNG).
+    /// The header could not be read, or names an unsupported variant
+    /// (progressive JPEG, 16-bit PNG).
     BadHeader,
     /// The decoder refused the body after it was admitted.
     DecodeFailed,
