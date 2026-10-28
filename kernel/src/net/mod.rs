@@ -568,12 +568,16 @@ pub fn poll_network_interface() -> usize {
                                         let mut to_ack_syn: Option<(u16, u16, u32, u32, u16)> = None;
                                         let mut to_process_est: Option<(u32, bool, u32)> = None;
                                         let mut need_ack: Option<u32> = None;
+                                        let mut closing_ack: Option<u32> = None;
+                                        let mut reset_by_peer = false;
                                         {
                                             let mut table = TCP_TABLE.lock();
                                             let _ = table.update_peer_window(id, segment.window);
                                             if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
-                                                if old_state == TcpState::SynSent {
+                                                if segment.flags & 0x04 != 0 {
+                                                    reset_by_peer = true;
+                                                } else if old_state == TcpState::SynSent {
                                                     if valid_syn_ack(&segment, conn.send_seq.wrapping_add(1)) {
                                                         conn.recv_seq = segment.seq.wrapping_add(1);
                                                         conn.send_seq = conn.send_seq.wrapping_add(1);
@@ -597,11 +601,26 @@ pub fn poll_network_interface() -> usize {
                                                     }
                                                 } else {
                                                     conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
-                                                    conn.state = tcp_next_state(old_state, segment.flags);
+                                                    if conn.fin_pending {
+                                                        // A FIN we sent is still unacknowledged, so the
+                                                        // state only moves once this segment's ACK has
+                                                        // been recorded: acknowledge_fin is what stamps
+                                                        // the TIME-WAIT hold. Letting the generic table
+                                                        // jump to Closed first leaves the retry timer
+                                                        // armed against a slot nobody will free.
+                                                        closing_ack = Some(segment.ack);
+                                                    } else {
+                                                        conn.state = tcp_next_state(old_state, segment.flags);
+                                                    }
                                                 }
                                             }
                                             if let Some(ack) = need_ack {
                                                 let _ = table.acknowledge_tx(id, ack);
+                                                let _ = table.acknowledge_fin(id, ack);
+                                            }
+                                            if reset_by_peer {
+                                                let _ = table.abort_by_peer(id);
+                                            } else if let Some(ack) = closing_ack {
                                                 let _ = table.acknowledge_fin(id, ack);
                                             }
                                         }

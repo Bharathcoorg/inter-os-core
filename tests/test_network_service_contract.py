@@ -122,6 +122,11 @@ def main():
     assert "TCP_TABLE.lock().acknowledge_syn" not in net, "SYN-ACK path must not re-lock TCP_TABLE while its guard is held"
     assert "TCP_TABLE.lock().acknowledge_tx" not in net, "ACK path must not re-lock TCP_TABLE while its guard is held"
     assert "TCP_TABLE.lock().acknowledge_fin" not in net, "FIN ACK path must not re-lock TCP_TABLE while its guard is held"
+    must(net, "closing_ack = Some(segment.ack)", "FIN acknowledgement read in the closing states")
+    must(net, "table.acknowledge_fin(id, ack)", "FIN acknowledgement retires the closing connection")
+    must(net, "segment.flags & 0x04 != 0", "inbound TCP reset detection")
+    must(net, "table.abort_by_peer(id)", "reset connection discarded under the table guard")
+    must(sock, "pub fn abort_by_peer", "TCP peer reset lifecycle")
     must(sock, "TCP_MAX_RETRIES", "bounded TCP retry count")
     must(sock, "arm_retransmit", "TCP retransmission state")
     must(sock, "arm_fin", "TCP FIN lifecycle")

@@ -637,6 +637,28 @@ impl TcpConnectionTable {
         false
     }
 
+    /// Discards a connection the peer reset.
+    ///
+    /// A segment with RST set ends the connection at once: the peer has
+    /// forgotten this 4-tuple, so every retransmission aimed at it is a
+    /// timeout waiting to happen. Clearing the pending flags is what lets the
+    /// bounded poll reclaim the slot on the next pass instead of after the
+    /// whole retry budget has been spent against a dead address.
+    pub fn abort_by_peer(&mut self, id: u32) -> bool {
+        let conn = match self.get_mut(id) { Some(c) => c, None => return false };
+        crate::serial_println!(
+            "[TCP RESET] Connection {} dropped: peer at {}.{}.{}.{}:{} sent a reset (local port {})",
+            id, conn.remote_ip.0[0], conn.remote_ip.0[1], conn.remote_ip.0[2], conn.remote_ip.0[3],
+            conn.remote_port, conn.local_port
+        );
+        conn.state = crate::net::TcpState::Closed;
+        conn.syn_pending = false;
+        conn.fin_pending = false;
+        conn.tx_pending = false;
+        conn.time_wait_until = 0;
+        true
+    }
+
     pub fn due_fin_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32, u16)> {
         for slot in self.entries.iter_mut() {
             if let Some(conn) = slot.as_mut() {
@@ -814,6 +836,51 @@ mod tcp_reliability_tests {
         assert_eq!(table.reap_time_wait(until), 1);
         assert_eq!(table.reap_closed(), 1);
         assert!(table.get(id).is_none());
+    }
+
+    /// The other half of a close: the peer finished first, so this side's FIN
+    /// needs only an ACK and no hold afterwards. The reply must clear the
+    /// pending flag, or the reaper treats the slot as still owned by a retry
+    /// timer and the next requester is refused.
+    #[test]
+    fn a_fin_acknowledged_in_last_ack_frees_the_slot_without_a_hold() {
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(7, 41_100, Ipv4Address::LOCALHOST, 41_101, 100)
+            .expect("connection should open");
+        table.get_mut(id).expect("connection exists").state = crate::net::TcpState::CloseWait;
+
+        let fin_seq = table.arm_fin(id, 0).expect("FIN should arm");
+        assert_eq!(table.get(id).expect("entry exists").state, crate::net::TcpState::LastAck);
+        assert!(table.acknowledge_fin(id, fin_seq.wrapping_add(1)));
+
+        assert_eq!(table.get(id).expect("entry remains until reap").state, crate::net::TcpState::Closed);
+        assert!(table.is_closed(id), "the retry timer must no longer claim the slot");
+        assert_eq!(table.reap_closed(), 1);
+        assert!(table.get(id).is_none());
+    }
+
+    /// A reset means the peer has forgotten the 4-tuple, so the slot is dead
+    /// weight the moment it arrives. The browser's subresource burst needs it
+    /// back on the next poll, not after the retry budget has run out.
+    #[test]
+    fn a_peer_reset_returns_the_slot_to_the_next_requester() {
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(7, 41_200, Ipv4Address::LOCALHOST, 41_201, 100)
+            .expect("connection should open");
+        table.get_mut(id).expect("connection exists").state = crate::net::TcpState::Established;
+        table.arm_fin(id, 0).expect("FIN should arm");
+        assert!(table.due_fin_retransmit(TCP_RETRANSMIT_TICKS).is_some(), "the FIN is still owed a wire");
+
+        assert!(table.abort_by_peer(id));
+        assert_eq!(table.get(id).expect("entry remains until reap").state, crate::net::TcpState::Closed);
+        assert_eq!(table.due_fin_retransmit(u64::MAX), None, "nothing may be resent to a reset peer");
+        assert_eq!(table.reap_closed(), 1);
+
+        table
+            .open(7, 41_200, Ipv4Address::LOCALHOST, 41_201, 200)
+            .expect("the freed tuple is open again");
     }
 
     /// A page load is a burst of short connections, and each one leaves a
