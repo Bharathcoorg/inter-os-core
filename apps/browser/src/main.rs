@@ -2363,7 +2363,7 @@ impl BrowserApp {
     fn fetch_linked_stylesheets(&mut self, dom: &mut layout::Dom) {
         // The page's own `<style>` blocks are already in the arena, so the
         // room left for the files it links is what is left of the rule budget.
-        let mut held = css::parse_stylesheet(dom.css()).len;
+        let mut held = css::parse_stylesheet(dom.css(), dom.token_store()).len;
         for index in 0..dom.stylesheets().len() {
             if held >= css::MAX_RULES || dom.css().len() == layout::dom::MAX_CSS_BYTES {
                 break;
@@ -2462,7 +2462,13 @@ impl BrowserApp {
             style[..len].copy_from_slice(&response.body[..len]);
             len
         };
-        let (carries_bytes, carries_rules) = css::keep_readable_rules(&mut style[..text], room);
+        // The file's `--token` definitions are read before anything is cut
+        // away: a rules file that asks for `var(--color-accent-fg)` is only
+        // legible once the theme file that names it has been heard, and the
+        // theme file's own rules are exactly the kind this compaction drops.
+        dom.stow_tokens_from(&style[..text]);
+        let (carries_bytes, carries_rules) =
+            css::keep_readable_rules(&mut style[..text], room, dom.token_store());
         if carries_bytes == 0 {
             // Every selector in the file is one this engine skips. Its text is
             // not kept, because keeping it would leave the page looking the
@@ -3117,7 +3123,7 @@ impl BrowserApp {
         self.execute_page_scripts();
         let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
         {
-            let sheet = css::parse_stylesheet(dom.css());
+            let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
             layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
             for id in 0..dom.node_count() as layout::NodeId {
                 let bs = layout::style::compute(dom, id, &sheet, None);
@@ -3208,7 +3214,7 @@ impl BrowserApp {
             }
         }
         if reflow {
-            let sheet = css::parse_stylesheet(dom.css());
+            let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
             layout::build_with_outcomes(&*dom, &sheet, browser::CONTENT_WIDTH, &outcomes, out);
         }
 

@@ -1650,7 +1650,7 @@ pub fn html_to_reader_document_kind(html: &[u8], kind: PayloadKind, out: &mut [u
                     // to grow this app's work without bound.
                     if !sheet_parsed && tag_word.eq_ignore_ascii_case(b"style") {
                         let css_end = scan.min(n).min(next.saturating_add(css::MAX_CSS_BYTES));
-                        sheet = css::parse_stylesheet(&html[next..css_end]);
+                        sheet = css::parse_stylesheet(&html[next..css_end], css::TokenStore::NONE);
                         sheet_parsed = true;
                     }
                     r = next_r;
@@ -5313,7 +5313,7 @@ mod tests {
         dom.parse(markup);
         assert!(dom.node_count() > 1);
 
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let mut layout = layout::TextLayout::new();
         layout::build(&dom, &sheet, 672, &mut layout);
 

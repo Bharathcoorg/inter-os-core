@@ -45,6 +45,21 @@ pub const MAX_LINKS: usize = 128;
 /// to sit side by side.
 pub const MAX_CSS_BYTES: usize = 32 * 1024;
 
+/// The room one document keeps for the `--token` names its styles declared.
+///
+/// WHY beside the style text and not inside it: a theme's token file carries no
+/// rule this engine paints from, so the text it is written in is given back
+/// when a stylesheet is cut down to what reaches a pixel -- and the names the
+/// rules of the next file ask for would be gone with it. The names survive
+/// here, out of the text they came from.
+///
+/// WHY this much: a name and its value together run to about forty-seven bytes
+/// on a live page measured on 2026-10-28, and [`crate::css::MAX_TOKENS`] of them
+/// are what the stylesheet window can reach, so the room is the table's full
+/// count at that price. As with the table, the bytes are sized so that the
+/// window is what cuts a theme short, not the arena.
+pub const MAX_TOKEN_TEXT_BYTES: usize = 40 * 1024;
+
 /// The most `<link rel="stylesheet">` addresses one document may name.
 ///
 /// WHY a chain rather than one: a page that splits its styles is ordinary,
@@ -237,6 +252,10 @@ pub struct Dom {
     link_count: usize,
     css: [u8; MAX_CSS_BYTES],
     css_len: usize,
+    tokens: [crate::css::TokenSlot; crate::css::MAX_TOKENS],
+    token_len: usize,
+    token_text: [u8; MAX_TOKEN_TEXT_BYTES],
+    token_text_len: usize,
     meta: DocMeta,
     root: NodeId,
     truncated: bool,
@@ -256,6 +275,10 @@ impl Dom {
             link_count: 0,
             css: [0; MAX_CSS_BYTES],
             css_len: 0,
+            tokens: [crate::css::TokenSlot::EMPTY; crate::css::MAX_TOKENS],
+            token_len: 0,
+            token_text: [0; MAX_TOKEN_TEXT_BYTES],
+            token_text_len: 0,
             meta: DocMeta::EMPTY,
             root: NO_NODE,
             truncated: false,
@@ -398,6 +421,8 @@ impl Dom {
         self.attr_count = 0;
         self.link_count = 0;
         self.css_len = 0;
+        self.token_len = 0;
+        self.token_text_len = 0;
         self.meta = DocMeta::EMPTY;
         self.root = NO_NODE;
         self.truncated = false;
@@ -636,11 +661,74 @@ impl Dom {
 
     fn capture_css(&mut self, css: &[u8]) {
         let n = css.len().min(MAX_CSS_BYTES);
+        self.stow_tokens_from(&css[..n]);
         self.css[..n].copy_from_slice(&css[..n]);
         self.css_len = n;
         if css.len() > n {
             self.note(OVERFLOW_CSS);
         }
+    }
+
+    /// The `--token` names this document's styles declared, for the rules that
+    /// ask one for a colour.
+    pub fn token_store(&self) -> crate::css::TokenStore<'_> {
+        crate::css::TokenStore {
+            slots: &self.tokens[..self.token_len],
+            text: &self.token_text[..self.token_text_len],
+        }
+    }
+
+    /// Keeps every `--token: value` a stylesheet declares.
+    ///
+    /// `css` must not be a slice of this document: the walk reads it while the
+    /// names are being written into the arena.
+    pub fn stow_tokens_from(&mut self, css: &[u8]) {
+        crate::css::for_each_custom_property(css, &mut |name, value| {
+            let _ = self.stow_token(name, value);
+        });
+    }
+
+    /// Keeps one `--token` definition, and says whether it was kept.
+    ///
+    /// WHY a repeat is refused rather than written over: a site that ships a
+    /// light and a dark theme declares the same names in both files, and this
+    /// reader cannot tell which one the page is wearing. The first file a page
+    /// links is the style sheet it asked for first, and overwriting it with the
+    /// last would paint a dark page's colours onto a light surface.
+    ///
+    /// WHY a full table is not an overflow the reader reports: a theme file
+    /// declares its names by the hundred -- GitHub leads with nearly two
+    /// thousand -- and the names past the first 832 are ones no rule in the
+    /// page asks for. Saying so would mark a whole page truncated for a list
+    /// of colours it never needed.
+    fn stow_token(&mut self, name: &[u8], value: &[u8]) -> bool {
+        if name.len() > crate::css::MAX_TOKEN_LEN
+            || value.len() > crate::css::MAX_TOKEN_LEN
+            || self.token_len >= crate::css::MAX_TOKENS
+            || self.token_text_len + name.len() + value.len() > MAX_TOKEN_TEXT_BYTES
+        {
+            return false;
+        }
+        let mut index = 0usize;
+        while index < self.token_len {
+            let slot = self.tokens[index];
+            let (at, len) = (slot.name.0 as usize, slot.name.1 as usize);
+            if len == name.len() && at + len <= self.token_text_len && &self.token_text[at..at + len] == name {
+                return false;
+            }
+            index += 1;
+        }
+        let name_at = self.token_text_len as u16;
+        self.token_text[name_at as usize..name_at as usize + name.len()].copy_from_slice(name);
+        let value_at = (name_at as usize + name.len()) as u16;
+        self.token_text[value_at as usize..value_at as usize + value.len()].copy_from_slice(value);
+        self.token_text_len = value_at as usize + value.len();
+        self.tokens[self.token_len] = crate::css::TokenSlot {
+            name: (name_at, name.len() as u16),
+            value: (value_at, value.len() as u16),
+        };
+        self.token_len += 1;
+        true
     }
 
     /// Adds a linked stylesheet's rules after the ones the page carried.
@@ -1974,5 +2062,83 @@ mod tests {
         assert!(dom.meta().title.is_empty());
         assert!(dom.meta().description.is_empty());
         assert!(dom.stylesheets().is_empty());
+    }
+
+    #[test]
+    fn a_stylesheets_names_are_stowed_before_its_rules_are_cut() {
+        let mut dom = Dom::new();
+        dom.parse(b"<style>:root{--accent:#0969da;color-scheme:light}</style><p>text</p>");
+        let tokens = dom.token_store();
+        assert_eq!(tokens.value(b"--accent"), Some(&b"#0969da"[..]));
+        // A name the page never declared has no answer, and inventing one
+        // would paint a colour the page did not ask for.
+        assert_eq!(tokens.value(b"--missing"), None);
+    }
+
+    #[test]
+    fn a_names_second_answer_is_refused() {
+        // WHY: the reader cannot tell a light theme from the dark one written
+        // after it, so the first answer stands and the second is dropped.
+        let mut dom = Dom::new();
+        dom.stow_tokens_from(b":root{--bg:#ffffff}");
+        dom.stow_tokens_from(b":root{--bg:#0d1117}");
+        assert_eq!(dom.token_store().value(b"--bg"), Some(&b"#ffffff"[..]));
+    }
+
+    #[test]
+    fn a_value_too_long_to_keep_is_not_kept() {
+        // WHY the whole definition goes rather than the tail of it: half of a
+        // colour is a colour, and it is the wrong one.
+        let mut dom = Dom::new();
+        let mut sheet = [0u8; 128];
+        let head = b":root{--n:";
+        sheet[..head.len()].copy_from_slice(head);
+        let mut at = head.len();
+        let long = [b'x'; crate::css::MAX_TOKEN_LEN + 1];
+        sheet[at..at + long.len()].copy_from_slice(&long);
+        at += long.len();
+        sheet[at] = b'}';
+        dom.stow_tokens_from(&sheet[..at + 1]);
+        assert_eq!(dom.token_store().value(b"--n"), None);
+    }
+
+    #[test]
+    fn the_name_budget_holds_the_first_names_and_lets_the_rest_go() {
+        let mut dom = Dom::new();
+        let mut sheet = std::vec![0u8; 32 * 1024];
+        let mut at = 0usize;
+        sheet[at..at + 6].copy_from_slice(b":root{");
+        at += 6;
+        // Enough names to fill the table and spill past it, each one a colour
+        // this engine would paint with.
+        for i in 0..(crate::css::MAX_TOKENS + 8) {
+            let decl = std::format!("--n{}:#0969da;", i);
+            if at + decl.len() + 1 > sheet.len() {
+                break;
+            }
+            sheet[at..at + decl.len()].copy_from_slice(decl.as_bytes());
+            at += decl.len();
+        }
+        sheet[at] = b'}';
+        dom.stow_tokens_from(&sheet[..at + 1]);
+        assert_eq!(dom.token_store().slots.len(), crate::css::MAX_TOKENS);
+        assert_eq!(dom.token_store().value(b"--n0"), Some(&b"#0969da"[..]));
+        assert_eq!(dom.token_store().value(b"--past-the-table"), None);
+    }
+
+    #[test]
+    fn a_name_for_a_value_this_engine_cannot_paint_is_not_kept() {
+        // The theme list names shadows, font stacks and gradient curves in the
+        // same run as its colours; only the colours are worth a slot.
+        let mut dom = Dom::new();
+        dom.stow_tokens_from(
+            b":root{--fg:#0969da;--shadow:0 1px 2px #0000001a;--stack:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;--size:12px;--next:var(--fg)}",
+        );
+        let tokens = dom.token_store();
+        assert_eq!(tokens.value(b"--fg"), Some(&b"#0969da"[..]));
+        assert_eq!(tokens.value(b"--size"), Some(&b"12px"[..]));
+        assert_eq!(tokens.value(b"--next"), Some(&b"var(--fg)"[..]));
+        assert_eq!(tokens.value(b"--shadow"), None);
+        assert_eq!(tokens.value(b"--stack"), None);
     }
 }

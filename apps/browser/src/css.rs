@@ -47,6 +47,148 @@ pub const MAX_INLINE_DECLARATIONS: usize = 16;
 /// The specificity of an inline `style` attribute.
 pub const SPEC_INLINE: u16 = 1000;
 
+/// The most `--token` definitions a document may name.
+///
+/// WHY it is a count of its own: a theme file is one long list of names for the
+/// colours a page paints with -- GitHub's leads with nearly two thousand of
+/// them -- and a reader that kept every name would spend the room its rules
+/// need on names no rule asked for.
+///
+/// WHY this many: the stylesheet text one read covers is [`MAX_CSS_BYTES`], and
+/// a live page's token block measured on 2026-10-28 declares 959 distinct names
+/// in a file of that size, of which 788 are paintable and land inside the
+/// window. The table holds those 788 with room over, so it is the window that
+/// cuts a theme short and not the count: a table smaller than the window drops
+/// names the page asked for while bytes of the file went unread beside them.
+pub const MAX_TOKENS: usize = 832;
+
+/// The longest token name or token value that is kept.
+///
+/// WHY a value is dropped rather than cut: half of a colour is a colour, and
+/// it is the wrong one.
+pub const MAX_TOKEN_LEN: usize = 48;
+
+/// One `--token` definition, as the range of text its name and value occupy.
+///
+/// WHY offsets and not slices: the definitions are read out of a stylesheet
+/// while it is being cut down and used long afterwards, and the only place
+/// they can live between those two moments is the document's own arena, which
+/// cannot borrow from itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TokenSlot {
+    pub name: (u16, u16),
+    pub value: (u16, u16),
+}
+
+impl TokenSlot {
+    pub const EMPTY: Self = Self { name: (0, 0), value: (0, 0) };
+}
+
+/// The `--token` definitions a document's styles named.
+#[derive(Clone, Copy)]
+pub struct TokenStore<'a> {
+    pub slots: &'a [TokenSlot],
+    pub text: &'a [u8],
+}
+
+impl<'a> TokenStore<'a> {
+    pub const NONE: Self = Self { slots: &[], text: &[] };
+
+    /// The value a name was given.
+    ///
+    /// WHY the first definition wins: a site that ships a light and a dark
+    /// theme writes the same names into both files, and this reader cannot
+    /// tell which theme the page is wearing. The file that comes first is the
+    /// one the page asked for first, and taking the last would paint a dark
+    /// page's colours onto the light surface the reader draws on.
+    pub fn value(&self, name: &[u8]) -> Option<&'a [u8]> {
+        for slot in self.slots {
+            let (at, len) = (slot.name.0 as usize, slot.name.1 as usize);
+            let (v_at, v_len) = (slot.value.0 as usize, slot.value.1 as usize);
+            if len == 0 || v_at + v_len > self.text.len() || at + len > self.text.len() {
+                continue;
+            }
+            if &self.text[at..at + len] == name {
+                return Some(&self.text[v_at..v_at + v_len]);
+            }
+        }
+        None
+    }
+}
+
+/// Whether a declaration names a custom property, and the name it gives it.
+fn custom_property(property: &[u8]) -> Option<&[u8]> {
+    let property = trim(property);
+    if property.len() > 2 && property.starts_with(b"--") {
+        Some(property)
+    } else {
+        None
+    }
+}
+
+/// Whether a run of digits is a length this engine's properties take.
+fn length_value(value: &[u8]) -> bool {
+    let mut digits = 0usize;
+    let mut at = 0usize;
+    while at < value.len() && (value[at].is_ascii_digit() || value[at] == b'.') {
+        if value[at].is_ascii_digit() {
+            digits += 1;
+        }
+        at += 1;
+    }
+    digits > 0 && matches!(&value[at..], b"" | b"px" | b"em" | b"rem" | b"%")
+}
+
+/// Whether a token's value is one this reader could paint if it found it.
+///
+/// WHY the test is at the door and not at the rule: a theme file names its
+/// shadows, its font stacks and its gradient curve in the same list as its
+/// colours, and a table filled with values no property can use is a table with
+/// no room left for the ones a rule does ask for. A chain is kept because the
+/// answer at the end of it may well be a colour.
+fn paintable(value: &[u8]) -> bool {
+    if value.len() > MAX_TOKEN_LEN {
+        return false;
+    }
+    value.starts_with(b"var(") || parse_color(value).is_some() || length_value(value)
+}
+
+/// Replaces a `var(--name)` or `var(--name, fallback)` with what it stands for.
+///
+/// WHY only a whole value: a token inside a list (`margin: 0 var(--x)`) would
+/// need somewhere to put the bytes it becomes, and every value this reader
+/// applies is a single token -- one colour, one size, one font rung. A `var()`
+/// that is part of a larger value is handed back as it was, and the
+/// declaration is then refused for what it is: a value this reader cannot
+/// resolve.
+///
+/// WHY a chain is walked: a theme names its colours after other names
+/// (`--fgColor-muted: var(--color-fg-muted)`), so the answer to one question
+/// can be another question. Four hops is where the walk stops, because a page
+/// that defines a token in terms of itself has no answer.
+pub fn resolve_custom<'a>(tokens: TokenStore<'a>, value: &'a [u8]) -> &'a [u8] {
+    let mut value = trim(value);
+    let mut hops = 0usize;
+    while value.starts_with(b"var(") && hops < 4 {
+        hops += 1;
+        let inner = &value[4..];
+        let Some(close) = inner.iter().rposition(|&b| b == b')') else {
+            break;
+        };
+        let inner = &inner[..close];
+        let (name, fallback) = match inner.iter().position(|&b| b == b',') {
+            Some(comma) => (trim(&inner[..comma]), trim(&inner[comma + 1..])),
+            None => (inner, b"" as &[u8]),
+        };
+        let named = custom_property(name).and_then(|name| tokens.value(name));
+        value = trim(named.unwrap_or(fallback));
+        if value.is_empty() {
+            break;
+        }
+    }
+    value
+}
+
 /// The reader's computed style for one block.
 ///
 /// `font_scale` is zero when no rule or inline declaration set a size;
@@ -134,6 +276,12 @@ impl<'a> Rule<'a> {
 pub struct Stylesheet<'a> {
     pub rules: [Rule<'a>; MAX_RULES],
     pub len: usize,
+    /// The `--token` definitions the document's styles named.
+    ///
+    /// WHY they ride with the sheet rather than with the text: a rule's colour
+    /// is read when the sheet is parsed, and the name it points at lives in a
+    /// different file than the rule that asks for it.
+    pub tokens: TokenStore<'a>,
 }
 
 impl<'a> Stylesheet<'a> {
@@ -141,6 +289,7 @@ impl<'a> Stylesheet<'a> {
         Self {
             rules: [Rule::EMPTY; MAX_RULES],
             len: 0,
+            tokens: TokenStore::NONE,
         }
     }
 }
@@ -334,11 +483,23 @@ pub fn font_scale_for(value: &[u8]) -> Option<u8> {
 /// Applies one `property: value` declaration to `style`.
 ///
 /// A property this subset does not implement is ignored, exactly as a
-/// browser ignores a property its engine does not know.
-pub fn apply_declaration(style: &mut ComputedStyle, property: &[u8], value: &[u8]) {
+/// browser ignores a property its engine does not know. A value written as
+/// `var(--name)` is read through `tokens` first, because that is where the
+/// page wrote the colour the name stands for.
+pub fn apply_declaration<'a>(
+    style: &mut ComputedStyle,
+    property: &[u8],
+    value: &'a [u8],
+    tokens: TokenStore<'a>,
+) {
     let property = trim(property);
-    let value = trim(value);
+    let value = resolve_custom(tokens, value);
     if property.is_empty() || value.is_empty() {
+        return;
+    }
+    if custom_property(property).is_some() {
+        // A custom property sets no pixel: the reader keeps its value when it
+        // stows the name, and applying it here would change nothing.
         return;
     }
     if eq_ignore_ascii(property, b"color") {
@@ -421,7 +582,11 @@ fn apply_border(style: &mut ComputedStyle, value: &[u8]) {
 }
 
 /// Parses a declaration list (`a: b; c: d`) onto `base`.
-pub fn parse_declarations(bytes: &[u8], base: ComputedStyle) -> ComputedStyle {
+pub fn parse_declarations<'a>(
+    bytes: &'a [u8],
+    base: ComputedStyle,
+    tokens: TokenStore<'a>,
+) -> ComputedStyle {
     let mut style = base;
     let mut start = 0usize;
     let mut count = 0usize;
@@ -434,7 +599,7 @@ pub fn parse_declarations(bytes: &[u8], base: ComputedStyle) -> ComputedStyle {
         let decl = &bytes[start..end];
         if decl.len() <= MAX_DECLARATION_LEN {
             if let Some(colon) = decl.iter().position(|&b| b == b':') {
-                apply_declaration(&mut style, &decl[..colon], &decl[colon + 1..]);
+                apply_declaration(&mut style, &decl[..colon], &decl[colon + 1..], tokens);
                 count += 1;
             }
         }
@@ -633,9 +798,11 @@ fn next_rule(css: &[u8], limit: usize, mut i: usize) -> Option<RulePos> {
 /// A rule that cannot be parsed is skipped; a comment, an at-rule and a
 /// declaration that is not understood simply contribute nothing. The
 /// scan reads at most [`MAX_CSS_BYTES`] and keeps at most [`MAX_RULES`]
-/// rules.
-pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
+/// rules. `tokens` is where a `var(--name)` finds the value the page wrote
+/// for that name.
+pub fn parse_stylesheet<'a>(css: &'a [u8], tokens: TokenStore<'a>) -> Stylesheet<'a> {
     let mut sheet = Stylesheet::empty();
+    sheet.tokens = tokens;
     let limit = css.len().min(MAX_CSS_BYTES);
     let mut at = 0usize;
     while at < limit && sheet.len < MAX_RULES {
@@ -646,7 +813,7 @@ pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
         let selector_text = &css[pos.selector_start..pos.selector_end];
         let body = &css[pos.body_start..pos.body_end];
 
-        let style = parse_declarations(body, ComputedStyle::DEFAULT);
+        let style = parse_declarations(body, ComputedStyle::DEFAULT, tokens);
         if style.is_default() {
             continue;
         }
@@ -667,6 +834,47 @@ pub fn parse_stylesheet(css: &[u8]) -> Stylesheet<'_> {
         }
     }
     sheet
+}
+
+/// Reports every `--token: value` a stylesheet declares, in the order the page
+/// wrote them.
+///
+/// WHY the walk is its own: a file of colour tokens carries no rule this engine
+/// paints from, so [`keep_readable_rules`] gives it back empty and the names it
+/// defined would be lost with it. The rules that ask for those names live in
+/// the files behind it, so the names are kept where the rules can reach them.
+pub fn for_each_custom_property(css: &[u8], visit: &mut dyn FnMut(&[u8], &[u8])) {
+    let limit = css.len().min(MAX_CSS_BYTES);
+    let mut at = 0usize;
+    while at < limit {
+        let Some(pos) = next_rule(css, limit, at) else {
+            break;
+        };
+        at = pos.next;
+        let body = &css[pos.body_start..pos.body_end];
+        let mut start = 0usize;
+        while start < body.len() {
+            let end = body[start..]
+                .iter()
+                .position(|&b| b == b';')
+                .map(|p| start + p)
+                .unwrap_or(body.len());
+            let decl = &body[start..end];
+            start = end.saturating_add(1);
+            if decl.len() > MAX_DECLARATION_LEN {
+                continue;
+            }
+            let Some(colon) = decl.iter().position(|&b| b == b':') else {
+                continue;
+            };
+            let (property, value) = (trim(&decl[..colon]), trim(&decl[colon + 1..]));
+            if let Some(name) = custom_property(property) {
+                if !value.is_empty() && paintable(value) {
+                    visit(name, value);
+                }
+            }
+        }
+    }
 }
 
 /// Whether any name in a selector list is one this engine can match.
@@ -711,7 +919,11 @@ fn readable_selector(css: &[u8], start: usize, end: usize) -> bool {
 /// to be the text the page wrote.
 ///
 /// Returns how many bytes the kept rules occupy and how many rules they are.
-pub fn keep_readable_rules(css: &mut [u8], max_rules: usize) -> (usize, usize) {
+pub fn keep_readable_rules(
+    css: &mut [u8],
+    max_rules: usize,
+    tokens: TokenStore<'_>,
+) -> (usize, usize) {
     let limit = css.len().min(MAX_CSS_BYTES);
     let mut read = 0usize;
     let mut written = 0usize;
@@ -720,7 +932,8 @@ pub fn keep_readable_rules(css: &mut [u8], max_rules: usize) -> (usize, usize) {
         let Some(pos) = next_rule(css, limit, read) else {
             break;
         };
-        let style = parse_declarations(&css[pos.body_start..pos.body_end], ComputedStyle::DEFAULT);
+        let style =
+            parse_declarations(&css[pos.body_start..pos.body_end], ComputedStyle::DEFAULT, tokens);
         let carries = !style.is_default()
             && readable_selector(css, pos.selector_start, pos.selector_end);
         read = pos.next;
@@ -863,7 +1076,7 @@ pub fn cascade(
         }
     }
     if let Some(inline) = inline {
-        let inline_style = parse_declarations(inline, ComputedStyle::DEFAULT);
+        let inline_style = parse_declarations(inline, ComputedStyle::DEFAULT, sheet.tokens);
         merge(&mut style, &mut specs, &inline_style, SPEC_INLINE);
     }
     style
@@ -999,7 +1212,7 @@ mod tests {
 
     #[test]
     fn a_style_rule_changes_the_computed_color() {
-        let sheet = parse_stylesheet(b"p { color: #ff0000; }");
+        let sheet = parse_stylesheet(b"p { color: #ff0000; }", TokenStore::NONE);
         assert_eq!(rule_count(&sheet), 1);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         assert!(style.has_color);
@@ -1008,7 +1221,7 @@ mod tests {
 
     #[test]
     fn the_inline_style_wins_over_a_tag_rule() {
-        let sheet = parse_stylesheet(b"p { color: #00ff00; margin: 8px; }");
+        let sheet = parse_stylesheet(b"p { color: #00ff00; margin: 8px; }", TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], Some(b"color: #0000ff"));
         assert_eq!(style.color, 0xFF0000FF);
         // A property the inline attribute does not name still comes from
@@ -1018,7 +1231,7 @@ mod tests {
 
     #[test]
     fn unknown_properties_are_ignored() {
-        let sheet = parse_stylesheet(b"p { bogus-property: 3px; color: #123456; }");
+        let sheet = parse_stylesheet(b"p { bogus-property: 3px; color: #123456; }", TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         assert_eq!(style.color, 0xFF123456);
         assert_eq!(style.background, 0);
@@ -1041,7 +1254,7 @@ mod tests {
             b". { color: #fff }",
         ];
         for case in cases {
-            let sheet = parse_stylesheet(case);
+            let sheet = parse_stylesheet(case, TokenStore::NONE);
             let _ = cascade(&sheet, element(b"p", b"", b""), &[], Some(case));
             assert!(sheet.len <= MAX_RULES);
         }
@@ -1049,7 +1262,7 @@ mod tests {
 
     #[test]
     fn descendant_selectors_match_the_named_ancestor() {
-        let sheet = parse_stylesheet(b".card p { color: #ff8800; }");
+        let sheet = parse_stylesheet(b".card p { color: #ff8800; }", TokenStore::NONE);
         let ancestors = [element(b"div", b"card", b"")];
         let matched = cascade(&sheet, element(b"p", b"", b""), &ancestors, None);
         assert_eq!(matched.color, 0xFFFF8800);
@@ -1063,6 +1276,7 @@ mod tests {
     fn specificity_orders_id_then_class_then_tag() {
         let sheet = parse_stylesheet(
             b"p { color: #111111; } .note { color: #222222; } #lead { color: #333333; }",
+            TokenStore::NONE,
         );
         let style = cascade(
             &sheet,
@@ -1079,7 +1293,7 @@ mod tests {
 
     #[test]
     fn a_later_rule_of_equal_specificity_wins() {
-        let sheet = parse_stylesheet(b"p { color: #111111; } p { color: #222222; }");
+        let sheet = parse_stylesheet(b"p { color: #111111; } p { color: #222222; }", TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         assert_eq!(style.color, 0xFF222222);
     }
@@ -1091,7 +1305,7 @@ mod tests {
         assert_eq!(font_scale_for(b"24"), Some(2));
         assert_eq!(font_scale_for(b"small"), Some(1));
         assert_eq!(font_scale_for(b"3em"), None);
-        let sheet = parse_stylesheet(b"p { font-size: 24px; }");
+        let sheet = parse_stylesheet(b"p { font-size: 24px; }", TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         assert_eq!(style.font_scale, 2);
     }
@@ -1100,6 +1314,7 @@ mod tests {
     fn margins_padding_and_border_are_parsed() {
         let sheet = parse_stylesheet(
             b"div { margin: 12px; padding: 10px 4px; border: 1px solid #334455; }",
+            TokenStore::NONE,
         );
         let style = cascade(&sheet, element(b"div", b"", b""), &[], None);
         assert_eq!(style.margin_top, 12);
@@ -1113,6 +1328,7 @@ mod tests {
     fn unsupported_selectors_are_skipped() {
         let sheet = parse_stylesheet(
             b"div > p { color: #ff0000; } a:hover { color: #ff0000; } * { color: #ff0000; }",
+            TokenStore::NONE,
         );
         assert_eq!(rule_count(&sheet), 0);
     }
@@ -1130,10 +1346,10 @@ mod tests {
             w += rule.len();
             let _ = i;
         }
-        let sheet = parse_stylesheet(&css[..w]);
+        let sheet = parse_stylesheet(&css[..w], TokenStore::NONE);
         assert!(sheet.len <= MAX_RULES);
         let long_selector = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa { color: #fff }";
-        let long_sheet = parse_stylesheet(long_selector);
+        let long_sheet = parse_stylesheet(long_selector, TokenStore::NONE);
         assert_eq!(long_sheet.len, 0);
     }
 
@@ -1170,7 +1386,7 @@ mod tests {
     #[test]
     fn stray_closing_brace_does_not_abort_parsing() {
         let css = b"div { color: #ff0000; } } p { color: #00ff00; }";
-        let sheet = parse_stylesheet(css);
+        let sheet = parse_stylesheet(css, TokenStore::NONE);
         assert_eq!(rule_count(&sheet), 2);
     }
 
@@ -1188,7 +1404,7 @@ mod tests {
         css[pos..pos + suffix.len()].copy_from_slice(suffix);
         pos += suffix.len();
 
-        let sheet = parse_stylesheet(&css[..pos]);
+        let sheet = parse_stylesheet(&css[..pos], TokenStore::NONE);
         let style = cascade(&sheet, element(b"p", b"", b""), &[], None);
         // The oversized declaration should be dropped, but the subsequent valid one parsed
         assert_eq!(style.font_scale, 2);
@@ -1201,7 +1417,7 @@ mod tests {
 a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         let mut css = [0u8; 256];
         css[..whole_text.len()].copy_from_slice(whole_text);
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
         assert_eq!(kept, 2);
         assert_eq!(
             &css[..written],
@@ -1209,8 +1425,8 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         );
         // What the kept text says is what the whole file said, for the rules
         // this engine reads.
-        let compacted = parse_stylesheet(&css[..written]);
-        let whole = parse_stylesheet(whole_text);
+        let compacted = parse_stylesheet(&css[..written], TokenStore::NONE);
+        let whole = parse_stylesheet(whole_text, TokenStore::NONE);
         assert_eq!(compacted.len, whole.len);
         assert_eq!(compacted.rules[0].style, whole.rules[0].style);
         assert_eq!(compacted.rules[1].style, whole.rules[1].style);
@@ -1222,22 +1438,22 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         // than the rule occupied, and the extra would land on rules the walk
         // had not reached yet.
         let mut css = *b"a,b{color:#ff0000}";
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
         assert_eq!(kept, 1);
         assert_eq!(&css[..written], b"a,b{color:#ff0000}");
-        assert_eq!(parse_stylesheet(&css[..written]).len, 2);
+        assert_eq!(parse_stylesheet(&css[..written], TokenStore::NONE).len, 2);
     }
 
     #[test]
     fn a_token_sheet_keeps_nothing_and_holds_no_room() {
         let mut css = *b":root{--color-canvas-default:#ffffff;--color-fg-default:#1f2328}";
-        assert_eq!(keep_readable_rules(&mut css, MAX_RULES), (0, 0));
+        assert_eq!(keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE), (0, 0));
     }
 
     #[test]
     fn compaction_stops_where_the_rule_budget_is_spent() {
         let mut css = *b"p{color:#ff0000}a{color:#00ff00}h1{color:#0000ff}";
-        let (written, kept) = keep_readable_rules(&mut css, 2);
+        let (written, kept) = keep_readable_rules(&mut css, 2, TokenStore::NONE);
         assert_eq!(kept, 2);
         assert_eq!(&css[..written], b"p{color:#ff0000}a{color:#00ff00}");
     }
@@ -1249,11 +1465,102 @@ a{color:#0969da;text-decoration:underline}h1{font-size:large;margin-top:24px}";
         css[..head.len()].copy_from_slice(head);
         let rule = b";}a{color:#0969da}";
         css[560..560 + rule.len()].copy_from_slice(rule);
-        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
         assert_eq!(kept, 1);
         assert_eq!(&css[..written], b"a{color:#0969da}");
-        let sheet = parse_stylesheet(&css[..written]);
+        let sheet = parse_stylesheet(&css[..written], TokenStore::NONE);
         let style = cascade(&sheet, element(b"a", b"", b""), &[], None);
         assert_eq!(style.color, 0xFF0969DA);
+    }
+
+    /// The names and values the tests below answer from, laid end to end the
+    /// way the document's token arena lays them: `--a` and `--b` name a colour,
+    /// and `--c` names `--a` the way a theme file names another theme's colour.
+    fn theme() -> TokenStore<'static> {
+        const TEXT: &[u8] = b"--a#111111--b#222222--cvar(--a)";
+        const SLOTS: &[TokenSlot] = &[
+            TokenSlot { name: (0, 3), value: (3, 7) },
+            TokenSlot { name: (10, 3), value: (13, 7) },
+            TokenSlot { name: (20, 3), value: (23, 8) },
+        ];
+        TokenStore { slots: SLOTS, text: TEXT }
+    }
+
+    #[test]
+    fn a_var_is_answered_by_the_value_its_name_was_given() {
+        let tokens = theme();
+        assert_eq!(resolve_custom(tokens, b"var(--a)"), b"#111111");
+        assert_eq!(resolve_custom(tokens, b"  var(--b)  "), b"#222222");
+    }
+
+    #[test]
+    fn a_name_defined_after_another_is_walked_to_the_colour() {
+        let tokens = theme();
+        assert_eq!(resolve_custom(tokens, b"var(--c)"), b"#111111");
+    }
+
+    #[test]
+    fn an_unknown_name_keeps_the_fallback_the_rule_offered() {
+        let tokens = theme();
+        assert_eq!(resolve_custom(tokens, b"var(--zz, #0969da)"), b"#0969da");
+        // With no fallback there is nothing to say, and the declaration is
+        // refused for what it is rather than painted with a guessed colour.
+        assert!(resolve_custom(tokens, b"var(--zz)").is_empty());
+    }
+
+    #[test]
+    fn a_name_defined_in_terms_of_itself_stops_answering() {
+        const TEXT: &[u8] = b"--avar(--a)";
+        let tokens = TokenStore {
+            slots: &[TokenSlot { name: (0, 3), value: (3, 8) }],
+            text: TEXT,
+        };
+        // The walk has a hop budget, so a page that names a colour after
+        // itself gets the question back instead of a loop.
+        assert_eq!(resolve_custom(tokens, b"var(--a)"), b"var(--a)");
+    }
+
+    #[test]
+    fn a_colour_asked_of_a_token_reaches_the_rule_that_kept_it() {
+        // The two files a bundled site splits its design across: the one that
+        // names the colours and the one that paints with them.
+        let tokens = theme();
+        let whole_text = b":root{--a:#111111}a{color:var(--a)}p{color:#000000}";
+        let mut css = [0u8; 64];
+        css[..whole_text.len()].copy_from_slice(whole_text);
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, tokens);
+        assert_eq!(kept, 2);
+        assert_eq!(&css[..written], b"a{color:var(--a)}p{color:#000000}");
+        let sheet = parse_stylesheet(&css[..written], tokens);
+        let style = cascade(&sheet, element(b"a", b"", b""), &[], None);
+        assert!(style.has_color);
+        assert_eq!(style.color, 0xFF111111);
+    }
+
+    #[test]
+    fn a_colour_asked_of_a_name_nobody_declared_is_not_painted() {
+        let mut css = *b"a{color:var(--missing)}";
+        let (written, kept) = keep_readable_rules(&mut css, MAX_RULES, TokenStore::NONE);
+        assert_eq!((written, kept), (0, 0));
+    }
+
+    #[test]
+    fn a_custom_property_is_not_mistaken_for_a_painted_thing() {
+        let tokens = theme();
+        let sheet = parse_stylesheet(b":root{--a:#111111}", tokens);
+        assert_eq!(sheet.len, 0);
+        let mut style = ComputedStyle::DEFAULT;
+        apply_declaration(&mut style, b"--a", b"#111111", tokens);
+        apply_declaration(&mut style, b"color", b"var(--a)", tokens);
+        assert!(style.has_color);
+        assert_eq!(style.color, 0xFF111111);
+    }
+
+    #[test]
+    fn an_inline_style_asks_the_sheet_for_its_names() {
+        let tokens = theme();
+        let sheet = parse_stylesheet(b"a { color: #222222; }", tokens);
+        let style = cascade(&sheet, element(b"a", b"", b""), &[], Some(b"color: var(--a)"));
+        assert_eq!(style.color, 0xFF111111);
     }
 }

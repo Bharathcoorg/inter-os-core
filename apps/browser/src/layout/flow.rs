@@ -1816,7 +1816,7 @@ mod tests {
     fn layout_html(html: &[u8], width: usize) -> (Dom, TextLayout) {
         let mut dom = Dom::new();
         dom.parse(html);
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let mut out = TextLayout::new();
         build(&dom, &sheet, width, &mut out);
         (dom, out)
@@ -2095,7 +2095,7 @@ mod tests {
     #[test]
     fn the_second_pass_gives_an_image_the_box_it_ended_up_needing() {
         let (dom, first) = layout_html(b"<p><img src='/a.png'></p><p>Under</p>", 600);
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let outcomes = [ImageOutcome::Placed { w: 200, h: 90 }; MAX_IMAGES];
         let mut out = TextLayout::new();
         build_with_outcomes(&dom, &sheet, 600, &outcomes, &mut out);
@@ -2112,7 +2112,7 @@ mod tests {
     #[test]
     fn a_slot_with_no_outcome_keeps_the_box_the_markup_declared() {
         let (dom, _first) = layout_html(b"<img src='/a.png' width='120' height='80'>", 600);
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let mut out = TextLayout::new();
         build_with_outcomes(&dom, &sheet, 600, &UNKNOWN_OUTCOMES, &mut out);
         assert_eq!(out.images[0].w, 120);
@@ -2124,7 +2124,7 @@ mod tests {
         // The fetched pictures are indexed by slot, so a second pass that
         // renumbered them would draw the wrong picture under the right box.
         let (dom, _first) = layout_html(b"<img src='/a.png'><img src='/b.png'><img>", 600);
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let outcomes = [
             ImageOutcome::Placed { w: 100, h: 40 },
             ImageOutcome::Placed { w: 120, h: 60 },
@@ -2273,7 +2273,7 @@ mod tests {
     fn layout_truncation_is_recorded() {
         let mut dom = Dom::new();
         dom.parse(b"<p>hello</p>");
-        let sheet = css::parse_stylesheet(b"");
+        let sheet = css::parse_stylesheet(b"", css::TokenStore::NONE);
         let mut out = TextLayout::new();
         build(&dom, &sheet, 400, &mut out);
         assert!(!out.truncated);
@@ -2366,7 +2366,7 @@ mod tests {
         huge.extend_from_slice(b"</p>");
         dom.parse(&huge);
         assert_eq!(dom.overflow() & crate::layout::dom::OVERFLOW_TEXT, crate::layout::dom::OVERFLOW_TEXT);
-        let sheet = css::parse_stylesheet(dom.css());
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
         let mut out = TextLayout::new();
         build(&dom, &sheet, 300, &mut out);
         assert_eq!(out.overflow & dom.overflow(), dom.overflow());
