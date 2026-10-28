@@ -1,3 +1,6 @@
+#[path = "../src/image/policy.rs"]
+mod policy;
+
 #[path = "../src/image/svg.rs"]
 mod svg;
 
@@ -552,10 +555,102 @@ fn test_security_and_reject_paths() {
     let odd_pts = br#"<svg width="20" height="20"><polygon points="5,5 10"/></svg>"#;
     assert_eq!(decode_svg(odd_pts, &mut out), Err(()));
 
-    // Unknown elements skipped, not rejected
-    let unk_svg = br#"<svg width="20" height="20"><foreignObject/><rect width="20" height="20" fill="red"/></svg>"#;
-    assert_eq!(decode_svg(unk_svg, &mut out).map(|(w, h, _)| (w, h)), Ok((20, 20)));
+    // An element that can carry content this reader cannot draw is refused
+    // rather than skipped: skipping it would paint a partial picture and
+    // call it the file.
+    let foreign_svg = br#"<svg width="20" height="20"><foreignObject/><rect width="20" height="20" fill="red"/></svg>"#;
+    assert_eq!(decode_svg(foreign_svg, &mut out), Err(()));
+    // The refusal leaves no pixels behind.
+    assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+
+    // An element that cannot change what is drawn is skipped, not refused.
+    let inert_svg = br#"<svg width="20" height="20"><title>a title</title><desc>a description</desc><rect width="20" height="20" fill="red"/></svg>"#;
+    assert_eq!(decode_svg(inert_svg, &mut out).map(|(w, h, _)| (w, h)), Ok((20, 20)));
     assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn test_a_paint_server_is_refused_rather_than_faked() {
+    let mut out = [0u8; 20 * 20 * 4];
+
+    // A gradient is a paint server this reader does not implement. Drawing
+    // a black fill where the file asked for a gradient would be inventing a
+    // picture, so the document is refused.
+    let gradient_svg = br##"<svg width="20" height="20"><defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs><rect width="20" height="20" fill="url(#g)"/></svg>"##;
+    assert_eq!(decode_svg(gradient_svg, &mut out), Err(()));
+
+    // The same answer for a gradient that is named but never defined, and
+    // for a filter that would have to be expanded.
+    let undefined_svg = br#"<svg width="20" height="20"><rect width="20" height="20" fill="url(#missing)"/></svg>"#;
+    assert_eq!(decode_svg(undefined_svg, &mut out), Err(()));
+
+    let filter_svg = br#"<svg width="20" height="20"><rect width="20" height="20" filter="url(#f)"/></svg>"#;
+    assert_eq!(decode_svg(filter_svg, &mut out), Err(()));
+}
+
+#[test]
+fn test_nothing_outside_the_document_is_fetched() {
+    let mut out = [0u8; 20 * 20 * 4];
+
+    // An element reference is the way an SVG pulls another element into the
+    // document. This reader expands none, so it refuses the document.
+    let use_svg = br##"<svg width="20" height="20"><defs><rect id="r" width="20" height="20"/></defs><use href="#r"/></svg>"##;
+    assert_eq!(decode_svg(use_svg, &mut out), Err(()));
+
+    // A link that names another host is a reference outside the document.
+    let link_svg = br#"<svg width="20" height="20"><a href="https://example.com/x"><rect width="20" height="20"/></a></svg>"#;
+    assert_eq!(decode_svg(link_svg, &mut out), Err(()));
+
+    // A stylesheet can import a remote sheet, and this reader applies no
+    // stylesheets at all, so it refuses the document.
+    let style_svg = br#"<svg width="20" height="20"><style>@import url("http://evil.com/x.css");</style><rect width="20" height="20"/></svg>"#;
+    assert_eq!(decode_svg(style_svg, &mut out), Err(()));
+
+    // A reference inside the same document is not a fetch, but the element
+    // that asks for it is one this reader does not implement.
+    let same_document_svg = br#"<svg width="20" height="20"><text x="0" y="10">hello</text></svg>"#;
+    assert_eq!(decode_svg(same_document_svg, &mut out), Err(()));
+}
+
+#[test]
+fn test_the_document_is_bounded() {
+    let mut out = [0u8; 20 * 20 * 4];
+
+    // Groups: the reader walks the document without recursion and refuses a
+    // document with more groups than its style stack can carry, rather than
+    // drawing the deeper ones with the wrong inherited style.
+    let mut nested = Vec::from(&b"<svg width=\"20\" height=\"20\">"[..]);
+    for _ in 0..(MAX_GROUP_DEPTH + 4) {
+        nested.extend_from_slice(b"<g>");
+    }
+    nested.extend_from_slice(b"<rect width=\"20\" height=\"20\"/>");
+    for _ in 0..(MAX_GROUP_DEPTH + 4) {
+        nested.extend_from_slice(b"</g>");
+    }
+    nested.extend_from_slice(b"</svg>");
+    assert_eq!(decode_svg(&nested, &mut out), Err(()));
+
+    // Shapes: every shape costs a pass over the canvas it touches.
+    let mut many = Vec::from(&b"<svg width=\"20\" height=\"20\">"[..]);
+    for _ in 0..(MAX_DRAW_ELEMENTS + 1) {
+        many.extend_from_slice(b"<rect width=\"2\" height=\"2\"/>");
+    }
+    many.extend_from_slice(b"</svg>");
+    assert_eq!(decode_svg(&many, &mut out), Err(()));
+}
+
+#[test]
+fn test_a_failed_decode_leaves_no_picture_behind() {
+    let mut out = [0xFFu8; 20 * 20 * 4];
+
+    // A document that is refused half way through must not leave the
+    // shapes it had already drawn in the caller's buffer.
+    let broken = br#"<svg width="20" height="20"><rect width="20" height="20" fill="red"/><path d="M 5 5 X 10 10"/></svg>"#;
+    assert_eq!(decode_svg(broken, &mut out), Err(()));
+    assert!(
+        out.iter().all(|&byte| byte == 0),
+        "a refused document must leave no pixels behind"
+    );
 }
 
 #[test]

@@ -6,6 +6,35 @@
 //! - 16-subscanline coverage-AA rasterizer (4-bit coverage AA) with non-zero winding and even-odd fill rules.
 //! - Porter-Duff Over alpha compositing into RGBA8 destination buffer.
 //! - Bounded memory usage (stack / static buffers up to `MAX_SEGMENTS`).
+//!
+//! # The document policy
+//!
+//! This reader draws a *subset* of SVG: groups, rectangles, circles,
+//! ellipses, lines, polylines, polygons and paths. Everything else in a
+//! document is either refused or, where it cannot change what is drawn,
+//! ignored. The rules are:
+//!
+//! - **Nothing outside the document is ever fetched.** A document that names
+//!   an external resource -- an `href` that is not a same-document fragment,
+//!   or a `url(...)` reference -- is refused. This reader has no network
+//!   access at all, so refusing is the honest answer, rather than quietly
+//!   drawing the picture without the part that was asked for.
+//! - **A feature the reader does not implement is refused, not faked.** A
+//!   paint server (a gradient, a pattern), a filter, a clip path, a mask, a
+//!   marker, an element reference (`<use>`), a script or a run of text is
+//!   refused. Drawing a substitute -- a black fill where a gradient was
+//!   asked for -- would be inventing a picture the file never held.
+//! - **The document is walked without recursion.** The reader is a loop over
+//!   the document's tags, so nesting cannot make it recurse. The number of
+//!   groups is capped at [`MAX_GROUP_DEPTH`] and the number of drawn shapes
+//!   at [`MAX_DRAW_ELEMENTS`], so neither the inheritance stack nor the
+//!   work a document can ask for grows without bound.
+//! - **A document the reader cannot make sense of fails closed.** A
+//!   malformed path, a truncated tag, an unreadable dimension or a shape
+//!   that does not fit is an error, never a blank picture. A failed decode
+//!   leaves no pixels behind.
+
+use super::policy::{check_decode_size, check_encoded_size};
 
 pub const MAX_SEGMENTS: usize = 1024;
 pub const MAX_CROSSINGS: usize = 1024;
@@ -13,6 +42,75 @@ pub const MAX_WIDTH: usize = 1280;
 pub const SUBSAMPLES: i32 = 16;
 pub const ONE: i32 = 1 << 16;
 pub const FULL_COVER: i32 = 256;
+
+/// The most groups one document may carry.
+///
+/// WHY a bound: the inherited style of a group is held in a fixed stack, and
+/// a group deeper than the stack could hold would be drawn with the wrong
+/// inherited style. Refusing the document is the honest answer; drawing it
+/// with the wrong colours is not.
+pub const MAX_GROUP_DEPTH: usize = 16;
+
+/// The most shapes one document may draw.
+///
+/// WHY a bound: every shape costs one pass over the canvas it touches, so a
+/// document with a million shapes would ask for a million passes. The
+/// document's own size is bounded too, but the number of *drawn* shapes is
+/// what the work actually scales with.
+pub const MAX_DRAW_ELEMENTS: usize = 256;
+
+/// Elements this reader refuses outright.
+///
+/// WHY a list rather than "draw what you know": every element here can
+/// carry content the reader cannot draw faithfully -- script to run, markup
+/// to fetch, a paint server or an animation to expand, or words that would
+/// need a glyph rasteriser -- and skipping one silently would paint a
+/// partial picture and call it the file. The names are compared without
+/// regard to case and without their namespace prefix.
+pub const REFUSED_ELEMENTS: [&[u8]; 28] = [
+    b"script",
+    b"foreignObject",
+    b"image",
+    b"use",
+    b"style",
+    b"filter",
+    b"mask",
+    b"clipPath",
+    b"pattern",
+    b"marker",
+    b"linearGradient",
+    b"radialGradient",
+    b"symbol",
+    b"animate",
+    b"animateColor",
+    b"animateTransform",
+    b"animateMotion",
+    b"set",
+    b"font",
+    b"font-face",
+    b"glyph",
+    b"text",
+    b"tspan",
+    b"textPath",
+    b"switch",
+    b"audio",
+    b"video",
+    b"cursor",
+];
+
+/// Attributes this reader refuses outright.
+///
+/// WHY: each of them asks for a feature the reader does not implement, and
+/// an element that asks for one would otherwise be drawn without it.
+pub const REFUSED_ATTRIBUTES: [&[u8]; 6] = [
+    b"filter",
+    b"mask",
+    b"clip-path",
+    b"marker-start",
+    b"marker-mid",
+    b"marker-end",
+];
+
 
 /// Kappa constant for cubic Bézier circle approximation: 0.55228475 * 65536
 pub const KAPPA: i32 = 36196;
@@ -1685,9 +1783,68 @@ pub fn emit_path_d(
     Ok(())
 }
 
+/// Whether an element name is one this reader refuses.
+///
+/// WHY the name is compared without regard to case, and without its
+/// namespace prefix: a document that names a refused element must not slip
+/// past because it was spelled `Script`, `svg:script` or `SCRIPT`.
+pub fn is_refused_element(elem: &[u8]) -> bool {
+    let mut name = elem;
+    if name.first() == Some(&b'/') {
+        name = &name[1..];
+    }
+    if let Some(stripped) = strip_namespace(name) {
+        name = stripped;
+    }
+    REFUSED_ELEMENTS
+        .iter()
+        .any(|refused| name.eq_ignore_ascii_case(refused))
+}
+
+/// Strips a namespace prefix such as `svg:` from an element name.
+fn strip_namespace(name: &[u8]) -> Option<&[u8]> {
+    let colon = name.iter().position(|&b| b == b':')?;
+    Some(&name[colon + 1..])
+}
+
+/// Whether the tag carries an attribute this reader refuses.
+pub fn has_refused_attribute(tag: &[u8]) -> bool {
+    REFUSED_ATTRIBUTES
+        .iter()
+        .any(|attr| get_attr(tag, attr).is_some())
+}
+
+/// Whether the tag names a resource with a `url(...)` reference.
+///
+/// WHY every `url(...)` is refused and not only the remote ones: a `url()`
+/// names a paint server or a filter, and this reader implements neither, so
+/// an element that asks for one would be drawn with a colour the file never
+/// asked for. A remote `url()` is refused for the stronger reason that
+/// nothing outside the document is ever fetched.
+pub fn names_a_resource(tag: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 4 <= tag.len() {
+        if tag[i..i + 4].eq_ignore_ascii_case(b"url(") {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether a reference names something inside the same document.
+pub fn is_same_document_reference(value: &[u8]) -> bool {
+    value.starts_with(b"#")
+}
+
 /// Reads dimensions from the `<svg>` header.
 /// Returns `(width, height)`.
+///
+/// WHY the body is measured first: the encoded budget is about the work of
+/// walking a document, and a document over the limit is refused before a
+/// single tag is read.
 pub fn decode_svg_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    check_encoded_size(data.len())?;
     let mut pos = 0;
     while pos < data.len() {
         if data[pos] == b'<' {
@@ -1741,6 +1898,11 @@ pub fn decode_svg_header(data: &[u8]) -> Result<(u32, u32), ()> {
                         _ => return Err(()),
                     };
                     if w > 0 && h > 0 && w <= MAX_WIDTH as u32 && h <= 4096 {
+                        // WHY the platform's own size budget is checked here:
+                        // the caller sizes its buffer from this answer, so the
+                        // answer has to be the platform's answer and not only
+                        // the document's.
+                        check_decode_size(w, h)?;
                         return Ok((w, h));
                     } else {
                         return Err(());
@@ -1810,7 +1972,25 @@ struct StyleState {
 
 /// Decodes an SVG image into the supplied RGBA buffer.
 /// Returns `(width, height, bytes_written)`.
+///
+/// WHY a failed decode leaves nothing behind: the walker draws into the
+/// caller's buffer as it goes, so a document that is refused half way
+/// through would otherwise leave a half-drawn picture in a buffer the
+/// caller is about to look at. The buffer is cleared on the way out, so a
+/// failure is a failure and not a picture.
 pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    match decode_svg_inner(data, out_rgba) {
+        Ok(decoded) => Ok(decoded),
+        Err(()) => {
+            for px in out_rgba.iter_mut() {
+                *px = 0;
+            }
+            Err(())
+        }
+    }
+}
+
+fn decode_svg_inner(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
     let (target_w, target_h) = decode_svg_header(data)?;
     let pixel_count = (target_w as usize).checked_mul(target_h as usize).ok_or(())?;
     let required = pixel_count.checked_mul(4).ok_or(())?;
@@ -1857,8 +2037,12 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
         opacity: ONE,
         fill_opacity: ONE,
         stroke_opacity: ONE,
-    }; 8];
+    }; MAX_GROUP_DEPTH + 1];
     let mut style_depth = 0usize;
+    // WHY the number of drawn shapes is counted: each one costs a pass over
+    // the canvas it touches, so the work a document can ask for grows with
+    // the number of shapes in it.
+    let mut draw_elements = 0usize;
 
     let mut pos = 0;
     while pos < data.len() {
@@ -1895,18 +2079,50 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                 if elem.eq_ignore_ascii_case(b"script") || elem.eq_ignore_ascii_case(b"/script") {
                     return Err(());
                 }
+                // WHY a refused element ends the whole document: every
+                // element on the list can carry content this reader cannot
+                // draw faithfully -- script to run, markup to fetch, a paint
+                // server or an animation to expand, or words that would need
+                // a glyph rasteriser -- and skipping one would paint a
+                // partial picture and call it the file.
+                if is_refused_element(elem) {
+                    return Err(());
+                }
+                // WHY an attribute the reader does not implement ends the
+                // document: an element asking for a filter, a mask, a clip
+                // path or a marker would be drawn without it.
+                if has_refused_attribute(tag) {
+                    return Err(());
+                }
+                // WHY a `url(...)` reference ends the document: it names a
+                // paint server or a filter, which this reader does not
+                // implement, and a remote one names something outside the
+                // document, which is never fetched.
+                if names_a_resource(tag) {
+                    return Err(());
+                }
                 if let Some(href) = get_attr(tag, b"href").or_else(|| get_attr(tag, b"xlink:href")) {
                     let mut h = href;
                     while !h.is_empty() && h[0].is_ascii_whitespace() {
                         h = &h[1..];
                     }
-                    if !h.is_empty() && !h.starts_with(b"#") {
+                    // WHY only a same-document fragment is allowed: a
+                    // reference to anything else names a resource outside
+                    // the document, and this reader fetches nothing.
+                    if !h.is_empty() && !is_same_document_reference(h) {
                         return Err(());
                     }
                 }
 
                 if elem == b"g" {
-                    if !tag.ends_with(b"/") && style_depth + 1 < style_stack.len() {
+                    if !tag.ends_with(b"/") {
+                        // WHY a group deeper than the style stack is refused:
+                        // it would be drawn with the wrong inherited style,
+                        // and a wrong colour is a picture the file never
+                        // held.
+                        if style_depth >= MAX_GROUP_DEPTH {
+                            return Err(());
+                        }
                         let cur = style_stack[style_depth];
                         let new_fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill);
                         let new_stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke);
@@ -1942,6 +2158,10 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                         style_depth -= 1;
                     }
                 } else if elem == b"rect" || elem == b"circle" || elem == b"ellipse" || elem == b"line" || elem == b"polyline" || elem == b"polygon" || elem == b"path" {
+                    draw_elements += 1;
+                    if draw_elements > MAX_DRAW_ELEMENTS {
+                        return Err(());
+                    }
                     let cur = style_stack[style_depth];
                     let raw_fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
                     let raw_stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);

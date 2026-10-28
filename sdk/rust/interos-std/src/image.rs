@@ -9,7 +9,19 @@
 //! Every decoder here is a real decoder: it reads the container's own fields and
 //! refuses a file it cannot make sense of rather than inventing a picture.
 
+pub mod policy;
 pub mod svg;
+
+/// The platform's image policy: the size caps every decoder is held to.
+///
+/// WHY the caps are re-exported here: the policy is written once, in
+/// [`policy`], and every decoder in this module is checked against it, so
+/// there is one number for "how big a picture may be" rather than one per
+/// format.
+pub use policy::{
+    check_decode_size, check_encoded_size, MAX_DECODE_DIMENSION, MAX_DECODE_PIXELS,
+    MAX_ENCODED_BYTES,
+};
 
 /// The image file extensions the platform recognises.
 pub const IMAGE_SUFFIXES: [&[u8]; 10] = [
@@ -111,6 +123,11 @@ pub fn decode_qoi_header(data: &[u8]) -> Result<(u32, u32, u8, u8), ()> {
     if width == 0 || height == 0 || (channels != 3 && channels != 4) {
         return Err(());
     }
+    // WHY the size is checked here and not only in the decoder: a QOI header
+    // is fourteen bytes and names any size at all, and the caller sizes its
+    // buffer from this answer. The refusal has to happen at the header so
+    // that the buffer is never sized from a hostile length field.
+    check_decode_size(width, height)?;
     Ok((width, height, channels, colorspace))
 }
 
@@ -268,6 +285,10 @@ pub fn decode_ppm_header(data: &[u8]) -> Result<(u32, u32, usize), ()> {
     if width == 0 || height == 0 || maxval == 0 || maxval > 255 {
         return Err(());
     }
+    // WHY the size is checked at the header: the caller sizes its buffer
+    // from this answer, and a PPM header is a line of text that can name any
+    // size at all.
+    check_decode_size(width, height)?;
     if pos >= data.len() || !data[pos].is_ascii_whitespace() {
         return Err(());
     }
@@ -359,6 +380,9 @@ pub fn decode_bmp_header(data: &[u8]) -> Result<(u32, u32, u16, usize), ()> {
     if planes != 1 || (bpp != 24 && bpp != 32) || compression != 0 {
         return Err(());
     }
+    // WHY the size is checked at the header: the caller sizes its buffer
+    // from this answer, and a BMP header names any size at all.
+    check_decode_size(width, height)?;
     Ok((width, height, bpp, data_offset))
 }
 
@@ -535,6 +559,7 @@ fn ico_pick(data: &[u8]) -> Result<IcoEntry, ()> {
 /// Reads the size of the picture an `.ico` container would be drawn from.
 pub fn decode_ico_header(data: &[u8]) -> Result<(u32, u32), ()> {
     let entry = ico_pick(data)?;
+    check_decode_size(entry.width, entry.height)?;
     Ok((entry.width, entry.height))
 }
 
@@ -614,6 +639,10 @@ pub fn decode_raw(
     bpp: u8,
     out_rgba: &mut [u8],
 ) -> Result<usize, ()> {
+    // WHY the size is checked here too: every entry point that names a
+    // picture answers with the same budget, so a caller cannot reach a
+    // decode that the headers refuse.
+    check_decode_size(width, height)?;
     let pixel_count = (width as usize).checked_mul(height as usize).ok_or(())?;
     let required_rgba = pixel_count.checked_mul(4).ok_or(())?;
     if out_rgba.len() < required_rgba {
@@ -644,17 +673,6 @@ pub fn decode_raw(
 // ---------------------------------------------------------------------------
 // PNG and GIF
 // ---------------------------------------------------------------------------
-
-/// The largest width or height, in pixels, that this module will decode.
-///
-/// WHY a limit exists: a PNG's dimensions come out of an untrusted header, and
-/// a ten-byte file can name a picture of any size at all. The caller's buffer
-/// already refuses anything that does not fit, but the decoder's own fixed
-/// scratch (a row buffer pair) has to be sized for *some* maximum, so the
-/// refusal is explicit and comes before any decoding work: 4096 is wider than
-/// any surface this device paints, and it makes every scratch size below a
-/// constant the linker can check.
-pub const MAX_DECODE_DIMENSION: u32 = 4096;
 
 /// The LZ77 history window every DEFLATE stream is allowed to reference.
 const INFLATE_WINDOW: usize = 32 * 1024;
@@ -1226,13 +1244,10 @@ fn png_parse_header(data: &[u8]) -> Result<PngHeader, ()> {
     let compression = data[26];
     let filter = data[27];
     let interlace = data[28];
-    if width == 0
-        || height == 0
-        || width > MAX_DECODE_DIMENSION
-        || height > MAX_DECODE_DIMENSION
-    {
-        return Err(());
-    }
+    // WHY the size is checked here and not only in the decoder: the caller's
+    // buffer is sized from this answer, so the answer has to be the
+    // platform's answer and not only the file's.
+    check_decode_size(width, height)?;
     // Only 8-bit samples: 1/2/4-bit images would need sub-byte unpacking and
     // 16-bit images a sample width the rest of this module does not carry, and
     // guessing at either would produce a picture that is not the file's.
@@ -1705,9 +1720,10 @@ fn gif_parse_header(data: &[u8]) -> Result<GifHeader, ()> {
     }
     let width = u16::from_le_bytes([data[6], data[7]]) as u32;
     let height = u16::from_le_bytes([data[8], data[9]]) as u32;
-    if width == 0 || height == 0 || width > MAX_DECODE_DIMENSION || height > MAX_DECODE_DIMENSION {
-        return Err(());
-    }
+    // WHY the size is checked here and not only in the decoder: a GIF's
+    // screen size is two sixteen-bit numbers in the file, and the caller
+    // sizes its canvas from this answer.
+    check_decode_size(width, height)?;
     let packed = data[10];
     let mut pos = 13usize;
     let gct = if packed & 0x80 != 0 {
@@ -2933,13 +2949,10 @@ fn jpeg_parse_sof(
     let height = u16::from_be_bytes([seg[1], seg[2]]) as u32;
     let width = u16::from_be_bytes([seg[3], seg[4]]) as u32;
     let ncomp = seg[5] as usize;
-    if width == 0
-        || height == 0
-        || width > MAX_DECODE_DIMENSION
-        || height > MAX_DECODE_DIMENSION
-    {
-        return Err(());
-    }
+    // WHY the size is checked here and not only in the decoder: the caller's
+    // buffer is sized from this answer, so the answer has to be the
+    // platform's answer and not only the file's.
+    check_decode_size(width, height)?;
     // One component is grayscale and three are colour. Four components are
     // CMYK/YCCK, which this decoder does not convert.
     if ncomp != 1 && ncomp != 3 {
@@ -4675,9 +4688,9 @@ fn webp_vp8l_dimensions(chunk: &[u8]) -> Result<(u32, u32, bool), ()> {
     if packed >> 29 != 0 {
         return Err(());
     }
-    if width > MAX_DECODE_DIMENSION || height > MAX_DECODE_DIMENSION {
-        return Err(());
-    }
+    // WHY the size is checked here and not only in the decoder: the caller
+    // sizes its buffer from the dimensions this function reports.
+    check_decode_size(width, height)?;
     Ok((width, height, packed & (1 << 28) != 0))
 }
 
@@ -4690,7 +4703,13 @@ pub fn decode_webp_header(data: &[u8]) -> Result<(u32, u32), ()> {
             Ok((width, height))
         }
         WebpChunk::Lossy(chunk) => {
-            crate::vp8::dimensions(chunk)
+            let (width, height) = crate::vp8::dimensions(chunk)?;
+            // WHY the lossy stream is checked against the platform's budget
+            // here: the caller sizes its buffer from this answer, so the
+            // answer has to be the platform's answer and not only the
+            // stream's.
+            check_decode_size(width, height)?;
+            Ok((width, height))
         }
     }
 }
@@ -4741,11 +4760,13 @@ pub fn decode_webp(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize)
 
 /// Returns the dimensions an SVG file declares, without decoding pixels.
 pub fn decode_svg_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    check_encoded_size(data.len())?;
     svg::decode_svg_header(data)
 }
 
 /// Decodes an SVG image into an RGBA (4 bytes per pixel) destination buffer.
 pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    check_encoded_size(data.len())?;
     svg::decode_svg(data, out_rgba)
 }
 
@@ -4804,11 +4825,18 @@ pub fn decode_bitmap<'a>(
 }
 
 /// Decodes an image file by sniffing its magic header or file extension into RGBA.
+///
+/// WHY the body is measured before anything is parsed: the encoded budget is
+/// about the work of walking a body, and a body over the limit is refused
+/// before a single header field is read. The refusal is the whole answer --
+/// the body is not truncated into a half-picture, because half a picture is
+/// not the file.
 pub fn decode_image(
     data: &[u8],
     name: &[u8],
     out_rgba: &mut [u8],
 ) -> Result<(u32, u32, usize), ()> {
+    check_encoded_size(data.len())?;
     if name.ends_with(b".ppm") || (data.len() >= 2 && &data[0..2] == b"P6") {
         let (w, h, _) = decode_ppm_header(data)?;
         let bytes = decode_ppm(data, out_rgba)?;
