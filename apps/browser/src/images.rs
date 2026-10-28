@@ -13,7 +13,7 @@
 //! The policy is deliberately narrow:
 //! - bodies above [`MAX_IMAGE_BODY_BYTES`] are refused, never truncated
 //!   into a half-image;
-//! - only PNG, JPEG, GIF and WebP are accepted, because those
+//! - only PNG, JPEG, GIF, WebP and SVG are accepted, because those
 //!   are the decoders the platform actually has;
 //! - a declared width or height above [`MAX_IMAGE_DIMENSION`] is refused
 //!   before a byte of RGBA is allocated;
@@ -81,6 +81,8 @@ pub enum ImageType {
     /// device-independent bitmap, which is the form a page most often names
     /// its own picture in.
     Ico,
+    /// A scalable vector graphic.
+    Svg,
     Unsupported,
 }
 
@@ -188,6 +190,9 @@ pub fn sniff_image_type(body: &[u8]) -> ImageType {
     if body.len() >= 22 && body[..4] == [0, 0, 1, 0] && body[4..6] != [0, 0] {
         return ImageType::Ico;
     }
+    if crate::std::image::is_svg(body) {
+        return ImageType::Svg;
+    }
     ImageType::Unsupported
 }
 
@@ -219,6 +224,7 @@ fn probe_dimensions(kind: ImageType, body: &[u8]) -> Result<(u32, u32), ImageRef
             image::decode_webp_header(body).map_err(|_| ImageRefusal::BadHeader)
         }
         ImageType::Ico => image::decode_ico_header(body).map_err(|_| ImageRefusal::BadHeader),
+        ImageType::Svg => image::decode_svg_header(body).map_err(|_| ImageRefusal::BadHeader),
         ImageType::Unsupported => Err(ImageRefusal::UnsupportedType),
     }
 }
@@ -762,6 +768,20 @@ mod tests {
                 kind: ImageType::WebP,
                 width: 64,
                 height: 64,
+            }
+        );
+    }
+
+    #[test]
+    fn an_svg_is_admitted() {
+        let body = b"<svg width=\"48\" height=\"48\" viewBox=\"0 0 48 48\"><rect width=\"48\" height=\"48\" fill=\"red\"/></svg>";
+        assert_eq!(sniff_image_type(body), ImageType::Svg);
+        assert_eq!(
+            admit_image(body),
+            ImageAdmission::Accepted {
+                kind: ImageType::Svg,
+                width: 48,
+                height: 48,
             }
         );
     }

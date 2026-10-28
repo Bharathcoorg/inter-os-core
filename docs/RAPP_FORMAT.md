@@ -246,6 +246,7 @@ Evidence levels used below:
 | **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | QEMU-verified (log) | Audio streams inside AVI files are detected but not decoded. The player logs `"[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed."` and shows `"Audio stream: unavailable"` while the stream is open. |
 | **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Unit-tested | Decoded via native zero-heap image decoders. |
 | **Images** | `image/webp` | **Supported** | `org.interos.gallery` | Unit-tested | Lossless (VP8L) and lossy (VP8 keyframe) WebP fully supported. |
+| **Images** | `image/svg+xml` | **Supported** | `org.interos.gallery`, `org.interos.browser` | Unit-tested | Decoded via native zero-heap bounded SVG subset renderer. |
 | **Images** | `image/bmp`, `image/qoi`, `image/x-portable-pixmap` | **Supported** | `org.interos.gallery` | Unit-tested | Fully supported native raster formats. |
 
 AVI playback is a sequential, forward-only stream. The player cannot seek an AVI: the scrubber and seek target log `"[VIDEO PLAYER] A sequential AVI cannot seek; position unchanged."` and leave the position alone. Pacing comes from the `avih`/`strh` timing; when decoding falls behind, frames are dropped rather than played in slow motion. End of stream closes the file and logs `"[VIDEO PLAYER] AVI end of stream; the file was closed."`. Sub-second durations display as `--:--` because the player reports whole seconds.

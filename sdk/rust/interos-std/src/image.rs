@@ -9,9 +9,11 @@
 //! Every decoder here is a real decoder: it reads the container's own fields and
 //! refuses a file it cannot make sense of rather than inventing a picture.
 
+pub mod svg;
+
 /// The image file extensions the platform recognises.
-pub const IMAGE_SUFFIXES: [&[u8]; 9] = [
-    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw",
+pub const IMAGE_SUFFIXES: [&[u8]; 10] = [
+    b".jpg", b".jpeg", b".png", b".bmp", b".gif", b".webp", b".qoi", b".ppm", b".raw", b".svg",
 ];
 
 
@@ -4737,6 +4739,51 @@ pub fn decode_webp(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize)
     }
 }
 
+/// Returns the dimensions an SVG file declares, without decoding pixels.
+pub fn decode_svg_header(data: &[u8]) -> Result<(u32, u32), ()> {
+    svg::decode_svg_header(data)
+}
+
+/// Decodes an SVG image into an RGBA (4 bytes per pixel) destination buffer.
+pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    svg::decode_svg(data, out_rgba)
+}
+
+/// Sniffs whether the input buffer is an SVG document.
+pub fn is_svg(data: &[u8]) -> bool {
+    let mut p = 0;
+    while p < data.len() && (data[p] == b' ' || data[p] == b'\t' || data[p] == b'\n' || data[p] == b'\r') {
+        p += 1;
+    }
+    let rest = &data[p..];
+    if rest.starts_with(b"<svg") {
+        let after = 4;
+        after >= rest.len()
+            || rest[after].is_ascii_whitespace()
+            || rest[after] == b'>'
+            || rest[after] == b'/'
+            || rest[after] == b':'
+    } else if rest.starts_with(b"<?xml") || rest.starts_with(b"<!--") {
+        let limit = rest.len().min(1024);
+        for j in 0..limit.saturating_sub(4) {
+            if rest[j..].starts_with(b"<svg") {
+                let after = j + 4;
+                if after >= rest.len()
+                    || rest[after].is_ascii_whitespace()
+                    || rest[after] == b'>'
+                    || rest[after] == b'/'
+                    || rest[after] == b':'
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    } else {
+        false
+    }
+}
+
 /// Decodes an image into a bitmap that borrows the caller's buffer.
 ///
 /// WHY this and not a function that allocates: the apps in this system have
@@ -4824,6 +4871,9 @@ pub fn decode_image(
         || name_ends_with(name, b".webp")
     {
         return decode_webp(data, out_rgba);
+    }
+    if is_svg(data) || name_ends_with(name, b".svg") {
+        return decode_svg(data, out_rgba);
     }
     Err(())
 }
