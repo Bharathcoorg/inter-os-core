@@ -17,6 +17,7 @@ pub mod font;
 pub mod font_fhd;
 pub mod heap;
 pub mod image;
+pub mod vp8;
 pub mod settings;
 pub mod wav;
 pub mod engine;

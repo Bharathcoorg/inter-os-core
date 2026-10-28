@@ -4612,12 +4612,15 @@ fn webp_decode_argb(
     Ok(())
 }
 
-/// Finds the image chunk of a WebP file and returns its VP8L payload.
-///
-/// WHY lossy VP8 is refused instead of skipped: a `VP8 ` chunk is a lossy
-/// bitstream this decoder does not implement, and an error is the honest
-/// answer rather than drawing a stand-in for a picture that was not decoded.
-fn webp_image_chunk(data: &[u8]) -> Result<&[u8], ()> {
+#[derive(Clone, Copy, Debug)]
+pub enum WebpChunk<'a> {
+    Lossless(&'a [u8]),
+    Lossy(&'a [u8]),
+}
+
+/// Finds the image chunk of a WebP file and returns either its VP8L payload or
+/// its lossy VP8 payload.
+fn webp_image_chunk(data: &[u8]) -> Result<WebpChunk<'_>, ()> {
     if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
         return Err(());
     }
@@ -4637,10 +4640,20 @@ fn webp_image_chunk(data: &[u8]) -> Result<&[u8], ()> {
         }
         let kind = &data[pos..pos + 4];
         if kind == b"VP8L" {
-            return Ok(&data[start..payload_end]);
+            return Ok(WebpChunk::Lossless(&data[start..payload_end]));
         }
         if kind == b"VP8 " {
-            return Err(());
+            return Ok(WebpChunk::Lossy(&data[start..payload_end]));
+        }
+        if kind == b"VP8X" {
+            if size < 10 {
+                return Err(());
+            }
+            let flags = data[start];
+            // Refuse alpha (bit 4, 0x10) or animation (bit 1, 0x02)
+            if (flags & 0x12) != 0 {
+                return Err(());
+            }
         }
         pos = payload_end.checked_add(size & 1).ok_or(())?;
     }
@@ -4666,51 +4679,62 @@ fn webp_vp8l_dimensions(chunk: &[u8]) -> Result<(u32, u32, bool), ()> {
     Ok((width, height, packed & (1 << 28) != 0))
 }
 
-/// Returns the dimensions a WebP file's VP8L header declares, without decoding
-/// pixels. A lossy `VP8 ` image has no lossless header and is refused.
+/// Returns the dimensions a WebP file declares, without decoding pixels.
+/// Supports both lossless (VP8L) and lossy (VP8 keyframe) streams.
 pub fn decode_webp_header(data: &[u8]) -> Result<(u32, u32), ()> {
-    let chunk = webp_image_chunk(data)?;
-    let (width, height, _) = webp_vp8l_dimensions(chunk)?;
-    Ok((width, height))
-}
-
-/// Decodes a lossless (VP8L) WebP file into an RGBA (4 bytes per pixel)
-/// destination buffer.
-///
-/// The plain RIFF form and the extended `VP8X` form are both read, including
-/// files that carry ICC, Exif or XMP chunks ahead of the image. Lossy `VP8 `
-/// images are refused: this crate has no lossy decoder and will not pretend to
-/// have decoded one. Returns the number of RGBA bytes written.
-pub fn decode_webp(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
-    let chunk = webp_image_chunk(data)?;
-    let (width, height, alpha_is_used) = webp_vp8l_dimensions(chunk)?;
-    let pixels = (width as usize).checked_mul(height as usize).ok_or(())?;
-    let required = pixels.checked_mul(4).ok_or(())?;
-    if required > out_rgba.len() {
-        return Err(());
-    }
-
-    let mut bits = WebpBits::new(&chunk[5..]);
-    webp_decode_argb(
-        &mut bits,
-        width as usize,
-        height as usize,
-        true,
-        webp_scratch(),
-        out_rgba,
-    )?;
-
-    // The decoder works in ARGB words; the platform's pixels are red first.
-    for index in 0..pixels {
-        let offset = index.checked_mul(4).ok_or(())?;
-        let end = offset.checked_add(4).ok_or(())?;
-        let pixel = out_rgba.get_mut(offset..end).ok_or(())?;
-        pixel.swap(0, 2);
-        if !alpha_is_used {
-            pixel[3] = 255;
+    match webp_image_chunk(data)? {
+        WebpChunk::Lossless(chunk) => {
+            let (width, height, _) = webp_vp8l_dimensions(chunk)?;
+            Ok((width, height))
+        }
+        WebpChunk::Lossy(chunk) => {
+            crate::vp8::dimensions(chunk)
         }
     }
-    Ok((width, height, required))
+}
+
+/// Decodes a WebP file (lossless VP8L or lossy VP8 keyframe) into an RGBA
+/// (4 bytes per pixel) destination buffer.
+///
+/// The plain RIFF form and the extended `VP8X` form are both read, including
+/// files that carry ICC, Exif or XMP chunks ahead of the image. Returns the
+/// dimensions and number of RGBA bytes written.
+pub fn decode_webp(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()> {
+    match webp_image_chunk(data)? {
+        WebpChunk::Lossless(chunk) => {
+            let (width, height, alpha_is_used) = webp_vp8l_dimensions(chunk)?;
+            let pixels = (width as usize).checked_mul(height as usize).ok_or(())?;
+            let required = pixels.checked_mul(4).ok_or(())?;
+            if required > out_rgba.len() {
+                return Err(());
+            }
+
+            let mut bits = WebpBits::new(&chunk[5..]);
+            webp_decode_argb(
+                &mut bits,
+                width as usize,
+                height as usize,
+                true,
+                webp_scratch(),
+                out_rgba,
+            )?;
+
+            // The decoder works in ARGB words; the platform's pixels are red first.
+            for index in 0..pixels {
+                let offset = index.checked_mul(4).ok_or(())?;
+                let end = offset.checked_add(4).ok_or(())?;
+                let pixel = out_rgba.get_mut(offset..end).ok_or(())?;
+                pixel.swap(0, 2);
+                if !alpha_is_used {
+                    pixel[3] = 255;
+                }
+            }
+            Ok((width, height, required))
+        }
+        WebpChunk::Lossy(chunk) => {
+            crate::vp8::decode(chunk, out_rgba)
+        }
+    }
 }
 
 /// Decodes an image into a bitmap that borrows the caller's buffer.
