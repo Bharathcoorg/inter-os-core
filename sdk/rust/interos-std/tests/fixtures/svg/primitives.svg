@@ -1,0 +1,7 @@
+<svg width="40" height="40" viewBox="0 0 40 40">
+  <rect x="2" y="2" width="16" height="16" rx="3" ry="3" fill="#ff0000"/>
+  <circle cx="30" cy="10" r="7" fill="#0000ff"/>
+  <line x1="2" y1="24" x2="38" y2="24" stroke="#008000" stroke-width="2"/>
+  <polyline points="2,28 16,28 16,38" fill="none" stroke="#ffff00" stroke-width="2"/>
+  <polygon points="22,38 30,28 38,38" fill="#ff00ff"/>
+</svg>

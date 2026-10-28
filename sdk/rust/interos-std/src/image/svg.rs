@@ -3,7 +3,7 @@
 //! # Platform Guarantees
 //! - `#![no_std]` and zero heap allocation in render paths.
 //! - Fixed-point 16.16 arithmetic (no floating point instructions).
-//! - 16-subscanline coverage-AA rasterizer with non-zero winding rule.
+//! - 16-subscanline coverage-AA rasterizer (4-bit coverage AA) with non-zero winding and even-odd fill rules.
 //! - Porter-Duff Over alpha compositing into RGBA8 destination buffer.
 //! - Bounded memory usage (stack / static buffers up to `MAX_SEGMENTS`).
 
@@ -86,6 +86,63 @@ pub fn cos_fixed(deg_16: i32) -> i32 {
 
 pub fn sin_cos_fixed(deg_16: i32) -> (i32, i32) {
     (sin_fixed(deg_16), cos_fixed(deg_16))
+}
+
+pub fn atan2_deg_16(y: i64, x: i64) -> i32 {
+    if x == 0 && y == 0 {
+        return 0;
+    }
+    if x > 0 && y == 0 {
+        return 0;
+    }
+    if x == 0 && y > 0 {
+        return 90 * ONE;
+    }
+    if x < 0 && y == 0 {
+        return 180 * ONE;
+    }
+    if x == 0 && y < 0 {
+        return 270 * ONE;
+    }
+
+    let abs_x = x.abs();
+    let abs_y = y.abs();
+
+    let mut lo = 0usize;
+    let mut hi = 90usize;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let s = SIN_TABLE_90[mid] as i64;
+        let c = SIN_TABLE_90[90 - mid] as i64;
+        if abs_y * c >= abs_x * s {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let deg = if lo > 0 { lo - 1 } else { 0 };
+    let s0 = SIN_TABLE_90[deg] as i64;
+    let c0 = SIN_TABLE_90[90 - deg] as i64;
+    let s1 = SIN_TABLE_90[(deg + 1).min(90)] as i64;
+    let c1 = SIN_TABLE_90[90 - (deg + 1).min(90)] as i64;
+    let f0 = abs_y * c0 - abs_x * s0;
+    let f1 = abs_x * s1 - abs_y * c1;
+    let frac = if f0 + f1 > 0 {
+        ((f0 * ONE as i64) / (f0 + f1)).clamp(0, ONE as i64) as i32
+    } else {
+        0
+    };
+    let base_deg = (deg as i32) * ONE + frac;
+
+    if x >= 0 && y >= 0 {
+        base_deg
+    } else if x < 0 && y >= 0 {
+        180 * ONE - base_deg
+    } else if x < 0 && y < 0 {
+        180 * ONE + base_deg
+    } else {
+        360 * ONE - base_deg
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1182,6 +1239,142 @@ pub fn emit_points(
     Ok(())
 }
 
+pub fn emit_arc_to(
+    x0: i32,
+    y0: i32,
+    rx: i32,
+    ry: i32,
+    x_rot: i32,
+    large_arc: bool,
+    sweep: bool,
+    x1: i32,
+    y1: i32,
+    transform: &impl Fn(i32, i32) -> (i32, i32),
+    segments: &mut SegmentBuffer,
+) -> Result<(), ()> {
+    if x0 == x1 && y0 == y1 {
+        return Ok(());
+    }
+    if rx <= 0 || ry <= 0 {
+        let p0 = transform(x0, y0);
+        let p1 = transform(x1, y1);
+        return segments.push(p0.0, p0.1, p1.0, p1.1);
+    }
+
+    let dx = (x0 - x1) as i64;
+    let dy = (y0 - y1) as i64;
+    let mid_x = (x0 + x1) as i64 / 2;
+    let mid_y = (y0 + y1) as i64 / 2;
+
+    let (cos_r, sin_r) = if x_rot != 0 {
+        sin_cos_fixed(x_rot)
+    } else {
+        (ONE, 0)
+    };
+    let cos_r = cos_r as i64;
+    let sin_r = sin_r as i64;
+
+    let x1_p = (cos_r * dx + sin_r * dy) / (2 * ONE as i64);
+    let y1_p = (-sin_r * dx + cos_r * dy) / (2 * ONE as i64);
+
+    let mut rx64 = rx as i64;
+    let mut ry64 = ry as i64;
+    let mut rx8 = (rx64 >> 8).max(1);
+    let mut ry8 = (ry64 >> 8).max(1);
+    let x1_p8 = x1_p >> 8;
+    let y1_p8 = y1_p >> 8;
+
+    let lambda = (x1_p8 * x1_p8 * ONE as i64) / (rx8 * rx8)
+        + (y1_p8 * y1_p8 * ONE as i64) / (ry8 * ry8);
+    if lambda > ONE as i64 {
+        let l_sqrt = isqrt64((lambda as u64) << 16) as i64;
+        rx64 = (rx64 * l_sqrt) >> 16;
+        ry64 = (ry64 * l_sqrt) >> 16;
+        rx8 = (rx64 >> 8).max(1);
+        ry8 = (ry64 >> 8).max(1);
+    }
+
+    let rx_sq = rx8 * rx8;
+    let ry_sq = ry8 * ry8;
+    let x1_p_sq = x1_p8 * x1_p8;
+    let y1_p_sq = y1_p8 * y1_p8;
+
+    let num = rx_sq * ry_sq - rx_sq * y1_p_sq - ry_sq * x1_p_sq;
+    let den = rx_sq * y1_p_sq + ry_sq * x1_p_sq;
+
+    let coef = if den > 0 && num > 0 {
+        let frac = (num << 16) / den;
+        let sq = isqrt64((frac as u64) << 16) as i64;
+        if large_arc != sweep {
+            sq
+        } else {
+            -sq
+        }
+    } else {
+        0
+    };
+
+    let cx_p = (coef * ((rx64 * y1_p) / ry64.max(1))) >> 16;
+    let cy_p = (-coef * ((ry64 * x1_p) / rx64.max(1))) >> 16;
+
+    let cx = if x_rot != 0 {
+        mid_x + ((cos_r * cx_p - sin_r * cy_p) >> 16)
+    } else {
+        mid_x + cx_p
+    } as i32;
+    let cy = if x_rot != 0 {
+        mid_y + ((sin_r * cx_p + cos_r * cy_p) >> 16)
+    } else {
+        mid_y + cy_p
+    } as i32;
+
+    let theta0 = atan2_deg_16(
+        ((y0 - cy) as i64 * ONE as i64) / ry64.max(1),
+        ((x0 - cx) as i64 * ONE as i64) / rx64.max(1),
+    );
+    let theta1 = atan2_deg_16(
+        ((y1 - cy) as i64 * ONE as i64) / ry64.max(1),
+        ((x1 - cx) as i64 * ONE as i64) / rx64.max(1),
+    );
+
+    let mut delta = (theta1 - theta0) % (360 * ONE);
+    if sweep {
+        if delta <= 0 {
+            delta += 360 * ONE;
+        }
+    } else {
+        if delta >= 0 {
+            delta -= 360 * ONE;
+        }
+    }
+
+    let steps = 8;
+    let mut prev = transform(x0, y0);
+    for i in 1..=steps {
+        if i == steps {
+            let curr = transform(x1, y1);
+            segments.push(prev.0, prev.1, curr.0, curr.1)?;
+            break;
+        }
+        let angle = theta0 + ((delta as i64 * i as i64) / steps as i64) as i32;
+        let (s_a, c_a) = sin_cos_fixed(angle);
+        let ex = (rx64 * c_a as i64) >> 16;
+        let ey = (ry64 * s_a as i64) >> 16;
+        let (px, py) = if x_rot != 0 {
+            (
+                cx + (((cos_r * ex - sin_r * ey) >> 16) as i32),
+                cy + (((sin_r * ex + cos_r * ey) >> 16) as i32),
+            )
+        } else {
+            (cx + ex as i32, cy + ey as i32)
+        };
+        let curr = transform(px, py);
+        segments.push(prev.0, prev.1, curr.0, curr.1)?;
+        prev = curr;
+    }
+    Ok(())
+}
+
 pub fn emit_path_d(
     d_bytes: &[u8],
     transform: &impl Fn(i32, i32) -> (i32, i32),
@@ -1447,6 +1640,36 @@ pub fn emit_path_d(
                 last_quad_ctrl = Some((x1, y1));
                 last_cubic_ctrl = None;
             }
+            b'A' => {
+                let rx = scanner.next_fixed().ok_or(())?.abs();
+                let ry = scanner.next_fixed().ok_or(())?.abs();
+                let x_rot = scanner.next_fixed().ok_or(())?;
+                let large_arc = scanner.next_fixed().ok_or(())? != 0;
+                let sweep = scanner.next_fixed().ok_or(())? != 0;
+                let x = scanner.next_fixed().ok_or(())?;
+                let y = scanner.next_fixed().ok_or(())?;
+                emit_arc_to(cur_orig.0, cur_orig.1, rx, ry, x_rot, large_arc, sweep, x, y, transform, segments)?;
+                cur_orig = (x, y);
+                cur_pt = transform(x, y);
+                last_cubic_ctrl = None;
+                last_quad_ctrl = None;
+            }
+            b'a' => {
+                let rx = scanner.next_fixed().ok_or(())?.abs();
+                let ry = scanner.next_fixed().ok_or(())?.abs();
+                let x_rot = scanner.next_fixed().ok_or(())?;
+                let large_arc = scanner.next_fixed().ok_or(())? != 0;
+                let sweep = scanner.next_fixed().ok_or(())? != 0;
+                let dx = scanner.next_fixed().ok_or(())?;
+                let dy = scanner.next_fixed().ok_or(())?;
+                let x = cur_orig.0 + dx;
+                let y = cur_orig.1 + dy;
+                emit_arc_to(cur_orig.0, cur_orig.1, rx, ry, x_rot, large_arc, sweep, x, y, transform, segments)?;
+                cur_orig = (x, y);
+                cur_pt = transform(x, y);
+                last_cubic_ctrl = None;
+                last_quad_ctrl = None;
+            }
             b'Z' | b'z' => {
                 if cur_pt != start_pt {
                     segments.push(cur_pt.0, cur_pt.1, start_pt.0, start_pt.1)?;
@@ -1580,6 +1803,9 @@ struct StyleState {
     stroke_width: Option<i32>,
     fill_rule: FillRule,
     transform: Transform2D,
+    opacity: i32,
+    fill_opacity: i32,
+    stroke_opacity: i32,
 }
 
 /// Decodes an SVG image into the supplied RGBA buffer.
@@ -1628,6 +1854,9 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
         stroke_width: None,
         fill_rule: FillRule::NonZero,
         transform: Transform2D::IDENTITY,
+        opacity: ONE,
+        fill_opacity: ONE,
+        stroke_opacity: ONE,
     }; 8];
     let mut style_depth = 0usize;
 
@@ -1677,12 +1906,16 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                 }
 
                 if elem == b"g" {
-                    if style_depth + 1 < style_stack.len() {
+                    if !tag.ends_with(b"/") && style_depth + 1 < style_stack.len() {
                         let cur = style_stack[style_depth];
                         let new_fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill);
                         let new_stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke);
                         let new_sw = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width);
                         let new_fr = get_attr_or_style(tag, b"fill-rule").and_then(parse_fill_rule).unwrap_or(cur.fill_rule);
+                        let g_op = get_attr_or_style(tag, b"opacity").and_then(parse_fixed).unwrap_or(ONE);
+                        let g_fill_op = get_attr_or_style(tag, b"fill-opacity").and_then(parse_fixed).unwrap_or(cur.fill_opacity);
+                        let g_stroke_op = get_attr_or_style(tag, b"stroke-opacity").and_then(parse_fixed).unwrap_or(cur.stroke_opacity);
+                        let new_opacity = ((cur.opacity as i64 * g_op as i64) >> 16) as i32;
                         let new_transform = if let Some(t_attr) = get_attr_or_style(tag, b"transform") {
                             if let Some(t) = parse_transform(t_attr) {
                                 cur.transform.multiply(&t)
@@ -1699,6 +1932,9 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                             stroke_width: new_sw,
                             fill_rule: new_fr,
                             transform: new_transform,
+                            opacity: new_opacity,
+                            fill_opacity: g_fill_op,
+                            stroke_opacity: g_stroke_op,
                         };
                     }
                 } else if elem == b"/g" {
@@ -1707,10 +1943,30 @@ pub fn decode_svg(data: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize),
                     }
                 } else if elem == b"rect" || elem == b"circle" || elem == b"ellipse" || elem == b"line" || elem == b"polyline" || elem == b"polygon" || elem == b"path" {
                     let cur = style_stack[style_depth];
-                    let fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
-                    let stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);
+                    let raw_fill = get_attr_or_style(tag, b"fill").and_then(parse_color).or(cur.fill).unwrap_or(Color::Rgba(0, 0, 0, 255));
+                    let raw_stroke = get_attr_or_style(tag, b"stroke").and_then(parse_color).or(cur.stroke).unwrap_or(Color::None);
                     let stroke_width = get_attr_or_style(tag, b"stroke-width").and_then(parse_fixed).or(cur.stroke_width).unwrap_or(ONE);
                     let fill_rule = get_attr_or_style(tag, b"fill-rule").and_then(parse_fill_rule).unwrap_or(cur.fill_rule);
+
+                    let elem_op = get_attr_or_style(tag, b"opacity").and_then(parse_fixed).unwrap_or(ONE);
+                    let elem_fill_op = get_attr_or_style(tag, b"fill-opacity").and_then(parse_fixed).unwrap_or(cur.fill_opacity);
+                    let elem_stroke_op = get_attr_or_style(tag, b"stroke-opacity").and_then(parse_fixed).unwrap_or(cur.stroke_opacity);
+
+                    let total_fill_op = (((cur.opacity as i64 * elem_op as i64) >> 16) * elem_fill_op as i64) >> 16;
+                    let total_stroke_op = (((cur.opacity as i64 * elem_op as i64) >> 16) * elem_stroke_op as i64) >> 16;
+
+                    let apply_opacity = |color: Color, op_16: i64| -> Color {
+                        match color {
+                            Color::Rgba(r, g, b, a) => {
+                                let new_a = ((a as i64 * op_16.clamp(0, ONE as i64)) >> 16) as u8;
+                                Color::Rgba(r, g, b, new_a)
+                            }
+                            Color::None => Color::None,
+                        }
+                    };
+
+                    let fill = apply_opacity(raw_fill, total_fill_op);
+                    let stroke = apply_opacity(raw_stroke, total_stroke_op);
 
                     let elem_transform = if let Some(t_attr) = get_attr_or_style(tag, b"transform") {
                         if let Some(t) = parse_transform(t_attr) {

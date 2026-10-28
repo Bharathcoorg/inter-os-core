@@ -275,6 +275,26 @@ fn test_malformed_svg_rejections() {
 }
 
 #[test]
+fn test_documented_bounds_limits() {
+    // MAX_WIDTH bounds: 1280 is valid, 1281 is rejected
+    assert_eq!(decode_svg_header(br#"<svg width="1280" height="20"></svg>"#), Ok((1280, 20)));
+    assert_eq!(decode_svg_header(br#"<svg width="1281" height="20"></svg>"#), Err(()));
+
+    // MAX_SEGMENTS bounds: pushing > 1024 segments returns Err(())
+    let mut segs = SegmentBuffer::new();
+    for i in 0..MAX_SEGMENTS {
+        assert!(segs.push(0, 0, (i as i32) * ONE, (i as i32) * ONE).is_ok());
+    }
+    assert_eq!(segs.len, MAX_SEGMENTS);
+    assert_eq!(segs.push(0, 0, 100, 100), Err(()));
+
+    // MAX_CROSSINGS bounds: rasterizer handles dense segments safely without panic
+    let mut rasterizer = SvgRasterizer::new();
+    let mut out = [0u8; 100 * 10 * 4];
+    rasterizer.rasterize(&segs, 100, 10, (255, 0, 0, 255), FillRule::NonZero, &mut out);
+}
+
+#[test]
 fn test_all_named_colors() {
     let colors = [
         ("black", (0, 0, 0, 255)),
@@ -536,4 +556,112 @@ fn test_security_and_reject_paths() {
     let unk_svg = br#"<svg width="20" height="20"><foreignObject/><rect width="20" height="20" fill="red"/></svg>"#;
     assert_eq!(decode_svg(unk_svg, &mut out).map(|(w, h, _)| (w, h)), Ok((20, 20)));
     assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn test_inline_svg_dom_layout_participation() {
+    // HTML containing inline SVG inside text / elements
+    let html = br#"
+        <div>
+            <p>Header text before SVG</p>
+            <svg width="60" height="30" viewBox="0 0 120 60">
+                <rect width="120" height="60" fill="red"/>
+                <circle cx="60" cy="30" r="20" fill="blue"/>
+            </svg>
+            <p>Footer text after SVG</p>
+        </div>
+    "#;
+
+    // Header dimensions decoded from inline SVG element
+    let (w, h) = decode_svg_header(html).expect("inline SVG header must decode");
+    assert_eq!(w, 60);
+    assert_eq!(h, 30);
+
+    // Intrinsic aspect-ratio sizing from viewBox when one dimension is omitted
+    let html_w_only = br#"<svg width="60" viewBox="0 0 200 100"><rect width="200" height="100"/></svg>"#;
+    let (w1, h1) = decode_svg_header(html_w_only).expect("width-only with viewBox");
+    assert_eq!(w1, 60);
+    assert_eq!(h1, 30); // 60 * 100 / 200 = 30
+
+    let html_h_only = br#"<svg height="40" viewBox="0 0 200 100"><rect width="200" height="100"/></svg>"#;
+    let (w2, h2) = decode_svg_header(html_h_only).expect("height-only with viewBox");
+    assert_eq!(w2, 80); // 40 * 200 / 100 = 80
+    assert_eq!(h2, 40);
+
+    let html_vb_only = br#"<svg viewBox="0 0 160 90"><rect width="160" height="90"/></svg>"#;
+    let (w3, h3) = decode_svg_header(html_vb_only).expect("viewBox-only");
+    assert_eq!(w3, 160);
+    assert_eq!(h3, 90);
+
+    // Render buffer sized to the layout dimensions
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    let (dec_w, dec_h, len) = decode_svg(html, &mut out).expect("inline SVG must render into layout buffer");
+    assert_eq!(dec_w, 60);
+    assert_eq!(dec_h, 30);
+    assert_eq!(len, 60 * 30 * 4);
+
+    // Center pixel of layout box (30, 15) must contain blue circle
+    let center_idx = (15 * 60 + 30) * 4;
+    assert_eq!(&out[center_idx..center_idx + 4], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn decodes_svg_fixtures_against_sidecars() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg");
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("svg"))
+        .collect();
+    entries.sort();
+
+    let mut total_diffs = 0;
+    let mut failures = Vec::new();
+    for path in &entries {
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let data = std::fs::read(path).unwrap();
+
+        // Documented bounds check: overflow cases are marked structurally-only
+        if name == "bounds_overflow" {
+            assert!(decode_svg_header(&data).is_err(), "bounds_overflow exceeding MAX_WIDTH must fail header decode");
+            continue;
+        }
+
+        let rgba_path = path.with_extension("rgba");
+        assert!(rgba_path.exists(), "Missing sidecar for {:?}", path);
+        let expected = std::fs::read(&rgba_path).unwrap();
+        let width = u32::from_le_bytes(expected[0..4].try_into().unwrap());
+        let height = u32::from_le_bytes(expected[4..8].try_into().unwrap());
+        let exp_pixels = &expected[8..];
+
+        // Test decode_svg_header
+        assert_eq!(decode_svg_header(&data), Ok((width, height)), "{path:?}");
+
+        // Test decode_svg
+        let mut out = vec![0u8; (width * height * 4) as usize];
+        let res = decode_svg(&data, &mut out);
+        assert!(res.is_ok(), "decode_svg failed for {path:?}: {res:?}");
+        let (dec_w, dec_h, dec_len) = res.unwrap();
+        assert_eq!(dec_w, width);
+        assert_eq!(dec_h, height);
+        assert_eq!(dec_len, out.len());
+
+        let mut diff_count = 0;
+        for (&actual, &exp) in out.iter().zip(exp_pixels.iter()) {
+            if actual != exp {
+                diff_count += 1;
+            }
+        }
+        eprintln!(
+            "Fixture {:<20} {:>4}x{:<4} {:>5} / {:>5} differing bytes",
+            name, width, height, diff_count, exp_pixels.len()
+        );
+        if diff_count > 0 {
+            failures.push(name.to_string());
+        }
+        total_diffs += diff_count;
+    }
+    assert!(entries.len() >= 6, "Expected at least 6 fixtures, saw {}", entries.len());
+    assert_eq!(failures, Vec::<String>::new(), "Pixel mismatch in fixtures: {failures:?}");
+    assert_eq!(total_diffs, 0, "All fixture pixels must match exactly");
 }

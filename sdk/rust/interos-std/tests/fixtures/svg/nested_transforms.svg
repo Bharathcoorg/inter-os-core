@@ -1,0 +1,10 @@
+<svg width="40" height="40" viewBox="0 0 40 40">
+  <g transform="translate(10, 10)">
+    <g transform="scale(2)">
+      <rect x="0" y="0" width="8" height="8" fill="#00ffff"/>
+    </g>
+    <g transform="translate(5, 5)">
+      <rect x="0" y="0" width="10" height="10" fill="#ffff00"/>
+    </g>
+  </g>
+</svg>
