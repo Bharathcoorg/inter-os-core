@@ -346,6 +346,13 @@ pub fn set_current_server_name(name: &[u8]) {
 
 /// The outcome of a fetch over TCP.
 struct FetchOutcome {
+    /// Whether the bytes arrived over a TLS session whose handshake completed.
+    ///
+    /// WHY it is kept: the secure mark in the omnibox is a claim about the
+    /// transport that delivered the document, so it has to be read from what
+    /// the transport actually did rather than inferred from the scheme the
+    /// user typed.
+    tls_verified: bool,
     /// The number of bytes received.
     bytes: usize,
     /// Whether the response filled the buffer, and so was truncated.
@@ -364,10 +371,11 @@ struct FetchOutcome {
 
 /// Fetches an HTTP response over a TLS 1.3 encrypted transport.
 ///
-/// Port 443 HTTPS traffic wraps in a TLS 1.3 ClientHello record and never sends
-/// raw plaintext HTTP GET. On TLS failure (handshake failure, cert rejected,
-/// unsupported cipher), the connection fails closed with explicit
-/// FetchErrorKind::TlsHandshakeFailed and does not send plaintext over port 443.
+/// An `https` hop wraps its request in a TLS 1.3 ClientHello record and never
+/// sends raw plaintext HTTP GET, whatever port that hop resolves to. On TLS
+/// failure (handshake failure, cert rejected, unsupported cipher) the
+/// connection fails closed with explicit FetchErrorKind::TlsHandshakeFailed and
+/// no plaintext request is emitted.
 fn fetch_over_tls(
     dst_ip: [u8; 4],
     dst_port: u16,
@@ -377,6 +385,7 @@ fn fetch_over_tls(
     window: usize,
 ) -> FetchOutcome {
     let mut outcome = FetchOutcome {
+        tls_verified: false,
         bytes: 0,
         truncated: false,
         error: 0,
@@ -501,6 +510,10 @@ fn fetch_over_tls(
         let _ = std::tcp_close(connection);
         return outcome;
     }
+    // The only place that says a channel was authenticated, and it is set after
+    // the handshake completed and the verifier rejected nothing. Every failure
+    // path above returns before this line, so nothing unverified can be marked.
+    outcome.tls_verified = true;
 
     // Send HTTP request encrypted via tls_client.write
     if let Err(_) = tls_client.write(request) {
@@ -553,21 +566,26 @@ fn fetch_over_tls(
 /// they land. Stopping the transfer at the room saves the wire and the time
 /// for the fetches behind it -- a page that chains twenty stylesheets pays
 /// for every one of them.
+/// WHY the caller names the security, not the port: `https` on any port means
+/// the channel has to be TLS, and an `http` URL on 443 means it does not.
+/// Deciding here from `dst_port == 443` let `https://host:4300` reach the wire
+/// as a plaintext GET while the omnibox still drew the mark the scheme implied.
 fn fetch_over_tcp(
     dst_ip: [u8; 4],
     dst_port: u16,
     local_port: u16,
     request: &[u8],
     window: usize,
+    use_tls: bool,
 ) -> FetchOutcome {
-    // Port 443 HTTPS traffic wraps in TLS 1.3 ClientHello record and never sends raw plaintext HTTP GET.
-    if dst_port == 443 {
+    if use_tls {
         let host_str = unsafe {
             core::str::from_utf8(&TLS_HOSTNAME_BUF[..TLS_HOSTNAME_LEN]).unwrap_or("localhost")
         };
         return fetch_over_tls(dst_ip, dst_port, local_port, host_str, request, window);
     }
     let mut outcome = FetchOutcome {
+        tls_verified: false,
         bytes: 0,
         truncated: false,
         error: 0,
@@ -2096,6 +2114,14 @@ pub struct BrowserApp {
     pub transport_failure: TransportFailure,
     /// Why connection to the gateway failed.
     pub connection_failure: ConnectionFailure,
+    /// Whether the document on screen arrived over a TLS session whose
+    /// handshake completed.
+    ///
+    /// WHY it is kept: the secure mark in the omnibox is a claim about this
+    /// page's transport. Deriving it from the scheme alone would also mark a
+    /// page whose request went out as plaintext, and that is the one thing the
+    /// mark must never do.
+    pub document_tls_verified: bool,
     /// Why protocol handling or document decoding failed.
     pub protocol_fault: ProtocolFaultKind,
     /// The reason the gateway gave for the last failed fetch.
@@ -2306,6 +2332,7 @@ impl BrowserApp {
             download_failure: DownloadFailure::None,
             transport_failure: TransportFailure::None,
             connection_failure: ConnectionFailure::None,
+            document_tls_verified: false,
             protocol_fault: ProtocolFaultKind::None,
             gateway_reason: [0; browser::GATEWAY_REASON_MAX],
             gateway_reason_len: 0,
@@ -2620,6 +2647,7 @@ impl BrowserApp {
             local_port,
             &request[..request_len],
             STYLESHEET_WINDOW_BYTES,
+            false,
         );
         let buffer = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
         let reply = &buffer[..outcome.bytes];
@@ -2870,6 +2898,7 @@ impl BrowserApp {
             local_port,
             &request[..request_len],
             MAX_RESPONSE_BYTES,
+            false,
         );
         if outcome.bytes == 0 {
             return (
@@ -4521,6 +4550,7 @@ impl BrowserApp {
             local_port,
             &request[..request_len],
             MAX_RESPONSE_BYTES,
+            false,
         );
         let end = std::get_ticks().ok();
         match self.download_rate(start, end, outcome, SPEEDTEST_DOWNLOAD_BYTES) {
@@ -4547,6 +4577,7 @@ impl BrowserApp {
             local_port,
             &request[..request_len],
             MAX_RESPONSE_BYTES,
+            false,
         );
         match (start, outcome.first_byte_tick) {
             (Some(start), Some(first)) if outcome.bytes > 0 && outcome.error == 0 => {
@@ -4677,6 +4708,7 @@ impl BrowserApp {
             local_port,
             &request[..request_len],
             MAX_RESPONSE_BYTES,
+            false,
         );
         let mut result = LabResult::EMPTY;
         if outcome.bytes == 0 || outcome.error != 0 {
@@ -4789,6 +4821,11 @@ impl BrowserApp {
         self.transport_failure = TransportFailure::None;
         self.connection_failure = ConnectionFailure::None;
         self.protocol_fault = ProtocolFaultKind::None;
+        // The security mark is a claim about the document that arrives. This
+        // navigation has delivered nothing yet, so the page it replaces keeps
+        // its mark in its own history entry and cannot lend it to a URL whose
+        // transport has not been tried.
+        self.document_tls_verified = false;
         // A navigation is a new document; the previous document's bytes must
         // not be savable under the new address, and the previous page's
         // keyboard must not stay attached to controls that no longer exist.
@@ -4885,7 +4922,12 @@ impl BrowserApp {
 
         loop {
             let hop_parsed = parse_uri(&hop_buf[..hop_len]);
-            let hop_is_https = hop_parsed.scheme == UriScheme::Https || hop_parsed.port == 443;
+            // The scheme alone decides both where this hop dials and whether it
+            // wraps in TLS. `|| port == 443` used to be here, which sent an
+            // `http://host:443` request into a TLS client hello and, together
+            // with the port test inside the transport, let an `https` URL on
+            // any other port travel as plaintext.
+            let hop_is_https = hop_parsed.scheme == UriScheme::Https;
             let (dst_ip, dst_port) = if hop_is_https {
                 if let Ok(h) = core::str::from_utf8(hop_parsed.host) {
                     set_current_server_name(h.as_bytes());
@@ -4962,7 +5004,13 @@ impl BrowserApp {
                 local_port,
                 &request_buf[..request_len],
                 MAX_RESPONSE_BYTES,
+                hop_is_https,
             );
+
+            // The secure mark follows this reading rather than the scheme the
+            // address was typed with. Every hop overwrites it, so a redirect
+            // that leaves a secure channel cannot keep the mark behind.
+            self.document_tls_verified = outcome.tls_verified;
 
             // PLATFORM TRUTH: a page is loaded only when the transport
             // actually delivered bytes. The specific failure is reported
@@ -6539,7 +6587,9 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 // -----------------------------------------------------------------------------
 fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     let parsed = parse_uri(app.current_url());
-    let is_https = parsed.scheme == UriScheme::Https;
+    // Secure only when both halves agree: the address says https, and the
+    // document on screen came off a channel whose handshake completed.
+    let is_https = parsed.scheme == UriScheme::Https && app.document_tls_verified;
 
     // Omnibox Capsule
     if let Some(c) = draw_rounded_rect(
@@ -6568,10 +6618,15 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // the address in the field, and a face says more about what is loaded
         // here than a lock this app never verified does.
         if app.favicon.is_none() && padlock_glyph(x, y) {
-            // WHY the mark reflects authenticated TLS: a loaded HTTPS page has
-            // completed a verified TLS 1.3 handshake. Its secure status is
-            // truthfully rendered in THEME.primary, while an unverified plain HTTP
-            // channel remains muted in THEME.on_surface_variant.
+            // WHY the mark reflects an observed TLS channel: it is read from the
+            // transport that delivered this document, so it appears only for a
+            // page whose TLS 1.3 handshake completed and whose peer certificate
+            // passed the browser's verifier -- which checks the certificate's
+            // structure, its validity dates, the name match against the address
+            // dialled, and a signature chain to the roots the browser ships.
+            // It says nothing beyond that, and in particular nothing about a
+            // public trust root. A plain HTTP channel stays muted in
+            // THEME.on_surface_variant.
             //
             // The mark is not drawn at all when nothing has loaded, so a
             // failed navigation shows no lock beside a URL that was never
