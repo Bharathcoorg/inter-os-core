@@ -8,4 +8,7 @@ assert "buf.len() > MAX_FILE_SIZE" in v
 assert "checked_add(buf.len())" in v
 assert "end > MAX_FILE_SIZE" in v
 assert "FsError::FileTooLarge | FsError::PathTooLong" in s
+assert "pub fn mkdir_for_task" in v
+assert "FsMkdir = 161" in s
+assert "pub fn sys_fs_mkdir" in s
 print("VFS boundary contract: PASS")

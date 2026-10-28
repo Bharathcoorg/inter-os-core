@@ -1010,9 +1010,6 @@ impl Vfs {
             return Err(no_filesystem_authority(task_caps));
         }
         let normalized = normalize_path(path);
-        if self.lookup(&normalized).is_some() {
-            return Err(FsError::InvalidPath);
-        }
         let is_storage = normalized.starts_with("/storage/");
         if !is_storage {
             let Some(root) = Self::app_storage_root(task_id) else {
@@ -1021,6 +1018,9 @@ impl Vfs {
             if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
                 return Err(FsError::PermissionDenied);
             }
+        }
+        if self.lookup(&normalized).is_some() {
+            return Err(FsError::InvalidPath);
         }
         let parent = parent_path(&normalized);
         let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
@@ -3324,6 +3324,288 @@ mod tests {
         // Generations MUST advance on mutating writes
         assert!(vfs.data_generation.get() > clean_data_gen, "mutating write must advance data generation");
         assert!(vfs.metadata_generation.get() > clean_meta_gen, "mutating write must advance metadata generation");
+    }
+
+    extern "C" fn dummy_test_entry() -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_capability_denial_no_write_authority() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(901);
+
+        // 1. Empty table: no FileSystemWrite or FileSystemRead
+        let empty_caps = CapabilityTable::new_for_task(task_id, 4);
+        let res1 = vfs.mkdir_for_task(task_id, &empty_caps, 0, "/storage/new_dir");
+        assert!(
+            matches!(res1, Err(FsError::CapabilityError(crate::capability::CapError::TypeMismatch))),
+            "empty table must fail with TypeMismatch, got {:?}", res1
+        );
+
+        // 2. Table with only FileSystemRead with READ rights
+        let mut read_only_caps = CapabilityTable::new_for_task(task_id, 4);
+        read_only_caps.insert(Capability {
+            id: CapabilityId(9001),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+        let res2 = vfs.mkdir_for_task(task_id, &read_only_caps, 0, "/storage/new_dir");
+        assert!(
+            matches!(res2, Err(FsError::CapabilityError(crate::capability::CapError::InvalidSlot))),
+            "read-only capability table must fail with InvalidSlot, got {:?}", res2
+        );
+
+        // 3. Table with FileSystemWrite but only READ rights
+        let mut write_no_write_rights = CapabilityTable::new_for_task(task_id, 4);
+        write_no_write_rights.insert(Capability {
+            id: CapabilityId(9002),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+        let res3 = vfs.mkdir_for_task(task_id, &write_no_write_rights, 0, "/storage/new_dir");
+        assert!(
+            matches!(res3, Err(FsError::CapabilityError(crate::capability::CapError::InvalidSlot))),
+            "write cap lacking WRITE rights must fail with InvalidSlot, got {:?}", res3
+        );
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_object_scoped_capability_binding() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let parent_inode = vfs.lookup("/storage").expect("parent inode");
+        let task_id = TaskId(902);
+
+        // Capability table holding FileSystemWrite with WRITE rights, BUT scoped to a different object_id
+        let wrong_object_id = parent_inode.0 + 9999;
+        let mut scoped_caps = CapabilityTable::new_for_task(task_id, 4);
+        scoped_caps.insert(Capability {
+            id: CapabilityId(9021),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: wrong_object_id,
+        }).unwrap();
+
+        // Object-scoped check must bind: authority for wrong_object_id cannot mkdir in /storage
+        let res_denied = vfs.mkdir_for_task(task_id, &scoped_caps, 0, "/storage/denied_dir");
+        assert_eq!(
+            res_denied,
+            Err(FsError::PermissionDenied),
+            "scoped capability to wrong object must be denied"
+        );
+
+        // Now insert a capability scoped directly to parent_inode.0
+        scoped_caps.insert(Capability {
+            id: CapabilityId(9022),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: parent_inode.0,
+        }).unwrap();
+
+        // Note honestly: _cap_slot is ignored by mkdir_for_task (house pattern),
+        // and passing slot 999 succeeds because find_capability_for_object finds the matching grant
+        let res_ok = vfs.mkdir_for_task(task_id, &scoped_caps, 999, "/storage/bound_dir");
+        assert!(res_ok.is_ok(), "object-scoped capability matching parent inode must succeed");
+        assert!(vfs.lookup("/storage/bound_dir").is_some());
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_sandbox_root_escape() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = crate::task::SCHEDULER.lock();
+        let app_task = sched.spawn("org.interos.notes", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 1);
+        drop(sched);
+
+        crate::task::process::register_leader(app_task, TaskId(1));
+        crate::task::process::bind_user_for_task(app_task, 1).unwrap();
+
+        let mut caps = CapabilityTable::new_for_task(app_task, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9031),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        let mut vfs = Vfs::new();
+        // Setup app storage parent
+        vfs.mkdir("/user");
+        vfs.mkdir("/user/1");
+        vfs.mkdir("/user/1/apps");
+        vfs.mkdir("/user/1/apps/org.interos.notes");
+        vfs.mkdir("/user/1/apps/org.interos.notes/files");
+
+        // 1. Attempt to mkdir outside sandbox root (different app)
+        let res_escape = vfs.mkdir_for_task(app_task, &caps, 0, "/user/1/apps/org.interos.browser/escaped");
+        assert_eq!(res_escape, Err(FsError::PermissionDenied));
+
+        // 2. Attempt to mkdir root itself
+        let res_root = vfs.mkdir_for_task(app_task, &caps, 0, "/user/1/apps/org.interos.notes");
+        assert_eq!(res_root, Err(FsError::PermissionDenied));
+
+        // 3. Attempt to mkdir in /system
+        let res_system = vfs.mkdir_for_task(app_task, &caps, 0, "/system/rogue");
+        assert_eq!(res_system, Err(FsError::PermissionDenied));
+
+        // 4. Task without app storage root attempting to mkdir outside /storage
+        let non_app_task = TaskId(9999);
+        let res_no_root = vfs.mkdir_for_task(non_app_task, &caps, 0, "/user/1/apps/org.interos.notes/leak");
+        assert_eq!(res_no_root, Err(FsError::FileNotFound));
+
+        // 5. Valid mkdir inside task's own sandbox succeeds
+        let res_valid = vfs.mkdir_for_task(app_task, &caps, 0, "/user/1/apps/org.interos.notes/files/subdir");
+        assert!(res_valid.is_ok(), "mkdir within task sandbox root must succeed");
+        assert!(vfs.lookup("/user/1/apps/org.interos.notes/files/subdir").is_some());
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_storage_branch() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(904);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9041),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // Any task with FileSystemWrite can create under /storage/
+        let inode = vfs.mkdir_for_task(task_id, &caps, 0, "/storage/photos").expect("storage mkdir");
+        assert!(inode.0 > 0);
+        let looked_up = vfs.lookup("/storage/photos").expect("lookup created storage dir");
+        assert_eq!(looked_up, inode);
+        let inode_entry = vfs.inodes.get(&inode).expect("inode entry");
+        assert_eq!(inode_entry.file_type, FileType::Directory);
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_existing_path_fails() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(905);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9051),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // /storage without trailing slash requires app root, which task 905 lacks -> FileNotFound
+        let res1 = vfs.mkdir_for_task(task_id, &caps, 0, "/storage");
+        assert_eq!(res1, Err(FsError::FileNotFound));
+
+        // Create a directory, then try to create it again
+        vfs.mkdir_for_task(task_id, &caps, 0, "/storage/existing").expect("first create");
+        let res2 = vfs.mkdir_for_task(task_id, &caps, 0, "/storage/existing");
+        assert_eq!(res2, Err(FsError::InvalidPath));
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_empty_and_oversized_path() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(906);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9061),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // Empty path
+        let res_empty = vfs.mkdir_for_task(task_id, &caps, 0, "");
+        assert_eq!(res_empty, Err(FsError::PathTooLong));
+
+        // Path exceeding MAX_PATH_LEN (256)
+        let long_name = alloc::vec!['a' as u8; 260];
+        let long_path = alloc::format!("/storage/{}", core::str::from_utf8(&long_name).unwrap());
+        assert!(long_path.len() > MAX_PATH_LEN);
+        let res_long = vfs.mkdir_for_task(task_id, &caps, 0, &long_path);
+        assert_eq!(res_long, Err(FsError::PathTooLong));
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_parent_missing() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(907);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9071),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // Parent /storage/nonexistent does not exist
+        let res = vfs.mkdir_for_task(task_id, &caps, 0, "/storage/nonexistent/child");
+        assert_eq!(res, Err(FsError::FileNotFound));
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_parent_not_a_directory() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        vfs.create_file("/storage/regular_file.txt", b"not a dir", false);
+        let task_id = TaskId(908);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9081),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // Parent /storage/regular_file.txt is a file, not a directory
+        let res = vfs.mkdir_for_task(task_id, &caps, 0, "/storage/regular_file.txt/child");
+        assert_eq!(res, Err(FsError::NotADirectory));
+    }
+
+    #[test]
+    fn vfs_mkdir_for_task_metadata_generation_bump_and_snapshot() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        let task_id = TaskId(909);
+
+        let mut caps = CapabilityTable::new_for_task(task_id, 4);
+        caps.insert(Capability {
+            id: CapabilityId(9091),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        let meta_gen_before = vfs.metadata_generation.get();
+        let created_id = vfs.mkdir_for_task(task_id, &caps, 0, "/storage/persisted_dir").expect("mkdir");
+
+        // Generation must strictly advance
+        assert!(vfs.metadata_generation.get() > meta_gen_before, "metadata generation must bump on mkdir");
+
+        // Encode metadata snapshot and verify recovery
+        let mut meta_buf = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
+        let meta_len = vfs.encode_metadata_snapshot(&mut meta_buf);
+        assert!(meta_len > 0, "metadata snapshot must encode");
+
+        let mut restored = Vfs::new();
+        restored.decode_metadata_snapshot(&meta_buf[..meta_len], meta_len, true);
+        let restored_inode = restored.lookup("/storage/persisted_dir");
+        assert!(restored_inode.is_some(), "persisted directory must exist in restored VFS");
+        assert_eq!(restored_inode.unwrap(), created_id);
     }
 }
 

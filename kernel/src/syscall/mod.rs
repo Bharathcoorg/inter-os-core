@@ -7,10 +7,47 @@ pub mod content;
 pub mod entry;
 pub mod user_ptr;
 pub use entry::set_current_kernel_rsp;
+#[cfg(not(test))]
+pub use user_ptr::copy_from_user;
+
 pub use user_ptr::{
-    copy_from_user, copy_to_user, read_user_string, read_user_value, write_user_value,
+    copy_to_user, read_user_string, read_user_value, write_user_value,
     validate_user_buffer, UserAccessError, UserPtr, UserSlice, UserSliceMut,
 };
+
+#[cfg(test)]
+pub(crate) static TEST_USER_BUFFERS: spin::Mutex<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u8>>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+#[cfg(test)]
+pub fn register_test_user_buffer(addr: u64, data: &[u8]) {
+    TEST_USER_BUFFERS.lock().insert(addr, data.to_vec());
+}
+
+#[cfg(test)]
+pub fn clear_test_user_buffers() {
+    TEST_USER_BUFFERS.lock().clear();
+}
+
+#[cfg(test)]
+pub fn copy_from_user(dst: &mut [u8], src_addr: u64, len: usize) -> Result<usize, UserAccessError> {
+    if len > dst.len() {
+        return Err(UserAccessError::OutOfBounds);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(src_addr, len)?;
+    let buffers = TEST_USER_BUFFERS.lock();
+    if let Some(buf) = buffers.get(&src_addr) {
+        if len > buf.len() {
+            return Err(UserAccessError::OutOfBounds);
+        }
+        dst[..len].copy_from_slice(&buf[..len]);
+        Ok(len)
+    } else {
+        user_ptr::copy_from_user(dst, src_addr, len)
+    }
+}
 
 use crate::audio::{
     AudioStreamError, PcmChannels, PcmFormat, PcmSampleRate, AUDIO_MANAGER,
@@ -8232,6 +8269,107 @@ fn browser_clock_monotonic_increments() {
     assert_eq!(ts2.tv_nsec, 500_000_000);
     assert!(ts2.tv_sec > ts1.tv_sec || (ts2.tv_sec == ts1.tv_sec && ts2.tv_nsec >= ts1.tv_nsec));
 }
+
+    #[test]
+    fn sys_fs_mkdir_permission_denied_without_current_task() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sched = SCHEDULER.lock();
+        let has_current = sched.current_task().is_some();
+        drop(sched);
+        if !has_current {
+            assert_eq!(sys_fs_mkdir(0, "/storage/test"), Err(SyscallResult::PermissionDenied));
+        }
+    }
+
+    #[test]
+    fn syscall_161_dispatch_bad_user_pointer() {
+        // Null pointer
+        let res_null = sys_dispatch(161, 0, 0, 16, 0, 0);
+        assert_eq!(res_null, SyscallResult::InvalidArguments as i64);
+
+        // Guard page pointer (< 0x1000)
+        let res_guard = sys_dispatch(161, 0, 0x500, 16, 0, 0);
+        assert_eq!(res_guard, SyscallResult::InvalidArguments as i64);
+
+        // Kernel pointer (>= 0x0000_8000_0000_0000)
+        let res_kernel = sys_dispatch(161, 0, 0xFFFF_8000_0000_0000, 16, 0, 0);
+        assert_eq!(res_kernel, SyscallResult::InvalidArguments as i64);
+
+        // Unmapped user pointer
+        let res_unmapped = sys_dispatch(161, 0, 0x0000_7000_0000_0000, 16, 0, 0);
+        assert_eq!(res_unmapped, SyscallResult::InvalidArguments as i64);
+    }
+
+    #[test]
+    fn syscall_161_dispatch_path_length_bounds() {
+        // path_len 0 is invalid
+        let res_zero = sys_dispatch(161, 0, 0x2000, 0, 0, 0);
+        assert_eq!(res_zero, SyscallResult::InvalidArguments as i64);
+
+        // path_len > 256 is invalid
+        let res_too_long = sys_dispatch(161, 0, 0x2000, 257, 0, 0);
+        assert_eq!(res_too_long, SyscallResult::InvalidArguments as i64);
+    }
+
+    #[test]
+    fn syscall_161_dispatch_non_utf8_path() {
+        let user_addr = 0x2500u64;
+        let invalid_utf8 = [0xFF, 0xFE, 0xFD];
+        register_test_user_buffer(user_addr, &invalid_utf8);
+
+        let res = sys_dispatch(161, 0, user_addr, invalid_utf8.len() as u64, 0, 0);
+        assert_eq!(res, SyscallResult::InvalidArguments as i64);
+
+        clear_test_user_buffers();
+    }
+
+    #[test]
+    fn syscall_161_dispatch_successful_round_trip() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Ensure VFS has /storage directory
+        {
+            let mut vfs = VFS.lock();
+            let _ = vfs.mkdir("/storage");
+        }
+
+        // Initialize scheduler and ensure current task has FileSystemWrite capability
+        let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(9161),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        {
+            let mut sched = SCHEDULER.lock();
+            sched.init(caps);
+            if let Some(task) = sched.current_task_mut() {
+                let _ = task.cap_table.insert(crate::capability::Capability {
+                    id: crate::capability::CapabilityId(9161),
+                    cap_type: CapabilityType::FileSystemWrite,
+                    rights: Rights::WRITE,
+                    object_id: 0,
+                });
+            }
+        }
+
+        let user_addr = 0x3000u64;
+        let dir_path = b"/storage/dispatch_dir";
+        register_test_user_buffer(user_addr, dir_path);
+
+        let res = sys_dispatch(161, 0, user_addr, dir_path.len() as u64, 0, 0);
+        assert_eq!(res, SyscallResult::Success as i64);
+
+        // Verify the directory actually exists in the VFS
+        {
+            let vfs = VFS.lock();
+            assert!(vfs.lookup("/storage/dispatch_dir").is_some(), "directory must exist in VFS after syscall 161");
+        }
+
+        clear_test_user_buffers();
+    }
 }
 #[test]
 fn test_inference_ipc_security_denial_without_capability() {
