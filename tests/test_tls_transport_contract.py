@@ -96,12 +96,14 @@ def check_advertised_equals_accepted():
     # advertised must be refused too. The outer `signatureAlgorithm` field is
     # not covered by the certificate's own signature, so without this gate a
     # chain entry could declare an unchecked scheme and still verify.
-    walk = section(hand, "pub fn process_certificate", "pub fn process_certificate_verify")
-    must(
-        walk,
-        "parsed.sig_alg_oid != ED25519_SPKI_OID",
-        "declared signature algorithm must be the advertised one",
-    )
+    #
+    # WHY the gate is read where the link is checked: each link is verified with
+    # the scheme its own field names, so the refusal belongs to `verify_link`
+    # rather than to the message parser, which no longer picks the arithmetic.
+    link = section(cert, "pub fn verify_link", "pub const TAG_BOOLEAN")
+    must(link, "scheme_for_sig_oid(subject.sig_alg_oid)", "the declared scheme names the check")
+    must(link, "is_supported_sig_scheme", "declared scheme passes the advertised predicate")
+    must(link, "UnsupportedSignatureScheme", "an undeclared scheme is a refusal, not a skip")
 
 
 def check_hostname_on_the_live_path():
@@ -131,14 +133,14 @@ def check_hostname_on_the_live_path():
     must(pc, "reference_identity.is_empty()", "empty identity refused in the walk")
     must(pc, "if depth >= MAX_CHAIN_DEPTH", "chain depth cap")
     must(pc, "prev.issuer_raw != parsed.subject_raw", "chain continuity by name")
-    must(pc, "verify_ed25519(", "issuer signature is really verified")
+    must(pc, "verify_link(&prev, &parsed)?", "issuer signature is really verified")
     must(pc, "let mut chain = &body[cur..cur + list_len];", "walk is bounded by the declared list")
 
     # The live client path supplies the identity from the session and refuses a
     # handshake whose verifier is not pinned to the name it advertises.
     must(client, "fn require_live_identity", "live handshake identity guard")
     must(client, "reference_identity() != Some(host", "SNI and pinned identity must agree")
-    must(client, "process_certificate(payload, verifier, identity)", "identity reaches the walk")
+    must(client, "process_certificate(message, verifier, identity)", "identity reaches the walk")
     must(client, "if !self.has_server_cert", "CertificateVerify needs a validated leaf")
     must_not(client, "spki_public_key: &[1u8; 32]", "a fabricated leaf public key")
     must_not(client, "AllowAnyCertVerifier", "a permissive verifier on the client path")
@@ -194,7 +196,7 @@ def check_tests_claim_enforcement():
         "fn tls_non_leaf_positions_are_not_trusted_without_a_proved_link",
         "fn tls_chain_deeper_than_the_cap_is_refused",
         "fn tls_rejects_server_key_share_for_unadvertised_group",
-        "fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme",
+        "fn tls_reject_server_choosing_an_unadvertised_scheme",
         "fn tls_client_hello_advertises_exactly_the_verifiable_sets",
         "fn tls_client_hello_extension_lengths_cover_exactly_their_bytes",
         "fn tls_client_hello_rejects_empty_and_oversized_peer_name",
