@@ -23,6 +23,14 @@ pub fn is_leap_year(year: u32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Whether this civil date is one the app has not already put on the console.
+pub fn rtc_report_is_new(last: Option<(u32, u8, u8)>, now: (u32, u8, u8)) -> bool {
+    match last {
+        Some(previous) => previous != now,
+        None => true,
+    }
+}
+
 /// Returns the number of days in a given month.
 pub fn days_in_month(year: u32, month: u8) -> u8 {
     match month {
@@ -510,6 +518,18 @@ mod tests {
         assert_eq!(days_in_month(2026, 1), 31);
         assert_eq!(days_in_month(2026, 4), 30);
         assert_eq!(days_in_month(2026, 12), 31);
+    }
+
+    #[test]
+    fn test_the_clock_is_reported_once_per_civil_date_not_once_per_tick() {
+        assert!(rtc_report_is_new(None, (2026, 10, 29)),
+            "the first reading a backgrounded app takes has to be reported, or the \
+             console says nothing about the clock at all");
+        assert!(!rtc_report_is_new(Some((2026, 10, 29)), (2026, 10, 29)),
+            "the timer fires about twice a second; reprinting the same date every \
+             time is what buried the rest of the platform's console output");
+        assert!(rtc_report_is_new(Some((2026, 10, 29)), (2026, 10, 30)),
+            "a day that really rolled over is news once");
     }
 
     #[test]

@@ -28,7 +28,7 @@ use interos_std::design::outline_text;
 
 pub use calendar::{
     chevron_pixel, days_in_month, day_of_week, event_location, is_leap_year,
-    step_selected_day, ChevronDir, DayArrow,
+    rtc_report_is_new, step_selected_day, ChevronDir, DayArrow,
     EventRecord, StoreState,
     DAY_ARROW_BAND_Y0, DAY_ARROW_BAND_Y1,
     DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, DAY_NEXT_ARROW_X0, DAY_NEXT_ARROW_X1,
@@ -283,6 +283,10 @@ pub struct CalendarApp {
     sector_encrypted: bool,
     /// Whether a real civil date has been read from the hardware RTC.
     date_known: bool,
+    /// The civil date this app last put on the console.
+    rtc_reported_date: Option<(u32, u8, u8)>,
+    /// Whether the current "the clock did not answer" state has been reported.
+    rtc_unknown_reported: bool,
     /// The day the month grid highlights and the agenda lists.
     selected_day: Option<u8>,
     /// Events read from, and written to, the platform settings store.
@@ -321,6 +325,8 @@ impl CalendarApp {
             rtc_synchronized: false,
             sector_encrypted: false,
             date_known: false,
+            rtc_reported_date: None,
+            rtc_unknown_reported: false,
             selected_day: None,
             store: EventStore::EMPTY,
             view_mode: ViewMode::Month,
@@ -410,8 +416,6 @@ impl CalendarApp {
         match std::rtc_get_time(&mut time_buf) {
             Ok(n) if n > 0 => {
                 let payload = &time_buf[..n];
-                std::log("[CALENDAR APP] RTC payload as reported by the kernel:").ok();
-                std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
 
                 // WHY the SDK reads the fields and not this app: the calendar
                 // used to scan the payload itself and then mask each time field
@@ -430,28 +434,46 @@ impl CalendarApp {
                         self.current_minute = now.minute as u8;
                         self.date_known = true;
                         self.rtc_synchronized = true;
-                        std::log("[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
-                        )
-                        .ok();
+                        // WHY this is gated: `sync_rtc` runs from the timer
+                        // branch about twice a second, and used to print the
+                        // whole payload plus a success line every time, so one
+                        // backgrounded instance buried the console in tens of
+                        // thousands of identical lines and pushed real input
+                        // answers seconds late. A civil date is news once.
+                        let today = (now.year, now.month as u8, now.day as u8);
+                        if rtc_report_is_new(self.rtc_reported_date, today) {
+                            self.rtc_reported_date = Some(today);
+                            self.rtc_unknown_reported = false;
+                            std::log("[CALENDAR APP] RTC payload as reported by the kernel:").ok();
+                            std::log(core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
+                            std::log("[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
+                            )
+                            .ok();
+                        }
                         return true;
                     }
                     None => {
-                        std::log("[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.",
-                        )
-                        .ok();
+                        self.report_unknown_state("[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.");
                     }
                 }
             }
             Ok(_) => {
-                std::log("[CALENDAR APP] RTC returned an empty payload; current date unknown.").ok();
+                self.report_unknown_state("[CALENDAR APP] RTC returned an empty payload; current date unknown.");
             }
             Err(_) => {
-                std::log("[CALENDAR APP] RTC query refused by the kernel; current date unknown.",
-                )
-                .ok();
+                self.report_unknown_state("[CALENDAR APP] RTC query refused by the kernel; current date unknown.");
             }
         }
         false
+    }
+
+    /// Puts a clock failure on the console once, not once per timer tick.
+    fn report_unknown_state(&mut self, message: &str) {
+        if !self.rtc_unknown_reported {
+            self.rtc_unknown_reported = true;
+            self.rtc_reported_date = None;
+            std::log(message).ok();
+        }
     }
 
     pub fn check_due_notifications(&mut self) {

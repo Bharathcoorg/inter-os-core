@@ -423,6 +423,27 @@ def test_settings_never_advertises_unobserved_hardware_or_governor_state():
     assert 'b"Temperature telemetry unavailable"' in source
 
 
+def test_calendar_reports_the_clock_once_per_civil_date_not_once_per_tick():
+    """`sync_rtc` runs from the timer branch, so its console lines need a gate.
+
+    WHY this needs pinning: one stress pass carried 383 copies of the same
+    "RTC payload" line from two Calendar tasks, because the function printed
+    the payload and a success line every time the clock answered -- roughly
+    twice a second, forever. The serial console is the suites' only instrument,
+    and burying it pushed real input answers seconds late. A civil date is
+    news once, and a clock failure is reported once until the state changes.
+    """
+    source = read("apps/calendar/src/main.rs")
+    body = source.split("pub fn sync_rtc(&mut self) -> bool {")[1].split("\n    pub fn ")[0]
+    assert "if rtc_report_is_new(self.rtc_reported_date, today)" in body
+    assert body.count("self.rtc_unknown_reported") >= 2
+    assert "fn report_unknown_state(&mut self" in source
+    # The payload may only reach the console inside that gate.
+    payload_log = 'std::log("[CALENDAR APP] RTC payload as reported by the kernel:")'
+    assert payload_log in body
+    assert body.index("if rtc_report_is_new(self.rtc_reported_date, today)") < body.index(payload_log)
+
+
 def test_calendar_browser_and_gallery_do_not_draw_sample_status_values():
     calendar = read("apps/calendar/src/main.rs")
     browser = read("apps/browser/src/main.rs")
