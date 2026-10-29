@@ -246,3 +246,31 @@ def test_a_local_handle_is_not_handed_to_the_transport():
     lib = messages_lib()
     assert "pub fn is_dialable(" in lib
     assert "TransportOutcome::NotDialable => DeliveryStatus::LocalOnly" in messages_main()
+
+
+def test_the_send_reports_what_happened_instead_of_a_fixed_summary():
+    """The send site printed "Message composed and processed." on every path.
+
+    A press with no recipient had already been answered with "nothing was
+    stored locally", and the summary line printed straight over the top of it,
+    so the log claimed a completed send for a message the app had thrown away.
+    The transport was the other half of the gap: it said nothing when it
+    accepted a message and nothing when the recipient was not dialable, so the
+    only positive statement on those paths was the unearned summary.
+
+    Each outcome has to be said by the code that observed it, and the summary
+    has to be gone.
+    """
+    source = messages_main()
+    assert "Message composed and processed" not in source
+    assert "The telephony service accepted the composed message" in source
+    assert "The recipient is not a dialable number" in source
+    assert "Telephony refused the composed message" in source
+    # The paths that already reported their own answer keep reporting it.
+    assert "Send pressed with no recipient; nothing was stored locally" in source
+    assert "Send pressed with an empty composer; nothing was sealed" in source
+    # And the accepted and not-dialable statements live inside attempt_transport,
+    # not at a call site that could print them before the call returns.
+    transport = source.split("fn attempt_transport(")[1].split("\nfn ")[0]
+    assert "The telephony service accepted the composed message" in transport
+    assert "The recipient is not a dialable number" in transport

@@ -2877,18 +2877,25 @@ fn is_dialable(recipient: &[u8]) -> bool {
 /// message, or it does not get drawn.
 fn attempt_transport(recipient: &[u8], body: &[u8]) -> TransportOutcome {
     if !is_dialable(recipient) {
+        std::log("[MESSAGES APP] The recipient is not a dialable number, so nothing was handed to the telephony service.").ok();
         return TransportOutcome::NotDialable;
     }
     let dest = match core::str::from_utf8(recipient) {
         Ok(s) => s,
-        Err(_) => return TransportOutcome::NotDialable,
+        Err(_) => {
+            std::log("[MESSAGES APP] The recipient is not a dialable number, so nothing was handed to the telephony service.").ok();
+            return TransportOutcome::NotDialable;
+        }
     };
     let text = match core::str::from_utf8(body) {
         Ok(s) => s,
         Err(_) => "",
     };
     match std::telephony_send_sms(dest, text) {
-        Ok(_) => TransportOutcome::Accepted,
+        Ok(_) => {
+            std::log("[MESSAGES APP] The telephony service accepted the composed message.").ok();
+            TransportOutcome::Accepted
+        }
         Err(code) => {
             std::log("[MESSAGES APP] Telephony refused the composed message; it was not transmitted.",
             )
@@ -3254,7 +3261,11 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw(Dirty::None);
         }
         let dirty = send_composed(app);
-        std::log("[MESSAGES APP] Message composed and processed.").ok();
+        // WHY there is no summary line here: the send used to print "Message
+        // composed and processed." whatever had happened, so a press with no
+        // recipient - which the app had just announced it was storing nothing
+        // for - still read as a completed send. The transport, the vault and
+        // the thread store each report their own answer on every path.
         return Tap::Redraw(dirty);
     }
 
