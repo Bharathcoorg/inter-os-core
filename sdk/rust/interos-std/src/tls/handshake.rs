@@ -256,13 +256,20 @@ impl HandshakeClient {
         }
 
         // 4. key_share: exactly one entry for the single advertised group
+        //
+        // RFC 8446 Section 4.2.8 declares this extension's content as
+        // `KeyShareEntry client_shares<1..2^16-1>`. The vector's two prefix
+        // bytes belong to the extension's content but NOT to the vector's own
+        // length, so the entry's size is the vector length and the content is
+        // that size plus the prefix. Counting the prefix in both made a peer
+        // read a 34-byte key, step over the next extension's header and refuse
+        // the hello with illegal_parameter before looking at any set we advertise.
         let ks_entry_len = 2 + 2 + self.client_public_key.len();
-        let client_shares_len = 2 + ks_entry_len;
         body[pos..pos + 2].copy_from_slice(&EXT_KEY_SHARE.to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&(2 + client_shares_len as u16).to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&(2 + ks_entry_len as u16).to_be_bytes());
         pos += 2;
-        body[pos..pos + 2].copy_from_slice(&(client_shares_len as u16).to_be_bytes());
+        body[pos..pos + 2].copy_from_slice(&(ks_entry_len as u16).to_be_bytes());
         pos += 2;
         body[pos..pos + 2].copy_from_slice(&SUPPORTED_GROUPS[0].to_be_bytes());
         pos += 2;

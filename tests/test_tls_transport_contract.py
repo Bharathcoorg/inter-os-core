@@ -196,6 +196,7 @@ def check_tests_claim_enforcement():
         "fn tls_rejects_server_key_share_for_unadvertised_group",
         "fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme",
         "fn tls_client_hello_advertises_exactly_the_verifiable_sets",
+        "fn tls_client_hello_extension_lengths_cover_exactly_their_bytes",
         "fn tls_client_hello_rejects_empty_and_oversized_peer_name",
         "fn tls_client_hello_requires_the_whole_record_to_fit_the_buffer",
         "fn tls_stub_verifier_without_identity_cannot_start_a_handshake",

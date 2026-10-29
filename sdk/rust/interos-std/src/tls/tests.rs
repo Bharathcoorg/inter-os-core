@@ -646,6 +646,72 @@ fn tls_client_hello_advertises_exactly_the_verifiable_sets() {
     );
 }
 
+/// The framing of every extension in the hello, checked by walking the block the
+/// way a peer does.
+///
+/// WHY a walk rather than one more set comparison: `KeyShareEntry
+/// client_shares<1..2^16-1>` (RFC 8446 Section 4.2.8) is a vector, so its own
+/// two-byte prefix counts towards the extension's content but NOT towards the
+/// vector's length. When the encoder added that prefix to both fields, a peer
+/// read a 34-byte key, landed two bytes inside the next extension's header and
+/// answered illegal_parameter/decode_error without ever naming a set - so every
+/// assertion about what the hello advertises stayed green over it.
+///
+/// The expected lengths are derived from the RFC and from x25519's 32-byte share,
+/// not from the encoder's arithmetic, which is the thing under test.
+#[test]
+fn tls_client_hello_extension_lengths_cover_exactly_their_bytes() {
+    let verifier = DefaultCertVerifier::for_host("interos.org");
+    let mut session = TlsClientSession::new(TlsConfig {
+        server_name: Some("interos.org"),
+        random: [0x55; 32],
+        private_key: [0x77; 32],
+        verifier: &verifier,
+    });
+    let mut out = [0u8; 1024];
+    let len = session.start_handshake(&mut out).unwrap();
+    let record = &out[..len];
+
+    assert_eq!(record[0], 0x16, "the record must carry the handshake content type");
+    assert_eq!(record[5], 0x01, "the handshake message must be a client_hello");
+
+    // Read the hello's fixed part field by field, so where the extension block
+    // starts is derived from the bytes rather than remembered from an offset.
+    let mut i = 5 + 4 + 2 + 32; // handshake header + legacy_version + random
+    i += 1 + record[i] as usize; // legacy_session_id
+    i += 2 + u16::from_be_bytes([record[i], record[i + 1]]) as usize; // cipher_suites
+    i += 1 + record[i] as usize; // legacy_compression_methods
+    let ext_len = u16::from_be_bytes([record[i], record[i + 1]]) as usize;
+    let ext_end = i + 2 + ext_len;
+    assert_eq!(ext_end, record.len(), "the extensions length must reach the end of the record");
+
+    let mut key_share_at: Option<usize> = None;
+    let mut key_share_declared = 0usize;
+    let mut pos = i + 2;
+    while pos + 4 <= ext_end {
+        let kind = u16::from_be_bytes([record[pos], record[pos + 1]]);
+        let declared = u16::from_be_bytes([record[pos + 2], record[pos + 3]]) as usize;
+        if kind == 0x0033 {
+            key_share_at = Some(pos + 4);
+            key_share_declared = declared;
+        }
+        pos += 4 + declared;
+    }
+    assert_eq!(
+        pos, ext_end,
+        "an extension declares more or less than the bytes it holds, so a peer that \
+         steps by the declared length lands inside the next extension's header"
+    );
+
+    let ks = key_share_at.expect("the hello must advertise a key_share");
+    assert!(ks + 38 <= record.len(), "the key_share content the hello declares is not in the record");
+    let vector_len = u16::from_be_bytes([record[ks], record[ks + 1]]) as usize;
+    let key_len = u16::from_be_bytes([record[ks + 4], record[ks + 5]]) as usize;
+    assert_eq!(key_len, 32, "the advertised group is x25519, whose share is 32 bytes");
+    assert_eq!(vector_len, 36, "client_shares counts its entries (2+2+32), not its own two prefix bytes");
+    assert_eq!(key_share_declared, 38, "the key_share extension covers the vector prefix once");
+}
+
 #[test]
 fn tls_rejects_server_key_share_for_unadvertised_group() {
     let mut hs = HandshakeClient::new([0x11u8; 32]);
