@@ -157,6 +157,21 @@ def test_kernel_keyboard_contract_encodes_canonical_keys():
     assert "pub fn post_key_event" in input_source
     assert "InputEventKind::Key" in driver
     assert "INPUT_KEYCODE" in serial
+    # The console used to answer the name from a second, hand-written number table
+    # and had Enter and Backspace the wrong way round in it. That table sat below
+    # the handler the dispatcher asks first, so nothing ever reached it while the
+    # correct table above answered the verb. It is gone, and one table remains.
+    assert serial.count('eq_ignore_ascii_case("INPUT_KEYCODE")') == 1
+    assert '"Enter" => 0x' not in serial and '"Backspace" => 0x' not in serial
+    assert '"ENTER" => crate::input::KeyCode::Enter' in serial
+    assert '"BACKSPACE" => crate::input::KeyCode::Backspace' in serial
+    # And the numbers those names finally arrive at the application with are the
+    # numbers the SDK hands out, or a swap elsewhere would undo the table's fix.
+    assert "KeyCode::Enter => 0x10000" in driver
+    assert "KeyCode::Backspace => 0x10002" in driver
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    assert "pub const ENTER: u32 = 0x10000" in sdk
+    assert "pub const BACKSPACE: u32 = 0x10002" in sdk
 
 
 def test_studio_keyboard_uses_server_key_contract():

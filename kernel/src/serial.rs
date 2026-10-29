@@ -811,6 +811,10 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    // WHY this is the only key-name table: handle_serial_command asks this handler
+    // before its own chain and returns whenever it answers, so a second INPUT_KEYCODE
+    // branch written further down that chain is never reached. The one that used to
+    // live there named Enter and Backspace the wrong way round.
     if verb.eq_ignore_ascii_case("INPUT_KEYCODE") {
         let Some(name) = parts.next() else { return true; };
         let code = match name.to_ascii_uppercase().as_str() {
@@ -1671,31 +1675,6 @@ fn handle_serial_command(cmd: &[u8]) {
         };
         crate::drivers::input::dispatch_to_focused_window(key_ev);
         crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-    } else if verb.eq_ignore_ascii_case("INPUT_KEYCODE") {
-        if let Some(key) = parts.next() {
-            crate::serial_println!("[COM1 INPUT] Hardware KEYCODE received: {}", key);
-            let code = match key {
-                "Power" | "Lock" => 0x1000F,
-                "Home" => 0x10008,
-                "Escape" => 0x10001,
-                "Enter" => 0x10002,
-                "Backspace" => 0x10000,
-                "ArrowUp" => 0x10004,
-                "ArrowDown" => 0x10005,
-                "ArrowLeft" => 0x10006,
-                "ArrowRight" => 0x10007,
-                _ => 0,
-            };
-            if code != 0 {
-                let key_ev = crate::drivers::input::InputEvent {
-                    kind: crate::drivers::input::InputEventKind::Key,
-                    x: code,
-                    y: 1,
-                    ..crate::drivers::input::InputEvent::EMPTY
-                };
-                crate::drivers::input::dispatch_to_focused_window(key_ev);
-            }
-        }
     } else if verb.eq_ignore_ascii_case("INPUT_KEY") {
         if let Some(cp_s) = parts.next() {
             if let Ok(cp) = cp_s.parse::<u32>() {
