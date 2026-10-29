@@ -14,6 +14,21 @@ pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
 
 /// Ed25519 `SubjectPublicKeyInfo` algorithm OID (`1.3.101.112`) body bytes.
 pub const ED25519_SPKI_OID: [u8; 3] = [0x2b, 0x65, 0x70];
+/// `rsaEncryption` (`1.2.840.113549.1.1.1`) — the algorithm a certificate names
+/// when its key is an RSA public key.
+pub const RSA_ENCRYPTION_OID: [u8; 9] =
+    [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+/// `sha256WithRSAEncryption` (`1.2.840.113549.1.1.11`) — the name almost every
+/// public CA signs with, including every link of the ISRG chain.
+pub const SHA256_WITH_RSA_OID: [u8; 9] =
+    [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+/// `ecPublicKey` (`1.2.840.10045.2.1`).
+pub const EC_PUBLIC_KEY_OID: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+/// `prime256v1` (`1.2.840.10045.3.1.7`) — the curve an EC `AlgorithmIdentifier`
+/// names in its parameters.
+pub const PRIME256V1_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// `ecdsa-with-SHA256` (`1.2.840.10045.4.3.2`).
+pub const ECDSA_WITH_SHA256_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
 
 /// The ONLY signature schemes this client advertises in its ClientHello and the
 /// only ones the verifier can actually check. Advertised set and accepted set
@@ -89,6 +104,71 @@ pub fn read_sequence<'a>(input: &'a [u8]) -> Result<(&'a [u8], &'a [u8]), TlsErr
         return Err(TlsError::CertificateParsingError);
     }
     Ok((value, rem))
+}
+
+/// An RSA key's two integers, as slices of the `RSAPublicKey` DER a certificate
+/// stores inside its `subjectPublicKey` bit string.
+#[derive(Clone, Copy, Debug)]
+pub struct RsaPublicKey<'a> {
+    pub modulus: &'a [u8],
+    pub exponent: &'a [u8],
+}
+
+/// Drops the leading zero byte DER puts on an `INTEGER` whose top bit is set,
+/// which marks it positive and is not part of the value.
+fn unsigned_integer(value: &[u8]) -> &[u8] {
+    if value.len() > 1 && value[0] == 0 {
+        &value[1..]
+    } else {
+        value
+    }
+}
+
+/// Reads `SEQUENCE { INTEGER modulus, INTEGER exponent }`.
+///
+/// WHY here rather than in `crypto::rsa`: the primitive takes plain integers and
+/// stays independent of any encoding; this layer already owns DER.
+pub fn parse_rsa_public_key(der: &[u8]) -> Result<RsaPublicKey<'_>, TlsError> {
+    let (content, _) = read_sequence(der)?;
+    let (tag, modulus, rem) = read_tlv(content)?;
+    if tag != TAG_INTEGER {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let (tag, exponent, _) = read_tlv(rem)?;
+    if tag != TAG_INTEGER {
+        return Err(TlsError::CertificateParsingError);
+    }
+    Ok(RsaPublicKey {
+        modulus: unsigned_integer(modulus),
+        exponent: unsigned_integer(exponent),
+    })
+}
+
+/// Decodes an ECDSA signature — `SEQUENCE { INTEGER r, INTEGER s }` — into the
+/// fixed 64-byte `r || s` pair the P-256 verifier takes.
+///
+/// WHY a fixed frame: an integer DER wrote short is left-padded here, which is
+/// where a peer could hide a value that is not the one it signed, so anything
+/// wider than a P-256 scalar is refused.
+pub fn decode_ecdsa_signature(der: &[u8]) -> Result<[u8; 64], TlsError> {
+    let (content, _) = read_sequence(der)?;
+    let (tag, r, rem) = read_tlv(content)?;
+    if tag != TAG_INTEGER {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let (tag, s, _) = read_tlv(rem)?;
+    if tag != TAG_INTEGER {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let mut pair = [0u8; 64];
+    let r = unsigned_integer(r);
+    let s = unsigned_integer(s);
+    if r.len() > 32 || s.len() > 32 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    pair[32 - r.len()..32].copy_from_slice(r);
+    pair[64 - s.len()..].copy_from_slice(s);
+    Ok(pair)
 }
 
 /// Days between 1970-01-01 and a proleptic-Gregorian civil date, negative for
@@ -188,6 +268,10 @@ pub struct ParsedCertificate<'a> {
     pub not_after: &'a [u8],
     pub subject_raw: &'a [u8],
     pub spki_algorithm_oid: &'a [u8],
+    /// The `AlgorithmIdentifier` parameters, when they are an OID. That is how
+    /// an EC certificate names its curve; RSA carries `NULL` and Ed25519 carries
+    /// nothing, and both read as empty here.
+    pub spki_params: &'a [u8],
     pub spki_public_key: &'a [u8],
     pub sig_alg_oid: &'a [u8],
     pub signature_value: &'a [u8],
@@ -284,9 +368,18 @@ impl<'a> ParsedCertificate<'a> {
         }
 
         let (_, spki_alg_val, spki_rem) = read_tlv(spki_val)?;
-        let (oid_tag, spki_algorithm_oid, _) = read_tlv(spki_alg_val)?;
+        let (oid_tag, spki_algorithm_oid, spki_alg_rem) = read_tlv(spki_alg_val)?;
         if oid_tag != TAG_OID {
             return Err(TlsError::CertificateParsingError);
+        }
+        // The curve an EC key belongs to is the parameters of its own
+        // AlgorithmIdentifier; RSA's NULL and Ed25519's absence are both read
+        // as no parameters at all.
+        let mut spki_params: &[u8] = &[];
+        if let Ok((tag, params, _)) = read_tlv(spki_alg_rem) {
+            if tag == TAG_OID {
+                spki_params = params;
+            }
         }
 
         let (bit_tag, bit_val, _) = read_tlv(spki_rem)?;
@@ -305,6 +398,7 @@ impl<'a> ParsedCertificate<'a> {
             not_after,
             subject_raw,
             spki_algorithm_oid,
+            spki_params,
             spki_public_key,
             sig_alg_oid,
             signature_value,
