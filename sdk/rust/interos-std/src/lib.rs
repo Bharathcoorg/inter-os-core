@@ -1168,7 +1168,12 @@ pub fn get_random(out_buf: &mut [u8]) -> Result<usize, i64> {
 /// WHY repeated here rather than imported: kernel and userspace do not share a
 /// crate, so the two numbers are pinned across the boundary by
 /// `tests/test_tls_trust_contract.py` rather than by the compiler.
-pub const TLS_TRUST_ANCHOR_BYTES: usize = 512;
+///
+/// WHY 2048: a public root has to fit -- ISRG Root X1, which anchors every
+/// Let's Encrypt chain, measures 1391 bytes. The client holds this table in
+/// static storage, so the cost is `TLS_TRUST_MAX_ANCHORS` of these buffers, not a
+/// heap the constrained apps do not have.
+pub const TLS_TRUST_ANCHOR_BYTES: usize = 2048;
 
 /// How many anchors the device can hand out, which is the kernel's store size.
 pub const TLS_TRUST_MAX_ANCHORS: usize = 4;

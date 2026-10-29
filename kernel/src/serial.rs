@@ -96,8 +96,8 @@ static ANCHOR_TRANSFER: Mutex<Option<AnchorTransfer>> = Mutex::new(None);
 ///
 /// WHY 240 hex characters, or 120 bytes: a console line accumulates up to 511
 /// characters and one past that discards the whole line, so a chunk leaves room
-/// for the verb and a three-digit offset. It is also under a quarter of the
-/// largest anchor, so even a full 512-byte certificate arrives in five lines.
+/// for the verb and a four-digit offset. It is also well under a sixth of the
+/// largest anchor, so even a full 2 KiB certificate arrives in eighteen lines.
 const ANCHOR_CHUNK_HEX_CHARS: usize = 240;
 
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
@@ -1023,9 +1023,9 @@ fn handle_rapp_command(s: &str) -> bool {
 ///
 /// WHY the anchor can arrive two ways: one line is the friendly path, and it
 /// carries at most 250 anchor bytes -- a console line holds 511 characters, the
-/// verb and a space take 10 of them, and hex doubles what is left. A realistic
-/// root is bigger than that; a trimmed self-signed Ed25519 CA measures 274 bytes,
-/// 548 hex characters. So `TLS_TRUST_BEGIN` / `TLS_TRUST_CHUNK` /
+/// verb and a space take 10 of them, and hex doubles what is left. A real root is
+/// far bigger than that; a trimmed self-signed Ed25519 CA measures 274 bytes and
+/// ISRG Root X1 measures 1391. So `TLS_TRUST_BEGIN` / `TLS_TRUST_CHUNK` /
 /// `TLS_TRUST_COMMIT` carries the rest in the shape `RAPP_*` already uses for
 /// packages: staging is bounded by `MAX_ANCHOR_DER_BYTES`, a chunk that runs past
 /// the declared size is refused, and nothing is judged until commit, when the

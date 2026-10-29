@@ -111,6 +111,13 @@ def test_the_two_sides_agree_about_how_big_an_anchor_and_a_store_are():
         sdk, "TLS_TRUST_MAX_ANCHORS"
     ), "the kernel's store is bigger than the table the SDK enumerates, so a " \
        "device with the extra anchors verifies against part of its own store"
+    # The ceiling has to be a number a real root fits inside, not merely a
+    # consistent one: agreement at 512 would keep both sides unable to hold
+    # ISRG Root X1, which measures 1391 bytes.
+    assert const_value(kernel, "MAX_ANCHOR_DER_BYTES") >= 1391, (
+        "the anchor ceiling is below the size of a public root certificate, so the "
+        "store can hold only keys made on this device"
+    )
 
 
 def test_only_the_operators_console_can_change_the_store():
@@ -172,13 +179,14 @@ def test_the_console_verbs_are_wired_and_only_answer_their_own_lines():
 
 
 def test_an_anchor_bigger_than_a_console_line_arrives_in_chunks():
-    """The store holds 512-byte anchors, and one console line cannot carry one.
+    """The store holds 2 KiB anchors, and one console line cannot carry one.
 
     WHY this is a real limit rather than a convenience: a line accumulates at
     most 511 characters and a 512th discards the whole line, so `TLS_TRUST <hex>`
     tops out near 250 anchor bytes -- under the 274 bytes a trimmed self-signed
-    Ed25519 root actually measures. Without the chunk verbs the largest anchor
-    the store was built to hold could never be installed.
+    Ed25519 root measures and far under the 1391 of a public one. Without the
+    chunk verbs the largest anchor the store was built to hold could never be
+    installed.
     """
     serial = code_only(read_source("kernel/src/serial.rs"))
     staging = serial.split("struct AnchorTransfer {")[1].split("}\n")[0]
@@ -203,8 +211,11 @@ def test_a_chunked_anchor_is_framed_inside_one_console_line():
     assert match, "the chunk payload is no longer a single bounded constant"
     chunk_hex = int(match.group(1))
     assert chunk_hex % 2 == 0, "an odd hex limit splits a byte across two chunks"
-    # "TLS_TRUST_CHUNK " + a three-digit offset + a space + the payload.
-    assert len("TLS_TRUST_CHUNK") + 1 + 3 + 1 + chunk_hex <= 511, (
+    # "TLS_TRUST_CHUNK " + the largest offset the store can name + a space + the
+    # payload. A 2 KiB ceiling puts the last chunk at offset 1920, four digits.
+    anchor_bytes = const_value(kernel_store_source(), "MAX_ANCHOR_DER_BYTES")
+    offset_digits = len(str(anchor_bytes - 2))
+    assert len("TLS_TRUST_CHUNK") + 1 + offset_digits + 1 + chunk_hex <= 511, (
         "the largest chunk does not fit the console line, so a whole anchor would "
         "be installable only by luck about how long its offset field is"
     )
@@ -502,14 +513,23 @@ def test_an_anchor_that_could_never_verify_is_refused_at_the_door():
     person pasted, and a copy that lost its tail is a common mistake. Accepted, it
     would sit in the store verifying nothing, and the operator would have no way to
     tell a wrong key from an unused one.
+
+    WHY the accepted set is the client's own: a door that names fewer key types
+    than the verifier can check would refuse anchors the device is able to use,
+    which is how a 512-byte ceiling left a 1391-byte public root un-installable.
     """
     src = code_only(kernel_store_source())
     gate = src.split("pub fn check_anchor_shape(")[1].split("\nfn contains_subsequence")[0]
-    for refusal in ("AnchorTooLarge", "NotDerSequence", "NotEd25519"):
+    for refusal in ("AnchorTooLarge", "NotDerSequence", "NoVerifiableKey"):
         assert refusal in gate, f"the install gate no longer names {refusal}"
-    assert "ED25519_ALGORITHM_OID" in gate, (
-        "the store accepts any certificate, including one for a signature scheme "
-        "this client cannot verify at all"
+    for identifier in ("ED25519_ALGORITHM_OID", "RSA_ENCRYPTION_OID", "EC_PUBLIC_KEY_OID"):
+        assert identifier in gate, (
+            f"the store refuses anchors naming {identifier}, which is a key type the "
+            "client's own verifier can check a signature with"
+        )
+    assert "PRIME256V1_OID" in gate, (
+        "an EC anchor is accepted without its curve, so a P-384 root would be stored "
+        "and then never verify anything"
     )
     assert "header + declared != der.len()" in gate, (
         "the store accepts bytes that are not one complete DER sequence"

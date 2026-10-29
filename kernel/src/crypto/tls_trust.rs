@@ -19,10 +19,10 @@
 //! returns to refusing every chain, and one console line puts it back.
 //!
 //! WHY installing an anchor grants nothing by itself: the anchor only takes part
-//! in the checks the client already performs -- the Ed25519 signature over the
-//! chain, the reference identity at the leaf position, and the validity window
-//! against the device clock. An anchor whose subject never appears as an issuer
-//! is inert.
+//! in the checks the client already performs -- the signature over each chain
+//! link under the scheme that link declares, the reference identity at the leaf
+//! position, and the validity window against the device clock. An anchor whose
+//! subject never appears as an issuer is inert.
 
 use crate::serial_println;
 use spin::Mutex;
@@ -32,19 +32,34 @@ use spin::Mutex;
 /// nothing to keep.
 pub const MAX_TRUSTED_ANCHORS: usize = 4;
 
-/// The largest anchor accepted. A trimmed self-signed Ed25519 root measures 274
-/// bytes, so this leaves room for a root with a long subject and several
-/// extensions without letting one anchor crowd out the table.
-pub const MAX_ANCHOR_DER_BYTES: usize = 512;
+/// The largest anchor accepted.
+///
+/// WHY 2048 rather than the 512 that fit a local CA: a public root has to fit.
+/// ISRG Root X1 -- the anchor behind Let's Encrypt chains, and the one a browser
+/// needs to reach any ordinary HTTPS site -- measures 1391 bytes, and a 4096-bit
+/// RSA root carries roughly 700 bytes more than an Ed25519 one of the same
+/// subject and extensions. The previous ceiling could not hold a real root at
+/// all, so the store was only ever usable for keys made here.
+///
+/// WHY not larger: the store is four anchors of static space, the console has to
+/// type the whole thing, and every root in the popular trust stores is under this
+/// ceiling. A `MAX_ANCHOR_DER_BYTES` anchor costs the kernel 2 KiB of `.bss`.
+pub const MAX_ANCHOR_DER_BYTES: usize = 2048;
 
 /// The label the operator attaches to an anchor, so a listing can say which key
 /// is which instead of printing four identical blobs.
 pub const ANCHOR_LABEL_BYTES: usize = 32;
 
-/// The DER encoding of the Ed25519 `AlgorithmIdentifier` (`OID 1.3.101.112`),
-/// which every X.509 certificate this client can verify carries as its
-/// `subjectPublicKeyInfo` algorithm.
+/// The DER encoding of the Ed25519 `AlgorithmIdentifier` (`OID 1.3.101.112`).
 const ED25519_ALGORITHM_OID: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+/// `rsaEncryption` (`1.2.840.113549.1.1.1`), the algorithm an RSA root names.
+const RSA_ENCRYPTION_OID: &[u8] =
+    &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+/// `ecPublicKey` (`1.2.840.10045.2.1`), which names a curve rather than a key.
+const EC_PUBLIC_KEY_OID: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+/// `prime256v1` (`1.2.840.10045.3.1.7`), the only curve an EC certificate can
+/// name that this client does arithmetic on.
+const PRIME256V1_OID: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustError {
@@ -54,9 +69,9 @@ pub enum TrustError {
     AnchorTooLarge,
     /// The bytes are not one DER `SEQUENCE` whose declared length covers them.
     NotDerSequence,
-    /// The certificate names no Ed25519 key, so this client could never verify
-    /// a chain through it.
-    NotEd25519,
+    /// The certificate names no key this client can verify with, so it could
+    /// never vouch for a chain this device would accept.
+    NoVerifiableKey,
     /// All [`MAX_TRUSTED_ANCHORS`] slots are taken.
     StoreFull,
     /// The same anchor is already installed.
@@ -73,7 +88,7 @@ impl TrustError {
             TrustError::EmptyAnchor => "no certificate bytes were offered",
             TrustError::AnchorTooLarge => "certificate is larger than the anchor limit",
             TrustError::NotDerSequence => "certificate is not one complete DER sequence",
-            TrustError::NotEd25519 => "certificate names no Ed25519 key",
+            TrustError::NoVerifiableKey => "certificate names no key this client can verify",
             TrustError::StoreFull => "the trust store is full",
             TrustError::DuplicateAnchor => "that anchor is already installed",
             TrustError::NoAnchorAtIndex => "no trust anchor at that position",
@@ -117,12 +132,12 @@ impl Anchor {
 /// truncated DER stored as an anchor would simply never verify anything, and the
 /// operator would have no way to tell a wrong key from an unused one.
 ///
-/// WHY the Ed25519 test is a byte search rather than a parse: the kernel holds no
+/// WHY the key test is a byte search rather than a parse: the kernel holds no
 /// X.509 parser, and the question being answered -- "could this client ever
-/// verify a chain through this certificate?" -- only needs to know whether the
-/// Ed25519 algorithm identifier appears anywhere in it. The client still parses
-/// the anchor itself, and still refuses it if the key is not in the position the
-/// certificate profile requires.
+/// verify a chain through this certificate?" -- only needs to know whether one of
+/// the algorithm identifiers the client does arithmetic on appears in it. The
+/// client still parses the anchor itself, and still refuses it if the key is not
+/// in the position the certificate profile requires.
 pub fn check_anchor_shape(der: &[u8]) -> Result<(), TrustError> {
     if der.is_empty() {
         return Err(TrustError::EmptyAnchor);
@@ -135,7 +150,7 @@ pub fn check_anchor_shape(der: &[u8]) -> Result<(), TrustError> {
     }
     // DER lengths are definite and the smallest possible encoding: short form
     // below 0x80, then one or two length bytes above it. Anything else -- an
-    // indefinite form, or three length bytes for a 512-byte blob -- is not the
+    // indefinite form, or three length bytes for a 2 KiB blob -- is not the
     // certificate this store was offered.
     let (header, declared) = if der.len() < 2 {
         return Err(TrustError::NotDerSequence);
@@ -165,10 +180,22 @@ pub fn check_anchor_shape(der: &[u8]) -> Result<(), TrustError> {
     if header + declared != der.len() {
         return Err(TrustError::NotDerSequence);
     }
-    if !contains_subsequence(der, ED25519_ALGORITHM_OID) {
-        return Err(TrustError::NotEd25519);
+    if !names_verifiable_key(der) {
+        return Err(TrustError::NoVerifiableKey);
     }
     Ok(())
+}
+
+/// Whether this certificate names a key the client can check a signature with:
+/// Ed25519, RSA, or EC on the one curve implemented. An EC identifier carries no
+/// meaning without its curve parameter, so a certificate that names `ecPublicKey`
+/// but no `prime256v1` -- a P-384 or P-521 root -- is refused here rather than
+/// installed and then silently unable to vouch for anything.
+fn names_verifiable_key(der: &[u8]) -> bool {
+    contains_subsequence(der, ED25519_ALGORITHM_OID)
+        || contains_subsequence(der, RSA_ENCRYPTION_OID)
+        || (contains_subsequence(der, EC_PUBLIC_KEY_OID)
+            && contains_subsequence(der, PRIME256V1_OID))
 }
 
 fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
@@ -297,6 +324,11 @@ mod tests {
     /// definite short/long form DER requires for that size, so a test that
     /// changes only `total` cannot accidentally trip the shortest-form rule.
     fn anchor_bytes(total: usize) -> Vec<u8> {
+        anchor_bytes_naming(total, &[ED25519_ALGORITHM_OID])
+    }
+
+    /// The same framing, naming whichever algorithm identifiers are given.
+    fn anchor_bytes_naming(total: usize, oids: &[&[u8]]) -> Vec<u8> {
         let mut der: Vec<u8> = if total <= 129 {
             vec![0x30, (total - 2) as u8]
         } else if total <= 258 {
@@ -305,7 +337,9 @@ mod tests {
             let content = total - 4;
             vec![0x30, 0x82, (content >> 8) as u8, content as u8]
         };
-        der.extend_from_slice(ED25519_ALGORITHM_OID);
+        for oid in oids {
+            der.extend_from_slice(oid);
+        }
         der.resize(total, 0x41);
         der
     }
@@ -350,14 +384,47 @@ mod tests {
 
     #[test]
     fn a_key_this_client_cannot_verify_is_refused_at_the_door() {
-        // A correctly framed sequence that names no Ed25519 key (here the
-        // ECDSA-P256 curve OID), so the algorithm is the only thing the door can
-        // object to.
-        let mut der: Vec<u8> = vec![0x30, 0x0d];
-        der.extend_from_slice(&[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]);
-        der.resize(15, 0x41);
+        // Correctly framed sequences that name a key the client has no arithmetic
+        // for, so the algorithm is the only thing the door can object to: Ed448,
+        // and EC on a curve other than the one implemented.
+        let ed448 = anchor_bytes_naming(40, &[&[0x06, 0x03, 0x2b, 0x65, 0x71]]);
+        // `prime384v1` (1.3.132.0.4) beside `ecPublicKey`.
+        let p384 = anchor_bytes_naming(
+            60,
+            &[
+                EC_PUBLIC_KEY_OID,
+                &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+            ],
+        );
         let mut store = TlsTrustStore::new();
-        assert_eq!(store.install(&der, "ecdsa root"), Err(TrustError::NotEd25519));
+        assert_eq!(store.install(&ed448, "ed448 root"), Err(TrustError::NoVerifiableKey));
+        assert_eq!(store.install(&p384, "p384 root"), Err(TrustError::NoVerifiableKey));
+        assert!(store.is_empty(), "a refused install must not occupy a slot");
+    }
+
+    #[test]
+    fn an_rsa_or_ec_root_is_accepted_at_the_door() {
+        // The two shapes a public HTTPS chain ends on that this client did not
+        // previously accept: an RSA root names `rsaEncryption`, and an EC root
+        // names `ecPublicKey` with its curve.
+        let rsa = anchor_bytes_naming(1391, &[RSA_ENCRYPTION_OID]);
+        let ec = anchor_bytes_naming(400, &[EC_PUBLIC_KEY_OID, PRIME256V1_OID]);
+        let mut store = TlsTrustStore::new();
+        assert_eq!(store.install(&rsa, "rsa root"), Ok(0));
+        assert_eq!(store.install(&ec, "ec root"), Ok(1));
+        assert_eq!(store.anchor_der(0), Some(rsa.as_slice()));
+    }
+
+    #[test]
+    fn a_real_public_root_of_1391_bytes_fits_the_store() {
+        // ISRG Root X1 measures 1391 bytes, and the ceiling that used to hold 512
+        // could not contain it at all. This is the size the store now has to
+        // carry, framed the way that certificate is: a two-byte length header.
+        let der = anchor_bytes_naming(1391, &[ED25519_ALGORITHM_OID]);
+        assert_eq!(der.len(), 1391);
+        let mut store = TlsTrustStore::new();
+        assert_eq!(store.install(&der, "isrg-shaped root"), Ok(0));
+        assert_eq!(store.anchor_der(0).unwrap().len(), 1391);
     }
 
     #[test]
