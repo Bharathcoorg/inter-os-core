@@ -174,3 +174,37 @@ def test_a_signed_manifest_cannot_declare_the_entropy_grant():
     assert int(range_match.group(2)) < ENTROPY_RAW_ID, (
         "package verification now accepts an entropy id straight from a manifest"
     )
+
+
+def tls_seed_block() -> str:
+    """The browser's ClientHello key material, from the first fill to the config."""
+    src = code_only(read_source("apps/browser/src/main.rs"))
+    return src.split("let mut random = [0u8; 32];")[1].split("tls::TlsConfig::new(")[0]
+
+
+def test_a_refused_entropy_read_stops_the_handshake_instead_of_substituting_a_timer():
+    """A predictable key is not a failed read; it is a silent downgrade of it.
+
+    WHY this is the same contract as the gate above: the browser holds the
+    entropy grant, so a refused read means the TRNG itself said no. Falling
+    back to bytes folded out of the tick counter still produces a well-formed
+    x25519 key and a well-formed hello, so the connection succeeds and both
+    peers believe they just agreed on an ephemeral secret. Nothing on either
+    side can tell. The only honest answer to a refused read is a page that
+    says the handshake never started.
+    """
+    block = tls_seed_block()
+    assert "get_ticks" not in block, (
+        "the TLS key material is being manufactured from the tick counter when "
+        "the TRNG refuses, which is a predictable shared secret presented as an "
+        "ephemeral one"
+    )
+    assert "return" in block, (
+        "a refused entropy read falls through to the handshake instead of "
+        "ending the fetch where the refusal happened"
+    )
+    http_src = code_only(read_source("apps/browser/src/http.rs"))
+    assert "TlsEntropyRefused" in http_src, (
+        "no error kind names an entropy refusal, so the user is shown a generic "
+        "handshake failure for a fault that happened before the hello was built"
+    )

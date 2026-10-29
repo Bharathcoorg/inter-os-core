@@ -40,6 +40,14 @@ pub enum FetchErrorKind {
     /// against, and reporting it as a rejected certificate would describe a
     /// fault that did not happen.
     TlsNameRefused,
+    /// The TRNG refused the reads that seed the handshake, so no hello was sent.
+    ///
+    /// WHY this is not a handshake failure: nothing was put on the wire. The
+    /// alternative was to fold the tick counter into a key, which builds a
+    /// well-formed x25519 share and a well-formed hello, so the connection
+    /// succeeds and both peers hold a shared secret an observer can derive
+    /// from the boot time. A refusal has to look like a refusal.
+    TlsEntropyRefused,
 }
 
 /// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.

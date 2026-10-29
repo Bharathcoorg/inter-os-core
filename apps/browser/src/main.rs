@@ -501,17 +501,15 @@ fn fetch_over_tls(
 
     let mut random = [0u8; 32];
     if std::get_random(&mut random).is_err() || random == [0u8; 32] || random == [0x42u8; 32] {
-        let ticks = std::get_ticks().unwrap_or(0x1234_5678);
-        for i in 0..32 {
-            random[i] = ((ticks >> ((i % 8) * 8)) as u8) ^ (i as u8).wrapping_mul(0x57).wrapping_add(0x31);
-        }
+        outcome.kind = FetchErrorKind::TlsEntropyRefused;
+        let _ = std::tcp_close(connection);
+        return outcome;
     }
     let mut private_key = [0u8; 32];
     if std::get_random(&mut private_key).is_err() || private_key == [0u8; 32] || private_key == [0x24u8; 32] {
-        let ticks = std::get_ticks().unwrap_or(0x8765_4321);
-        for i in 0..32 {
-            private_key[i] = ((ticks >> ((i % 8) * 8)) as u8) ^ (i as u8).wrapping_mul(0x39).wrapping_add(0x73);
-        }
+        outcome.kind = FetchErrorKind::TlsEntropyRefused;
+        let _ = std::tcp_close(connection);
+        return outcome;
     }
 
     let config = match tls::TlsConfig::new(
@@ -1228,6 +1226,10 @@ the peer's certificate. The browser failed closed: no plaintext was sent.";
 const BODY_TLS_NAME_REFUSED: &[u8] = b"The host name in the address was refused before the secure \
 connection was opened, so no certificate could be checked against it. The browser \
 failed closed: no plaintext was sent.";
+const BODY_TLS_ENTROPY_REFUSED: &[u8] = b"The device's random-number service refused the two reads \
+that seed a secure connection, so the browser had no key to offer. The connection was closed \
+before a single handshake byte was sent; a key folded out of the boot clock was refused rather \
+than used, because both peers could have derived it.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
@@ -5155,6 +5157,11 @@ impl BrowserApp {
                         self.connection_failure = ConnectionFailure::TlsNameRefused;
                         std::log("[BROWSER APP] The server name in the address was refused before the TLS handshake; no connection was opened.").ok();
                     }
+                    FetchErrorKind::TlsEntropyRefused => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsEntropyRefused;
+                        std::log("[BROWSER APP] The TRNG refused the reads that seed the TLS handshake; no ClientHello was sent.").ok();
+                    }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
                         std::log("[BROWSER APP] The gateway returned zero bytes. No document data was received.").ok();
@@ -5899,6 +5906,7 @@ impl Frame {
                 ConnectionFailure::TlsFailed => (b"Security check failed", BODY_TLS_HANDSHAKE_FAILED),
                 ConnectionFailure::TlsNoTrustAnchor => (b"No trust anchor", BODY_TLS_NO_TRUST_ANCHOR),
                 ConnectionFailure::TlsNameRefused => (b"Address refused", BODY_TLS_NAME_REFUSED),
+                ConnectionFailure::TlsEntropyRefused => (b"No key entropy", BODY_TLS_ENTROPY_REFUSED),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -7696,6 +7704,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::TlsFailed => b"TLS HANDSHAKE FAILED",
                     ConnectionFailure::TlsNoTrustAnchor => b"NO TRUST ANCHOR",
                     ConnectionFailure::TlsNameRefused => b"ADDRESS REFUSED",
+                    ConnectionFailure::TlsEntropyRefused => b"NO KEY ENTROPY",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

@@ -1260,6 +1260,8 @@ pub enum ConnectionFailure {
     TlsNoTrustAnchor,
     /// The server name was refused before the handshake began.
     TlsNameRefused,
+    /// The TRNG refused the reads that seed the handshake, so no hello was sent.
+    TlsEntropyRefused,
 }
 
 /// Why document decoding or protocol handling failed.
