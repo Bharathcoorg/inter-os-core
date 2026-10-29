@@ -4970,7 +4970,21 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.
 pub fn sys_get_random(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    // WHY the narrow capability: the guard used to be the object-blind
+    // `require_system_control()`, so obtaining an IV meant acquiring power,
+    // telephony and device-policy authority over the whole device. No app was
+    // granted that, so the call was refused for every one of them and nothing
+    // that seals a record -- Messages, Calendar, the browser's key agreement --
+    // could ever do it. `CryptoEntropyRead` with READ rights is the least
+    // privilege that answers the actual question, "may this task read entropy?"
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table
+        .authorize_capability(CapabilityType::CryptoEntropyRead, Rights::READ)
+        .then_some(())
+        .ok_or(SyscallResult::PermissionDenied)?;
+    drop(sched);
+
     crate::crypto::get_random_bytes(out_buf);
     Ok(out_buf.len())
 }

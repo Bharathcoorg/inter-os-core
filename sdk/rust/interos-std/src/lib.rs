@@ -1139,6 +1139,11 @@ pub fn telephony_query(out_buf: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Fills `out_buf` with cryptographically secure random bytes from the hardware TRNG.
+///
+/// WHY the result must not be ignored: the read needs the `crypto.entropy`
+/// capability, which the kernel grants per app rather than through a manifest,
+/// so an ungranted caller is refused. A refused read leaves the buffer at
+/// whatever it was initialised to, and a record sealed with that is not sealed.
 pub fn get_random(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(

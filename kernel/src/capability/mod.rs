@@ -134,6 +134,27 @@ pub enum CapabilityType {
     WebViewBridge,
     /// Permission to communicate with the system webview rendering service.
     WebViewService,
+    /// Permission to read bytes from the hardware TRNG.
+    ///
+    /// WHY this exists rather than reusing `SystemControl`: `sys_get_random`
+    /// used to be guarded by the object-blind `require_system_control()`, so
+    /// the only way to let an app obtain an initialisation vector was to hand
+    /// it power, telephony and device-policy authority over the whole device.
+    /// No app was willing to ask for that, and none was granted it, so the
+    /// gate silently refused everybody: Messages, Calendar and Browser -- the
+    /// three callers of `std::get_random` -- each seal records with a fresh IV
+    /// or perform an X25519 key agreement, and all three were permanently
+    /// unable to. Messages proved it on the serial line, refusing every
+    /// composed message with "Refusing to seal message without cryptographic
+    /// TRNG entropy", so a conversation could never be persisted at all.
+    ///
+    /// Reading entropy grants no authority over any object, which is the same
+    /// argument that made `RealtimeClockRead` the right shape for the clock.
+    /// It is deliberately not in the RAPP manifest ladder: package
+    /// verification accepts ids `1..=30`, so this grant is minted by the
+    /// kernel for the built-in apps that need it and no third-party manifest
+    /// can ask for it.
+    CryptoEntropyRead,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -174,6 +195,7 @@ impl CapabilityType {
             CapabilityType::AudioCapture => 35,
             CapabilityType::WebViewBridge => 36,
             CapabilityType::WebViewService => 37,
+            CapabilityType::CryptoEntropyRead => 38,
         }
     }
 
@@ -211,6 +233,7 @@ impl CapabilityType {
             35 => Some(CapabilityType::AudioCapture),
             36 => Some(CapabilityType::WebViewBridge),
             37 => Some(CapabilityType::WebViewService),
+            38 => Some(CapabilityType::CryptoEntropyRead),
             _ => None,
         }
     }
@@ -250,6 +273,7 @@ impl CapabilityType {
             CapabilityType::AudioCapture => "audio.capture",
             CapabilityType::WebViewBridge => "webview.bridge",
             CapabilityType::WebViewService => "webview.service",
+            CapabilityType::CryptoEntropyRead => "crypto.entropy",
         }
     }
 
@@ -288,6 +312,7 @@ impl CapabilityType {
             "audio.capture" => Some(CapabilityType::AudioCapture),
             "webview.bridge" => Some(CapabilityType::WebViewBridge),
             "webview.service" => Some(CapabilityType::WebViewService),
+            "crypto.entropy" => Some(CapabilityType::CryptoEntropyRead),
             _ => None,
         }
     }
@@ -1656,19 +1681,23 @@ mod tests {
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
-            31, 32, 33, 34, 35, 36, 37,
+            31, 32, 33, 34, 35, 36, 37, 38,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 38, 999] {
+        for invalid in [19, 20, 21, 22, 23, 39, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
         assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");
         assert_eq!(CapabilityType::ProcessThreads.as_str(), "process.threads");
         assert_eq!(CapabilityType::from_name("memory.heap"), Some(CapabilityType::MemoryHeap));
         assert_eq!(CapabilityType::from_name("process.threads"), Some(CapabilityType::ProcessThreads));
+        // 38 is the entropy read: above the id a signed manifest may declare, so
+        // it round-trips here and is still refused by package verification.
+        assert_eq!(CapabilityType::CryptoEntropyRead.as_str(), "crypto.entropy");
+        assert_eq!(CapabilityType::from_name("crypto.entropy"), Some(CapabilityType::CryptoEntropyRead));
     }
 
     #[test]

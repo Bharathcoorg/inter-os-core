@@ -1463,6 +1463,19 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // WHY the entropy: a TLS handshake cannot be started without randomness.
+    // The browser draws its X25519 ephemeral private key and each record's
+    // padding salt from the hardware TRNG, and the syscall that serves them was
+    // guarded by device-wide SystemControl, which this table does not hold --
+    // so every https attempt was refused before it could build a ClientHello,
+    // not by the network and not by the peer but by its own key generation.
+    // Read-only, and it is the least authority that makes a handshake possible.
+    caps.insert(Capability {
+        id: CapabilityId(2314),
+        cap_type: CapabilityType::CryptoEntropyRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_browser",
         APP_BROWSER_ELF,
@@ -1547,6 +1560,19 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // WHY the entropy: this app seals every conversation it stores, and a seal
+    // needs a fresh initialisation vector from the hardware TRNG. The syscall
+    // that hands entropy out used to be guarded by device-wide SystemControl,
+    // which this table does not hold and must not acquire, so the refusal was
+    // silent and total: every composed message was dropped with "Refusing to
+    // seal message without cryptographic TRNG entropy" and no thread could ever
+    // be persisted. Read-only, and it grants authority over nothing.
+    caps.insert(Capability {
+        id: CapabilityId(2411),
+        cap_type: CapabilityType::CryptoEntropyRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_messages",
         APP_MESSAGES_ELF,
@@ -1626,6 +1652,16 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::StorageRawBlock,
         rights: Rights::INVOKE,
         object_id: crate::syscall::vault_object_for_user(active_uid),
+    }).ok();
+    // WHY the entropy: the calendar seals the journal it persists, and a seal
+    // needs a fresh initialisation vector. Its app asked the TRNG for one and
+    // was refused by a gate that demanded device-wide administration for what
+    // is a read of noise, so the journal stayed unsealed.
+    caps.insert(Capability {
+        id: CapabilityId(2511),
+        cap_type: CapabilityType::CryptoEntropyRead,
+        rights: Rights::READ,
+        object_id: 0,
     }).ok();
 
     let id = spawn_user_process_with_parent(
