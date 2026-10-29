@@ -44,6 +44,12 @@ pub enum TlsError {
     UnsupportedVersion,
     CertificateParsingError,
     CertificateVerificationFailed,
+    /// The certificate's own `notAfter` instant is behind the clock the
+    /// verifier was given. Reported separately from a generic failure because
+    /// the fix belongs to the calendar, not to the key.
+    CertificateExpired,
+    /// The certificate's `notBefore` instant is ahead of that clock.
+    CertificateNotYetValid,
     InvalidSignature,
     VerifyDataMismatch,
     IoError,

@@ -45,6 +45,12 @@ impl CertificateVerifier for MockTrustStoreVerifier {
     fn verify_certificate(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
         Ok(())
     }
+    /// Structural only: these fixtures carry no clock, and neither stub can
+    /// report a verified handshake anyway (AnyPassVerifier declares no
+    /// identity, and the mock store holds a certificate it never signs).
+    fn check_validity_window(&self, cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
+        cert.check_validity()
+    }
     fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
         Ok(())
     }

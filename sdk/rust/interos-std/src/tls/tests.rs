@@ -1,9 +1,10 @@
 //! TLS 1.3 Client and Certificate Trust Unit Tests
 
 use super::certificate::{
-    hostname_matches, is_supported_sig_scheme, CertificateVerifier, DefaultCertVerifier,
-    ParsedCertificate, SubjectAltNames, INTEROS_ROOT_CA_DER, SIG_SCHEME_ECDSA_SECP256R1_SHA256,
-    SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PSS_RSAE_SHA256, SUPPORTED_SIG_SCHEMES,
+    asn1_time_to_unix, hostname_matches, is_supported_sig_scheme, CertificateVerifier,
+    DefaultCertVerifier, ParsedCertificate, SubjectAltNames, INTEROS_ROOT_CA_DER,
+    SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PSS_RSAE_SHA256,
+    SUPPORTED_SIG_SCHEMES,
 };
 use super::client::{TlsClientSession, TlsConfig};
 use super::handshake::{
@@ -23,6 +24,12 @@ struct AnyPassVerifier;
 impl CertificateVerifier for AnyPassVerifier {
     fn verify_certificate(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
         Ok(())
+    }
+    /// Structural only: these fixtures carry no clock, and neither stub can
+    /// report a verified handshake anyway (AnyPassVerifier declares no
+    /// identity, and the mock store holds a certificate it never signs).
+    fn check_validity_window(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
+        cert.check_validity()
     }
     fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
         Ok(())
@@ -964,6 +971,114 @@ fn tls_pinned_self_issued_leaf_passes_only_when_der_pinned() {
 }
 
 // ---------------------------------------------------------------------------
+// Validity window
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tls_validity_times_are_read_as_instants_not_as_presence() {
+    // CA_ED25519_DER runs 2026-01-01T00:00:00Z to 2035-12-31T00:00:00Z.
+    let cert = ParsedCertificate::parse(CA_ED25519_DER).unwrap();
+    assert_eq!(asn1_time_to_unix(cert.not_before), Some(1_767_225_600));
+    assert_eq!(asn1_time_to_unix(cert.not_after), Some(2_082_672_000));
+
+    // RFC 5280 makes both endpoints part of the valid period, so the instant a
+    // certificate becomes valid and the instant it stops being valid are both
+    // usable; one second past either is not.
+    assert_eq!(cert.check_validity_at(1_767_225_600), Ok(()));
+    assert_eq!(cert.check_validity_at(2_082_672_000), Ok(()));
+    assert_eq!(
+        cert.check_validity_at(1_767_225_599),
+        Err(TlsError::CertificateNotYetValid)
+    );
+    assert_eq!(
+        cert.check_validity_at(2_082_672_001),
+        Err(TlsError::CertificateExpired)
+    );
+}
+
+#[test]
+fn tls_a_time_this_parser_cannot_read_yields_no_instant() {
+    // RFC 5280 wants "Z" and nothing else; a numeric offset is both illegal and
+    // silently wrong by hours, so it must produce no instant rather than a
+    // plausible one.
+    assert_eq!(asn1_time_to_unix(b"260101000000"), None);
+    assert_eq!(asn1_time_to_unix(b"2601010000+0530"), None);
+    assert_eq!(asn1_time_to_unix(b"20260101000000"), None);
+    // Fields that are digits but not dates, and a non-leap 29 February.
+    assert_eq!(asn1_time_to_unix(b"260132000000Z"), None);
+    assert_eq!(asn1_time_to_unix(b"261301000000Z"), None);
+    assert_eq!(asn1_time_to_unix(b"260101240000Z"), None);
+    assert_eq!(asn1_time_to_unix(b"260229000000Z"), None);
+    assert_eq!(asn1_time_to_unix(b"notatime!!!!!"), None);
+    // UTCTime's century window: 50 onward is 19YY, below it is 20YY.
+    assert_eq!(asn1_time_to_unix(b"500101000000Z"), Some(-631_152_000));
+    assert_eq!(asn1_time_to_unix(b"490101000000Z"), Some(2_493_072_000));
+    // GeneralizedTime is the other form, and must land on the same instant.
+    assert_eq!(asn1_time_to_unix(b"20351231000000Z"), Some(2_082_672_000));
+    assert_eq!(asn1_time_to_unix(b"240229000000Z"), Some(1_709_164_800));
+}
+
+#[test]
+fn tls_a_verifier_without_a_clock_only_checks_that_times_exist() {
+    // What the browser contract is built on: this degradation is real, so the
+    // shipping path must supply a clock or refuse the connection outright.
+    static ROOTS: [&[u8]; 1] = [CA_ED25519_DER];
+    let leaf = ParsedCertificate::parse(LEAF_GOOD_DER).unwrap();
+    let no_clock = DefaultCertVerifier::for_host("docs.interos.dev").with_roots(&ROOTS);
+    assert_eq!(no_clock.now_unix, None);
+    assert_eq!(no_clock.verify_certificate(&leaf), Ok(()));
+}
+
+#[test]
+fn tls_a_certificate_past_its_expiry_is_refused_end_to_end() {
+    // The whole point of the window: a leaf that really is signed by a pinned
+    // anchor must still be refused once the anchor's own validity has run out.
+    static ROOTS: [&[u8]; 1] = [CA_ED25519_DER];
+    let leaf = ParsedCertificate::parse(LEAF_GOOD_DER).unwrap();
+    let inside = DefaultCertVerifier::for_host("docs.interos.dev")
+        .with_roots(&ROOTS)
+        .with_clock(1_767_225_600);
+    assert_eq!(inside.verify_certificate(&leaf), Ok(()));
+
+    let expired = DefaultCertVerifier::for_host("docs.interos.dev")
+        .with_roots(&ROOTS)
+        .with_clock(2_082_672_001);
+    assert_eq!(
+        expired.verify_certificate(&leaf),
+        Err(TlsError::CertificateExpired)
+    );
+}
+
+#[test]
+fn tls_the_handshake_walk_judges_every_entry_against_the_clock() {
+    // The verifier is only worth having if the live walk consults it: this is
+    // the shape a real Certificate message arrives in, and the refusal has to
+    // come from inside the walk rather than from a test calling the verifier.
+    static ROOTS: [&[u8]; 1] = [CA_ED25519_DER];
+    let mut msg = [0u8; 1024];
+    let len = build_certificate_message(&[LEAF_GOOD_DER, CA_ED25519_DER], &mut msg);
+    let chain = &msg[..len];
+
+    let stale = DefaultCertVerifier::for_host("docs.interos.dev")
+        .with_roots(&ROOTS)
+        .with_clock(2_082_672_001);
+    let mut hs = HandshakeClient::new([0x11u8; 32]);
+    hs.state = HandshakeState::EncryptedExtensionsReceived;
+    assert_eq!(
+        hs.process_certificate(chain, &stale, "docs.interos.dev").err(),
+        Some(TlsError::CertificateExpired)
+    );
+    assert_ne!(hs.state, HandshakeState::CertificateReceived);
+
+    let live = DefaultCertVerifier::for_host("docs.interos.dev")
+        .with_roots(&ROOTS)
+        .with_clock(1_767_225_600);
+    let mut hs2 = HandshakeClient::new([0x11u8; 32]);
+    hs2.state = HandshakeState::EncryptedExtensionsReceived;
+    assert!(hs2.process_certificate(chain, &live, "docs.interos.dev").is_ok());
+}
+
+// ---------------------------------------------------------------------------
 // Name comparison hardening
 // ---------------------------------------------------------------------------
 
@@ -1104,6 +1219,7 @@ fn tls_client_hello_rejects_empty_and_oversized_peer_name() {
     static EMPTY_VERIFIER: DefaultCertVerifier<'static> = DefaultCertVerifier {
         expected_hostname: Some(""),
         trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+        now_unix: None,
     };
     let mut empty_session = TlsClientSession::new(TlsConfig {
         server_name: Some("interos.org"),
@@ -1272,6 +1388,7 @@ fn tls_empty_and_oversized_reference_identity_fail_closed_at_every_position() {
     static EMPTY: DefaultCertVerifier<'static> = DefaultCertVerifier {
         expected_hostname: Some(""),
         trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+        now_unix: None,
     };
     assert_eq!(EMPTY.reference_identity(), None);
     let cert = ParsedCertificate::parse(LEAF_GOOD_DER).unwrap();
@@ -1284,6 +1401,7 @@ fn tls_empty_and_oversized_reference_identity_fail_closed_at_every_position() {
     static LONG: DefaultCertVerifier<'static> = DefaultCertVerifier {
         expected_hostname: Some(LONG_SNI_NAME),
         trusted_roots: super::certificate::DEFAULT_TRUSTED_ROOTS,
+        now_unix: None,
     };
     assert_eq!(LONG.reference_identity(), Some(LONG_SNI_NAME));
     assert_eq!(

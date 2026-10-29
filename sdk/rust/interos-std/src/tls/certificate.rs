@@ -91,6 +91,91 @@ pub fn read_sequence<'a>(input: &'a [u8]) -> Result<(&'a [u8], &'a [u8]), TlsErr
     Ok((value, rem))
 }
 
+/// Days between 1970-01-01 and a proleptic-Gregorian civil date, negative for
+/// dates before the epoch.
+///
+/// WHY the era arithmetic instead of a month table: it needs no lookup array and
+/// no mutable state, which keeps the whole time path allocation-free.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_of_year = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_of_year + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365
+        + year_of_era / 4
+        - year_of_era / 100
+        + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if is_leap_year(year) { 29 } else { 28 },
+        _ => 0,
+    }
+}
+
+/// `count` ASCII decimal digits starting at `at`, or `None` if the slice is
+/// short or any byte is not a digit.
+fn decimal(raw: &[u8], at: usize, count: usize) -> Option<i64> {
+    let mut value = 0;
+    let mut i = 0;
+    while i < count {
+        let byte = *raw.get(at + i)?;
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + (byte - b'0') as i64;
+        i += 1;
+    }
+    Some(value)
+}
+
+/// Turns one ASN.1 time value into seconds since 1970-01-01T00:00:00Z, or `None`
+/// when the value is not a form that can be read as an instant.
+///
+/// Accepts exactly the two profiles RFC 5280 §4.1.2.5 mandates: UTCTime
+/// `YYMMDDHHMMSSZ` (the century window puts `YY` >= 50 in the 1900s and the rest
+/// in the 2000s) and GeneralizedTime `YYYYMMDDHHMMSSZ`. Everything else is
+/// refused, including a numeric UTC offset: offsets are illegal in a certificate
+/// but would otherwise shift the instant by hours without any way to notice.
+pub fn asn1_time_to_unix(raw: &[u8]) -> Option<i64> {
+    let (year, month, day, time_at) = match raw.len() {
+        13 => {
+            let yy = decimal(raw, 0, 2)?;
+            let century = if yy >= 50 { 1900 } else { 2000 };
+            (century + yy, decimal(raw, 2, 2)?, decimal(raw, 4, 2)?, 6)
+        }
+        15 => (
+            decimal(raw, 0, 4)?,
+            decimal(raw, 4, 2)?,
+            decimal(raw, 6, 2)?,
+            8,
+        ),
+        _ => return None,
+    };
+    if *raw.last()? != b'Z' {
+        return None;
+    }
+    if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    let hour = decimal(raw, time_at, 2)?;
+    let minute = decimal(raw, time_at + 2, 2)?;
+    let second = decimal(raw, time_at + 4, 2)?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 /// Parsed X.509 Certificate referencing slices within the raw DER input.
 #[derive(Clone, Copy, Debug)]
 pub struct ParsedCertificate<'a> {
@@ -226,7 +311,13 @@ impl<'a> ParsedCertificate<'a> {
         })
     }
 
-    /// Basic structural and validity checks.
+    /// Structural checks only: every field a certificate has to carry is
+    /// present and non-empty.
+    ///
+    /// WHY this is not enough to trust a certificate: it never asks whether the
+    /// instant now falls inside `notBefore`/`notAfter`, so a certificate that
+    /// expired last week passed exactly like one issued this morning. Use
+    /// [`Self::check_validity_at`] wherever the platform has a clock.
     pub fn check_validity(&self) -> Result<(), TlsError> {
         if self.serial_number.is_empty() {
             return Err(TlsError::CertificateVerificationFailed);
@@ -239,6 +330,28 @@ impl<'a> ParsedCertificate<'a> {
         }
         if self.spki_public_key.is_empty() {
             return Err(TlsError::CertificateVerificationFailed);
+        }
+        Ok(())
+    }
+
+    /// The structural checks plus the certificate's own validity window. Both
+    /// endpoints are inside the window, as RFC 5280 defines the valid period.
+    ///
+    /// A window that cannot be read is refused rather than waved through: the
+    /// two time formats X.509 allows are UTCTime and GeneralizedTime, and
+    /// anything else is either a profile this parser does not claim to speak or
+    /// a deliberately malformed certificate.
+    pub fn check_validity_at(&self, now_unix: i64) -> Result<(), TlsError> {
+        self.check_validity()?;
+        let not_before = asn1_time_to_unix(self.not_before)
+            .ok_or(TlsError::CertificateVerificationFailed)?;
+        let not_after = asn1_time_to_unix(self.not_after)
+            .ok_or(TlsError::CertificateVerificationFailed)?;
+        if now_unix < not_before {
+            return Err(TlsError::CertificateNotYetValid);
+        }
+        if now_unix > not_after {
+            return Err(TlsError::CertificateExpired);
         }
         Ok(())
     }
@@ -493,6 +606,17 @@ pub trait CertificateVerifier {
     /// Validates the certificate structure, chain, and validity period.
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
 
+    /// Judges one chain entry against this verifier's clock.
+    ///
+    /// WHY this is a required method rather than a call to
+    /// [`ParsedCertificate::check_validity`] inside the walk: the walk visits
+    /// every entry of the chain, but only the end-entity and the anchor get a
+    /// `verify_*` call, so an intermediate that expired last month was checked
+    /// for presence alone. Asking the verifier keeps one clock decision for all
+    /// three positions, and a new verifier cannot implement this trait without
+    /// saying what it does with a clock.
+    fn check_validity_window(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
+
     /// Validates a chain entry occupying the trust-anchor position: it must be
     /// self-signed and a member of this verifier's trust store. No hostname
     /// policy applies at this position — only the end-entity certificate carries
@@ -568,8 +692,12 @@ pub const INTEROS_ROOT_CA_DER: &[u8] = &[
 ///   [`DefaultCertVerifier::with_roots`]; there is no implicit fallback.
 pub const DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[];
 
-/// Default certificate verifier: enforces DER structure, validity dates,
-/// SubjectPublicKeyInfo presence, reference hostname match, and standard handshake signatures.
+/// Default certificate verifier: enforces DER structure, SubjectPublicKeyInfo
+/// presence, reference hostname match, and standard handshake signatures.
+///
+/// It enforces the validity *window* only when the caller supplies a clock with
+/// [`DefaultCertVerifier::with_clock`]; without one it can confirm that both
+/// timestamps exist but cannot tell an expired certificate from a fresh one.
 ///
 /// The trust store it starts with is [`DEFAULT_TRUSTED_ROOTS`], which is
 /// **empty**: a default verifier therefore trusts no certificate at all until
@@ -578,6 +706,9 @@ pub const DEFAULT_TRUSTED_ROOTS: &[&[u8]] = &[];
 pub struct DefaultCertVerifier<'a> {
     pub expected_hostname: Option<&'a str>,
     pub trusted_roots: &'a [&'a [u8]],
+    /// The instant validity windows are judged against, or `None` when the
+    /// caller has not supplied one.
+    pub now_unix: Option<i64>,
 }
 
 impl<'a> DefaultCertVerifier<'a> {
@@ -585,6 +716,7 @@ impl<'a> DefaultCertVerifier<'a> {
         Self {
             expected_hostname: None,
             trusted_roots: DEFAULT_TRUSTED_ROOTS,
+            now_unix: None,
         }
     }
 
@@ -593,6 +725,7 @@ impl<'a> DefaultCertVerifier<'a> {
         Self {
             expected_hostname: Some(hostname),
             trusted_roots: DEFAULT_TRUSTED_ROOTS,
+            now_unix: None,
         }
     }
 
@@ -605,6 +738,17 @@ impl<'a> DefaultCertVerifier<'a> {
         self.trusted_roots = roots;
         self
     }
+
+    /// Sets the instant the certificate's validity window is compared against.
+    ///
+    /// WHY the caller has to supply it: this SDK has no clock of its own — reading
+    /// the RTC is a capability-gated syscall the apps hold, not the TLS library —
+    /// so the guest passes the civil date it already has. A verifier built without
+    /// this keeps only the structural check, which accepts an expired certificate.
+    pub const fn with_clock(mut self, now_unix: i64) -> Self {
+        self.now_unix = Some(now_unix);
+        self
+    }
 }
 
 impl<'a> Default for DefaultCertVerifier<'a> {
@@ -614,8 +758,17 @@ impl<'a> Default for DefaultCertVerifier<'a> {
 }
 
 impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
+    /// With a clock the window is compared; without one it is not, and the
+    /// absence is reported rather than papered over with a guessed date.
+    fn check_validity_window(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
+        match self.now_unix {
+            Some(now) => cert.check_validity_at(now),
+            None => cert.check_validity(),
+        }
+    }
+
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
-        cert.check_validity()?;
+        self.check_validity_window(cert)?;
 
         // Only Ed25519 keys are accepted: that is the single scheme the client
         // advertises and the single signature path implemented here.
@@ -674,7 +827,7 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
     }
 
     fn verify_trust_anchor(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
-        cert.check_validity()?;
+        self.check_validity_window(cert)?;
         if !cert.is_self_signed() {
             return Err(TlsError::CertificateVerificationFailed);
         }

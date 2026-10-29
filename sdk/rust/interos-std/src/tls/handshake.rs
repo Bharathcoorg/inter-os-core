@@ -579,7 +579,10 @@ impl HandshakeClient {
             chain = &chain[ext_len..];
 
             let parsed = ParsedCertificate::parse(cert_der)?;
-            parsed.check_validity()?;
+            // Every position is judged against the verifier's clock, not merely
+            // for the presence of two timestamps: an intermediate that expired
+            // is refused here rather than trusted because it parsed.
+            verifier.check_validity_window(&parsed)?;
 
             // Only the advertised key type is usable at any chain position.
             if parsed.spki_algorithm_oid != ED25519_SPKI_OID {
