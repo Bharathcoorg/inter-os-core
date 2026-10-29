@@ -990,6 +990,95 @@ fn handle_rapp_command(s: &str) -> bool {
     false
 }
 
+/// Installs, lists and withdraws the device's TLS trust anchors.
+///
+/// WHY this is a console verb and not a syscall: an anchor is device-wide trust,
+/// and an application that could add one would choose which certificate chains
+/// every other application on the device accepts. The console is the channel the
+/// operator of the device holds, which is the same reason `RAPP_TRUST` has no
+/// syscall wrapper.
+///
+/// WHY the anchor arrives as hex in one line: a self-signed Ed25519 root is about
+/// 170 bytes, so 340 hex characters fit the 512-byte console line, and a single
+/// line means a chunked transfer state machine cannot be left half-filled by a
+/// dropped line.
+fn handle_tls_trust_command(s: &str) -> bool {
+    let mut parts = s.split_ascii_whitespace();
+    let Some(verb) = parts.next() else { return false; };
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST_LIST") {
+        let store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+        serial_println!("[TLS_TRUST] anchors={}", store.len());
+        for position in 0..store.len() {
+            let der = store.anchor_der(position).unwrap_or(&[]);
+            let label = store.anchor_label(position).unwrap_or("");
+            serial_println!("[TLS_TRUST] {} bytes={} label={}", position, der.len(), label);
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST_REVOKE") {
+        let Some(position) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
+            serial_println!("[TLS_TRUST] REJECT revoke position missing");
+            return true;
+        };
+        let mut store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+        return match store.revoke(position) {
+            Ok(()) => {
+                serial_println!("[TLS_TRUST] REVOKED position={} remaining={}", position, store.len());
+                true
+            }
+            Err(err) => {
+                serial_println!("[TLS_TRUST] REVOKE_FAILED {}", err.message());
+                true
+            }
+        };
+    }
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST") {
+        let Some(hex) = parts.next() else {
+            serial_println!("[TLS_TRUST] REJECT anchor missing");
+            return true;
+        };
+        let label = parts.next().unwrap_or("");
+        if hex.is_empty() || hex.len() % 2 != 0 || hex.len() / 2 > crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES {
+            serial_println!("[TLS_TRUST] REJECT anchor dimensions");
+            return true;
+        }
+        let raw = hex.as_bytes();
+        let mut der = [0u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES];
+        let mut i = 0usize;
+        while i < raw.len() {
+            let (Some(hi), Some(lo)) = (hex_nibble(raw[i]), hex_nibble(raw[i + 1])) else {
+                serial_println!("[TLS_TRUST] REJECT anchor hex");
+                return true;
+            };
+            der[i / 2] = (hi << 4) | lo;
+            i += 2;
+        }
+        let der = &der[..raw.len() / 2];
+        let mut store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+        return match store.install(der, label) {
+            Ok(position) => {
+                serial_println!(
+                    "[TLS_TRUST] ANCHOR position={} bytes={} label={} total={}",
+                    position,
+                    der.len(),
+                    label,
+                    store.len()
+                );
+                true
+            }
+            Err(err) => {
+                serial_println!("[TLS_TRUST] REJECT {}", err.message());
+                true
+            }
+        };
+    }
+
+    false
+}
+
 fn handle_serial_command(cmd: &[u8]) {
     let s = if let Ok(s) = core::str::from_utf8(cmd) {
         s.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0')
@@ -1011,6 +1100,9 @@ fn handle_serial_command(cmd: &[u8]) {
         crate::serial_println!("[CMD] {}", s);
     }
     if handle_rapp_command(s) {
+        return;
+    }
+    if handle_tls_trust_command(s) {
         return;
     }
 

@@ -267,6 +267,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // declarations are seeded from the table that mirrors their manifests.
     kernel::content::init();
     serial_println!("[PACKAGE] persistent registry, payload store and revocation state restored.");
+    // WHY this is said at boot: the TLS trust anchors live in RAM, so the operator
+    // who installed one yesterday cannot tell from the screen whether this boot
+    // still holds it. Saying it once here -- before the first connection is
+    // attempted -- is what turns "HTTPS failed" into "this device trusts nothing".
+    kernel::crypto::tls_trust::report_at_boot();
 
     // Generate sample sandboxed package bytecode: returns 0 (exit success)
     let mut wasm_app_code = Vec::new();

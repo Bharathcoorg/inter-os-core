@@ -8,6 +8,7 @@ pub mod hmac;
 pub mod keystore;
 pub mod rng;
 pub mod sha256;
+pub mod tls_trust;
 
 pub use hmac::HmacSha256;
 pub use keystore::{KeySlot, KeystoreError, SecureKeystore, SECURE_KEYSTORE};
