@@ -9,8 +9,8 @@ use super::certificate::{
 use super::client::{TlsClientSession, TlsConfig};
 use super::handshake::{
     HandshakeClient, HandshakeState, MAX_CHAIN_DEPTH, HANDSHAKE_CERTIFICATE,
-    HANDSHAKE_CERTIFICATE_VERIFY, SUPPORTED_GROUPS, TLS_CIPHER_CHACHA20_POLY1305_SHA256,
-    TLS_VERSION_1_3,
+    HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED,
+    SUPPORTED_GROUPS, TLS_CIPHER_CHACHA20_POLY1305_SHA256, TLS_VERSION_1_3,
 };
 use super::ed25519::Sha512;
 use super::TlsError;
@@ -1236,7 +1236,7 @@ fn tls_stub_verifier_without_identity_cannot_start_a_handshake() {
     assert_eq!(session.start_handshake(&mut out), Err(TlsError::Unavailable));
     assert_eq!(session.handle_server_hello(&[0u8; 8]), Err(TlsError::Unavailable));
     assert_eq!(
-        session.handle_encrypted_handshake_record(&[0u8; 8]),
+        session.handle_handshake_message(&[0u8; 8]),
         Err(TlsError::Unavailable)
     );
     assert!(!session.is_connected());
@@ -1375,8 +1375,12 @@ fn tls_certificate_verify_without_a_validated_leaf_is_rejected() {
         use super::record::RecordCipher;
         RecordCipher::new([0x01u8; 32], [0x02u8; 12])
     });
+    let mut plain = [0u8; 256];
+    let arrived = session
+        .open_handshake_record(&enc_buf[..record_len], &mut plain)
+        .unwrap();
     assert_eq!(
-        session.handle_encrypted_handshake_record(&enc_buf[..record_len]),
+        session.handle_handshake_message(&plain[..arrived]),
         Err(TlsError::UnexpectedMessage)
     );
 }
@@ -1649,3 +1653,183 @@ fn tls_stub_return_path_cannot_turn_a_failed_check_into_a_verified_handshake() {
     );
 }
 
+
+// ---------------------------------------------------------------------------
+// Handshake records belong to the server; handshake messages belong to the
+// protocol, and the two boundaries do not agree.
+// ---------------------------------------------------------------------------
+
+/// Writes `bytes` into the rejoiner the way a decrypted record does.
+fn feed(reader: &mut super::client::HandshakeReader<'_>, bytes: &[u8]) -> Result<(), TlsError> {
+    let room = reader.tail();
+    assert!(bytes.len() <= room.len(), "the record does not fit the room under test");
+    room[..bytes.len()].copy_from_slice(bytes);
+    reader.commit(bytes.len())
+}
+
+/// A handshake message of `body_len` bytes, carrying `kind` and a body that
+/// counts so a test can see whether the bytes handed over are the ones sent.
+fn stamped_message(kind: u8, body_len: usize, out: &mut [u8]) -> usize {
+    let total = 4 + body_len;
+    out[0] = kind;
+    out[1] = (body_len >> 16) as u8;
+    out[2] = (body_len >> 8) as u8;
+    out[3] = body_len as u8;
+    for (i, byte) in out[4..total].iter_mut().enumerate() {
+        *byte = (i % 251) as u8;
+    }
+    total
+}
+
+#[test]
+fn holds_a_message_until_the_record_that_completes_it_arrives() {
+    let mut message = [0u8; 64];
+    let total = stamped_message(HANDSHAKE_CERTIFICATE, 40, &mut message);
+    assert_eq!(total, 44);
+
+    let mut room = [0u8; 128];
+    let mut reader = super::client::HandshakeReader::new(&mut room);
+    let mut handed = 0usize;
+
+    // A record that carries only the first 20 bytes cannot be a message yet.
+    feed(&mut reader, &message[..20]).unwrap();
+    reader.drain(|_| {
+        handed += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(handed, 0, "a prefix of a message is not a message");
+
+    // The record that completes it hands over the whole thing, first byte to last.
+    feed(&mut reader, &message[20..total]).unwrap();
+    let mut seen = [0u8; 64];
+
+    let mut seen_len = 0usize;
+    reader
+        .drain(|complete| {
+            handed += 1;
+            seen_len = complete.len();
+            seen[..complete.len()].copy_from_slice(complete);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(handed, 1);
+    assert_eq!(seen_len, total);
+    assert_eq!(&seen[..total], &message[..total]);
+}
+
+#[test]
+fn hands_over_every_message_one_record_carries() {
+    let mut first = [0u8; 64];
+    let mut second = [0u8; 64];
+    let first_len = stamped_message(HANDSHAKE_ENCRYPTED_EXTENSIONS, 6, &mut first);
+    let second_len = stamped_message(HANDSHAKE_CERTIFICATE_VERIFY, 10, &mut second);
+
+    let mut joined = [0u8; 128];
+    joined[..first_len].copy_from_slice(&first[..first_len]);
+    joined[first_len..first_len + second_len].copy_from_slice(&second[..second_len]);
+
+    let mut room = [0u8; 128];
+    let mut reader = super::client::HandshakeReader::new(&mut room);
+    feed(&mut reader, &joined[..first_len + second_len]).unwrap();
+
+    let mut kinds = [0u8; 4];
+    let mut handed = 0usize;
+    reader
+        .drain(|message| {
+            kinds[handed] = message[0];
+            handed += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(handed, 2, "both messages arrived in one record");
+    assert_eq!(kinds[0], HANDSHAKE_ENCRYPTED_EXTENSIONS);
+    assert_eq!(kinds[1], HANDSHAKE_CERTIFICATE_VERIFY);
+}
+
+#[test]
+fn keeps_only_what_still_has_a_message_missing() {
+    // A complete message followed by the header of one that has not arrived.
+    let mut whole = [0u8; 32];
+    let whole_len = stamped_message(HANDSHAKE_FINISHED, 8, &mut whole);
+    let mut partial = [0u8; 32];
+    let partial_len = stamped_message(HANDSHAKE_CERTIFICATE, 20, &mut partial);
+
+    let mut room = [0u8; 128];
+    let mut reader = super::client::HandshakeReader::new(&mut room);
+    feed(&mut reader, &whole[..whole_len]).unwrap();
+    feed(&mut reader, &partial[..5]).unwrap();
+
+    let mut handed = 0usize;
+    reader
+        .drain(|message| {
+            handed += 1;
+            assert_eq!(message[0], HANDSHAKE_FINISHED);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(handed, 1);
+
+    // The bytes still held are the beginning of the certificate, and the rest
+    // of it completes the message on the next record.
+    feed(&mut reader, &partial[5..partial_len]).unwrap();
+    let mut again = 0usize;
+    reader
+        .drain(|message| {
+            again += 1;
+            assert_eq!(message[0], HANDSHAKE_CERTIFICATE);
+            assert_eq!(message.len(), partial_len);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(again, 1);
+}
+
+#[test]
+fn refuses_a_chain_bigger_than_the_room_it_was_given() {
+    // A certificate message that names more bytes than this client will ever
+    // reassemble is refused by name; it is not read in pieces and not truncated.
+    let mut room = [0u8; super::client::MAX_HANDSHAKE_MESSAGE_BYTES];
+    let mut reader = super::client::HandshakeReader::new(&mut room);
+    let header = [HANDSHAKE_CERTIFICATE, 0xff, 0xff, 0xff];
+    feed(&mut reader, &header).unwrap();
+    assert_eq!(
+        reader.drain(|_| Ok(())),
+        Err(TlsError::RecordTooLarge),
+        "a message too large to reassemble must not wait for more records"
+    );
+}
+
+#[test]
+fn the_room_holds_a_public_certificate_chain_whole() {
+    // Measured on the wire: the chain developer.mozilla.org sends is a 4113-byte
+    // certificate message, and example.com's is 3686 bytes. Both arrive as one
+    // protected record larger than the frame this client used to read into.
+    const MDN_CERTIFICATE_MESSAGE_BYTES: usize = 4113;
+    let mut message = [0u8; MDN_CERTIFICATE_MESSAGE_BYTES];
+    let total = stamped_message(
+        HANDSHAKE_CERTIFICATE,
+        MDN_CERTIFICATE_MESSAGE_BYTES - 4,
+        &mut message,
+    );
+    assert_eq!(total, MDN_CERTIFICATE_MESSAGE_BYTES);
+
+    let mut room = [0u8; super::client::MAX_HANDSHAKE_MESSAGE_BYTES];
+    let mut reader = super::client::HandshakeReader::new(&mut room);
+    // Split where a server would: partway through the DER of the second certificate.
+    feed(&mut reader, &message[..3000]).unwrap();
+    let mut handed = 0usize;
+    reader.drain(|_| { handed += 1; Ok(()) }).unwrap();
+    assert_eq!(handed, 0);
+    feed(&mut reader, &message[3000..]).unwrap();
+    let mut length_seen = 0usize;
+    reader
+        .drain(|complete| {
+            handed += 1;
+            length_seen = complete.len();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(handed, 1);
+    assert_eq!(length_seen, MDN_CERTIFICATE_MESSAGE_BYTES);
+}

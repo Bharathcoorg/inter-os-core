@@ -59,6 +59,22 @@ def client_read_body(source: str) -> str:
     return source.split(marker, 1)[1].split("\n}", 1)[0]
 
 
+def client_record_gather_body(source: str) -> str:
+    """The function that pulls one record off the wire, wherever `read` reaches it.
+
+    WHY this is a separate locator: gathering a record and dispatching what a
+    record holds are two jobs, and the handshake reader needs the first without
+    the second. Pinning them together would mean a test about the transport's
+    receive window watching a function that no longer contains it.
+    """
+    marker = "fn read_record_into(&mut self)"
+    assert marker in source, (
+        "the client no longer gathers a record in one place, so nothing pins how "
+        "much of it it asks the transport for at a time"
+    )
+    return source.split(marker, 1)[1].split("\n    }", 1)[0]
+
+
 def kernel_store_source() -> str:
     return read_source("kernel/src/crypto/tls_trust.rs")
 
@@ -553,12 +569,12 @@ def test_a_record_the_server_fills_is_bigger_than_any_window_the_caller_offers()
         "the read frame is a hand-picked size again, so a server that fills a "
         "record is refused by a client that asked for that record"
     )
-    read = client_read_body(src)
+    gather = client_record_gather_body(src)
     assert "record: [u8; MAX_READ_RECORD_BYTES]" in src, (
         "the client holds one record on the stack of a single read again, which "
         "is where the 2 KiB ceiling came from"
     )
-    assert "Err(TlsError::RecordTooLarge)" in read, (
+    assert "Err(TlsError::RecordTooLarge)" in gather, (
         "a record longer than the protocol allows is read as though it were one "
         "this client could hold"
     )
@@ -640,11 +656,11 @@ def test_the_reader_asks_the_transport_for_no_more_than_the_device_answers():
     ran on -- the small answer arrived and the page-sized one never did.
     """
     src = code_only(read_source("sdk/rust/interos-std/src/tls/client.rs"))
-    read = client_read_body(src)
+    gather = client_record_gather_body(src)
     assert "const TRANSPORT_READ_BYTES: usize = 2048;" in src, (
         "the reader no longer names the window the transport will answer"
     )
-    assert ".min(TRANSPORT_READ_BYTES)" in read, (
+    assert ".min(TRANSPORT_READ_BYTES)" in gather, (
         "the reader asks the transport for the remainder of a record in one call "
         "again, which the device refuses above its own receive window"
     )
@@ -673,4 +689,71 @@ def test_an_empty_record_is_not_read_as_the_peer_having_stopped():
     assert "ContentType::ApplicationData => {}" in read, (
         "an empty application-data record has nowhere to go, so it falls through "
         "to the refusal a peer's silence does not deserve"
+    )
+
+
+def method_body(source: str, name: str) -> str:
+    """One inherent method's text, from its signature to the brace that closes it.
+
+    WHY not `fn_body`: every method in the client is indented inside its `impl`,
+    so a search for a brace at column 0 runs past the end of the method and into
+    whatever comes next, and the assertion would pass on someone else's code. The
+    name is matched without its paren because a generic method is declared as
+    `drain<F>(`, and a reader that pins the arithmetic must find it either way.
+    """
+    marker = f"fn {name}"
+    assert marker in source, f"{name} is not defined anywhere in this source"
+    return source.split(marker, 1)[1].split("\n    }", 1)[0]
+
+
+def test_a_public_certificate_chain_does_not_fit_one_handshake_record():
+    """The handshake reader has to hold what a public server actually sends.
+
+    WHY these numbers are measured: developer.mozilla.org answers the ClientHello
+    with a ServerHello of 122 bytes and then a protected record of 4130 carrying a
+    chain of 1316 + 1246 + 1528 bytes of DER, and example.com answers with 3845.
+    Both are above the 2048-byte frame the handshake used to read into, so the
+    handshake died on the record header before a single byte of certificate was
+    parsed -- which is why the refusal looked like a crypto failure and was not
+    one. RFC 8446 5.1 lets a server also write several messages into one record,
+    so a reader sized for the largest message would still be wrong about where a
+    message ends.
+    """
+    src = code_only(read_source("sdk/rust/interos-std/src/tls/client.rs"))
+    for seam in ("pub fn open_handshake_record", "pub fn handle_handshake_message",
+                 "pub fn read_server_hello", "pub fn read_handshake_payload"):
+        assert seam in src, (
+            f"{seam} is gone, so the handshake is back to treating one record as "
+            "one message and one message as one frame"
+        )
+    assert "fn handle_encrypted_handshake_record" not in src, (
+        "the record-level dispatcher is still reachable, and it is the shape that "
+        "refused a chain bigger than its buffer"
+    )
+    assert const_value(src, "MAX_HANDSHAKE_MESSAGE_BYTES") >= 4113, (
+        "the ceiling is below the certificate message a public chain measured, so "
+        "the same dial is refused again"
+    )
+    drain = method_body(src, "drain")
+    assert "message_len > total - taken" in drain, (
+        "a message that has only partly arrived is dispatched anyway, so the "
+        "verifier reads a truncated chain"
+    )
+    assert "self.buf.copy_within(taken..total, 0)" in drain, (
+        "bytes still missing their message are dropped instead of held for the "
+        "record that completes them"
+    )
+    assert "Err(TlsError::RecordTooLarge)" in drain, (
+        "a chain bigger than the room the reader was given is silently truncated "
+        "rather than refused"
+    )
+
+    browser = code_only(read_source("apps/browser/src/http.rs"))
+    assert "HandshakeReader::new" in browser, (
+        "the browser is back to a stack frame of its own for the handshake, which "
+        "is where the 2 KiB ceiling came from"
+    )
+    assert "client.session.app_send_cipher.is_none()" in browser, (
+        "the handshake loop no longer stops where the server stops encrypting, so "
+        "it reads the response as if it were still handshake"
     )

@@ -52,6 +52,91 @@ const MAX_READ_RECORD_BYTES: usize = MAX_RECORD_WIRE_LEN;
 /// record is still gathered whole into `record` -- only the request is bounded.
 const TRANSPORT_READ_BYTES: usize = 2048;
 
+/// The largest handshake message a [`HandshakeReader`] will rejoin.
+///
+/// WHY 8 KiB: the chain a public server sends is the message that decides this.
+/// Measured on the wire, `developer.mozilla.org` writes a 4113-byte certificate
+/// message and `example.com` a 3686-byte one, and the trust store holds four
+/// anchors of at most 2 KiB, so no chain this client may accept needs more room
+/// than that. A bigger message is refused rather than read in pieces, because a
+/// half-parsed certificate would be blamed on the peer.
+pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 8192;
+
+/// Handshake messages rejoined across the record boundaries a server chose.
+///
+/// WHY this exists at all: RFC 8446 5.1 lets a server put several handshake
+/// messages in one record and carry one message over several records, and a
+/// certificate chain is larger than the record a server is required to fit it
+/// into. A reader that calls the first byte of a record the message type is then
+/// right only by luck, and every public chain measured here is big enough to
+/// make that luck run out.
+///
+/// WHY the caller brings the buffer: this is the room a chain takes, and which
+/// client asks for it is the client's memory budget, not the protocol's.
+pub struct HandshakeReader<'a> {
+    buf: &'a mut [u8],
+    /// Bytes held that no message has been cut from yet.
+    held: usize,
+}
+
+impl<'a> HandshakeReader<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, held: 0 }
+    }
+
+    /// The room still free, so a record's payload can be decrypted straight
+    /// into it instead of through a second frame.
+    pub fn tail(&mut self) -> &mut [u8] {
+        &mut self.buf[self.held..]
+    }
+
+    /// Claims `written` bytes of the tail as arriving record payload.
+    pub fn commit(&mut self, written: usize) -> Result<(), TlsError> {
+        if written > self.buf.len() - self.held {
+            return Err(TlsError::BufferTooSmall);
+        }
+        self.held += written;
+        Ok(())
+    }
+
+    /// Hands every whole message to `f`, oldest first, and keeps only the prefix
+    /// of a message that has not arrived in full.
+    ///
+    /// WHY `f` is called before the remainder moves: the caller holds `&mut` to
+    /// the session it is feeding, and a message is only ever complete, so no
+    /// dispatch has to be unwound if a later one fails.
+    pub fn drain<F>(&mut self, mut f: F) -> Result<(), TlsError>
+    where
+        F: FnMut(&[u8]) -> Result<(), TlsError>,
+    {
+        let total = self.held;
+        let mut taken = 0usize;
+        while total - taken >= 4 {
+            let declared = (self.buf[taken + 1] as usize) << 16
+                | (self.buf[taken + 2] as usize) << 8
+                | self.buf[taken + 3] as usize;
+            let message_len = match 4usize.checked_add(declared) {
+                Some(len) => len,
+                None => return Err(TlsError::BadHandshakeMessage),
+            };
+            if message_len > MAX_HANDSHAKE_MESSAGE_BYTES {
+                return Err(TlsError::RecordTooLarge);
+            }
+            if message_len > total - taken {
+                // Only a prefix of this message has arrived; the next record
+                // carries the rest, and the bytes already held stay where they
+                // are until a whole message can be cut.
+                break;
+            }
+            f(&self.buf[taken..taken + message_len])?;
+            taken += message_len;
+        }
+        self.buf.copy_within(taken..total, 0);
+        self.held = total - taken;
+        Ok(())
+    }
+}
+
 /// Stream abstraction for underlying transport (e.g. TCP socket, mock memory buffer).
 pub trait TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TlsError>;
@@ -244,33 +329,53 @@ impl<'a> TlsClientSession<'a> {
         Ok(())
     }
 
-    /// Processes an encrypted handshake record from server.
-    pub fn handle_encrypted_handshake_record(
+    /// Opens one protected handshake record into `out` and reports how many
+    /// plaintext bytes arrived.
+    ///
+    /// WHY the caller brings the buffer: the room a handshake record needs is
+    /// the room the server's certificate chain takes, and a public chain is
+    /// bigger than any frame this client used to hold. Measured on the wire, the
+    /// answer to `https://developer.mozilla.org/` seals 4130 bytes into a single
+    /// record, so the buffer has to be chosen where the record is read rather
+    /// than in here.
+    pub fn open_handshake_record(
         &mut self,
         record: &[u8],
-    ) -> Result<(), TlsError> {
-        let identity = self.require_live_identity()?;
-        let verifier: &'a dyn CertificateVerifier = self.config.verifier;
+        out: &mut [u8],
+    ) -> Result<usize, TlsError> {
         let recv_cipher = self.recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
-
-        let mut decrypted_payload = [0u8; 2048];
-        let (content_type, payload_len) = recv_cipher.decrypt_record(record, &mut decrypted_payload)?;
+        let (content_type, payload_len) = recv_cipher.decrypt_record(record, out)?;
 
         if content_type != ContentType::Handshake {
             return Err(TlsError::UnexpectedMessage);
         }
-
-        let payload = &decrypted_payload[..payload_len];
-        if payload.is_empty() {
+        if payload_len == 0 {
             return Err(TlsError::BadHandshakeMessage);
         }
+        Ok(payload_len)
+    }
 
-        match payload[0] {
+    /// Applies one complete handshake message.
+    ///
+    /// WHY a whole message rather than a record: the server decides where its
+    /// records end, and TLS lets it write several handshake messages into one
+    /// record and split one message across several. Treating the first byte of a
+    /// record as a message type is only right when the record boundary happens
+    /// to be a message boundary, so the boundaries are rejoined by
+    /// [`HandshakeReader`] before this function is called.
+    pub fn handle_handshake_message(&mut self, message: &[u8]) -> Result<(), TlsError> {
+        let identity = self.require_live_identity()?;
+        let verifier: &'a dyn CertificateVerifier = self.config.verifier;
+        let Some(&message_type) = message.first() else {
+            return Err(TlsError::BadHandshakeMessage);
+        };
+
+        match message_type {
             HANDSHAKE_ENCRYPTED_EXTENSIONS => {
-                self.handshake.process_encrypted_extensions(payload)?;
+                self.handshake.process_encrypted_extensions(message)?;
             }
             HANDSHAKE_CERTIFICATE => {
-                let cert = self.handshake.process_certificate(payload, verifier, identity)?;
+                let cert = self.handshake.process_certificate(message, verifier, identity)?;
                 // Pin the verified leaf key for CertificateVerify. A key larger
                 // than the pin can never be pinned whole, so the handshake stops
                 // here instead of carrying a truncated identity forward — a
@@ -295,10 +400,10 @@ impl<'a> TlsClientSession<'a> {
                 }
                 let len = self.server_cert_spki_len;
                 self.handshake
-                    .process_certificate_verify(payload, &self.server_cert_spki[..len], verifier)?;
+                    .process_certificate_verify(message, &self.server_cert_spki[..len], verifier)?;
             }
             HANDSHAKE_FINISHED => {
-                self.handshake.process_server_finished(payload)?;
+                self.handshake.process_server_finished(message)?;
 
                 // Initialize application traffic ciphers
                 self.app_send_cipher = Some(RecordCipher::new(
@@ -389,6 +494,93 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
         Ok(plaintext.len())
     }
 
+    /// Gathers exactly one record into the buffer this client owns and reports
+    /// how many bytes it occupies, header included. `Ok(0)` means the peer
+    /// stopped talking before a header arrived.
+    ///
+    /// WHY the whole record: a server fills a record to the protocol limit, and
+    /// the limit is above what the device's TCP receive answers, so the gather
+    /// loops over bounded requests rather than refusing the record.
+    fn read_record_into(&mut self) -> Result<usize, TlsError> {
+        let mut read_bytes = 0;
+        while read_bytes < RECORD_HEADER_LEN {
+            let n = self
+                .stream
+                .read(&mut self.record[read_bytes..RECORD_HEADER_LEN])?;
+            if n == 0 {
+                return Ok(0);
+            }
+            read_bytes += n;
+        }
+
+        let record_len = u16::from_be_bytes([self.record[3], self.record[4]]) as usize;
+        let total_len = RECORD_HEADER_LEN + record_len;
+        if total_len > self.record.len() {
+            return Err(TlsError::RecordTooLarge);
+        }
+
+        while read_bytes < total_len {
+            let want = (total_len - read_bytes).min(TRANSPORT_READ_BYTES);
+            let n = self.stream.read(&mut self.record[read_bytes..read_bytes + want])?;
+            if n == 0 {
+                return Err(TlsError::BadRecordLength);
+            }
+            read_bytes += n;
+        }
+        Ok(total_len)
+    }
+
+    /// Reads records until the ServerHello, and hands it to the session.
+    ///
+    /// WHY the compatibility record is stepped over: RFC 8446 5.3 has a server
+    /// that got a middlebox-compatible session id send a plaintext
+    /// ChangeCipherSpec before its real first record, and every public server
+    /// measured here does.
+    pub fn read_server_hello(&mut self) -> Result<(), TlsError> {
+        let mut skipped = 0usize;
+        loop {
+            let total_len = self.read_record_into()?;
+            if total_len == 0 {
+                return Err(TlsError::BadRecordLength);
+            }
+            if self.record[0] == ContentType::ChangeCipherSpec as u8 {
+                skipped += 1;
+                if skipped >= MAX_SKIPPED_RECORDS {
+                    return Err(TlsError::UnexpectedMessage);
+                }
+                continue;
+            }
+            return self.session.handle_server_hello(&self.record[..total_len]);
+        }
+    }
+
+    /// Opens the next handshake record into `out` and reports how many plaintext
+    /// bytes arrived, stepping over the plaintext ChangeCipherSpec a server may
+    /// still send after the handshake is encrypted.
+    ///
+    /// WHY `out` is the caller's: the bytes belong to a [`HandshakeReader`],
+    /// which is the only thing that can tell where one message ends and the next
+    /// begins, so the payload goes to the buffer that keeps the messages.
+    pub fn read_handshake_payload(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        let mut skipped = 0usize;
+        loop {
+            let total_len = self.read_record_into()?;
+            if total_len == 0 {
+                return Ok(0);
+            }
+            if self.record[0] == ContentType::ChangeCipherSpec as u8 {
+                skipped += 1;
+                if skipped >= MAX_SKIPPED_RECORDS {
+                    return Err(TlsError::UnexpectedMessage);
+                }
+                continue;
+            }
+            return self
+                .session
+                .open_handshake_record(&self.record[..total_len], out);
+        }
+    }
+
     /// Reads the next application data, filling the caller's window from a
     /// record of any size the protocol allows.
     ///
@@ -421,28 +613,9 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
 
         let mut skipped = 0usize;
         loop {
-            let mut read_bytes = 0;
-            while read_bytes < RECORD_HEADER_LEN {
-                let n = self.stream.read(&mut self.record[read_bytes..RECORD_HEADER_LEN])?;
-                if n == 0 {
-                    return Ok(0); // EOF
-                }
-                read_bytes += n;
-            }
-
-            let record_len = u16::from_be_bytes([self.record[3], self.record[4]]) as usize;
-            let total_len = RECORD_HEADER_LEN + record_len;
-            if total_len > self.record.len() {
-                return Err(TlsError::RecordTooLarge);
-            }
-
-            while read_bytes < total_len {
-                let want = (total_len - read_bytes).min(TRANSPORT_READ_BYTES);
-                let n = self.stream.read(&mut self.record[read_bytes..read_bytes + want])?;
-                if n == 0 {
-                    return Err(TlsError::BadRecordLength);
-                }
-                read_bytes += n;
+            let total_len = self.read_record_into()?;
+            if total_len == 0 {
+                return Ok(0); // EOF
             }
 
             let (content_type, len) = self

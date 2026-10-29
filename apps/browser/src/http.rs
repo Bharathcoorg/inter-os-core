@@ -10,11 +10,32 @@
 //! pipeline in `lib.rs` owns that, and this module hands it bytes in UTF-8.
 
 use crate::{parse_uri, UriScheme};
-use interos_std::tls::{TlsClient, TlsError, TlsStream};
+use interos_std::tls::{HandshakeReader, TlsClient, TlsError, TlsStream, MAX_HANDSHAKE_MESSAGE_BYTES};
 
 // =============================================================================
 // Transport and TLS 1.3 Client Integration
 // =============================================================================
+
+/// Where handshake messages wait for the record that completes them.
+///
+/// WHY a static rather than a frame in the handshake function: this is the room a
+/// server's whole certificate chain takes -- 4113 bytes for the chain
+/// `developer.mozilla.org` sent when this was measured -- and a chain arrives on
+/// every navigation, so the buffer is taken once instead of rebuilt on the stack
+/// each time the address bar is used.
+///
+/// WHY one buffer is enough: the browser fetches from a single task, exactly as
+/// it reads a single document at a time.
+static mut HANDSHAKE_MESSAGES: [u8; MAX_HANDSHAKE_MESSAGE_BYTES] = [0; MAX_HANDSHAKE_MESSAGE_BYTES];
+
+/// How many records one handshake may arrive in.
+///
+/// WHY 64 rather than the sixteen this used to allow: a record carries whatever
+/// part of a message the server felt like writing, and the chain that decided
+/// this number arrives in one 4 KiB record on every server measured here, so 64
+/// is far past any real handshake while still ending a peer that streams records
+/// forever.
+const MAX_HANDSHAKE_RECORDS: usize = 64;
 
 /// The specific stage or nature of transport/connection failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,89 +168,67 @@ impl TlsStream for TcpSocketStream {
 pub fn perform_tls_handshake<S: TlsStream>(
     client: &mut TlsClient<'_, S>,
 ) -> Result<(), FetchErrorKind> {
-    // WHY this frame stays one request's size: the records here carry the
-    // server's certificate chain, and a public chain is bigger than 2 KiB, so
-    // widening it belongs with the signature schemes that have to verify that
-    // chain rather than with the reader that now takes a whole page.
-    let mut record_buf = [0u8; 2048];
+    // WHY this frame only ever carries a write: the client's own request is a
+    // few hundred bytes, and everything it reads is gathered by the client into
+    // the record-sized buffer it already owns. Reading into a frame of this
+    // size is what refused a public certificate chain -- measured, the answer to
+    // `https://developer.mozilla.org/` puts 4130 bytes in one record.
+    let mut out_buf = [0u8; 2048];
 
     // 1. Emit and send ClientHello
     let hello_len = client
         .session
-        .start_handshake(&mut record_buf)
+        .start_handshake(&mut out_buf)
         .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
     client
         .stream_mut()
-        .write_all(&record_buf[..hello_len])
+        .write_all(&out_buf[..hello_len])
         .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
 
-    // Helper to read a complete TLS record (5-byte header + payload)
-    fn read_record<S: TlsStream>(
-        stream: &mut S,
-        buf: &mut [u8],
-    ) -> Result<usize, FetchErrorKind> {
-        let mut header = [0u8; 5];
-        let mut n = 0;
-        while n < 5 {
-            let r = stream.read(&mut header[n..]).map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
-            if r == 0 {
-                return Err(FetchErrorKind::TlsHandshakeFailed);
-            }
-            n += r;
-        }
-        let payload_len = u16::from_be_bytes([header[3], header[4]]) as usize;
-        let total_len = 5 + payload_len;
-        if total_len > buf.len() {
-            return Err(FetchErrorKind::TlsHandshakeFailed);
-        }
-        buf[..5].copy_from_slice(&header);
-        while n < total_len {
-            let r = stream.read(&mut buf[n..total_len]).map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
-            if r == 0 {
-                return Err(FetchErrorKind::TlsHandshakeFailed);
-            }
-            n += r;
-        }
-        Ok(total_len)
-    }
-
-    // 2. Read ServerHello record
-    let mut sh_len = read_record(client.stream_mut(), &mut record_buf)?;
-    // If middlebox compatibility ChangeCipherSpec arrived before ServerHello, skip it
-    if record_buf[0] == 20 {
-        sh_len = read_record(client.stream_mut(), &mut record_buf)?;
-    }
+    // 2. Read the ServerHello, and any compatibility record in front of it
     client
-        .session
-        .handle_server_hello(&record_buf[..sh_len])
+        .read_server_hello()
         .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
 
-    // 3. Process encrypted handshake records until Finished
-    let mut loops = 0;
+    // 3. Rejoin the encrypted handshake messages, however the server split them
+    // into records, and apply each one until Finished installs the application
+    // keys.
+    //
+    // WHY the bound is on records rather than on rounds: one certificate chain
+    // arrives as one message, but a message is only ever as big as the record
+    // the server chose to write, so a chain that fills two frames needs two
+    // records and the rejoiner still has work to do after the last one.
+    let mut messages = unsafe {
+        HandshakeReader::new(&mut *core::ptr::addr_of_mut!(HANDSHAKE_MESSAGES))
+    };
+    let mut records = 0usize;
     while client.session.app_send_cipher.is_none() {
-        loops += 1;
-        if loops > 16 {
+        records += 1;
+        if records > MAX_HANDSHAKE_RECORDS {
             return Err(FetchErrorKind::TlsHandshakeFailed);
         }
-        let rec_len = read_record(client.stream_mut(), &mut record_buf)?;
-        if record_buf[0] == 20 {
-            // Middlebox compatibility ChangeCipherSpec; skip
-            continue;
+        let arrived = client
+            .read_handshake_payload(messages.tail())
+            .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+        if arrived == 0 {
+            return Err(FetchErrorKind::TlsHandshakeFailed);
         }
-        client
-            .session
-            .handle_encrypted_handshake_record(&record_buf[..rec_len])
+        messages
+            .commit(arrived)
+            .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
+        messages
+            .drain(|message| client.session.handle_handshake_message(message))
             .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
     }
 
     // 4. Emit and send Client Finished
     let fin_len = client
         .session
-        .emit_client_finished(&mut record_buf)
+        .emit_client_finished(&mut out_buf)
         .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
     client
         .stream_mut()
-        .write_all(&record_buf[..fin_len])
+        .write_all(&out_buf[..fin_len])
         .map_err(|_| FetchErrorKind::TlsHandshakeFailed)?;
 
     if !client.session.is_connected() {

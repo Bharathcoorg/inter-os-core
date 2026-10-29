@@ -20,12 +20,14 @@ use interos_std::crypto::sha256::Sha256;
 use interos_std::crypto::x25519::{x25519, x25519_base};
 use interos_std::tls::certificate::{CertificateVerifier, ParsedCertificate};
 use interos_std::tls::client::{
-    MemoryStream, TlsClient, TlsClientSession, TlsConfig, TlsStream,
+    HandshakeReader, MemoryStream, TlsClient, TlsClientSession, TlsConfig, TlsStream,
+    MAX_HANDSHAKE_MESSAGE_BYTES,
 };
 use interos_std::tls::handshake::{
     HandshakeState, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_CLIENT_HELLO,
     HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED, HANDSHAKE_SERVER_HELLO,
 };
+use interos_std::tls::TlsError;
 use interos_std::tls::record::{
     compute_nonce, ContentType, RecordCipher, MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN,
     TLS_LEGACY_VERSION,
@@ -411,6 +413,18 @@ fn test_mock_tls13_handshake_and_traffic() {
 
     let mut server_send_cipher = RecordCipher::new(s_hs_key, s_hs_iv);
 
+    // Records are handed to the same rejoiner the browser uses. This server
+    // writes one message per record, but the client may not assume that: a
+    // public chain arrives as one message bigger than the record a server is
+    // required to fit it into, and the reader is what makes the two shapes agree.
+    let mut handshake_room = [0u8; MAX_HANDSHAKE_MESSAGE_BYTES];
+    let mut messages = HandshakeReader::new(&mut handshake_room);
+    let mut deliver = |record: &[u8]| -> Result<(), TlsError> {
+        let arrived = client_session.open_handshake_record(record, messages.tail())?;
+        messages.commit(arrived)?;
+        messages.drain(|message| client_session.handle_handshake_message(message))
+    };
+
     // EncryptedExtensions
     let ee_msg = [HANDSHAKE_ENCRYPTED_EXTENSIONS, 0, 0, 2, 0, 0];
     server_transcript.update(&ee_msg);
@@ -418,7 +432,7 @@ fn test_mock_tls13_handshake_and_traffic() {
     let ee_len = server_send_cipher
         .encrypt_record(ContentType::Handshake, &ee_msg, &mut ee_record)
         .unwrap();
-    client_session.handle_encrypted_handshake_record(&ee_record[..ee_len]).unwrap();
+    deliver(&ee_record[..ee_len]).unwrap();
 
     // Certificate (valid 201-byte X.509 DER Certificate)
     let cert_msg = hex_to_bytes(
@@ -429,7 +443,7 @@ fn test_mock_tls13_handshake_and_traffic() {
     let cert_rec_len = server_send_cipher
         .encrypt_record(ContentType::Handshake, &cert_msg, &mut cert_record)
         .unwrap();
-    client_session.handle_encrypted_handshake_record(&cert_record[..cert_rec_len]).unwrap();
+    deliver(&cert_record[..cert_rec_len]).unwrap();
 
     // CertificateVerify
     let cv_payload = [
@@ -444,7 +458,7 @@ fn test_mock_tls13_handshake_and_traffic() {
     let cv_rec_len = server_send_cipher
         .encrypt_record(ContentType::Handshake, &cv_payload, &mut cv_record)
         .unwrap();
-    client_session.handle_encrypted_handshake_record(&cv_record[..cv_rec_len]).unwrap();
+    deliver(&cv_record[..cv_rec_len]).unwrap();
 
     // Server Finished
     let mut s_finished_key = [0u8; 32];
@@ -464,7 +478,7 @@ fn test_mock_tls13_handshake_and_traffic() {
     let sf_rec_len = server_send_cipher
         .encrypt_record(ContentType::Handshake, &sf_msg, &mut sf_record)
         .unwrap();
-    client_session.handle_encrypted_handshake_record(&sf_record[..sf_rec_len]).unwrap();
+    deliver(&sf_record[..sf_rec_len]).unwrap();
 
     // 6. Client emits Finished
     let mut client_fin_record = [0u8; 256];

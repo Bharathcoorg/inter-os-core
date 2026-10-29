@@ -21,7 +21,10 @@ mod tests;
 pub use certificate::{
     CertificateVerifier, DefaultCertVerifier, ParsedCertificate, SIG_SCHEME_ED25519,
 };
-pub use client::{MemoryStream, TlsClient, TlsClientSession, TlsConfig, TlsStream};
+pub use client::{
+    HandshakeReader, MAX_HANDSHAKE_MESSAGE_BYTES, MemoryStream, TlsClient, TlsClientSession,
+    TlsConfig, TlsStream,
+};
 pub use handshake::{
     HandshakeClient, HandshakeState, TLS_CIPHER_CHACHA20_POLY1305_SHA256, TLS_VERSION_1_3,
 };
