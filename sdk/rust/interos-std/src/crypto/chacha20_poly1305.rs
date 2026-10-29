@@ -307,6 +307,52 @@ impl Poly1305 {
 /// ChaCha20-Poly1305 AEAD Authenticated Encryption (RFC 8439 Section 2.8).
 pub struct ChaCha20Poly1305;
 
+/// Assembles the Poly1305 MAC of a record, keyed by the ChaCha20 block-0
+/// one-time key and covering the associated data and the ciphertext.
+///
+/// WHY the tag is computable from the ciphertext alone: a reader can then check
+/// a whole incoming record before unmasking a single byte of it, which is what
+/// makes an in-place open safe.
+fn expected_tag(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> [u8; TAG_LEN] {
+    let otk_block = chacha20_block(key, 0, nonce);
+    let mut otk = [0u8; 32];
+    otk.copy_from_slice(&otk_block[0..32]);
+
+    let mut poly = Poly1305::new(&otk);
+    poly.update(aad);
+    let pad_aad = (16 - (aad.len() % 16)) % 16;
+    if pad_aad > 0 {
+        poly.update(&[0u8; 16][..pad_aad]);
+    }
+
+    poly.update(ciphertext);
+    let pad_ct = (16 - (ciphertext.len() % 16)) % 16;
+    if pad_ct > 0 {
+        poly.update(&[0u8; 16][..pad_ct]);
+    }
+
+    let aad_len = (aad.len() as u64).to_le_bytes();
+    let ct_len = (ciphertext.len() as u64).to_le_bytes();
+    poly.update(&aad_len);
+    poly.update(&ct_len);
+
+    poly.finalize()
+}
+
+/// Compares two tags without leaking which byte first differed.
+fn tags_match(expected: &[u8; TAG_LEN], actual: &[u8; TAG_LEN]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..TAG_LEN {
+        diff |= expected[i] ^ actual[i];
+    }
+    diff == 0
+}
+
 impl ChaCha20Poly1305 {
     /// Encrypts `plaintext` with associated data `aad`, writing the ciphertext into `ciphertext`
     /// and the 16-byte authentication tag into `tag`.
@@ -322,35 +368,12 @@ impl ChaCha20Poly1305 {
     ) {
         assert_eq!(ciphertext.len(), plaintext.len());
 
-        // 1. Generate Poly1305 one-time key from ChaCha20 counter 0
-        let otk_block = chacha20_block(key, 0, nonce);
-        let mut otk = [0u8; 32];
-        otk.copy_from_slice(&otk_block[0..32]);
-
-        // 2. Encrypt plaintext starting at counter 1
+        // 1. Encrypt plaintext starting at counter 1
         ciphertext.copy_from_slice(plaintext);
         chacha20_xor(key, 1, nonce, ciphertext);
 
-        // 3. Authenticate with Poly1305
-        let mut poly = Poly1305::new(&otk);
-        poly.update(aad);
-        let pad_aad = (16 - (aad.len() % 16)) % 16;
-        if pad_aad > 0 {
-            poly.update(&[0u8; 16][..pad_aad]);
-        }
-
-        poly.update(ciphertext);
-        let pad_ct = (16 - (ciphertext.len() % 16)) % 16;
-        if pad_ct > 0 {
-            poly.update(&[0u8; 16][..pad_ct]);
-        }
-
-        let aad_len = (aad.len() as u64).to_le_bytes();
-        let ct_len = (ciphertext.len() as u64).to_le_bytes();
-        poly.update(&aad_len);
-        poly.update(&ct_len);
-
-        *tag = poly.finalize();
+        // 2. Authenticate the bytes that are now on the wire
+        *tag = expected_tag(key, nonce, aad, ciphertext);
     }
 
     /// Decrypts `ciphertext` with associated data `aad` and authentication tag `tag`.
@@ -369,44 +392,36 @@ impl ChaCha20Poly1305 {
             return Err(());
         }
 
-        // 1. Generate Poly1305 one-time key
-        let otk_block = chacha20_block(key, 0, nonce);
-        let mut otk = [0u8; 32];
-        otk.copy_from_slice(&otk_block[0..32]);
-
-        // 2. Compute expected tag
-        let mut poly = Poly1305::new(&otk);
-        poly.update(aad);
-        let pad_aad = (16 - (aad.len() % 16)) % 16;
-        if pad_aad > 0 {
-            poly.update(&[0u8; 16][..pad_aad]);
-        }
-
-        poly.update(ciphertext);
-        let pad_ct = (16 - (ciphertext.len() % 16)) % 16;
-        if pad_ct > 0 {
-            poly.update(&[0u8; 16][..pad_ct]);
-        }
-
-        let aad_len = (aad.len() as u64).to_le_bytes();
-        let ct_len = (ciphertext.len() as u64).to_le_bytes();
-        poly.update(&aad_len);
-        poly.update(&ct_len);
-
-        let expected_tag = poly.finalize();
-
-        // 3. Constant-time verification
-        let mut diff = 0u8;
-        for i in 0..TAG_LEN {
-            diff |= expected_tag[i] ^ tag[i];
-        }
-        if diff != 0 {
+        // 1. Verify the tag over the ciphertext, which is complete already
+        if !tags_match(&expected_tag(key, nonce, aad, ciphertext), tag) {
             return Err(());
         }
 
-        // 4. Decrypt ciphertext
+        // 2. Only then produce the plaintext
         plaintext.copy_from_slice(ciphertext);
         chacha20_xor(key, 1, nonce, plaintext);
+        Ok(())
+    }
+
+    /// Authenticates a record that is already in `data` and unmasks it there.
+    ///
+    /// WHY a caller can hold one buffer instead of two: the tag covers the
+    /// ciphertext, so the whole record is checked before a byte of it is turned
+    /// into plaintext. An open that fails leaves the buffer as the ciphertext
+    /// that arrived and hands the caller nothing, which is the only honest
+    /// answer for a record the peer cannot prove it sent.
+    pub fn open_in_place(
+        key: &[u8; KEY_LEN],
+        nonce: &[u8; NONCE_LEN],
+        aad: &[u8],
+        data: &mut [u8],
+        tag: &[u8; TAG_LEN],
+    ) -> Result<(), ()> {
+        if !tags_match(&expected_tag(key, nonce, aad, data), tag) {
+            return Err(());
+        }
+
+        chacha20_xor(key, 1, nonce, data);
         Ok(())
     }
 }

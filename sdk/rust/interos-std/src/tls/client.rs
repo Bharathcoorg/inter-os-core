@@ -10,7 +10,7 @@ use super::handshake::{
     HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY,
     HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED,
 };
-use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
+use super::record::{ContentType, MAX_RECORD_WIRE_LEN, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
 /// The `HandshakeType` of a post-handshake `NewSessionTicket` (RFC 8446 4.6.1).
@@ -28,13 +28,29 @@ const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;
 /// as an empty page.
 const MAX_SKIPPED_RECORDS: usize = 8;
 
-/// The largest record this client frames at once, header and tag included.
+/// The largest record this client writes at once, header and tag included.
 ///
-/// WHY it is named: the read path holds two buffers of this size -- the record
-/// off the wire, and the room a discarded record is decrypted into -- and they
-/// have to agree, or a record the client can frame could still fail to be
-/// discarded. The write path frames one of the same size.
+/// WHY it is smaller than what the client can read: a request is a few hundred
+/// bytes, and `RecordCipher::encrypt_record` frames the plaintext it was handed
+/// into a buffer of this size. Growing it would spend the same stack on a write
+/// path that never needs the room.
 const MAX_RECORD_BYTES: usize = 2048;
+
+/// The largest record the read path can hold, header and tag included.
+///
+/// WHY it follows the protocol rather than this client's convenience: a server
+/// fills a record to `MAX_PLAINTEXT_LEN` and seals the content type with it, so
+/// a reader that frames less refuses the answer to its own request. One record
+/// is what a page begins with.
+const MAX_READ_RECORD_BYTES: usize = MAX_RECORD_WIRE_LEN;
+
+/// How many bytes one call to the transport is asked for.
+///
+/// WHY the reader does not ask for the rest of the record at once: the device's
+/// TCP receive answers `InvalidArguments` above its own window, so a reader that
+/// requests a whole page-sized record is refused by the machine it runs on. The
+/// record is still gathered whole into `record` -- only the request is bounded.
+const TRANSPORT_READ_BYTES: usize = 2048;
 
 /// Stream abstraction for underlying transport (e.g. TCP socket, mock memory buffer).
 pub trait TlsStream {
@@ -303,16 +319,15 @@ impl<'a> TlsClientSession<'a> {
         app_cipher.encrypt_record(ContentType::ApplicationData, plaintext, out)
     }
 
-    /// Decrypts one record and says what the protected inner type turned out to
-    /// be, because after the handshake the record layer carries more than the
-    /// document.
-    pub fn decrypt_record(
+    /// Verifies one record and unmasks it in the buffer that holds it, reporting
+    /// the protected inner type -- after the handshake the record layer carries
+    /// more than the document.
+    pub fn open_record_in_place(
         &mut self,
-        record: &[u8],
-        out: &mut [u8],
+        buf: &mut [u8],
     ) -> Result<(ContentType, usize), TlsError> {
         let app_cipher = self.app_recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
-        app_cipher.decrypt_record(record, out)
+        app_cipher.open_record_in_place(buf)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -324,13 +339,26 @@ impl<'a> TlsClientSession<'a> {
 pub struct TlsClient<'a, S: TlsStream> {
     stream: S,
     pub session: TlsClientSession<'a>,
+    /// One record as it arrived, unmasked in place once its tag has verified.
+    record: [u8; MAX_READ_RECORD_BYTES],
+    /// End of the authenticated payload inside `record`, counted from the byte
+    /// after the header. Zero until a record has been opened.
+    payload_end: usize,
+    /// How much of that payload the caller has already taken.
+    payload_pos: usize,
 }
 
 impl<'a, S: TlsStream> TlsClient<'a, S> {
     /// Creates and connects a TLS 1.3 client over the provided stream.
     pub fn new(stream: S, config: TlsConfig<'a>) -> Self {
         let session = TlsClientSession::new(config);
-        Self { stream, session }
+        Self {
+            stream,
+            session,
+            record: [0u8; MAX_READ_RECORD_BYTES],
+            payload_end: 0,
+            payload_pos: 0,
+        }
     }
 
     pub fn stream_mut(&mut self) -> &mut S {
@@ -352,7 +380,8 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
         Ok(plaintext.len())
     }
 
-    /// Reads and decrypts the next application data record from the connection.
+    /// Reads the next application data, filling the caller's window from a
+    /// record of any size the protocol allows.
     ///
     /// WHY a record that is not application data is stepped over rather than
     /// taken as a failure: RFC 8446 4.6.1 has the server send one or more
@@ -367,59 +396,63 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
     /// the peer stopped talking. Both have to end with something the reader can
     /// name, not with a silent empty read.
     ///
-    /// WHY a skipped record is decrypted into a buffer of the client's own: the
-    /// caller's window is sized for what it intends to parse, and a caller that
-    /// asked for 64 bytes would otherwise be refused because the server happened
-    /// to send a ticket longer than that. The discarded bytes are not the
-    /// caller's problem, so they must not compete for the caller's room.
+    /// WHY the answer is handed over in pieces: a server puts the opening
+    /// kilobytes of a page inside one record of up to 16 KiB, while the caller
+    /// reads through a window of its own choosing. The record is authenticated
+    /// whole before any of it leaves this function, and then fills the caller's
+    /// window as many times as that window is smaller than the record.
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
         if !self.session.is_connected() {
             return Err(TlsError::UnexpectedMessage);
         }
 
+        if self.payload_pos < self.payload_end {
+            return self.take_payload(out);
+        }
+
         let mut skipped = 0usize;
-        let mut discard = [0u8; MAX_RECORD_BYTES];
         loop {
-            // Read 5-byte record header
-            let mut header = [0u8; RECORD_HEADER_LEN];
             let mut read_bytes = 0;
             while read_bytes < RECORD_HEADER_LEN {
-                let n = self.stream.read(&mut header[read_bytes..])?;
+                let n = self.stream.read(&mut self.record[read_bytes..RECORD_HEADER_LEN])?;
                 if n == 0 {
                     return Ok(0); // EOF
                 }
                 read_bytes += n;
             }
 
-            let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let record_len = u16::from_be_bytes([self.record[3], self.record[4]]) as usize;
             let total_len = RECORD_HEADER_LEN + record_len;
-
-            let mut record_buf = [0u8; MAX_RECORD_BYTES];
-            if total_len > record_buf.len() {
+            if total_len > self.record.len() {
                 return Err(TlsError::RecordTooLarge);
             }
-            record_buf[..RECORD_HEADER_LEN].copy_from_slice(&header);
 
             while read_bytes < total_len {
-                let n = self.stream.read(&mut record_buf[read_bytes..total_len])?;
+                let want = (total_len - read_bytes).min(TRANSPORT_READ_BYTES);
+                let n = self.stream.read(&mut self.record[read_bytes..read_bytes + want])?;
                 if n == 0 {
                     return Err(TlsError::BadRecordLength);
                 }
                 read_bytes += n;
             }
 
-            let (content_type, len) =
-                self.session
-                    .decrypt_record(&record_buf[..total_len], &mut discard)?;
+            let (content_type, len) = self
+                .session
+                .open_record_in_place(&mut self.record[..total_len])?;
+            // WHY an empty application-data record is stepped over: `Ok(0)` is
+            // this reader's only word for the peer having stopped talking, and a
+            // record carrying no bytes is the peer still talking.
             match content_type {
-                ContentType::ApplicationData => {
-                    if len > out.len() {
-                        return Err(TlsError::BufferTooSmall);
-                    }
-                    out[..len].copy_from_slice(&discard[..len]);
-                    return Ok(len);
+                ContentType::ApplicationData if len > 0 => {
+                    self.payload_end = len;
+                    self.payload_pos = 0;
+                    return self.take_payload(out);
                 }
-                ContentType::Handshake if is_new_session_ticket(&discard[..len]) => {}
+                ContentType::ApplicationData => {}
+                ContentType::Handshake
+                    if is_new_session_ticket(
+                        &self.record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + len],
+                    ) => {}
                 ContentType::ChangeCipherSpec => {}
                 _ => return Err(TlsError::UnexpectedMessage),
             }
@@ -428,6 +461,21 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
                 return Err(TlsError::UnexpectedMessage);
             }
         }
+    }
+
+    /// Copies the next piece of the record this client is still holding.
+    ///
+    /// WHY the payload stays behind the header: sliding it to the front of the
+    /// buffer would copy the whole record, up to 16 KiB, to make one index
+    /// smaller, and the bytes are about to be copied into the caller's window
+    /// anyway.
+    fn take_payload(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
+        let start = RECORD_HEADER_LEN + self.payload_pos;
+        let available = self.payload_end - self.payload_pos;
+        let n = available.min(out.len());
+        out[..n].copy_from_slice(&self.record[start..start + n]);
+        self.payload_pos += n;
+        Ok(n)
     }
 }
 

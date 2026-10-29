@@ -147,6 +147,10 @@ impl TlsStream for TcpSocketStream {
 pub fn perform_tls_handshake<S: TlsStream>(
     client: &mut TlsClient<'_, S>,
 ) -> Result<(), FetchErrorKind> {
+    // WHY this frame stays one request's size: the records here carry the
+    // server's certificate chain, and a public chain is bigger than 2 KiB, so
+    // widening it belongs with the signature schemes that have to verify that
+    // chain rather than with the reader that now takes a whole page.
     let mut record_buf = [0u8; 2048];
 
     // 1. Emit and send ClientHello

@@ -47,6 +47,18 @@ def fn_body(source: str, name: str) -> str:
     return source.split(marker, 1)[1].split("\n}", 1)[0]
 
 
+def client_read_body(source: str) -> str:
+    """The TLS client's `read`, located by its whole signature.
+
+    WHY not `fn_body`: the transport trait declares a shorter `fn read(...)` with
+    no body earlier in the same file, and a search for the name alone stops at
+    that declaration instead of the reader it meant to pin.
+    """
+    marker = "pub fn read(&mut self, out: &mut [u8])"
+    assert marker in source, "the client no longer reads through this signature"
+    return source.split(marker, 1)[1].split("\n}", 1)[0]
+
+
 def kernel_store_source() -> str:
     return read_source("kernel/src/crypto/tls_trust.rs")
 
@@ -407,8 +419,8 @@ def test_a_ticket_on_the_answer_is_stepped_over_rather_than_refused():
     assert "const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;" in src, (
         "the reader no longer names the message it is prepared to step over"
     )
-    body = src.split("pub fn read(&mut self, out: &mut [u8])")[1].split("\n}")[0]
-    assert "ContentType::Handshake if is_new_session_ticket(" in body, (
+    body = client_read_body(src)
+    assert "ContentType::Handshake" in body and "if is_new_session_ticket(" in body, (
         "a NewSessionTicket on the answer is refused again, which reads as an "
         "empty response from a server that did respond"
     )
@@ -423,9 +435,9 @@ def test_a_ticket_on_the_answer_is_stepped_over_rather_than_refused():
         "a post-handshake message that changes the keys or ends the connection is "
         "no longer refused, so its records would be decrypted under the wrong keys"
     )
-    assert "&mut discard" in body, (
-        "a discarded record is decrypted into the caller's window, so a caller "
-        "asking for a small read is refused for a message it never asked for"
+    assert "open_record_in_place(&mut self.record" in body, (
+        "a discarded record is decrypted into the caller's window again, so a "
+        "caller asking for a small read is refused for a message it never asked for"
     )
 
 
@@ -501,4 +513,144 @@ def test_an_anchor_that_could_never_verify_is_refused_at_the_door():
     )
     assert "header + declared != der.len()" in gate, (
         "the store accepts bytes that are not one complete DER sequence"
+    )
+
+
+def test_a_record_the_server_fills_is_bigger_than_any_window_the_caller_offers():
+    """A page begins inside a 16 KiB record; the reader may not require 16 KiB of it.
+
+    WHY the frame follows the protocol and the window follows the caller: servers
+    fill a TLS 1.3 record to MAX_PLAINTEXT_LEN, while the browser reads through a
+    2 KiB socket chunk. A reader that could only open a record as small as its
+    caller's window refused the answer to its own request and the screen blamed the
+    gateway. Holding one record and handing it over in pieces keeps the memory fixed
+    at the protocol's own limit instead of a number this client happened to pick.
+    """
+    src = code_only(read_source("sdk/rust/interos-std/src/tls/client.rs"))
+    assert (
+        "const MAX_READ_RECORD_BYTES: usize = MAX_RECORD_WIRE_LEN;" in src
+    ), (
+        "the read frame is a hand-picked size again, so a server that fills a "
+        "record is refused by a client that asked for that record"
+    )
+    read = client_read_body(src)
+    assert "record: [u8; MAX_READ_RECORD_BYTES]" in src, (
+        "the client holds one record on the stack of a single read again, which "
+        "is where the 2 KiB ceiling came from"
+    )
+    assert "Err(TlsError::RecordTooLarge)" in read, (
+        "a record longer than the protocol allows is read as though it were one "
+        "this client could hold"
+    )
+    for step in ("payload_end", "payload_pos", "take_payload"):
+        assert step in src, f"the held record no longer tracks {step} for the caller"
+
+
+def test_the_read_frame_counts_the_content_type_the_server_seals_with_the_page():
+    """A full fragment is not the whole protected plaintext, and the frame pays for it.
+
+    WHY this is pinned separately: the first version of the protocol-sized frame
+    was header + MAX_PLAINTEXT_LEN + tag, which a live OpenSSL server beat by one
+    byte -- it writes 16384 application bytes and seals the inner content type
+    along with them, so its record length field reads 16401 and the record on the
+    wire is 16406 bytes. The guest refused exactly that record and the page was
+    lost to a single byte of arithmetic.
+    """
+    record = code_only(read_source("sdk/rust/interos-std/src/tls/record.rs"))
+    crypto = code_only(read_source("sdk/rust/interos-std/src/crypto/chacha20_poly1305.rs"))
+    fragment = const_value(record, "MAX_PLAINTEXT_LEN")
+    header = const_value(record, "RECORD_HEADER_LEN")
+    tag = const_value(crypto, "TAG_LEN")
+
+    assert "pub const MAX_PROTECTED_LEN: usize = MAX_PLAINTEXT_LEN + 1;" in record, (
+        "the frame forgets that the content type is protected with the fragment, "
+        "so the biggest record a real server sends is one byte too large"
+    )
+    assert (
+        "pub const MAX_RECORD_WIRE_LEN: usize = "
+        "RECORD_HEADER_LEN + MAX_PROTECTED_LEN + TAG_LEN;" in record
+    ), "the whole-record frame is no longer header + protected plaintext + tag"
+    assert fragment + 1 + header + tag == 16406, (
+        "the arithmetic that a live OpenSSL server was measured at no longer holds"
+    )
+
+    # Both readers of a wire record bound it the same way; `decrypt_record` is
+    # generic so it is counted in the file rather than sliced by name.
+    assert record.count("ciphertext_len > MAX_PROTECTED_LEN") == 2, (
+        "only one of the two record readers allows a full fragment plus its "
+        "content type, so the other still refuses a real server's biggest record"
+    )
+    assert "ciphertext_len > MAX_PROTECTED_LEN" in fn_body(record, "open_record_in_place"), (
+        "the in-place reader bounds a record by the fragment alone and refuses "
+        "the size a server actually sends"
+    )
+
+
+def test_no_byte_of_a_record_reaches_the_caller_before_its_tag_verifies():
+    """Decrypting where the ciphertext lies is only safe because the tag covers it.
+
+    WHY this is pinned next to the frame: the record is opened in the buffer that
+    already holds it, which saves a second 16 KiB frame but only stays honest if
+    the Poly1305 check -- computed over the ciphertext, which is complete before
+    any byte is unmasked -- happens first. Swap the two and a forged record would
+    hand its garbage to the page while the failure is reported.
+    """
+    crypto = code_only(read_source("sdk/rust/interos-std/src/crypto/chacha20_poly1305.rs"))
+    opener = fn_body(crypto, "open_in_place")
+    assert "tags_match(" in opener, "the in-place open no longer authenticates what it unmasks"
+    assert opener.index("tags_match(") < opener.index("chacha20_xor("), (
+        "the record is unmasked before its tag is checked, so bytes of a forgery "
+        "reach the caller before the refusal does"
+    )
+
+    record = code_only(read_source("sdk/rust/interos-std/src/tls/record.rs"))
+    opener = fn_body(record, "open_record_in_place")
+    assert "DecryptionFailed" in opener, (
+        "a record that fails its tag is reported as some other fault, or as a page"
+    )
+
+
+def test_the_reader_asks_the_transport_for_no_more_than_the_device_answers():
+    """A record is gathered whole, but the wire is drained in the transport's pieces.
+
+    WHY this is separate from the frame size: holding 16 KiB of record proved the
+    reader could store a page, not that it could collect one. The kernel's TCP
+    receive answers `InvalidArguments` above its own 2048-byte window, so a reader
+    that asked for the rest of the record in one call was refused by the device it
+    ran on -- the small answer arrived and the page-sized one never did.
+    """
+    src = code_only(read_source("sdk/rust/interos-std/src/tls/client.rs"))
+    read = client_read_body(src)
+    assert "const TRANSPORT_READ_BYTES: usize = 2048;" in src, (
+        "the reader no longer names the window the transport will answer"
+    )
+    assert ".min(TRANSPORT_READ_BYTES)" in read, (
+        "the reader asks the transport for the remainder of a record in one call "
+        "again, which the device refuses above its own receive window"
+    )
+
+    kernel = code_only(read_source("kernel/src/syscall/mod.rs"))
+    assert "if len > 2048 { return SyscallResult::InvalidArguments as i64; }" in kernel, (
+        "the TCP receive window the TLS reader sizes itself by is no longer the "
+        "one the kernel actually enforces"
+    )
+
+
+def test_an_empty_record_is_not_read_as_the_peer_having_stopped():
+    """`Ok(0)` means the stream ended, and an empty record is not that.
+
+    WHY the two are separated at the reader: a fetch that sees the end of the
+    stream stops asking, so a server that pads its answer with an empty record
+    would lose everything after it. The reader steps over the record and keeps
+    reading.
+    """
+    src = code_only(read_source("sdk/rust/interos-std/src/tls/client.rs"))
+    read = client_read_body(src)
+    assert "ContentType::ApplicationData if len > 0" in read, (
+        "an application-data record is taken as the document even when it carries "
+        "no bytes, which ends the response early"
+    )
+    assert "ContentType::ApplicationData => {}" in read, (
+        "an empty application-data record has nowhere to go, so it falls through "
+        "to the refusal a peer's silence does not deserve"
     )

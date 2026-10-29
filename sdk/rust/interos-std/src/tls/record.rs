@@ -11,6 +11,18 @@ pub const TLS_LEGACY_VERSION: u16 = 0x0303;
 pub const MAX_PLAINTEXT_LEN: usize = 16384;
 pub const MAX_CIPHERTEXT_LEN: usize = MAX_PLAINTEXT_LEN + 256;
 
+/// The largest plaintext a peer seals into one record.
+///
+/// WHY it is one byte above the fragment limit: the inner content type travels
+/// inside the protected plaintext, so a server that fills a fragment to
+/// `MAX_PLAINTEXT_LEN` seals that many bytes plus the type. Measured against a
+/// live OpenSSL server, the biggest record it answers a page-sized write with
+/// carries a length field of 16401 — fragment, type, and tag.
+pub const MAX_PROTECTED_LEN: usize = MAX_PLAINTEXT_LEN + 1;
+
+/// The largest whole record a reader has to be able to hold.
+pub const MAX_RECORD_WIRE_LEN: usize = RECORD_HEADER_LEN + MAX_PROTECTED_LEN + TAG_LEN;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ContentType {
@@ -162,6 +174,9 @@ impl RecordCipher {
         if ciphertext_len > out.len() {
             return Err(TlsError::BufferTooSmall);
         }
+        if ciphertext_len > MAX_PROTECTED_LEN {
+            return Err(TlsError::RecordTooLarge);
+        }
 
         let aad = &record[..RECORD_HEADER_LEN];
         let ciphertext = &record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + ciphertext_len];
@@ -171,34 +186,91 @@ impl RecordCipher {
         let nonce = compute_nonce(&self.iv, self.seq);
         self.seq = self.seq.wrapping_add(1);
 
-        let mut decrypted_buf = [0u8; 2048];
-        if ciphertext_len > decrypted_buf.len() {
-            return Err(TlsError::RecordTooLarge);
-        }
-
+        // WHY the caller's buffer is also the decryption target: an intermediate
+        // frame of the reader's own would cap every record at its size, and a
+        // server fills a record to the protocol limit, not to this reader's.
         ChaCha20Poly1305::decrypt(
             &self.key,
             &nonce,
             aad,
             ciphertext,
             &tag,
-            &mut decrypted_buf[..ciphertext_len],
+            &mut out[..ciphertext_len],
         ).map_err(|_| TlsError::DecryptionFailed)?;
 
         // Find the inner content type by scanning backwards past any zero padding (RFC 8446 Section 5.4)
         let mut idx = ciphertext_len;
-        while idx > 0 && decrypted_buf[idx - 1] == 0 {
+        while idx > 0 && out[idx - 1] == 0 {
             idx -= 1;
         }
         if idx == 0 {
             return Err(TlsError::InvalidContentType);
         }
 
-        let inner_type_byte = decrypted_buf[idx - 1];
+        let inner_type_byte = out[idx - 1];
         let inner_type = ContentType::try_from(inner_type_byte)?;
-        let payload_len = idx - 1;
+        Ok((inner_type, idx - 1))
+    }
 
-        out[..payload_len].copy_from_slice(&decrypted_buf[..payload_len]);
-        Ok((inner_type, payload_len))
+    /// Verifies the record already sitting in `buf` and unmasks it where it lies.
+    /// Returns `(ContentType, payload_length)`, with the payload left at
+    /// `buf[RECORD_HEADER_LEN..]`.
+    ///
+    /// WHY this exists beside `decrypt_record`: a reader that wants the whole
+    /// protocol's largest record would otherwise need a wire buffer and a
+    /// plaintext buffer of the same size. The tag covers the ciphertext, so the
+    /// record is fully authenticated before a byte of it is turned into
+    /// plaintext, and one buffer can be both.
+    ///
+    /// WHY the payload is not slid to the front: copying up to 16 KiB per record
+    /// to make the indexing uniform costs a pass over the document for the shape
+    /// of a slice.
+    pub fn open_record_in_place(&mut self, buf: &mut [u8]) -> Result<(ContentType, usize), TlsError> {
+        if buf.len() < RECORD_HEADER_LEN + TAG_LEN + 1 {
+            return Err(TlsError::BadRecordLength);
+        }
+
+        let outer_type = buf[0];
+        let legacy_ver = u16::from_be_bytes([buf[1], buf[2]]);
+        let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+
+        if legacy_ver != TLS_LEGACY_VERSION {
+            return Err(TlsError::InvalidRecordVersion);
+        }
+        if outer_type != ContentType::ApplicationData as u8 {
+            return Err(TlsError::InvalidContentType);
+        }
+        if buf.len() < RECORD_HEADER_LEN + record_len {
+            return Err(TlsError::BadRecordLength);
+        }
+        if record_len < TAG_LEN + 1 {
+            return Err(TlsError::BadRecordLength);
+        }
+
+        let ciphertext_len = record_len - TAG_LEN;
+        if ciphertext_len > MAX_PROTECTED_LEN {
+            return Err(TlsError::RecordTooLarge);
+        }
+
+        let mut tag = [0u8; TAG_LEN];
+        tag.copy_from_slice(&buf[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len]);
+
+        let nonce = compute_nonce(&self.iv, self.seq);
+        self.seq = self.seq.wrapping_add(1);
+
+        let (aad, body) = buf.split_at_mut(RECORD_HEADER_LEN);
+        ChaCha20Poly1305::open_in_place(&self.key, &nonce, aad, &mut body[..ciphertext_len], &tag)
+            .map_err(|_| TlsError::DecryptionFailed)?;
+
+        let mut idx = ciphertext_len;
+        while idx > 0 && body[idx - 1] == 0 {
+            idx -= 1;
+        }
+        if idx == 0 {
+            return Err(TlsError::InvalidContentType);
+        }
+
+        let inner_type = ContentType::try_from(body[idx - 1])?;
+        Ok((inner_type, idx - 1))
     }
 }

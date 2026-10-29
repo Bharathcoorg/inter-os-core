@@ -11,18 +11,25 @@
 //! - Mock TLS 1.3 Full Handshake & Encrypted Application Data Exchange
 //! - Post-handshake records on the read path (RFC 8446 4.6.1)
 
-use interos_std::crypto::chacha20_poly1305::{chacha20_block, ChaCha20Poly1305, Poly1305};
+use interos_std::crypto::chacha20_poly1305::{
+    chacha20_block, ChaCha20Poly1305, Poly1305, TAG_LEN,
+};
 use interos_std::crypto::hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, hkdf_extract};
 use interos_std::crypto::hmac::HmacSha256;
 use interos_std::crypto::sha256::Sha256;
 use interos_std::crypto::x25519::{x25519, x25519_base};
 use interos_std::tls::certificate::{CertificateVerifier, ParsedCertificate};
-use interos_std::tls::client::{MemoryStream, TlsClient, TlsClientSession, TlsConfig};
+use interos_std::tls::client::{
+    MemoryStream, TlsClient, TlsClientSession, TlsConfig, TlsStream,
+};
 use interos_std::tls::handshake::{
     HandshakeState, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_CLIENT_HELLO,
     HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED, HANDSHAKE_SERVER_HELLO,
 };
-use interos_std::tls::record::{ContentType, RecordCipher, TLS_LEGACY_VERSION};
+use interos_std::tls::record::{
+    compute_nonce, ContentType, RecordCipher, MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN,
+    TLS_LEGACY_VERSION,
+};
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     let clean: String = hex.chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
@@ -510,13 +517,39 @@ fn new_session_ticket(body_len: usize) -> Vec<u8> {
 
 /// Encrypts a sequence of post-handshake records the way a server would, so the
 /// client's receive cipher sees the same sequence numbers it would on the wire.
+///
+/// WHY the peer seals with the AEAD directly instead of through
+/// `RecordCipher::encrypt_record`: this client's own sealing path frames one
+/// request-sized record, while a server fills a record to the protocol limit,
+/// and a test peer that could only make small records could not produce the
+/// answer the reader has to cope with.
 fn peer_records(items: &[(ContentType, Vec<u8>)]) -> Vec<u8> {
-    let mut cipher = RecordCipher::new(PEER_APP_KEY, PEER_APP_IV);
-    let mut buf = [0u8; 2048];
     let mut wire = Vec::new();
-    for (kind, plaintext) in items {
-        let len = cipher.encrypt_record(*kind, plaintext, &mut buf).unwrap();
-        wire.extend_from_slice(&buf[..len]);
+    for (seq, (kind, plaintext)) in items.iter().enumerate() {
+        let nonce = compute_nonce(&PEER_APP_IV, seq as u64);
+        let mut inner = plaintext.clone();
+        inner.push(*kind as u8);
+
+        let mut header = [0u8; RECORD_HEADER_LEN];
+        header[0] = ContentType::ApplicationData as u8;
+        header[1..3].copy_from_slice(&TLS_LEGACY_VERSION.to_be_bytes());
+        let record_len = inner.len() + TAG_LEN;
+        header[3..5].copy_from_slice(&(record_len as u16).to_be_bytes());
+
+        let mut ciphertext = vec![0u8; inner.len()];
+        let mut tag = [0u8; TAG_LEN];
+        ChaCha20Poly1305::encrypt(
+            &PEER_APP_KEY,
+            &nonce,
+            &header,
+            &inner,
+            &mut ciphertext,
+            &mut tag,
+        );
+
+        wire.extend_from_slice(&header);
+        wire.extend_from_slice(&ciphertext);
+        wire.extend_from_slice(&tag);
     }
     wire
 }
@@ -631,6 +664,189 @@ fn a_peer_that_only_sends_tickets_is_refused_rather_than_read_as_an_empty_page()
         client.read(&mut out),
         Err(interos_std::tls::TlsError::UnexpectedMessage)
     );
+}
+
+/// A peer that only sends tickets is refused, but the other half of the same
+/// defect was size: a server puts the first kilobytes of a page inside one
+/// record, and a reader that framed 2 KiB refused the answer to its own request.
+/// The record now arrives whole through a window far smaller than it is.
+#[test]
+fn a_record_larger_than_the_callers_window_arrives_whole() {
+    let mut document = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n".to_vec();
+    document.extend_from_slice(&vec![b'x'; 9000]);
+    let expected = document.clone();
+    let wire = peer_records(&[(ContentType::ApplicationData, document)]);
+
+    let mut sink = [0u8; 64];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut received = Vec::new();
+    let mut reads = 0usize;
+    loop {
+        let mut out = [0u8; 2048];
+        let read = client.read(&mut out).unwrap();
+        if read == 0 {
+            break;
+        }
+        received.extend_from_slice(&out[..read]);
+        reads += 1;
+        assert!(reads < 10, "one record took {reads} reads to hand over");
+    }
+
+    assert_eq!(received, expected);
+    assert!(reads > 1, "a 9 KiB record was handed over in one read");
+}
+
+/// The protocol's own ceiling, not a number this client happened to pick.
+///
+/// WHY the exact size: a record filled to `MAX_PLAINTEXT_LEN` is what a CDN
+/// sends when it has a page to deliver, and an off-by-one in the frame the
+/// reader holds only shows up at that boundary.
+///
+/// WHY a whole fragment rather than one byte less: measured on the wire against
+/// a live OpenSSL server, an answer written in 16 KiB pieces arrives as a record
+/// whose length field is 16401 — the fragment, the content type byte that is
+/// sealed with it, and the tag. A reader that sized its frame by the fragment
+/// alone is one byte short of the biggest thing a real server sends.
+#[test]
+fn the_biggest_record_the_protocol_allows_is_read_whole() {
+    let document = vec![b'A'; MAX_PLAINTEXT_LEN];
+    let wire = peer_records(&[(ContentType::ApplicationData, document.clone())]);
+
+    let mut sink = [0u8; 64];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut received = Vec::new();
+    loop {
+        let mut out = [0u8; 4096];
+        let read = client.read(&mut out).unwrap();
+        if read == 0 {
+            break;
+        }
+        received.extend_from_slice(&out[..read]);
+    }
+
+    assert_eq!(received, document);
+}
+
+/// How many bytes the device's own transport is willing to hand over in one call.
+///
+/// WHY the number is the kernel's rather than the reader's: `tcp_recv` answers
+/// `InvalidArguments` above this, so a TLS reader that asks the wire for a whole
+/// record is refused by the machine it runs on.
+const TRANSPORT_WINDOW: usize = 2048;
+
+/// A transport that refuses any read larger than the device allows.
+///
+/// WHY this stands beside `MemoryStream`: the memory stream answers a read of any
+/// size, so every test built on it proved the reader could hold a page-sized
+/// record without ever proving it could *collect* one. On the phone the
+/// 126-byte answer arrived and the 16 KiB one did not, and the difference was
+/// this cap.
+struct CappedStream<'a> {
+    inner: MemoryStream<'a>,
+}
+
+impl<'a> TlsStream for CappedStream<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, interos_std::tls::TlsError> {
+        if buf.len() > TRANSPORT_WINDOW {
+            return Err(interos_std::tls::TlsError::IoError);
+        }
+        self.inner.read(buf)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), interos_std::tls::TlsError> {
+        self.inner.write_all(buf)
+    }
+}
+
+/// A page-sized record arrives whole through a transport that hands out 2 KiB a
+/// call, which is the only size the device's TCP receive allows.
+#[test]
+fn a_page_sized_record_is_gathered_from_a_transport_that_hands_out_two_kib() {
+    let document = vec![b'B'; MAX_PLAINTEXT_LEN];
+    let wire = peer_records(&[(ContentType::ApplicationData, document.clone())]);
+
+    let mut sink = [0u8; 64];
+    let mut client = TlsClient::new(
+        CappedStream {
+            inner: MemoryStream::new(&wire, &mut sink),
+        },
+        TlsConfig::default(),
+    );
+    client.session.handshake.state = HandshakeState::Connected;
+    client.session.app_recv_cipher = Some(RecordCipher::new(PEER_APP_KEY, PEER_APP_IV));
+
+    let mut received = Vec::new();
+    loop {
+        let mut out = [0u8; 4096];
+        let read = client.read(&mut out).unwrap();
+        if read == 0 {
+            break;
+        }
+        received.extend_from_slice(&out[..read]);
+    }
+
+    assert_eq!(received, document);
+}
+
+/// WHY the reader stops at the protocol's limit rather than at its own: a peer
+/// that claims a longer record than TLS allows is describing bytes this client
+/// will never hold, so the fetch has to end in a named refusal. Reading on would
+/// hand the caller a page that was cut in the middle.
+#[test]
+fn a_record_beyond_the_protocol_limit_is_refused() {
+    let claimed = (MAX_PLAINTEXT_LEN + TAG_LEN + 100) as u16;
+    let mut wire = vec![ContentType::ApplicationData as u8, 3, 3];
+    wire.extend_from_slice(&claimed.to_be_bytes());
+    wire.extend_from_slice(&[0u8; 64]);
+
+    let mut sink = [0u8; 64];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 2048];
+    assert_eq!(
+        client.read(&mut out),
+        Err(interos_std::tls::TlsError::RecordTooLarge)
+    );
+}
+
+/// An empty record is the peer still talking, not the peer having stopped.
+///
+/// WHY it matters here: `Ok(0)` is the reader's only word for the end of the
+/// stream and a fetch that sees it stops asking, so an empty record taken for an
+/// end would cut a response short with the rest of the page still on the wire.
+#[test]
+fn an_empty_application_data_record_does_not_end_the_response() {
+    let wire = peer_records(&[
+        (ContentType::ApplicationData, Vec::new()),
+        (ContentType::ApplicationData, b"hello".to_vec()),
+    ]);
+
+    let mut sink = [0u8; 64];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 64];
+    let read = client.read(&mut out).unwrap();
+    assert_eq!(&out[..read], b"hello");
+}
+
+/// WHAT a failed tag is allowed to produce: nothing.
+///
+/// WHY this is a test and not an assumption: opening a record in place means the
+/// bytes the caller receives came out of the same buffer the ciphertext arrived
+/// in, so the check has to happen before any of it is unmasked. A tampered
+/// record must leave the caller's window exactly as it was handed over.
+#[test]
+fn a_record_that_does_not_authenticate_releases_no_bytes() {
+    let mut wire = peer_records(&[(ContentType::ApplicationData, b"the page".to_vec())]);
+    let last = wire.len() - 1;
+    wire[last] ^= 0x01; // the tag no longer describes the record
+
+    let mut sink = [0u8; 64];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 64];
+    assert_eq!(
+        client.read(&mut out),
+        Err(interos_std::tls::TlsError::DecryptionFailed)
+    );
+    assert_eq!(out, [0u8; 64], "an unauthenticated record reached the caller");
 }
 
 /// The mock store above is a test fixture, not a trust decision: the client
