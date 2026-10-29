@@ -3,8 +3,8 @@
 use super::certificate::{
     asn1_time_to_unix, hostname_matches, is_supported_sig_scheme, CertificateVerifier,
     DefaultCertVerifier, ParsedCertificate, SubjectAltNames, INTEROS_ROOT_CA_DER,
-    SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PSS_RSAE_SHA256,
-    SUPPORTED_SIG_SCHEMES,
+    SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PKCS1_SHA256,
+    SIG_SCHEME_RSA_PSS_RSAE_SHA256, SUPPORTED_SIG_SCHEMES, TAG_INTEGER, TAG_SEQUENCE,
 };
 use super::client::{TlsClientSession, TlsConfig};
 use super::handshake::{
@@ -32,6 +32,9 @@ impl CertificateVerifier for AnyPassVerifier {
         cert.check_validity()
     }
     fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
+        Ok(())
+    }
+    fn verify_reaches_trust_store(&self, _cert: &ParsedCertificate) -> Result<(), TlsError> {
         Ok(())
     }
     fn reference_identity(&self) -> Option<&str> {
@@ -447,15 +450,15 @@ fn tls_reject_wronghost_on_default_path() {
 }
 
 #[test]
-fn tls_reject_server_choosing_unsupported_scheme_0x0403() {
-    // A server choosing 0x0403 (ECDSA_SECP256R1_SHA256) must fail with UnsupportedSignatureScheme,
-    // not silently accept or report generic InvalidSignature. The stub verifier
-    // below would have answered Ok to anything: the advertised-scheme gate runs
-    // before it, so the stub cannot turn an unadvertised scheme into a pass.
+fn tls_reject_server_choosing_a_scheme_the_leaf_key_cannot_sign() {
+    // 0x0403 is advertised, but the leaf here carries a 32-byte Ed25519 key, and
+    // an ECDSA P-256 signature is made by a P-256 point. Pairing a scheme with a
+    // key of another type is refused before any arithmetic: the alternative is
+    // believing a signature that was made for some other key entirely.
     let mut hs = HandshakeClient::new([0x11u8; 32]);
     hs.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
-    let verifier = AnyPassVerifier;
+    let verifier = DefaultCertVerifier::for_host("example.com");
     let cv_payload = [
         HANDSHAKE_CERTIFICATE_VERIFY,
         0, 0, 6,
@@ -469,7 +472,10 @@ fn tls_reject_server_choosing_unsupported_scheme_0x0403() {
 }
 
 #[test]
-fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme() {
+fn tls_reject_server_choosing_an_unadvertised_scheme() {
+    // 0x0503 (ecdsa_secp384r1_sha384) is a code point this client never offers in
+    // its ClientHello, so a server that picks it is refused by the gate itself --
+    // ahead of the verifier, which here would have answered Ok to anything.
     let mut hs = HandshakeClient::new([0x11u8; 32]);
     hs.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
@@ -477,7 +483,7 @@ fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme() {
     let cv_payload = [
         HANDSHAKE_CERTIFICATE_VERIFY,
         0, 0, 6,
-        0x08, 0x04, // SIG_SCHEME_RSA_PSS_RSAE_SHA256
+        0x05, 0x03, // ecdsa_secp384r1_sha384: never advertised
         0, 2,
         0xaa, 0xbb,
     ];
@@ -485,9 +491,11 @@ fn tls_reject_server_choosing_unadvertised_rsa_pss_scheme() {
         hs.process_certificate_verify(&cv_payload, cert.spki_public_key, &verifier),
         Err(TlsError::UnsupportedSignatureScheme)
     );
-    assert_eq!(SIG_SCHEME_RSA_PSS_RSAE_SHA256, 0x0804);
-    assert!(!is_supported_sig_scheme(SIG_SCHEME_RSA_PSS_RSAE_SHA256));
-    assert!(!is_supported_sig_scheme(SIG_SCHEME_ECDSA_SECP256R1_SHA256));
+    assert_eq!(hs.state, HandshakeState::CertificateReceived);
+    assert!(!is_supported_sig_scheme(0x0503));
+    for scheme in SUPPORTED_SIG_SCHEMES.iter() {
+        assert!(is_supported_sig_scheme(*scheme), "{scheme:#06x} is advertised");
+    }
 }
 
 #[test]
@@ -501,8 +509,10 @@ fn tls_session_built_from_default_reports_unavailable() {
 }
 
 #[test]
-fn tls_client_hello_advertises_only_ed25519() {
-    // Verify ClientHello advertises only SIG_SCHEME_ED25519 in signature_algorithms extension
+fn tls_client_hello_advertises_the_supported_scheme_list() {
+    // The ClientHello's `signature_algorithms` is the verifier's accepted list
+    // written out byte for byte, in order: a server may pick nothing else, and
+    // nothing offered here goes unimplemented.
     let verifier = DefaultCertVerifier::for_host("example.com");
     let mut session = TlsClientSession::new(TlsConfig {
         server_name: Some("example.com"),
@@ -514,21 +524,33 @@ fn tls_client_hello_advertises_only_ed25519() {
     let len = session.start_handshake(&mut out).unwrap();
     assert!(len > 0);
 
-    // Scan for signature_algorithms extension (0x000d) in the ClientHello record
+    // Scan for signature_algorithms extension (0x000d) in the ClientHello record.
+    // A candidate only counts when its own lengths match the list this client
+    // holds, so a `00 0d` that appears inside the random or a session id is not
+    // mistaken for the extension.
     let record = &out[..len];
+    let expected_list_len = 2 * SUPPORTED_SIG_SCHEMES.len();
     let mut found = false;
-    for i in 0..record.len() - 8 {
-        if record[i] == 0x00 && record[i + 1] == 0x0d {
-            // Found extension 0x000d
-            let ext_len = u16::from_be_bytes([record[i + 2], record[i + 3]]);
-            let list_len = u16::from_be_bytes([record[i + 4], record[i + 5]]);
-            let scheme = u16::from_be_bytes([record[i + 6], record[i + 7]]);
-            assert_eq!(ext_len, 4, "ext length must be 4");
-            assert_eq!(list_len, 2, "algorithms list length must be 2");
-            assert_eq!(scheme, SIG_SCHEME_ED25519, "advertised scheme must be ED25519");
-            found = true;
-            break;
+    for i in 0..record.len() - 4 {
+        if record[i] != 0x00 || record[i + 1] != 0x0d {
+            continue;
         }
+        let ext_len = u16::from_be_bytes([record[i + 2], record[i + 3]]) as usize;
+        if ext_len != expected_list_len + 2 || record.len() < i + 4 + ext_len {
+            continue;
+        }
+        let list_len = u16::from_be_bytes([record[i + 4], record[i + 5]]) as usize;
+        assert_eq!(list_len, expected_list_len, "algorithms list length");
+        for (position, scheme) in SUPPORTED_SIG_SCHEMES.iter().enumerate() {
+            let at = i + 6 + position * 2;
+            assert_eq!(
+                u16::from_be_bytes([record[at], record[at + 1]]),
+                *scheme,
+                "advertised scheme {position}"
+            );
+        }
+        found = true;
+        break;
     }
     assert!(found, "signature_algorithms extension must be present in ClientHello");
 }
@@ -580,15 +602,56 @@ fn tls_config_new_rejects_dummy_or_empty_values() {
 
 #[test]
 fn tls_advertised_schemes_are_all_verifiable() {
-    // Every advertised scheme must be a scheme the verifier actually attempts
-    // (a garbage signature yields InvalidSignature, never Unsupported).
-    assert_eq!(SUPPORTED_SIG_SCHEMES, [SIG_SCHEME_ED25519]);
+    // Every advertised scheme must be a scheme the verifier actually attempts:
+    // given a key of the shape that scheme signs with, a garbage signature is
+    // reported as a failed check, never as a scheme it declined to run.
+    assert_eq!(
+        SUPPORTED_SIG_SCHEMES,
+        [
+            SIG_SCHEME_ECDSA_SECP256R1_SHA256,
+            SIG_SCHEME_ED25519,
+            SIG_SCHEME_RSA_PSS_RSAE_SHA256,
+            SIG_SCHEME_RSA_PKCS1_SHA256,
+        ]
+    );
     let verifier = DefaultCertVerifier::new();
-    let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
-    for scheme in SUPPORTED_SIG_SCHEMES.iter() {
-        let res = verifier.verify_server_signature(cert.spki_public_key, *scheme, b"msg", &[0x55u8; 64]);
-        assert_eq!(res, Err(TlsError::InvalidSignature), "scheme {scheme:#06x} must be checked, not skipped");
+    // One key per advertised shape. Their contents do not matter: what is being
+    // pinned here is that the verifier reaches the arithmetic instead of
+    // shrugging at the scheme.
+    let ed25519_key = [0x09u8; 32];
+    let mut p256_point = [0x2au8; 65];
+    p256_point[0] = 0x04;
+    let rsa_key = rsa_public_key_der();
+    let cases: [(u16, &[u8]); 4] = [
+        (SIG_SCHEME_ED25519, &ed25519_key),
+        (SIG_SCHEME_ECDSA_SECP256R1_SHA256, &p256_point),
+        (SIG_SCHEME_RSA_PSS_RSAE_SHA256, &rsa_key),
+        (SIG_SCHEME_RSA_PKCS1_SHA256, &rsa_key),
+    ];
+    for (scheme, key) in cases {
+        let res = verifier.verify_server_signature(key, scheme, b"msg", &[0x55u8; 64]);
+        assert_ne!(
+            res,
+            Err(TlsError::UnsupportedSignatureScheme),
+            "scheme {scheme:#06x} must be checked, not skipped"
+        );
     }
+}
+
+/// A 2048-bit `RSAPublicKey` in the DER the certificate carries it in: only the
+/// shape matters, so the modulus is a pattern rather than a real key.
+fn rsa_public_key_der() -> std::vec::Vec<u8> {
+    let mut der = std::vec::Vec::new();
+    der.push(TAG_SEQUENCE);
+    der.extend_from_slice(&[0x82, 0x01, 0x0a]); // 266 bytes of content
+    der.push(TAG_INTEGER);
+    der.extend_from_slice(&[0x82, 0x01, 0x01]); // 257 bytes: 0x00 pad + 256
+    der.push(0x00);
+    der.extend_from_slice(&[0xAAu8; 256]);
+    der.push(TAG_INTEGER);
+    der.push(0x03);
+    der.extend_from_slice(&[0x01, 0x00, 0x01]); // 65537
+    der
 }
 
 #[test]
@@ -848,7 +911,10 @@ fn tls_non_leaf_positions_are_not_trusted_without_a_proved_link() {
     let len4 = build_certificate_message(&[&tampered[..LEAF_GOOD_DER.len()], CA_ED25519_DER], &mut msg);
     assert_eq!(
         hs4.process_certificate(&msg[..len4], &AnyPassVerifier, "docs.interos.dev").err(),
-        Some(TlsError::CertificateVerificationFailed)
+        // The scheme's own answer is what surfaces: an Ed25519 link that does not
+        // check is reported as the invalid signature it is, not as a generic
+        // verification failure that would hide which link broke.
+        Some(TlsError::InvalidSignature)
     );
     assert_eq!(hs4.state, HandshakeState::EncryptedExtensionsReceived);
 }
@@ -1543,16 +1609,34 @@ fn tls_stub_return_path_cannot_turn_a_failed_check_into_a_verified_handshake() {
         Some(TlsError::CertificateVerificationFailed)
     );
 
-    // 3. A signature scheme that was never advertised.
+    // 3. A signature scheme that was never advertised. 0x0804 became a scheme
+    // this client does offer, so the code point has to be one it still does not:
+    // the gate is the advertised list, whatever is on it.
     let mut hs3 = HandshakeClient::new([0x11u8; 32]);
     hs3.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
-    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x08, 0x04, 0, 2, 0xaa, 0xbb];
+    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x05, 0x03, 0, 2, 0xaa, 0xbb];
     assert_eq!(
         hs3.process_certificate_verify(&cv, cert.spki_public_key, &AnyPassVerifier),
         Err(TlsError::UnsupportedSignatureScheme)
     );
     assert_eq!(hs3.state, HandshakeState::CertificateReceived);
+
+    // 3b. An advertised scheme paired with a leaf key that cannot carry it: the
+    // transport refuses the combination itself, so a stub cannot make an Ed25519
+    // key sign an RSA-PSS transcript.
+    let mut hs3b = HandshakeClient::new([0x11u8; 32]);
+    hs3b.state = HandshakeState::CertificateReceived;
+    let cv_pss = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x08, 0x04, 0, 2, 0xaa, 0xbb];
+    assert_eq!(
+        hs3b.process_certificate_verify(
+            &cv_pss,
+            cert.spki_public_key,
+            &DefaultCertVerifier::for_host("docs.interos.dev")
+        ),
+        Err(TlsError::UnsupportedSignatureScheme)
+    );
+    assert_eq!(hs3b.state, HandshakeState::CertificateReceived);
 
     // 4. A chain whose issuer does not prove the link.
     let mut hs4 = HandshakeClient::new([0x11u8; 32]);

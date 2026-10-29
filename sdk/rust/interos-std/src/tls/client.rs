@@ -166,7 +166,10 @@ pub struct TlsClientSession<'a> {
     pub app_send_cipher: Option<RecordCipher>,
     pub app_recv_cipher: Option<RecordCipher>,
     pub last_parsed_cert: Option<ParsedCertificate<'a>>,
-    pub server_cert_spki: [u8; 32],
+    /// The leaf `subjectPublicKey` bytes, pinned from the certificate the client
+    /// validated so `CertificateVerify` can only be checked against that key.
+    pub server_cert_spki: [u8; crate::tls::certificate::MAX_LEAF_PUBLIC_KEY_BYTES],
+    pub server_cert_spki_len: usize,
     pub has_server_cert: bool,
 }
 
@@ -181,7 +184,8 @@ impl<'a> TlsClientSession<'a> {
             app_send_cipher: None,
             app_recv_cipher: None,
             last_parsed_cert: None,
-            server_cert_spki: [0u8; 32],
+            server_cert_spki: [0u8; crate::tls::certificate::MAX_LEAF_PUBLIC_KEY_BYTES],
+            server_cert_spki_len: 0,
             has_server_cert: false,
         }
     }
@@ -267,14 +271,19 @@ impl<'a> TlsClientSession<'a> {
             }
             HANDSHAKE_CERTIFICATE => {
                 let cert = self.handshake.process_certificate(payload, verifier, identity)?;
-                // Pin the verified leaf key for CertificateVerify. An
-                // unexpected key length can never be pinned, so the handshake
-                // stops here instead of carrying a partial identity forward.
-                if cert.spki_public_key.len() != self.server_cert_spki.len() {
+                // Pin the verified leaf key for CertificateVerify. A key larger
+                // than the pin can never be pinned whole, so the handshake stops
+                // here instead of carrying a truncated identity forward — a
+                // clipped RSA modulus would still verify nothing, but it would
+                // look like a key the client had checked.
+                let key = cert.spki_public_key;
+                if key.is_empty() || key.len() > self.server_cert_spki.len() {
                     self.has_server_cert = false;
+                    self.server_cert_spki_len = 0;
                     return Err(TlsError::CertificateVerificationFailed);
                 }
-                self.server_cert_spki.copy_from_slice(cert.spki_public_key);
+                self.server_cert_spki[..key.len()].copy_from_slice(key);
+                self.server_cert_spki_len = key.len();
                 self.has_server_cert = true;
             }
             HANDSHAKE_CERTIFICATE_VERIFY => {
@@ -284,9 +293,9 @@ impl<'a> TlsClientSession<'a> {
                 if !self.has_server_cert {
                     return Err(TlsError::UnexpectedMessage);
                 }
-                let leaf_public_key = self.server_cert_spki;
+                let len = self.server_cert_spki_len;
                 self.handshake
-                    .process_certificate_verify(payload, &leaf_public_key, verifier)?;
+                    .process_certificate_verify(payload, &self.server_cert_spki[..len], verifier)?;
             }
             HANDSHAKE_FINISHED => {
                 self.handshake.process_server_finished(payload)?;

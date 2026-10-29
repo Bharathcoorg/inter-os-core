@@ -6,11 +6,12 @@
 use super::TlsError;
 
 pub const SIG_SCHEME_ED25519: u16 = 0x0807;
-/// Code points the client knows the name of but explicitly does NOT verify.
-/// They are never advertised and never accepted; kept only so rejection can be
-/// named precisely in diagnostics and tests.
 pub const SIG_SCHEME_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
 pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+/// `rsa_pkcs1_sha256` — what a CA certificate signed with
+/// `sha256WithRSAEncryption` is verified as, and the scheme a legacy RSA server
+/// falls back to when it will not do PSS.
+pub const SIG_SCHEME_RSA_PKCS1_SHA256: u16 = 0x0401;
 
 /// Ed25519 `SubjectPublicKeyInfo` algorithm OID (`1.3.101.112`) body bytes.
 pub const ED25519_SPKI_OID: [u8; 3] = [0x2b, 0x65, 0x70];
@@ -30,10 +31,27 @@ pub const PRIME256V1_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0
 /// `ecdsa-with-SHA256` (`1.2.840.10045.4.3.2`).
 pub const ECDSA_WITH_SHA256_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
 
+/// The largest leaf public key a client has to hold for `CertificateVerify`.
+///
+/// An RSA-4096 `RSAPublicKey` is the widest of the three shapes this client can
+/// verify — a 512-byte modulus that DER pads to 513, its INTEGER headers, and the
+/// `65537` exponent — which measures 526 bytes. The 65-byte uncompressed P-256
+/// point and the 32-byte Ed25519 key fit inside it with room to spare.
+pub const MAX_LEAF_PUBLIC_KEY_BYTES: usize = 528;
+
 /// The ONLY signature schemes this client advertises in its ClientHello and the
 /// only ones the verifier can actually check. Advertised set and accepted set
 /// are this single list; nothing else may add or drop a code point.
-pub const SUPPORTED_SIG_SCHEMES: [u16; 1] = [SIG_SCHEME_ED25519];
+///
+/// The order is the client's preference: ECDSA P-256 first because it is what
+/// the public web signs with most and what the verifier reaches fastest, then
+/// Ed25519, then the two RSA readings a legacy endpoint may pick.
+pub const SUPPORTED_SIG_SCHEMES: [u16; 4] = [
+    SIG_SCHEME_ECDSA_SECP256R1_SHA256,
+    SIG_SCHEME_ED25519,
+    SIG_SCHEME_RSA_PSS_RSAE_SHA256,
+    SIG_SCHEME_RSA_PKCS1_SHA256,
+];
 
 /// True when `scheme` is in [`SUPPORTED_SIG_SCHEMES`].
 pub const fn is_supported_sig_scheme(scheme: u16) -> bool {
@@ -45,6 +63,158 @@ pub const fn is_supported_sig_scheme(scheme: u16) -> bool {
         i += 1;
     }
     false
+}
+
+/// The code point a certificate's own `signatureAlgorithm` OID is verified as.
+///
+/// WHY a mapping rather than a free choice: a chain entry declares the algorithm
+/// that signed it, and the client must check it under exactly that declaration.
+/// Reading an RSA signature as PSS, or a PSS one as PKCS#1 v1.5, turns a
+/// verification failure into a coincidence — so an OID with no entry here is
+/// refused rather than guessed at. `id-RSASSA-PSS` (`...1.1.10`) is deliberately
+/// absent: it carries its parameters inside the AlgorithmIdentifier and no
+/// certificate on the paths this client walks is signed that way.
+pub fn scheme_for_sig_oid(oid: &[u8]) -> Option<u16> {
+    if oid == ED25519_SPKI_OID {
+        // Ed25519 certificates name the same OID for the key and for the
+        // signature, because the algorithm IS the key's whole specification.
+        Some(SIG_SCHEME_ED25519)
+    } else if oid == SHA256_WITH_RSA_OID {
+        Some(SIG_SCHEME_RSA_PKCS1_SHA256)
+    } else if oid == ECDSA_WITH_SHA256_OID {
+        Some(SIG_SCHEME_ECDSA_SECP256R1_SHA256)
+    } else {
+        None
+    }
+}
+
+/// True when a certificate's own `signatureAlgorithm` names a scheme this client
+/// advertised.
+///
+/// WHY this is asked of the chain rather than of the verifier: the field is not
+/// covered by the certificate's signature, so it is the one part of a chain entry
+/// a peer can rewrite at will. Checking it inside a verifier would let a
+/// permissive verifier accept an entry that declares an algorithm no code here
+/// implements.
+pub fn declares_advertised_scheme(cert: &ParsedCertificate<'_>) -> bool {
+    scheme_for_sig_oid(cert.sig_alg_oid)
+        .is_some_and(|scheme| is_supported_sig_scheme(scheme))
+}
+
+/// True when `cert` carries a public key this client can verify a signature with.
+///
+/// The EC case checks the curve parameter as well as the key algorithm: an
+/// `ecPublicKey` on P-384 is a key the P-256 arithmetic cannot touch, and
+/// accepting the algorithm while ignoring the curve would refuse it later, in a
+/// place that says nothing about why.
+pub fn spki_is_verifiable(cert: &ParsedCertificate<'_>) -> bool {
+    if cert.spki_algorithm_oid == ED25519_SPKI_OID || cert.spki_algorithm_oid == RSA_ENCRYPTION_OID {
+        return true;
+    }
+    cert.spki_algorithm_oid == EC_PUBLIC_KEY_OID && cert.spki_params == PRIME256V1_OID
+}
+
+/// The key algorithm each advertised scheme requires its signer to carry.
+fn scheme_key_algorithm(scheme: u16) -> &'static [u8] {
+    match scheme {
+        SIG_SCHEME_ED25519 => &ED25519_SPKI_OID,
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => &EC_PUBLIC_KEY_OID,
+        SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => &RSA_ENCRYPTION_OID,
+        _ => &[],
+    }
+}
+
+/// Checks `signature` over `message` against the public key `bytes`, under
+/// `scheme`.
+///
+/// This is the one place the accepted schemes are turned into arithmetic, so a
+/// chain link and a `CertificateVerify` cannot drift apart in what they accept.
+///
+/// `algorithm_oid` and `curve_oid` are what the signer's certificate actually
+/// names, or empty when the caller holds only key bytes — which is the
+/// `CertificateVerify` case, where the chain walk has already refused every key
+/// algorithm this client cannot verify. What is never skipped is the key's
+/// *shape*: a scheme paired with a key of another type is the one downgrade this
+/// layer can still catch on its own, and each advertised scheme needs a width and
+/// a leading byte no other key can be made to look like.
+pub fn verify_signed_by(
+    bytes: &[u8],
+    algorithm_oid: &[u8],
+    curve_oid: &[u8],
+    scheme: u16,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), TlsError> {
+    if !key_shape_matches(bytes, scheme) {
+        return Err(TlsError::UnsupportedSignatureScheme);
+    }
+    if !algorithm_oid.is_empty() && algorithm_oid != scheme_key_algorithm(scheme) {
+        return Err(TlsError::UnsupportedSignatureScheme);
+    }
+    match scheme {
+        SIG_SCHEME_ED25519 => super::ed25519::verify_ed25519(bytes, message, signature),
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => {
+            if !curve_oid.is_empty() && curve_oid != PRIME256V1_OID {
+                return Err(TlsError::UnsupportedSignatureScheme);
+            }
+            let pair = decode_ecdsa_signature(signature)?;
+            if crate::crypto::p256::verify(bytes, message, &pair) {
+                Ok(())
+            } else {
+                Err(TlsError::CertificateVerificationFailed)
+            }
+        }
+        SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => {
+            let key = parse_rsa_public_key(bytes)?;
+            let verified = if scheme == SIG_SCHEME_RSA_PSS_RSAE_SHA256 {
+                crate::crypto::rsa::verify_pss_sha256(key.modulus, key.exponent, signature, message)
+            } else {
+                crate::crypto::rsa::verify_pkcs1_sha256(key.modulus, key.exponent, signature, message)
+            };
+            if verified {
+                Ok(())
+            } else {
+                Err(TlsError::CertificateVerificationFailed)
+            }
+        }
+        _ => Err(TlsError::UnsupportedSignatureScheme),
+    }
+}
+
+/// The key each advertised scheme is able to sign with, read from its shape.
+fn key_shape_matches(bytes: &[u8], scheme: u16) -> bool {
+    match scheme {
+        SIG_SCHEME_ED25519 => bytes.len() == 32,
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => bytes.len() == 65 && bytes[0] == 0x04,
+        SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => {
+            !bytes.is_empty() && bytes[0] == TAG_SEQUENCE
+        }
+        _ => false,
+    }
+}
+
+/// Checks the signature one chain entry carries against the key of the entry
+/// that issued it.
+///
+/// The scheme comes from `subject`'s own `signatureAlgorithm` field, which names
+/// the algorithm its issuer signed with — the issuer certificate's own field
+/// names whoever signed *it*, and reading the two as one would check a link with
+/// the wrong arithmetic.
+pub fn verify_link(
+    subject: &ParsedCertificate<'_>,
+    issuer: &ParsedCertificate<'_>,
+) -> Result<(), TlsError> {
+    let scheme = scheme_for_sig_oid(subject.sig_alg_oid)
+        .filter(|s| is_supported_sig_scheme(*s))
+        .ok_or(TlsError::UnsupportedSignatureScheme)?;
+    verify_signed_by(
+        issuer.spki_public_key,
+        issuer.spki_algorithm_oid,
+        issuer.spki_params,
+        scheme,
+        subject.tbs_raw,
+        subject.signature_value,
+    )
 }
 
 /// ASN.1 DER Tag constants
@@ -717,6 +887,18 @@ pub trait CertificateVerifier {
     /// a reference identity.
     fn verify_trust_anchor(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
 
+    /// Judges the entry a chain ends on: it must reach this verifier's trust
+    /// store, either by being a pinned self-signed anchor or by carrying the
+    /// signature of one.
+    ///
+    /// WHY the chain head needs its own question: a TLS 1.3 server usually sends
+    /// the leaf and its intermediates and stops there, because the root is
+    /// expected to already be in the client's store. Asking only "is this entry
+    /// self-signed and pinned?" would refuse every public chain for omitting the
+    /// certificate the client already holds, so the head is judged on whether the
+    /// path reaches an anchor, not on whether the server handed one over.
+    fn verify_reaches_trust_store(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
+
     /// The reference identity (RFC 6125) this verifier pins names against.
     ///
     /// `None` means the verifier declares no identity, so it can never drive a
@@ -864,9 +1046,9 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
     fn verify_certificate(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
         self.check_validity_window(cert)?;
 
-        // Only Ed25519 keys are accepted: that is the single scheme the client
-        // advertises and the single signature path implemented here.
-        if cert.spki_algorithm_oid != ED25519_SPKI_OID {
+        // Only a key this client can do arithmetic with is accepted at any
+        // position: Ed25519, RSA, or an EC P-256 point on the named curve.
+        if !spki_is_verifiable(cert) {
             return Err(TlsError::UnsupportedSignatureScheme);
         }
 
@@ -878,15 +1060,23 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
             return Err(TlsError::CertificateVerificationFailed);
         }
 
-        // Validate certificate trust against the pinned trust store.
-        //
-        // A self-issued certificate is only trusted when its exact DER (or its
-        // subject + SPKI) is pinned in the store — there is no signature to
-        // check, so the pin IS the proof. An issued certificate must be
-        // *actually* signed by a pinned self-signed anchor, verified with the
-        // one scheme the ClientHello advertised. That verification is never
-        // skipped for an inconvenient algorithm and its result is never
-        // discarded: any failure aborts here.
+        self.verify_reaches_trust_store(cert)
+    }
+
+    /// Trust, without any identity policy attached.
+    ///
+    /// A self-issued certificate is only trusted when its exact DER (or its
+    /// subject + SPKI) is pinned in the store — there is no signature to check,
+    /// so the pin IS the proof. An issued certificate must be *actually* signed
+    /// by a pinned self-signed anchor, verified under the scheme its own
+    /// `signatureAlgorithm` declares. That verification is never skipped for an
+    /// inconvenient algorithm and its result is never discarded: any failure
+    /// aborts here.
+    fn verify_reaches_trust_store(&self, cert: &ParsedCertificate) -> Result<(), TlsError> {
+        self.check_validity_window(cert)?;
+        if !spki_is_verifiable(cert) {
+            return Err(TlsError::UnsupportedSignatureScheme);
+        }
         if cert.is_self_signed() {
             return self.verify_trust_anchor(cert);
         }
@@ -895,21 +1085,13 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
             let Ok(root_cert) = ParsedCertificate::parse(root_der) else {
                 continue;
             };
-            if !root_cert.is_self_signed() || root_cert.spki_algorithm_oid != ED25519_SPKI_OID {
+            if !root_cert.is_self_signed() || !spki_is_verifiable(&root_cert) {
                 continue;
             }
             if root_cert.subject_raw != cert.issuer_raw {
                 continue;
             }
-            if cert.sig_alg_oid != ED25519_SPKI_OID {
-                return Err(TlsError::UnsupportedSignatureScheme);
-            }
-            super::ed25519::verify_ed25519(
-                root_cert.spki_public_key,
-                cert.tbs_raw,
-                cert.signature_value,
-            )
-            .map_err(|_| TlsError::CertificateVerificationFailed)?;
+            verify_link(cert, &root_cert)?;
             return Ok(());
         }
 
@@ -925,7 +1107,7 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         if !cert.is_self_signed() {
             return Err(TlsError::CertificateVerificationFailed);
         }
-        if cert.spki_algorithm_oid != ED25519_SPKI_OID {
+        if !spki_is_verifiable(cert) {
             return Err(TlsError::UnsupportedSignatureScheme);
         }
         for root_der in self.trusted_roots {
@@ -956,6 +1138,20 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         if !is_supported_sig_scheme(algorithm) {
             return Err(TlsError::UnsupportedSignatureScheme);
         }
-        crate::tls::ed25519::verify_ed25519(public_key, context_and_hash, signature)
+        // The scheme names its own key type, and `verify_signed_by` requires the
+        // leaf key to have that shape before any arithmetic runs: a 32-byte
+        // Ed25519 key, a 65-byte uncompressed P-256 point, or a DER
+        // `RSAPublicKey`. No other key can be made to look like one, so a server
+        // cannot present an RSA leaf and then sign the transcript as if it were
+        // ECDSA. The algorithm OID is left to the chain walk, which read it from
+        // the certificate this key came from.
+        verify_signed_by(
+            public_key,
+            &[],
+            &[],
+            algorithm,
+            context_and_hash,
+            signature,
+        )
     }
 }

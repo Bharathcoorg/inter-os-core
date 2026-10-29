@@ -9,9 +9,11 @@
 
 use interos_std::crypto::{p256, rsa};
 use interos_std::tls::certificate::{
-    decode_ecdsa_signature, parse_rsa_public_key, ParsedCertificate, EC_PUBLIC_KEY_OID,
-    PRIME256V1_OID, RSA_ENCRYPTION_OID, SHA256_WITH_RSA_OID,
+    asn1_time_to_unix, decode_ecdsa_signature, parse_rsa_public_key, DefaultCertVerifier,
+    ParsedCertificate, EC_PUBLIC_KEY_OID, PRIME256V1_OID, RSA_ENCRYPTION_OID, SHA256_WITH_RSA_OID,
 };
+use interos_std::tls::handshake::{HandshakeClient, HandshakeState};
+use interos_std::tls::TlsError;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -259,4 +261,158 @@ fn decodes_an_ecdsa_signature_and_refuses_garbage() {
     oversized.extend_from_slice(&[0x02, 0x20]);
     oversized.extend_from_slice(&[0x01; 32]);
     assert!(decode_ecdsa_signature(&oversized).is_err());
+}
+
+/// The 24-bit lengths the TLS 1.3 `Certificate` message uses for the handshake
+/// body, the `certificate_list` and each entry.
+fn push24(out: &mut Vec<u8>, value: usize) {
+    out.extend_from_slice(&[(value >> 16) as u8, (value >> 8) as u8, value as u8]);
+}
+
+/// Frames `chain` exactly as a server sends it: leaf first, each issuer above the
+/// entry before it, no per-entry extensions.
+fn certificate_message(chain: &[&[u8]]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for der in chain {
+        push24(&mut list, der.len());
+        list.extend_from_slice(der);
+        list.extend_from_slice(&[0x00, 0x00]);
+    }
+    let mut body = Vec::new();
+    body.push(0x00); // certificate_request_context, empty for a server
+    push24(&mut body, list.len());
+    body.extend_from_slice(&list);
+
+    let mut message = vec![0x0b]; // HandshakeType.certificate
+    push24(&mut message, body.len());
+    message.extend_from_slice(&body);
+    message
+}
+
+/// One certificate with a bit flipped inside its own signature, which leaves
+/// every length, tag and name in the DER exactly as it was: only the arithmetic
+/// can notice.
+fn tampered_signature(der: &[u8]) -> Vec<u8> {
+    let cert = ParsedCertificate::parse(der).unwrap();
+    let last = cert.signature_value.len() - 1;
+    let offset = cert.signature_value.as_ptr() as usize - der.as_ptr() as usize + last;
+    let mut broken = der.to_vec();
+    broken[offset] ^= 0x01;
+    broken
+}
+
+fn walk(
+    message: &[u8],
+    roots: &[&[u8]],
+    now: i64,
+) -> Result<(), TlsError> {
+    let mut handshake = HandshakeClient::new([0u8; 32]);
+    handshake.state = HandshakeState::EncryptedExtensionsReceived;
+    let verifier = DefaultCertVerifier::for_host("developer.mozilla.org")
+        .with_roots(roots)
+        .with_clock(now);
+    handshake
+        .process_certificate(message, &verifier, "developer.mozilla.org")
+        .map(|_| ())
+}
+
+/// The point of the whole exercise: a chain nobody here issued, with only the
+/// root pinned, accepted by the real walk — not by a fixture-level helper that
+/// agrees with itself.
+#[test]
+fn walks_the_live_isrg_chain_with_only_the_root_pinned() {
+    let root = fixture("isrg_root_x1.der");
+    let cross = fixture("root_yr_under_isrg.der");
+    let intermediate = fixture("yr2_under_root_yr.der");
+    let leaf_der = fixture("leaf_under_yr2.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let not_before = asn1_time_to_unix(leaf.not_before).unwrap();
+    let not_after = asn1_time_to_unix(leaf.not_after).unwrap();
+    // Mid-way through the leaf's own window, so this says the same thing after
+    // the fixture's ninety days have passed as it says today.
+    let now = not_before + (not_after - not_before) / 2;
+    let roots: [&[u8]; 1] = [&root];
+
+    // As a real server sends it: the leaf and two intermediates, no root.
+    let message = certificate_message(&[&leaf_der, &intermediate, &cross]);
+    walk(&message, &roots, now).expect("the walk refused a live public chain");
+
+    // And when a server appends the root it was not asked for, the path still
+    // ends on a pinned anchor rather than tripping the depth limit.
+    let with_root = certificate_message(&[&leaf_der, &intermediate, &cross, &root]);
+    walk(&with_root, &roots, now).expect("the walk refused a chain that included its root");
+}
+
+#[test]
+fn refuses_a_chain_that_stops_one_link_short_of_the_pin() {
+    let root = fixture("isrg_root_x1.der");
+    let intermediate = fixture("yr2_under_root_yr.der");
+    let leaf_der = fixture("leaf_under_yr2.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let now = asn1_time_to_unix(leaf.not_before).unwrap();
+    let roots: [&[u8]; 1] = [&root];
+
+    // The cross-signed root taken out of the path: the intermediate is not the
+    // certificate the pin names, so a client that accepted it would trust any
+    // intermediate under any root.
+    let message = certificate_message(&[&leaf_der, &intermediate]);
+    assert_eq!(
+        walk(&message, &roots, now),
+        Err(TlsError::CertificateVerificationFailed)
+    );
+}
+
+#[test]
+fn refuses_a_live_chain_when_nothing_is_pinned() {
+    let cross = fixture("root_yr_under_isrg.der");
+    let intermediate = fixture("yr2_under_root_yr.der");
+    let leaf_der = fixture("leaf_under_yr2.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let now = asn1_time_to_unix(leaf.not_before).unwrap();
+
+    let message = certificate_message(&[&leaf_der, &intermediate, &cross]);
+    assert_eq!(
+        walk(&message, &[], now),
+        Err(TlsError::CertificateVerificationFailed),
+        "an empty trust store accepted a chain"
+    );
+}
+
+#[test]
+fn refuses_a_link_whose_signature_was_edited() {
+    let root = fixture("isrg_root_x1.der");
+    let cross = fixture("root_yr_under_isrg.der");
+    let intermediate = fixture("yr2_under_root_yr.der");
+    let leaf_der = fixture("leaf_under_yr2.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let now = asn1_time_to_unix(leaf.not_before).unwrap();
+    let roots: [&[u8]; 1] = [&root];
+
+    let broken = tampered_signature(&intermediate);
+    assert!(ParsedCertificate::parse(&broken).is_ok(), "edit broke the DER");
+    let message = certificate_message(&[&leaf_der, &broken, &cross]);
+    assert_eq!(
+        walk(&message, &roots, now),
+        Err(TlsError::CertificateVerificationFailed),
+        "the walk trusted a link it never proved"
+    );
+}
+
+#[test]
+fn refuses_the_chain_once_the_leaf_has_expired() {
+    let root = fixture("isrg_root_x1.der");
+    let cross = fixture("root_yr_under_isrg.der");
+    let intermediate = fixture("yr2_under_root_yr.der");
+    let leaf_der = fixture("leaf_under_yr2.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let not_after = asn1_time_to_unix(leaf.not_after).unwrap();
+    let roots: [&[u8]; 1] = [&root];
+
+    let message = certificate_message(&[&leaf_der, &intermediate, &cross]);
+    // Every link still verifies; the clock is what refuses this, at the first
+    // position the walk visits.
+    assert_eq!(
+        walk(&message, &roots, not_after + 1),
+        Err(TlsError::CertificateExpired)
+    );
 }

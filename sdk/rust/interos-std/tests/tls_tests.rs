@@ -62,6 +62,9 @@ impl CertificateVerifier for MockTrustStoreVerifier {
     fn verify_trust_anchor(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
         Ok(())
     }
+    fn verify_reaches_trust_store(&self, _cert: &ParsedCertificate) -> Result<(), interos_std::tls::TlsError> {
+        Ok(())
+    }
     fn reference_identity(&self) -> Option<&str> {
         Some(self.identity)
     }

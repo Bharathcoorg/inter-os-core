@@ -13,8 +13,8 @@ use crate::crypto::hmac::HmacSha256;
 use crate::crypto::sha256::Sha256;
 use crate::crypto::x25519::{x25519, x25519_base};
 use super::certificate::{
-    is_supported_sig_scheme, CertificateVerifier, ParsedCertificate, ED25519_SPKI_OID,
-    MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
+    declares_advertised_scheme, is_supported_sig_scheme, spki_is_verifiable, verify_link,
+    CertificateVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
 };
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
@@ -501,10 +501,12 @@ impl HandshakeClient {
     /// - position 0 (end-entity): reference-identity (SAN/CN) match against
     ///   `reference_identity` — the name this client advertised in SNI — plus the
     ///   verifier's trust policy.
-    /// - positions 1..: must parse, pass structural validity, carry an Ed25519
-    ///   key, continue the chain (`previous.issuer == subject`) and actually sign
-    ///   the previous entry; the final entry must be a member of the trust store
-    ///   via [`CertificateVerifier::verify_trust_anchor`].
+    /// - positions 1..: must parse, pass structural validity, carry a key this
+    ///   client can verify with, continue the chain (`previous.issuer ==
+    ///   subject`) and actually sign the previous entry under the scheme that
+    ///   entry declares; the final entry must reach the trust store, either as a
+    ///   pinned self-signed anchor or as a certificate a pinned anchor signed —
+    ///   see [`CertificateVerifier::verify_reaches_trust_store`].
     /// - a chain longer than [`MAX_CHAIN_DEPTH`] is refused, not truncated, and
     ///   the declared `certificate_list` must be consumed exactly.
     pub fn process_certificate<'a>(
@@ -584,17 +586,19 @@ impl HandshakeClient {
             // is refused here rather than trusted because it parsed.
             verifier.check_validity_window(&parsed)?;
 
-            // Only the advertised key type is usable at any chain position.
-            if parsed.spki_algorithm_oid != ED25519_SPKI_OID {
+            // Only a key this client can do arithmetic with is usable at any
+            // chain position: Ed25519, RSA, or an EC P-256 point.
+            if !spki_is_verifiable(&parsed) {
                 return Err(TlsError::UnsupportedSignatureScheme);
             }
-            // The signature algorithm the certificate *declares* must also be
-            // one this client advertised. The outer `signatureAlgorithm` field
-            // is NOT covered by the certificate's own signature, so a chain
-            // entry could otherwise declare a scheme this client never
-            // advertised (and never checked) while its bytes still verify
-            // under Ed25519. Advertised set == accepted set, here too.
-            if parsed.sig_alg_oid != ED25519_SPKI_OID {
+            // The signature algorithm the entry declares must also be one this
+            // client advertised. The outer `signatureAlgorithm` field is NOT
+            // covered by the certificate's own signature, so a chain entry could
+            // otherwise declare a scheme this client never advertised (and never
+            // checked) while its bytes still verify under another algorithm.
+            // Advertised set == accepted set, here and not inside the verifier,
+            // so no verifier can be configured past it.
+            if !declares_advertised_scheme(&parsed) {
                 return Err(TlsError::UnsupportedSignatureScheme);
             }
 
@@ -606,7 +610,16 @@ impl HandshakeClient {
                     {
                         return Err(TlsError::CertificateVerificationFailed);
                     }
-                    verifier.verify_certificate(&parsed)?;
+                    // A server that sends the leaf alone leaves no link to
+                    // prove, so the verifier's own end-entity policy -- identity
+                    // plus trust -- decides. A deeper chain gets the identity
+                    // check here and its trust from the links below, because
+                    // requiring the leaf to be signed directly by a pinned root
+                    // would refuse every public chain that ships an
+                    // intermediate.
+                    if chain.is_empty() {
+                        verifier.verify_certificate(&parsed)?;
+                    }
                     leaf = Some(parsed);
                 }
                 Some(prev) => {
@@ -614,15 +627,11 @@ impl HandshakeClient {
                     if prev.issuer_raw != parsed.subject_raw {
                         return Err(TlsError::CertificateVerificationFailed);
                     }
-                    super::ed25519::verify_ed25519(
-                        parsed.spki_public_key,
-                        prev.tbs_raw,
-                        prev.signature_value,
-                    )
-                    .map_err(|_| TlsError::CertificateVerificationFailed)?;
+                    verify_link(&prev, &parsed)?;
                     if chain.is_empty() {
-                        // Last entry must be a trust anchor from the store.
-                        verifier.verify_trust_anchor(&parsed)?;
+                        // The head of the path must reach the trust store, whether
+                        // the server sent a root or stopped at an intermediate.
+                        verifier.verify_reaches_trust_store(&parsed)?;
                     }
                 }
             }
