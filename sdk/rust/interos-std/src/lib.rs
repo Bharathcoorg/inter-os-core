@@ -1391,6 +1391,16 @@ pub fn android_bridge_intent(
     }
 }
 
+/// The longest RTC answer the kernel is willing to write, which is also the
+/// buffer size every client reads it into.
+///
+/// WHY a named constant: the kernel truncates its JSON answer to the length the
+/// caller offers and refuses anything longer, so a client that guessed smaller
+/// silently lost whichever field fell past the cut -- and nothing in the return
+/// value says a field was lost. `tests/test_status_band_truth_contract.py` pins
+/// that this number and the kernel's own guard stay equal.
+pub const RTC_PAYLOAD_BYTES: usize = 128;
+
 /// Queries current real-time clock (RTC / CMOS) wall-clock time into `out_buf` JSON string.
 pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
@@ -1421,10 +1431,14 @@ pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
 pub mod rtc {
     /// One wall-clock reading, with only the fields the platform publishes.
     ///
-    /// The seconds are not carried: the kernel answers at most 64 bytes and a
-    /// two-digit year, month, day, hour and minute push `"second"` past that,
-    /// so a client that asked for seconds would sometimes receive a truncated
-    /// digit run. A clock face does not need them and no screen prints them.
+    /// WHY both a civil date and an instant: a clock face prints the local hour
+    /// and minute, while a client that must compare an absolute time -- whether
+    /// a certificate's validity window has run out -- needs UTC seconds. Only
+    /// the kernel knows the zone it applied, so an app that converted one into
+    /// the other would be hard-coding a timezone the device may not be in.
+    ///
+    /// The civil `second` is not carried: no screen prints it, and `unix_epoch`
+    /// already gives any client that needs seconds the same whole number.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Reading {
         pub year: u32,
@@ -1432,6 +1446,9 @@ pub mod rtc {
         pub day: u32,
         pub hour: u32,
         pub minute: u32,
+        /// The kernel's own UTC instant, or `None` when the answer it sent did
+        /// not carry a whole one.
+        pub unix_epoch: Option<u64>,
     }
 
     impl Reading {
@@ -1444,12 +1461,27 @@ pub mod rtc {
         /// honest render is a blank lane -- a placeholder such as `00:00` is
         /// read by a person as a measurement the device never took.
         pub fn now() -> Option<Reading> {
-            // WHY 64 bytes and not more: the kernel's RtcGetTime handler
-            // rejects any requested length above 64 with InvalidArguments, so a
-            // larger buffer silently costs the whole clock read.
-            let mut buf = [0u8; 64];
+            // WHY 128 bytes and not the 64 this reader used to ask for: the
+            // kernel writes one JSON answer and truncates it to the length it
+            // was offered, and its own cap is the same number. At 64 the answer
+            // stopped inside `"second"`, so no client could ever reach
+            // `unix_epoch` -- which is the only field that can judge an
+            // absolute deadline. The clock face was unaffected: it lives in the
+            // first 60 bytes either way.
+            let mut buf = [0u8; super::RTC_PAYLOAD_BYTES];
             let n = super::rtc_get_time(&mut buf).ok()?;
             parse(&buf[..n])
+        }
+
+        /// The reading as the UTC seconds an absolute deadline is judged in.
+        ///
+        /// WHY the caller gets an `Option` and not a guessed number: a client
+        /// that could not reach the instant has no way to tell an expired
+        /// credential from a live one, so the only honest answer it can give is
+        /// "not verified". `epoch` bounds the run at ten digits, which always
+        /// fits an `i64`.
+        pub fn unix_utc(&self) -> Option<i64> {
+            self.unix_epoch.map(|secs| secs as i64)
         }
 
         /// The reading as the 24-hour `HH:MM` a clock face prints.
@@ -1503,6 +1535,7 @@ pub mod rtc {
             day,
             hour,
             minute,
+            unix_epoch: epoch(data),
         })
     }
 
@@ -1541,6 +1574,40 @@ pub mod rtc {
                 if j > start {
                     return Some(value);
                 }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Reads the kernel's UTC instant, or reports that the answer did not carry
+    /// a whole one.
+    ///
+    /// WHY this is not [`field`]: `field` stops a run at nine digits because no
+    /// calendar field needs ten, and the current epoch needs ten. And WHY a run
+    /// that reaches the end of the buffer is refused rather than believed: the
+    /// kernel truncates to the length it was offered, so a cut answer leaves
+    /// something like `176000000` behind, and reading that as an instant would
+    /// compare a certificate against the year 1975.
+    fn epoch(data: &[u8]) -> Option<u64> {
+        const KEY: &[u8] = b"\"unix_epoch\":";
+        let mut i = 0usize;
+        while i + KEY.len() <= data.len() {
+            if &data[i..i + KEY.len()] == KEY {
+                let start = i + KEY.len();
+                let mut j = start;
+                let mut value: u64 = 0;
+                while j < data.len() && data[j].is_ascii_digit() {
+                    if j - start >= 10 {
+                        return None;
+                    }
+                    value = value * 10 + (data[j] - b'0') as u64;
+                    j += 1;
+                }
+                if j == start || j == data.len() {
+                    return None;
+                }
+                return Some(value);
             }
             i += 1;
         }
@@ -1630,6 +1697,45 @@ pub mod rtc {
             // rather than saturating into a number that looks plausible.
             let data = br#"{"year":12345678901,"month":10,"day":27,"hour":9,"minute":41}"#;
             assert!(parse(data).is_none());
+        }
+
+        #[test]
+        fn the_instant_the_kernel_sent_reaches_a_client_that_asks_for_it() {
+            // A certificate's validity window is an absolute instant, so a
+            // client that has to judge "has this expired?" needs the kernel's
+            // UTC seconds, not a civil date it would have to convert itself.
+            let r = parse(TYPICAL).expect("the full payload reads");
+            assert_eq!(r.unix_epoch, Some(1_760_000_000));
+        }
+
+        #[test]
+        fn a_truncated_instant_is_no_instant_even_though_the_clock_face_survives() {
+            // The kernel truncates its answer to the length it was offered. At
+            // 89 bytes the epoch run is cut mid-number, and a reader that took
+            // the surviving `176000000` as a value would compare certificates
+            // against 1975 -- so an unfinished run reports no instant at all.
+            for cut in [64usize, 79, 85, 89] {
+                let r = parse(&TYPICAL[..cut])
+                    .unwrap_or_else(|| panic!("{cut} bytes still carry a clock face"));
+                assert_eq!(r.unix_epoch, None, "a cut digit run is not an instant");
+                assert_eq!(&r.clock_text(), b"09:41");
+            }
+            // One byte later the comma terminates the run, and it reads.
+            assert_eq!(
+                parse(&TYPICAL[..90]).and_then(|r| r.unix_epoch),
+                Some(1_760_000_000)
+            );
+        }
+
+        #[test]
+        fn a_payload_without_the_instant_key_reports_only_the_clock_face() {
+            // Every screen that prints HH:MM must keep working on a payload that
+            // carries no absolute time, otherwise the band goes blank for a
+            // reason the reader invented.
+            let local_only = br#"{"year":2026,"month":10,"day":27,"hour":9,"minute":41}"#;
+            let r = parse(local_only).expect("reads");
+            assert_eq!(&r.clock_text(), b"09:41");
+            assert_eq!(r.unix_epoch, None);
         }
 
         #[test]

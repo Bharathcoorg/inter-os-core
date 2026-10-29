@@ -1791,10 +1791,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         38 => {
             // RtcGetTime: a1 = out_buf_ptr, a2 = out_buf_len
             let len = a2 as usize;
-            if len > 64 {
+            // WHY 128 and not the 64 this guard used to carry: the answer is one
+            // JSON line, and every field after `"second"` was cut off by this
+            // number arriving first. `unix_epoch` sits at byte ~79, so no client
+            // could ever read an absolute instant -- which is the only thing a
+            // certificate's validity window can be compared against. A client
+            // that wants less still gets exactly less, so the clock faces that
+            // read 64 bytes are unchanged.
+            if len > 128 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let mut kbuf = [0u8; 64];
+            let mut kbuf = [0u8; 128];
             match sys_rtc_get_time(&mut kbuf[..len]) {
                 Ok(n) => {
                     if copy_to_user(a1, &kbuf[..n]).is_err() {
