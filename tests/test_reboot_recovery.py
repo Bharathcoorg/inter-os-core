@@ -30,7 +30,11 @@ def kill_proc_on_port(p):
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    proc = psutil.Process(conn.pid)
+                    # A foreign owner means another device is using this port;
+                    # leave it running and let the bind below fail loudly.
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
                 except Exception:
                     pass
     except Exception:
@@ -218,7 +222,10 @@ def main():
         )
 
         print("\n[SESSION-1] Establishing known userspace state (launching Calculator)...")
-        reader1.sock.sendall(b"TAP 180 520\n")
+        # The home screen answers taps only where a tile is painted, so a
+        # coordinate written into a test goes stale in silence; the launch
+        # bridge addresses the application by name instead.
+        reader1.sock.sendall(b"APP_LAUNCH calculator\n")
         assert reader1.wait_for("Initial frame presented to hardware scanout", timeout=30.0), "Calculator launch failed"
         print("[SESSION-1] Calculator presented frame.")
         time.sleep(1.5)
@@ -237,7 +244,16 @@ def main():
         send_tap_and_wait(b"TAP 598 1290\n", "Evaluation completed.", "Calculation '='")
         print("[SESSION-1] Calculation verified. Exiting back to homescreen...")
         reader1.sock.sendall(b"TAP 360 1420\n")   # Bottom gesture bar exit
-        assert reader1.wait_for("Foreground application exited and was reaped", timeout=30.0)
+        # WHY not the launcher's reap line: the shell reaps only a child it spawned
+        # itself (apps/launcher/src/main.rs reports it inside the active-child branch),
+        # and an application started over the serial bridge belongs to the kernel. Its
+        # exit is still observable - in the application's own gesture line and in the
+        # kernel's teardown line - so this asserts those two instead.
+        assert reader1.wait_for("[CALCULATOR] Home gesture tapped", timeout=30.0), \
+            "Calculator never saw the home gesture"
+        assert reader1.wait_for("sys_exit_with_code(0) called", timeout=30.0), \
+            "Calculator's task was never torn down by the kernel"
+        print("[SESSION-1] Calculator exited and the kernel tore its task down.")
         print("[SESSION-1] Homescreen re-established.")
         time.sleep(0.8)
 
@@ -265,16 +281,22 @@ def main():
         )
 
         print("\n[SESSION-2] Testing userspace responsiveness after reboot (launching Settings)...")
-        reader2.sock.sendall(b"TAP 180 350\n")
+        reader2.sock.sendall(b"APP_LAUNCH settings\n")
         assert reader2.wait_for("Settings UI presented to scanout buffer", timeout=15.0), "Settings launch failed after reboot"
         print("[SESSION-2] Settings presented frame.")
         time.sleep(1.5)
-        print("[SESSION-2] Switching tabs...")
-        reader2.sock.sendall(b"TAP 228 140\n")
+        print("[SESSION-2] Opening the Power & Battery category card...")
+        # WHY (188,776): Settings opens on a grid of category cards, and this is the centre of
+        # the Power & Battery card the app itself draws. The old (228,140) aimed at a tab strip
+        # that no longer exists, so the tap reached the app and nothing answered it.
+        reader2.sock.sendall(b"TAP 188 776\n")
         assert reader2.wait_for("tab switched.", timeout=10.0)
         print("[SESSION-2] Tab switch verified. Returning to home via bottom gesture bar...")
         reader2.sock.sendall(b"TAP 360 1420\n")
-        assert reader2.wait_for("Foreground application exited and was reaped", timeout=15.0)
+        assert reader2.wait_for("[SETTINGS APP] Home gesture pressed", timeout=15.0), \
+            "Settings never saw the home gesture after reboot"
+        assert reader2.wait_for("sys_exit_with_code(0) called", timeout=15.0), \
+            "Settings' task was never torn down by the kernel after reboot"
         print("[SESSION-2] Homescreen re-established and fully responsive after reboot.")
 
         # Clean shutdown of Session 2

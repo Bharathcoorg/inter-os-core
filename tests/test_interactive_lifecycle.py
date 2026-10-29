@@ -27,20 +27,34 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from emulator.server import qemu_x86_audio_args  # noqa: E402
 
+# WHY this line is here: emulator.server builds and starts its VNC scanout worker
+# at import time, so a suite that only wants the audio-args helper also inherits a
+# thread dialing 127.0.0.1:5901 every two seconds. That is the live Studio's VNC
+# port, never this suite's - its QEMU runs with -display none and no -vnc - and no
+# frame consumer exists in this process, so the worker can only log against us.
+import emulator.server as _emulator_server  # noqa: E402
+_emulator_server.vnc_client.running = False
+
 def kill_proc_on_port(p):
     try:
         import psutil
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    proc = psutil.Process(conn.pid)
+                    # A foreign owner means another device is using this port;
+                    # leave it running and let the bind below fail loudly.
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
                 except Exception:
                     pass
     except Exception:
         pass
     if sys.platform == "win32":
         try:
-            res = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue).OwningProcess"], capture_output=True, text=True, timeout=5)
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", f"Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue | "
+                                  "ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | "
+                                  "Where-Object { $_.ProcessName -like '*qemu*' } | ForEach-Object { $_.Id }"], capture_output=True, text=True, timeout=5)
             for line in res.stdout.splitlines():
                 pid = line.strip()
                 if pid and pid.isdigit() and int(pid) > 0:
@@ -149,8 +163,19 @@ class SerialReader:
 
 def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
     print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
-    print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
+    # WHY the drawer and not the home screen: the dock tiles and the Today card are
+    # the only home surfaces that answer a tap, so they reach six packages. The
+    # drawer reaches all fourteen, and a launch from it still leaves the shell as the
+    # parent - which is what the reap line this helper ends on requires. Each call
+    # starts from Home, because the caller waits for the home surface to come back.
+    print(f"[LIFECYCLE TEST] Opening the App Drawer, then tapping {app_name} at {tap_coords}...")
     time.sleep(1.0)
+    reader.send(b"TAP 590 1110\n")
+    drawer_open = reader.wait_for("App Drawer opened", timeout=20.0, print_keywords=["LAUNCHER", "INPUT"])
+    if not drawer_open:
+        reader.send(b"TAP 590 1110\n")
+        drawer_open = reader.wait_for("App Drawer opened", timeout=20.0, print_keywords=["LAUNCHER", "INPUT"])
+    assert drawer_open, "App Drawer never opened; the launch cell cannot be reached"
     reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
 
     # Wait for app launch and presentation
@@ -160,14 +185,21 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     if not presented:
-        time.sleep(0.8)
-        reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
-        presented = reader.wait_for(
-            present_marker,
-            timeout=45.0,
-            print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
+        # WHY no second tap: this used to re-send the identical tile tap when the
+        # marker had not arrived, and when that first tap had in fact launched a
+        # different package the retry pushed a stray touch into the app that was
+        # already running. The guest already names what it started, so the useful
+        # failure is the one that quotes that line instead of tapping again and
+        # hoping.
+        launched = "none observed"
+        for line in reversed(reader.captured_logs):
+            if "Launched application " in line:
+                launched = line.strip()
+                break
+        raise AssertionError(
+            f"{app_name} failed to present frame within timeout; the last package "
+            f"the guest said it launched was: {launched[-120:]}"
         )
-    assert presented, f"{app_name} failed to present frame within timeout"
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
 
     if monitor_sock:
@@ -307,8 +339,10 @@ def main():
         with open(data_disk, "wb") as f:
             f.truncate(512 * 1024 * 1024)
 
-    ser_port = 5555
-    mon_port = 5556
+    # WHY not 5555/5556: those are the Android emulator's console band, and a guest
+    # serial socket there can bind over - or talk to - somebody else's device.
+    ser_port = 5595
+    mon_port = 5596
     kill_proc_on_port(ser_port)
     kill_proc_on_port(mon_port)
     time.sleep(0.5)
@@ -433,7 +467,7 @@ def main():
             operation_num=2,
             app_name="Calculator",
             app_id="org.interos.calculator",
-            tap_coords=(180, 520),
+            tap_coords=(359, 256),
             present_marker="Initial frame presented to hardware scanout",
             dump_prefix="test_calculator",
             in_app_interactions=[
@@ -451,12 +485,16 @@ def main():
             operation_num=3,
             app_name="Settings",
             app_id="org.interos.settings",
-            tap_coords=(180, 350),
+            tap_coords=(146, 256),
             present_marker="Settings UI presented to scanout buffer",
             dump_prefix="test_settings",
             in_app_interactions=[
-                ("Tap Power & Battery Tab", (228, 140), "tab switched.", "tab_power"),
-                ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", "tab_thermals"),
+                # WHY a card centre and not the old (228,140) strip: Settings has no tab bar, it
+                # draws a two-column grid of category cards, and this point is the middle of the
+                # Power & Battery card as the app lays it out (GRID_Y 348, CARD_H 160, gap 14).
+                # Every one of the seven card centres was tapped on the guest and answered.
+                ("Open the Power & Battery category", (188, 776), "category opened; tab switched.", "tab_power"),
+                ("Return to the Settings landing grid", (48, 48), "returned to the System Space landing grid", "tab_back"),
             ],
             exit_gesture="home_bar"
         )
@@ -468,7 +506,7 @@ def main():
             operation_num=5,
             app_name="Vault",
             app_id="org.interos.vault",
-            tap_coords=(485, 520),
+            tap_coords=(146, 439),
             present_marker="Initial frame presented to hardware scanout",
             dump_prefix="test_vault",
             in_app_interactions=[
@@ -484,7 +522,7 @@ def main():
             operation_num=6,
             app_name="Camera",
             app_id="org.interos.camera",
-            tap_coords=(180, 690),
+            tap_coords=(359, 439),
             present_marker="Initial frame presented to hardware scanout",
             dump_prefix="test_camera",
             in_app_interactions=[
@@ -500,7 +538,7 @@ def main():
             operation_num=7,
             app_name="Dialer",
             app_id="org.interos.dialer",
-            tap_coords=(485, 690),
+            tap_coords=(572, 256),
             present_marker="Initial frame presented to hardware scanout",
             dump_prefix="test_dialer",
             in_app_interactions=[
@@ -516,7 +554,7 @@ def main():
             operation_num=8,
             app_name="Browser",
             app_id="org.interos.browser",
-            tap_coords=(180, 860),
+            tap_coords=(572, 439),
             present_marker="Browser canvas presented to scanout buffer.",
             dump_prefix="test_browser",
             in_app_interactions=[
@@ -532,7 +570,7 @@ def main():
             operation_num=9,
             app_name="Messages",
             app_id="org.interos.messages",
-            tap_coords=(485, 860),
+            tap_coords=(146, 622),
             present_marker="Messages canvas presented to scanout buffer.",
             dump_prefix="test_messages",
             in_app_interactions=[
@@ -548,7 +586,7 @@ def main():
             operation_num=10,
             app_name="Calendar",
             app_id="org.interos.calendar",
-            tap_coords=(180, 1030),
+            tap_coords=(359, 622),
             present_marker="Calendar canvas presented to scanout buffer.",
             dump_prefix="test_calendar",
             exit_gesture="swipe_up"
@@ -561,7 +599,7 @@ def main():
             operation_num=11,
             app_name="Music",
             app_id="org.interos.music",
-            tap_coords=(485, 1030),
+            tap_coords=(572, 622),
             present_marker="Music canvas presented to scanout buffer.",
             dump_prefix="test_music",
             in_app_interactions=[
@@ -577,11 +615,17 @@ def main():
             operation_num=12,
             app_name="Files",
             app_id="org.interos.file_manager",
-            tap_coords=(430, 260),
+            tap_coords=(146, 805),
             present_marker="Files UI presented to scanout buffer",
             dump_prefix="test_files",
             in_app_interactions=[
-                ("Tap Images category shortcut", (260, 370), "Category filter shortcut switched", "shortcut_images"),
+                # WHY (360, 803) and not the old (260, 370): Files has no shortcut strip at
+                # the top of its home screen. Its four category rows begin at CATEGORY_Y0 668
+                # and the first is 100 tall while the three under it are 70, so the Photos
+                # row - the images shortcut - spans 768..838 across the 36..684 column. This
+                # point is the middle of that row, and the guest answered it with the
+                # app's own "Category filter shortcut switched." line.
+                ("Tap Images category shortcut", (360, 803), "Category filter shortcut switched", "shortcut_images"),
             ],
             exit_gesture="home_bar"
         )
@@ -593,7 +637,7 @@ def main():
             operation_num=13,
             app_name="Gallery",
             app_id="org.interos.gallery",
-            tap_coords=(410, 1180),
+            tap_coords=(359, 805),
             present_marker="Gallery UI presented to scanout buffer",
             dump_prefix="test_gallery",
             in_app_interactions=[
@@ -609,7 +653,7 @@ def main():
             operation_num=14,
             app_name="Notes",
             app_id="org.interos.notes",
-            tap_coords=(550, 1180),
+            tap_coords=(572, 805),
             present_marker="Initial frame presented via hardware scanout",
             dump_prefix="test_notes",
             exit_gesture="home_bar"

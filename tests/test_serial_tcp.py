@@ -26,6 +26,14 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
 
 qemu_exe = find_qemu("qemu-system-x86_64.exe")
 kernel_img = os.path.abspath(r"target\inter-os-bios.img")
+data_img = os.path.abspath(r"target\\test_serial_data.img")
+if not os.path.exists(data_img):
+    # The gallery writes its capture under /storage, which only exists once a
+    # data disk is attached, so the walkthrough boots with one. It is snapshotted
+    # like the boot disk, so no run leaves bytes behind.
+    with open(data_img, "wb") as fh:
+        fh.write(b"\0" * (64 * 1024 * 1024))
+
 
 k1 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
 k2 = os.path.abspath(r"target\x86_64-unknown-none\debug\kernel")
@@ -41,27 +49,39 @@ def kill_proc_on_port(p):
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    proc = psutil.Process(conn.pid)
+                    # A foreign owner means another device is using this port;
+                    # leave it running and let the bind below fail loudly.
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
                 except Exception:
                     pass
     except Exception:
         pass
 
-port = 5555
+# WHY not 5555/5556: those are the Android emulator's console band, and a guest
+# serial socket there can bind over - or talk to - somebody else's device.
+port = 5593
 kill_proc_on_port(port)
 time.sleep(0.5)
 args = [
     qemu_exe,
-    "-drive", f"format=raw,file={kernel_img}",
-    "-snapshot",
+    "-machine", "q35",
+    "-cpu", "qemu64",
+    "-device", "piix3-ide,id=ide",
+    "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
+    "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+    "-drive", f"file={data_img},format=raw,if=none,id=datad,snapshot=on",
+    "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
     "-m", "1024M",
     "-display", "none",
     "-chardev", f"socket,id=ser0,host=127.0.0.1,port={port},server=on,wait=off",
     "-serial", "chardev:ser0",
-    "-no-reboot"
+    "-no-reboot",
 ]
 
 proc = subprocess.Popen(args)
+walkthrough_failure = None
 time.sleep(0.5)
 
 lines = []
@@ -135,8 +155,8 @@ try:
                             send_and_wait_for(b"TAP 360 720\n", "Notifications cleared")
                             print("[TEST STEP 7] Swiping up from middle (360 800 -> 360 400) to open App Drawer...")
                             send_and_wait_for(b"SWIPE 360 800 360 400 5\n", "App Drawer opened")
-                            print("[TEST STEP 8] Tapping Tools tab at (540, 160)...")
-                            send_and_wait_for(b"TAP 540 160\n", "App drawer category tab switched")
+                            print("[TEST STEP 8] Tapping Tools tab at (540, 137)...")
+                            send_and_wait_for(b"TAP 540 137\n", "App drawer category tab switched")
                             print("[TEST STEP 9] Tapping bottom home pill at (360, 1420) to return Home...")
                             send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from App Drawer")
                             print("[TEST STEP 10] Tapping universal search bar at (360, 700) to open Global search...")
@@ -151,34 +171,36 @@ try:
                             send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from Live Widgets")
                             print("[TEST STEP 15] Swiping up from middle to open App Drawer...")
                             send_and_wait_for(b"SWIPE 360 800 360 400 5\n", "App Drawer opened")
-                            print("[TEST STEP 16] Tapping Files app at (430, 260) in App Drawer to launch...")
-                            send_and_wait_for(b"TAP 430 260\n", "Files UI presented to scanout buffer")
-                            print("[TEST STEP 17] Tapping Images category shortcut at (260, 280) in Files...")
-                            send_and_wait_for(b"TAP 260 370\n", "Category filter shortcut switched")
-                            print("[TEST STEP 18] Tapping bottom home pill at (360, 1420) to exit Files back to Launcher...")
+                            print("[TEST STEP 16] Tapping the home pill to leave the App Drawer...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from App Drawer")
+                            print("[TEST STEP 17] Tapping the Files dock tile at (130, 1110) to launch...")
+                            send_and_wait_for(b"TAP 130 1110\n", "Files UI presented to scanout buffer")
+                            print("[TEST STEP 18] Tapping the first Files category row at (260, 720)...")
+                            send_and_wait_for(b"TAP 260 720\n", "Category filter shortcut switched")
+                            print("[TEST STEP 19] Tapping the home pill to exit Files back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
-                            print("[TEST STEP 19] Tapping Gallery dock item at (410, 1180) to launch Gallery...")
-                            send_and_wait_for(b"TAP 410 1180\n", "Gallery UI presented to scanout buffer")
-                            print("[TEST STEP 20] Tapping photo grid at (360, 550) in Gallery...")
-                            send_and_wait_for(b"TAP 360 550\n", "no media items in storage")
-                            print("[TEST STEP 21] Tapping Wallpapers category chip at (200, 175) in Gallery...")
+                            print("[TEST STEP 20] Launching Gallery through the guest bridge...")
+                            send_and_wait_for(b"APP_LAUNCH gallery\n", "Guest application launched id=gallery")
+                            print("[TEST STEP 21] Tapping the Gallery capture button at (612, 58)...")
+                            send_and_wait_for(b"TAP 612 58\n", "Screenshot saved to /storage/photos")
+                            print("[TEST STEP 22] Tapping the Wallpapers filter chip at (200, 175) in Gallery...")
                             send_and_wait_for(b"TAP 200 175\n", "Gallery filter chip switched")
-                            print("[TEST STEP 22] Tapping bottom home pill at (360, 1420) to exit Gallery back to Launcher...")
-                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
-                            print("[TEST STEP 23] Tapping Calculator card on HomeScreen at (180, 520) to launch...")
-                            send_and_wait_for(b"TAP 180 520\n", "Initial frame presented to hardware scanout")
-                            print("[TEST STEP 24] Tapping digit '7' on Calculator keypad at (100, 680)...")
+                            print("[TEST STEP 23] Tapping the home pill to exit Gallery...")
+                            send_and_wait_for(b"TAP 360 1420\n", "[GALLERY] Home gesture pressed")
+                            print("[TEST STEP 24] Launching Calculator through the guest bridge...")
+                            send_and_wait_for(b"APP_LAUNCH calculator\n", "Guest application launched id=calculator")
+                            print("[TEST STEP 25] Tapping digit '7' on Calculator keypad at (100, 680)...")
                             send_and_wait_for(b"TAP 100 680\n", "Keypad digit pressed")
-                            print("[TEST STEP 25] Tapping bottom home pill at (360, 1420) to exit Calculator back to Launcher...")
-                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
-                            print("[TEST STEP 26] Tapping Dialer card on HomeScreen at (480, 690) to launch...")
-                            send_and_wait_for(b"TAP 480 690\n", "Initial frame presented to hardware scanout")
-                            print("[TEST STEP 27] Tapping digit '1' on Dialer keypad at (140, 470)...")
+                            print("[TEST STEP 26] Tapping the home pill to exit Calculator...")
+                            send_and_wait_for(b"TAP 360 1420\n", "[CALCULATOR] Home gesture tapped")
+                            print("[TEST STEP 27] Launching Dialer through the guest bridge...")
+                            send_and_wait_for(b"APP_LAUNCH dialer\n", "Guest application launched id=dialer")
+                            print("[TEST STEP 28] Tapping digit '1' on Dialer keypad at (140, 470)...")
                             send_and_wait_for(b"TAP 140 470\n", "Keypad digit entered")
-                            print("[TEST STEP 28] Tapping Call button at (360, 1060)...")
+                            print("[TEST STEP 29] Tapping Call button at (360, 1060)...")
                             send_and_wait_for(b"TAP 360 1060\n", "Call request rejected by telephony service")
-                            print("[TEST STEP 29] Tapping bottom home pill at (360, 1420) to exit Dialer back to Launcher...")
-                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
+                            print("[TEST STEP 30] Tapping the home pill to exit Dialer...")
+                            send_and_wait_for(b"TAP 360 1420\n", "[DIALER APP] Home gesture pressed")
                             print("[TEST COMPLETE] All interactive gesture steps completed.")
                             lines.append("[TEST COMPLETE]")
                             break
@@ -186,6 +208,13 @@ try:
                     break
             except socket.timeout:
                 continue
+except AssertionError as failure:
+    # WHY the AssertionError is kept rather than printed and dropped: the walkthrough
+    # steps assert on the guest log, and this handler reported their failure as a socket
+    # error and exited 0, so the suite passed while every step after the first missed
+    # tap had never run.
+    walkthrough_failure = str(failure)
+
 except Exception as e:
     print(f"Socket error: {e}")
 finally:
@@ -199,3 +228,11 @@ print(f"Total lines captured: {len(lines)}")
 for l in lines:
     if any(k in l for k in ["[TEST]", "SDHCI", "Goodix", "SimpleFB", "PANIC", "assertion", "[TEST STEP", "[TEST COMPLETE"]):
         print(l)
+
+# WHY the walkthrough decides the exit code: reaching the end of the serial loop is not
+# proof the taps landed, and a suite that prints its report and exits 0 while half its
+# steps timed out is worse than one that never ran.
+if walkthrough_failure:
+    raise SystemExit(f"Interactive walkthrough failed: {walkthrough_failure}")
+if not any("[TEST COMPLETE]" in l for l in lines):
+    raise SystemExit("Interactive walkthrough never reached its final step")

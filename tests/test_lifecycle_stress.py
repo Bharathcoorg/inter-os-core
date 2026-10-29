@@ -38,7 +38,11 @@ def kill_proc_on_port(p):
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    proc = psutil.Process(conn.pid)
+                    # A foreign owner means another device is using this port;
+                    # leave it running and let the bind below fail loudly.
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
                 except Exception:
                     pass
     except Exception:
@@ -132,7 +136,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=2,
         app_name="Calculator",
         app_id="org.interos.calculator",
-        tap_coords=(180, 520),
+        tap_coords=(359, 256),
         present_marker="Initial frame presented to hardware scanout",
         dump_prefix=f"stress_iter{iter_num}_calc",
         in_app_interactions=[
@@ -150,12 +154,16 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=3,
         app_name="Settings",
         app_id="org.interos.settings",
-        tap_coords=(180, 350),
+        tap_coords=(146, 256),
         present_marker="Settings UI presented to scanout buffer",
         dump_prefix=f"stress_iter{iter_num}_settings",
         in_app_interactions=[
-            ("Tap Power & Battery Tab", (228, 140), "tab switched.", None),
-            ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", None),
+            # WHY these points: the Settings landing surface is a card grid, not a tab strip, so the
+            # Power & Battery card centre (188,776) and the SDK back control (48,48) are the two taps
+            # that answer - both measured on the guest, where all seven card centres opened a
+            # category and the back control returned to the landing grid.
+            ("Open the Power & Battery category", (188, 776), "category opened; tab switched.", None),
+            ("Return to the Settings landing grid", (48, 48), "returned to the System Space landing grid", None),
         ],
         exit_gesture="home_bar"
     )
@@ -167,7 +175,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=5,
         app_name="Vault",
         app_id="org.interos.vault",
-        tap_coords=(485, 520),
+        tap_coords=(146, 439),
         present_marker="Initial frame presented to hardware scanout",
         dump_prefix=f"stress_iter{iter_num}_vault",
         in_app_interactions=[
@@ -183,7 +191,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=6,
         app_name="Camera",
         app_id="org.interos.camera",
-        tap_coords=(180, 690),
+        tap_coords=(359, 439),
         present_marker="Initial frame presented to hardware scanout",
         dump_prefix=f"stress_iter{iter_num}_camera",
         exit_gesture="swipe_up"
@@ -196,7 +204,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=7,
         app_name="Dialer",
         app_id="org.interos.dialer",
-        tap_coords=(485, 690),
+        tap_coords=(572, 256),
         present_marker="Initial frame presented to hardware scanout",
         dump_prefix=f"stress_iter{iter_num}_dialer",
         in_app_interactions=[
@@ -212,7 +220,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=8,
         app_name="Browser",
         app_id="org.interos.browser",
-        tap_coords=(180, 860),
+        tap_coords=(572, 439),
         present_marker="Browser canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_browser",
         exit_gesture="back"
@@ -225,7 +233,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=9,
         app_name="Messages",
         app_id="org.interos.messages",
-        tap_coords=(485, 860),
+        tap_coords=(146, 622),
         present_marker="Messages canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_messages",
         exit_gesture="back"
@@ -238,7 +246,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=10,
         app_name="Music",
         app_id="org.interos.music",
-        tap_coords=(485, 1030),
+        tap_coords=(572, 622),
         present_marker="Music canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_music",
         exit_gesture="swipe_up"
@@ -251,7 +259,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         operation_num=11,
         app_name="Calendar",
         app_id="org.interos.calendar",
-        tap_coords=(180, 1030),
+        tap_coords=(359, 622),
         present_marker="Calendar canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_calendar",
         exit_gesture="swipe_up"

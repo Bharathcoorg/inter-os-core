@@ -33,7 +33,9 @@ def kill_proc_on_port(port):
         try:
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
-                 f"(Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue).OwningProcess"],
+                 f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
+                 "ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | "
+                 "Where-Object { $_.ProcessName -like '*qemu*' } | ForEach-Object { $_.Id }"],
                 capture_output=True, text=True, timeout=5
             )
             for line in res.stdout.splitlines():
@@ -195,9 +197,16 @@ def main():
     print("[TEST] Unlocked to HomeScreen!")
 
     time.sleep(1.0)
-    # 1. Tap Settings card on HomeScreen at (180, 350)
-    print("[TEST] Launching Settings from HomeScreen (TAP 180 350)...")
-    reader.send("TAP 180 350")
+    # 1. Open Settings the way a person does: the Apps tile on the dock, then the
+    # Settings cell in the drawer. WHY not the serial launch bridge: the bridge
+    # starts the application as the kernel's child, so the shell never reaps it -
+    # and re-reading the wallpaper store is something the shell only does when it
+    # regains the foreground, which is the behaviour this test exists to verify.
+    print("[TEST] Opening the App Drawer (TAP 590 1110)...")
+    reader.send("TAP 590 1110")
+    assert reader.wait_for("App Drawer opened", timeout=25.0, print_filter=["LAUNCHER", "INPUT"]), "App Drawer did not open!"
+    print("[TEST] Launching Settings from the drawer (TAP 146 256)...")
+    reader.send("TAP 146 256")
     assert reader.wait_for("Settings UI presented to scanout buffer", timeout=35.0, print_filter=["SETTINGS", "LAUNCHER"]), "Settings did not present UI!"
     print("[TEST] Settings app launched and UI presented!")
 
