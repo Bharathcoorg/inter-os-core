@@ -354,7 +354,11 @@ def main():
         "-device", "piix3-ide,id=ide",
         "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
         "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
-        "-drive", f"file={data_disk},format=raw,if=none,id=datad",
+        # WHY the snapshot: this suite boots the shared data disk, and an
+        # application that writes during the run used to leave its marks on the
+        # master image every device starts from. The overlay keeps the run
+        # hermetic and the master image as it was built.
+        "-drive", f"file={data_disk},format=raw,if=none,id=datad,snapshot=on",
         "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
         "-m", "1024M",
         "-display", "none",
