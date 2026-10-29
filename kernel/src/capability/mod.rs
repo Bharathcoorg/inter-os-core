@@ -155,6 +155,27 @@ pub enum CapabilityType {
     /// kernel for the built-in apps that need it and no third-party manifest
     /// can ask for it.
     CryptoEntropyRead,
+    /// Permission to read the TLS trust anchors the operator installed on this
+    /// device.
+    ///
+    /// WHY this is its own capability: reading an anchor is the act that turns a
+    /// key the device holds into a chain a client is willing to accept, so it has
+    /// to be grantable to exactly the programs that verify certificates and to
+    /// nothing else. It is read-only and grants no authority over any object,
+    /// which is the argument that made `RealtimeClockRead` and
+    /// `CryptoEntropyRead` the right shape for the clock and the TRNG.
+    ///
+    /// WHY there is no matching write: no syscall installs an anchor. A trust
+    /// anchor is device-wide authority over what every program on the device may
+    /// believe about a key, so an application that could add one could mint its
+    /// own root and every other application would inherit it. Installation stays
+    /// the console's act, exactly as a `.rapp` publisher root is installed by the
+    /// device owner rather than by a package.
+    ///
+    /// Like `CryptoEntropyRead`, this sits outside the RAPP manifest ladder: a
+    /// third-party manifest cannot ask for it, and the kernel mints it for the
+    /// built-in clients that verify chains.
+    TlsTrustRead,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -196,6 +217,7 @@ impl CapabilityType {
             CapabilityType::WebViewBridge => 36,
             CapabilityType::WebViewService => 37,
             CapabilityType::CryptoEntropyRead => 38,
+            CapabilityType::TlsTrustRead => 39,
         }
     }
 
@@ -234,6 +256,7 @@ impl CapabilityType {
             36 => Some(CapabilityType::WebViewBridge),
             37 => Some(CapabilityType::WebViewService),
             38 => Some(CapabilityType::CryptoEntropyRead),
+            39 => Some(CapabilityType::TlsTrustRead),
             _ => None,
         }
     }
@@ -274,6 +297,7 @@ impl CapabilityType {
             CapabilityType::WebViewBridge => "webview.bridge",
             CapabilityType::WebViewService => "webview.service",
             CapabilityType::CryptoEntropyRead => "crypto.entropy",
+            CapabilityType::TlsTrustRead => "tls.trust.read",
         }
     }
 
@@ -313,6 +337,7 @@ impl CapabilityType {
             "webview.bridge" => Some(CapabilityType::WebViewBridge),
             "webview.service" => Some(CapabilityType::WebViewService),
             "crypto.entropy" => Some(CapabilityType::CryptoEntropyRead),
+            "tls.trust.read" => Some(CapabilityType::TlsTrustRead),
             _ => None,
         }
     }
@@ -1681,13 +1706,13 @@ mod tests {
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
-            31, 32, 33, 34, 35, 36, 37, 38,
+            31, 32, 33, 34, 35, 36, 37, 38, 39,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 39, 999] {
+        for invalid in [19, 20, 21, 22, 23, 40, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
         assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");
@@ -1698,6 +1723,9 @@ mod tests {
         // it round-trips here and is still refused by package verification.
         assert_eq!(CapabilityType::CryptoEntropyRead.as_str(), "crypto.entropy");
         assert_eq!(CapabilityType::from_name("crypto.entropy"), Some(CapabilityType::CryptoEntropyRead));
+        // 39 is the trust-anchor read, and round-trips for the same reason.
+        assert_eq!(CapabilityType::TlsTrustRead.as_str(), "tls.trust.read");
+        assert_eq!(CapabilityType::from_name("tls.trust.read"), Some(CapabilityType::TlsTrustRead));
     }
 
     #[test]

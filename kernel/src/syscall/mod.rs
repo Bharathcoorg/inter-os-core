@@ -301,6 +301,10 @@ pub enum SyscallNumber {
     Poll = 159,
     ConsentResolve = 160,
     FsMkdir = 161,
+    /// How many TLS trust anchors the operator has installed on this device.
+    TlsTrustCount = 162,
+    /// Copies one installed TLS trust anchor's DER into the caller's buffer.
+    TlsTrustRead = 163,
 }
 
 /// System call result status codes.
@@ -2625,6 +2629,31 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             };
             match sys_fs_mkdir(cap_slot, path) {
                 Ok(()) => SyscallResult::Success as i64,
+                Err(e) => e as i64,
+            }
+        }
+        162 => {
+            // TlsTrustCount: the number of anchors this device's operator installed.
+            match sys_tls_trust_count() {
+                Ok(count) => count as i64,
+                Err(e) => e as i64,
+            }
+        }
+        163 => {
+            // TlsTrustRead: a1 = anchor position, a2 = out_buf_ptr, a3 = out_buf_len
+            let index = a1 as usize;
+            let len = a3 as usize;
+            if len == 0 || len > crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES];
+            match sys_tls_trust_read(index, &mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a2, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -4973,6 +5002,53 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
         5 => { let kms = crate::drivers::display_kms::DRM_KMS.lock(); Ok(kms.powered as u32) }
         _ => Err(SyscallResult::InvalidArguments),
     }
+}
+
+/// How many TLS trust anchors this device's operator has installed.
+///
+/// WHY this is readable at all: a client that is about to verify a chain has to
+/// be able to tell "this device holds no anchor" from "this device holds one and
+/// the peer's key is not it". Those are different answers for the page the browser
+/// shows, and without the count the first is invisible.
+pub fn sys_tls_trust_count() -> Result<usize, SyscallResult> {
+    authorize_tls_trust_read()?;
+    Ok(crate::crypto::tls_trust::TLS_TRUST_STORE.lock().len())
+}
+
+/// Copies the anchor at `position` into the caller's buffer.
+///
+/// WHY a refusal rather than a truncated copy: the bytes are a DER certificate,
+/// and half a certificate parses as nothing. A caller that offered too small a
+/// buffer has to hear that, not receive a shorter answer it will then fail to
+/// parse and attribute to the peer.
+pub fn sys_tls_trust_read(position: usize, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    authorize_tls_trust_read()?;
+    let store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+    let Some(der) = store.anchor_der(position) else {
+        return Err(SyscallResult::TargetNotFound);
+    };
+    if out_buf.len() < der.len() {
+        return Err(SyscallResult::InvalidArgument);
+    }
+    out_buf[..der.len()].copy_from_slice(der);
+    Ok(der.len())
+}
+
+/// WHY the narrow capability: reading an anchor is the act that turns a
+/// device-held public key into a chain a client may accept, so it is grantable to
+/// the programs that verify certificates and to nothing else. It is read-only and
+/// authorises no object, which is the argument that shaped `RealtimeClockRead` and
+/// `CryptoEntropyRead`. There is no matching write guard because no syscall writes
+/// this store: only the operator's console does.
+fn authorize_tls_trust_read() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table
+        .authorize_capability(CapabilityType::TlsTrustRead, Rights::READ)
+        .then_some(())
+        .ok_or(SyscallResult::PermissionDenied)?;
+    drop(sched);
+    Ok(())
 }
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.

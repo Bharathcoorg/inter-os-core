@@ -1476,6 +1476,18 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // WHY the trust anchors: a chain verifies only against an anchor the operator
+    // installed on this device, and the browser is the only client that walks a
+    // chain. Read-only -- the store has no write path any application can reach,
+    // so this grant cannot install, replace or withdraw a root, and the browser
+    // that holds it still refuses every certificate on a device where none was
+    // installed.
+    caps.insert(Capability {
+        id: CapabilityId(2315),
+        cap_type: CapabilityType::TlsTrustRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
     let id = spawn_user_process_with_parent(
         "app_browser",
         APP_BROWSER_ELF,
