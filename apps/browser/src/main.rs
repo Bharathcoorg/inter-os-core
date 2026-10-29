@@ -419,7 +419,7 @@ fn fetch_over_tls(
     dst_ip: [u8; 4],
     dst_port: u16,
     local_port: u16,
-    server_name: &str,
+    server_name: &'static str,
     request: &[u8],
     window: usize,
 ) -> FetchOutcome {
@@ -484,35 +484,16 @@ fn fetch_over_tls(
         return outcome;
     }
 
-    // Prepare TLS 1.3 configuration in static .bss
+    // The name was staged once, on the navigation path, by
+    // `set_current_server_name`, and the caller hands back exactly those bytes.
     //
-    // WHY the name is checked rather than truncated: the name the client
-    // advertises in SNI and the identity the verifier pins have to be the
-    // whole name. The buffer holds 128 bytes, so a longer name is refused
-    // here instead of being cut to a prefix, because a certificate issued
-    // for the prefix is not a certificate for the host that was dialled.
-    let host_str: &'static str = unsafe {
-        let name_bytes = server_name.as_bytes();
-        if name_bytes.len() > TLS_HOSTNAME_CAPACITY {
-            outcome.kind = FetchErrorKind::TlsNameRefused;
-            return outcome;
-        }
-        let buf = &mut *core::ptr::addr_of_mut!(TLS_HOSTNAME_BUF);
-        buf[..name_bytes.len()].copy_from_slice(name_bytes);
-        TLS_HOSTNAME_LEN = name_bytes.len();
-        let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
-        // WHY this is a checked conversion: the bytes came from a `&str`, so
-        // they are text, and an unchecked conversion over a buffer another
-        // path may have written would be undefined behaviour rather than a
-        // wrong answer.
-        match core::str::from_utf8(&buf[..TLS_HOSTNAME_LEN]) {
-            Ok(name) => name,
-            Err(_) => {
-                outcome.kind = FetchErrorKind::TlsNameRefused;
-                return outcome;
-            }
-        }
-    };
+    // WHY this path no longer copies them into the buffer again: the argument it
+    // was given *is* a borrow of that buffer, so the copy wrote a block of bytes
+    // onto itself, and `copy_nonoverlapping`'s overlap check panicked before a
+    // single TLS byte was read. The buffer has one writer so that can never
+    // happen again, and a name that did not fit or was not text was already
+    // refused by that writer before this function was reached.
+    let host_str: &'static str = server_name;
 
     unsafe {
         *core::ptr::addr_of_mut!(TLS_VERIFIER) = tls::DefaultCertVerifier::for_host(host_str);
@@ -640,11 +621,12 @@ fn fetch_over_tcp(
         // not store is a name it cannot honestly pin. Falling back to another
         // name would check the certificate against something the user never
         // asked for.
-        let host = unsafe {
+        let host: Option<&'static str> = unsafe {
             if TLS_HOSTNAME_REFUSED {
                 None
             } else {
-                core::str::from_utf8(&TLS_HOSTNAME_BUF[..TLS_HOSTNAME_LEN]).ok()
+                let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
+                core::str::from_utf8(&buf[..TLS_HOSTNAME_LEN]).ok()
             }
         };
         let Some(host_str) = host else {
