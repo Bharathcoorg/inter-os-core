@@ -55,6 +55,13 @@ pub enum FetchErrorKind {
     /// certificate's validity window at all, which is a different fact -- and
     /// the fix belongs to the clock, not to the peer's key.
     TlsClockUnavailable,
+    /// The kernel would not hand over the device's trust anchors.
+    ///
+    /// WHY this is not the empty store: an empty store is a fact the browser can
+    /// read and report ("no trust anchor"), while a refused read means it does not
+    /// know what the device holds. Saying "no anchor" on a refusal would describe
+    /// an anchor the operator may well have installed.
+    TlsTrustStoreRefused,
 }
 
 /// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.

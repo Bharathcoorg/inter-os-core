@@ -372,13 +372,17 @@ pub fn set_current_server_name(name: &[u8]) {
     }
 }
 
-/// Whether the browser's certificate verifier holds no trust anchor at all.
+/// Whether the verifier this connection was built with holds no trust anchor.
 ///
-/// WHY the browser asks its own store: the shipped verifier starts with an
-/// empty root list, so every certificate chain is refused. That is a fact
-/// about the device, and a screen that says "the certificate was rejected"
-/// when the device never had a root to accept it with is describing a fault
-/// it did not observe.
+/// WHY the browser asks its own verifier: the anchor list comes from the device,
+/// and a device whose operator never installed one has none -- the OS ships no
+/// root. That is a fact about this device, and a screen that says "the certificate
+/// was rejected" when nothing could ever have been accepted here is describing a
+/// fault the browser did not observe.
+///
+/// WHY it reads the verifier rather than the kernel again: the verifier was built
+/// from the store this connection was allowed to read, so asking it is asking what
+/// the handshake actually judged with.
 fn tls_trust_store_is_empty() -> bool {
     unsafe { (&(*core::ptr::addr_of!(TLS_VERIFIER)).trusted_roots).is_empty() }
 }
@@ -510,9 +514,26 @@ fn fetch_over_tls(
         }
     };
 
+    // WHY the anchors are read again for every connection: a chain verifies only
+    // against an anchor the operator installed on this device, and that happens
+    // from the console at a moment of the operator's choosing. A store read once at
+    // startup would keep refusing a chain the device could verify an instant later.
+    // An answer of "none" is not a fault to report here -- it is the device holding
+    // no anchor, which the page says in those words below.
+    let device_anchors = match tls::load_device_trust_anchors() {
+        Ok(roots) => roots,
+        Err(_) => {
+            outcome.kind = FetchErrorKind::TlsTrustStoreRefused;
+            let _ = std::tcp_close(connection);
+            return outcome;
+        }
+    };
+
     unsafe {
         *core::ptr::addr_of_mut!(TLS_VERIFIER) =
-            tls::DefaultCertVerifier::for_host(host_str).with_clock(now_unix);
+            tls::DefaultCertVerifier::for_host(host_str)
+                .with_roots(device_anchors)
+                .with_clock(now_unix);
     }
 
     let mut random = [0u8; 32];
@@ -1250,6 +1271,10 @@ const BODY_TLS_CLOCK_UNAVAILABLE: &[u8] = b"The device's clock answered no insta
 had nothing to measure a certificate's expiry against. The connection was closed before the \
 handshake: accepting a key whose validity window cannot be judged would carry the padlock past \
 a check the browser never made.";
+const BODY_TLS_TRUST_STORE_REFUSED: &[u8] = b"The kernel refused to hand this browser the trust \
+anchors installed on the device, so the browser cannot tell what it is allowed to trust. The \
+connection was closed before the handshake: verifying against a store the browser was not \
+allowed to read would report a decision it never had the information to make.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
@@ -5187,6 +5212,11 @@ impl BrowserApp {
                         self.connection_failure = ConnectionFailure::TlsClockUnavailable;
                         std::log("[BROWSER APP] The RTC answered no instant, so no certificate's expiry could be judged; the connection was closed before the handshake.").ok();
                     }
+                    FetchErrorKind::TlsTrustStoreRefused => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsTrustStoreRefused;
+                        std::log("[BROWSER APP] The kernel refused the trust-anchor read, so the device's store is unknown; the connection was closed before the handshake.").ok();
+                    }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
                         std::log("[BROWSER APP] The gateway returned zero bytes. No document data was received.").ok();
@@ -5933,6 +5963,7 @@ impl Frame {
                 ConnectionFailure::TlsNameRefused => (b"Address refused", BODY_TLS_NAME_REFUSED),
                 ConnectionFailure::TlsEntropyRefused => (b"No key entropy", BODY_TLS_ENTROPY_REFUSED),
                 ConnectionFailure::TlsClockUnavailable => (b"No clock reading", BODY_TLS_CLOCK_UNAVAILABLE),
+                ConnectionFailure::TlsTrustStoreRefused => (b"Trust store unreadable", BODY_TLS_TRUST_STORE_REFUSED),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -7732,6 +7763,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::TlsNameRefused => b"ADDRESS REFUSED",
                     ConnectionFailure::TlsEntropyRefused => b"NO KEY ENTROPY",
                     ConnectionFailure::TlsClockUnavailable => b"NO CLOCK READING",
+                    ConnectionFailure::TlsTrustStoreRefused => b"TRUST STORE REFUSED",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

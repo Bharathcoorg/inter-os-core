@@ -261,6 +261,10 @@ pub enum SyscallNumber {
     Poll = 159,
     ConsentResolve = 160,
     FsMkdir = 161,
+    /// How many TLS trust anchors the operator installed on this device.
+    TlsTrustCount = 162,
+    /// Reads one installed TLS trust anchor's DER into the caller's buffer.
+    TlsTrustRead = 163,
 }
 
 // -----------------------------------------------------------------------------
@@ -1148,6 +1152,57 @@ pub fn get_random(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(
             SyscallNumber::GetRandom,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// The largest anchor a client can read, which is the kernel's own anchor limit.
+///
+/// WHY repeated here rather than imported: kernel and userspace do not share a
+/// crate, so the two numbers are pinned across the boundary by
+/// `tests/test_tls_trust_contract.py` rather than by the compiler.
+pub const TLS_TRUST_ANCHOR_BYTES: usize = 512;
+
+/// How many anchors the device can hand out, which is the kernel's store size.
+pub const TLS_TRUST_MAX_ANCHORS: usize = 4;
+
+/// Asks the kernel how many TLS trust anchors this device's operator installed.
+///
+/// WHY the count is worth a syscall: a client about to verify a chain has to tell
+/// "this device holds no anchor" apart from "this device holds one and the peer's
+/// key is not it". Those are different answers to give a person, and without the
+/// count the first is invisible.
+pub fn tls_trust_count() -> Result<usize, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::TlsTrustCount, 0) };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Reads the anchor at `position` into `out_buf`, returning its length.
+///
+/// WHY the buffer has to be able to hold a whole anchor: the kernel refuses to
+/// hand back a truncated certificate instead of a shorter one, because half a DER
+/// would fail to parse and the failure would be blamed on the peer.
+///
+/// WHY the result must not be ignored: reading an anchor needs the
+/// `tls.trust.read` capability, which the kernel grants per built-in app rather
+/// than through a manifest, so an ungranted caller is refused and its buffer is
+/// left as it was.
+pub fn tls_trust_read(position: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::TlsTrustRead,
+            position as u64,
             out_buf.as_mut_ptr() as u64,
             out_buf.len() as u64,
         )

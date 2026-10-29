@@ -1264,6 +1264,9 @@ pub enum ConnectionFailure {
     TlsEntropyRefused,
     /// The wall clock answered nothing, so no certificate's expiry could be judged.
     TlsClockUnavailable,
+    /// The kernel refused the read that lists this device's trust anchors, so the
+    /// browser does not know what the device trusts.
+    TlsTrustStoreRefused,
 }
 
 /// Why document decoding or protocol handling failed.
