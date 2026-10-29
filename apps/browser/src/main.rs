@@ -495,8 +495,24 @@ fn fetch_over_tls(
     // refused by that writer before this function was reached.
     let host_str: &'static str = server_name;
 
+    // WHY the clock is part of the verifier: a certificate's expiry is an
+    // absolute instant, and a verifier that is not given one can only confirm
+    // that two timestamps are present -- so a key that ran out years ago would
+    // verify. The RTC is the only source of that instant the guest has, so a
+    // reading that does not arrive ends the connection here rather than
+    // continuing with a date the browser invented.
+    let now_unix = match std::rtc::Reading::now().and_then(|reading| reading.unix_utc()) {
+        Some(instant) => instant,
+        None => {
+            outcome.kind = FetchErrorKind::TlsClockUnavailable;
+            let _ = std::tcp_close(connection);
+            return outcome;
+        }
+    };
+
     unsafe {
-        *core::ptr::addr_of_mut!(TLS_VERIFIER) = tls::DefaultCertVerifier::for_host(host_str);
+        *core::ptr::addr_of_mut!(TLS_VERIFIER) =
+            tls::DefaultCertVerifier::for_host(host_str).with_clock(now_unix);
     }
 
     let mut random = [0u8; 32];
@@ -1230,6 +1246,10 @@ const BODY_TLS_ENTROPY_REFUSED: &[u8] = b"The device's random-number service ref
 that seed a secure connection, so the browser had no key to offer. The connection was closed \
 before a single handshake byte was sent; a key folded out of the boot clock was refused rather \
 than used, because both peers could have derived it.";
+const BODY_TLS_CLOCK_UNAVAILABLE: &[u8] = b"The device's clock answered no instant, so the browser \
+had nothing to measure a certificate's expiry against. The connection was closed before the \
+handshake: accepting a key whose validity window cannot be judged would carry the padlock past \
+a check the browser never made.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
@@ -5162,6 +5182,11 @@ impl BrowserApp {
                         self.connection_failure = ConnectionFailure::TlsEntropyRefused;
                         std::log("[BROWSER APP] The TRNG refused the reads that seed the TLS handshake; no ClientHello was sent.").ok();
                     }
+                    FetchErrorKind::TlsClockUnavailable => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsClockUnavailable;
+                        std::log("[BROWSER APP] The RTC answered no instant, so no certificate's expiry could be judged; the connection was closed before the handshake.").ok();
+                    }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
                         std::log("[BROWSER APP] The gateway returned zero bytes. No document data was received.").ok();
@@ -5907,6 +5932,7 @@ impl Frame {
                 ConnectionFailure::TlsNoTrustAnchor => (b"No trust anchor", BODY_TLS_NO_TRUST_ANCHOR),
                 ConnectionFailure::TlsNameRefused => (b"Address refused", BODY_TLS_NAME_REFUSED),
                 ConnectionFailure::TlsEntropyRefused => (b"No key entropy", BODY_TLS_ENTROPY_REFUSED),
+                ConnectionFailure::TlsClockUnavailable => (b"No clock reading", BODY_TLS_CLOCK_UNAVAILABLE),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -7705,6 +7731,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::TlsNoTrustAnchor => b"NO TRUST ANCHOR",
                     ConnectionFailure::TlsNameRefused => b"ADDRESS REFUSED",
                     ConnectionFailure::TlsEntropyRefused => b"NO KEY ENTROPY",
+                    ConnectionFailure::TlsClockUnavailable => b"NO CLOCK READING",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

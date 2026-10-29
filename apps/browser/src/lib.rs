@@ -1262,6 +1262,8 @@ pub enum ConnectionFailure {
     TlsNameRefused,
     /// The TRNG refused the reads that seed the handshake, so no hello was sent.
     TlsEntropyRefused,
+    /// The wall clock answered nothing, so no certificate's expiry could be judged.
+    TlsClockUnavailable,
 }
 
 /// Why document decoding or protocol handling failed.

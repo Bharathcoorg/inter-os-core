@@ -48,6 +48,13 @@ pub enum FetchErrorKind {
     /// succeeds and both peers hold a shared secret an observer can derive
     /// from the boot time. A refusal has to look like a refusal.
     TlsEntropyRefused,
+    /// The wall clock answered nothing, so no expiry date could be checked.
+    ///
+    /// WHY this is not folded into a handshake failure: the browser sent no
+    /// certificate rejection and received none. It declined to judge a
+    /// certificate's validity window at all, which is a different fact -- and
+    /// the fix belongs to the clock, not to the peer's key.
+    TlsClockUnavailable,
 }
 
 /// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.
