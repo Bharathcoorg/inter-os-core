@@ -144,11 +144,85 @@ def test_the_console_verbs_are_wired_and_only_answer_their_own_lines():
     assert "handle_tls_trust_command(s)" in src, (
         "the trust handler is defined but never tried by the command dispatcher"
     )
-    for verb in ('"TLS_TRUST_LIST"', '"TLS_TRUST_REVOKE"', '"TLS_TRUST"'):
+    for verb in (
+        '"TLS_TRUST_LIST"',
+        '"TLS_TRUST_REVOKE"',
+        '"TLS_TRUST"',
+        '"TLS_TRUST_BEGIN"',
+        '"TLS_TRUST_CHUNK"',
+        '"TLS_TRUST_COMMIT"',
+    ):
         assert verb in src, f"the console no longer accepts {verb}"
     handler = src.split("fn handle_tls_trust_command")[1].split("\nfn handle_serial_command")[0]
     assert "false" in handler, (
         "the trust handler claims lines that are not its verbs"
+    )
+
+
+def test_an_anchor_bigger_than_a_console_line_arrives_in_chunks():
+    """The store holds 512-byte anchors, and one console line cannot carry one.
+
+    WHY this is a real limit rather than a convenience: a line accumulates at
+    most 511 characters and a 512th discards the whole line, so `TLS_TRUST <hex>`
+    tops out near 250 anchor bytes -- under the 274 bytes a trimmed self-signed
+    Ed25519 root actually measures. Without the chunk verbs the largest anchor
+    the store was built to hold could never be installed.
+    """
+    serial = code_only(read_source("kernel/src/serial.rs"))
+    staging = serial.split("struct AnchorTransfer {")[1].split("}\n")[0]
+    for field in ("der", "received"):
+        assert f"{field}: [u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES]" in staging or \
+               f"{field}: [bool; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES]" in staging, (
+            f"the staging buffer's {field} is no longer bounded by the store's own "
+            "anchor limit, so a chunked transfer could overflow it"
+        )
+    begin = fn_body(serial, "handle_tls_trust_command").split("TLS_TRUST_BEGIN")[1]
+    begin = begin.split("TLS_TRUST_CHUNK")[0]
+    assert "len > crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES" in begin, (
+        "BEGIN accepts an anchor larger than the store, so a declared size the "
+        "staging buffer cannot hold is taken on trust"
+    )
+
+
+def test_a_chunked_anchor_is_framed_inside_one_console_line():
+    """A chunk that outgrows the line is a chunk the console throws away."""
+    serial = code_only(read_source("kernel/src/serial.rs"))
+    match = re.search(r"const ANCHOR_CHUNK_HEX_CHARS: usize = (\d+);", serial)
+    assert match, "the chunk payload is no longer a single bounded constant"
+    chunk_hex = int(match.group(1))
+    assert chunk_hex % 2 == 0, "an odd hex limit splits a byte across two chunks"
+    # "TLS_TRUST_CHUNK " + a three-digit offset + a space + the payload.
+    assert len("TLS_TRUST_CHUNK") + 1 + 3 + 1 + chunk_hex <= 511, (
+        "the largest chunk does not fit the console line, so a whole anchor would "
+        "be installable only by luck about how long its offset field is"
+    )
+    assert chunk_hex >= 2, "the chunk verbs cannot carry an anchor at all"
+
+
+def test_a_half_received_anchor_is_refused_at_commit_rather_than_padded():
+    """The staging buffer starts as zeroes, and a dropped chunk leaves them in.
+
+    WHY the check is at commit: a certificate with bytes quietly replaced by
+    zeroes is still DER-shaped enough to install, and the operator would then
+    watch a chain fail against an anchor the console said was accepted.
+    """
+    body = fn_body(code_only(read_source("kernel/src/serial.rs")), "handle_tls_trust_command")
+    chunk = body.split('"TLS_TRUST_CHUNK"')[1].split('"TLS_TRUST_COMMIT"')[0]
+    assert "offset.checked_add(chunk_len)" in chunk, (
+        "a chunk is written wherever it claims to start, so one line can run past "
+        "the anchor the operator declared"
+    )
+    assert "state.received[offset + i] = true" in chunk, (
+        "received bytes are no longer marked, so commit cannot tell a whole anchor "
+        "from a partial one"
+    )
+    commit = body.split('"TLS_TRUST_COMMIT"')[1]
+    assert ".iter().any(|v| !*v)" in commit, (
+        "commit installs whatever the staging buffer holds, zeroes and all"
+    )
+    assert "transfer.take()" in commit, (
+        "a committed or abandoned transfer stays staged, so the next commit could "
+        "reinstall an anchor the operator already withdrew"
     )
 
 

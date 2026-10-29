@@ -32,7 +32,7 @@ use spin::Mutex;
 /// nothing to keep.
 pub const MAX_TRUSTED_ANCHORS: usize = 4;
 
-/// The largest anchor accepted. A self-signed Ed25519 root DER is roughly 170
+/// The largest anchor accepted. A trimmed self-signed Ed25519 root measures 274
 /// bytes, so this leaves room for a root with a long subject and several
 /// extensions without letting one anchor crowd out the table.
 pub const MAX_ANCHOR_DER_BYTES: usize = 512;

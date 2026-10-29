@@ -77,6 +77,29 @@ struct RappTransfer {
 
 static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 
+/// A trust anchor arriving over more console lines than one line can hold.
+///
+/// WHY a bitmap rather than a running offset: the console is a queue, so the same
+/// chunk can arrive twice -- a person re-sending a line whose acknowledgement
+/// scrolled past. Rewriting the same bytes at the same position is harmless,
+/// while an offset that trusted line order would slide the anchor and store a
+/// certificate that is neither the original nor anything recognisable.
+struct AnchorTransfer {
+    expected_len: usize,
+    der: [u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
+    received: [bool; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
+}
+
+static ANCHOR_TRANSFER: Mutex<Option<AnchorTransfer>> = Mutex::new(None);
+
+/// The most hex one `TLS_TRUST_CHUNK` line may carry.
+///
+/// WHY 240 hex characters, or 120 bytes: a console line accumulates up to 511
+/// characters and one past that discards the whole line, so a chunk leaves room
+/// for the verb and a three-digit offset. It is also under a quarter of the
+/// largest anchor, so even a full 512-byte certificate arrives in five lines.
+const ANCHOR_CHUNK_HEX_CHARS: usize = 240;
+
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
 ///
 /// Avoids `test_loopback()` which panics if external TCP or terminal clients
@@ -998,13 +1021,110 @@ fn handle_rapp_command(s: &str) -> bool {
 /// operator of the device holds, which is the same reason `RAPP_TRUST` has no
 /// syscall wrapper.
 ///
-/// WHY the anchor arrives as hex in one line: a self-signed Ed25519 root is about
-/// 170 bytes, so 340 hex characters fit the 512-byte console line, and a single
-/// line means a chunked transfer state machine cannot be left half-filled by a
-/// dropped line.
+/// WHY the anchor can arrive two ways: one line is the friendly path, and it
+/// carries at most 250 anchor bytes -- a console line holds 511 characters, the
+/// verb and a space take 10 of them, and hex doubles what is left. A realistic
+/// root is bigger than that; a trimmed self-signed Ed25519 CA measures 274 bytes,
+/// 548 hex characters. So `TLS_TRUST_BEGIN` / `TLS_TRUST_CHUNK` /
+/// `TLS_TRUST_COMMIT` carries the rest in the shape `RAPP_*` already uses for
+/// packages: staging is bounded by `MAX_ANCHOR_DER_BYTES`, a chunk that runs past
+/// the declared size is refused, and nothing is judged until commit, when the
+/// whole anchor is in hand. A half-filled transfer installs nothing.
 fn handle_tls_trust_command(s: &str) -> bool {
     let mut parts = s.split_ascii_whitespace();
     let Some(verb) = parts.next() else { return false; };
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST_BEGIN") {
+        let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
+            serial_println!("[TLS_TRUST] REJECT anchor size missing");
+            return true;
+        };
+        if len == 0 || len > crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES {
+            serial_println!("[TLS_TRUST] REJECT anchor dimensions");
+            return true;
+        }
+        *ANCHOR_TRANSFER.lock() = Some(AnchorTransfer {
+            expected_len: len,
+            der: [0u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
+            received: [false; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
+        });
+        serial_println!("[TLS_TRUST] READY bytes={}", len);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST_CHUNK") {
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
+            serial_println!("[TLS_TRUST] REJECT chunk offset missing");
+            return true;
+        };
+        let Some(hex) = parts.next() else {
+            serial_println!("[TLS_TRUST] REJECT chunk data missing");
+            return true;
+        };
+        if hex.is_empty() || hex.len() % 2 != 0 || hex.len() > ANCHOR_CHUNK_HEX_CHARS {
+            serial_println!("[TLS_TRUST] REJECT chunk size");
+            return true;
+        }
+        let mut transfer = ANCHOR_TRANSFER.lock();
+        let Some(state) = transfer.as_mut() else {
+            serial_println!("[TLS_TRUST] REJECT no anchor in progress");
+            return true;
+        };
+        let chunk_len = hex.len() / 2;
+        if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) {
+            serial_println!("[TLS_TRUST] REJECT chunk bounds");
+            return true;
+        }
+        let raw = hex.as_bytes();
+        for i in 0..chunk_len {
+            let (Some(hi), Some(lo)) = (hex_nibble(raw[i * 2]), hex_nibble(raw[i * 2 + 1])) else {
+                serial_println!("[TLS_TRUST] REJECT chunk hex");
+                return true;
+            };
+            state.der[offset + i] = (hi << 4) | lo;
+            state.received[offset + i] = true;
+        }
+        let received = state.received[..state.expected_len].iter().filter(|b| **b).count();
+        serial_println!(
+            "[TLS_TRUST] CHUNK offset={} len={} received={}/{}",
+            offset,
+            chunk_len,
+            received,
+            state.expected_len
+        );
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("TLS_TRUST_COMMIT") {
+        let label = parts.next().unwrap_or("");
+        let mut transfer = ANCHOR_TRANSFER.lock();
+        let Some(state) = transfer.take() else {
+            serial_println!("[TLS_TRUST] REJECT no anchor in progress");
+            return true;
+        };
+        if state.received[..state.expected_len].iter().any(|v| !*v) {
+            serial_println!("[TLS_TRUST] REJECT incomplete anchor");
+            return true;
+        }
+        let der = &state.der[..state.expected_len];
+        let mut store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+        return match store.install(der, label) {
+            Ok(position) => {
+                serial_println!(
+                    "[TLS_TRUST] ANCHOR position={} bytes={} label={} total={}",
+                    position,
+                    der.len(),
+                    label,
+                    store.len()
+                );
+                true
+            }
+            Err(err) => {
+                serial_println!("[TLS_TRUST] REJECT {}", err.message());
+                true
+            }
+        };
+    }
 
     if verb.eq_ignore_ascii_case("TLS_TRUST_LIST") {
         let store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
@@ -1041,6 +1161,8 @@ fn handle_tls_trust_command(s: &str) -> bool {
             return true;
         };
         let label = parts.next().unwrap_or("");
+        // The store's own bound, which one console line can never carry this far;
+        // see the handler header for why the chunk verbs exist.
         if hex.is_empty() || hex.len() % 2 != 0 || hex.len() / 2 > crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES {
             serial_println!("[TLS_TRUST] REJECT anchor dimensions");
             return true;
@@ -1094,7 +1216,9 @@ fn handle_serial_command(cmd: &[u8]) {
     // pressure that exposed the unbounded UART wait. The `CHUNK_OK`
     // acknowledgement still proves the chunk was received.
     let bulk = s.split_ascii_whitespace().next().is_some_and(|verb| {
-        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") || verb.eq_ignore_ascii_case("RAPP_CHUNK")
+        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK")
+            || verb.eq_ignore_ascii_case("RAPP_CHUNK")
+            || verb.eq_ignore_ascii_case("TLS_TRUST_CHUNK")
     });
     if !bulk {
         crate::serial_println!("[CMD] {}", s);
@@ -1836,6 +1960,59 @@ mod tests {
         assert!(HARDWARE_KILLSWITCHES.lock().camera_cut);
         handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA OFF");
         assert!(!HARDWARE_KILLSWITCHES.lock().camera_cut);
+    }
+
+    #[test]
+    fn a_trust_anchor_arrives_over_several_console_lines() {
+        use alloc::format;
+
+        crate::crypto::tls_trust::TLS_TRUST_STORE.lock().clear();
+
+        // One complete DER sequence carrying the Ed25519 algorithm identifier --
+        // the shape the store gates on -- sent as two chunks so the framing, not
+        // the certificate, is what this case exercises. The length header is the
+        // short form because a `0x81` prefix below 0x80 is BER, which the store
+        // refuses.
+        let mut der: Vec<u8> = Vec::new();
+        der.extend_from_slice(&[0x30, 38, 0x06, 0x03, 0x2b, 0x65, 0x70]);
+        der.resize(40, 0x41);
+        let hex: String = der.iter().map(|b| format!("{:02x}", b)).collect();
+
+        handle_serial_command(b"TLS_TRUST_BEGIN 40");
+        handle_serial_command(format!("TLS_TRUST_CHUNK 0 {}", &hex[..40]).as_bytes());
+        handle_serial_command(format!("TLS_TRUST_CHUNK 20 {}", &hex[40..]).as_bytes());
+        handle_serial_command(b"TLS_TRUST_COMMIT probe-ca");
+
+        let store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+        assert_eq!(store.len(), 1, "a chunked anchor must occupy exactly one slot");
+        assert_eq!(store.anchor_der(0), Some(der.as_slice()));
+        assert_eq!(store.anchor_label(0), Some("probe-ca"));
+        drop(store);
+
+        // A chunk that runs past the declared size is refused, and the anchor it
+        // belonged to never reaches the store.
+        crate::crypto::tls_trust::TLS_TRUST_STORE.lock().clear();
+        handle_serial_command(b"TLS_TRUST_BEGIN 8");
+        handle_serial_command(b"TLS_TRUST_CHUNK 0 ffffffffffffffffffffffffffff");
+        handle_serial_command(b"TLS_TRUST_COMMIT overshoot");
+        assert!(
+            crate::crypto::tls_trust::TLS_TRUST_STORE.lock().is_empty(),
+            "a chunk outside the declared anchor was accepted"
+        );
+
+        // A byte that never arrived is caught at commit rather than left as the
+        // zero the staging buffer was filled with.
+        handle_serial_command(b"TLS_TRUST_BEGIN 40");
+        handle_serial_command(format!("TLS_TRUST_CHUNK 0 {}", &hex[..20]).as_bytes());
+        handle_serial_command(b"TLS_TRUST_COMMIT half");
+        assert!(
+            crate::crypto::tls_trust::TLS_TRUST_STORE.lock().is_empty(),
+            "an incomplete anchor was installed"
+        );
+
+        // Committing with nothing staged answers for itself.
+        handle_serial_command(b"TLS_TRUST_COMMIT nothing");
+        assert!(crate::crypto::tls_trust::TLS_TRUST_STORE.lock().is_empty());
     }
 }
 
