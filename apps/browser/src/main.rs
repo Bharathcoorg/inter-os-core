@@ -4498,6 +4498,31 @@ impl BrowserApp {
             entry.length = record.length;
             self.upload_count += 1;
         }
+        // WHY the two counts are both stated: an empty picker and a picker that
+        // refused every record for length zero look identical on screen, and a
+        // person cannot tell whether the index holds nothing or the platform
+        // handed out records with no bytes in them. Saying which it saw is the
+        // difference between a working device and a silent one.
+        {
+            let mut line = [0u8; 128];
+            let mut lp = 0;
+            let p1 = b"[BROWSER APP] The upload picker lists ";
+            line[lp..lp + p1.len()].copy_from_slice(p1);
+            lp += p1.len();
+            lp = browser::append_decimal(&mut line, lp, self.upload_count as u64);
+            let p2 = b" of ";
+            line[lp..lp + p2.len()].copy_from_slice(p2);
+            lp += p2.len();
+            lp = browser::append_decimal(&mut line, lp, count as u64);
+            let p3 = b" indexed documents.";
+            if lp + p3.len() <= line.len() {
+                line[lp..lp + p3.len()].copy_from_slice(p3);
+                lp += p3.len();
+            }
+            if let Ok(text) = core::str::from_utf8(&line[..lp]) {
+                let _ = std::log(text);
+            }
+        }
     }
 
     /// The local port the next outbound connection asks for.
