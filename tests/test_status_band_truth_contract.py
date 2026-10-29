@@ -269,6 +269,46 @@ def test_an_app_that_draws_the_band_clock_lane_holds_the_clock_read():
     )
 
 
+def test_the_clock_answer_is_long_enough_to_reach_the_instant():
+    """The kernel's RTC answer and the reader's buffer are one number.
+
+    WHY this crosses the boundary: the kernel truncates its JSON to the length
+    the caller offered and refuses anything longer, so the two halves have to
+    agree byte for byte. At 64 the answer stopped inside `"second"` and
+    `unix_epoch` -- the field at the end -- could never be read by anyone, which
+    is what left the TLS client unable to tell an expired certificate from a
+    live one. A silent truncation looks exactly like a clock with no instant.
+    """
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    arm = syscall[syscall.index("38 => {"):]
+    arm = arm[: arm.index("40 => {")]
+    guard = re.search(r"if len > (\d+) \{\n\s*return SyscallResult::InvalidArguments", arm)
+    assert guard, "the RtcGetTime arm must bound the length a caller may request"
+    kernel_cap = int(guard.group(1))
+    assert f"let mut kbuf = [0u8; {kernel_cap}];" in arm, (
+        f"the kernel's own staging buffer must be the {kernel_cap} bytes it accepts"
+    )
+
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    declared = re.search(r"pub const RTC_PAYLOAD_BYTES: usize = (\d+);", sdk)
+    assert declared, "the reader must name the RTC answer size it depends on"
+    assert int(declared.group(1)) == kernel_cap, (
+        f"the SDK reads {declared.group(1)} bytes but the kernel refuses more than "
+        f"{kernel_cap}; one of them silently loses the tail of the clock answer"
+    )
+    assert "let mut buf = [0u8; super::RTC_PAYLOAD_BYTES];" in sdk, (
+        "the shared clock reader must size its buffer from that constant"
+    )
+
+    # The instant is only worth reading if a client that must judge an absolute
+    # deadline actually reaches for it.
+    browser = (ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8")
+    assert "reading.unix_utc()" in browser, (
+        "the browser must take the UTC instant out of the clock reading it is "
+        "the only way a certificate's expiry can be judged on the device"
+    )
+
+
 if __name__ == "__main__":
     test_sdk_exports_status_band()
     test_status_band_behavior_and_pixels_pass()
@@ -278,4 +318,5 @@ if __name__ == "__main__":
     test_cellular_mark_requires_measured_level_not_modem_presence()
     test_file_manager_adopts_band_with_only_obtainable_instruments()
     test_an_app_that_draws_the_band_clock_lane_holds_the_clock_read()
+    test_the_clock_answer_is_long_enough_to_reach_the_instant()
     print("Status band truth contract: PASS")

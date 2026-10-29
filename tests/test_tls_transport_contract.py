@@ -220,6 +220,79 @@ def check_tests_claim_enforcement():
     )
 
 
+def check_validity_window_is_a_clock_decision():
+    """Closure 4: "is this certificate still valid" is an instant comparison.
+
+    WHY this needs pinning across three files: the parser can read a timestamp,
+    the verifier can hold a clock, and the browser can reach the RTC -- and if
+    any one of the three drops out, the code still compiles and still calls
+    itself verified. The presence-only check is the failure mode, so it is named
+    here as what it is not.
+    """
+    cert = read("sdk/rust/interos-std/src/tls/certificate.rs")
+    mod_text = read("sdk/rust/interos-std/src/tls/mod.rs")
+    hand = read("sdk/rust/interos-std/src/tls/handshake.rs")
+    browser = read("apps/browser/src/main.rs")
+    tests = read("sdk/rust/interos-std/src/tls/tests.rs")
+
+    # Both refusal conditions exist and are distinguishable, so a page can say
+    # which half of the window failed instead of "security check failed".
+    for variant in ("CertificateExpired", "CertificateNotYetValid"):
+        must(mod_text, f"    {variant},", f"distinct TlsError for {variant}")
+
+    # The window comparison is a real bound test in both directions.
+    window = section(cert, "pub fn check_validity_at", "pub fn is_self_signed")
+    must(window, "if now_unix < not_before", "notBefore is compared, not merely present")
+    must(window, "if now_unix > not_after", "notAfter is compared, not merely present")
+    must(window, "TlsError::CertificateNotYetValid", "not-yet-valid is its own refusal")
+    must(window, "TlsError::CertificateExpired", "expiry is its own refusal")
+    must(window, "asn1_time_to_unix(self.not_before)", "the instant comes from the payload")
+
+    # A time this parser cannot read is no instant at all: refusing to guess is
+    # the difference between a clock error and a silently wrong deadline.
+    reader = section(cert, "pub fn asn1_time_to_unix", "pub struct ParsedCertificate")
+    for fail_closed in ("_ => return None", "!= b'Z'", "day > days_in_month(year, month)",
+                        "hour > 23 || minute > 59 || second > 59"):
+        must(reader, fail_closed, "a time form or value this parser cannot read")
+
+    # The verifier decides the window, and the decision has two arms: compare if
+    # a clock was supplied, and say so if it was not.
+    must(cert, "pub const fn with_clock(mut self, now_unix: i64) -> Self", "clock setter")
+    must(cert, "fn check_validity_window(&self, cert: &ParsedCertificate)", "trait window hook")
+    deciding = section(cert, "fn check_validity_window(&self, cert: &ParsedCertificate)",
+                       "fn verify_certificate")
+    must(deciding, "Some(now) => cert.check_validity_at(now)", "a clock is used when held")
+    must(deciding, "None => cert.check_validity()", "no clock is reported as no comparison")
+
+    # Every chain position goes through that hook -- the walk is where an
+    # expired intermediate used to be waved through for parsing cleanly.
+    walk = section(hand, "pub fn process_certificate", "pub fn process_certificate_verify")
+    must(walk, "verifier.check_validity_window(&parsed)?", "window enforced per chain entry")
+    must_not(walk, "parsed.check_validity()", "presence-only check left inside the walk")
+
+    # The shipping client supplies the clock and refuses to guess without one.
+    must(browser, "reading.unix_utc()", "the browser reads the kernel's UTC instant")
+    must(browser, ".with_clock(now_unix)", "the verifier is built with that instant")
+    must(browser, "FetchErrorKind::TlsClockUnavailable", "no clock is its own refusal")
+    must(browser, "outcome.kind = FetchErrorKind::TlsClockUnavailable;", "and it fails closed")
+    live = section(browser, "fn fetch_over_tls(", "fn fetch_over_tcp(")
+    for build in re.findall(r"DefaultCertVerifier::for_host\([^)]*\)[^;]*;", live):
+        assert "with_clock" in build, (
+            f"the browser builds a verifier without a clock, so an expired "
+            f"certificate would verify: {build}"
+        )
+
+    # The unit tests claim the same failures the code enforces.
+    for claim in (
+        "fn tls_validity_times_are_read_as_instants_not_as_presence",
+        "fn tls_a_time_this_parser_cannot_read_yields_no_instant",
+        "fn tls_a_certificate_past_its_expiry_is_refused_end_to_end",
+        "fn tls_a_verifier_without_a_clock_only_checks_that_times_exist",
+        "fn tls_the_handshake_walk_judges_every_entry_against_the_clock",
+    ):
+        must(tests, claim, "validity-window test")
+
+
 def section(text, start, end):
     """Extract `text[start..first end after start]` for bounded assertions."""
     i = text.index(start)
@@ -236,6 +309,7 @@ def main():
     check_hostname_on_the_live_path()
     check_no_stub_reports_verified()
     check_tests_claim_enforcement()
+    check_validity_window_is_a_clock_decision()
 
     # Cross-check against the real sources rather than a copy of the lists.
     cert = read("sdk/rust/interos-std/src/tls/certificate.rs")
