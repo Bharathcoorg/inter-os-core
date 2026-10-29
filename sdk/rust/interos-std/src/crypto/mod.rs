@@ -7,14 +7,21 @@
 //! - X25519 (RFC 7748) Montgomery curve scalar multiplication
 //! - ChaCha20-Poly1305 AEAD (RFC 8439)
 //!
+//! The signature checkers P-256 ECDSA (FIPS PUB 186-5) and RSA (PKCS#1 v2.2)
+//! are verification-only and `no_std`, but not constant-time: they only ever
+//! handle public keys and other peers' signatures, so no secret is available
+//! to time.
+//! - ChaCha20-Poly1305 AEAD (RFC 8439)
+//!
 //! All implementations are pure Rust with zero third-party dependencies and zero heap allocations.
 
 pub mod chacha20_poly1305;
 pub mod hkdf;
 pub mod hmac;
+pub mod p256;
+pub mod rsa;
 pub mod sha256;
 pub mod x25519;
-
 pub use chacha20_poly1305::{ChaCha20Poly1305, Poly1305};
 pub use hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, hkdf_extract};
 pub use hmac::HmacSha256;
