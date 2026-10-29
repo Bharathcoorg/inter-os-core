@@ -48,7 +48,9 @@ def kill_proc_on_port(port):
         try:
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
-                 f"(Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue).OwningProcess"],
+                 f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
+                 "ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | "
+                 "Where-Object { $_.ProcessName -like '*qemu*' } | ForEach-Object { $_.Id }"],
                 capture_output=True, text=True, timeout=5
             )
             for line in res.stdout.splitlines():

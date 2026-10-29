@@ -35,7 +35,11 @@ def kill_proc_on_port(p):
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    proc = psutil.Process(conn.pid)
+                    # A foreign owner means another device is using this port;
+                    # leave it running and let the bind below fail loudly.
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
                 except Exception:
                     pass
     except Exception:

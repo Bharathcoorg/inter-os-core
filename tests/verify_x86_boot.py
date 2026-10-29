@@ -133,19 +133,32 @@ def inspect_framebuffer(ppm_path):
 
 
 def kill_proc_on_port(p):
+    """Clear a stale QEMU left by an earlier run of this gate.
+
+    Only a process whose own name says qemu may be killed. These serial and
+    monitor ports sit inside the range an Android emulator binds by default, so
+    force-killing whatever holds one would destroy someone else's device. When
+    the port belongs to anything else this returns without touching it and the
+    boot below fails loudly instead.
+    """
     try:
         import psutil
         for conn in psutil.net_connections():
             if conn.laddr and conn.laddr.port == p and conn.pid:
                 try:
-                    psutil.Process(conn.pid).kill()
+                    if "qemu" in psutil.Process(conn.pid).name().lower():
+                        psutil.Process(conn.pid).kill()
                 except Exception:
                     pass
     except Exception:
         pass
     if sys.platform == "win32":
         try:
-            res = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue).OwningProcess"], capture_output=True, text=True, timeout=5)
+            res = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                  f"Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue | "
+                                  "ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | "
+                                  "Where-Object { $_.ProcessName -like '*qemu*' } | ForEach-Object { $_.Id }"],
+                                 capture_output=True, text=True, timeout=5)
             for line in res.stdout.splitlines():
                 pid = line.strip()
                 if pid and pid.isdigit() and int(pid) > 0:
@@ -172,8 +185,11 @@ def main():
             try: os.remove(p)
             except Exception: pass
 
-    ser_port = 5555
-    mon_port = 5556
+    ser_port = 5591
+    # WHY not 5555/5556: those are the Android emulator's console band, and a
+    # guest serial socket there can bind over -- or talk to -- somebody else's
+    # running device.
+    mon_port = 5592
     kill_proc_on_port(ser_port)
     kill_proc_on_port(mon_port)
     time.sleep(0.5)
