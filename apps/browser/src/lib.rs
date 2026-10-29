@@ -3039,7 +3039,18 @@ pub enum AddressOutcome {
 pub fn classify_address(raw: &[u8]) -> AddressOutcome {
     let parsed = parse_uri(raw);
     match parsed.scheme {
-        UriScheme::Unknown => return AddressOutcome::NoScheme,
+        UriScheme::Unknown => {
+            // WHY a scheme the parser does not know is not filed under "no host":
+            // `ftp://example.org` does name a host - it names one the browser has
+            // no way to ask - so the fault is the scheme, and telling the person
+            // the address named no host describes a mistake they did not make. An
+            // address with no scheme separator in it named nothing at all, which
+            // is the other answer.
+            if raw.windows(3).any(|triplet| triplet == b"://") {
+                return AddressOutcome::UnsupportedScheme;
+            }
+            return AddressOutcome::NoScheme;
+        }
         // WHY the gemini scheme is refused: the browser reads pages over
         // HTTP and the gateway in front of it speaks HTTP. It cannot speak
         // gemini, so an address in that scheme names a host the browser has
@@ -4897,7 +4908,10 @@ mod tests {
     #[test]
     fn test_an_address_that_names_no_host_is_not_recognised() {
         assert_eq!(classify_address(b"hello"), AddressOutcome::NoScheme);
-        assert_eq!(classify_address(b"ftp://example.org"), AddressOutcome::NoScheme);
+        assert_eq!(
+            classify_address(b"ftp://example.org"),
+            AddressOutcome::UnsupportedScheme
+        );
         assert_eq!(classify_address(b"http://"), AddressOutcome::NoHost);
         assert_eq!(
             classify_address(b"gemini://geminispace.info"),
