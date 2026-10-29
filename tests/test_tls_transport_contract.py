@@ -146,7 +146,7 @@ def check_hostname_on_the_live_path():
 
 def check_no_stub_reports_verified():
     """Closure 3: nothing permissive is reachable from a production build."""
-    shipped = ["mod.rs", "client.rs", "handshake.rs", "certificate.rs", "record.rs", "ed25519.rs"]
+    shipped = ["mod.rs", "client.rs", "handshake.rs", "certificate.rs", "record.rs", "ed25519.rs", "trust.rs"]
     for name in shipped:
         text = read(f"sdk/rust/interos-std/src/tls/{name}")
         for forbidden in (
