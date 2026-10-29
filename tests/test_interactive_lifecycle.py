@@ -604,6 +604,15 @@ def main():
             dump_prefix="test_music",
             in_app_interactions=[
                 ("Tap Play/Pause toggle", (360, 990), ("Transport playing", "transport stays stopped", "Transport paused", "Transport resumed"), "playback_toggled"),
+                # WHY the transport is paused before the exit gesture: pressing
+                # home while audio is playing deliberately keeps the player
+                # alive -- the app backgrounds itself so the track carries on,
+                # which is what a person expects and what the app says on the
+                # serial line ("App moved to background; audio playback
+                # continues"). Only a stopped transport takes the exit path that
+                # this suite is measuring: destroy the surface, exit, and let
+                # the launcher reap the child.
+                ("Pause the transport again", (360, 990), ("Transport paused", "transport stays stopped", "Playback refused"), "playback_paused"),
             ],
             exit_gesture="swipe_up"
         )
