@@ -249,7 +249,13 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         tap_coords=(572, 622),
         present_marker="Music canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_music",
-        exit_gesture="swipe_up"
+        exit_gesture="swipe_up",
+        # Measured, not guessed: Music's cold open is 35.3-44.2 s on one image and
+        # 46.4 s on an earlier one (target/verify/music_open_probe.py), so the 45 s
+        # default sat inside the app's own spread and this pass failed on a package
+        # that did paint. See the note at the Music call in
+        # tests/test_interactive_lifecycle.py.
+        present_timeout=60.0
     )
 
     # App 10: Calendar (Row 4, Card 0: x=180, y=1030)

@@ -161,7 +161,7 @@ class SerialReader:
                 continue
         return False
 
-def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
+def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back", present_timeout=45.0):
     print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
     # WHY the drawer and not the home screen: the dock tiles and the Today card are
     # the only home surfaces that answer a tap, so they reach six packages. The
@@ -181,7 +181,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=45.0,
+        timeout=present_timeout,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     if not presented:
@@ -197,7 +197,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
                 launched = line.strip()
                 break
         raise AssertionError(
-            f"{app_name} failed to present frame within timeout; the last package "
+            f"{app_name} failed to present frame within {present_timeout:.1f} s; the last package "
             f"the guest said it launched was: {launched[-120:]}"
         )
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
@@ -618,7 +618,17 @@ def main():
                 # the launcher reap the child.
                 ("Pause the transport again", (360, 990), ("Transport paused", "transport stays stopped", "Playback refused"), "playback_paused"),
             ],
-            exit_gesture="swipe_up"
+            exit_gesture="swipe_up",
+            # WHY Music gets its own presentation clock: measured four cold opens on
+            # one image - 35.3, 37.5, 43.0 and 44.2 s from the launch verb to
+            # "Music canvas presented to scanout buffer", across an empty and the
+            # shared data disk and with nothing / seven other packages running -
+            # and 46.4 s on an earlier image. The 45 s default therefore sits inside
+            # the app's own spread: it fails a package that painted, and only at the
+            # tail. 60 s is still reachable by the break this check is for - the
+            # first frame never arriving - because the app paints every frame in
+            # well under a second once it starts.
+            present_timeout=60.0
         )
 
         # App 11: Files (App Drawer / Grid View: x=430, y=260)
