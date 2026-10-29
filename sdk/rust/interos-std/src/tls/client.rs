@@ -13,6 +13,29 @@ use super::handshake::{
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
+/// The `HandshakeType` of a post-handshake `NewSessionTicket` (RFC 8446 4.6.1).
+///
+/// WHY it is not with the other handshake types: those name the messages this
+/// client walks during the handshake, and this one exists only so the reader
+/// after the handshake can recognise it and drop it.
+const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;
+
+/// How many records that are not the document one read will step over.
+///
+/// WHY a bound at all: a peer may send as many tickets as it likes, and a fetch
+/// that skipped them without limit would never return. Eight is well past what a
+/// server sends unprompted, and passing it is reported as a refusal rather than
+/// as an empty page.
+const MAX_SKIPPED_RECORDS: usize = 8;
+
+/// The largest record this client frames at once, header and tag included.
+///
+/// WHY it is named: the read path holds two buffers of this size -- the record
+/// off the wire, and the room a discarded record is decrypted into -- and they
+/// have to agree, or a record the client can frame could still fail to be
+/// discarded. The write path frames one of the same size.
+const MAX_RECORD_BYTES: usize = 2048;
+
 /// Stream abstraction for underlying transport (e.g. TCP socket, mock memory buffer).
 pub trait TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TlsError>;
@@ -280,14 +303,16 @@ impl<'a> TlsClientSession<'a> {
         app_cipher.encrypt_record(ContentType::ApplicationData, plaintext, out)
     }
 
-    /// Decrypts application data record.
-    pub fn decrypt_application_data(&mut self, record: &[u8], out: &mut [u8]) -> Result<usize, TlsError> {
+    /// Decrypts one record and says what the protected inner type turned out to
+    /// be, because after the handshake the record layer carries more than the
+    /// document.
+    pub fn decrypt_record(
+        &mut self,
+        record: &[u8],
+        out: &mut [u8],
+    ) -> Result<(ContentType, usize), TlsError> {
         let app_cipher = self.app_recv_cipher.as_mut().ok_or(TlsError::UnexpectedMessage)?;
-        let (content_type, len) = app_cipher.decrypt_record(record, out)?;
-        if content_type != ContentType::ApplicationData {
-            return Err(TlsError::UnexpectedMessage);
-        }
-        Ok(len)
+        app_cipher.decrypt_record(record, out)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -321,46 +346,98 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
         if !self.session.is_connected() {
             return Err(TlsError::UnexpectedMessage);
         }
-        let mut record_buf = [0u8; 2048];
+        let mut record_buf = [0u8; MAX_RECORD_BYTES];
         let record_len = self.session.encrypt_application_data(plaintext, &mut record_buf)?;
         self.stream.write_all(&record_buf[..record_len])?;
         Ok(plaintext.len())
     }
 
-    /// Reads and decrypts an application data record from the connection.
+    /// Reads and decrypts the next application data record from the connection.
+    ///
+    /// WHY a record that is not application data is stepped over rather than
+    /// taken as a failure: RFC 8446 4.6.1 has the server send one or more
+    /// NewSessionTicket records as soon as the handshake completes, so the first
+    /// record a GET meets on a real server is a ticket, not the page. Reading it
+    /// as an error ends the fetch with zero bytes and the screen then blames the
+    /// gateway for an answer it did send. Tickets are dropped here because this
+    /// client never resumes a session.
+    ///
+    /// WHY the skip is bounded and the rest still refused: a peer can stream
+    /// records that are not the document forever, and an alert genuinely means
+    /// the peer stopped talking. Both have to end with something the reader can
+    /// name, not with a silent empty read.
+    ///
+    /// WHY a skipped record is decrypted into a buffer of the client's own: the
+    /// caller's window is sized for what it intends to parse, and a caller that
+    /// asked for 64 bytes would otherwise be refused because the server happened
+    /// to send a ticket longer than that. The discarded bytes are not the
+    /// caller's problem, so they must not compete for the caller's room.
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
         if !self.session.is_connected() {
             return Err(TlsError::UnexpectedMessage);
         }
 
-        // Read 5-byte record header
-        let mut header = [0u8; RECORD_HEADER_LEN];
-        let mut read_bytes = 0;
-        while read_bytes < RECORD_HEADER_LEN {
-            let n = self.stream.read(&mut header[read_bytes..])?;
-            if n == 0 {
-                return Ok(0); // EOF
+        let mut skipped = 0usize;
+        let mut discard = [0u8; MAX_RECORD_BYTES];
+        loop {
+            // Read 5-byte record header
+            let mut header = [0u8; RECORD_HEADER_LEN];
+            let mut read_bytes = 0;
+            while read_bytes < RECORD_HEADER_LEN {
+                let n = self.stream.read(&mut header[read_bytes..])?;
+                if n == 0 {
+                    return Ok(0); // EOF
+                }
+                read_bytes += n;
             }
-            read_bytes += n;
-        }
 
-        let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
-        let total_len = RECORD_HEADER_LEN + record_len;
+            let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let total_len = RECORD_HEADER_LEN + record_len;
 
-        let mut record_buf = [0u8; 2048];
-        if total_len > record_buf.len() {
-            return Err(TlsError::RecordTooLarge);
-        }
-        record_buf[..RECORD_HEADER_LEN].copy_from_slice(&header);
-
-        while read_bytes < total_len {
-            let n = self.stream.read(&mut record_buf[read_bytes..total_len])?;
-            if n == 0 {
-                return Err(TlsError::BadRecordLength);
+            let mut record_buf = [0u8; MAX_RECORD_BYTES];
+            if total_len > record_buf.len() {
+                return Err(TlsError::RecordTooLarge);
             }
-            read_bytes += n;
-        }
+            record_buf[..RECORD_HEADER_LEN].copy_from_slice(&header);
 
-        self.session.decrypt_application_data(&record_buf[..total_len], out)
+            while read_bytes < total_len {
+                let n = self.stream.read(&mut record_buf[read_bytes..total_len])?;
+                if n == 0 {
+                    return Err(TlsError::BadRecordLength);
+                }
+                read_bytes += n;
+            }
+
+            let (content_type, len) =
+                self.session
+                    .decrypt_record(&record_buf[..total_len], &mut discard)?;
+            match content_type {
+                ContentType::ApplicationData => {
+                    if len > out.len() {
+                        return Err(TlsError::BufferTooSmall);
+                    }
+                    out[..len].copy_from_slice(&discard[..len]);
+                    return Ok(len);
+                }
+                ContentType::Handshake if is_new_session_ticket(&discard[..len]) => {}
+                ContentType::ChangeCipherSpec => {}
+                _ => return Err(TlsError::UnexpectedMessage),
+            }
+            skipped += 1;
+            if skipped >= MAX_SKIPPED_RECORDS {
+                return Err(TlsError::UnexpectedMessage);
+            }
+        }
     }
+}
+
+/// Does this decrypted payload hold a `NewSessionTicket` handshake message?
+///
+/// WHY only the one type is ignorable: the message type is the first byte of the
+/// payload, so a ticket is distinguishable from any other post-handshake message
+/// without parsing it. A KeyUpdate or an unexpected Certificate would fall
+/// through to the refusal, because continuing to read with the old keys after a
+/// key change would decrypt garbage and present it as the peer's answer.
+fn is_new_session_ticket(payload: &[u8]) -> bool {
+    payload.first() == Some(&HANDSHAKE_NEW_SESSION_TICKET)
 }

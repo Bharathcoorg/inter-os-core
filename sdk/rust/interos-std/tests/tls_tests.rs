@@ -9,6 +9,7 @@
 //! - X.509 DER Certificate parsing and validation (RFC 5280)
 //! - TLS 1.3 Record Framing and Nonce Generation (RFC 8446)
 //! - Mock TLS 1.3 Full Handshake & Encrypted Application Data Exchange
+//! - Post-handshake records on the read path (RFC 8446 4.6.1)
 
 use interos_std::crypto::chacha20_poly1305::{chacha20_block, ChaCha20Poly1305, Poly1305};
 use interos_std::crypto::hkdf::{derive_secret, hkdf_expand, hkdf_expand_label, hkdf_extract};
@@ -16,9 +17,9 @@ use interos_std::crypto::hmac::HmacSha256;
 use interos_std::crypto::sha256::Sha256;
 use interos_std::crypto::x25519::{x25519, x25519_base};
 use interos_std::tls::certificate::{CertificateVerifier, ParsedCertificate};
-use interos_std::tls::client::{TlsClientSession, TlsConfig};
+use interos_std::tls::client::{MemoryStream, TlsClient, TlsClientSession, TlsConfig};
 use interos_std::tls::handshake::{
-    HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_CLIENT_HELLO,
+    HandshakeState, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_CLIENT_HELLO,
     HANDSHAKE_ENCRYPTED_EXTENSIONS, HANDSHAKE_FINISHED, HANDSHAKE_SERVER_HELLO,
 };
 use interos_std::tls::record::{ContentType, RecordCipher, TLS_LEGACY_VERSION};
@@ -485,6 +486,151 @@ fn test_mock_tls13_handshake_and_traffic() {
 
     assert_eq!(c_type, ContentType::ApplicationData);
     assert_eq!(&decrypted_req[..dec_req_len], request_data);
+}
+
+// ==========================================
+// 6. Post-handshake records on the read path
+// ==========================================
+
+/// The keys the mock peer encrypts its post-handshake records under, and the
+/// keys the client under test is given as its receive keys.
+const PEER_APP_KEY: [u8; 32] = [0x6eu8; 32];
+const PEER_APP_IV: [u8; 12] = [0x74u8; 12];
+
+/// A `NewSessionTicket` message body of the given length.
+///
+/// The filler is deliberately non-zero: the record layer finds the inner content
+/// type by scanning backwards past trailing zero bytes, so a body of zeros would
+/// be shorter than the ticket this is meant to stand in for.
+fn new_session_ticket(body_len: usize) -> Vec<u8> {
+    let mut msg = vec![4u8, 0, 0, body_len as u8];
+    msg.resize(4 + body_len, 0xa5);
+    msg
+}
+
+/// Encrypts a sequence of post-handshake records the way a server would, so the
+/// client's receive cipher sees the same sequence numbers it would on the wire.
+fn peer_records(items: &[(ContentType, Vec<u8>)]) -> Vec<u8> {
+    let mut cipher = RecordCipher::new(PEER_APP_KEY, PEER_APP_IV);
+    let mut buf = [0u8; 2048];
+    let mut wire = Vec::new();
+    for (kind, plaintext) in items {
+        let len = cipher.encrypt_record(*kind, plaintext, &mut buf).unwrap();
+        wire.extend_from_slice(&buf[..len]);
+    }
+    wire
+}
+
+/// A client that has completed the handshake and holds the keys
+/// [`peer_records`] encrypts under.
+///
+/// WHY the state is placed directly rather than reached through the handshake:
+/// what is under test is the record reader, and re-running the key schedule
+/// would prove nothing about it that the mock handshake above does not already
+/// prove. The application receive cipher is a public field so the record layer
+/// can be exercised on its own.
+fn client_awaiting_records<'w>(
+    wire: &'w [u8],
+    sink: &'w mut [u8],
+) -> TlsClient<'w, MemoryStream<'w>> {
+    let mut client = TlsClient::new(MemoryStream::new(wire, sink), TlsConfig::default());
+    client.session.handshake.state = HandshakeState::Connected;
+    client.session.app_recv_cipher = Some(RecordCipher::new(PEER_APP_KEY, PEER_APP_IV));
+    client
+}
+
+/// RFC 8446 4.6.1: a server sends one or more `NewSessionTicket` records as soon
+/// as the handshake completes, so the first record answering a GET is a ticket,
+/// not the document. Reading it as a fault ended the fetch with zero bytes and
+/// the browser then reported that the gateway had returned nothing.
+#[test]
+fn a_ticket_before_the_document_still_delivers_the_document() {
+    let document = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    let wire = peer_records(&[
+        (ContentType::Handshake, new_session_ticket(64)),
+        (ContentType::ApplicationData, document.to_vec()),
+    ]);
+
+    let mut sink = [0u8; 512];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 512];
+    let read = client.read(&mut out).unwrap();
+    assert_eq!(&out[..read], &document[..]);
+
+    // The peer closes after the response: the next read is the end of the
+    // stream, which the reader reports as a zero-length read rather than a fault.
+    assert_eq!(client.read(&mut out).unwrap(), 0);
+}
+
+/// WHY a discarded record does not use the caller's buffer: a caller asking for
+/// eight bytes has said how much of the document it can hold, not how much of
+/// the peer's housekeeping it has to tolerate. Sharing the window made a long
+/// ticket refuse the fetch outright.
+#[test]
+fn a_ticket_larger_than_the_callers_window_does_not_eat_the_document() {
+    let document = b"hello";
+    let wire = peer_records(&[
+        (ContentType::Handshake, new_session_ticket(400)),
+        (ContentType::ApplicationData, document.to_vec()),
+    ]);
+
+    let mut sink = [0u8; 512];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 8];
+    let read = client.read(&mut out).unwrap();
+    assert_eq!(&out[..read], &document[..]);
+}
+
+/// A post-handshake message that changes the keys cannot be stepped over: the
+/// records after it would decrypt to garbage under the old keys, and handing
+/// that garbage to the reader would present a forged stream as the peer's answer.
+#[test]
+fn a_post_handshake_record_that_is_not_a_ticket_is_refused() {
+    let key_update = vec![24u8, 0, 0, 1, 1u8];
+    let wire = peer_records(&[(ContentType::Handshake, key_update)]);
+
+    let mut sink = [0u8; 512];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 512];
+    assert_eq!(
+        client.read(&mut out),
+        Err(interos_std::tls::TlsError::UnexpectedMessage)
+    );
+}
+
+/// An alert is the peer saying it stopped, which is a fact the caller has to be
+/// told about rather than one that arrives as an empty read.
+#[test]
+fn an_alert_record_is_refused_rather_than_read_as_an_empty_page() {
+    let wire = peer_records(&[(ContentType::Alert, vec![2u8, 0u8])]);
+
+    let mut sink = [0u8; 512];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 512];
+    assert_eq!(
+        client.read(&mut out),
+        Err(interos_std::tls::TlsError::UnexpectedMessage)
+    );
+}
+
+/// Tickets are skipped because they are the peer's business, but a peer that
+/// sends nothing else would otherwise keep the read spinning forever. The bound
+/// turns that into a named refusal instead of a hang or a zero-byte page.
+#[test]
+fn a_peer_that_only_sends_tickets_is_refused_rather_than_read_as_an_empty_page() {
+    let mut items = Vec::new();
+    for _ in 0..32 {
+        items.push((ContentType::Handshake, new_session_ticket(16)));
+    }
+    let wire = peer_records(&items);
+
+    let mut sink = [0u8; 512];
+    let mut client = client_awaiting_records(&wire, &mut sink);
+    let mut out = [0u8; 512];
+    assert_eq!(
+        client.read(&mut out),
+        Err(interos_std::tls::TlsError::UnexpectedMessage)
+    );
 }
 
 /// The mock store above is a test fixture, not a trust decision: the client

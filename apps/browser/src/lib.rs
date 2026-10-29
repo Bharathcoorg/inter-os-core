@@ -1267,6 +1267,14 @@ pub enum ConnectionFailure {
     /// The kernel refused the read that lists this device's trust anchors, so the
     /// browser does not know what the device trusts.
     TlsTrustStoreRefused,
+    /// The secure channel was established, the request was sent, and the answer
+    /// arrived as a record this client refuses to accept.
+    ///
+    /// WHY this is not a connection failure and not "no data received": the
+    /// peer connected, verified and replied. What rejected the reply was this
+    /// device's own record reader, and naming it is the only way the screen
+    /// avoids accusing a gateway that answered correctly.
+    TlsRecordRefused,
 }
 
 /// Why document decoding or protocol handling failed.

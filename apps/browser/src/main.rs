@@ -597,6 +597,7 @@ fn fetch_over_tls(
     // Receive decrypted HTTP response via tls_client.read
     let cap = window.min(MAX_RESPONSE_BYTES);
     let mut total = 0usize;
+    let mut record_refused = false;
     loop {
         if total >= cap {
             outcome.truncated = true;
@@ -612,14 +613,25 @@ fn fetch_over_tls(
                     outcome.first_byte_tick = std::get_ticks().ok();
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                record_refused = true;
+                break;
+            }
         }
     }
 
     let _ = std::tcp_close(connection);
     outcome.bytes = total;
     if total == 0 {
-        outcome.kind = FetchErrorKind::ZeroBytes;
+        // WHY the two zero-byte cases are separate: an empty read is the peer
+        // closing after a request it answered with nothing, while an error here
+        // is this client refusing a record it did receive. Only the first is a
+        // fact about the gateway.
+        outcome.kind = if record_refused {
+            FetchErrorKind::TlsRecordRefused
+        } else {
+            FetchErrorKind::ZeroBytes
+        };
     }
     outcome
 }
@@ -1277,6 +1289,9 @@ connection was closed before the handshake: verifying against a store the browse
 allowed to read would report a decision it never had the information to make.";
 const BODY_ZERO_BYTES: &[u8] = b"The gateway connection succeeded and the request was sent, \
 but the gateway closed the connection without returning any response data.";
+const BODY_TLS_RECORD_REFUSED: &[u8] = b"The secure channel was opened, the request was sent, \
+and an answer arrived, but this device's record reader refused the answer and accepted none of \
+it. The gateway replied; nothing of the page was read here.";
 const BODY_PROTOCOL_MALFORMED: &[u8] = b"The gateway returned a response that could not be \
 parsed as valid HTTP or gateway envelope data.";
 const BODY_PROTOCOL_ENCODING: &[u8] = b"The response payload had invalid encoding or \
@@ -5217,6 +5232,11 @@ impl BrowserApp {
                         self.connection_failure = ConnectionFailure::TlsTrustStoreRefused;
                         std::log("[BROWSER APP] The kernel refused the trust-anchor read, so the device's store is unknown; the connection was closed before the handshake.").ok();
                     }
+                    FetchErrorKind::TlsRecordRefused => {
+                        self.status = PageStatus::ConnectionFailed;
+                        self.connection_failure = ConnectionFailure::TlsRecordRefused;
+                        std::log("[BROWSER APP] The secure channel answered with a record this client refuses; no response data was accepted.").ok();
+                    }
                     FetchErrorKind::ZeroBytes | FetchErrorKind::None => {
                         self.status = PageStatus::ZeroBytes;
                         std::log("[BROWSER APP] The gateway returned zero bytes. No document data was received.").ok();
@@ -5964,6 +5984,7 @@ impl Frame {
                 ConnectionFailure::TlsEntropyRefused => (b"No key entropy", BODY_TLS_ENTROPY_REFUSED),
                 ConnectionFailure::TlsClockUnavailable => (b"No clock reading", BODY_TLS_CLOCK_UNAVAILABLE),
                 ConnectionFailure::TlsTrustStoreRefused => (b"Trust store unreadable", BODY_TLS_TRUST_STORE_REFUSED),
+                ConnectionFailure::TlsRecordRefused => (b"Answer refused here", BODY_TLS_RECORD_REFUSED),
                 ConnectionFailure::None => (b"Connection failed", BODY_CONNECTION_TIMEOUT),
             },
             PageStatus::ZeroBytes => (b"No data received", BODY_ZERO_BYTES),
@@ -7764,6 +7785,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     ConnectionFailure::TlsEntropyRefused => b"NO KEY ENTROPY",
                     ConnectionFailure::TlsClockUnavailable => b"NO CLOCK READING",
                     ConnectionFailure::TlsTrustStoreRefused => b"TRUST STORE REFUSED",
+                    ConnectionFailure::TlsRecordRefused => b"ANSWER REFUSED HERE",
                     ConnectionFailure::None => b"CONNECTION FAILED",
                 },
                 PageStatus::ZeroBytes => b"NO RESPONSE FROM THE GATEWAY",

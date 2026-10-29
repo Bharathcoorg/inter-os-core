@@ -392,6 +392,73 @@ def test_a_store_that_could_not_be_read_is_not_reported_as_an_empty_one():
     )
 
 
+def test_a_ticket_on_the_answer_is_stepped_over_rather_than_refused():
+    """A server sends its session ticket before the page, and a ticket is not a fault.
+
+    WHY this is pinned at the record reader: RFC 8446 4.6.1 lets the server emit
+    NewSessionTicket as soon as the handshake closes, so on a real peer the first
+    record answering a GET is housekeeping, not the document. Treating it as an
+    error ended the fetch with zero bytes -- and the screen then told the operator
+    the gateway had returned nothing, when the gateway had returned exactly what
+    was asked for. Skipping it is also bounded, because a peer that sends nothing
+    but tickets has to end with a named refusal instead of a hung read.
+    """
+    src = read_source("sdk/rust/interos-std/src/tls/client.rs")
+    assert "const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;" in src, (
+        "the reader no longer names the message it is prepared to step over"
+    )
+    body = src.split("pub fn read(&mut self, out: &mut [u8])")[1].split("\n}")[0]
+    assert "ContentType::Handshake if is_new_session_ticket(" in body, (
+        "a NewSessionTicket on the answer is refused again, which reads as an "
+        "empty response from a server that did respond"
+    )
+    assert "ContentType::ApplicationData" in body, (
+        "the reader no longer separates the document from what it discards"
+    )
+    assert "MAX_SKIPPED_RECORDS" in body, (
+        "records that are not the document are skipped without a bound, so a peer "
+        "that only sends tickets never lets the read return"
+    )
+    assert "_ => return Err(TlsError::UnexpectedMessage)" in body, (
+        "a post-handshake message that changes the keys or ends the connection is "
+        "no longer refused, so its records would be decrypted under the wrong keys"
+    )
+    assert "&mut discard" in body, (
+        "a discarded record is decrypted into the caller's window, so a caller "
+        "asking for a small read is refused for a message it never asked for"
+    )
+
+
+def test_a_refused_answer_is_not_blamed_on_the_gateway():
+    """The reader refusing a record is this device's decision, not the server's silence.
+
+    WHY the browser keeps the two apart: "the gateway returned zero bytes" and "an
+    answer arrived and this client would not take it" point an operator at
+    completely different machines. Both leave the screen with no document, so the
+    only thing that distinguishes them is whether the read errored.
+    """
+    src = code_only(read_source("apps/browser/src/main.rs"))
+    fetch = src.split("fn fetch_over_tls(")[1].split("\n}")[0]
+    assert "record_refused = true" in fetch, (
+        "the read error is dropped, so the browser cannot tell its own refusal "
+        "from a peer that answered with nothing"
+    )
+    assert "if record_refused" in fetch, (
+        "both zero-byte outcomes collapse into one report again"
+    )
+    assert "FetchErrorKind::ZeroBytes" in fetch, (
+        "a peer that closes after an empty answer no longer has its own report"
+    )
+    assert "ConnectionFailure::TlsRecordRefused" in src, (
+        "no screen state names a refused record, so the user is shown a transport "
+        "failure for a decision this device made"
+    )
+    for subpath in ("apps/browser/src/http.rs", "apps/browser/src/lib.rs"):
+        assert "TlsRecordRefused" in code_only(read_source(subpath)), (
+            f"{subpath} no longer carries the kind that names a refused record"
+        )
+
+
 def test_the_image_installs_no_anchor_of_its_own():
     """The OS ships no root: only the operator's console puts one on a device.
 

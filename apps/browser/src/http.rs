@@ -62,6 +62,16 @@ pub enum FetchErrorKind {
     /// know what the device holds. Saying "no anchor" on a refusal would describe
     /// an anchor the operator may well have installed.
     TlsTrustStoreRefused,
+    /// The handshake completed and the request was written, but the encrypted
+    /// stream then held a record this client will not accept, so no byte of a
+    /// response was read.
+    ///
+    /// WHY this is not `ZeroBytes`: that wording tells the operator the gateway
+    /// answered with nothing. Here the gateway answered, the client decrypted
+    /// the answer and refused it. The fault is in this reader, and a screen that
+    /// blames the destination sends the operator to check a server that did its
+    /// job.
+    TlsRecordRefused,
 }
 
 /// A `TlsStream` transport adapter wrapping an InterOS kernel TCP connection socket.
