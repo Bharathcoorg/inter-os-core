@@ -4964,6 +4964,9 @@ pub extern "C" fn _start() -> ! {
                                     refresh_runtime_recents(&mut state);
                                     screens::app_drawer::invalidate_app_drawer_frame();
                                     state.current_view = ViewMode::AppDrawer;
+                                    state.app_drawer_tab = 0;
+                                    state.app_drawer_page = 0;
+                                    state.search_query_len = 0;
                                     render_view(surface, &state);
                                     surface_flip_display();
                                     std::log("[LAUNCHER] App Drawer opened via upward swipe gesture.",
@@ -5220,6 +5223,11 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::AppDrawer;
                                     state.search_query_len = 0;
                                     state.app_drawer_page = 0;
+                                    // WHY the tab belongs in this list: a cell is answered
+                                    // through the filtered grid, so leaving the last category
+                                    // active moved every coordinate to a different package on
+                                    // the next open.
+                                    state.app_drawer_tab = 0;
                                     render_view(surface, &state);
                                     surface_flip_display();
                                     std::log("[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();

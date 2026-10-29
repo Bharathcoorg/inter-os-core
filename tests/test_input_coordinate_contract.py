@@ -220,6 +220,35 @@ def test_launcher_drawer_pagination_is_registry_backed():
     assert "state.app_drawer_page.min(pages - 1)" in drawer
 
 
+def test_app_drawer_open_paths_clear_the_filter_that_moves_every_slot():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+    openings = []
+    cursor = 0
+    while True:
+        at = source.find("App Drawer opened", cursor)
+        if at < 0:
+            break
+        openings.append(source[max(0, at - 900):at])
+        cursor = at + 1
+    # WHY this pins the reset: a tap in a drawer cell is answered through
+    # filtered_indices(state, state.app_drawer_tab, ...), so which package a
+    # fixed coordinate launches depends on the filter that was active the last
+    # time the drawer was open. The lifecycle suites browse a category chip and
+    # then, in the next pass, tap (359,256) expecting the Calculator they
+    # measured there -- and the guest answered with the Calendar, because the
+    # drawer silently reopened on the Work tab. Opening the drawer from Home is
+    # a fresh appointment with the whole catalogue, so every open path has to
+    # clear the category, the page and the search in the same breath.
+    assert len(openings) >= 2, "the launcher no longer logs both drawer-open paths"
+    for block in openings:
+        for reset in (
+            "state.app_drawer_tab = 0;",
+            "state.app_drawer_page = 0;",
+            "state.search_query_len = 0;",
+        ):
+            assert reset in block, f"an App Drawer open path is missing {reset}"
+
+
 def test_launcher_home_taps_are_answered_only_by_painted_tiles():
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     routing = source[source.index("fn resolve_app_at_touch"):source.index("fn resolve_app_at_touch") + 6_000]
