@@ -49,8 +49,27 @@ pub const SPILL_CHUNK_SIZE: usize = 64 * 1024;
 pub const SPILL_FILE_LIMIT: usize = crate::allocator::HEAP_SIZE / 4;
 /// The data-snapshot entry flag marking a payload kept in the block store.
 const DATA_ENTRY_EXTERNAL: u32 = 0x8000_0000;
+/// The data-snapshot entry flag marking a payload the kernel never holds.
+///
+/// WHY a second flag next to [`DATA_ENTRY_EXTERNAL`] rather than one: an
+/// external record names bytes in the block store for one of two reasons.
+/// Either the kernel held the payload and it was too big for a snapshot entry,
+/// so a restore reads it back into memory and the file behaves like any other;
+/// or the kernel never held it, and a restore that materialised it would put a
+/// model file back into the heap the flag exists to keep it out of. The two
+/// have to be told apart, and an old snapshot carries neither bit, so the
+/// first meaning stays the one a record without the second flag has.
+const DATA_ENTRY_STREAMED: u32 = 0x4000_0000;
 /// The prefix of every block-backed payload name.
 const SPILL_PREFIX: &str = "/data/.vfs.s.";
+/// The namespace whose files live on the device instead of in the kernel heap.
+///
+/// WHY a namespace and not a size: a weight file is known in advance to be
+/// larger than the heap, and choosing by size would make every ordinary file's
+/// cost depend on how far it happens to grow after someone opened it. The
+/// inference service looks for models here, so these are the files the device
+/// has to be able to hold without the kernel holding them.
+pub const MODEL_NAMESPACE: &str = "/data/models/";
 pub const DEFAULT_FILE_MODE: u16 = 0o644;
 pub const DEFAULT_DIR_MODE: u16 = 0o755;
 pub const ROOT_UID: u32 = 0;
@@ -127,6 +146,15 @@ pub struct Inode {
     pub file_type: FileType,
     pub size: usize,
     pub data: InodeData,
+    /// Whether the bytes are on the device and not in this inode.
+    ///
+    /// WHY a flag on the inode and not another `InodeData` variant: `as_slice`
+    /// is how stat, the content walk, the snapshot encoder and the whole-file
+    /// reads ask what a file's bytes are, and a variant that holds none would
+    /// answer every one of them with an empty file. The flag makes each of
+    /// those sites say that the payload is on the device and has to be
+    /// streamed, rather than reporting it as a file with no contents.
+    pub block_backed: bool,
     pub sha256_digest: [u8; 32],
     pub children: Vec<InodeId>,
 }
@@ -177,6 +205,12 @@ pub struct SpillStore {
     pub file_len: fn(&str) -> Option<u64>,
     /// Removes the named file.
     pub remove: fn(&str) -> bool,
+    /// Makes the named file exist with room for `capacity` bytes.
+    pub reserve: fn(&str, u64) -> bool,
+    /// Writes `data` at `offset` in the named file, growing it as needed.
+    pub write_at: fn(&str, u64, &[u8]) -> bool,
+    /// Publishes a new length for the named file, keeping the bytes it holds.
+    pub truncate: fn(&str, u64) -> bool,
 }
 
 /// Writes a whole payload into a block-store file.
@@ -199,6 +233,21 @@ fn device_remove(name: &str) -> bool {
     crate::storage::filesystem::remove_data_file(name).is_ok()
 }
 
+/// Makes a block-store file exist with room for `capacity` bytes.
+fn device_reserve(name: &str, capacity: u64) -> bool {
+    crate::storage::filesystem::reserve_data_file(name, capacity).is_ok()
+}
+
+/// Writes `data` at `offset` inside a block-store file.
+fn device_write_at(name: &str, offset: u64, data: &[u8]) -> bool {
+    crate::storage::filesystem::store_data_file_range(name, offset, data).is_ok()
+}
+
+/// Publishes a new length for a block-store file.
+fn device_truncate(name: &str, new_size: u64) -> bool {
+    crate::storage::filesystem::truncate_data_file(name, new_size).is_ok()
+}
+
 impl SpillStore {
     /// The store that talks to the real block device.
     pub const fn device() -> Self {
@@ -207,6 +256,9 @@ impl SpillStore {
             read_at: device_read_at,
             file_len: device_file_len,
             remove: device_remove,
+            reserve: device_reserve,
+            write_at: device_write_at,
+            truncate: device_truncate,
         }
     }
 }
@@ -378,6 +430,7 @@ impl Vfs {
             file_type: FileType::Directory,
             size: 0,
             data: InodeData::Static(&[]),
+            block_backed: false,
             sha256_digest: [0u8; 32],
             children: Vec::new(),
         };
@@ -422,11 +475,59 @@ impl Vfs {
         let parent = parent_path(&new); let parent_id = self.lookup(parent).ok_or(FsError::FileNotFound)?;
         if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) { return Err(FsError::NotADirectory); }
         if self.inodes.get(&id).map(|i| i.file_type == FileType::Directory && !i.children.is_empty()).unwrap_or(false) { return Err(FsError::DirectoryNotEmpty); }
+        // WHY the payload moves with the name: a device-held file's bytes are
+        // named by its path, so a rename that only moved the directory entry
+        // would leave the payload under a name no inode has and give the new
+        // path nothing to read. The copy is chunked because the payload is
+        // exactly the kind of file that does not fit in memory.
+        let backed = self.inodes.get(&id).map(|i| i.block_backed).unwrap_or(false);
+        if backed {
+            let from = spill_path_for(&old);
+            let to = spill_path_for(&new);
+            let size = self.inodes.get(&id).map(|i| i.size).unwrap_or(0);
+            if size > 0 && !self.move_block_store_payload(&from, &to, size) {
+                return Err(FsError::ReadOnlyFileSystem);
+            }
+            (self.spill.remove)(&from);
+        }
         self.path_to_inode.remove(&old);
         if let Some(inode) = self.inodes.get_mut(&id) { inode.path=new.clone(); inode.name=path_filename(&new); }
         self.path_to_inode.insert(new,id); self.rebuild_children();
+        self.bump_data_generation();
         self.bump_metadata_generation();
         Ok(())
+    }
+
+    /// Copies a device-held payload to a new block-store name.
+    ///
+    /// Returns whether the whole payload landed; the caller only moves the
+    /// directory entry once it has, so a refused copy leaves the file exactly
+    /// where it was instead of renaming it onto a partial payload.
+    fn move_block_store_payload(&self, from: &str, to: &str, size: usize) -> bool {
+        if !(self.spill.reserve)(to, size as u64) {
+            crate::serial_println!("[VFS STREAM] the block device refused to hold {} for a rename", to);
+            return false;
+        }
+        let mut chunk = alloc::vec![0u8; core::cmp::min(SPILL_CHUNK_SIZE, size)];
+        let mut offset = 0usize;
+        while offset < size {
+            let want = core::cmp::min(chunk.len(), size - offset);
+            if (self.spill.read_at)(from, offset as u64, &mut chunk[..want]) != Some(want) {
+                crate::serial_println!(
+                    "[VFS STREAM] {} has no readable payload at {}; the rename was refused",
+                    from, offset
+                );
+                (self.spill.remove)(to);
+                return false;
+            }
+            if !(self.spill.write_at)(to, offset as u64, &chunk[..want]) {
+                crate::serial_println!("[VFS STREAM] the block device refused {} during a rename", to);
+                (self.spill.remove)(to);
+                return false;
+            }
+            offset += want;
+        }
+        matches!((self.spill.file_len)(to), Some(len) if len as usize >= size)
     }
 
     /// Truncates a writable regular file and publishes the mutation immediately.
@@ -436,6 +537,43 @@ impl Vfs {
         let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
         if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
         let inode_id=handle.inode_id;
+        let block_backed = self.inodes.get(&inode_id).map(|i| i.block_backed).unwrap_or(false);
+        // A device-held payload is resized by the device. The kernel has no
+        // bytes to resize, and a resize that left the device copy at its old
+        // length would be undone by the next restore, which takes the length
+        // from the device.
+        if block_backed {
+            if handle.offset > length { handle.offset = length; }
+            let path = self.inodes.get(&inode_id).map(|i| i.path.clone()).unwrap_or_default();
+            let name = spill_path_for(&path);
+            if length == 0 {
+                (self.spill.remove)(&name);
+            } else {
+                if (self.spill.file_len)(&name).is_none() && !(self.spill.reserve)(&name, SPILL_CHUNK_SIZE as u64) {
+                    crate::serial_println!(
+                        "[VFS STREAM] the block device refused to hold {}; {} bytes were not published",
+                        name, length
+                    );
+                    return Err(FsError::ReadOnlyFileSystem);
+                }
+                if !(self.spill.truncate)(&name, length as u64) {
+                    crate::serial_println!(
+                        "[VFS STREAM] the block device refused to resize {} to {} bytes",
+                        name, length
+                    );
+                    return Err(FsError::ReadOnlyFileSystem);
+                }
+            }
+            if let Some(inode) = self.inodes.get_mut(&inode_id) {
+                inode.size = length;
+                inode.sha256_digest = [0u8; 32];
+            }
+            self.bump_data_generation();
+            self.bump_metadata_generation();
+            self.persist_data_snapshot()?;
+            self.persist_metadata_snapshot()?;
+            return Ok(());
+        }
         let was_spilled = self.inodes.get(&inode_id).map(|i| i.size > SNAPSHOT_FILE_LIMIT).unwrap_or(false);
         let path = self.inodes.get(&inode_id).map(|i| i.path.clone()).unwrap_or_default();
         let inode=self.inodes.get_mut(&inode_id).ok_or(FsError::FileNotFound)?;
@@ -527,6 +665,11 @@ impl Vfs {
     pub fn read_file_range(&self, path: &str, offset: usize, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if inode.block_backed {
+            let name = spill_path_for(&inode.path);
+            let size = inode.size;
+            return self.stream_read(&name, offset, size, out);
+        }
         if offset >= inode.data.as_slice().len() { return Ok(0); }
         let data = inode.data.as_slice();
         let n = core::cmp::min(out.len(), data.len() - offset);
@@ -537,6 +680,11 @@ impl Vfs {
     pub fn read_file_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if inode.block_backed {
+            let name = spill_path_for(&inode.path);
+            let size = inode.size;
+            return self.stream_read(&name, 0, size, out);
+        }
         let slice = inode.data.as_slice();
         let to_copy = slice.len().min(out.len());
         out[..to_copy].copy_from_slice(&slice[..to_copy]);
@@ -570,6 +718,11 @@ impl Vfs {
         self.bump_storage_generation(&norm_path);
 
         if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
+            let was_backed = self
+                .inodes
+                .get(&existing_id)
+                .map(|inode| inode.block_backed)
+                .unwrap_or(false);
             let was_spilled = self
                 .inodes
                 .get(&existing_id)
@@ -578,6 +731,7 @@ impl Vfs {
             if let Some(inode) = self.inodes.get_mut(&existing_id) {
                 inode.data = InodeData::Dynamic(content);
                 inode.size = content_size;
+                inode.block_backed = false;
                 inode.sha256_digest = digest;
                 if read_only {
                     inode.file_type = FileType::ReadOnlySystem;
@@ -587,6 +741,13 @@ impl Vfs {
             // its block-store copy behind: nothing would name that copy
             // again, and it would hold blocks no file can reach.
             if was_spilled && content_size <= SNAPSHOT_FILE_LIMIT {
+                (self.spill.remove)(&spill_path_for(&norm_path));
+            }
+            // WHY this is a separate case: a backed inode's device copy was the
+            // whole file, and the caller has just replaced the whole file with
+            // bytes it handed over. However large those are, the copy on the
+            // device now describes a payload nothing points at.
+            if was_backed {
                 (self.spill.remove)(&spill_path_for(&norm_path));
             }
             self.bump_data_generation();
@@ -611,6 +772,7 @@ impl Vfs {
             file_type: if read_only { FileType::ReadOnlySystem } else { FileType::RegularFile },
             size: content_size,
             data: InodeData::Dynamic(content),
+            block_backed: false,
             sha256_digest: digest,
             children: Vec::new(),
         };
@@ -628,6 +790,181 @@ impl Vfs {
         inode_id
     }
 
+    /// Creates a file whose bytes are held by the device and never by the
+    /// kernel: the inode carries a length and a place to stream from, and no
+    /// payload at all.
+    ///
+    /// WHY the payload is not staged in memory and written when the descriptor
+    /// closes: the kernel heap is 64 MiB and a weight file is a multiple of
+    /// that, so a staged write would fail at exactly the size the mechanism
+    /// exists for. Each chunk goes to the device as it arrives, which also
+    /// means a reset part-way through an install leaves the bytes that reached
+    /// the device and no more, instead of nothing.
+    ///
+    /// WHY nothing touches the device here: a file with no bytes has nothing to
+    /// hold, and a create that the block device refuses would then be reported
+    /// as a failed create rather than a read-only filesystem. The first chunk
+    /// asks the device for room, and that refusal is the honest one.
+    pub fn create_block_backed_file(&mut self, path: &str) -> InodeId {
+        let norm_path = normalize_path(path);
+        if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
+            if let Some(inode) = self.inodes.get_mut(&existing_id) {
+                if inode.block_backed {
+                    return existing_id;
+                }
+                // A path that held its bytes in memory and is now declared
+                // device-held has those bytes released: the device copy, if a
+                // previous install left one, is lengthened and overwritten by
+                // the chunks that follow.
+                inode.data = InodeData::Dynamic(Vec::new());
+                inode.size = 0;
+                inode.block_backed = true;
+                inode.sha256_digest = [0u8; 32];
+                self.bump_data_generation();
+                self.bump_metadata_generation();
+                return existing_id;
+            }
+            return existing_id;
+        }
+
+        let inode_id = self.allocate_inode();
+        let name = path_filename(&norm_path);
+        let inode = Inode {
+            id: inode_id,
+            uid: ROOT_UID,
+            gid: ROOT_UID,
+            mode: DEFAULT_FILE_MODE,
+            nlink: 1,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            name,
+            path: norm_path.clone(),
+            file_type: FileType::RegularFile,
+            size: 0,
+            data: InodeData::Dynamic(Vec::new()),
+            block_backed: true,
+            sha256_digest: [0u8; 32],
+            children: Vec::new(),
+        };
+        self.inodes.insert(inode_id, inode);
+        self.path_to_inode.insert(norm_path.clone(), inode_id);
+        if let Some(parent_id) = self.path_to_inode.get(parent_path(&norm_path)).copied() {
+            if let Some(parent_inode) = self.inodes.get_mut(&parent_id) {
+                parent_inode.children.push(inode_id);
+            }
+        }
+        self.bump_data_generation();
+        self.bump_metadata_generation();
+        inode_id
+    }
+
+    /// Makes the device hold a file ready for a streamed payload of its own.
+    fn prepare_block_store(&self, name: &str) -> Result<(), FsError> {
+        match (self.spill.file_len)(name) {
+            Some(0) => Ok(()),
+            Some(_) if (self.spill.truncate)(name, 0) => Ok(()),
+            None if (self.spill.reserve)(name, SPILL_CHUNK_SIZE as u64) => Ok(()),
+            _ => {
+                crate::serial_println!(
+                    "[VFS STREAM] {} could not be opened on the block device; the payload was not accepted",
+                    name
+                );
+                Err(FsError::ReadOnlyFileSystem)
+            }
+        }
+    }
+
+    /// Writes one chunk of a device-held payload and publishes the length the
+    /// device now reports.
+    ///
+    /// WHY no snapshot is written with the chunk: the bytes are already on the
+    /// device -- that is what the chunk call did -- and the record that names
+    /// them carries no payload, only the path. Re-sealing and re-writing the
+    /// data snapshot per chunk would also re-write every *other* oversized
+    /// payload in the tree, because that is what a data persist does, so a
+    /// 4 KiB piece of a model would cost a full pass over unrelated files. The
+    /// snapshot is written when the descriptor closes and on an explicit sync,
+    /// and a restore takes the length from the device rather than from the
+    /// record, so a reset between chunks loses the chunks that never arrived
+    /// and nothing else.
+    fn stream_write(
+        &mut self,
+        inode_id: InodeId,
+        offset: usize,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        let name = {
+            let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+            spill_path_for(&inode.path)
+        };
+        let fresh = self
+            .inodes
+            .get(&inode_id)
+            .map(|inode| inode.size == 0)
+            .unwrap_or(false);
+        if fresh {
+            self.prepare_block_store(&name)?;
+        }
+        if !(self.spill.write_at)(&name, offset as u64, buf) {
+            crate::serial_println!(
+                "[VFS STREAM] the block device refused {} bytes at {} of {}",
+                buf.len(),
+                offset,
+                name
+            );
+            return Err(FsError::ReadOnlyFileSystem);
+        }
+        let end = offset.checked_add(buf.len()).ok_or(FsError::FileTooLarge)?;
+        let stored = (self.spill.file_len)(&name).unwrap_or(end as u64) as usize;
+        if let Some(inode) = self.inodes.get_mut(&inode_id) {
+            // WHY the device's length wins: the store publishes a file's length
+            // as its commit point, so it knows how much of the payload is down.
+            // The inode's own count is what stat answers between now and the
+            // next persist, and a count behind the device would report a file
+            // shorter than the bytes a reader can stream back.
+            inode.size = core::cmp::max(inode.size, core::cmp::max(end, stored));
+        }
+        self.bump_data_generation();
+        self.bump_metadata_generation();
+        Ok(buf.len())
+    }
+
+    /// Streams `buf` full from `offset` of a device-held payload.
+    ///
+    /// WHY a short read is an integrity report and not a zero fill: the length
+    /// the inode carries came from the device once. If the device no longer
+    /// gives those bytes back, the file is not what the tree says it is, and
+    /// handing over zeroes would let a model loader read a silently corrupt
+    /// weight instead of being told the payload is not there.
+    fn stream_read(&self, name: &str, offset: usize, size: usize, buf: &mut [u8]) -> Result<usize, FsError> {
+        if offset >= size || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = core::cmp::min(size - offset, buf.len());
+        match (self.spill.read_at)(name, offset as u64, &mut buf[..want]) {
+            Some(read) if read == want => Ok(read),
+            Some(read) => {
+                crate::serial_println!(
+                    "[VFS STREAM] {} gave {} of the {} bytes it is recorded to hold at {}",
+                    name,
+                    read,
+                    want,
+                    offset
+                );
+                Err(FsError::IntegrityViolation)
+            }
+            None => {
+                crate::serial_println!(
+                    "[VFS STREAM] {} holds no payload at {}; the file is not intact",
+                    name,
+                    offset
+                );
+                Err(FsError::IntegrityViolation)
+            }
+        }
+    }
+
     /// Creates a static read-only file referencing an embedded byte slice with zero heap overhead.
     pub fn create_static_file(
         &mut self,
@@ -641,6 +978,7 @@ impl Vfs {
             if let Some(inode) = self.inodes.get_mut(&existing_id) {
                 inode.data = InodeData::Static(content);
                 inode.size = content.len();
+                inode.block_backed = false;
                 inode.sha256_digest = digest;
                 inode.file_type = FileType::ReadOnlySystem;
             }
@@ -665,6 +1003,7 @@ impl Vfs {
             file_type: FileType::ReadOnlySystem,
             size: content.len(),
             data: InodeData::Static(content),
+            block_backed: false,
             sha256_digest: digest,
             children: Vec::new(),
         };
@@ -705,6 +1044,7 @@ impl Vfs {
             file_type: FileType::DeviceNode,
             size: 0,
             data: InodeData::Static(&[]),
+            block_backed: false,
             sha256_digest: [0u8; 32],
             children: Vec::new(),
         };
@@ -801,13 +1141,24 @@ impl Vfs {
             if !inode.path.starts_with(&prefix) {
                 continue;
             }
-            let head = inode
-                .data
-                .as_slice()
-                .iter()
-                .take(head_len)
-                .copied()
-                .collect::<Vec<u8>>();
+            let head = if inode.block_backed {
+                // The classifier asks for the first bytes of a document to name
+                // its type, and a device-held payload has no bytes in the inode
+                // to take, so the head is streamed from the device.
+                let mut head = alloc::vec![0u8; head_len];
+                let name = spill_path_for(&inode.path);
+                let read = self.stream_read(&name, 0, inode.size, &mut head).unwrap_or(0);
+                head.truncate(read);
+                head
+            } else {
+                inode
+                    .data
+                    .as_slice()
+                    .iter()
+                    .take(head_len)
+                    .copied()
+                    .collect::<Vec<u8>>()
+            };
             out.push((
                 inode.path.clone(),
                 inode.size as u64,
@@ -1214,7 +1565,14 @@ impl Vfs {
             } else {
                 let normalized = normalize_path(path);
                 let is_storage = normalized.starts_with("/storage/");
-                if !is_storage {
+                // WHY the model namespace sits beside `/storage/` here: this
+                // check asks which tree a caller's identity may create in, and
+                // the app-isolation gate has already run above -- a packaged
+                // app is refused `/data/models` there. What reaches this line
+                // is a service that holds filesystem write authority, which is
+                // exactly who installs a model.
+                let is_model = is_model_namespace(&normalized);
+                if !is_storage && !is_model {
                     let Some(root) = Self::app_storage_root(task_id) else {
                         return Err(FsError::FileNotFound);
                     };
@@ -1227,7 +1585,14 @@ impl Vfs {
                 if self.inodes.get(&parent_inode).map(|inode| inode.file_type != FileType::Directory).unwrap_or(true) {
                     return Err(FsError::NotADirectory);
                 }
-                let created = self.create_file(&normalized, &[], false);
+                // A model file is created device-held: its bytes are known in
+                // advance to be larger than the kernel heap, so an inode that
+                // collected them would fail at the size it exists for.
+                let created = if is_model {
+                    self.create_block_backed_file(&normalized)
+                } else {
+                    self.create_file(&normalized, &[], false)
+                };
                 self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
                 self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
                 created
@@ -1376,6 +1741,27 @@ pub fn read_file_for_task(
     }
 
     // Bound the copy, not the allocation that follows it.
+    if inode.block_backed {
+        // WHY the bound is checked against the reported length and not the
+        // inode's bytes: a device-held inode holds no bytes, so `data.len()`
+        // would be zero for a two-gigabyte file and this call would answer an
+        // empty document the caller then trusts.
+        let name = spill_path_for(&inode.path);
+        let size = inode.size;
+        if size > max_len {
+            return Err(FsError::FileTooLarge);
+        }
+        let mut buf = alloc::vec![0u8; size];
+        let mut offset = 0usize;
+        while offset < size {
+            let read = self.stream_read(&name, offset, size, &mut buf[offset..])?;
+            if read == 0 {
+                return Err(FsError::IntegrityViolation);
+            }
+            offset += read;
+        }
+        return Ok(buf);
+    }
     if inode.data.len() > max_len {
         return Err(FsError::FileTooLarge);
     }
@@ -1467,6 +1853,20 @@ pub fn read_file_for_task(
             return crate::fs::devfs::device_read(&inode.path, buf);
         }
 
+        if inode.block_backed {
+            let name = spill_path_for(&inode.path);
+            let size = inode.size;
+            let offset = handle.offset;
+            // The inode borrow above has to be over before this call: streaming
+            // from the device is a call on the filesystem, not on one field of
+            // it.
+            let count = self.stream_read(&name, offset, size, buf)?;
+            let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+            let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
+            handle.offset += count;
+            return Ok(count);
+        }
+
         if handle.offset >= inode.data.len() {
             return Ok(0); // EOF
         }
@@ -1531,6 +1931,7 @@ pub fn read_file_for_task(
         let inode_id = handle.inode_id;
         let offset = handle.offset;
 
+        let block_backed = self.inodes.get(&inode_id).map(|i| i.block_backed).unwrap_or(false);
         let inode = self.inodes.get_mut(&inode_id).ok_or(FsError::FileNotFound)?;
 
         if inode.file_type == FileType::DeviceNode {
@@ -1539,6 +1940,20 @@ pub fn read_file_for_task(
 
         if inode.file_type == FileType::ReadOnlySystem {
             return Err(FsError::ReadOnlyFileSystem);
+        }
+
+        // WHY the chunk goes straight to the device: the whole point of a
+        // device-held file is that the kernel never holds it, so the buffer the
+        // caller passed is copied a piece at a time into the block store and
+        // dropped. The inode's borrow ends at the checks above -- streaming is
+        // a call on the filesystem, because it asks the device for room and
+        // reads the published length back.
+        if block_backed {
+            let written = self.stream_write(inode_id, offset, buf)?;
+            let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+            let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
+            handle.offset += written;
+            return Ok(written);
         }
 
         // Extend buffer if necessary
@@ -1725,6 +2140,25 @@ pub fn read_file_for_task(
             if inode.file_type != FileType::RegularFile || !is_persistent_data_path(&inode.path) { continue; }
             let path=inode.path.as_bytes();
             let data=inode.data.as_slice();
+            if inode.block_backed {
+                if path.len() > 255 { continue; }
+                if pos + 2 + path.len() + 4 > buf.len() { break; }
+                buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
+                buf[pos..pos+path.len()].copy_from_slice(path); pos+=path.len();
+                // WHY the encoded length is zero and not `inode.size`: the
+                // device already publishes the payload's length, and it is the
+                // copy that survives a reset mid-chunk. A length read back from
+                // the store can therefore never disagree with the bytes the
+                // store holds, while a length sealed into this record could --
+                // and a model file is far too large to re-write per chunk. It
+                // also keeps the record inside the 31 bits left by the flags: a
+                // two-gigabyte file would otherwise have its length eat the
+                // flag that says the payload is on the device.
+                let marked = DATA_ENTRY_EXTERNAL | DATA_ENTRY_STREAMED;
+                buf[pos..pos+4].copy_from_slice(&marked.to_le_bytes()); pos+=4;
+                count=count.saturating_add(1);
+                continue;
+            }
             // A size that no bytes back is a record from a boot that lost the
             // payload; persisting it again would keep the lie alive.
             if data.is_empty() && inode.size > 0 { continue; }
@@ -2018,7 +2452,30 @@ pub fn read_file_for_task(
             let path=match core::str::from_utf8(&buf[pos..pos+plen]).ok(){Some(v)=>v, None=>break}; pos+=plen;
             let raw=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as u32; pos+=4;
             let external = raw & DATA_ENTRY_EXTERNAL != 0;
-            let dlen=(raw & !DATA_ENTRY_EXTERNAL) as usize;
+            let streamed = raw & DATA_ENTRY_STREAMED != 0;
+            let dlen=(raw & !(DATA_ENTRY_EXTERNAL | DATA_ENTRY_STREAMED)) as usize;
+            if external && streamed {
+                // A streamed record names a payload the kernel never holds, so
+                // restoring it costs no memory: the inode takes the length the
+                // device publishes and the bytes stay where they are.
+                if !is_persistent_data_path(path) { continue; }
+                let name = spill_path_for(path);
+                let size = (store.file_len)(&name).unwrap_or(0) as usize;
+                if size == 0 {
+                    crate::serial_println!(
+                        "[VFS RESTORE] {} is device-held but the block store has no payload for it; restored empty",
+                        path
+                    );
+                }
+                let parent = parent_path(path);
+                if parent != "/" { self.ensure_dir_path(parent); }
+                crate::serial_println!("[VFS RESTORE] Restored device-held file: {} ({} bytes)", path, size);
+                let id = self.create_block_backed_file(path);
+                if let Some(inode) = self.inodes.get_mut(&id) {
+                    inode.size = size;
+                }
+                continue;
+            }
             if external {
                 if dlen == 0 { continue; }
                 if dlen > SPILL_FILE_LIMIT {
@@ -2224,6 +2681,11 @@ fn spill_path_for(vfs_path: &str) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Whether a path names a file the device holds and the kernel never does.
+fn is_model_namespace(path: &str) -> bool {
+    path.starts_with(MODEL_NAMESPACE)
 }
 
 /// Normalizes a path string.
@@ -2467,6 +2929,53 @@ mod tests {
         true
     }
 
+    /// Makes a file exist in the in-memory store with room for `capacity`.
+    ///
+    /// WHY the bytes are not allocated up front: the device reserves blocks, it
+    /// does not commit them to a length, and a test store that allocated a two
+    /// gigabyte vector to model a reservation would fail in the opposite way to
+    /// the kernel it is meant to prove.
+    fn memory_reserve(name: &str, _capacity: u64) -> bool {
+        let mut files = MEMORY_STORE.lock();
+        files
+            .entry(String::from(name))
+            .or_insert_with(|| StoredFile { bytes: Vec::new(), published: 0 });
+        true
+    }
+
+    /// Writes bytes at an offset, publishing the new length as the commit point.
+    fn memory_write_at(name: &str, offset: u64, data: &[u8]) -> bool {
+        let mut files = MEMORY_STORE.lock();
+        let start = offset as usize;
+        let Some(file) = files.get_mut(name) else {
+            // The device refuses a range write to a file it does not have.
+            return false;
+        };
+        let end = start + data.len();
+        if file.bytes.len() < end {
+            file.bytes.resize(end, 0);
+        }
+        file.bytes[start..end].copy_from_slice(data);
+        file.published = core::cmp::max(file.published, end as u64);
+        true
+    }
+
+    /// Publishes a new length for a file, keeping the bytes inside it.
+    fn memory_truncate(name: &str, new_size: u64) -> bool {
+        let mut files = MEMORY_STORE.lock();
+        let Some(file) = files.get_mut(name) else {
+            return false;
+        };
+        let size = new_size as usize;
+        if file.bytes.len() < size {
+            file.bytes.resize(size, 0);
+        } else {
+            file.bytes.truncate(size);
+        }
+        file.published = new_size;
+        true
+    }
+
     /// The store the spill tests install in place of the block device.
     fn memory_store() -> SpillStore {
         SpillStore {
@@ -2474,6 +2983,9 @@ mod tests {
             read_at: memory_read_at,
             file_len: memory_file_len,
             remove: memory_remove,
+            reserve: memory_reserve,
+            write_at: memory_write_at,
+            truncate: memory_truncate,
         }
     }
 
@@ -3008,6 +3520,325 @@ mod tests {
             memory_file_len(&name).is_none(),
             "a payload that no longer needs the block store must not leave it behind"
         );
+    }
+
+    /// Writes `chunks` x `CHUNK_BYTES` of a distinguishable pattern into a
+    /// device-held file through one descriptor, and returns the bytes written.
+    fn stream_model_chunks(
+        vfs: &mut Vfs,
+        task_id: TaskId,
+        caps: &CapabilityTable,
+        fd: FileDescriptor,
+        chunks: usize,
+    ) -> Vec<u8> {
+        const CHUNK_BYTES: usize = 256 * 1024;
+        let mut expected = Vec::new();
+        for round in 0..chunks {
+            let chunk: Vec<u8> = (0..CHUNK_BYTES).map(|i| ((round * 7 + i) % 251) as u8).collect();
+            let written = vfs
+                .write(task_id, caps, 0, fd, &chunk)
+                .expect("a streamed chunk is accepted");
+            assert_eq!(written, CHUNK_BYTES, "the whole chunk is reported written");
+            let inode_id = vfs
+                .task_file_tables
+                .get(&task_id)
+                .and_then(|table| table[fd.0 as usize].as_ref())
+                .map(|handle| handle.inode_id)
+                .expect("the descriptor is open");
+            assert!(
+                vfs.inodes[&inode_id].data.as_slice().is_empty(),
+                "chunk {} left {} bytes of the payload in the kernel heap",
+                round,
+                vfs.inodes[&inode_id].data.len()
+            );
+            expected.extend_from_slice(&chunk);
+        }
+        expected
+    }
+
+    /// A write-capable capability table for a streaming test.
+    fn stream_caps(task_id: TaskId) -> CapabilityTable {
+        let mut caps = CapabilityTable::new_for_task(task_id, 8);
+        caps.insert(Capability {
+            id: CapabilityId(13010),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE.union(Rights::READ),
+            object_id: 0,
+        })
+        .expect("write capability");
+        caps.insert(Capability {
+            id: CapabilityId(13011),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        })
+        .expect("read capability");
+        caps
+    }
+
+    /// The defect this pins: a model file travelled through the kernel heap, so
+    /// a payload above the 16 MiB spill ceiling could not be installed at all,
+    /// and one below it was copied whole into memory on every boot. A
+    /// device-held file hands each chunk to the block store as it arrives and
+    /// keeps only the length in the inode.
+    #[test]
+    fn vfs_a_model_file_is_streamed_to_the_device_and_never_holds_its_bytes() {
+        const CHUNK_BYTES: usize = 256 * 1024;
+        const CHUNKS: usize = 8;
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file("/data/models/gemma-mini.gguf");
+
+        let task_id = TaskId(1301);
+        let caps = stream_caps(task_id);
+        let fd = vfs
+            .allocate_fd(task_id, id, Rights::READ | Rights::WRITE)
+            .expect("a descriptor for the model file");
+
+        let expected = stream_model_chunks(&mut vfs, task_id, &caps, fd, CHUNKS);
+        let total = CHUNK_BYTES * CHUNKS;
+        assert_eq!(vfs.inodes[&id].size, total, "the inode reports the streamed length");
+
+        // The store, not the inode, holds the bytes.
+        let name = spill_path_for("/data/models/gemma-mini.gguf");
+        assert_eq!(
+            memory_file_len(&name),
+            Some(total as u64),
+            "the chunks reached the block store"
+        );
+
+        // And they come back through the ordinary read path, from the start.
+        let table = vfs.task_file_tables.get_mut(&task_id).expect("table");
+        table[fd.0 as usize].as_mut().expect("handle").offset = 0;
+        let mut read_back = alloc::vec![0u8; total];
+        let read = vfs.read(task_id, &caps, 0, fd, &mut read_back).expect("streamed read");
+        assert_eq!(read, total);
+        assert_eq!(read_back, expected, "the streamed bytes read back exactly");
+
+        // A persist has no resident payload to write for this inode: the bytes
+        // are already on the device.
+        assert!(
+            vfs.store_spilled_payloads().is_empty(),
+            "a device-held file must not be re-written wholesale on every persist"
+        );
+    }
+
+    /// The second half of the same mechanism: what a reboot does with a file the
+    /// kernel never held.
+    #[test]
+    fn vfs_a_device_held_file_is_recorded_by_name_and_restored_without_bytes() {
+        const CHUNK_BYTES: usize = 64 * 1024;
+        let mut source = Vfs::with_spill_store(memory_store());
+        source.mkdir("/data");
+        source.mkdir("/data/models");
+        let id = source.create_block_backed_file("/data/models/gemma-tiny.gguf");
+        let task_id = TaskId(1302);
+        let caps = stream_caps(task_id);
+        let fd = source
+            .allocate_fd(task_id, id, Rights::READ | Rights::WRITE)
+            .expect("descriptor");
+        let mut written = 0usize;
+        for round in 0..8usize {
+            let chunk: Vec<u8> = (0..CHUNK_BYTES).map(|i| ((round * 31 + i) % 253) as u8).collect();
+            written += source.write(task_id, &caps, 0, fd, &chunk).expect("chunk");
+        }
+
+        let spilled = source.store_spilled_payloads();
+        assert!(spilled.is_empty(), "nothing is spilled for a file the kernel never held");
+        let mut data = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
+        let len = source.encode_data_snapshot_with(&mut data, &spilled);
+        let path = b"/data/models/gemma-tiny.gguf";
+        assert_eq!(
+            len,
+            6 + 2 + path.len() + 4,
+            "the record names the payload and carries neither its bytes nor its length"
+        );
+        let record = u32::from_le_bytes([data[len - 4], data[len - 3], data[len - 2], data[len - 1]]);
+        assert_eq!(
+            record,
+            DATA_ENTRY_EXTERNAL | DATA_ENTRY_STREAMED,
+            "the record says the bytes are on the device and were never in memory"
+        );
+
+        let mut restored = Vfs::with_spill_store(memory_store());
+        restored.decode_data_snapshot_with(&data[..len], len, memory_store());
+        let file = restored
+            .lookup("/data/models/gemma-tiny.gguf")
+            .expect("the model file is restored");
+        let inode = &restored.inodes[&file];
+        assert!(inode.block_backed, "the restored file stays device-held");
+        assert!(inode.data.as_slice().is_empty(), "restoring did not copy the payload into the heap");
+        assert_eq!(inode.size, written, "the length came from the device, not the record");
+
+        // ...and it is readable through the restored inode.
+        let task_id = TaskId(1303);
+        let caps = stream_caps(task_id);
+        let read_fd = restored.allocate_fd(task_id, file, Rights::READ).expect("read fd");
+        let mut read_back = alloc::vec![0u8; written];
+        let read = restored.read(task_id, &caps, 0, read_fd, &mut read_back).expect("restored read");
+        assert_eq!(read, written);
+        let first: Vec<u8> = (0..CHUNK_BYTES).map(|i| (i % 253) as u8).collect();
+        assert_eq!(&read_back[..CHUNK_BYTES], &first[..], "the restored bytes are the written bytes");
+    }
+
+    /// A length that came from the device is a promise the device has to keep.
+    #[test]
+    fn vfs_a_device_held_file_the_device_lost_reports_integrity_loss() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file("/data/models/lost.gguf");
+        let task_id = TaskId(1304);
+        let caps = stream_caps(task_id);
+        let fd = vfs.allocate_fd(task_id, id, Rights::READ | Rights::WRITE).expect("fd");
+        vfs.write(task_id, &caps, 0, fd, &[0x5Au8; 4096]).expect("chunk");
+        let table = vfs.task_file_tables.get_mut(&task_id).expect("table");
+        table[fd.0 as usize].as_mut().expect("handle").offset = 0;
+
+        // The payload disappears under the inode -- the case a corrupt or
+        // re-formatted data region produces.
+        memory_remove(&spill_path_for("/data/models/lost.gguf"));
+
+        let mut buf = alloc::vec![0u8; 4096];
+        assert_eq!(
+            vfs.read(task_id, &caps, 0, fd, &mut buf).err(),
+            Some(FsError::IntegrityViolation),
+            "a missing payload is reported, not filled with zeroes"
+        );
+    }
+
+    /// Resizing a device-held file has to resize the device's copy, or the next
+    /// restore undoes the call.
+    #[test]
+    fn vfs_truncating_a_device_held_file_resizes_the_device_copy() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file("/data/models/resized.gguf");
+        let task_id = TaskId(1305);
+        let caps = stream_caps(task_id);
+        let fd = vfs.allocate_fd(task_id, id, Rights::READ | Rights::WRITE).expect("fd");
+        vfs.write(task_id, &caps, 0, fd, &alloc::vec![0x77u8; 512 * 1024]).expect("payload");
+
+        vfs.truncate(task_id, fd, 128 * 1024).expect("truncate below the written length");
+        let name = spill_path_for("/data/models/resized.gguf");
+        assert_eq!(memory_file_len(&name), Some(128 * 1024), "the store was resized, not the copy in memory");
+        assert_eq!(vfs.inodes[&id].size, 128 * 1024);
+
+        // Growing past the end publishes the new length with zeroes in between.
+        vfs.truncate(task_id, fd, 256 * 1024).expect("grow");
+        assert_eq!(memory_file_len(&name), Some(256 * 1024));
+        let table = vfs.task_file_tables.get_mut(&task_id).expect("table");
+        table[fd.0 as usize].as_mut().expect("handle").offset = 200 * 1024;
+        let mut tail = alloc::vec![0u8; 4096];
+        let read = vfs
+            .read(task_id, &caps, 0, fd, &mut tail)
+            .expect("read the grown region");
+        assert_eq!(read, 4096);
+        assert!(tail.iter().all(|b| *b == 0), "the grown region is zero-filled");
+        assert_eq!(
+            memory_read_at(&name, 1024, &mut tail[..64]),
+            Some(64),
+            "the bytes that survived the shrink are still the written ones"
+        );
+        assert!(tail[..64].iter().all(|b| *b == 0x77));
+    }
+
+    /// A rename that moved only the directory entry would orphan the payload:
+    /// the new path would read as empty and the bytes would be named by a path
+    /// no inode holds.
+    #[test]
+    fn vfs_renaming_a_device_held_file_moves_the_payload() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file("/data/models/downloading.tmp");
+        let task_id = TaskId(1306);
+        let caps = stream_caps(task_id);
+        let fd = vfs.allocate_fd(task_id, id, Rights::READ | Rights::WRITE).expect("fd");
+        let payload: Vec<u8> = (0..200 * 1024usize).map(|i| (i % 199) as u8).collect();
+        vfs.write(task_id, &caps, 0, fd, &payload).expect("payload");
+
+        vfs.rename("/data/models/downloading.tmp", "/data/models/installed.gguf").expect("rename");
+
+        assert_eq!(vfs.lookup("/data/models/downloading.tmp"), None);
+        let moved = vfs.lookup("/data/models/installed.gguf").expect("the renamed file");
+        let inode = &vfs.inodes[&moved];
+        assert!(inode.block_backed, "the renamed file is still device-held");
+        assert_eq!(inode.size, payload.len());
+        assert!(inode.data.as_slice().is_empty(), "the rename did not stage the payload");
+
+        let mut out = alloc::vec![0u8; payload.len()];
+        let read = vfs.read_file_by_path("/data/models/installed.gguf", &mut out).expect("read the renamed file");
+        assert_eq!(read, payload.len());
+        assert_eq!(out, payload, "the bytes moved with the name");
+        assert!(
+            memory_file_len(&spill_path_for("/data/models/downloading.tmp")).is_none(),
+            "the old block-store name must not keep blocks no inode can reach"
+        );
+    }
+
+    /// A whole-file reader must not hand a caller a two-gigabyte allocation, and
+    /// must not report an empty document either.
+    #[test]
+    fn vfs_reading_a_device_held_file_whole_is_bounded_by_the_callers_limit() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file("/data/models/bounded.gguf");
+        let task_id = TaskId(1307);
+        let caps = stream_caps(task_id);
+        let fd = vfs.allocate_fd(task_id, id, Rights::READ | Rights::WRITE).expect("fd");
+        let payload: Vec<u8> = (0..512 * 1024usize).map(|i| (i % 97) as u8).collect();
+        vfs.write(task_id, &caps, 0, fd, &payload).expect("payload");
+
+        assert_eq!(
+            vfs.read_file_for_task(&caps, 0, "/data/models/bounded.gguf", 4096).err(),
+            Some(FsError::FileTooLarge),
+            "a caller that cannot hold the file is told so before any copy"
+        );
+
+        let whole = vfs
+            .read_file_for_task(&caps, 0, "/data/models/bounded.gguf", payload.len())
+            .expect("a caller that named the whole file gets it");
+        assert_eq!(whole, payload);
+    }
+
+    /// The namespace decides, not the size: a download of the same length stays
+    /// an ordinary resident file, and a model file of a few bytes is device-held.
+    #[test]
+    fn vfs_opening_a_model_path_creates_a_device_held_file_and_nothing_else_does() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/downloads");
+        let task_id = TaskId(1308);
+        crate::task::process::register_leader(task_id, TaskId(1));
+        let caps = stream_caps(task_id);
+
+        let model_fd = vfs
+            .open(task_id, &caps, 0, "/data/models/opened.gguf", Rights::READ | Rights::WRITE)
+            .expect("open a model file for writing");
+        let model = vfs.lookup("/data/models/opened.gguf").expect("the model file");
+        assert!(vfs.inodes[&model].block_backed, "a model file is created device-held");
+
+        let chunk = alloc::vec![0x41u8; 1024];
+        vfs.write(task_id, &caps, 0, model_fd, &chunk).expect("the first chunk of an install");
+        assert_eq!(memory_file_len(&spill_path_for("/data/models/opened.gguf")), Some(1024));
+        assert!(vfs.inodes[&model].data.as_slice().is_empty());
+
+        let download_fd = vfs
+            .open(task_id, &caps, 0, "/storage/downloads/same-size.bin", Rights::READ | Rights::WRITE)
+            .expect("open a download of the same size");
+        let download = vfs.lookup("/storage/downloads/same-size.bin").expect("the download");
+        assert!(
+            !vfs.inodes[&download].block_backed,
+            "the decision is the namespace, not the length -- a download keeps its ordinary path"
+        );
+        vfs.write(task_id, &caps, 0, download_fd, &chunk).expect("the download still writes");
+        assert_eq!(vfs.inodes[&download].data.as_slice(), chunk.as_slice());
     }
 
     #[test]

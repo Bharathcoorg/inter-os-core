@@ -1424,4 +1424,56 @@ mod tests {
         assert_eq!(read, 3000);
         assert!(out.iter().all(|b| *b == 7));
     }
+
+    /// The defect this pins: `truncate_file` used to read the file into a buffer
+    /// and write it back, so resizing a payload larger than the kernel's spill
+    /// ceiling could not be done at all -- and the length of a streamed install
+    /// is set by the bytes that arrived, not by the heap.
+    #[test]
+    fn a_stream_above_the_spill_ceiling_is_resized_in_place_and_keeps_its_bytes() {
+        const CHUNK: usize = 2 * 1024 * 1024;
+        // Ten chunks is 20 MiB: above the ceiling a resident payload is
+        // refused, and the reason the resize must not need the file in memory.
+        const CHUNKS: usize = 10;
+        assert!(CHUNK * CHUNKS > crate::fs::vfs::SPILL_FILE_LIMIT);
+
+        let mut dev = SparseDevice::new(HALF_GB_SECTORS);
+        InterFs::format_at(&mut dev, 0).expect("format");
+        let mut fs = InterFs::mount_at(&mut dev, 0).expect("mount");
+
+        fs.create_stream("/models/large.gguf", (CHUNK * CHUNKS * 2) as u64).expect("reserve");
+        let chunk: Vec<u8> = (0..CHUNK).map(|i| (i % 251) as u8).collect();
+        for round in 0..CHUNKS {
+            fs.write_at("/models/large.gguf", (round * CHUNK) as u64, &chunk).expect("chunk");
+        }
+        assert_eq!(
+            fs.file_len("/models/large.gguf").expect("length"),
+            (CHUNK * CHUNKS) as u64,
+            "the streamed bytes publish their own length"
+        );
+
+        // Shrink, then grow past the old end: the resize never holds the file.
+        fs.truncate_file("/models/large.gguf", (CHUNK * 3) as u64).expect("shrink");
+        assert_eq!(fs.file_len("/models/large.gguf").expect("length"), (CHUNK * 3) as u64);
+        fs.truncate_file("/models/large.gguf", (CHUNK * 6) as u64).expect("grow");
+        assert_eq!(fs.file_len("/models/large.gguf").expect("length"), (CHUNK * 6) as u64);
+
+        let mut head = alloc::vec![0u8; CHUNK];
+        assert_eq!(fs.read_at("/models/large.gguf", 0, &mut head).expect("head"), CHUNK);
+        assert_eq!(head[..], chunk[..], "the bytes before the shrink are untouched");
+        let mut grown = [0u8; 512];
+        assert_eq!(
+            fs.read_at("/models/large.gguf", (CHUNK * 4) as u64, &mut grown).expect("grown region"),
+            512,
+        );
+        assert!(grown.iter().all(|b| *b == 0), "the region grown past the end is zero-filled");
+
+        // The resize is what the next mount sees, and the metadata still agrees
+        // with the bitmap.
+        drop(fs);
+        let mut fs = InterFs::mount_at(&mut dev, 0).expect("remount");
+        assert_eq!(fs.file_len("/models/large.gguf").expect("length"), (CHUNK * 6) as u64);
+        let report = fs.check_integrity().expect("the filesystem is consistent after a resize");
+        assert_eq!(report.used_inodes, 1);
+    }
 }

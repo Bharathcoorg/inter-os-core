@@ -183,6 +183,15 @@ pub fn store_data_file(path: &str, data: &[u8]) -> Result<(), FsBackendError> {
 pub fn reserve_data_file(path: &str, capacity: u64) -> Result<(), FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    reserve_data_file_with_device(device, path, capacity)
+}
+
+/// Reserves room for `capacity` bytes in a data file on `device`.
+pub fn reserve_data_file_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+    capacity: u64,
+) -> Result<(), FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
@@ -193,6 +202,16 @@ pub fn reserve_data_file(path: &str, capacity: u64) -> Result<(), FsBackendError
 pub fn store_data_file_range(path: &str, offset: u64, data: &[u8]) -> Result<usize, FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    store_data_file_range_with_device(device, path, offset, data)
+}
+
+/// Writes `data` at `offset` inside a data file on `device`.
+pub fn store_data_file_range_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<usize, FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
@@ -203,16 +222,64 @@ pub fn store_data_file_range(path: &str, offset: u64, data: &[u8]) -> Result<usi
 pub fn load_data_file_range(path: &str, offset: u64, out: &mut [u8]) -> Result<usize, FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    load_data_file_range_with_device(device, path, offset, out)
+}
+
+/// Reads up to `out.len()` bytes from a data file on `device` at `offset`.
+pub fn load_data_file_range_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+    offset: u64,
+    out: &mut [u8],
+) -> Result<usize, FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     fs.read_at(path, offset, out)
 }
 
+/// Resizes a data file to `new_size` bytes, keeping the bytes it still holds.
+///
+/// WHY this is not "write the first `new_size` bytes back": a file that is
+/// larger than the kernel heap cannot be read into memory to be resized, which
+/// is the same reason the payload is streamed in the first place. The block
+/// backend resizes the published length in place.
+pub fn truncate_data_file(path: &str, new_size: u64) -> Result<(), FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    truncate_data_file_with_device(device, path, new_size)
+}
+
+/// Resizes a data file on `device` to `new_size` bytes.
+pub fn truncate_data_file_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+    new_size: u64,
+) -> Result<(), FsBackendError> {
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.truncate_file(path, new_size)
+}
+
 /// The published size of a data file, in bytes.
 pub fn data_file_len(path: &str) -> Result<u64, FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    data_file_len_with_device(device, path)
+}
+
+/// The published size of a data file on `device`, in bytes.
+///
+/// WHY this is the streaming path's commit point: a chunk write publishes the
+/// file's length, so a reader that asks the length knows how much of the
+/// payload actually landed. The VFS takes a device-held file's length from here
+/// rather than from the snapshot record, because the record was written before
+/// the reset and the device was not.
+pub fn data_file_len_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+) -> Result<u64, FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
@@ -430,5 +497,70 @@ mod tests {
             "a 6 GiB device must yield a region of its own size, not a capped one: {region}",
         );
         assert!(region > MIN_INTERFS_REGION_SECTORS);
+    }
+
+    /// The streamed path the VFS uses for a payload it must not hold: reserve
+    /// once, write a chunk at a time, read a range back, resize in place. None
+    /// of these calls ever carries the whole file, and none of them is the
+    /// whole-file `store_data_file`, which would need the payload in memory.
+    #[test]
+    fn a_streamed_payload_round_trips_through_the_range_helpers() {
+        let path = "/data/models/streamed.gguf";
+        let mut dev = MockDevice::blank(PACKAGED_SECTORS);
+        init_block_filesystem_with_device(&mut dev).expect("format a data device");
+
+        reserve_data_file_with_device(&mut dev, path, 512 * 1024).expect("reserve the extent");
+        // A reservation is not a payload: the file exists and holds nothing.
+        assert_eq!(data_file_len_with_device(&mut dev, path).expect("length"), 0);
+
+        let chunk: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            store_data_file_range_with_device(&mut dev, path, 0, &chunk).expect("first chunk"),
+            chunk.len()
+        );
+        assert_eq!(
+            store_data_file_range_with_device(&mut dev, path, 4096, &chunk).expect("second chunk"),
+            chunk.len()
+        );
+        assert_eq!(data_file_len_with_device(&mut dev, path).expect("length"), 8192);
+
+        let mut out = alloc::vec![0u8; 4096];
+        assert_eq!(load_data_file_range_with_device(&mut dev, path, 4096, &mut out).expect("read the second chunk"), 4096);
+        assert_eq!(out[..], chunk[..], "the chunk reads back byte for byte at its offset");
+
+        // Shrink and grow: the resize is what the next mount sees, and the
+        // grown region is zeroes rather than whatever the extent held before.
+        truncate_data_file_with_device(&mut dev, path, 2048).expect("shrink");
+        assert_eq!(data_file_len_with_device(&mut dev, path).expect("length"), 2048);
+        truncate_data_file_with_device(&mut dev, path, 300 * 1024).expect("grow");
+        assert_eq!(data_file_len_with_device(&mut dev, path).expect("length"), 300 * 1024);
+
+        let mut head = [0u8; 64];
+        load_data_file_range_with_device(&mut dev, path, 0, &mut head).expect("read the head");
+        assert_eq!(head[..], chunk[..64], "the bytes before the shrink survived");
+        let mut grown = [0u8; 512];
+        load_data_file_range_with_device(&mut dev, path, 100 * 1024, &mut grown).expect("read the grown region");
+        assert!(grown.iter().all(|b| *b == 0), "the region past the end is zero-filled");
+
+        // A range write to a file the store does not have is refused rather
+        // than silently creating one with no extent behind it.
+        assert_eq!(
+            store_data_file_range_with_device(&mut dev, "/data/models/absent.gguf", 0, &chunk).err(),
+            Some(FsBackendError::FileNotFound),
+        );
+    }
+
+    /// The boot guard is not bypassed by the streaming helpers: a payload can
+    /// only be streamed into a region the placement layer already allows.
+    #[test]
+    fn the_streaming_helpers_refuse_the_boot_device() {
+        let mut dev = MockDevice::packaged_boot_image();
+        let before = dev.sectors.clone();
+        assert_eq!(
+            reserve_data_file_with_device(&mut dev, "/data/models/x.gguf", 4096),
+            Err(FsBackendError::BootDeviceProtected)
+        );
+        assert_eq!(dev.writes, 0);
+        assert_eq!(dev.sectors, before);
     }
 }
