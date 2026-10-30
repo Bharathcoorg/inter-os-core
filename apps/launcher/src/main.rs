@@ -1448,10 +1448,7 @@ fn section_keywords(section: interos_std::settings::Section, buf: &mut [u8; 96])
 /// that does not say what it does. The path is on the row for the same
 /// reason: it is where the file is.
 fn list_storage_files(state: &mut LauncherState) -> Result<(), &'static str> {
-    use launcher::search::{Entry, SearchKind};
-
-    /// The name of the app a file row opens.
-    const FILES_APP: &[u8] = b"Files: ";
+    use launcher::search::{file_row_subtitle, Entry, SearchKind};
 
     let mut buf = [0u8; 4096];
     let listed = std::fs_list("/storage", &mut buf)
@@ -1497,19 +1494,10 @@ fn list_storage_files(state: &mut LauncherState) -> Result<(), &'static str> {
             continue;
         }
         let mut subtitle = [0u8; 40];
-        let mut sub_at = 0usize;
-        for &byte in FILES_APP {
-            if sub_at >= subtitle.len() {
-                break;
-            }
-            subtitle[sub_at] = byte;
-            sub_at += 1;
-        }
-        let sub_len = at.min(subtitle.len().saturating_sub(sub_at));
-        subtitle[sub_at..sub_at + sub_len].copy_from_slice(&path[..sub_len]);
+        let sub_len = file_row_subtitle(&path[..at], &mut subtitle);
         state
             .search_index
-            .push(Entry::new(SearchKind::File, name, &subtitle[..sub_at + sub_len], &path[..at]));
+            .push(Entry::new(SearchKind::File, name, &subtitle[..sub_len], &path[..at]));
     }
 
     // One level into each folder the storage holds.
@@ -1554,20 +1542,11 @@ fn list_storage_files(state: &mut LauncherState) -> Result<(), &'static str> {
             full[at..at + name_len].copy_from_slice(&name[..name_len]);
             at += name_len;
             let mut subtitle = [0u8; 40];
-            let mut sub_at = 0usize;
-            for &byte in b"Files: " {
-                if sub_at >= subtitle.len() {
-                    break;
-                }
-                subtitle[sub_at] = byte;
-                sub_at += 1;
-            }
-            let sub_len = at.min(subtitle.len().saturating_sub(sub_at));
-            subtitle[sub_at..sub_at + sub_len].copy_from_slice(&full[..sub_len]);
+            let sub_len = file_row_subtitle(&full[..at], &mut subtitle);
             state.search_index.push(Entry::new(
                 SearchKind::File,
                 name,
-                &subtitle[..sub_at + sub_len],
+                &subtitle[..sub_len],
                 &full[..at],
             ));
         }

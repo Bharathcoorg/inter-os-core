@@ -194,8 +194,15 @@ fn build(state: &LauncherState) -> Plan {
     }
 
     // The headline: how many results the query found.
+    //
+    // WHY an empty query does not read "No results": the per-source verdicts
+    // below already refuse to report nothing-found for a query nobody typed,
+    // and the headline would contradict them by claiming a search ran and came
+    // back empty the moment the surface opens.
     let count = state.search_results.count;
-    let headline = if count == 0 {
+    let headline = if state.search_query_len == 0 {
+        b"Type to search".as_slice()
+    } else if count == 0 {
         b"No results".as_slice()
     } else {
         b"Results".as_slice()

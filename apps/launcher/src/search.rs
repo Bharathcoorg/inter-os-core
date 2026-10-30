@@ -153,6 +153,38 @@ impl Entry {
     }
 }
 
+/// The subtitle of a file row: the app it opens, then where the file is.
+///
+/// WHY this lives with the entry it fills: `/storage` itself and the folders
+/// one level into it push the same kind of row, and while the rule was written
+/// out twice a path cut at the buffer's edge was shortened in one copy and not
+/// the other. Both rows then read `/storage/downloads/preview_clip.p`, which
+/// names a file the storage does not hold -- a cut that passes itself off as a
+/// shorter real name. Wherever the path came from, a cut has to look like a cut.
+///
+/// Returns the length written, which never exceeds `buf`.
+pub fn file_row_subtitle(path: &[u8], buf: &mut [u8; SUBTITLE_MAX]) -> usize {
+    const FILES_APP: &[u8] = b"Files: ";
+    let mut at = 0usize;
+    for &byte in FILES_APP {
+        if at >= buf.len() {
+            break;
+        }
+        buf[at] = byte;
+        at += 1;
+    }
+    let room = buf.len().saturating_sub(at);
+    if path.len() > room {
+        let keep = room.saturating_sub(3);
+        buf[at..at + keep].copy_from_slice(&path[..keep]);
+        buf[at + keep..at + keep + 3].copy_from_slice(b"...");
+        at + keep + 3
+    } else {
+        buf[at..at + path.len()].copy_from_slice(path);
+        at + path.len()
+    }
+}
+
 /// Whether a category could be read at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceState {

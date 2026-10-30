@@ -607,6 +607,45 @@ fn sample_index() -> search::Index {
 }
 
 #[test]
+fn a_file_row_names_the_whole_path_when_it_fits() {
+    let mut buf = [0u8; search::SUBTITLE_MAX];
+    let len = search::file_row_subtitle(b"/storage/photos/holiday.ppm", &mut buf);
+    assert_eq!(
+        core::str::from_utf8(&buf[..len]),
+        Ok("Files: /storage/photos/holiday.ppm"),
+        "a path that fits is the path, with nothing added to it"
+    );
+}
+
+#[test]
+fn a_cut_file_path_says_it_was_cut() {
+    // WHY this case: the row this replaced painted
+    // "Files: /storage/downloads/preview_clip.p" -- the real name cut at the
+    // buffer's edge, so the row named a file the storage does not hold and
+    // presented the cut as a shorter name that does.
+    let mut buf = [0u8; search::SUBTITLE_MAX];
+    let len = search::file_row_subtitle(b"/storage/downloads/preview_clip.ppm", &mut buf);
+    let text = core::str::from_utf8(&buf[..len]).expect("ascii path");
+    assert!(text.ends_with("..."), "a cut has to look like a cut: {text}");
+    assert!(
+        !text.ends_with(".p"),
+        "a truncated extension reads as a real shorter name: {text}"
+    );
+}
+
+#[test]
+fn the_subtitle_never_writes_past_its_buffer() {
+    let mut buf = [0u8; search::SUBTITLE_MAX];
+    let deep = b"/storage/a-very-deeply-nested-folderindeed/with-another-one/and-a-file.ppm";
+    let len = search::file_row_subtitle(deep, &mut buf);
+    assert_eq!(
+        len,
+        search::SUBTITLE_MAX,
+        "the longest path still fills the row exactly"
+    );
+}
+
+#[test]
 fn an_exact_title_beats_every_other_match() {
     let index = sample_index();
     let results = index.search(b"messages", &ExactMatch);
