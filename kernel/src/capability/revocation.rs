@@ -33,9 +33,12 @@
 //! to bound this list. Either would silently restore authority: a capability
 //! must stay dead until something explicitly re-establishes it. The only
 //! reclaim path is `reinstate`, which an explicit fresh user consent resolution
-//! calls. The list is bounded by the number of distinct capabilities the kernel
-//! has minted (at most `MAX_KEY_SLOTS` per task plus one per sensitive
-//! permission per task), which is a fixed small number per task.
+//! calls.
+//!
+//! What is bounded instead is the *shape* the record is kept in: the store holds
+//! disjoint ascending ranges of identifiers, so a task that revokes a run of
+//! consecutive identities occupies one range rather than one entry each. See
+//! [`publish`].
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -43,8 +46,9 @@ use spin::Mutex;
 use super::{delegation, CapabilityId, CapabilityType};
 use crate::task::TaskId;
 
-/// Revoked capability identifiers.
-static REVOKED: Mutex<Vec<CapabilityId>> = Mutex::new(Vec::new());
+/// Revoked capability identifiers, as disjoint ascending `(start, end)` inclusive
+/// ranges.
+static REVOKED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
 /// Ephemeral capabilities currently suspended because their owning application/surface
 /// has moved to the background or into the task switcher.
@@ -78,20 +82,91 @@ pub fn revoke(cap_id: CapabilityId) -> bool {
 /// WHY the split: `revoke` recurses into the delegation registry, and a lease
 /// revocation has to publish the identity that lease minted. Without a
 /// non-recursive publish that would call itself.
+///
+/// WHY a range store rather than one entry per identity: identities come off one
+/// monotonic per-boot counter, so the ones an exiting task publishes are a
+/// contiguous run. Stored individually, every app that ever ran left its whole
+/// capability table behind as permanent heap - which the lifecycle stress suite
+/// measured as unbounded growth across relaunches - and every authorization
+/// check had to scan all of it. Folded into ranges, one exited task costs one
+/// range, and the store is bounded by the runs that still-live identities split
+/// it into, not by the number of launches. Nothing is dropped, so no revocation
+/// can be outrun.
 fn publish(cap_id: CapabilityId) -> bool {
-    let mut revoked = REVOKED.lock();
-    if revoked.contains(&cap_id) {
-        false
-    } else {
-        revoked.push(cap_id);
-        true
+    fold(&mut REVOKED.lock(), cap_id.0)
+}
+
+/// Tests membership by locating the one range that can cover the identifier.
+fn contains_revoked(id: u64) -> bool {
+    covers(&REVOKED.lock(), id)
+}
+
+/// Adds one identifier to a set of disjoint ascending inclusive ranges, widening
+/// or joining the ranges it touches, and reports whether it was not already in
+/// the set.
+///
+/// The ranges are kept disjoint *and* non-touching, which is what makes
+/// [`covers`] a binary search rather than a scan: if two stored ranges were
+/// adjacent, a membership test could not tell a gap from a boundary.
+fn fold(ranges: &mut Vec<(u64, u64)>, id: u64) -> bool {
+    // Ranges ascend, so every range before `at` ends below `id` and every range
+    // from `at` on ends at or above it.
+    let at = ranges.partition_point(|&(_, end)| end < id);
+    if ranges.get(at).is_some_and(|&(start, _)| start <= id) {
+        return false;
     }
+    // `id` may be adjacent to the range below, the range above, or both.
+    // Neither `+ 1` can overflow: a range ending below `id` ends at most at
+    // `id - 1`, and a range starting above `id` starts at most at `u64::MAX`,
+    // so `id` itself is below `u64::MAX` whenever it is compared that way.
+    let joins_below = at > 0 && ranges[at - 1].1 + 1 == id;
+    let joins_above = ranges.get(at).is_some_and(|&(start, _)| start == id + 1);
+    match (joins_below, joins_above) {
+        (true, true) => {
+            let upper_end = ranges[at].1;
+            ranges[at - 1].1 = upper_end;
+            ranges.remove(at);
+        }
+        (true, false) => ranges[at - 1].1 = id,
+        (false, true) => ranges[at].0 = id,
+        (false, false) => ranges.insert(at, (id, id)),
+    }
+    true
+}
+
+/// Removes one identifier from the range set, splitting the range it sat in, and
+/// reports whether it was there.
+fn unfold(ranges: &mut Vec<(u64, u64)>, id: u64) -> bool {
+    let at = ranges.partition_point(|&(_, end)| end < id);
+    let Some(&(start, end)) = ranges.get(at) else { return false; };
+    if start > id {
+        return false;
+    }
+    if start == end {
+        ranges.remove(at);
+    } else if start == id {
+        ranges[at].0 = id + 1;
+    } else if end == id {
+        ranges[at].1 = id - 1;
+    } else {
+        // One identity is lifted out of the middle: the authority either side of
+        // it was revoked separately from this one and stays revoked.
+        ranges[at].1 = id - 1;
+        ranges.insert(at + 1, (id + 1, end));
+    }
+    true
+}
+
+/// Reports whether `id` falls inside any stored range.
+fn covers(ranges: &[(u64, u64)], id: u64) -> bool {
+    let at = ranges.partition_point(|&(_, end)| end < id);
+    ranges.get(at).is_some_and(|&(start, _)| start <= id)
 }
 
 /// Returns whether `cap_id` has been revoked or ephemerally suspended.
 /// This is the authoritative question every authorization check must ask.
 pub fn is_revoked(cap_id: CapabilityId) -> bool {
-    if REVOKED.lock().contains(&cap_id) {
+    if contains_revoked(cap_id.0) {
         return true;
     }
     EPHEMERAL_SUSPENDED.lock().iter().any(|(_, id)| *id == cap_id)
@@ -210,14 +285,7 @@ pub fn cleanup_task(task_id: TaskId) {
 /// security property for an availability one. Lifting is tied to resolving an
 /// outstanding consent request, never to the mere passage of time.
 pub fn reinstate(cap_id: CapabilityId) -> bool {
-    let mut revoked = REVOKED.lock();
-    match revoked.iter().position(|id| *id == cap_id) {
-        Some(index) => {
-            revoked.remove(index);
-            true
-        }
-        None => false,
-    }
+    unfold(&mut REVOKED.lock(), cap_id.0)
 }
 
 /// Revokes a delegated lease directly, for a capability that lives in the lease
@@ -249,12 +317,15 @@ pub fn revoke_grantee_delegations(grantee: TaskId) -> usize {
 
 /// Number of published revocations. Diagnostics only.
 pub fn revoked_count() -> usize {
-    REVOKED.lock().len()
+    REVOKED.lock().iter().fold(0usize, |total, &(start, end)| {
+        total.saturating_add((end - start + 1) as usize)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
     use crate::task::TaskId;
 
@@ -762,6 +833,126 @@ mod tests {
         assert!(!is_ephemeral_suspended(cam_id));
 
         cleanup_task(task);
+    }
+
+    /// The store shape that bounds revocation memory: a run of consecutive
+    /// identities occupies one range.
+    ///
+    /// WHY this is the test: an exiting task publishes the identities of its
+    /// whole capability table, and those identities come off one monotonic
+    /// counter, so they arrive as a run. Kept one entry per identity, the store
+    /// grew by eight bytes for every capability of every app that ever ran, and
+    /// the lifecycle stress suite measured it as heap that never came back.
+    #[test]
+    fn a_run_of_identities_folds_into_one_range() {
+        let mut ranges = Vec::new();
+        for id in 100..132 {
+            assert!(fold(&mut ranges, id), "{id} was not revoked before");
+            assert_eq!(ranges.len(), 1, "a contiguous run must stay one range");
+            assert!(covers(&ranges, id));
+        }
+        assert!(!covers(&ranges, 99));
+        assert!(!covers(&ranges, 132));
+        assert!(!fold(&mut ranges, 115), "publishing a revoked identity again is a no-op");
+        assert_eq!(ranges, vec![(100, 131)]);
+    }
+
+    /// Relaunching does not add to the store once the first exit has folded.
+    #[test]
+    fn repeated_launch_and_exit_cycles_do_not_add_ranges() {
+        let mut ranges = Vec::new();
+        let mut next_id = 0x0000_1000u64;
+        for _ in 0..40 {
+            // One spawn: the table's slots take the next identities in order.
+            let run = next_id..next_id + 12;
+            next_id += 12;
+            // One exit: every identity in it is published.
+            for id in run {
+                fold(&mut ranges, id);
+            }
+        }
+        assert_eq!(ranges.len(), 1, "40 exit-time runs became one revoked span");
+        assert_eq!(ranges[0], (0x0000_1000, next_id - 1));
+        assert!(covers(&ranges, 0x0000_1000));
+        assert!(covers(&ranges, next_id - 1));
+        assert!(!covers(&ranges, next_id), "nothing past the minted run is revoked");
+    }
+
+    /// A still-live identity keeps the revoked runs either side of it apart, and
+    /// revoking it afterwards joins them back into one.
+    #[test]
+    fn a_live_identity_holds_two_runs_apart_and_folds_them_when_it_goes() {
+        let mut ranges = Vec::new();
+        for id in 200..210 {
+            fold(&mut ranges, id);
+        }
+        // The next task is still running, so 210 is not revoked and the runs
+        // below and above it cannot be joined.
+        for id in 211..221 {
+            fold(&mut ranges, id);
+        }
+        assert_eq!(ranges, vec![(200, 209), (211, 220)]);
+        assert!(!covers(&ranges, 210));
+
+        assert!(fold(&mut ranges, 210), "the gap was live until now");
+        assert_eq!(ranges, vec![(200, 220)], "bridging a gap joins both sides");
+    }
+
+    /// Folding must not swallow an identity that was never revoked.
+    #[test]
+    fn folding_never_revokes_an_identity_beyond_the_one_published() {
+        let mut ranges = Vec::new();
+        fold(&mut ranges, 300);
+        fold(&mut ranges, 302);
+        assert_eq!(ranges, vec![(300, 300), (302, 302)]);
+        for (id, expected) in [(299, false), (300, true), (301, false), (302, true), (303, false)] {
+            assert_eq!(covers(&ranges, id), expected, "{id}");
+        }
+    }
+
+    /// Lifting one identity out of a folded range leaves the rest revoked, so the
+    /// range shape cannot make `reinstate` restore more authority than it was
+    /// given.
+    #[test]
+    fn lifting_one_identity_out_of_a_folded_range_splits_it() {
+        let mut ranges = Vec::new();
+        for id in 400..410 {
+            fold(&mut ranges, id);
+        }
+        assert!(unfold(&mut ranges, 405));
+        assert_eq!(ranges, vec![(400, 404), (406, 409)]);
+        assert!(!covers(&ranges, 405));
+        assert!(covers(&ranges, 404));
+        assert!(covers(&ranges, 406));
+        assert!(!unfold(&mut ranges, 405), "lifting a live identity is a no-op");
+
+        // The ends of a range behave the same way, and shrink rather than split.
+        assert!(unfold(&mut ranges, 400));
+        assert!(unfold(&mut ranges, 409));
+        assert_eq!(ranges, vec![(401, 404), (406, 408)]);
+
+        // A range of one is removed outright, so no empty range survives.
+        let mut single = Vec::new();
+        fold(&mut single, 7);
+        assert!(unfold(&mut single, 7));
+        assert!(single.is_empty());
+        assert!(!unfold(&mut single, 7));
+    }
+
+    /// The edges of the identifier space must not be able to wrap a range.
+    #[test]
+    fn the_ends_of_the_identifier_space_stay_separate_ranges() {
+        let mut ranges = Vec::new();
+        fold(&mut ranges, u64::MIN);
+        fold(&mut ranges, u64::MAX);
+        assert_eq!(ranges, vec![(u64::MIN, u64::MIN), (u64::MAX, u64::MAX)]);
+        assert!(covers(&ranges, u64::MIN));
+        assert!(covers(&ranges, u64::MAX));
+        assert!(!covers(&ranges, 1));
+
+        // Widening a range to the very top must not overflow the adjacency test.
+        fold(&mut ranges, u64::MAX - 1);
+        assert_eq!(ranges, vec![(u64::MIN, u64::MIN), (u64::MAX - 1, u64::MAX)]);
     }
 
     #[test]
