@@ -267,8 +267,13 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
         reader.send(b"TAP 360 1420\n")
     else:
-        print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
-        reader.send(b"TAP 62 48\n")
+        # WHY (48,80) rather than the (62,48) this helper used to send: the back
+        # control is the platform's and starts at viewport::HEADER_TOP (56), so
+        # row 48 fell above it. The apps still exited because the retry below
+        # falls back to the home bar, which meant the suite was proving the home
+        # gesture while reporting a back press.
+        print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=48, y=80)...")
+        reader.send(b"TAP 48 80\n")
 
     # Wait for child exit and Launcher reaping
     reaped = reader.wait_for(
@@ -284,7 +289,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
             reader.send(b"TAP 360 1420\n")
             reader.send(b"TAP 360 1420\n")
         else:
-            reader.send(b"TAP 62 48\n")
+            reader.send(b"TAP 48 80\n")
             reader.send(b"TAP 360 1420\n")
         reaped = reader.wait_for(
             "Foreground application exited and was reaped",
@@ -498,7 +503,13 @@ def main():
                 # Power & Battery card as the app lays it out (GRID_Y 348, CARD_H 160, gap 14).
                 # Every one of the seven card centres was tapped on the guest and answered.
                 ("Open the Power & Battery category", (188, 776), "category opened; tab switched.", "tab_power"),
-                ("Return to the Settings landing grid", (48, 48), "returned to the System Space landing grid", "tab_back"),
+                # WHY (48,80) and not the old (48,48): the back control is the
+                # platform's, and its top row is viewport::HEADER_TOP -- 56, the
+                # first row below the status band. The guest still routed (48,48)
+                # to Settings, but the press landed 8 rows above the control, so
+                # the app took the tap and had nothing of its own to answer it
+                # with. The centre of the 48x48 control is (48,80).
+                ("Return to the Settings landing grid", (48, 80), "returned to the System Space landing grid", "tab_back"),
             ],
             exit_gesture="home_bar"
         )

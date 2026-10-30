@@ -159,11 +159,13 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         dump_prefix=f"stress_iter{iter_num}_settings",
         in_app_interactions=[
             # WHY these points: the Settings landing surface is a card grid, not a tab strip, so the
-            # Power & Battery card centre (188,776) and the SDK back control (48,48) are the two taps
+            # Power & Battery card centre (188,776) and the SDK back control (48,80) are the two taps
             # that answer - both measured on the guest, where all seven card centres opened a
-            # category and the back control returned to the landing grid.
+            # category and the back control returned to the landing grid. The control's top row is
+            # viewport::HEADER_TOP (56), below the status band that owns 0..48, so the point is its
+            # centre rather than the (48,48) that predates the band.
             ("Open the Power & Battery category", (188, 776), "category opened; tab switched.", None),
-            ("Return to the Settings landing grid", (48, 48), "returned to the System Space landing grid", None),
+            ("Return to the Settings landing grid", (48, 80), "returned to the System Space landing grid", None),
         ],
         exit_gesture="home_bar"
     )
