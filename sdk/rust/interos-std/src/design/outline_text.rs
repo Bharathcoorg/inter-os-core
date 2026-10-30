@@ -117,6 +117,13 @@ pub fn reset_slot_pool() {
             *slot = None;
         }
     }
+    // WHY the gate boxes go with them: a caller resets these caches when the
+    // screen it was painting is gone. A box left behind from that screen would
+    // be handed to the next one's run of the same text at the same origin,
+    // which is the same box -- but a caller that has just decided the caches
+    // are untrustworthy should not have to reason about which of the two
+    // tables it invalidated.
+    reset_box_cache();
 }
 
 /// The run that was placed last.
@@ -138,6 +145,147 @@ struct LastPlaced {
 }
 
 static mut LAST_PLACED: Option<LastPlaced> = None;
+
+/// How many gate boxes are remembered.
+///
+/// WHY as many as the coverage pool: a frame that paints one pixel at a time
+/// asks the gate question for every run it owns at every pixel, so the box
+/// cache has to hold the whole screen's runs or it answers nothing. A screen
+/// with more distinct runs than this still gets the right boxes; it just
+/// re-measures the ones that were evicted.
+const BOX_SLOTS: usize = SLOTS;
+
+/// A run's gate box, remembered from the one time it was measured.
+///
+/// WHY the box needs its own memo when the coverage already has one: a caller
+/// that gates a pixel before drawing it asks [`run_box`], and `run_box` walks
+/// the whole string twice -- once for the bitmap face's width and once for the
+/// outline's. The coverage pool answers questions about a *placement*, and
+/// `run_box` is keyed by the text's own origin, so it cannot use it. Both are
+/// asked once per pixel by the same kind of caller, so both need remembering.
+#[derive(Clone, Copy)]
+struct Boxed {
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    len: usize,
+    used: u32,
+    key: [u8; KEY_MAX],
+    box_: (usize, usize, usize, usize),
+}
+
+static mut BOXES: [Option<Boxed>; BOX_SLOTS] = [None; BOX_SLOTS];
+
+/// Which box slot a gate question lands in.
+///
+/// Mirrors [`slot_for`]: a hash of the key's cheap parts selects the probe
+/// start, so a walk that asks the same few questions again finds them without
+/// comparing every entry in the table.
+fn box_slot_for(x0: usize, y0: usize, scale: usize, len: usize) -> usize {
+    let mut h = x0 ^ (y0 << 5) ^ (scale << 9) ^ len;
+    h ^= (h >> 3) ^ (h >> 7);
+    h % BOX_SLOTS
+}
+
+/// The remembered box for this exact run, if one is resident.
+fn cached_box(
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+) -> Option<(usize, usize, usize, usize)> {
+    let base = box_slot_for(x0, y0, scale, text.len());
+    let hit = unsafe {
+        let boxes = &*core::ptr::addr_of!(BOXES);
+        let mut found = None;
+        for i in 0..BOX_SLOTS {
+            let slot = (base + i) % BOX_SLOTS;
+            if let Some(entry) = boxes[slot].as_ref() {
+                if entry.x0 == x0
+                    && entry.y0 == y0
+                    && entry.scale == scale
+                    && entry.len == text.len()
+                    && entry.key[..entry.len] == *text
+                {
+                    found = Some((slot, entry.box_));
+                    break;
+                }
+            }
+        }
+        found
+    };
+    let (slot, measured) = hit?;
+    // SAFETY: the borrow above is released before this pointer is taken, and
+    // nothing reached from here re-enters the table.
+    unsafe {
+        if let Some(entry) = (*core::ptr::addr_of_mut!(BOXES))[slot].as_mut() {
+            entry.used = next_stamp();
+        }
+    }
+    Some(measured)
+}
+
+/// Remembers a box, replacing the least recently asked-for one in its probe
+/// run when the run is full.
+fn remember_box(
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    measured: (usize, usize, usize, usize),
+) {
+    if text.len() > KEY_MAX {
+        return;
+    }
+    let base = box_slot_for(x0, y0, scale, text.len());
+    let mut key = [0u8; KEY_MAX];
+    key[..text.len()].copy_from_slice(text);
+    // SAFETY: as above -- the table is written through a raw pointer and no
+    // borrow of it is live here.
+    unsafe {
+        let boxes = &mut *core::ptr::addr_of_mut!(BOXES);
+        let mut target = base;
+        let mut oldest = u32::MAX;
+        for i in 0..BOX_SLOTS {
+            let slot = (base + i) % BOX_SLOTS;
+            match boxes[slot].as_ref() {
+                None => {
+                    target = slot;
+                    break;
+                }
+                Some(entry) => {
+                    if entry.used < oldest {
+                        oldest = entry.used;
+                        target = slot;
+                    }
+                }
+            }
+        }
+        boxes[target] = Some(Boxed {
+            x0,
+            y0,
+            scale,
+            len: text.len(),
+            used: next_stamp(),
+            key,
+            box_: measured,
+        });
+    }
+}
+
+/// Forgets every remembered gate box.
+///
+/// WHY this is separate from [`reset_slot_pool`]: a box names no coverage
+/// slot, so emptying one cache cannot invalidate the other. It is folded into
+/// `reset_slot_pool` anyway, because a caller that declares the caches stale
+/// means the whole screen, not one table of it.
+pub fn reset_box_cache() {
+    unsafe {
+        for entry in (*core::ptr::addr_of_mut!(BOXES)).iter_mut() {
+            *entry = None;
+        }
+    }
+}
 
 /// Forgets the last placement.
 ///
@@ -205,6 +353,138 @@ fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (
         }
         (victim, false)
     }
+}
+
+/// Whether the named slot still holds exactly this run.
+///
+/// WHY the question is asked at all: the one-entry memo names a slot, and a
+/// caller that then places more distinct runs than the pool holds evicts the
+/// run that slot was drawn for. Reading the memo without checking would hand
+/// out the eviction's glyphs under the old run's name -- a wrong glyph set, not
+/// a stale one, and the kind of failure that shows up on one run and not the
+/// next.
+fn slot_still_holds(
+    slot: usize,
+    em: u32,
+    x: usize,
+    y: usize,
+    text: &[u8],
+    bold: bool,
+) -> bool {
+    unsafe {
+        // SAFETY: the static is read through a raw pointer and the reference it
+        // yields does not outlive this call.
+        match (&*core::ptr::addr_of!(LOADED)).get(slot) {
+            Some(Some(entry)) => {
+                entry.em == em
+                    && entry.x == x
+                    && entry.y == y
+                    && entry.bold == bold
+                    && entry.len == text.len()
+                    && entry.key[..text.len()] == *text
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The run this placement question was already asked about, if one is resident.
+///
+/// WHY this is a lookup and not [`find_or_alloc_slot`]: the allocator answers
+/// "where would this go", and in doing so hands out a slot for a run that is
+/// not there. A per-pixel caller asks a question it has already had answered
+/// far more often than one it has not, and it must be able to take that answer
+/// without touching the table.
+///
+/// WHY the last placement is refreshed from a table hit: the one-entry memo is
+/// what makes the run a caller is painting right now cost a comparison rather
+/// than a scan. Without the refresh it would only ever hold a run from the
+/// first pixel of a frame, and a caller that cycles through a screen's runs --
+/// which is what painting a frame one pixel at a time means -- would miss it
+/// every time.
+fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<OutlineRun> {
+    unsafe {
+        // SAFETY: the static is read through a raw pointer and the reference it
+        // yields does not outlive this block, and nothing reached from here
+        // re-enters it.
+        if let Some(last) = (&*core::ptr::addr_of!(LAST_PLACED)).as_ref() {
+            if last.em == em
+                && last.x == x
+                && last.y == y
+                && last.bold == bold
+                && last.len as usize == text.len()
+                && last.key[..text.len()] == *text
+            {
+                if let Some(run) = last.run {
+                    // WHY the slot is confirmed before the answer is taken:
+                    // the memo names a slot, and the pool may have drawn a
+                    // different run into it since. A miss here falls through to
+                    // the table, which answers from what is actually resident.
+                    if slot_still_holds(run.slot, em, x, y, text, bold) {
+                        // WHY the hit also stamps the slot: this is the run the
+                        // pixel walk is asking for right now, so it must be the
+                        // last candidate for eviction rather than the first.
+                        if let Some(entry) =
+                            (*core::ptr::addr_of_mut!(LOADED))[run.slot].as_mut()
+                        {
+                            entry.used = next_stamp();
+                        }
+                        return last.run;
+                    }
+                }
+            }
+        }
+    }
+
+    let base = slot_for(em, x, y, text, bold);
+    let hit = unsafe {
+        let loaded = &*core::ptr::addr_of!(LOADED);
+        let mut found = None;
+        for i in 0..SLOTS {
+            let slot = (base + i) % SLOTS;
+            if let Some(entry) = loaded[slot].as_ref() {
+                if entry.em == em
+                    && entry.x == x
+                    && entry.y == y
+                    && entry.bold == bold
+                    && entry.len == text.len()
+                    && entry.key[..text.len()] == *text
+                {
+                    found = Some((slot, entry.w, entry.h));
+                    break;
+                }
+            }
+        }
+        found
+    };
+    let (slot, w, h) = hit?;
+    let (ascent, _) = typeface::line_metrics(em);
+    let run = OutlineRun {
+        x,
+        y,
+        w,
+        h,
+        ascent: ascent as usize,
+        slot,
+    };
+    // SAFETY: the borrow above is released before either pointer is taken here.
+    unsafe {
+        if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[slot].as_mut() {
+            entry.used = next_stamp();
+        }
+        let mut key = [0u8; KEY_MAX];
+        key[..text.len()].copy_from_slice(text);
+        *core::ptr::addr_of_mut!(LAST_PLACED) = Some(LastPlaced {
+            em,
+            x,
+            y,
+            bold,
+            len: text.len() as u8,
+            key,
+            run: Some(run),
+        });
+    }
+    Some(run)
 }
 
 /// Pixels per em that draw the cap height the scale rung names.
@@ -372,6 +652,17 @@ impl OutlineRun {
         if em == 0 || text.is_empty() || text.len() > KEY_MAX {
             return None;
         }
+        // WHY the resident run is looked up before the walk below: a caller
+        // that paints a frame one pixel at a time asks for the same run once
+        // per pixel of it, and the walk costs a character's worth of work each
+        // time. A run already in the table passed every gate on the way in --
+        // its stored width is the width the walk would recompute, its height is
+        // the same line box, and its baseline and em are part of the key that
+        // just matched -- so answering from the table cannot admit a run the
+        // walk would have refused.
+        if let Some(resident) = resident_run(em, x, y, text, bold) {
+            return Some(resident);
+        }
         // WHY one walk covers the gate, the width and the pen: the face is
         // indexed by code point, and a walk of bytes reads the continuation
         // bytes of a multi-byte sequence as characters the face has not got.
@@ -404,66 +695,12 @@ impl OutlineRun {
             return None;
         }
 
-        // WHY the fast path comes first: a caller that paints a run asks
-        // for it once per pixel, and the key below is a sixty-four byte
-        // array that is zeroed and then filled. The check is a comparison
-        // against the text placed last, which copies nothing.
-        unsafe {
-            // SAFETY: the static is read through a raw pointer and the
-            // reference it yields does not outlive this call, and nothing
-            // reached from here re-enters it.
-            if let Some(last) = (&*core::ptr::addr_of!(LAST_PLACED)).as_ref() {
-                if last.em == em
-                    && last.x == x
-                    && last.y == y
-                    && last.bold == bold
-                    && last.len as usize == text.len()
-                    && last.key[..text.len()] == *text
-                {
-                    // WHY the hit also stamps the slot: this is the run the
-                    // pixel walk is asking for right now, so it must be the
-                    // last candidate for eviction rather than the first.
-                    if let Some(run) = last.run {
-                        if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[run.slot].as_mut() {
-                            entry.used = next_stamp();
-                        }
-                    }
-                    return last.run;
-                }
-            }
-        }
-
         let mut key = [0u8; KEY_MAX];
         key[..text.len()].copy_from_slice(text);
-        let (slot, is_cached) = find_or_alloc_slot(em, x, y, text, bold);
-
-        if is_cached {
-            if let Some(loaded) = unsafe { &*core::ptr::addr_of!(LOADED) }[slot].as_ref() {
-                let run = OutlineRun {
-                    x,
-                    y,
-                    w: loaded.w,
-                    h: loaded.h,
-                    ascent: ascent as usize,
-                    slot,
-                };
-                unsafe {
-                    if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[slot].as_mut() {
-                        entry.used = next_stamp();
-                    }
-                    *core::ptr::addr_of_mut!(LAST_PLACED) = Some(LastPlaced {
-                        em,
-                        x,
-                        y,
-                        bold,
-                        len: text.len() as u8,
-                        key,
-                        run: Some(run),
-                    });
-                }
-                return Some(run);
-            }
-        }
+        // WHY the search is not repeated here: `resident_run` probed these same
+        // slots for this same key and did not find it, so this call only has to
+        // choose where the new run goes.
+        let (slot, _is_cached) = find_or_alloc_slot(em, x, y, text, bold);
 
         let buf = unsafe { &mut *core::ptr::addr_of_mut!(COVERAGE) };
         let cov = &mut buf[slot][..w * line_h];
@@ -654,6 +891,21 @@ pub fn baseline_row(y0: usize, scale: usize, ascent: u32) -> usize {
 }
 
 pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize, usize, usize) {
+    // WHY the memo comes first: this is the gate a per-pixel painter asks
+    // before it asks anything else, so it is asked once per pixel per run, and
+    // the measurement below is a walk of the whole string. The box is a pure
+    // function of the four arguments, so a remembered answer is not an
+    // approximation of the measured one -- it is the measured one.
+    if let Some(remembered) = cached_box(x0, y0, scale, text) {
+        return remembered;
+    }
+    let measured = measure_box(x0, y0, scale, text);
+    remember_box(x0, y0, scale, text, measured);
+    measured
+}
+
+/// Measures a run's gate box, the walk [`run_box`] now remembers the answer to.
+fn measure_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize, usize, usize) {
     let em = em_for_scale(scale);
     let bitmap_w = font::measure(text, scale);
     let outline_w = typeface::text_advance_px(text, em) as usize;
@@ -1323,5 +1575,64 @@ mod tests {
         let b = OutlineRun::place_styled(b_x, b_y, em, b_text, true).expect("b placed");
         assert!(still_readable(&a), "placing the second run evicted the first");
         assert!(still_readable(&b), "placing the first run evicted the second");
+    }
+
+    #[test]
+    fn a_remembered_box_is_the_measured_box() {
+        let _pool: Option<_> = Some(reset_slots());
+        // The box a per-pixel caller gets from the memo has to be the box the
+        // walk computes, or the gate lets ink through that the painter then
+        // refuses -- and the reader loses the top row of a glyph.
+        let screen = [
+            (24usize, 60usize, 2usize, &b"Now Playing"[..]),
+            (24, 100, 1, b"no track selected"),
+            (300, 640, 3, b"00:00 / 03:41"),
+            (24, 700, 1, "Über".as_bytes()),
+        ];
+        let measured: [(usize, usize, usize, usize); 4] = [
+            measure_box(24, 60, 2, b"Now Playing"),
+            measure_box(24, 100, 1, b"no track selected"),
+            measure_box(300, 640, 3, b"00:00 / 03:41"),
+            measure_box(24, 700, 1, "Über".as_bytes()),
+        ];
+        // Two passes over the whole screen, the way a pixel walk revisits every
+        // run: the second pass reads the memo the first one filled.
+        for pass in 0..2 {
+            for (i, &(x0, y0, scale, text)) in screen.iter().enumerate() {
+                let got = run_box(x0, y0, scale, text);
+                assert_eq!(
+                    got, measured[i],
+                    "pass {pass}: box for {:?} at ({x0},{y0}) scale {scale}",
+                    core::str::from_utf8(text).unwrap_or("?")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_is_remembered_by_its_text_and_not_only_its_origin() {
+        let _pool: Option<_> = Some(reset_slots());
+        // The origin is part of the key, so two runs that share a position must
+        // not share an answer -- that is the difference between a memo and a
+        // guess. `WIDE` is the wider run, so a box handed over would clip it.
+        let narrow = run_box(120, 400, 2, b"up");
+        let wide = run_box(120, 400, 2, b"understanding");
+        assert!(
+            wide.2 > narrow.2,
+            "the longer run at the same origin is {} against {}",
+            wide.2,
+            narrow.2
+        );
+        // Asked again in the other order, both still answer for themselves.
+        let _ = run_box(120, 400, 2, b"understanding");
+        assert_eq!(run_box(120, 400, 2, b"up"), narrow);
+        assert_eq!(run_box(120, 400, 2, b"understanding"), wide);
+        // A run too long to key is measured every time rather than hashed.
+        let long = [b'e'; KEY_MAX + 8];
+        assert_eq!(
+            run_box(0, 900, 1, &long),
+            measure_box(0, 900, 1, &long),
+            "an unkeyable run still gets the box the walk computes"
+        );
     }
 }
