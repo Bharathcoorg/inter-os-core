@@ -501,25 +501,29 @@ def main():
         ready = reader.wait_for("Step 5: Initial presentation complete", timeout=90.0)
         if not ready:
             raise RuntimeError("Guest failed to reach initial launcher presentation within timeout")
-        time.sleep(2.0)
 
         # Unlock device to HomeScreen
+        #
+        # WHY the swipe waits for the lock screen instead of the clock: a gesture
+        # that arrives while the boot animation still owns the screen is delivered
+        # to `view=BootScreen` and dropped, and the animation ends on guest ticks,
+        # so a fixed sleep after `Step 5` lands on either side of that handover
+        # depending on host load. Two runs of this suite disagreed only because one
+        # swiped during the animation and the other after it.
         print("[STRESS SETUP] Unlocking device via swipe-up gesture...")
-        reader.send(b"SWIPE 360 1350 360 300 5\n")
-        unlocked = reader.wait_for(
-            "Home surface rendered.",
-            timeout=15.0,
-            print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
-        )
-        if not unlocked:
-            print("[STRESS SETUP] Retrying unlock swipe...")
-            time.sleep(1.0)
+        reader.wait_for("lock screen is now guest-owned", timeout=60.0)
+        unlocked = False
+        for attempt in range(3):
+            if attempt:
+                print(f"[STRESS SETUP] Retrying unlock swipe (attempt {attempt + 1})...")
             reader.send(b"SWIPE 360 1350 360 300 5\n")
             unlocked = reader.wait_for(
                 "Home surface rendered.",
-                timeout=20.0,
+                timeout=15.0,
                 print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
             )
+            if unlocked:
+                break
         if not unlocked:
             print(f"[DEBUG] Recent logs: {reader.captured_logs[-20:]}")
             raise RuntimeError("Failed to unlock device from LockScreen")
