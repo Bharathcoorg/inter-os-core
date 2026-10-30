@@ -176,7 +176,11 @@ def main():
     reader = SerialReader(ser_sock)
 
     print("[TEST] Awaiting LockScreen...")
-    ready = reader.wait_for("lock screen is now guest-owned", timeout=60.0,
+    # WHY 90 s and not 60: the boot presentation runs until the launcher has seen
+    # screens::boot::BOOT_TICKS ticks, and on a loaded host that handover lands 60-70 s
+    # after the serial port opens. The PIN suite already waits 90 s for this same
+    # marker; a shorter budget here only ever produced a false "not presented".
+    ready = reader.wait_for("lock screen is now guest-owned", timeout=90.0,
                             print_filter=["BOOT", "USER", "LAUNCHER", "Step 5"])
     assert ready, "Lock screen not presented!"
 
@@ -299,7 +303,7 @@ def main():
     proc2, ser2, mon2 = launch_qemu(boot_img, data_img, ser_port, mon_port)
     r2 = SerialReader(ser2)
 
-    assert r2.wait_for("lock screen is now guest-owned", timeout=60.0, print_filter=["BOOT", "LAUNCHER"]), "Reboot lock screen not presented!"
+    assert r2.wait_for("lock screen is now guest-owned", timeout=90.0, print_filter=["BOOT", "LAUNCHER"]), "Reboot lock screen not presented!"
     ppm_reboot_lock = ROOT / "target" / "reboot_lock_stock.ppm"
     screendump(mon2, ppm_reboot_lock)
     w_rl, h_rl, raw_rl = parse_ppm(ppm_reboot_lock)
