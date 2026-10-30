@@ -29,6 +29,32 @@ pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
 pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
+/// The most kernel heap every surface may hold between them.
+///
+/// WHY the slot count is not the bound: a surface is width x height x 4 bytes
+/// of kernel heap, so a phone-full 720x1440 surface is 4,147,200 bytes and the
+/// 32 slots this driver allows would be 132,710,400 bytes of them -- nearly
+/// twice the whole 67,108,864-byte heap. The panic transcript states what that
+/// did: `memory allocation of 4147200 bytes failed` with
+/// heap_used=66803512 heap_free=305352, and the panic policy halts the CPU, so
+/// the device stopped because one app asked for a screen. Thirty-two slots of
+/// 64x64 overlays and twelve slots of full-screen apps are the same number of
+/// surfaces and a very different device, so the memory needs its own ceiling.
+///
+/// WHY 48 MiB: the same heap carries every task's kernel-side bookkeeping, the
+/// mailboxes, the network tables and the scanout buffers too, and at the halt
+/// there were 305,352 bytes left for all of it. Leaving 16 MiB of the 64
+/// unclaimed by surfaces is the difference between a refused launch and a halt
+/// on the next unrelated allocation, and it still pays for twelve full-screen
+/// surfaces (49,766,400 bytes) -- the device reaches its ceiling a little
+/// sooner, because the shell's own surfaces are inside the same budget.
+pub const MAX_SURFACE_BYTES: usize = 48 * 1024 * 1024;
+
+/// The bytes an ARGB8888 surface of `pixels` pixels holds.
+pub const fn surface_bytes(pixels: usize) -> usize {
+    pixels.saturating_mul(4)
+}
+
 /// The colour every composite starts from.
 ///
 /// WHY the platform's paper and not the desktop-era slate: this is a phone,
@@ -634,6 +660,45 @@ impl DrmKmsController {
         true
     }
 
+    /// Whether a surface of `pixels` pixels fits inside the memory every
+    /// surface shares, alongside what is already allocated.
+    ///
+    /// WHY it is a question rather than a check buried in the allocation: the
+    /// syscall layer has to ask it *before* refusing an app, because the answer
+    /// is also the trigger for retiring a backgrounded app to pay for the new
+    /// one. Two copies of the arithmetic is how a budget comes to mean one
+    /// thing to the driver and another to the policy above it.
+    pub fn can_afford_surface(&self, pixels: usize) -> bool {
+        let held: usize = self.surfaces.iter().map(|s| surface_bytes(s.pixels.len())).sum();
+        held.saturating_add(surface_bytes(pixels)) <= MAX_SURFACE_BYTES
+    }
+
+    /// The bytes every surface holds right now, and the ceiling they share.
+    pub fn surface_bytes_held(&self) -> (usize, usize) {
+        let held: usize = self.surfaces.iter().map(|s| surface_bytes(s.pixels.len())).sum();
+        (held, MAX_SURFACE_BYTES)
+    }
+
+    /// The backgrounded app whose memory should pay for a new surface.
+    ///
+    /// WHY the lowest application z order: raising a surface is what bringing
+    /// an app to the front does, so among the surfaces that are not on screen
+    /// the lowest one is the app that has been out of sight longest. That is
+    /// the order Android's cached process list and iOS's jetsam walk, and it is
+    /// the only order this kernel keeps.
+    ///
+    /// WHY the system's own surfaces are never the answer: they are not an
+    /// app's memory to give back. The band and the compositor's overlay sit
+    /// outside the application z band, and the caller is excluded because a
+    /// task cannot be asked to pay for the screen it is asking for.
+    pub fn evictable_app_owner(&self, caller: u64) -> Option<(u64, usize)> {
+        self.surfaces
+            .iter()
+            .filter(|s| !s.visible && (200..1000).contains(&s.z_order) && s.owner_task != caller)
+            .min_by_key(|s| s.z_order)
+            .map(|s| (s.owner_task, surface_bytes(s.pixels.len())))
+    }
+
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         // A client that explicitly requests a 1080x2160 surface is asking for
@@ -658,6 +723,19 @@ impl DrmKmsController {
             crate::serial_println!(
                 "[SURFACE_CREATE REFUSED] owner={} {}: the client surface table is full",
                 owner_task, width
+            );
+            return 0;
+        }
+        // WHY this is checked here and not by the allocator: past this point the
+        // next thing that happens is a `Vec` of `pixels` words, and a kernel heap
+        // that cannot satisfy it does not return an error -- it panics, and the
+        // panic policy halts the CPU. Refusing is the only answer the device gets
+        // to make before the allocation, and the app that asked can be told.
+        if !self.can_afford_surface(pixels) {
+            let (held, budget) = self.surface_bytes_held();
+            crate::serial_println!(
+                "[SURFACE_CREATE REFUSED] owner={} {}x{} z={}: the surfaces hold {} bytes of the {} byte budget and this one needs {}",
+                owner_task, width, height, z_order, held, budget, surface_bytes(pixels)
             );
             return 0;
         }
@@ -1835,6 +1913,91 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_surface_the_heap_cannot_pay_for_is_refused_before_it_is_asked() {
+        // WHY this test exists: twelve full-screen surfaces are 49,766,400 of
+        // the 67,108,864 kernel bytes, and the run that passed them asked for one
+        // more and panicked the device -- the panic policy halted the CPU because
+        // one app wanted a screen. The budget is what turns that halt into a
+        // refused launch, so what matters is not the number but which bound ends
+        // the run: it has to be the memory, and the heap has to be asked for
+        // nothing it cannot give.
+        let mut kms = DrmKmsController::new(720, 1440);
+        kms.set_display_mode(720, 1440, 60).expect("mode");
+        kms.surfaces.clear();
+
+        let mut accepted = 0usize;
+        for task in 10..40u64 {
+            if kms.create_surface(720, 1440, 200 + task as u32, task) == 0 {
+                break;
+            }
+            accepted += 1;
+        }
+
+        assert!(
+            accepted >= 8,
+            "the budget afforded only {accepted} full-screen surfaces; the demo cannot open that many"
+        );
+        assert!(
+            accepted < MAX_CLIENT_SURFACES,
+            "the run ended at the {accepted} slot table rather than at the memory budget"
+        );
+        let (held, budget) = kms.surface_bytes_held();
+        assert!(held <= budget, "{held} bytes held against a {budget} byte budget");
+        assert!(
+            !kms.can_afford_surface(720 * 1440),
+            "the surface the run stopped at was affordable after all, so something else refused it"
+        );
+    }
+
+    #[test]
+    fn a_retirement_picks_the_backgrounded_app_and_nothing_else() {
+        // WHY this test exists: the kernel now ends an application to pay for a
+        // launch it cannot otherwise afford, and the one wrong choice is worse
+        // than the refusal it replaces -- taking the app in front, the shell, or
+        // the system band would break the screen the person is looking at.
+        let mut kms = DrmKmsController::new(720, 1440);
+        kms.set_display_mode(720, 1440, 60).expect("mode");
+        kms.surfaces.clear();
+        for (task, z, visible) in [
+            (11u64, 0u32, true),     // the launcher's own surface, in front
+            (10u64, 100, false),     // the system band, outside the app band
+            (15, 205, false),        // backgrounded, and the oldest of them
+            (16, 207, false),        // backgrounded, more recently raised
+            (17, 210, true),         // on screen, so not a candidate
+            (18, 211, false),        // backgrounded, newest
+        ] {
+            let mut s = DrmSurface::new(100 + task as u32, 8, 8, z, task);
+            s.visible = visible;
+            kms.surfaces.push(s);
+        }
+        assert_eq!(
+            kms.evictable_app_owner(18).map(|(owner, _)| owner),
+            Some(15),
+            "the retirement did not pick the app that has been out of sight longest"
+        );
+        // The caller is never the one that pays, even when it is the only
+        // backgrounded app left -- it is asking for a screen, not giving one up.
+        assert_eq!(kms.evictable_app_owner(15).map(|(owner, _)| owner), Some(16));
+        kms.surfaces.retain(|s| s.owner_task != 16 && s.owner_task != 18);
+        assert_eq!(kms.evictable_app_owner(15), None);
+    }
+
+    #[test]
+    fn the_slot_count_alone_cannot_be_the_memory_bound() {
+        // WHY: the table of 32 slots is the only bound this driver had, and
+        // thirty-two full-screen surfaces are more than twice the whole kernel
+        // heap. A device bounded by that count is bounded by a number the heap
+        // cannot honour, so the memory needs its own ceiling below the heap.
+        let full_screen = surface_bytes(720 * 1440);
+        assert_eq!(full_screen, 4_147_200);
+        assert!(
+            MAX_CLIENT_SURFACES * full_screen > crate::allocator::HEAP_SIZE,
+            "the slot table no longer overruns the heap, so this test has stopped proving the budget is needed"
+        );
+        assert!(MAX_SURFACE_BYTES < crate::allocator::HEAP_SIZE);
+    }
 
     #[test]
     fn scaled_blit_interpolates_rather_than_replicating_pixels() {

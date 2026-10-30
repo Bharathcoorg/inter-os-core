@@ -4563,6 +4563,45 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
+    // WHY the room is looked for before the ask rather than after the failure:
+    // the allocation the driver cannot honour is the one that panics the kernel,
+    // so a policy that wants memory has to give something up before it asks.
+    // The device hands the screen to the app that is being opened and retires the
+    // one that has been out of sight longest -- what Android's low-memory killer
+    // and iOS's jetsam do -- and the task asking is never the one that pays.
+    let pixels = (width as usize) * (height as usize);
+    loop {
+        let candidate = {
+            let kms = crate::drivers::display_kms::DRM_KMS.lock();
+            if kms.can_afford_surface(pixels) {
+                None
+            } else {
+                kms.evictable_app_owner(owner.0)
+            }
+        };
+        let Some((victim, held)) = candidate else { break };
+        crate::serial_println!(
+            "[LIFECYCLE] task {} asked for a {}x{} surface; retiring task {}, backgrounded longest, which holds {} bytes of surface",
+            owner.0, width, height, victim, held
+        );
+        // The scheduler is taken with the KMS lock released: reclaiming a task
+        // destroys its surfaces, and holding both here would invert the order the
+        // exit path takes.
+        if let Err(why) = SCHEDULER.lock().terminate_task(TaskId(victim), -1) {
+            crate::serial_println!("[LIFECYCLE] task {} could not be retired: {}", victim, why);
+        }
+        let reclaimed = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(victim);
+        if reclaimed > 0 {
+            crate::serial_println!(
+                "[KMS] Reclaimed {} display surface(s) owned by retired task {}.",
+                reclaimed, victim
+            );
+        }
+        // WHY the loop is not capped: every pass destroys the candidate's
+        // surfaces, so the set it is chosen from strictly shrinks and the loop
+        // ends by itself -- on the last app in sight it ends in the refusal
+        // below rather than in a heap that was never asked.
+    }
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     let created = display.create_surface(width, height, z_order, owner.0);
