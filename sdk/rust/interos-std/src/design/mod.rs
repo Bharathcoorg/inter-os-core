@@ -856,6 +856,14 @@ pub mod viewport {
     pub const GESTURE_BAR_HEIGHT: usize = 48;
     pub const CONTENT_PADDING: usize = 24;
 
+    /// Where an application's own chrome starts.
+    ///
+    /// WHY it is not the top of the panel: the band owns `0..STATUS_BAR_HEIGHT`
+    /// and answers the pixel function before any header content is reached, so
+    /// a row authored from y=0 loses the crown of its title and the top arc of
+    /// its pills to a surface that was painted over it.
+    pub const HEADER_TOP: usize = STATUS_BAR_HEIGHT + 8;
+
     /// Display orientation mode.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum DisplayOrientation {
@@ -1141,7 +1149,10 @@ pub mod back_button {
     use super::radius::*;
 
     pub const X: usize = 24;
-    pub const Y: usize = 24;
+    /// WHY it starts below the band: the control is painted by the app's header
+    /// row, and the band answers every pixel above it -- a button authored at
+    /// y=24 had its top quarter shaved on every app that carries the band.
+    pub const Y: usize = super::viewport::HEADER_TOP;
     pub const SIZE: usize = 48;
     pub const RADIUS: usize = CONTROL;
 
@@ -1412,11 +1423,14 @@ mod tests {
     #[test]
     fn back_button_geometry_and_ink() {
         use super::back_button;
-        assert!(back_button::contains(24, 24));
-        assert!(back_button::contains(71, 71));
-        assert!(!back_button::contains(23, 24));
-        assert!(!back_button::contains(72, 72));
-        assert!(back_button::pixel(48, 48, 0xFF000000, 0xFF888888, 0xFFFFFFFF).is_some());
+        use super::viewport::STATUS_BAR_HEIGHT;
+        assert!(back_button::contains(24, back_button::Y));
+        assert!(back_button::contains(71, back_button::Y + 47));
+        assert!(!back_button::contains(23, back_button::Y));
+        assert!(!back_button::contains(72, back_button::Y + 48));
+        // The whole control clears the band that paints over it.
+        assert!(back_button::Y >= STATUS_BAR_HEIGHT);
+        assert!(back_button::pixel(48, back_button::Y + 24, 0xFF000000, 0xFF888888, 0xFFFFFFFF).is_some());
     }
 
     #[test]

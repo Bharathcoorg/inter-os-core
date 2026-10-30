@@ -225,8 +225,19 @@ const GUTTER: usize = 12;
 const CELL: usize = 216;
 const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + GUTTER)];
 
+/// The first row this app's own chrome may paint in.
+///
+/// WHY not the top of the panel: the status band owns `0..STATUS_BAR_HEIGHT` and
+/// answers the pixel function before any header content is reached, so a 48-tall
+/// pill authored at y=34 had the crown of its round end painted over by a surface
+/// that was never asked about it.
+const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;
+
 const HEADER_H: usize = 144;
-const TITLE_Y: usize = 36;
+/// Where the title's line box starts. WHY centred in the 48 the pills stand in:
+/// the box at this rung is shorter than the control, and a title authored at the
+/// control's own top reads high against a round button beside it.
+const TITLE_Y: usize = HEADER_TOP + (48 - font::line_height(2)) / 2;
 /// The screen's one subtitle line, under the title.
 ///
 /// WHY one line and not the two diagnostic lines this used to be: "Built-in
@@ -234,7 +245,17 @@ const TITLE_Y: usize = 36;
 /// description of itself, and the second line made the header read as a
 /// console readout under the page title. `build_subtitle` puts both measured
 /// counts in one sentence, so there is still a real number for each kind.
-const SUBTITLE_Y: usize = 78;
+///
+/// WHY below the control row's own bottom: the two line boxes together are taller
+/// than the 48 the pills stand in, and the chip row that follows is the header's
+/// hard stop -- so the pair is stacked from the title's top rather than centred,
+/// which is what keeps the subtitle clear of the row under it.
+const SUBTITLE_Y: usize = TITLE_Y + font::line_height(2) + 4;
+/// WHY checked at compile time: the header branch answers every pixel below
+/// `HEADER_H`, so a subtitle whose line box reached past it would lose its
+/// descent to the surface under the row -- the same defect that put the controls
+/// here under the band, only one row lower.
+const _: () = assert!(SUBTITLE_Y + font::line_height(2) <= HEADER_H);
 
 /// The filter chip row.
 ///
@@ -303,7 +324,19 @@ const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 // Inspection view geometry.
-const DETAIL_BAR_H: usize = 112;
+/// The app bar's own box. WHY 120 and not 112: the back control stands 48 tall
+/// from `HEADER_TOP` because the band owns the rows above it, and the meta line
+/// under the title reaches two rows past the old bottom -- the rule this bar draws
+/// would have cut its descent off.
+const DETAIL_BAR_H: usize = 120;
+/// The title and meta lines, stacked from the control row's top. WHY the meta
+/// overlaps the title's line box: the box carries the descent the title's own
+/// glyphs rarely reach, so the two cap bands still clear each other.
+const DETAIL_TITLE_Y: usize = HEADER_TOP;
+const DETAIL_META_Y: usize = HEADER_TOP + 28;
+/// WHY at compile time: the bar paints its rule on the row before its bottom, so
+/// a meta line whose box reached that row would lose its last pixels to a border.
+const _: () = assert!(DETAIL_META_Y + font::line_height(2) < DETAIL_BAR_H);
 const DETAIL_VIEW_Y0: usize = 128;
 const DETAIL_VIEW_Y1: usize = 800;
 const DETAIL_VIEW_H: usize = DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0;
@@ -312,8 +345,12 @@ const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
 // Action buttons for CRUD & capture (meeting >= 48px touch targets)
-const CAPTURE_BTN: Rect = Rect::new(540, 34, 144, 48);
-const HEADER_BACK: Rect = Rect::new(MARGIN, 34, 48, 48);
+//
+// WHY every one of these now starts at `HEADER_TOP`: they are 48 tall and the row
+// they belong to is the header's, so authored at 32 or 34 their top quarter fell
+// inside the band that answers the pixel function first.
+const CAPTURE_BTN: Rect = Rect::new(540, HEADER_TOP, 144, 48);
+const HEADER_BACK: Rect = Rect::new(MARGIN, HEADER_TOP, 48, 48);
 const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
 const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
@@ -328,8 +365,8 @@ const SCRUB_HIT: Rect = Rect::new(
 /// The fullscreen control.
 const FULLSCREEN_BTN: Rect = Rect::new(W - MARGIN - 120, DETAIL_VIEW_Y1 + 112, 120, 48);
 /// The aspect-ratio control.
-const ASPECT_BTN: Rect = Rect::new(W - 88, 32, 68, 48);
-const PHOTO_FULLSCREEN_BTN: Rect = Rect::new(W - 88, 32, 68, 48);
+const ASPECT_BTN: Rect = Rect::new(W - 88, HEADER_TOP, 68, 48);
+const PHOTO_FULLSCREEN_BTN: Rect = Rect::new(W - 88, HEADER_TOP, 68, 48);
 const DETAIL_INFO: Rect = Rect::new(W / 2 - 40, H - 100, 80, 48);
 const PHOTO_FAV_BTN: Rect = Rect::new(MARGIN + 40, H - 100, 80, 48);
 const PHOTO_DEL_BTN: Rect = Rect::new(W - MARGIN - 120, H - 100, 80, 48);
@@ -3728,17 +3765,35 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         let text_x = std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
         let text_w = W.saturating_sub(text_x + 100);
         let title_bytes = app.detail_title();
-        if y >= 26 && y < 26 + font::line_height(2) {
+        if y >= DETAIL_TITLE_Y && y < DETAIL_TITLE_Y + font::line_height(2) {
             let mut buf = [0u8; 48];
             let n = font::ellipsize(title_bytes, 2, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 26, 2, &buf[..n], THEME.on_surface, THEME.surface_container) {
+            if let Some(c) = text(
+                x,
+                y,
+                text_x,
+                DETAIL_TITLE_Y,
+                2,
+                &buf[..n],
+                THEME.on_surface,
+                THEME.surface_container,
+            ) {
                 return c;
             }
         }
-        if y >= 64 && y < 64 + font::line_height(2) {
+        if y >= DETAIL_META_Y && y < DETAIL_META_Y + font::line_height(2) {
             let mut buf = [0u8; 64];
             let n = font::ellipsize(&app.detail_meta[..app.detail_meta_len], 2, text_w, &mut buf);
-            if let Some(c) = text(x, y, text_x, 64, 2, &buf[..n], THEME.on_surface_variant, THEME.surface_container) {
+            if let Some(c) = text(
+                x,
+                y,
+                text_x,
+                DETAIL_META_Y,
+                2,
+                &buf[..n],
+                THEME.on_surface_variant,
+                THEME.surface_container,
+            ) {
                 return c;
             }
         }

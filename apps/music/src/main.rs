@@ -1153,8 +1153,11 @@ const CHUNK: usize = 4096;
 const MARGIN: usize = spacing::GRID_24;
 const CONTENT_W: usize = W - 2 * MARGIN;
 
-const BAR_H: usize = 96;
-const BACK: Rect = Rect::new(24, 24, 72, 72);
+/// WHY 112 and not 96: the back control starts at HEADER_TOP because the band
+/// owns the rows above it, and a 48-tall control placed there ends at 104 -- the
+/// rule has to fall below that or it cuts the control in half.
+const BAR_H: usize = 112;
+const BACK: Rect = Rect::new(24, interos_std::design::viewport::HEADER_TOP, 72, 48);
 
 const ART_X: usize = 136;
 const ART_Y: usize = 128;
@@ -1814,11 +1817,11 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         if y == BAR_H - 1 {
             return THEME.border;
         }
-        // Standardized back button squircle (24..72, 24..72)
+        // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_low) {
             return c;
         }
-        if let Some(c) = text_centered_bold(x, y, 40, 2, b"Media Player", THEME.on_surface, THEME.surface) {
+        if let Some(c) = text_centered_bold(x, y, 56, 2, b"Media Player", THEME.on_surface, THEME.surface) {
             return c;
         }
         return THEME.surface;

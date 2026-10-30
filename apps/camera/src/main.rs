@@ -94,7 +94,10 @@ const DOCK_Y1: usize = H;
 // -----------------------------------------------------------------------------
 // Top control row geometry (height 48px, all >= 48px touch affordance)
 // -----------------------------------------------------------------------------
-const TOP_ROW_Y: usize = 24;
+/// WHY the row starts at HEADER_TOP and not at 24: the band owns the first 48
+/// rows and answers the pixel function before this row is reached, so half of
+/// every control here was painted over.
+const TOP_ROW_Y: usize = interos_std::design::viewport::HEADER_TOP;
 const TOP_ROW_H: usize = 48;
 
 /// Back control, 48x48: matches the SDK back button's painted box exactly.

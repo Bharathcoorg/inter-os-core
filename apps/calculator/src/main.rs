@@ -42,6 +42,7 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 
 pub fn status_band() -> (usize, usize) {
     (0, STATUS_BAR_HEIGHT)
@@ -518,22 +519,22 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Status Bar & Header Title with Back Chevron Disc (y: 0..110)
+    // 1. Header row: title, back chevron and history toggle (y: 48..110)
     if y < HEADER_H {
-        // Standardized back button squircle (24..72, 24..72)
+        // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
         // Canonical App Title: "Calculator" vertically centered with back button and history pill
-        if let Some(c) = test_text(x, y, 92, 36, interos_std::design::typography::TITLE_CAP_PX, b"Calculator", THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = test_text(x, y, 92, 60, interos_std::design::typography::TITLE_CAP_PX, b"Calculator", THEME.on_surface, THEME.surface, true) {
             return c;
         }
 
-        // History toggle pill button at top right: x: 576..688, y: 32..80
-        if x >= 576 && x < 688 && y >= 32 && y < 80 {
+        // History toggle pill button at top right: x: 576..688, y: 56..104
+        if x >= 576 && x < 688 && y >= HEADER_TOP && y < HEADER_TOP + 48 {
             let rx = (x - 576).min(687 - x);
-            let ry = (y - 32).min(79 - y);
+            let ry = (y - HEADER_TOP).min(HEADER_TOP + 47 - y);
             if rx < R_SOFT && ry < R_SOFT {
                 let cdx = (R_SOFT - rx) as isize;
                 let cdy = (R_SOFT - ry) as isize;
@@ -551,7 +552,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
             let hw = calculator::text_width(b"History", typography::BODY_CAP_PX);
             let hx = 576 + (112 - hw) / 2;
-            let hy = 32 + (48 - typography::BODY_CAP_PX as usize) / 2;
+            let hy = HEADER_TOP + (48 - typography::BODY_CAP_PX as usize) / 2;
             if let Some(c) = test_text(x, y, hx, hy, typography::BODY_CAP_PX, b"History", text_c, bg, true) {
                 return c;
             }
@@ -1096,11 +1097,8 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
 
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
     // Back button
-    let is_back = std::design::back_button::contains(x as usize, y as usize) || {
-        let dx = x as i32 - 62;
-        let dy = y as i32 - 55;
-        dx * dx + dy * dy <= 24 * 24
-    };
+    let is_back = std::design::back_button::contains(x as usize, y as usize)
+        || (x >= 24 && x < 100 && y >= HEADER_TOP as u32 && y < (HEADER_TOP + 48) as u32);
     if is_back {
         return Tap::Leave("[CALCULATOR] Back button tapped. Returning to launcher.");
     }
@@ -1110,8 +1108,8 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
         return Tap::Leave("[CALCULATOR] Home gesture tapped. Returning to launcher.");
     }
 
-    // History button in Header (576..688, 32..80)
-    if x >= 576 && x < 688 && y >= 32 && y < 80 {
+    // History button in Header (576..688, HEADER_TOP..HEADER_TOP+48)
+    if x >= 576 && x < 688 && y >= HEADER_TOP as u32 && y < (HEADER_TOP + 48) as u32 {
         calc.toggle_history();
         return Tap::Redraw(Dirty::All);
     }

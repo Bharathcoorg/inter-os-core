@@ -107,18 +107,22 @@ pub fn chevron_pixel(x: usize, y: usize, apex_x: isize, apex_y: isize, dir: Chev
 }
 
 // The day-view header band and the two arrow buttons inside it.
-pub const DAY_ARROW_BAND_Y0: usize = 160;
-pub const DAY_ARROW_BAND_Y1: usize = 208;
+//
+// WHY the band starts at 176: the platform's status band owns the first 48 rows
+// and the app's own header row the 48 below that, so the day view's controls
+// begin where the header row ends.
+pub const DAY_ARROW_BAND_Y0: usize = 176;
+pub const DAY_ARROW_BAND_Y1: usize = 224;
 pub const DAY_PREV_ARROW_X0: usize = 24;
 pub const DAY_PREV_ARROW_X1: usize = 72;
 pub const DAY_NEXT_ARROW_X0: usize = 648;
 pub const DAY_NEXT_ARROW_X1: usize = 696;
 /// The previous-day chevron's apex: the leftmost point of its glyph.
 pub const DAY_PREV_ARROW_APEX_X: isize = 44;
-pub const DAY_PREV_ARROW_APEX_Y: isize = 184;
+pub const DAY_PREV_ARROW_APEX_Y: isize = 200;
 /// The next-day chevron's apex: the rightmost point of its glyph.
 pub const DAY_NEXT_ARROW_APEX_X: isize = 676;
-pub const DAY_NEXT_ARROW_APEX_Y: isize = 184;
+pub const DAY_NEXT_ARROW_APEX_Y: isize = 200;
 
 /// Which way a day-view header arrow moves the selected day.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

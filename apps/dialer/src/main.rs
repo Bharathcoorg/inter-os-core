@@ -2355,13 +2355,40 @@ const fn run_rows(scale: usize) -> usize {
     std::design::font::line_height(scale)
 }
 
+/// The row the app's own chrome starts at. WHY not the top of the panel: the
+/// status band owns `0..STATUS_BAR_HEIGHT` and answers the pixel function before
+/// any header content is reached, so a control authored at y=24 lost its top half
+/// to a surface painted over it.
+const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
+
 /// Header band height: y >= HEADER_H draws the hairline rule, so a header run
 /// has to fit inside 0..HEADER_H.
-const HEADER_H: usize = 94;
+///
+/// WHY 112 and not 94: the back control is 48 tall and starts at `HEADER_TOP`, so
+/// its last row is 103 and the rule has to fall below that.
+const HEADER_H: usize = 112;
 const TITLE_SCALE: usize = type_scale::TITLE;
+/// The row the header's controls are centred on.
+const HEADER_ROW: usize = HEADER_TOP + std::design::back_button::SIZE / 2;
+/// The title's line box top.
+///
+/// WHY the caps are centred on the control's row rather than the box: the box
+/// at this rung is fifty-nine rows and the button beside it is forty-eight, so
+/// centring the box puts the letters below the button and keeping the box
+/// inside the row puts them above it. Centring the cap height is the one
+/// placement where the word and the button read as a single row of chrome.
+const TITLE_Y0: usize = HEADER_ROW
+    - std::design::font::ascent_for_scale(TITLE_SCALE)
+    + std::design::font::cap_for_scale(TITLE_SCALE) as usize / 2;
 
-// Segmented navigation tabs (y: 104..156). Symmetrically balanced pills across
+// Segmented navigation tabs (y: 120..164). Symmetrically balanced pills across
 // the 720px viewport (48px margins, 12px gaps).
+//
+// WHY the band starts at 120 and not 104: the header's own rule is the row
+// `HEADER_H` names, and the tabs are the next surface down -- a band that began on
+// the rule row drew its pills one row under a hairline that was never meant to
+// cross them. 44 rows is the platform's minimum touch target, so the band did not
+// have to keep its old 52.
 //
 // WHY four pills and not three: the dialer's design document asks for a
 // settings surface - a ringtone picker, a keypad-tone choice and the choice
@@ -2369,8 +2396,8 @@ const TITLE_SCALE: usize = type_scale::TITLE;
 // not a surface. The four pills are 147px wide with 12px gaps, which still
 // leaves the longest label ("Contacts") its full width.
 const TAB_SCALE: usize = type_scale::BODY;
-const TAB_BAND_Y0: usize = 104;
-const TAB_BAND_H: usize = 52;
+const TAB_BAND_Y0: usize = 120;
+const TAB_BAND_H: usize = 44;
 const TAB_W: usize = 147;
 const TAB1_X0: usize = 48;
 const TAB1_X1: usize = TAB1_X0 + TAB_W; // 195
@@ -2693,13 +2720,12 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     // Header Title: "Phone". The run is scale 3, so it needs
-    // run_rows(3) = 72 rows; the 94-row header band has room, so the line
-    // box is centred in it instead of being gated to a 24-row window that
-    // kept only 18 of the glyph's 57 ink rows.
+    // run_rows(3) = 44 rows, and the line box is centred on the row the back
+    // control stands in rather than in the whole band -- a title centred from 0
+    // would sit with half its box inside the band that paints over it.
     let title_rows = run_rows(TITLE_SCALE);
-    let title_y0 = (HEADER_H - title_rows) / 2;
-    if y >= title_y0 && y < title_y0 + title_rows {
-        if let Some(c) = test_text(x, y, 120, title_y0, TITLE_SCALE, b"Phone", 240, THEME.on_surface, THEME.surface_container) {
+    if y >= TITLE_Y0 && y < TITLE_Y0 + title_rows {
+        if let Some(c) = test_text(x, y, 120, TITLE_Y0, TITLE_SCALE, b"Phone", 240, THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
@@ -2718,7 +2744,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 x,
                 y,
                 600 - width,
-                52,
+                HEADER_TOP + 8,
                 1,
                 label,200, 
                 THEME.on_surface_variant,
@@ -2729,15 +2755,15 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     }
 
-    // Cellular signal indicator (x: 610..670, y: 40..62)
+    // Cellular signal indicator (x: 610..670, on the ringtone caption's row)
     //
     // WHY the bar count is real: the previous renderer filled all four bars from
     // the `modem_present` boolean, so a present-but-idle radio drew a full
     // signal. `signal_bars` is the `"bars"` field of the modem telemetry.
-    if x >= 610 && x < 670 && y >= 40 && y < 62 {
+    if x >= 610 && x < 670 && y >= HEADER_TOP + 8 && y < HEADER_TOP + 30 {
         let bar_idx = (x - 610) / 15;
         let bar_x = (x - 610) % 15;
-        let bar_min_y = 62 - (bar_idx + 1) * 5;
+        let bar_min_y = (HEADER_TOP + 30) - (bar_idx + 1) * 5;
         if bar_x < 9 && y >= bar_min_y {
             return if (bar_idx as u8) < dialer.signal_bars {
                 THEME.primary
@@ -2748,14 +2774,14 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return THEME.surface_container;
     }
 
-    // Battery indicator (x: 678..706, y: 44..58)
+    // Battery indicator (x: 678..706, centred on the same row)
     //
     // WHY it is drawn only when the fuel gauge answered: this app holds no
     // power-control capability, so `battery_query` is refused and there is no
     // state of charge to draw. An always-drawn empty shell read as "battery at
     // 0%", which is a hardware claim this app cannot make. The browser takes the
     // same approach for telemetry it does not receive: draw nothing.
-    if x >= 678 && x < 706 && y >= 44 && y < 58 {
+    if x >= 678 && x < 706 && y >= HEADER_TOP + 12 && y < HEADER_TOP + 26 {
         if let Some(soc) = dialer.battery_soc {
             let pct = soc.min(100) as usize;
             let inner_x0 = 681usize;
@@ -2763,11 +2789,16 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             let inner_w = inner_x1 - inner_x0;
             let fill_w = inner_w * pct / 100;
             // Outline.
-            if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
+            if x == 678
+                || x == 702
+                || y == HEADER_TOP + 12
+                || y == HEADER_TOP + 25
+                || (x >= 703 && y >= HEADER_TOP + 16 && y < HEADER_TOP + 22)
+            {
                 return THEME.on_surface_variant;
             }
             // Real fill from the reported state of charge.
-            if x >= inner_x0 && x < inner_x0 + fill_w && y >= 46 && y < 56 {
+            if x >= inner_x0 && x < inner_x0 + fill_w && y >= HEADER_TOP + 14 && y < HEADER_TOP + 24 {
                 return THEME.on_surface;
             }
         }
@@ -4444,7 +4475,7 @@ fn section_band_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 }
 
 fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    // 1. Status bar & header (y: 0..94)
+    // 1. Status bar & header (y: 0..HEADER_H, the rule on the last row)
     if y < HEADER_H + 1 {
         return header_pixel(x, y, dialer);
     }
@@ -4664,7 +4695,9 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     if x >= 240 && x <= 480 && y >= 1400 {
         return Tap::Leave("[DIALER APP] Home gesture pressed. Exiting to launcher.");
     }
-    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
+    if std::design::back_button::contains(x, y)
+        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
+    {
         if dialer.section == DialerSection::Contacts && dialer.contact_edit.is_some() {
             dialer.cancel_edit_contact();
             return Tap::Redraw(Dirty::All);

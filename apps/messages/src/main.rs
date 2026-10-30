@@ -672,15 +672,17 @@ fn test_text_bold(
 // Layout Geometry
 // -----------------------------------------------------------------------------
 const HEADER_Y0: usize = 0;
-const HEADER_Y1: usize = 96;
+/// WHY 112: the band owns the first 48 rows and the back control stands 48 tall
+/// from HEADER_TOP, so the header has to reach past 104 before its rule.
+const HEADER_Y1: usize = 112;
 const TITLE_TEXT: &[u8] = b"Messages";
 const TITLE_X: usize = 116;
 const TITLE_SCALE: usize = type_scale::TITLE;
-const TITLE_Y: usize = 36;
+const TITLE_Y: usize = interos_std::design::viewport::HEADER_TOP + 4;
 
 const PILL_RIGHT: usize = W - 24;
-const PILL_TOP: usize = 28;
-const PILL_BOTTOM: usize = 68;
+const PILL_TOP: usize = interos_std::design::viewport::HEADER_TOP + 4;
+const PILL_BOTTOM: usize = PILL_TOP + 40;
 const PILL_PAD_X: usize = spacing::GRID_20;
 
 #[inline]
@@ -709,10 +711,10 @@ fn pill_left_for(label: &[u8], scale: usize) -> usize {
     PILL_RIGHT.saturating_sub(w)
 }
 
-// Search field geometry (y 104..156)
-const SEARCH_Y0: usize = 104;
-const SEARCH_Y1: usize = 156;
-const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 106, 672, 48);
+// Search field geometry (y 112..164)
+const SEARCH_Y0: usize = 112;
+const SEARCH_Y1: usize = 164;
+const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 114, 672, 48);
 const SEARCH_TEXT_X: usize = 82;
 const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
@@ -834,7 +836,7 @@ const HOME_Y0: usize = 1400;
 // Thread card geometry
 const CARD_X0: usize = 24;
 const CARD_X1: usize = 696;
-const CARD_Y0: usize = 180;
+const CARD_Y0: usize = 188;
 const CARD_H: usize = 120;
 const CARD_BODY_H: usize = 104;
 
@@ -1595,9 +1597,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Header (y 0..96)
+    // 1. Header (y 0..112)
     if y < HEADER_Y1 {
-        if y >= 94 {
+        if y >= HEADER_Y1 - 2 {
             return THEME.border;
         }
 
@@ -1606,9 +1608,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return c;
         }
 
-        // Electric red dot accent at (96, 48)
+        // Electric red dot accent at (96, 80) -- on the row the controls stand in.
         let dot_dx = x as i32 - 96;
-        let dot_dy = y as i32 - 48;
+        let dot_dy = y as i32 - 80;
         if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
             return THEME.error;
         }
@@ -1657,7 +1659,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     // ViewMode 1: ThreadListView
     // -------------------------------------------------------------------------
     if messages.view_mode == ViewMode::ThreadList {
-        // 2. Search & Filter Bar (y 104..156)
+        // 2. Search & Filter Bar (y 112..164)
         if y >= SEARCH_Y0 && y < SEARCH_Y1 {
             if in_rect(SEARCH_FIELD, x, y) {
                 let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
@@ -2141,7 +2143,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // ViewMode 2: ConversationView
         // ---------------------------------------------------------------------
 
-        // Threat Warning Banner or clean header info bar (y 104..156)
+        // Threat Warning Banner or clean header info bar (y 112..164)
         if y >= SEARCH_Y0 && y < SEARCH_Y1 {
             let active_id = messages.active_thread_id.unwrap_or(0);
             let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
@@ -3103,7 +3105,11 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     }
 
     // Header Back button (24..72, 24..72)
-    if std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68) {
+    if std::design::back_button::contains(x, y)
+        || (x >= 24 && x < 100
+            && y >= interos_std::design::viewport::HEADER_TOP
+            && y < interos_std::design::viewport::HEADER_TOP + 48)
+    {
         match app.view_mode {
             ViewMode::Conversation => {
                 // Return to conversation directory

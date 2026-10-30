@@ -560,7 +560,7 @@ const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;
 
 // Segmented Navigation Tabs (y: 100..152) - comfortable >= 48px touch targets
 const TAB_SCALE: usize = type_scale::BODY;
-const TAB_BAND_Y0: usize = 100;
+const TAB_BAND_Y0: usize = 116;
 const TAB_BAND_H: usize = 50;
 const TAB_W: usize = 147;
 const TAB1_X0: usize = 48;
@@ -765,7 +765,7 @@ const ROW_PITCH: usize = 52;
 const GRID_ROWS: usize = 6;
 const GRID_START_Y: usize = 204;
 
-const WEEKDAY_Y0: usize = 160;
+const WEEKDAY_Y0: usize = 172;
 const WEEKDAY_SCALE: usize = type_scale::BODY;
 
 const NO_DATE_PILL: &[u8] = b"NO DATE";
@@ -957,6 +957,16 @@ fn keyboard_key_at(x: usize, y: usize) -> Option<(usize, usize)> {
 // -----------------------------------------------------------------------------
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
+
+/// The header row's own box. WHY it reaches 112: the back control and the month
+/// badge are both 48 tall and start at HEADER_TOP, so the row has to end below
+/// 104 or the surface under it is painted over their last rows.
+const HEADER_H: usize = 112;
+/// WHY nine rows into the control band: the title's line box is a little
+/// shorter than the 48 the controls stand in, and starting it at the band's own
+/// top would hang its descent below the row.
+const TITLE_Y0: usize = HEADER_TOP + 9;
 
 pub fn status_band() -> (usize, usize) {
     (0, STATUS_BAR_HEIGHT)
@@ -982,25 +992,25 @@ fn get_calendar_pixel(
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
-        // Standardized back button squircle (24..72, 24..72)
+    // 1. Header row: back control, title and month badge (y: 48..112)
+    if y < HEADER_H {
+        // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
         // Header Title: "Calendar"
-        if y >= 12 && y < 12 + std::design::font::line_height(3) {
-            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, THEME.on_surface, THEME.surface_container) {
+        if y >= TITLE_Y0 && y < TITLE_Y0 + std::design::font::line_height(3) {
+            if let Some(c) = test_text(x, y, 116, TITLE_Y0, 3, b"Calendar", 480 - 116, THEME.on_surface, THEME.surface_container) {
                 return c;
             }
         }
 
-        // Month & Year Pill Badge at top-right (x: 480..696, y: 20..76)
-        if x >= 480 && x < 696 && y >= 20 && y < 76 {
+        // Month & Year Pill Badge at top-right (x: 480..696, HEADER_TOP..HEADER_TOP+48)
+        if x >= 480 && x < 696 && y >= HEADER_TOP && y < HEADER_TOP + 48 {
             let mut on_pill_border = false;
             let rx = (x - 480).min(695 - x);
-            let ry = (y - 20).min(75 - y);
+            let ry = (y - HEADER_TOP).min(HEADER_TOP + 47 - y);
             if rx < R_CARD && ry < R_CARD {
                 let cdx = (R_CARD - rx) as isize;
                 let cdy = (R_CARD - ry) as isize;
@@ -1031,7 +1041,7 @@ fn get_calendar_pixel(
 
             let pill_text: &[u8] = if app.date_known { &month_str[..] } else { NO_DATE_PILL };
             let pill_x = centered_x(pill_text, 2, 480, 216);
-            let pill_y0 = 20 + (56 - std::design::font::line_height(2)) / 2;
+            let pill_y0 = HEADER_TOP + (48 - std::design::font::line_height(2)) / 2;
             if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, THEME.primary, THEME.surface_container_high) {
                 return c;
             }
@@ -1045,7 +1055,7 @@ fn get_calendar_pixel(
         return THEME.surface_container;
     }
 
-    // 2. Segmented Navigation Tabs (y: 100..152)
+    // 2. Segmented Navigation Tabs (y: 116..166)
     if y >= TAB_BAND_Y0 && y < TAB_BAND_Y0 + TAB_BAND_H {
         return tabs_pixel(x, y, app);
     }
@@ -1330,18 +1340,18 @@ fn week_view_pixel(
     display_year: u32,
     display_month: u8,
 ) -> u32 {
-    // Header (y: 160..196)
-    if y >= 160 && y < 196 {
-        if let Some(c) = test_text_bold(x, y, 28, 164, 2, b"WEEKLY SCHEDULE", 400, THEME.on_surface, THEME.surface) {
+    // Header (y: 176..212)
+    if y >= 176 && y < 212 {
+        if let Some(c) = test_text_bold(x, y, 28, 180, 2, b"WEEKLY SCHEDULE", 400, THEME.on_surface, THEME.surface) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 560, 164, 2, b"7 DAYS", 120, THEME.primary, THEME.surface) {
+        if let Some(c) = test_text(x, y, 560, 180, 2, b"7 DAYS", 120, THEME.primary, THEME.surface) {
             return c;
         }
         return THEME.surface;
     }
 
-    // 7 Day Cards (y: 204..792)
+    // 7 Day Cards (y: 220..808)
     let selected_d = app.selected_day.unwrap_or(app.current_day.max(1));
     let dow = if app.date_known { day_of_week(display_year, display_month, selected_d) } else { 0 };
     let sunday = if selected_d > dow { selected_d - dow } else { 1 };
@@ -1350,7 +1360,7 @@ fn week_view_pixel(
     const WEEK_LABELS: [&[u8]; 7] = [b"SUN", b"MON", b"TUE", b"WED", b"THU", b"FRI", b"SAT"];
 
     for i in 0..7 {
-        let card_y = 204 + i * 84;
+        let card_y = 220 + i * 84;
         if y >= card_y && y < card_y + 74 && x >= 24 && x < W - 24 {
             let day_num = (sunday + i as u8).min(num_days);
             let is_sel = app.selected_day == Some(day_num);
@@ -1446,9 +1456,9 @@ fn day_view_pixel(
     display_month: u8,
     agenda: &AgendaView,
 ) -> u32 {
-    // Day hero header (y: 160..240)
-    if y >= 160 && y < 240 {
-        // Prev button '<' (x: 24..72, y: 160..208)
+    // Day hero header (y: 176..256)
+    if y >= 176 && y < 256 {
+        // Prev button '<' (x: 24..72, y: 176..224)
         //
         // WHY the direction is named: the glyph used to be drawn mirrored, so
         // the arrow on the left pointed forward and the arrow on the right
@@ -1461,7 +1471,7 @@ fn day_view_pixel(
             return THEME.surface_container_high;
         }
 
-        // Next button '>' (x: 648..696, y: 160..208)
+        // Next button '>' (x: 648..696, y: 176..224)
         if x >= DAY_NEXT_ARROW_X0 && x < DAY_NEXT_ARROW_X1 && y >= DAY_ARROW_BAND_Y0 && y < DAY_ARROW_BAND_Y1 {
             if chevron_pixel(x, y, DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, ChevronDir::Right) {
                 return THEME.primary;
@@ -1475,7 +1485,7 @@ fn day_view_pixel(
         let dn = fmt_date(&mut date_buf, display_year as u16, display_month, day);
         let date_str = &date_buf[..dn];
         let tx = centered_x(date_str, 2, 80, 560);
-        if let Some(c) = test_text_bold(x, y, tx, 168, 2, date_str, 560, THEME.on_surface, THEME.surface) {
+        if let Some(c) = test_text_bold(x, y, tx, 184, 2, date_str, 560, THEME.on_surface, THEME.surface) {
             return c;
         }
 
@@ -1484,7 +1494,7 @@ fn day_view_pixel(
         let cn = fmt_count(&mut count_buf, agenda.len);
         let count_str = &count_buf[..cn];
         let cx0 = centered_x(count_str, 2, 80, 560);
-        if let Some(c) = test_text(x, y, cx0, 206, 2, count_str, 560, THEME.primary, THEME.surface) {
+        if let Some(c) = test_text(x, y, cx0, 222, 2, count_str, 560, THEME.primary, THEME.surface) {
             return c;
         }
 
@@ -1492,10 +1502,10 @@ fn day_view_pixel(
     }
 
     // Day Schedule / Timeline Cards (y: 250..800)
-    if y >= 250 && y < 800 {
+    if y >= 266 && y < 816 {
         if agenda.len == 0 {
             // Day empty card (y: 260..520)
-            if x >= 24 && x < W - 24 && y >= 260 && y < 520 {
+            if x >= 24 && x < W - 24 && y >= 276 && y < 536 {
                 let rx = (x - 24).min(W - 25 - x);
                 let ry = (y - 260).min(519 - y);
                 if rx < R_CARD && ry < R_CARD {
@@ -1506,7 +1516,7 @@ fn day_view_pixel(
                     }
                 }
                 let hx = centered_x(b"No Events on this Day", 2, 24, 672);
-                if let Some(c) = test_text_bold(x, y, hx, 340, 2, b"No Events on this Day", 672, THEME.on_surface, THEME.surface_container) {
+                if let Some(c) = test_text_bold(x, y, hx, 356, 2, b"No Events on this Day", 672, THEME.on_surface, THEME.surface_container) {
                     return c;
                 }
                 let dx0 = centered_x(b"Your schedule is clear", 2, 24, 672);
@@ -1521,7 +1531,7 @@ fn day_view_pixel(
         } else {
             // Day event timeline cards
             for (i, item) in agenda.items[..agenda.len].iter().enumerate() {
-                let card_y = 250 + i * 136;
+                let card_y = 266 + i * 136;
                 if y >= card_y && y < card_y + 120 && x >= 24 && x < W - 24 {
                     let rx = (x - 24).min(W - 25 - x);
                     let ry = (y - card_y).min(card_y + 119 - y);
@@ -1600,15 +1610,15 @@ fn agenda_view_pixel(
     y: usize,
     app: &CalendarApp,
 ) -> u32 {
-    // Header (y: 160..204)
-    if y >= 160 && y < 204 {
-        if let Some(c) = test_text_bold(x, y, 28, 168, 2, b"AGENDA TIMELINE", 350, THEME.on_surface, THEME.surface) {
+    // Header (y: 176..220)
+    if y >= 176 && y < 220 {
+        if let Some(c) = test_text_bold(x, y, 28, 184, 2, b"AGENDA TIMELINE", 350, THEME.on_surface, THEME.surface) {
             return c;
         }
         let mut count_buf = [0u8; 16];
         let cn = fmt_count(&mut count_buf, app.store.len());
         let count_str = &count_buf[..cn];
-        if let Some(c) = test_text(x, y, 540, 168, 2, count_str, 156, THEME.primary, THEME.surface) {
+        if let Some(c) = test_text(x, y, 540, 184, 2, count_str, 156, THEME.primary, THEME.surface) {
             return c;
         }
         return THEME.surface;
@@ -1645,7 +1655,7 @@ fn agenda_view_pixel(
     } else {
         // Chronological cards
         for (i, item) in all_items[..total].iter().enumerate() {
-            let card_y = 216 + i * 116;
+            let card_y = 232 + i * 116;
             if y >= card_y && y < card_y + 104 && x >= 24 && x < W - 24 {
                 let rx = (x - 24).min(W - 25 - x);
                 let ry = (y - card_y).min(card_y + 103 - y);
@@ -2648,9 +2658,9 @@ impl Dirty {
 }
 
 const BANDS: [(Dirty, usize, usize); 3] = [
-    (Dirty::HEADER, 0, 96),
-    (Dirty::TABS, 96, 156),
-    (Dirty::CONTENT, 156, 1360),
+    (Dirty::HEADER, 0, HEADER_H),
+    (Dirty::TABS, HEADER_H, 172),
+    (Dirty::CONTENT, 172, 1360),
 ];
 
 fn repaint(surface: u32, app: &CalendarApp, dirty: Dirty) {
@@ -2847,7 +2857,7 @@ fn stepper_button_at(x: usize, y: usize, boxes: &[(usize, usize)]) -> Option<(us
 fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
     // Back button or touch Close [X] at top-right of sheet
     if std::design::back_button::contains(x, y)
-        || (x >= 24 && x < 100 && y >= 28 && y < 68)
+        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
         || (x >= 624 && x < 676 && y >= 538 && y < 590)
     {
         app.flow = Flow::None;
@@ -2912,7 +2922,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
         return Tap::Leave("[CALENDAR APP] Back button or home gesture pressed. Exiting to launcher.");
     }
 
-    let is_back = std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= 28 && y < 68);
+    let is_back = std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48);
 
     // 2. If Event Details modal is open
     if let Some(event) = app.details_event {
@@ -3026,7 +3036,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             let num_days = if app.date_known { days_in_month(display_year, display_month) } else { 31 };
 
             for i in 0..7 {
-                let card_y = 204 + i * 84;
+                let card_y = 220 + i * 84;
                 if y >= card_y && y < card_y + 74 && x >= 24 && x < W - 24 {
                     let day_num = (sunday + i as u8).min(num_days);
                     app.selected_day = Some(day_num);
@@ -3070,7 +3080,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             // Event cards in Day view
             let agenda = app.agenda_view();
             for (i, item) in agenda.items[..agenda.len].iter().enumerate() {
-                let card_y = 250 + i * 136;
+                let card_y = 266 + i * 136;
                 if y >= card_y && y < card_y + 120 && x >= 24 && x < W - 24 {
                     app.details_event = Some(*item);
                     return Tap::Redraw(Dirty::CONTENT);
@@ -3088,7 +3098,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             let total = app.store.all_events_sorted(&mut all_items);
 
             for (i, item) in all_items[..total].iter().enumerate() {
-                let card_y = 216 + i * 116;
+                let card_y = 232 + i * 116;
                 if y >= card_y && y < card_y + 104 && x >= 24 && x < W - 24 {
                     app.details_event = Some(*item);
                     return Tap::Redraw(Dirty::CONTENT);

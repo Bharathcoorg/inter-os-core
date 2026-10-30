@@ -61,8 +61,40 @@ const CARD_GAP: usize = 20;
 /// The distance from one card's top to the next one's top.
 const CARD_STRIDE: usize = CARD_H + CARD_GAP;
 
+/// The row this app's own chrome starts at.
+///
+/// WHY not the top of the panel: the status band owns `0..STATUS_BAR_HEIGHT` and
+/// answers the pixel function before any of this app's rows are reached, so the
+/// search pill authored at y=24 lost the whole upper arc of its round ends to a
+/// surface painted over it -- and the editor's circular tools lost their top half.
+const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
+
+/// The list's search pill.
+const SEARCH_Y0: usize = HEADER_TOP;
+const SEARCH_H: usize = 54;
+const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_H;
+
+/// The category chip row, 16 rows under the pill.
+const CHIP_Y0: usize = SEARCH_Y1 + 16;
+const CHIP_H: usize = 48;
+const CHIP_Y1: usize = CHIP_Y0 + CHIP_H;
+
+/// The editor's toolbar box, and the centre row its circular tools stand on.
+///
+/// WHY the centre is 24 rows into the box rather than at its middle: the tools are
+/// circles of radius 20-22 and the box has to carry the divider below them.
+const EDITOR_BAR_H: usize = HEADER_TOP + 62;
+const EDITOR_TOOL_CY: usize = HEADER_TOP + 24;
+
+/// The editor's title row, the body band under it, and the first line's top.
+const EDITOR_TITLE_Y0: usize = EDITOR_BAR_H + 12;
+const EDITOR_TITLE_Y1: usize = EDITOR_TITLE_Y0 + 70;
+const EDITOR_TITLE_TEXT_Y: usize = EDITOR_TITLE_Y0 + 20;
+const EDITOR_BODY_Y0: usize = EDITOR_TITLE_Y1 + 4;
+const EDITOR_TEXT_Y0: usize = EDITOR_BODY_Y0 + 6;
+
 /// The top of the note list's visible band.
-const LIST_TOP: usize = 164;
+const LIST_TOP: usize = CHIP_Y1 + 22;
 
 /// The bottom of the note list's visible band.
 const LIST_BOTTOM: usize = 1308;
@@ -91,7 +123,7 @@ const CHIP_WS: [usize; 5] = [88, 88, 110, 88, 100];
 /// category chips are the same size. A 42-pixel chip is two pixels short
 /// of the minimum, which is the kind of shortfall nobody notices and
 /// everybody's thumb does.
-const PIN_FILTER: (usize, usize, usize, usize) = (556, 94, 136, 48);
+const PIN_FILTER: (usize, usize, usize, usize) = (556, CHIP_Y0, 136, CHIP_H);
 
 /// The ruled page's left edge.
 const RULE_X0: usize = 44;
@@ -887,15 +919,15 @@ fn extract_card_snippet<'a>(body: &'a [u8]) -> CardSnippet<'a> {
 // -----------------------------------------------------------------------------
 
 fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
-    // --- A. Elevated Search Pill Bar (y: 24..78, x: 28..692) ---
-    if y >= 24 && y <= 78 && x >= 28 && x <= 692 {
-        if in_rounded_rect(x, y, 28, 24, 664, 54, 24) {
-            if !in_rounded_rect(x, y, 30, 26, 660, 50, 22) {
+    // --- A. Elevated Search Pill Bar (y: SEARCH_Y0..SEARCH_Y1, x: 28..692) ---
+    if y >= SEARCH_Y0 && y <= SEARCH_Y1 && x >= 28 && x <= 692 {
+        if in_rounded_rect(x, y, 28, SEARCH_Y0, 664, SEARCH_H, 24) {
+            if !in_rounded_rect(x, y, 30, SEARCH_Y0 + 2, 660, SEARCH_H - 4, 22) {
                 return if state.search_active { THEME.primary } else { THEME.border };
             }
 
             // Search Icon on Left
-            if let Some(c) = draw_search_glyph(x, y, 58, 51, THEME.on_surface_variant) {
+            if let Some(c) = draw_search_glyph(x, y, 58, SEARCH_Y0 + SEARCH_H / 2, THEME.on_surface_variant) {
                 return c;
             }
 
@@ -908,20 +940,20 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let mut q_buf = [0u8; 40];
                 let q_len = std::design::font::ellipsize(q, 2, 696 - 20 - 88, &mut q_buf);
                 let q = &q_buf[..q_len];
-                if let Some(c) = test_text(x, y, 88, 38, 2, q, THEME.on_surface, THEME.surface_container, false) {
+                if let Some(c) = test_text(x, y, 88, SEARCH_Y0 + 14, 2, q, THEME.on_surface, THEME.surface_container, false) {
                     return c;
                 }
                 // Blinking cursor
                 if state.cursor_visible && state.search_active {
                     let cur_w = outline_text::drawn_advance(q, 2, None).unwrap_or_else(|| std::design::font::measure(q, 2));
                     let cur_x = 88 + cur_w;
-                    if x >= cur_x && x <= cur_x + 2 && y >= 38 && y <= 64 {
+                    if x >= cur_x && x <= cur_x + 2 && y >= SEARCH_Y0 + 14 && y <= SEARCH_Y0 + 40 {
                         return THEME.primary;
                     }
                 }
             } else {
                 let hint = b"Search your notes...";
-                if let Some(c) = test_text(x, y, 88, 38, 2, hint, THEME.on_surface_variant, THEME.surface_container, false) {
+                if let Some(c) = test_text(x, y, 88, SEARCH_Y0 + 14, 2, hint, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             }
@@ -929,7 +961,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             // Right Clear 'X' or Note Count Pill
             if state.search_len > 0 {
                 let dx = (x as i32 - 650).abs();
-                let dy = (y as i32 - 51).abs();
+                let dy = (y as i32 - (SEARCH_Y0 + SEARCH_H / 2) as i32).abs();
                 if (dx - dy).abs() <= 1 && dx <= 7 {
                     return THEME.on_surface_variant;
                 }
@@ -943,7 +975,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 let w = outline_text::drawn_advance(&badge[..n], 1, None)
                     .unwrap_or_else(|| std::design::font::measure(&badge[..n], 1));
                 let bx = 682usize.saturating_sub(w);
-                if let Some(c) = test_text(x, y, bx, 42, 1, &badge[..n], THEME.primary, THEME.surface_container, true) {
+                if let Some(c) = test_text(x, y, bx, SEARCH_Y0 + 18, 1, &badge[..n], THEME.primary, THEME.surface_container, true) {
                     return c;
                 }
             }
@@ -953,9 +985,9 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         return THEME.surface;
     }
 
-    // --- B. Category Filter Chips and the Pin Filter (y: 94..142) ---
+    // --- B. Category Filter Chips and the Pin Filter (y: CHIP_Y0..CHIP_Y1) ---
     // Clean 16px gap below search bar, >= 48px touch targets
-    if y >= 94 && y <= 142 {
+    if y >= CHIP_Y0 && y <= CHIP_Y1 {
         let chip_names: [&[u8]; 5] = [
             CATEGORY_NAMES[0],
             CATEGORY_NAMES[1],
@@ -969,22 +1001,22 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             let cw = CHIP_WS[i];
             if x >= cx && x < cx + cw {
                 let is_active = state.selected_category as usize == i;
-                if in_rounded_rect(x, y, cx, 94, cw, 48, 14) {
+                if in_rounded_rect(x, y, cx, CHIP_Y0, cw, CHIP_H, 14) {
                     if is_active {
                         let txt_color = THEME.on_primary;
                         let text_w = std::design::font::measure(chip_names[i], 1);
                         let text_x = cx + (cw.saturating_sub(text_w)) / 2;
-                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], txt_color, THEME.primary, true) {
+                        if let Some(c) = test_text(x, y, text_x, CHIP_Y0 + 15, 1, chip_names[i], txt_color, THEME.primary, true) {
                             return c;
                         }
                         return THEME.primary;
                     } else {
-                        if !in_rounded_rect(x, y, cx + 1, 95, cw - 2, 46, 13) {
+                        if !in_rounded_rect(x, y, cx + 1, CHIP_Y0 + 1, cw - 2, CHIP_H - 2, 13) {
                             return THEME.border;
                         }
                         let text_w = std::design::font::measure(chip_names[i], 1);
                         let text_x = cx + (cw.saturating_sub(text_w)) / 2;
-                        if let Some(c) = test_text(x, y, text_x, 109, 1, chip_names[i], THEME.on_surface_variant, THEME.surface_container, false) {
+                        if let Some(c) = test_text(x, y, text_x, CHIP_Y0 + 15, 1, chip_names[i], THEME.on_surface_variant, THEME.surface_container, false) {
                             return c;
                         }
                         return THEME.surface_container;
@@ -1012,7 +1044,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             if let Some(c) = draw_pin_glyph(x, y, PIN_FILTER.0 + 22, PIN_FILTER.1 + 24, active, ink) {
                 return c;
             }
-            if let Some(c) = test_text(x, y, PIN_FILTER.0 + 40, 109, 1, b"PINNED", ink, fill, false) {
+            if let Some(c) = test_text(x, y, PIN_FILTER.0 + 40, CHIP_Y0 + 15, 1, b"PINNED", ink, fill, false) {
                 return c;
             }
             return fill;
@@ -1079,9 +1111,9 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         return THEME.surface;
     }
 
-    // --- E. Dynamic Note Cards Feed (y: 162..1308) ---
+    // --- E. Dynamic Note Cards Feed (y: LIST_TOP-2..LIST_BOTTOM) ---
     // Clean 24px gap below category filter chips
-    if y >= 162 && y <= 1308 {
+    if y >= LIST_TOP - 2 && y <= LIST_BOTTOM {
         let mut filtered = [0usize; MAX_NOTES];
         let visible_count = state.filtered_indices(&mut filtered);
 
@@ -1339,11 +1371,11 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     };
     let theme = NOTE_TONES[note.color_idx as usize % NOTE_TONE_COUNT];
 
-    // --- A. Top Navigation Bar (y: 0..84) ---
-    if y < 84 {
-        // Back Chevron at (50, 46, r=22)
-        if in_circle(x, y, 50, 46, 22) {
-            if let Some(c) = draw_chevron_left(x, y, 50, 46, theme.title_ink) {
+    // --- A. Top Navigation Bar (y: 0..EDITOR_BAR_H) ---
+    if y < EDITOR_BAR_H {
+        // Back Chevron on the toolbar's centre row
+        if in_circle(x, y, 50, EDITOR_TOOL_CY, 22) {
+            if let Some(c) = draw_chevron_left(x, y, 50, EDITOR_TOOL_CY, theme.title_ink) {
                 return c;
             }
             return theme.chip;
@@ -1362,49 +1394,49 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             b"Saved"
         };
         let status_color = if state.save_failed { THEME.error } else { theme.muted_ink };
-        if let Some(c) = test_text(x, y, 96, 38, 1, status_text, status_color, theme.fill, false) {
+        if let Some(c) = test_text(x, y, 96, EDITOR_TOOL_CY - 8, 1, status_text, status_color, theme.fill, false) {
             return c;
         }
 
         // Right Tools:
-        // 1. Pin Toggle Glyph (x: 520, y: 46)
-        if in_circle(x, y, 520, 46, 20) {
+        // 1. Pin Toggle Glyph (x: 520, on the toolbar's centre row)
+        if in_circle(x, y, 520, EDITOR_TOOL_CY, 20) {
             // A pin is the note's own state, so it takes the tone's accent;
             // `warning` would report a caution the user never set.
             let pcol = if note.is_pinned { theme.accent } else { theme.muted_ink };
-            if let Some(c) = draw_pin_glyph(x, y, 520, 46, note.is_pinned, pcol) {
+            if let Some(c) = draw_pin_glyph(x, y, 520, EDITOR_TOOL_CY, note.is_pinned, pcol) {
                 return c;
             }
             return theme.chip;
         }
 
-        // 2. Palette Toggle Glyph (x: 580, y: 46)
-        if in_circle(x, y, 580, 46, 20) {
-            if let Some(c) = draw_palette_glyph(x, y, 580, 46, theme.title_ink) {
+        // 2. Palette Toggle Glyph (x: 580, on the toolbar's centre row)
+        if in_circle(x, y, 580, EDITOR_TOOL_CY, 20) {
+            if let Some(c) = draw_palette_glyph(x, y, 580, EDITOR_TOOL_CY, theme.title_ink) {
                 return c;
             }
             return theme.chip;
         }
 
-        // 3. Trash Can Glyph (x: 640, y: 46)
-        if in_circle(x, y, 640, 46, 20) {
-            if let Some(c) = draw_trash_glyph(x, y, 640, 46, THEME.error) {
+        // 3. Trash Can Glyph (x: 640, on the toolbar's centre row)
+        if in_circle(x, y, 640, EDITOR_TOOL_CY, 20) {
+            if let Some(c) = draw_trash_glyph(x, y, 640, EDITOR_TOOL_CY, THEME.error) {
                 return c;
             }
             return theme.chip;
         }
 
         // Subtle divider line
-        if y == 82 {
+        if y == EDITOR_BAR_H - 2 {
             return theme.border;
         }
 
         return theme.fill;
     }
 
-    // --- B. Note Title Area (y: 96..166) ---
+    // --- B. Note Title Area (y: EDITOR_TITLE_Y0..EDITOR_TITLE_Y1) ---
     // Clean, unruled modern typography with ample negative whitespace
-    if y >= 96 && y < 166 {
+    if y >= EDITOR_TITLE_Y0 && y < EDITOR_TITLE_Y1 {
         let title = note.title_bytes();
         // WHY the title is ellipsized to 460 px: the pin, palette and trash
         // tools start at x=520, so an unbounded title runs under them and
@@ -1413,11 +1445,11 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         let title_len = std::design::font::ellipsize(title, 2, 460, &mut title_buf);
         let title_disp = &title_buf[..title_len];
         if title.is_empty() {
-            if let Some(c) = test_text(x, y, 44, 116, 2, b"Title", theme.muted_ink, theme.fill, true) {
+            if let Some(c) = test_text(x, y, 44, EDITOR_TITLE_TEXT_Y, 2, b"Title", theme.muted_ink, theme.fill, true) {
                 return c;
             }
         } else {
-            if let Some(c) = test_text(x, y, 44, 116, 2, title_disp, theme.title_ink, theme.fill, true) {
+            if let Some(c) = test_text(x, y, 44, EDITOR_TITLE_TEXT_Y, 2, title_disp, theme.title_ink, theme.fill, true) {
                 return c;
             }
         }
@@ -1426,7 +1458,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         if state.focus == EditorFocus::Title && state.cursor_visible && state.keyboard_visible {
             let tw = outline_text::drawn_advance(title_disp, 2, None).unwrap_or_else(|| std::design::font::measure_bold(title_disp, 2));
             let cur_x = 44 + tw;
-            if x >= cur_x && x <= cur_x + 2 && y >= 114 && y <= 144 {
+            if x >= cur_x && x <= cur_x + 2 && y >= EDITOR_TITLE_TEXT_Y - 2 && y <= EDITOR_TITLE_TEXT_Y + 28 {
                 return theme.accent;
             }
         }
@@ -1622,18 +1654,18 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     }
 
     // --- E. Multiline Note Body Area (Scale 2 Body) ---
-    // Starts at y: 176 (clean 26px below title text)
+    // Starts at EDITOR_TEXT_Y0 (clean 26px below the title's text)
     let body_max_y = if state.keyboard_visible { 910 } else { 1318 };
-    if y >= 170 && y < body_max_y {
+    if y >= EDITOR_BODY_Y0 && y < body_max_y {
         // The ruled page.
         //
         // WHY the page is ruled: the design document asks for a ruled note
         // page, and an editor with no geometry under the text gives the
         // writer nothing to write on. The rule belongs to the note, so it
         // is drawn in the note's own border colour and not in the app's.
-        if y >= 176 + EDITOR_RULE_DY && x >= RULE_X0 && x < RULE_X1 {
-            let line_index = (y - 176 - EDITOR_RULE_DY) / EDITOR_LINE_STRIDE;
-            if (y - 176 - EDITOR_RULE_DY) % EDITOR_LINE_STRIDE == 0 {
+        if y >= EDITOR_TEXT_Y0 + EDITOR_RULE_DY && x >= RULE_X0 && x < RULE_X1 {
+            let line_index = (y - EDITOR_TEXT_Y0 - EDITOR_RULE_DY) / EDITOR_LINE_STRIDE;
+            if (y - EDITOR_TEXT_Y0 - EDITOR_RULE_DY) % EDITOR_LINE_STRIDE == 0 {
                 let ruled = if state.editor_buf.len == 0 {
                     line_index == 0
                 } else {
@@ -1645,14 +1677,14 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             }
         }
         if state.editor_buf.len == 0 {
-            if let Some(c) = test_text(x, y, 44, 176 + 4, 2, b"Note", theme.muted_ink, theme.fill, false) {
+            if let Some(c) = test_text(x, y, 44, EDITOR_TEXT_Y0 + 4, 2, b"Note", theme.muted_ink, theme.fill, false) {
                 return c;
             }
         } else {
             let body_bytes = state.editor_buf.as_bytes();
             for line_idx in 0..state.line_spans_count {
                 let span = state.line_spans[line_idx];
-                let line_y = 176 + line_idx * EDITOR_LINE_STRIDE;
+                let line_y = EDITOR_TEXT_Y0 + line_idx * EDITOR_LINE_STRIDE;
 
                 if y >= line_y && y < line_y + EDITOR_LINE_STRIDE {
                     let line_slice = &body_bytes[span.start..span.end];
@@ -1715,7 +1747,7 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
             let prefix_col = cur_col.saturating_sub(if is_chk { 4 } else { 0 }).min(text_slice.len());
             let cur_adv = std::design::font::measure(&text_slice[..prefix_col], 2);
             let cur_x = text_x0 + cur_adv;
-            let cur_y = 176 + cur_line * EDITOR_LINE_STRIDE + 4;
+            let cur_y = EDITOR_TEXT_Y0 + cur_line * EDITOR_LINE_STRIDE + 4;
             if x >= cur_x && x <= cur_x + 2 && y >= cur_y && y <= cur_y + 24 {
                 return theme.accent;
             }
@@ -1964,7 +1996,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
     match state.view {
         ViewMode::List => {
             // Dismiss keyboard if tapped outside keyboard when keyboard is open
-            if state.keyboard_visible && uy < KB_Y0 && uy > 78 {
+            if state.keyboard_visible && uy < KB_Y0 && uy > SEARCH_Y1 {
                 state.keyboard_visible = false;
                 state.search_active = false;
                 return TapAction::Redraw;
@@ -1980,8 +2012,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
             }
 
-            // Search Bar Tap (y: 24..78, x: 28..692)
-            if uy >= 24 && uy <= 78 && ux >= 28 && ux <= 692 {
+            // Search Bar Tap (y: SEARCH_Y0..SEARCH_Y1, x: 28..692)
+            if uy >= SEARCH_Y0 && uy <= SEARCH_Y1 && ux >= 28 && ux <= 692 {
                 // Clear field touch target: 68px wide x 54px tall >= 48px
                 if state.search_len > 0 && ux >= 618 && ux <= 686 {
                     state.search_len = 0;
@@ -1993,8 +2025,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 return TapAction::Redraw;
             }
 
-            // Category Filter Chips Tap (y: 94..142, touch target >= 48px)
-            if uy >= 94 && uy <= 142 {
+            // Category Filter Chips Tap (y: CHIP_Y0..CHIP_Y1, touch target >= 48px)
+            if uy >= CHIP_Y0 && uy <= CHIP_Y1 {
                 for i in 0..5 {
                     if ux >= CHIP_XS[i] && ux < CHIP_XS[i] + CHIP_WS[i] {
                         state.selected_category = i as u8;
@@ -2081,8 +2113,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
             }
 
-            // Card Deck Taps (y: 162..1308)
-            if uy >= 162 && uy <= 1308 {
+            // Card Deck Taps (y: LIST_TOP-2..LIST_BOTTOM)
+            if uy >= LIST_TOP - 2 && uy <= LIST_BOTTOM {
                 let mut filtered = [0usize; MAX_NOTES];
                 let visible_count = state.filtered_indices(&mut filtered);
                 let card_h = CARD_H;
@@ -2111,8 +2143,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
         }
 
         ViewMode::Editor => {
-            // Top Bar: Back Chevron at (50, 46, r=24)
-            if in_circle(ux, uy, 50, 46, 24) {
+            // Top Bar: Back Chevron on the toolbar's centre row
+            if in_circle(ux, uy, 50, EDITOR_TOOL_CY, 24) {
                 state.sync_editor_to_note();
                 state.save_to_storage();
                 state.view = ViewMode::List;
@@ -2122,22 +2154,22 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 return TapAction::Redraw;
             }
 
-            // Top Bar: Pin Toggle at (520, 46, r=22)
-            if in_circle(ux, uy, 520, 46, 22) {
+            // Top Bar: Pin Toggle on the toolbar's centre row
+            if in_circle(ux, uy, 520, EDITOR_TOOL_CY, 22) {
                 if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
                     note.toggle_pinned();
                 }
                 return TapAction::Redraw;
             }
 
-            // Top Bar: Palette Toggle at (580, 46, r=22)
-            if in_circle(ux, uy, 580, 46, 22) {
+            // Top Bar: Palette Toggle on the toolbar's centre row
+            if in_circle(ux, uy, 580, EDITOR_TOOL_CY, 22) {
                 state.swatch_picker_open = !state.swatch_picker_open;
                 return TapAction::Redraw;
             }
 
-            // Top Bar: Trash / Delete at (640, 46, r=22)
-            if in_circle(ux, uy, 640, 46, 22) {
+            // Top Bar: Trash / Delete on the toolbar's centre row
+            if in_circle(ux, uy, 640, EDITOR_TOOL_CY, 22) {
                 state.store.delete_note(state.selected_note_id);
                 state.sync_list_extent();
                 state.save_to_storage();
@@ -2147,8 +2179,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 return TapAction::Redraw;
             }
 
-            // Title Area Tap (y: 96..166)
-            if uy >= 96 && uy < 166 && ux >= 40 && ux <= 680 {
+            // Title Area Tap (y: EDITOR_TITLE_Y0..EDITOR_TITLE_Y1)
+            if uy >= EDITOR_TITLE_Y0 && uy < EDITOR_TITLE_Y1 && ux >= 40 && ux <= 680 {
                 state.focus = EditorFocus::Title;
                 state.keyboard_visible = true;
                 return TapAction::Redraw;
@@ -2273,8 +2305,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
             // Body Area Taps: Checkbox toggles and text positioning (Scale 2 Body)
             let body_max_y = if state.keyboard_visible { 910 } else { 1318 };
-            if uy >= 168 && uy <= body_max_y && ux >= 28 && ux <= 684 {
-                let line_idx = (uy.saturating_sub(172)) / EDITOR_LINE_STRIDE;
+            if uy >= EDITOR_BODY_Y0 && uy <= body_max_y && ux >= 28 && ux <= 684 {
+                let line_idx = (uy.saturating_sub(EDITOR_TEXT_Y0)) / EDITOR_LINE_STRIDE;
                 if line_idx < state.line_spans_count {
                     let span = state.line_spans[line_idx];
                     // Check if tap hit the checkbox directly at x: 28..80 (>= 48px touch target)

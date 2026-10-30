@@ -493,15 +493,23 @@ const CARD_BORDER: u32 = match CARD.border {
 const CARD_R: usize = CARD.radius;
 const INNER_W: usize = CARD_W - PAD * 2; // 624
 
-const HEAD_BOTTOM: usize = 104;
+/// WHY the row reaches 112: the band owns the first 48 rows, the back control
+/// stands 48 tall from HEADER_TOP, and the subtitle's line box has to end below
+/// that control before the header's own rule is drawn.
+const HEAD_BOTTOM: usize = 112;
 const TITLE_X: usize = 88;
 const BACK_X: usize = 24;
-const BACK_Y: usize = 24;
+const BACK_Y: usize = interos_std::design::viewport::HEADER_TOP;
 const BACK_S: usize = 48;
 
 /// Header action pill ("RE-PROBE"): 44px tall, right-aligned to the margin.
 const ACTION_H: usize = 44;
-const ACTION_Y: usize = 26;
+/// WHY two rows inside the back control's band: the pill is 44 tall beside a
+/// 48-tall control, and centring them is what keeps the row from reading crooked.
+const ACTION_Y: usize = BACK_Y + 2;
+
+const TITLE_Y0: usize = BACK_Y;
+const SUBTITLE_Y0: usize = BACK_Y + 26;
 const ACTION_X1: usize = W - MARGIN;
 const ACTION: &[u8] = b"RE-PROBE";
 
@@ -622,10 +630,10 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
@@ -725,10 +733,10 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
@@ -1215,10 +1223,10 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     }
     let (pill_x, _, _, _) = action_rect(ACTION);
     let text_max = pill_x.saturating_sub(TITLE_X + 16);
-    if let Some(c) = font::ink(x, y, TITLE_X, 18, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
-    if let Some(c) = font::ink(x, y, TITLE_X, 58, 2, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
         return c;
     }
     THEME.surface
