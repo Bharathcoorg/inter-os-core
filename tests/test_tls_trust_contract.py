@@ -543,10 +543,20 @@ def test_an_anchor_that_could_never_verify_is_refused_at_the_door():
             f"the store refuses anchors naming {identifier}, which is a key type the "
             "client's own verifier can check a signature with"
         )
-    assert "PRIME256V1_OID" in gate, (
-        "an EC anchor is accepted without its curve, so a P-384 root would be stored "
-        "and then never verify anything"
-    )
+    for curve in ("PRIME256V1_OID", "SECP384R1_OID"):
+        assert curve in gate, (
+            f"the store refuses anchors naming {curve}, which is a curve the client's "
+            "own verifier does arithmetic on, so a root there could never be installed"
+        )
+    # The door and the verifier are two lists that have to say the same thing: the
+    # store sees the bytes a person typed, the verifier sees a parsed certificate.
+    sdk = code_only(read_source("sdk/rust/interos-std/src/tls/certificate.rs"))
+    spki = sdk.split("pub fn spki_is_verifiable")[1].split("\n}")[0]
+    for curve in ("PRIME256V1_OID", "SECP384R1_OID"):
+        assert curve in spki, (
+            f"the verifier no longer does arithmetic on {curve}, so the store would be "
+            "accepting an anchor that can vouch for nothing"
+        )
     assert "header + declared != der.len()" in gate, (
         "the store accepts bytes that are not one complete DER sequence"
     )

@@ -57,9 +57,12 @@ const RSA_ENCRYPTION_OID: &[u8] =
     &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 /// `ecPublicKey` (`1.2.840.10045.2.1`), which names a curve rather than a key.
 const EC_PUBLIC_KEY_OID: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
-/// `prime256v1` (`1.2.840.10045.3.1.7`), the only curve an EC certificate can
-/// name that this client does arithmetic on.
+/// `prime256v1` (`1.2.840.10045.3.1.7`), one of the two curves an EC certificate
+/// can name that this client does arithmetic on.
 const PRIME256V1_OID: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// `secp384r1` (`1.3.132.0.34`), the curve a public chain sits on when its
+/// issuer signs with `ecdsa_secp384r1_sha384`.
+const SECP384R1_OID: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustError {
@@ -187,15 +190,22 @@ pub fn check_anchor_shape(der: &[u8]) -> Result<(), TrustError> {
 }
 
 /// Whether this certificate names a key the client can check a signature with:
-/// Ed25519, RSA, or EC on the one curve implemented. An EC identifier carries no
-/// meaning without its curve parameter, so a certificate that names `ecPublicKey`
-/// but no `prime256v1` -- a P-384 or P-521 root -- is refused here rather than
-/// installed and then silently unable to vouch for anything.
+/// Ed25519, RSA, or EC on a curve it has arithmetic for. An EC identifier carries
+/// no meaning without its curve parameter, so a certificate that names
+/// `ecPublicKey` but neither `prime256v1` nor `secp384r1` -- a P-521 root -- is
+/// refused here rather than installed and then silently unable to vouch for
+/// anything.
+///
+/// WHY the curve list lives twice: the store sees only the bytes someone typed,
+/// while the verifier sees a parsed certificate. These two still have to agree,
+/// because a door naming fewer curves than the arithmetic covers refuses an anchor
+/// the device could use.
 fn names_verifiable_key(der: &[u8]) -> bool {
     contains_subsequence(der, ED25519_ALGORITHM_OID)
         || contains_subsequence(der, RSA_ENCRYPTION_OID)
         || (contains_subsequence(der, EC_PUBLIC_KEY_OID)
-            && contains_subsequence(der, PRIME256V1_OID))
+            && (contains_subsequence(der, PRIME256V1_OID)
+                || contains_subsequence(der, SECP384R1_OID)))
 }
 
 fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
@@ -386,32 +396,38 @@ mod tests {
     fn a_key_this_client_cannot_verify_is_refused_at_the_door() {
         // Correctly framed sequences that name a key the client has no arithmetic
         // for, so the algorithm is the only thing the door can object to: Ed448,
-        // and EC on a curve other than the one implemented.
+        // and EC on a curve with no implementation behind it.
         let ed448 = anchor_bytes_naming(40, &[&[0x06, 0x03, 0x2b, 0x65, 0x71]]);
-        // `prime384v1` (1.3.132.0.4) beside `ecPublicKey`.
-        let p384 = anchor_bytes_naming(
+        // `secp521r1` (1.3.132.0.35) beside `ecPublicKey`. The neighbour code
+        // point, `secp384r1`, is a curve the client does have arithmetic for and
+        // belongs in the accepting test below.
+        let p521 = anchor_bytes_naming(
             60,
             &[
                 EC_PUBLIC_KEY_OID,
-                &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+                &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
             ],
         );
         let mut store = TlsTrustStore::new();
         assert_eq!(store.install(&ed448, "ed448 root"), Err(TrustError::NoVerifiableKey));
-        assert_eq!(store.install(&p384, "p384 root"), Err(TrustError::NoVerifiableKey));
+        assert_eq!(store.install(&p521, "p521 root"), Err(TrustError::NoVerifiableKey));
         assert!(store.is_empty(), "a refused install must not occupy a slot");
     }
 
     #[test]
     fn an_rsa_or_ec_root_is_accepted_at_the_door() {
-        // The two shapes a public HTTPS chain ends on that this client did not
-        // previously accept: an RSA root names `rsaEncryption`, and an EC root
-        // names `ecPublicKey` with its curve.
+        // The shapes a public HTTPS chain ends on: an RSA root names
+        // `rsaEncryption`, and an EC root names `ecPublicKey` with a curve the
+        // verifier has arithmetic for -- both P-256 and P-384, since the client
+        // advertises `ecdsa_secp384r1_sha384` and a root on that curve is the
+        // issuer of most of the chains a browser is asked to accept.
         let rsa = anchor_bytes_naming(1391, &[RSA_ENCRYPTION_OID]);
         let ec = anchor_bytes_naming(400, &[EC_PUBLIC_KEY_OID, PRIME256V1_OID]);
+        let ec384 = anchor_bytes_naming(474, &[EC_PUBLIC_KEY_OID, SECP384R1_OID]);
         let mut store = TlsTrustStore::new();
         assert_eq!(store.install(&rsa, "rsa root"), Ok(0));
         assert_eq!(store.install(&ec, "ec root"), Ok(1));
+        assert_eq!(store.install(&ec384, "ec p384 root"), Ok(2));
         assert_eq!(store.anchor_der(0), Some(rsa.as_slice()));
     }
 
