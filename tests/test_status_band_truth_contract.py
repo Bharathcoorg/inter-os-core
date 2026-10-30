@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APPS_DIR = ROOT / "apps"
 
 TARGET_APPS = [
+    "agent_manager",
     "calculator",
     "calendar",
     "camera",

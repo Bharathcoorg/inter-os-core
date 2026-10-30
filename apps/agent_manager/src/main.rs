@@ -33,6 +33,7 @@
 use core::panic::PanicInfo;
 
 use interos_std as std;
+use std::design::components;
 use std::design::font;
 use std::design::monochrome::{self, Icon};
 use std::design::primitives::Rect;
@@ -71,21 +72,44 @@ const GUTTER: usize = 24;
 /// The width of the content column.
 const CONTENT_W: usize = W - 2 * GUTTER;
 
+/// The height of the platform's band, taken from the platform.
+const STATUS_BAR_HEIGHT: usize = std::design::viewport::STATUS_BAR_HEIGHT;
+/// The first row this app's own chrome may paint in.
+const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;
 /// The app bar's height.
 ///
 /// WHY this band is the app's bar and not the platform's status bar: the
-/// platform's status bar belongs to the shell, and this app owns the whole
-/// frame it is given. What lives in this band is the app's own bar -- the
-/// way out, the title and the two controls the showcases put there.
-const APPBAR_H: usize = 84;
+/// platform's status bar owns the top inset and this app's bar is what lives
+/// under it -- the way out, the title and the two controls the showcases put
+/// there.
+///
+/// WHY it reaches to 112: the way out is the platform's own control, and the
+/// control is fixed at the row below the band and forty-eight tall. A bar of
+/// the height this file used to carry cut the control in half, because the
+/// segmented control beneath it answered the pixels the bar had given up.
+const APPBAR_H: usize = 112;
 /// The size of an app bar icon button.
 const ICON_BTN: usize = 44;
 /// The gap between two app bar icon buttons.
 const ICON_BTN_GAP: usize = 8;
 /// The app bar's title's left edge.
 const APPBAR_TITLE_X: usize = 88;
-/// The app bar's title's top.
-const APPBAR_TITLE_Y: usize = 24;
+/// The row the app bar's controls are centred on.
+const APPBAR_ROW: usize = HEADER_TOP + std::design::back_button::SIZE / 2;
+/// The top of an app bar icon button.
+///
+/// WHY it is not the bar's own middle: the bar now carries the band's rows as
+/// well, so a control centred on the whole bar sits above the platform's back
+/// button instead of beside it.
+const ICON_BTN_TOP: usize = APPBAR_ROW - ICON_BTN / 2;
+/// The app bar's title's line box top.
+///
+/// WHY it is solved from the baseline rather than from the box: the box is
+/// taller than the forty-eight the control stands in, so centring the box
+/// would leave the bar's row and pushing it down to clear the band drops the
+/// letters below the control. Centring the caps -- half a cap height above the
+/// row and half below -- is what lines the word up with the button next to it.
+const APPBAR_TITLE_Y: usize = APPBAR_ROW - CAP_TITLE_ASCENT + CAP_TITLE as usize / 2;
 /// The floating action button's radius.
 const FAB_R: usize = 28;
 /// The floating action button's margin from the body's edge.
@@ -106,12 +130,24 @@ const COMPOSER_FIELD_H: usize = LINE_BODY + 28;
 const COMPOSER_SEND_R: usize = 24;
 
 /// The segmented control's band.
-const TAB_Y: usize = 92;
+///
+/// WHY it follows the bar rather than sitting at a number of its own: the bar
+/// grew when it took the platform's back control, and a band pinned at the old
+/// bottom was drawn over the control it no longer clears.
+const TAB_Y: usize = 120;
 const TAB_H: usize = 44;
 const TAB_GAP: usize = 5;
 
 /// The scrollable body's band.
-const BODY_TOP: usize = 152;
+const BODY_TOP: usize = 180;
+/// WHY at compile time: the three bands above are written as numbers so the
+/// platform's layout contract can read them, and a number is only honest while
+/// it still matches the geometry the controls are actually placed from.
+const _: () = assert!(
+    APPBAR_H == HEADER_TOP + std::design::back_button::SIZE + 8
+        && TAB_Y == APPBAR_H + 8
+        && BODY_TOP == TAB_Y + TAB_H + 16
+);
 const BODY_BOTTOM: usize = 1284;
 const BODY_H: usize = BODY_BOTTOM - BODY_TOP;
 /// The bottom action bar's band.
@@ -210,6 +246,15 @@ const CAP_TITLE: u32 = std::design::typography::TITLE_CAP_PX;
 /// The line heights that go with the cap heights.
 const LINE_CAPTION: usize = std::design::typography::CAPTION_LINE_PX;
 const LINE_BODY: usize = std::design::typography::BODY_LINE_PX;
+/// The row the title rung's baseline sits on, below its line box's top.
+///
+/// WHY it comes from the ladder: the app's own `text` puts the baseline at
+/// `y0 + ascent` with these exact face metrics, so a line placed from this
+/// number has its ink where the place was, and not a few rows away.
+const CAP_TITLE_ASCENT: usize = font::ascent_for_scale(std::design::typography::TITLE_SCALE);
+
+/// The length of the band's clock lane, as the RTC formats it.
+const CLOCK_LEN: usize = 5;
 
 /// How many cards the body can hold.
 ///
@@ -562,6 +607,15 @@ pub struct AgentManagerApp {
     pub diagnostics: RuntimeDiagnostics,
     /// Measured IPC latency in ticks.
     pub ipc_latency_ticks: u64,
+    /// The platform band's clock lane, as the RTC answered it.
+    ///
+    /// WHY it is cached on the app: the read is a syscall and the band is
+    /// rasterised per pixel, so a band that asked per pixel would ask
+    /// thousands of times a frame. The loop reads it once per tick and hands
+    /// the bytes down.
+    pub clock: [u8; CLOCK_LEN],
+    /// Whether the RTC answered at all. When it did not, the lane stays blank.
+    pub clock_ok: bool,
 }
 
 impl AgentManagerApp {
@@ -599,6 +653,8 @@ impl AgentManagerApp {
             ],
             diagnostics: RuntimeDiagnostics::measure(),
             ipc_latency_ticks: 0,
+            clock: [b' '; CLOCK_LEN],
+            clock_ok: false,
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -2282,8 +2338,47 @@ fn fit_marked(body: &[u8], max_px: usize, cap_px: u32, out: &mut [u8]) -> usize 
 // Painting
 // -----------------------------------------------------------------------------
 
+/// The rows the platform's band owns on this screen.
+pub fn status_band() -> (usize, usize) {
+    (0, STATUS_BAR_HEIGHT)
+}
+
+/// Reads the wall clock once and says whether the band's lane changed.
+///
+/// WHY it returns the change rather than redrawing: the loop repaints only what
+/// actually moved, and a clock that answers the same minute costs no frame.
+/// WHY an unanswered RTC leaves the lane blank: the read needs the
+/// `RealtimeClockRead` capability, and a placeholder time is a measurement the
+/// device never took.
+fn refresh_clock(app: &mut AgentManagerApp) -> bool {
+    let mut clock = [b' '; CLOCK_LEN];
+    let mut clock_ok = false;
+    if let Some(now) = std::rtc::Reading::now() {
+        clock = now.clock_text();
+        clock_ok = true;
+    }
+    let changed = clock_ok != app.clock_ok || (clock_ok && clock != app.clock);
+    app.clock = clock;
+    app.clock_ok = clock_ok;
+    changed
+}
+
 /// The colour of one pixel.
 fn get_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
+    // The platform's band, above the app's own bar.
+    //
+    // WHY the instruments are unmeasured: this app holds no radio, no fuel
+    // gauge and no Wi-Fi association -- what it measures is the model
+    // directory and the service registry, and those readings are in its cards,
+    // not in the band. A filled bar here would be a level no instrument of this
+    // app took.
+    if y < STATUS_BAR_HEIGHT {
+        let band = components::StatusBand::new(W);
+        let clock = if app.clock_ok { Some(&app.clock[..]) } else { None };
+        return band
+            .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
+            .unwrap_or(THEME.surface);
+    }
     let base = if y < APPBAR_H {
         appbar_pixel(x, y, app)
     } else if y < BODY_TOP {
@@ -2388,22 +2483,12 @@ fn icon_button_px(x: usize, y: usize, rect: Rect, icon: Icon) -> Option<u32> {
 
 /// The app bar's search control.
 fn appbar_search_rect() -> Rect {
-    Rect::new(
-        W - GUTTER - ICON_BTN * 2 - ICON_BTN_GAP,
-        (APPBAR_H - ICON_BTN) / 2,
-        ICON_BTN,
-        ICON_BTN,
-    )
+    Rect::new(W - GUTTER - ICON_BTN * 2 - ICON_BTN_GAP, ICON_BTN_TOP, ICON_BTN, ICON_BTN)
 }
 
 /// The app bar's overflow control.
 fn appbar_more_rect() -> Rect {
-    Rect::new(
-        W - GUTTER - ICON_BTN,
-        (APPBAR_H - ICON_BTN) / 2,
-        ICON_BTN,
-        ICON_BTN,
-    )
+    Rect::new(W - GUTTER - ICON_BTN, ICON_BTN_TOP, ICON_BTN, ICON_BTN)
 }
 
 // ---------------------------------------------------------------------------
@@ -3084,7 +3169,14 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     let uy = y as usize;
 
     // The back control in the app bar.
-    if std::design::back_button::contains(ux, uy) || (ux >= 24 && ux < 88 && uy >= 20 && uy < 76) {
+    //
+    // WHY the rows are the control's own: the region used to reach up into the
+    // band and stop short of the control's bottom, so a tap on the lower half
+    // of the button the reader was looking at did nothing and a tap on the band
+    // did.
+    if std::design::back_button::contains(ux, uy)
+        || (ux >= 24 && ux < 88 && uy >= HEADER_TOP && uy < HEADER_TOP + std::design::back_button::SIZE)
+    {
         return Tap::Leave("[AGENT_MGR] Back button tapped. Returning to the launcher.");
     }
 
@@ -3270,6 +3362,21 @@ fn repaint(surface: u32, app: &AgentManagerApp) {
     }
 }
 
+/// Paints the platform band's rows and nothing else.
+///
+/// WHY a lane of its own: the clock moves while nobody is touching the screen,
+/// and answering a minute with a whole-screen repaint costs the reader a frame
+/// for five glyphs' worth of change.
+fn repaint_band(surface: u32, app: &AgentManagerApp) {
+    let mut row = [0u32; W];
+    for y in 0..STATUS_BAR_HEIGHT {
+        for (x, slot) in row.iter_mut().enumerate() {
+            *slot = get_pixel(x, y, app);
+        }
+        let _ = std::surface_write(surface, y * W, &row);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[AGENT_MGR (Ring 3)] Agent Manager online.").ok();
@@ -3287,6 +3394,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    refresh_clock(&mut app);
     repaint(surface, &app);
     let _ = std::surface_flip();
 
@@ -3364,8 +3472,14 @@ pub extern "C" fn _start() -> ! {
             // Nothing was waiting: sleep until something arrives.
             let _ = std::event_poll(std::EVENT_TOUCH_INPUT, 100);
         }
+        // WHY the clock is read here and not in the rasteriser: the band is a
+        // few glyphs, the read is a syscall, and the screen is 720x1440 pixels.
+        let clock_moved = refresh_clock(&mut app);
         if dirty == Dirty::All {
             repaint(surface, &app);
+            let _ = std::surface_flip();
+        } else if clock_moved {
+            repaint_band(surface, &app);
             let _ = std::surface_flip();
         }
         std::yield_now();

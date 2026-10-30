@@ -2134,6 +2134,16 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
         rights: Rights::READ.union(Rights::INVOKE),
         object_id: 0,
     }).ok();
+    // WHY the clock: the app draws the platform's status band, and the band's
+    // clock lane is the device's wall clock or nothing. Without this grant the
+    // syscall refuses the read and the lane stays blank on a device whose RTC
+    // is answering for every other app on the screen.
+    caps.insert(Capability {
+        id: CapabilityId(2939),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_agent_manager",
