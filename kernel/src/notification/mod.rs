@@ -64,7 +64,6 @@ pub struct NotificationRecord {
     pub visibility: LockscreenVisibility,
     pub badge_count: u32,
     pub timestamp_ticks: u64,
-    pub is_cancelled: bool,
 }
 
 /// Errors returned by the notification subsystem.
@@ -194,8 +193,7 @@ impl NotificationManager {
         }
 
         // 5. Check active capacity limit
-        let active_count = self.records.iter().filter(|r| !r.is_cancelled).count();
-        if active_count >= self.max_active {
+        if self.records.len() >= self.max_active {
             return Err(NotificationError::MaxNotificationsExceeded);
         }
 
@@ -213,7 +211,6 @@ impl NotificationManager {
             visibility,
             badge_count,
             timestamp_ticks: current_tick,
-            is_cancelled: false,
         };
 
         self.records.push(record);
@@ -234,44 +231,41 @@ impl NotificationManager {
     }
 
     /// Cancels an active notification.
+    ///
+    /// WHY the record is dropped rather than marked: marking was the only way to
+    /// cancel, and nothing ever read a marked record back -- every query already
+    /// filtered them out -- so a device that posted and cleared notifications for a
+    /// week kept every one it had ever posted, four heap strings each, in a Vec the
+    /// shade had stopped showing. max_active bounded what the person could see, never
+    /// what the kernel held, and each remaining reader paid for the whole trail on
+    /// every call.
     pub fn cancel(&mut self, package_id: &str, id: u64) -> Result<(), NotificationError> {
-        let record = self
-            .records
-            .iter_mut()
-            .find(|r| r.id == id && (package_id.is_empty() || r.package_id == package_id) && !r.is_cancelled)
-            .ok_or(NotificationError::NotificationNotFound)?;
-
-        record.is_cancelled = true;
+        let before = self.records.len();
+        self.records.retain(|r| {
+            !(r.id == id && (package_id.is_empty() || r.package_id == package_id))
+        });
+        if self.records.len() == before {
+            return Err(NotificationError::NotificationNotFound);
+        }
         crate::serial_println!("[NOTIFICATION] Cancelled #{} for '{}'", id, package_id);
         Ok(())
     }
 
-    /// Cancels all active notifications for a package.
+    /// Cancels all notifications for a package.
     pub fn cancel_all_for_package(&mut self, package_id: &str, user_id: u32) {
-        for record in self.records.iter_mut() {
-            if record.package_id == package_id && record.user_id == user_id && !record.is_cancelled {
-                record.is_cancelled = true;
-            }
-        }
+        self.records
+            .retain(|r| !(r.package_id == package_id && r.user_id == user_id));
     }
 
     /// Removes every notification owned by a package across all users. Package
     /// removal must not leave stale badges or lock-screen entries behind.
     pub fn cancel_all_for_package_all_users(&mut self, package_id: &str) {
-        for record in self.records.iter_mut() {
-            if record.package_id == package_id && !record.is_cancelled {
-                record.is_cancelled = true;
-            }
-        }
+        self.records.retain(|r| r.package_id != package_id);
     }
 
-    /// Cancels all active notifications for a user.
+    /// Cancels all notifications for a user.
     pub fn cancel_all_for_user(&mut self, user_id: u32) {
-        for record in self.records.iter_mut() {
-            if record.user_id == user_id && !record.is_cancelled {
-                record.is_cancelled = true;
-            }
-        }
+        self.records.retain(|r| r.user_id != user_id);
         crate::serial_println!("[NOTIFICATION] Cancelled all notifications for user {}", user_id);
     }
 
@@ -279,7 +273,7 @@ impl NotificationManager {
     pub fn query_active(&self, user_id: u32, is_locked: bool) -> Vec<NotificationRecord> {
         self.records
             .iter()
-            .filter(|r| !r.is_cancelled && r.user_id == user_id)
+            .filter(|r| r.user_id == user_id)
             .filter_map(|r| {
                 if is_locked {
                     match r.visibility {
@@ -319,7 +313,7 @@ impl NotificationManager {
     pub fn get_badge_count(&self, package_id: &str, user_id: u32) -> u32 {
         self.records
             .iter()
-            .filter(|r| !r.is_cancelled && r.package_id == package_id && r.user_id == user_id)
+            .filter(|r| r.package_id == package_id && r.user_id == user_id)
             .map(|r| r.badge_count)
             .max()
             .unwrap_or(0)
@@ -356,4 +350,115 @@ pub fn init() {
         current_ticks,
     );
     crate::serial_println!("[OK] Sovereign Notification Subsystem initialized.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Posts inside one rate window: a package may post 20 notifications per 1000
+    /// ticks, so `window` is what keeps a loop of posts from being refused for a
+    /// reason the test is not about.
+    fn post(nm: &mut NotificationManager, package: &str, window: u64, _seq: u64) -> u64 {
+        nm.post(
+            package,
+            1000,
+            "system",
+            "a title",
+            "a body",
+            NotificationPriority::Default,
+            LockscreenVisibility::Public,
+            1,
+            window * 1000 + 1,
+        )
+        .expect("post accepted")
+    }
+
+    #[test]
+    fn a_cancelled_notification_leaves_nothing_behind() {
+        // WHY this test exists: cancellation used to mark the record and keep it, so
+        // the shade stopped showing it while the kernel went on holding its four
+        // heap strings forever. The store now has to be empty, not merely quiet.
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        let id = post(&mut nm, "interos.calendar", 0, 1);
+        assert_eq!(nm.records.len(), 1);
+        assert!(nm.cancel("interos.calendar", id).is_ok());
+        assert_eq!(nm.records.len(), 0, "a cancelled record is still in the store");
+        assert!(nm.query_active(1000, false).is_empty());
+        assert_eq!(
+            nm.get_badge_count("interos.calendar", 1000),
+            0,
+            "the badge survived a notification the person dismissed"
+        );
+        // Cancelling it a second time is not a success, and not a panic either.
+        assert_eq!(nm.cancel("interos.calendar", id), Err(NotificationError::NotificationNotFound));
+    }
+
+    #[test]
+    fn a_week_of_posts_and_clears_does_not_grow_the_store() {
+        // WHY this test exists: a notification centre is opened, read and cleared
+        // many times a session, and each cycle used to add a record that nothing
+        // could ever remove. The bound has to be the memory, not the screen.
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        for cycle in 0..200u64 {
+            let id = post(&mut nm, "interos.messages", cycle / 20, cycle);
+            assert!(nm.cancel("interos.messages", id).is_ok());
+        }
+        assert_eq!(
+            nm.records.len(),
+            0,
+            "{} record(s) survived 200 post-and-clear cycles",
+            nm.records.len()
+        );
+    }
+
+    #[test]
+    fn the_active_limit_bounds_the_memory_as_well_as_the_screen() {
+        // WHY this test exists: max_active was checked against the count of
+        // uncancelled records while cancelled ones were retained, so the number
+        // bounded what the person could see and not what the kernel held. With the
+        // trail gone the same limit is both, which is what a phone-sized heap needs.
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        for seq in 0..64u64 {
+            post(&mut nm, "interos.notes", seq / 20, seq);
+        }
+        assert_eq!(nm.records.len(), 64);
+        assert_eq!(
+            nm.post(
+                "interos.notes",
+                1000,
+                "system",
+                "one too many",
+                "this one is refused",
+                NotificationPriority::Default,
+                LockscreenVisibility::Public,
+                1,
+                10_001,
+            ),
+            Err(NotificationError::MaxNotificationsExceeded)
+        );
+        assert_eq!(nm.records.len(), 64, "a refused post still entered the store");
+        nm.cancel_all_for_user(1000);
+        assert!(nm.records.is_empty(), "clearing a user's shade left their records held");
+    }
+
+    #[test]
+    fn removing_a_package_removes_its_records_not_just_its_badge() {
+        // WHY this test exists: package removal already promised to leave no stale
+        // badges or lock-screen entries behind, but it only marked the records, so an
+        // uninstalled app's history stayed resident for the rest of the session.
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        for seq in 0..3u64 {
+            post(&mut nm, "interos.vault", 0, seq);
+        }
+        post(&mut nm, "interos.notes", 0, 9);
+        assert_eq!(nm.records.len(), 4);
+        nm.cancel_all_for_package_all_users("interos.vault");
+        assert_eq!(nm.records.len(), 1, "an uninstalled package still holds records");
+        assert_eq!(nm.records[0].package_id, "interos.notes");
+    }
 }

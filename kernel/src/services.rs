@@ -157,6 +157,19 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_POWER_CONTROL_OBJECT });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT });
+            // WHY the shell owns the notification control object: the shade's
+            // "Clear all" and per-card "Dismiss" post an empty package id, which is
+            // a claim over every package's records and so is gated on this object.
+            // Nothing was ever granted it, so both controls were refused, the
+            // person tapped Clear and the notifications came back the next time the
+            // shade was pulled -- and because dismissal never reached the kernel, the
+            // record store could only ever grow. Scoped to the notification object,
+            // so it confers no power, audio or device-wide administration.
+            policy.push(ServiceCapabilitySpec {
+                cap_type: CapabilityType::SystemControl,
+                rights: Rights::INVOKE,
+                object_id: crate::syscall::NOTIFICATION_CONTROL_OBJECT,
+            });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SearchService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
         }
@@ -818,6 +831,60 @@ mod tests {
                 .any(|c| c.cap_type == CapabilityType::RealtimeClockRead && c.rights.contains(Rights::WRITE)),
             "the clock capability must be read-only"
         );
+    }
+
+    /// The shell must be able to clear the shade it draws.
+    ///
+    /// WHY this is its own test: the shade's Clear all and per-card Dismiss post an
+    /// empty package id, which is a claim over every package's records, so the
+    /// syscall gates it on the notification control object. Nothing held that object,
+    /// so both controls were refused and a person could not dismiss a notification at
+    /// all -- which is also how the record store became append-only in practice. The
+    /// grant is to that one object, and the second assertion is what keeps it that way.
+    #[test]
+    fn launcher_holds_the_notification_control_object_and_nothing_else_does() {
+        let launcher = capability_policy(ServiceId::Launcher, TaskId(1)).expect("launcher policy");
+        assert!(
+            launcher
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::SystemControl
+                    && c.object_id == crate::syscall::NOTIFICATION_CONTROL_OBJECT
+                    && c.rights.contains(Rights::INVOKE)),
+            "the shell cannot clear the notification shade without the notification control object"
+        );
+        assert!(
+            !launcher
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::SystemControl
+                    && c.object_id == crate::syscall::GLOBAL_SYSTEM_CONTROL_OBJECT),
+            "the notification grant must not arrive with device-wide system control attached"
+        );
+
+        for id in [
+            ServiceId::Display,
+            ServiceId::Input,
+            ServiceId::Storage,
+            ServiceId::Network,
+            ServiceId::Power,
+            ServiceId::Modem,
+            ServiceId::Audio,
+            ServiceId::Camera,
+            ServiceId::Compositor,
+            ServiceId::Sensor,
+            ServiceId::Inference,
+            ServiceId::Search,
+            ServiceId::Agent,
+            ServiceId::Voice,
+        ] {
+            let Ok(policy) = capability_policy(id, TaskId(1)) else {
+                continue;
+            };
+            assert!(
+                !policy.iter().any(|c| c.object_id == crate::syscall::NOTIFICATION_CONTROL_OBJECT),
+                "{:?} must not hold the notification control object",
+                id
+            );
+        }
     }
 
     /// No other service may acquire clock authority by accident.

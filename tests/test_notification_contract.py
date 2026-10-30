@@ -58,8 +58,7 @@ class NotificationSimulator:
         if self.dnd_enabled and not channel["dnd_bypass"] and priority < NotificationPriority.URGENT:
             raise PermissionError("DndSuppressed")
 
-        active_count = sum(1 for r in self.records if not r["is_cancelled"])
-        if active_count >= self.max_active:
+        if len(self.records) >= self.max_active:
             raise OverflowError("MaxNotificationsExceeded")
 
         nid = self.next_id
@@ -74,22 +73,26 @@ class NotificationSimulator:
             "priority": priority,
             "visibility": visibility,
             "badge_count": badge_count,
-            "is_cancelled": False,
         }
         self.records.append(rec)
         return nid
 
     def cancel(self, package_id: str, notif_id: int):
-        for r in self.records:
-            if r["id"] == notif_id and r["package_id"] == package_id and not r["is_cancelled"]:
-                r["is_cancelled"] = True
-                return True
-        raise KeyError("NotificationNotFound")
+        # WHY the record is dropped rather than marked: the kernel manager keeps no
+        # cancelled records, because every reader already filtered them out and the
+        # trail only cost heap. The simulator has to bound the same way or it would
+        # pin a behaviour the platform no longer has.
+        kept = [r for r in self.records
+                if not (r["id"] == notif_id and r["package_id"] == package_id)]
+        if len(kept) == len(self.records):
+            raise KeyError("NotificationNotFound")
+        self.records = kept
+        return True
 
     def query_active(self, user_id: int, is_locked: bool):
         result = []
         for r in self.records:
-            if r["is_cancelled"] or r["user_id"] != user_id:
+            if r["user_id"] != user_id:
                 continue
             if is_locked:
                 if r["visibility"] == LockscreenVisibility.PUBLIC:
@@ -175,6 +178,25 @@ class NotificationContractTests(unittest.TestCase):
         # Cancelling non-existent ID fails
         with self.assertRaises(KeyError):
             self.nm.cancel("interos.calendar", 9999)
+
+    def test_06_cancelled_notifications_do_not_accumulate(self):
+        """A post-and-clear cycle must free the record, not hide it."""
+        for _ in range(50):
+            nid = self.nm.post("interos.messages", 1000, "general", "New message", "Body")
+            self.nm.cancel("interos.messages", nid)
+        self.assertEqual(
+            self.nm.records, [],
+            "50 posted-and-dismissed notifications left %d record(s) held" % len(self.nm.records),
+        )
+
+        # The same limit that bounds the shade now bounds what is held: filling it to
+        # the cap and clearing it has to return the store to empty, not to 64 rows
+        # behind 64 invisible ones.
+        for _ in range(self.nm.max_active):
+            self.nm.post("interos.notes", 1000, "general", "Note", "Saved")
+        with self.assertRaises(OverflowError):
+            self.nm.post("interos.notes", 1000, "general", "Note", "One too many")
+        self.assertEqual(len(self.nm.records), self.nm.max_active)
 
 
 if __name__ == "__main__":
