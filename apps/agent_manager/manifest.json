@@ -12,7 +12,8 @@
     "CAP_FRAMEBUFFER",
     "CAP_EVENT_POLL",
     "CAP_FILESYSTEM_READ",
-    "CAP_CONTENT_INDEX"
+    "CAP_CONTENT_INDEX",
+    "CAP_SHM_CONSUMER"
   ],
   "min_sdk_version": "0.1.0"
 }

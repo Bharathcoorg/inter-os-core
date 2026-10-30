@@ -335,6 +335,78 @@ pub struct AiInferenceResponse {
     pub output_offset: u64,
 }
 
+/// The first shared-memory channel id a service may claim for its own answers.
+///
+/// WHY the number is published: the platform compiles the channels below this one
+/// in at boot, so a service that picks an id by guesswork can only guess wrong,
+/// and a wrong guess is a refused transfer it cannot tell the person about.
+pub const ANSWER_PIPE_FIRST: u32 = 5;
+
+/// How many answer channels exist at once, which is how many apps the device can
+/// be carrying an answer for at the same moment.
+pub const ANSWER_PIPE_COUNT: u32 = 3;
+
+/// The most one ring slot of an answer channel carries.
+pub const ANSWER_SLOT_BYTES: usize = 1024;
+
+/// No channel: the answer could not be streamed at all.
+pub const NO_ANSWER_PIPE: u32 = u32::MAX;
+
+/// The notice that says an answer is waiting on a shared-memory channel.
+///
+/// WHY the answer does not travel by IPC: a mailbox message carries 64 bytes, and
+/// a model's answer is not 64 bytes. Sent through the mailbox alone, everything
+/// past the 64th byte is dropped by the kernel while the response header goes on
+/// reporting the full length. The bytes therefore go over the channel the platform
+/// already provides, and this short pointer is what travels by IPC: which channel,
+/// how many bytes, and whether the answer succeeded at all.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiStreamNotice {
+    /// Execution status, using the same codes as [`AiInferenceResponse`].
+    pub status: u32,
+    /// The channel the answer was streamed onto, or [`NO_ANSWER_PIPE`].
+    pub pipe_id: u32,
+    /// Bytes the service actually handed to the channel.
+    pub streamed_len: u32,
+    /// The answer's full length, which can exceed what the channel could carry.
+    pub total_len: u32,
+}
+
+impl AiStreamNotice {
+    /// The notice's length on the wire.
+    pub const WIRE_LEN: usize = 16;
+
+    /// Writes the notice into `out` and reports how many bytes it took.
+    ///
+    /// Returns zero when the buffer cannot hold a notice, because a half-written
+    /// pointer is worse than none: the reader would act on a channel id it invented.
+    pub fn to_bytes(&self, out: &mut [u8]) -> usize {
+        if out.len() < Self::WIRE_LEN {
+            return 0;
+        }
+        out[0..4].copy_from_slice(&self.status.to_le_bytes());
+        out[4..8].copy_from_slice(&self.pipe_id.to_le_bytes());
+        out[8..12].copy_from_slice(&self.streamed_len.to_le_bytes());
+        out[12..16].copy_from_slice(&self.total_len.to_le_bytes());
+        Self::WIRE_LEN
+    }
+
+    /// Reads a notice, or reports that the bytes are not one.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::WIRE_LEN {
+            return None;
+        }
+        let read = |offset: usize| u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+        Some(Self {
+            status: read(0),
+            pipe_id: read(4),
+            streamed_len: read(8),
+            total_len: read(12),
+        })
+    }
+}
+
 /// Zero-copy wire descriptor for sending semantic search & RAG queries to Ring-3 `aid`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

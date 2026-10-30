@@ -750,6 +750,12 @@ pub mod log {
 
 /// Ergonomic IPC helper module matching application templates.
 pub mod ipc {
+    /// A copy of a dispatched input event the kernel also posts to the focused task.
+    pub const MSG_INPUT_EVENT: u32 = 0x494E_5054;
+
+    /// The notification that a window took focus, likewise posted into that task's mailbox.
+    pub const MSG_WINDOW_FOCUSED: u32 = 0x7001;
+
     pub fn send(target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
         crate::ipc_send(target_task_id, msg_type, payload)
     }

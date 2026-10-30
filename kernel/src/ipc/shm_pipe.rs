@@ -196,6 +196,20 @@ impl ShmRingBuffer {
         }
     }
 
+    /// Empties the ring without changing its endpoints.
+    ///
+    /// The channel's byte and packet counters are deliberately left alone: they
+    /// describe what the pipe has carried over its life, and a diagnostic that
+    /// reads them after a reconfigure would otherwise be told the channel is
+    /// brand new when it is not.
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        for slot in self.slots.iter_mut() {
+            *slot = ShmSlot::empty();
+        }
+    }
+
     /// Writes data directly into the next available ring buffer slot.
     pub fn write(
         &mut self,
@@ -275,6 +289,23 @@ pub const PIPE_VAULT_BULK: u32 = 2;
 pub const PIPE_MESH_DMA: u32 = 3;
 pub const PIPE_COMPOSITOR_DISPLAY_LIST: u32 = 4;
 
+/// The first pipe id a task may claim for itself.
+///
+/// WHY the fixed channels are excluded: their endpoints are compiled in, so a
+/// request naming one of them is an attempt to re-point a channel the platform
+/// set up at boot, not a request for a new channel.
+pub const PIPE_DYNAMIC_FIRST: u32 = 5;
+
+/// How many pipes tasks may claim, which is how many bulk transfers the device
+/// can carry at once. A claim is held by the pair it was made for and is freed
+/// when either endpoint exits.
+pub const PIPE_DYNAMIC_COUNT: u32 = 3;
+
+/// Whether an id is one a task is allowed to claim for itself.
+pub fn is_dynamic_pipe_id(pipe_id: u32) -> bool {
+    pipe_id >= PIPE_DYNAMIC_FIRST && pipe_id < PIPE_DYNAMIC_FIRST + PIPE_DYNAMIC_COUNT
+}
+
 impl ShmPipeManager {
     pub const fn new() -> Self {
         Self {
@@ -301,7 +332,21 @@ impl ShmPipeManager {
     ) -> Result<(), ShmError> {
         let idx = pipe_id as usize;
         if idx >= self.pipes.len() || producer == consumer { return Err(ShmError::InvalidArguments); }
-        if self.pipes[idx].is_some() { return Err(ShmError::PermissionDenied); }
+        // WHY an identical pair is allowed to re-ask: a producer that answers one
+        // query per request needs the same channel again on the next request, and
+        // the endpoints that were authorised last time are the endpoints being
+        // named now, so nothing new is being granted. The ring is emptied first
+        // because the bytes left in it belong to the turn that has already ended,
+        // and a channel that carried two answers would hand the consumer the older
+        // answer first. Any other pair is still refused, which is what stops one
+        // task pointing another task's channel at itself.
+        if let Some(pipe) = self.pipes[idx].as_mut() {
+            if pipe.producer == producer && pipe.consumer == consumer {
+                pipe.reset();
+                return Ok(());
+            }
+            return Err(ShmError::PermissionDenied);
+        }
         self.pipes[idx] = Some(ShmRingBuffer::new(pipe_id, producer, consumer, name));
         Ok(())
     }
@@ -485,6 +530,66 @@ mod tests {
             let expected = !ref_crc;
             assert_eq!(sliced, expected, "CRC mismatch at length {}", len);
         }
+    }
+
+    #[test]
+    fn a_pair_can_reclaim_its_channel_and_starts_from_empty() {
+        let mut mgr = ShmPipeManager::new();
+        let service = TaskId(12);
+        let app = TaskId(30);
+        mgr.create_pipe(PIPE_DYNAMIC_FIRST, service, app, "user.dma_pipe")
+            .expect("a free dynamic id is claimable");
+
+        // One answer carried, and the consumer never drained the last byte.
+        mgr.transfer(PIPE_DYNAMIC_FIRST, service, b"the first answer", 0, 10)
+            .expect("stream to the claimed pipe");
+
+        // The same pair asks again for its next turn.
+        assert_eq!(
+            mgr.create_pipe(PIPE_DYNAMIC_FIRST, service, app, "user.dma_pipe"),
+            Ok(()),
+            "re-asking for the channel this pair already holds grants nothing new"
+        );
+
+        // WHY this is the assertion that matters: without the reset the consumer
+        // would read the previous turn's bytes first and never learn they were
+        // stale.
+        let mut rx = [0u8; 64];
+        assert_eq!(
+            mgr.receive(PIPE_DYNAMIC_FIRST, app, &mut rx),
+            Err(ShmError::RingEmpty),
+            "a reclaimed channel must not carry over the bytes of the turn that ended"
+        );
+
+        // A different pair may not take the slot over.
+        assert_eq!(
+            mgr.create_pipe(PIPE_DYNAMIC_FIRST, service, TaskId(31), "user.dma_pipe"),
+            Err(ShmError::PermissionDenied),
+            "another consumer must not be able to point this channel at itself"
+        );
+    }
+
+    #[test]
+    fn the_compiled_in_channels_are_not_claimable() {
+        // WHY the range is asserted here: the fixed channels' endpoints are set at
+        // boot, and a userspace request naming one is an attempt to re-point a
+        // channel the platform owns.
+        assert!(!is_dynamic_pipe_id(PIPE_COMPOSITOR_DISPLAY_LIST));
+        assert!(is_dynamic_pipe_id(PIPE_DYNAMIC_FIRST));
+        assert!(!is_dynamic_pipe_id(PIPE_DYNAMIC_FIRST + PIPE_DYNAMIC_COUNT));
+        assert_eq!(PIPE_DYNAMIC_FIRST + PIPE_DYNAMIC_COUNT, 8);
+    }
+
+    #[test]
+    fn a_claimed_channel_is_freed_when_either_endpoint_exits() {
+        let mut mgr = ShmPipeManager::new();
+        let service = TaskId(12);
+        let app = TaskId(30);
+        mgr.create_pipe(PIPE_DYNAMIC_FIRST + 1, service, app, "user.dma_pipe")
+            .expect("claim");
+        assert_eq!(mgr.cleanup_task(app), 1, "the consumer exiting frees the slot");
+        mgr.create_pipe(PIPE_DYNAMIC_FIRST + 1, service, TaskId(31), "user.dma_pipe")
+            .expect("a freed slot is claimable by the next pair");
     }
 
     #[test]

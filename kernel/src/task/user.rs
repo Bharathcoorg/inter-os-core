@@ -2144,6 +2144,18 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    // WHY the app may consume a shared-memory pipe: the app is the only surface
+    // that shows a model's answer, and an answer is longer than the 64 bytes an
+    // IPC mailbox message carries. The service streams the bytes here and the app
+    // reads them; the notice that says so is the only part that travels by IPC.
+    // Consumer only, so the app can read the answer addressed to it and cannot
+    // put bytes onto anyone's channel.
+    caps.insert(Capability {
+        id: CapabilityId(2940),
+        cap_type: CapabilityType::ShmConsumer,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_agent_manager",

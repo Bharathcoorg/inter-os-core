@@ -6100,6 +6100,15 @@ pub fn sys_shm_pipe_create(
     }
     drop(sched);
 
+    // WHY the range is checked before the manager is asked: ids below the dynamic
+    // range name channels whose endpoints the platform compiled in at boot, so a
+    // request for one is not a request for a new channel and must be refused as
+    // the invalid argument it is rather than answered with the manager's own
+    // "that slot is taken".
+    if !crate::ipc::shm_pipe::is_dynamic_pipe_id(pipe_id) {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
     crate::ipc::shm_pipe::SHM_PIPE_MANAGER
         .lock()
         .create_pipe(pipe_id, current_id, peer_task, "user.dma_pipe")

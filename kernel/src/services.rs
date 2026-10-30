@@ -202,6 +202,15 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::MemoryHeap, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+            // WHY the inference service may claim a bulk channel: a model answer is
+            // not 64 bytes, and 64 bytes is everything an IPC mailbox message
+            // carries, so an answer sent by IPC alone arrives cut off and the
+            // person reads half a sentence. The service streams the bytes over the
+            // shared-memory pipe the platform already provides and posts one short
+            // notice naming the channel and its length. Producer only: reading a
+            // pipe is the separate consumer capability, which this service does not
+            // hold, so it cannot take back what it handed out.
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ShmProducer, rights: Rights::WRITE, object_id: 0 });
         }
         ServiceId::Search => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
@@ -882,6 +891,59 @@ mod tests {
             assert!(
                 !policy.iter().any(|c| c.object_id == crate::syscall::NOTIFICATION_CONTROL_OBJECT),
                 "{:?} must not hold the notification control object",
+                id
+            );
+        }
+    }
+
+    /// The inference service must be able to hand a whole answer to the app that
+    /// asked for it.
+    ///
+    /// WHY this is its own test: the grant exists only because the mailbox is small.
+    /// Without producer authority the service can still answer, but everything past
+    /// the first 64 bytes of the reply is dropped by the kernel while the response
+    /// header goes on reporting the full length -- which is a device that tells the
+    /// app it sent an answer it did not send. The second assertion keeps the grant to
+    /// one service, because a channel another service could claim is a channel whose
+    /// bytes could be pointed at the wrong task.
+    #[test]
+    fn the_inference_service_can_stream_a_whole_answer() {
+        let inference = capability_policy(ServiceId::Inference, TaskId(1)).expect("inference policy");
+        assert!(
+            inference
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::ShmProducer && c.rights.contains(Rights::WRITE)),
+            "the inference service cannot deliver an answer longer than a mailbox message"
+        );
+        assert!(
+            !inference
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::ShmConsumer),
+            "answering a query does not need the authority to consume a pipe"
+        );
+
+        for id in [
+            ServiceId::Display,
+            ServiceId::Input,
+            ServiceId::Storage,
+            ServiceId::Network,
+            ServiceId::Power,
+            ServiceId::Modem,
+            ServiceId::Audio,
+            ServiceId::Camera,
+            ServiceId::Compositor,
+            ServiceId::Launcher,
+            ServiceId::Sensor,
+            ServiceId::Search,
+            ServiceId::Agent,
+            ServiceId::Voice,
+        ] {
+            let Ok(policy) = capability_policy(id, TaskId(1)) else {
+                continue;
+            };
+            assert!(
+                !policy.iter().any(|c| c.cap_type == CapabilityType::ShmProducer),
+                "{:?} must not hold producer authority over a shared-memory channel",
                 id
             );
         }
