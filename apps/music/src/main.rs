@@ -1331,6 +1331,15 @@ fn text(
     if scale == 0 || s.is_empty() {
         return None;
     }
+    // WHY the row band comes first: `y0` and `scale` are literals at almost
+    // every ask on this surface, so the band folds to two integer compares,
+    // while the box below costs a hash and a walk of the label's bytes. A pixel
+    // on some other row cannot be inked by this run whatever it says, and this
+    // surface asks 28 questions of every one of 1,036,800 pixels.
+    let (band_top, band_bottom) = outline_text::row_band(y0, scale);
+    if y < band_top || y >= band_bottom {
+        return None;
+    }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
     let bitmap_h = font::line_height(scale);
     let bitmap_w = font::measure(s, scale);
@@ -1361,6 +1370,11 @@ fn text_bold(
     if scale == 0 || s.is_empty() {
         return None;
     }
+    // Rejected on the row band before the box is measured: see [`text`].
+    let (band_top, band_bottom) = outline_text::row_band(y0, scale);
+    if y < band_top || y >= band_bottom {
+        return None;
+    }
     let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
     let bitmap_h = font::line_height(scale);
     let bitmap_w = font::measure_bold(s, scale);
@@ -1388,6 +1402,13 @@ fn text_centered(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
+    // WHY the band is asked here too: the measure below is what centres the
+    // run, and it is a walk of the whole string -- an off-row pixel must not
+    // pay for it just to be told no.
+    let (band_top, band_bottom) = outline_text::row_band(y0, scale);
+    if y < band_top || y >= band_bottom {
+        return None;
+    }
     let w = font::measure(s, scale);
     if w > CONTENT_W {
         return None;
@@ -1405,6 +1426,10 @@ fn text_centered_bold(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
+    let (band_top, band_bottom) = outline_text::row_band(y0, scale);
+    if y < band_top || y >= band_bottom {
+        return None;
+    }
     let w = font::measure_bold(s, scale);
     if w > CONTENT_W {
         return None;
@@ -1422,9 +1447,13 @@ fn text_in_rect_centered(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
+    let y0 = rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2;
+    let (band_top, band_bottom) = outline_text::row_band(y0, scale);
+    if y < band_top || y >= band_bottom {
+        return None;
+    }
     let w = font::measure(s, scale);
     let x0 = rect.x + rect.w.saturating_sub(w) / 2;
-    let y0 = rect.y + rect.h.saturating_sub(font::line_height(scale)) / 2;
     text(x, y, x0, y0, scale, s, color, bg)
 }
 
@@ -1853,39 +1882,51 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         None => b"No track selected",
     };
     {
-        // Ellipsise to the content column so a long real title truncates instead
-        // of vanishing (the old code drew nothing when the title overflowed).
-        let mut tbuf = [0u8; 40];
-        let tn = font::ellipsize(title, 2, CONTENT_W, &mut tbuf);
-        let tw = font::measure_bold(&tbuf[..tn], 2);
-        if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 2, &tbuf[..tn], THEME.on_surface, THEME.surface) {
-            return c;
+        // WHY the row gate wraps the whole build: ellipsising the title and
+        // measuring it is a walk of the string, and it produces a run that can
+        // only ink its own two lines. Asking it for every pixel of the surface
+        // is what the launcher's home screen stopped doing when its labels were
+        // resolved once per frame; the gate is the same idea at a smaller cost.
+        let (band_top, band_bottom) = outline_text::row_band(TITLE_Y, 2);
+        if y >= band_top && y < band_bottom {
+            // Ellipsise to the content column so a long real title truncates
+            // instead of vanishing (the old code drew nothing when the title
+            // overflowed).
+            let mut tbuf = [0u8; 40];
+            let tn = font::ellipsize(title, 2, CONTENT_W, &mut tbuf);
+            let tw = font::measure_bold(&tbuf[..tn], 2);
+            if let Some(c) = text_bold(x, y, (W.saturating_sub(tw)) / 2, TITLE_Y, 2, &tbuf[..tn], THEME.on_surface, THEME.surface) {
+                return c;
+            }
         }
     }
     // Honest sub-caption. While a stream is open it shows the device's frame
     // count against the decoder's own total; stopped, it shows the length the
     // record holds or says the length was never read. An artist is prefixed
     // only when one is actually known.
-    if let Some(t) = sel {
-        let mut cap = [0u8; music::NOW_PLAYING_MAX];
-        let holds = app.player.holds(app.current_track_idx);
-        let position = if holds { app.player.position_ms() } else { None };
-        let total = if holds { app.player.duration_ms() } else { None };
-        let cl = music::now_playing_line(
-            music::known_artist(t.artist()),
-            position,
-            total,
-            t.duration_sec(),
-            t.duration_known(),
-            &mut cap,
-        );
-        let mut ebuf = [0u8; music::NOW_PLAYING_MAX];
-        let en = font::ellipsize(&cap[..cl], 2, CONTENT_W, &mut ebuf);
-        if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &ebuf[..en], THEME.on_surface, THEME.surface) {
+    let (artist_top, artist_bottom) = outline_text::row_band(ARTIST_Y, 2);
+    if y >= artist_top && y < artist_bottom {
+        if let Some(t) = sel {
+            let mut cap = [0u8; music::NOW_PLAYING_MAX];
+            let holds = app.player.holds(app.current_track_idx);
+            let position = if holds { app.player.position_ms() } else { None };
+            let total = if holds { app.player.duration_ms() } else { None };
+            let cl = music::now_playing_line(
+                music::known_artist(t.artist()),
+                position,
+                total,
+                t.duration_sec(),
+                t.duration_known(),
+                &mut cap,
+            );
+            let mut ebuf = [0u8; music::NOW_PLAYING_MAX];
+            let en = font::ellipsize(&cap[..cl], 2, CONTENT_W, &mut ebuf);
+            if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, &ebuf[..en], THEME.on_surface, THEME.surface) {
+                return c;
+            }
+        } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
             return c;
         }
-    } else if let Some(c) = text_centered_bold(x, y, ARTIST_Y, 2, b"Local library is empty - nothing to play", THEME.on_surface, THEME.surface) {
-        return c;
     }
     // WHY the label comes from the frame: the state is resolved once per
     // frame from the platform's report, so every pixel of the line shows the
@@ -1896,28 +1937,36 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         // reserve a second line from STATE_Y + 28, which ran into the search
         // field at 748, and the measured gap between STATE_Y + 32 and 748 is
         // only 4 px - too small for any line box.
-        let pos = &f.state[..f.state_len];
-        // The frame stores state first and appends " - <position>" only when
-        // the transport reported one. Drawing all of it beside the bold state
-        // repeated the state ("Stopped Stopped") when there was no position,
-        // so the suffix is what goes on this line.
-        let mut suffix = pos;
-        if suffix.len() >= state_label.len() && &suffix[..state_label.len()] == state_label {
-            suffix = &suffix[state_label.len()..];
-        }
-        if suffix.len() >= 3 && &suffix[..3] == b" - " {
-            suffix = &suffix[3..];
-        }
-        let lw = font::measure_bold(state_label, 2);
-        let pw = if suffix.is_empty() { 0 } else { font::measure(suffix, 1) };
-        let gap = if pw > 0 { 8 } else { 0 };
-        let x0 = W.saturating_sub(lw + gap + pw) / 2;
-        if let Some(c) = text_bold(x, y, x0, STATE_Y, 2, state_label, THEME.on_surface, THEME.surface) {
-            return c;
-        }
-        if pw > 0 {
-            if let Some(c) = text(x, y, x0 + lw + gap, STATE_Y + 5, 1, suffix, THEME.muted, THEME.surface) {
+        //
+        // WHY the gate covers both runs' rows: the two measures below size the
+        // line so it can be centred, and neither run inks a row outside its own
+        // band, so a pixel on some other row is refused before either walk.
+        let (bold_top, bold_bottom) = outline_text::row_band(STATE_Y, 2);
+        let (pos_top, pos_bottom) = outline_text::row_band(STATE_Y + 5, 1);
+        if y >= bold_top.min(pos_top) && y < bold_bottom.max(pos_bottom) {
+            let pos = &f.state[..f.state_len];
+            // The frame stores state first and appends " - <position>" only when
+            // the transport reported one. Drawing all of it beside the bold state
+            // repeated the state ("Stopped Stopped") when there was no position,
+            // so the suffix is what goes on this line.
+            let mut suffix = pos;
+            if suffix.len() >= state_label.len() && &suffix[..state_label.len()] == state_label {
+                suffix = &suffix[state_label.len()..];
+            }
+            if suffix.len() >= 3 && &suffix[..3] == b" - " {
+                suffix = &suffix[3..];
+            }
+            let lw = font::measure_bold(state_label, 2);
+            let pw = if suffix.is_empty() { 0 } else { font::measure(suffix, 1) };
+            let gap = if pw > 0 { 8 } else { 0 };
+            let x0 = W.saturating_sub(lw + gap + pw) / 2;
+            if let Some(c) = text_bold(x, y, x0, STATE_Y, 2, state_label, THEME.on_surface, THEME.surface) {
                 return c;
+            }
+            if pw > 0 {
+                if let Some(c) = text(x, y, x0 + lw + gap, STATE_Y + 5, 1, suffix, THEME.muted, THEME.surface) {
+                    return c;
+                }
             }
         }
     }
@@ -2424,6 +2473,134 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     return THEME.surface;
 }
 
+/// Guest tick counter, if this process is allowed to read it.
+///
+/// WHY an `Option` rather than a 0 default: a refused tick read and a render
+/// that genuinely took no ticks look identical as `0`, and the difference is
+/// whether the numbers below can be believed at all.
+///
+/// WHY no capability is named here: a slot is a position in this table and the
+/// position depends on the order the kernel inserted capabilities in, and the
+/// kernel authorises this call by the capability's *type* anyway -- so asking
+/// first would duplicate a check the syscall already makes, with a number that
+/// could only be wrong.
+#[inline]
+fn tick_opt() -> Option<u64> {
+    std::get_ticks().ok()
+}
+
+/// Guest ticks between two sample points.
+#[inline]
+fn tick_delta(a: Option<u64>, b: Option<u64>) -> u64 {
+    match (a, b) {
+        (Some(a), Some(b)) => b.wrapping_sub(a),
+        _ => 0,
+    }
+}
+
+/// Stack buffer for formatting a log line without an allocator.
+///
+/// WHY this exists rather than a `heapless::String`: the shell is `#![no_std]`
+/// with no heap and `std::log` takes a `&str`, so a number has to be rendered
+/// into fixed memory before it can be reported.
+struct LineBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> LineBuf<N> {
+    const fn new() -> Self {
+        LineBuf { buf: [0u8; N], len: 0 }
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl<const N: usize> core::fmt::Write for LineBuf<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for ch in s.bytes() {
+            if self.len >= N {
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.len] = ch;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Emits `[MUSIC APP] FRAMEBREAK prep= draw= write= px=`.
+///
+/// WHY a breakdown at all: the launch took 27 guest seconds and one number
+/// cannot say which of the three things a repaint does -- resolve the state
+/// strings, call the pixel function 1,036,800 times, hand the results to the
+/// kernel -- is the one that costs it. Guessing again is what produced the
+/// wrong fix last time.
+///
+/// WHY a separate line from the presentation marker: the lifecycle harness and
+/// the repeat probe both key on `Music canvas presented to scanout buffer.`
+/// and the breakdown is a different fact about the same frame.
+fn log_frame_breakdown(prep: u64, draw: u64, write: u64, px: usize) {
+    let mut line = LineBuf::<96>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(line, "[MUSIC APP] FRAMEBREAK prep={} draw={} write={} px={}",
+            prep, draw, write, px);
+    }
+    std::log(line.as_str()).ok();
+}
+
+/// A tick counter that answers "how long was the part I just ran?".
+///
+/// WHY laps rather than absolute stamps: the caller only ever wants the span it
+/// just crossed, and holding the previous sample in the object keeps that a
+/// one-token call at every step of the startup sequence.
+struct Laps {
+    prev: Option<u64>,
+}
+
+impl Laps {
+    fn start() -> Self {
+        Laps { prev: tick_opt() }
+    }
+
+    /// Guest ticks since the previous lap, or since `start`.
+    fn lap(&mut self) -> u64 {
+        let now = tick_opt();
+        let elapsed = tick_delta(self.prev, now);
+        self.prev = now;
+        elapsed
+    }
+}
+
+/// Emits `[MUSIC APP] OPENPROFILE` with one number per step of the cold open.
+///
+/// WHY per step and not just the whole launch: the frame breakdown says what
+/// painting costs, but the launch also contains storage and IPC round trips to
+/// three other services plus a surface allocation, and a slow launch that is
+/// not the renderer has to be attributed to one of those to be fixed at all.
+///
+/// WHY ticks and not wall time: the wall seconds a harness measures include the
+/// host scheduling QEMU behind whatever else is running. Guest ticks are the
+/// work the device actually did -- the only number that separates "this app is
+/// slow" from "the machine is busy".
+fn log_open_profile(store: u64, intent: u64, publish: u64, keystore: u64,
+                   surface: u64, volume: u64, render: u64, flip: u64) {
+    let mut line = LineBuf::<192>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "[MUSIC APP] OPENPROFILE store={} intent={} publish={} keystore={} \
+             surface={} volume={} render={} flip={} ticks={}",
+            store, intent, publish, keystore, surface, volume, render, flip,
+            store + intent + publish + keystore + surface + volume + render + flip
+        );
+    }
+    std::log(line.as_str()).ok();
+}
+
 fn render_music_ui(surface: u32, app: &MusicApp) {
     render_music_band(surface, app, 0, H);
 }
@@ -2439,7 +2616,11 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
 /// actually changed, and the pixels outside a requested band are left exactly as
 /// drawn because nothing about them changed.
 fn render_music_band(surface: u32, app: &MusicApp, y0: usize, y1: usize) {
+    let t_prep = tick_opt();
     let frame = build_frame(app);
+    let prep_ticks = tick_delta(t_prep, tick_opt());
+    let mut draw_ticks = 0u64;
+    let mut write_ticks = 0u64;
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -2447,6 +2628,7 @@ fn render_music_band(surface: u32, app: &MusicApp, y0: usize, y1: usize) {
         let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
+        let t_draw = tick_opt();
         for i in 0..count {
             chunk[i] = get_music_pixel(x, y, app, &frame);
             x += 1;
@@ -2455,8 +2637,18 @@ fn render_music_band(surface: u32, app: &MusicApp, y0: usize, y1: usize) {
                 y += 1;
             }
         }
+        draw_ticks += tick_delta(t_draw, tick_opt());
+        let t_write = tick_opt();
         let _ = std::surface_write(surface, offset, &chunk[..count]);
+        write_ticks += tick_delta(t_write, tick_opt());
         offset += count;
+    }
+    if y0 == 0 && y1 >= H {
+        // WHY only a whole-surface pass reports: the breakdown is a statement
+        // about the cost of painting the player, and a band repaint answers a
+        // different question (what one touch costs). Emitting it per band would
+        // bury the launch number under dozens of partial frames.
+        log_frame_breakdown(prep_ticks, draw_ticks, write_ticks, W * H);
     }
 }
 
@@ -2966,16 +3158,20 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut music = MusicApp::new();
+    let mut laps = Laps::start();
 
     // Load the real, persisted local library before the first frame so the
     // playlist and the now-playing row reflect what storage actually holds.
     music.store = store::TrackStore::load();
     music.sync_list_extent();
     music.restore_playback_state();
+    let store_lap = laps.lap();
     // A dispatch that launched this app is already waiting, so it is taken
     // before the first frame is drawn.
     music.handle_pending_intent();
+    let intent_lap = laps.lap();
     music.publish_now_playing();
+    let publish_lap = laps.lap();
     let load_note: &str = match music.store.state {
         store::StoreState::Empty => "Track store loaded: no tracks are stored yet.",
         store::StoreState::Loaded => "Track store loaded from the settings store.",
@@ -2992,6 +3188,10 @@ pub extern "C" fn _start() -> ! {
 
     // 2. Encrypt Track Record
     music.encrypt_track_record();
+    // WHY this lap also carries the store-state line above: the note is a
+    // serial write, so naming it "keystore" alone would blame the keystore for
+    // a cost that is partly the console.
+    let keystore_lap = laps.lap();
 
     // 3. Allocate DRM/KMS Client Surface (z=200)
     //
@@ -3006,10 +3206,12 @@ pub extern "C" fn _start() -> ! {
         }
         Err(_) => 0,
     };
+    let surface_lap = laps.lap();
 
     // 4. Real master volume. The player used to carry a hardcoded 85 here that
     //    was never drawn and never changed.
     music.refresh_volume();
+    let volume_lap = laps.lap();
 
     // 5. The transport starts stopped. Playback needs a file and the device's
     //    PCM stream, so it begins when the person presses play and the
@@ -3017,8 +3219,12 @@ pub extern "C" fn _start() -> ! {
 
     if surface > 0 {
         render_music_ui(surface, &music);
+        let render_lap = laps.lap();
         let _ = std::surface_flip();
         std::log("[MUSIC APP] Music canvas presented to scanout buffer.").ok();
+        let flip_lap = laps.lap();
+        log_open_profile(store_lap, intent_lap, publish_lap, keystore_lap,
+            surface_lap, volume_lap, render_lap, flip_lap);
     }
 
     // 6. Asynchronous Event Reactor Loop

@@ -890,6 +890,53 @@ pub fn baseline_row(y0: usize, scale: usize, ascent: u32) -> usize {
     (y0 + ascent as usize).max(y0 + font::ascent_for_scale(scale))
 }
 
+/// The rows a run at (`y0`, `scale`) can ink, whatever its bytes are.
+///
+/// WHY content-free: the vertical extent of a run comes from the face's ascent
+/// and descent at the rung's em and from the bitmap cell's own line height --
+/// never from the string. So it folds at compile time at a call site whose `y0`
+/// and `scale` are literals, and a painter can reject a pixel that is nowhere
+/// near the line with two integer compares instead of a hash, a key walk and a
+/// measure. This is the gate [`run_box`] remembers an answer for; the band is
+/// the part of that answer the caller can know before it asks.
+///
+/// WHY a range rather than a height: the caller already holds `y`. Returning
+/// the first and one-past-last row lets the test read `y >= top && y < bottom`
+/// with no subtraction, and the band covers the union of both renderers the way
+/// a painter's box test does -- the outline line box and the bitmap cell -- so
+/// a pixel rejected here is one neither face could have inked.
+pub const fn row_band(y0: usize, scale: usize) -> (usize, usize) {
+    if scale == 0 {
+        return (0, 0);
+    }
+    let em = font::em_for_scale(scale);
+    let (ascent, descent) = typeface::line_metrics(em);
+    let ascent = ascent as usize;
+    let descent = descent as usize;
+    // The same baseline `run_box` measures from: the lower of the outline
+    // ascent and the bitmap cell's ascent, because the caller draws whichever
+    // face the run fits.
+    let bitmap_ascent = font::ascent_for_scale(scale);
+    let outline_line = y0 + ascent;
+    let baseline = if outline_line > bitmap_ascent + y0 {
+        outline_line
+    } else {
+        y0 + bitmap_ascent
+    };
+    let box_top = if baseline > ascent { baseline - ascent } else { 0 };
+    // A painter clamps the top up to the origin it was given, so the band
+    // starts there when the outline box would sit above it.
+    let top = if box_top < y0 { box_top } else { y0 };
+    let outline_bottom = baseline + descent;
+    let bitmap_bottom = y0 + font::line_height(scale);
+    let bottom = if outline_bottom > bitmap_bottom {
+        outline_bottom
+    } else {
+        bitmap_bottom
+    };
+    (top, bottom)
+}
+
 pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize, usize, usize) {
     // WHY the memo comes first: this is the gate a per-pixel painter asks
     // before it asks anything else, so it is asked once per pixel per run, and
@@ -1634,5 +1681,46 @@ mod tests {
             measure_box(0, 900, 1, &long),
             "an unkeyable run still gets the box the walk computes"
         );
+    }
+
+    /// Every run at a given origin inks rows inside [`row_band`]'s range.
+    ///
+    /// WHY this is the contract worth pinning: a painter is about to reject
+    /// pixels against the band before it asks for a box, and a band that is one
+    /// row short silently clips a glyph -- the kind of defect that shows up as
+    /// a caption missing its descender on one screen and not another, with
+    /// nothing in the return value to say so. The band is therefore checked
+    /// against the union box the painter itself builds, for the sizes and
+    /// origins the shells actually use.
+    #[test]
+    fn a_row_band_covers_every_row_a_run_at_that_origin_can_ink() {
+        let _guard = reset_slots();
+        // A plain label, a run wider than the coverage buffer (so the bitmap
+        // cell decides the box), a multi-byte name, and a run whose outline line
+        // box is taller than the cell's.
+        let runs: [&[u8]; 4] = [
+            b"Stopped",
+            b"The quick brown fox jumps over the lazy dog and keeps going",
+            b"\xc3\x9cber",
+            "W".as_bytes(),
+        ];
+        for scale in 1usize..=4 {
+            for &y0 in &[0usize, 24, 101, 748, 1300] {
+                let (band_top, band_bottom) = row_band(y0, scale);
+                for text in runs {
+                    let (_, bt, bw, bh) = run_box(40, y0, scale, text);
+                    let top = bt.min(y0);
+                    let height = bh.max(font::line_height(scale));
+                    let width = bw.max(font::measure(text, scale));
+                    assert!(width > 0, "a run of {} bytes measures nothing", text.len());
+                    assert!(
+                        band_top <= top && top + height <= band_bottom,
+                        "scale {scale} at row {y0}: band {band_top}..{band_bottom} \
+                         misses the box {top}..{}",
+                        top + height
+                    );
+                }
+            }
+        }
     }
 }
