@@ -46,9 +46,9 @@ use agent_manager::{
     service_name, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole, ChatSession,
     ConsentOutcome, DeviceState, InstallState, ModelProbeStatus, PackageInstallOutcome,
     PackageRemoveOutcome, ProbeStatus, Provider, RegistryPackageState, RuntimeBinding,
-    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState, StreamChunk,
+    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState,
     Surface, ToolAuthority, transact_package_install, transact_package_remove,
-    CAPABILITY_COUNT, CHAT_PROMPT_MAX, HOST_BRIDGE, LOCAL_GENERATIVE,
+    CAPABILITY_COUNT, CHAT_PROMPT_MAX,
     MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
@@ -274,6 +274,19 @@ const WIDE_MAX: usize = WRAP_COLS * 3;
 const ACTION_LOG_MAX: usize = 120;
 /// The longest card title.
 const TITLE_MAX: usize = 30;
+/// How long the app waits for the platform's answer before it says none came.
+///
+/// WHY a deadline: the person pressed send, and a transcript that stays quiet
+/// while the app waits forever reports nothing about what it is waiting for.
+const ANSWER_TIMEOUT_TICKS: u64 = 30_000;
+/// How long one wait on the event reactor lasts before the app looks again.
+const ANSWER_POLL_TICKS: u32 = 50;
+/// How far a drain of the mailbox is allowed to walk.
+///
+/// WHY a bound: the platform keeps putting its own copies of dispatched input
+/// into this app's queue, so a drain with no limit is a hang waiting on a queue
+/// that never empties.
+const MAILBOX_DRAIN: usize = 16;
 
 // -----------------------------------------------------------------------------
 // The body model
@@ -315,10 +328,6 @@ impl Tone {
     }
 }
 
-/// The tone a transcript card's title carries.
-///
-/// WHY the roles are coloured differently: a conversation that is read as
-/// a list of undifferentiated lines is hard to follow, and the two sides
 /// The tone a transcript message's text carries.
 ///
 /// WHY the platform's own notices are muted rather than coloured as
@@ -329,6 +338,30 @@ fn chat_role_ink(role: ChatRole) -> Tone {
         ChatRole::User => Tone::Plain,
         ChatRole::Assistant => Tone::Plain,
         ChatRole::Notice => Tone::Muted,
+    }
+}
+
+/// The voice an answer arrives in, given what the service said about it.
+///
+/// WHY a refusal is a notice and not the model's words: an answer that says the
+/// platform could not answer is the platform speaking, and putting it in the
+/// assistant's bubble would let the transcript claim a model said it.
+fn answer_role(status: u32) -> ChatRole {
+    if status == std::ai::STATUS_SUCCESS {
+        ChatRole::Assistant
+    } else {
+        ChatRole::Notice
+    }
+}
+
+/// Writes text into a line, stopping at the line's end.
+fn put(out: &mut [u8], at: &mut usize, text: &[u8]) {
+    for byte in text {
+        if *at >= out.len() {
+            break;
+        }
+        out[*at] = *byte;
+        *at += 1;
     }
 }
 
@@ -607,6 +640,12 @@ pub struct AgentManagerApp {
     pub diagnostics: RuntimeDiagnostics,
     /// Measured IPC latency in ticks.
     pub ipc_latency_ticks: u64,
+    /// The tick by which the platform must have answered the waiting prompt.
+    ///
+    /// WHY the app holds a deadline rather than a retry count: the answer's cost
+    /// is the model's, and a count would punish a slow service for nothing while
+    /// a clock tells the person when the app stopped believing one is coming.
+    pub answer_deadline: u64,
     /// The platform band's clock lane, as the RTC answered it.
     ///
     /// WHY it is cached on the app: the read is a syscall and the band is
@@ -653,6 +692,7 @@ impl AgentManagerApp {
             ],
             diagnostics: RuntimeDiagnostics::measure(),
             ipc_latency_ticks: 0,
+            answer_deadline: 0,
             clock: [b' '; CLOCK_LEN],
             clock_ok: false,
         };
@@ -1595,7 +1635,24 @@ impl AgentManagerApp {
         );
         let mut doc_buf = [0u8; 1024];
         let mut shown = 0;
-        if let Ok(n) = std::ipc_recv(&mut doc_buf) {
+        // WHY the reply is taken by message type: the mailbox also holds the
+        // kernel's copy of every input event dispatched to this window, and the
+        // first message in the queue is not necessarily the one this card asked
+        // for. A touch read as a search reply paints a coordinate as a document.
+        let mut reply_len = 0usize;
+        for _ in 0..MAILBOX_DRAIN {
+            match std::ipc::receive_any(&mut doc_buf) {
+                Ok((_, std::ai::MSG_TYPE_SEARCH, len)) => {
+                    reply_len = len;
+                    break;
+                }
+                Ok((_, std::ipc::MSG_INPUT_EVENT, _))
+                | Ok((_, std::ipc::MSG_WINDOW_FOCUSED, _)) => continue,
+                _ => break,
+            }
+        }
+        let n = reply_len;
+        if n > 0 {
             let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
             let hit_hdr_len = core::mem::size_of::<std::ai::AiSearchHit>();
             if n >= resp_hdr_len + hit_hdr_len {
@@ -1762,6 +1819,11 @@ impl AgentManagerApp {
             self.set_action(b"Streaming generation active...", Tone::Accent);
         }
 
+        // WHY the queue is emptied before the prompt is sent: a generation that
+        // outlasted the app's wait still answers eventually, and its notice would
+        // otherwise be read as the reply to this prompt.
+        self.discard_stale_answers();
+
         let t0 = std::get_ticks().unwrap_or(0);
         let _ = std::ipc_send(
             std::ai::SERVICE_INFERENCE_TASK_ID,
@@ -1771,11 +1833,26 @@ impl AgentManagerApp {
         let t1 = std::get_ticks().unwrap_or(t0);
         self.ipc_latency_ticks = t1.saturating_sub(t0);
 
-        // Trigger a streaming generation step: query HostBridge or simulated generative model,
-        // appending generated token chunks to the transcript buffer incrementally.
+        // WHY the answer is not read here: the service has only just been told, so
+        // anything already in the queue is from before this prompt. The event loop
+        // reads it once the platform says a message is waiting.
         self.chat.start_stream(&prompt[..len]);
-        self.step_streaming();
+        self.answer_deadline = t1.saturating_add(ANSWER_TIMEOUT_TICKS);
         self.rebuild();
+    }
+
+    /// Throws away an answer that arrived after the app stopped waiting for it.
+    fn discard_stale_answers(&mut self) {
+        let mut rx = [0u8; 64];
+        for _ in 0..MAILBOX_DRAIN {
+            match std::ipc::receive_any(&mut rx) {
+                Err(_) => break,
+                Ok((_, std::ai::MSG_TYPE_GENERATE_CHUNK, _)) => continue,
+                Ok((_, std::ipc::MSG_INPUT_EVENT, _)) => continue,
+                Ok((_, std::ipc::MSG_WINDOW_FOCUSED, _)) => continue,
+                Ok(_) => break,
+            }
+        }
     }
 
     /// Cancels active streaming token generation via IPC to SERVICE_INFERENCE.
@@ -1786,84 +1863,157 @@ impl AgentManagerApp {
             b"CANC",
         );
         self.chat.finish_stream();
+        self.answer_deadline = 0;
         self.chat.push(ChatRole::Notice, b"[Generation cancelled by user]");
         self.set_action(b"Streaming cancelled.", Tone::Plain);
         self.rebuild();
     }
 
-    /// Advances one step of live streaming token generation.
+    /// Advances the conversation by whatever the platform has answered.
     ///
-    /// Returns true if the transcript buffer was updated and the screen
-    /// needs to be repainted.
+    /// WHY the message type is read before the message body: the kernel copies
+    /// every input event it dispatches into the focused task's mailbox, and a
+    /// touch copy is twenty-four bytes -- which is exactly what an inference
+    /// response header looks like. Taking whatever was at the front of the queue
+    /// let a tap on the screen be painted as the model's answer.
+    ///
+    /// WHY there is no invented reply: the answer is the platform's or it is not
+    /// there at all. Words this app wrote in a model's voice would be the app's
+    /// own, and a transcript that cannot tell the two apart records nothing.
     pub fn step_streaming(&mut self) -> bool {
         if !self.chat.is_streaming {
             return false;
         }
-        let step = self.chat.streaming_step as usize;
-        let prompt_bytes = self.chat.stream_prompt_text();
-
-        // 1. Try polling real IPC from aid
-        let mut rx_buf = [0u8; 1024];
-        if let Ok(n) = std::ipc_recv(&mut rx_buf) {
-            let hdr_size = core::mem::size_of::<std::ai::AiInferenceResponse>();
-            if n >= hdr_size {
-                let resp = unsafe {
-                    core::ptr::read_unaligned(rx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
-                };
-                let payload = &rx_buf[hdr_size..n];
-                if resp.status == 0 {
-                    if step == 0 {
-                        self.chat.push(ChatRole::Assistant, payload);
-                    } else {
-                        self.chat.append_chunk(payload);
-                    }
-                    self.chat.finish_stream();
-                    self.set_action(b"Streaming generation complete.", Tone::Plain);
-                    self.rebuild();
-                    return true;
-                } else {
-                    self.chat.finish_stream();
-                    self.chat.push(ChatRole::Notice, payload);
-                    self.set_action(payload, Tone::Unavailable);
-                    self.rebuild();
-                    return true;
-                }
+        let mut rx = [0u8; 64];
+        match std::ipc::receive_any(&mut rx) {
+            Err(_) => self.wait_for_answer(),
+            Ok((_, std::ai::MSG_TYPE_GENERATE_CHUNK, len)) => {
+                self.take_streamed_answer(&rx[..len])
             }
+            Ok((_, std::ai::MSG_TYPE_GENERATE, len)) => self.take_inline_answer(&rx[..len]),
+            Ok(_) => false,
         }
+    }
 
-        let chunk: StreamChunk = match self.selected {
-            0 => StreamChunk::Unavailable(
-                "EmbeddingGemma 2 is an embedding model and cannot generate conversational text.",
-            ),
-            2 => LOCAL_GENERATIVE.stream_chunk(prompt_bytes, step),
-            _ => HOST_BRIDGE.stream_chunk(prompt_bytes, step),
+    /// Sleeps until the platform has something to say, or the wait runs out.
+    fn wait_for_answer(&mut self) -> bool {
+        if std::get_ticks().unwrap_or(0) < self.answer_deadline {
+            // WHY the touch bit is in the interest mask: the wait is the longest
+            // the app can be out of the loop, and a screen that ignored a tap for
+            // the length of its own wait would look frozen.
+            let _ = std::event_poll(
+                std::EVENT_IPC_MSG | std::EVENT_SHM_READABLE | std::EVENT_TOUCH_INPUT,
+                ANSWER_POLL_TICKS,
+            );
+            return false;
+        }
+        self.answer_deadline = 0;
+        self.chat.finish_stream();
+        self.chat.push(
+            ChatRole::Notice,
+            b"The inference service sent no answer. Your prompt is still here.",
+        );
+        self.set_action(b"No answer received within the wait.", Tone::Unavailable);
+        self.rebuild();
+        true
+    }
+
+    /// Reads the answer the service placed on the channel its notice names.
+    fn take_streamed_answer(&mut self, notice_bytes: &[u8]) -> bool {
+        let Some(notice) = std::ai::AiStreamNotice::from_bytes(notice_bytes) else {
+            return self.report_unreadable_reply();
         };
-        match chunk {
-            StreamChunk::Chunk(chunk_bytes) => {
-                if step == 0 {
-                    self.chat.push(ChatRole::Assistant, chunk_bytes);
-                } else {
-                    self.chat.append_chunk(chunk_bytes);
-                }
-                self.chat.streaming_step += 1;
-                self.set_action(b"Streaming live tokens...", Tone::Accent);
-                self.rebuild();
-                true
+        let streamed = (notice.streamed_len as usize).min(notice.total_len as usize);
+        let mut buf = [0u8; std::ai::ANSWER_SLOT_BYTES];
+        let mut collected = 0usize;
+        while collected < streamed {
+            let read = match std::shm_pipe_receive(notice.pipe_id, &mut buf) {
+                Ok(read) if read > 0 => read,
+                _ => break,
+            };
+            let piece = &buf[..read.min(streamed - collected)];
+            if collected == 0 {
+                self.chat.push(answer_role(notice.status), piece);
+            } else {
+                self.chat.append_chunk(piece);
             }
-            StreamChunk::Unavailable(reason) => {
-                self.chat.finish_stream();
-                self.chat.push(ChatRole::Notice, reason.as_bytes());
-                self.set_action(reason.as_bytes(), Tone::Unavailable);
-                self.rebuild();
-                true
-            }
-            StreamChunk::Done => {
-                self.chat.finish_stream();
-                self.set_action(b"Streaming generation complete.", Tone::Plain);
-                self.rebuild();
-                true
-            }
+            collected += piece.len();
         }
+        self.close_answer(notice.status, collected as u32, notice.total_len)
+    }
+
+    /// Reads an answer the service sent through the mailbox because no channel was free.
+    ///
+    /// WHY the header's own length is believed: the mailbox cuts a message at
+    /// sixty-four bytes and says nothing, so the only witness left that a reply
+    /// was cut is the length the service wrote into its header.
+    fn take_inline_answer(&mut self, reply: &[u8]) -> bool {
+        let hdr = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        if reply.len() < hdr {
+            return self.report_unreadable_reply();
+        }
+        let resp = unsafe {
+            core::ptr::read_unaligned(reply.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        let payload = &reply[hdr..];
+        if !payload.is_empty() {
+            self.chat.push(answer_role(resp.status), payload);
+        }
+        self.close_answer(resp.status, payload.len() as u32, resp.output_dim)
+    }
+
+    /// Closes one answer and says, in bytes, how much of it reached the screen.
+    ///
+    /// WHY the numbers are shown: the channel, the mailbox and the transcript each
+    /// hold their own limit, and a bubble that stops mid-word has to name which one
+    /// stopped it -- otherwise the reader wonders whether the model ran out of words.
+    fn close_answer(&mut self, status: u32, arrived: u32, offered: u32) -> bool {
+        self.answer_deadline = 0;
+        self.chat.finish_stream();
+        let kept = self.chat.last_text_len() as u32;
+        if arrived < offered {
+            let mut line = [0u8; 64];
+            let mut n = 0;
+            put(&mut line, &mut n, b"Cut in transit: ");
+            n += format_u32(arrived, &mut line[n..]);
+            put(&mut line, &mut n, b" of ");
+            n += format_u32(offered, &mut line[n..]);
+            put(&mut line, &mut n, b" bytes reached the app.");
+            self.set_action(&line[..n], Tone::Unavailable);
+        } else if arrived == 0 {
+            self.chat
+                .push(ChatRole::Notice, b"The service answered with no bytes at all.");
+            self.set_action(b"Empty answer from the inference service.", Tone::Unavailable);
+        } else if kept < arrived {
+            let mut line = [0u8; 64];
+            let mut n = 0;
+            put(&mut line, &mut n, b"Transcript holds ");
+            n += format_u32(kept, &mut line[n..]);
+            put(&mut line, &mut n, b" of ");
+            n += format_u32(arrived, &mut line[n..]);
+            put(&mut line, &mut n, b" bytes.");
+            self.set_action(&line[..n], Tone::Unavailable);
+        } else if status != std::ai::STATUS_SUCCESS {
+            // WHY the reason is not repeated in the strip: the platform's own words
+            // are already in the transcript, and the strip only has to say that the
+            // request was refused.
+            self.set_action(b"The inference service refused the request.", Tone::Unavailable);
+        } else {
+            self.set_action(b"Answer received whole.", Tone::Good);
+        }
+        self.rebuild();
+        true
+    }
+
+    /// Says that a reply arrived and is not one this app can read.
+    fn report_unreadable_reply(&mut self) -> bool {
+        self.answer_deadline = 0;
+        self.chat.finish_stream();
+        self.chat
+            .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+        self.set_action(b"Unreadable reply from the inference service.", Tone::Unavailable);
+        self.rebuild();
+        true
     }
 
     /// Empties the conversation and the prompt.

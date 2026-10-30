@@ -449,6 +449,80 @@ fn emit_inference_response(
     }
 }
 
+/// The claim that an answer is waiting on a shared-memory channel.
+///
+/// WHY a channel and not the mailbox: an IPC message carries 64 bytes and the
+/// kernel truncates rather than refusing, so an answer of the size a model
+/// produces reached the app cut off with no sign that it had been -- and the
+/// service's own failure reasons are already past that limit. The bytes go over
+/// one of the dynamic pipes the platform provides; only this 16-byte notice
+/// travels by IPC, and it names the channel, the answer's length, and how many
+/// bytes actually made it.
+///
+/// Returns false when there is no app to answer, no channel to claim, or the
+/// notice itself was refused; the caller then replies inline as it always did.
+/// A short stream is reported as delivered, because the notice carries the
+/// shortfall, which is the honest answer where an inline reply is a silent cut.
+fn stream_answer(sender_task_id: u64, status: u32, message: &[u8]) -> bool {
+    if sender_task_id == 0 {
+        return false;
+    }
+    let pipe_id = match claim_answer_pipe(sender_task_id as u32) {
+        Some(pipe_id) => pipe_id,
+        None => return false,
+    };
+
+    let total = message.len();
+    let mut streamed = 0usize;
+    while streamed < total {
+        let end = (streamed + std::ai::ANSWER_SLOT_BYTES).min(total);
+        if std::shm_pipe_transfer(pipe_id, &message[streamed..end], 0).is_err() {
+            break;
+        }
+        streamed = end;
+    }
+
+    let notice = std::ai::AiStreamNotice {
+        status,
+        pipe_id,
+        streamed_len: streamed as u32,
+        total_len: total as u32,
+    };
+    let mut wire = [0u8; std::ai::AiStreamNotice::WIRE_LEN];
+    if notice.to_bytes(&mut wire) == 0 {
+        return false;
+    }
+    if std::ipc_send(sender_task_id, MSG_TYPE_GENERATE_CHUNK, &wire).is_err() {
+        return false;
+    }
+    if streamed != total {
+        let _ = std::log("[aid] answer channel filled before the whole answer streamed.");
+    }
+    true
+}
+
+/// Claims one of the dynamic answer channels for this service-and-app pair.
+///
+/// WHY a search rather than a fixed id: the channels are few and the pair that
+/// holds one keeps it until either endpoint exits, so the next app to ask is
+/// answered by whichever channel is free.
+fn claim_answer_pipe(consumer_task_id: u32) -> Option<u32> {
+    let last = std::ai::ANSWER_PIPE_FIRST + std::ai::ANSWER_PIPE_COUNT;
+    (std::ai::ANSWER_PIPE_FIRST..last).find(|pipe_id| std::shm_pipe_create(*pipe_id, 1, consumer_task_id).is_ok())
+}
+
+/// Answers a generative query, streaming the bytes when the mailbox cannot hold them.
+fn reply_with_answer(
+    sender_task_id: u64,
+    status: u32,
+    message: &[u8],
+    tx_buf: &mut [u8; 1024],
+) {
+    if !stream_answer(sender_task_id, status, message) {
+        emit_inference_response(sender_task_id, status, message, tx_buf);
+    }
+}
+
 static ACTIVE_GENERATION_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static CANCEL_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -605,28 +679,23 @@ pub fn handle_ipc_inference_query(
                             );
 
                             match gen_res {
-                                Ok(tokens_generated) => {
-                                    let resp = std::ai::AiInferenceResponse {
-                                        status: std::ai::STATUS_SUCCESS,
-                                        output_dim: tokens_generated as u32,
-                                        latency_micros: 25,
-                                        output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
-                                    };
-                                    let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
-                                    let resp_bytes = unsafe {
-                                        core::slice::from_raw_parts(&resp as *const _ as *const u8, resp_hdr_len)
-                                    };
-                                    tx_buf[..resp_hdr_len].copy_from_slice(resp_bytes);
-                                    let total_len = resp_hdr_len + chunk_len;
-                                    if total_len <= tx_buf.len() {
-                                        tx_buf[resp_hdr_len..total_len].copy_from_slice(&decoded_chunk[..chunk_len]);
-                                        if sender_task_id != 0 {
-                                            let _ = std::ipc_send(sender_task_id, MSG_TYPE_GENERATE, &tx_buf[..total_len]);
-                                        }
+                                Ok(_tokens_generated) => {
+                                    let answer = &decoded_chunk[..chunk_len];
+                                    // WHY the reply counts bytes and not tokens: every other answer this
+                                    // service sends reports the length of what it attached, and a reader
+                                    // can tell a whole answer from a cut one only by comparing that number
+                                    // with what arrived.
+                                    if !stream_answer(sender_task_id, std::ai::STATUS_SUCCESS, answer) {
+                                        emit_inference_response(
+                                            sender_task_id,
+                                            std::ai::STATUS_SUCCESS,
+                                            answer,
+                                            tx_buf,
+                                        );
                                     }
                                 }
                                 Err(_) => {
-                                    emit_inference_response(
+                                    reply_with_answer(
                                         sender_task_id,
                                         std::ai::STATUS_ERROR,
                                         b"[Inference cancelled by user]",
@@ -636,7 +705,7 @@ pub fn handle_ipc_inference_query(
                             }
                         }
                         Ok(_) => {
-                            emit_inference_response(
+                            reply_with_answer(
                                 sender_task_id,
                                 std::ai::STATUS_UNSUPPORTED,
                                 b"Generative model error: unsupported architecture or tensor configuration.",
@@ -644,7 +713,7 @@ pub fn handle_ipc_inference_query(
                             );
                         }
                         Err(gguf::GgufError::BufferTooShort | gguf::GgufError::ReadFailed | gguf::GgufError::FileNotFound) => {
-                            emit_inference_response(
+                            reply_with_answer(
                                 sender_task_id,
                                 std::ai::STATUS_UNAVAILABLE,
                                 b"On-device generative stream unavailable: no local model weights loaded.",
@@ -652,7 +721,7 @@ pub fn handle_ipc_inference_query(
                             );
                         }
                         Err(_) => {
-                            emit_inference_response(
+                            reply_with_answer(
                                 sender_task_id,
                                 std::ai::STATUS_UNSUPPORTED,
                                 b"Generative model error: unsupported architecture or corrupted weights.",
@@ -662,7 +731,7 @@ pub fn handle_ipc_inference_query(
                     }
                 }
                 Err(_) => {
-                    emit_inference_response(
+                    reply_with_answer(
                         sender_task_id,
                         std::ai::STATUS_UNAVAILABLE,
                         b"On-device generative stream unavailable: no local model weights loaded.",
@@ -672,7 +741,7 @@ pub fn handle_ipc_inference_query(
             }
         } else {
             // Platform Truth Contract: Report unavailable when physical generative weights are absent
-            emit_inference_response(
+            reply_with_answer(
                 sender_task_id,
                 std::ai::STATUS_UNAVAILABLE,
                 b"On-device generative stream unavailable: no local model weights loaded.",

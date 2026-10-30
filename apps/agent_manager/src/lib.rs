@@ -414,6 +414,15 @@ impl ChatSession {
         self.message_count as usize
     }
 
+    /// How many bytes the newest message holds.
+    ///
+    /// WHY this is public: the caller that offered a reply has to be able to ask
+    /// whether the transcript kept all of it, and a bubble that stops mid-word
+    /// without saying so is a claim that the message ended there.
+    pub fn last_text_len(&self) -> usize {
+        self.last_message().map(|message| message.text_len as usize).unwrap_or(0)
+    }
+
     /// Whether the transcript is empty.
     pub const fn is_empty(&self) -> bool {
         self.message_count == 0
@@ -827,11 +836,6 @@ impl LocalGenerative {
 static EMBEDDING_GEMMA2: EmbeddingGemma2 = EmbeddingGemma2;
 pub static HOST_BRIDGE: HostBridge = HostBridge;
 pub static LOCAL_GENERATIVE: LocalGenerative = LocalGenerative;
-
-/// Queries the host bridge or simulated generative model for the next streaming token chunk.
-pub fn query_streaming_chunk(prompt: &[u8], step: usize) -> StreamChunk {
-    HOST_BRIDGE.stream_chunk(prompt, step)
-}
 
 #[allow(dead_code)]
 fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -3654,28 +3658,33 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_streams_token_chunks_incrementally() {
+    fn a_generation_session_opens_and_closes_without_inventing_a_reply() {
+        // WHY this replaces the streaming test: the chat used to pull chunks from
+        // a provider it consulted itself, so the transcript could end up holding
+        // an assistant message no model ever wrote. The answer comes from the
+        // platform now, and what this app owns is only the session around it.
         let mut chat = ChatSession::new();
         chat.push(ChatRole::User, b"status");
         chat.start_stream(b"status");
         assert!(chat.is_streaming);
         assert_eq!(chat.stream_prompt_text(), b"status");
 
-        let step = 0;
-        let chunk = query_streaming_chunk(chat.stream_prompt_text(), step);
-        match chunk {
-            StreamChunk::Unavailable(reason) => {
-                chat.push(ChatRole::Notice, reason.as_bytes());
-                chat.finish_stream();
-            }
-            _ => panic!("expected unavailable stream chunk"),
-        }
+        chat.finish_stream();
         assert!(!chat.is_streaming);
+        assert_eq!(chat.len(), 1, "nothing was generated, so nothing was added");
+        assert_eq!(chat.last_message().expect("the prompt is still there").role, ChatRole::User);
+    }
 
-        let last = chat.last_message().expect("last message present");
-        assert_eq!(last.role, ChatRole::Notice);
-        let text = core::str::from_utf8(&last.text[..last.text_len as usize]).unwrap();
-        assert!(text.contains("Host bridge stream unavailable"));
+    #[test]
+    fn the_transcript_reports_how_much_of_a_reply_it_kept() {
+        // WHY the numbers are measured through the transcript: the bubble stops at
+        // CHAT_TEXT_MAX and the screen has to be able to say that it did, in bytes,
+        // rather than leave a sentence that looks like it ended there.
+        let mut chat = ChatSession::new();
+        let long: [u8; CHAT_TEXT_MAX + 40] = [b'a'; CHAT_TEXT_MAX + 40];
+        chat.push(ChatRole::Assistant, &long);
+        assert_eq!(chat.last_text_len(), CHAT_TEXT_MAX);
+        assert_eq!(chat.append_chunk(b"tail"), 0, "a full bubble holds nothing more");
     }
 
     #[test]

@@ -448,6 +448,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_stream_notice_round_trips_through_its_wire_form() {
+        // WHY this is worth a test: the notice is the only thing that says whether
+        // an answer arrived whole, and a reader that misreads it reports a length
+        // the service never sent.
+        let notice = AiStreamNotice {
+            status: STATUS_SUCCESS,
+            pipe_id: ANSWER_PIPE_FIRST,
+            streamed_len: 71,
+            total_len: 71,
+        };
+        let mut wire = [0u8; AiStreamNotice::WIRE_LEN];
+        assert_eq!(notice.to_bytes(&mut wire), AiStreamNotice::WIRE_LEN);
+        assert_eq!(AiStreamNotice::from_bytes(&wire), Some(notice));
+    }
+
+    #[test]
+    fn a_buffer_too_small_for_a_notice_is_refused_rather_than_guessed() {
+        let notice = AiStreamNotice {
+            status: STATUS_UNAVAILABLE,
+            pipe_id: ANSWER_PIPE_FIRST + 1,
+            streamed_len: 4,
+            total_len: 900,
+        };
+        let mut short = [0u8; AiStreamNotice::WIRE_LEN - 1];
+        assert_eq!(notice.to_bytes(&mut short), 0);
+        // WHY the reader gets nothing rather than a partial: a notice cut at eight
+        // bytes would hand it a channel to read with no lengths attached, and it
+        // would then claim an answer arrived when it cannot know that one did.
+        assert_eq!(AiStreamNotice::from_bytes(&short), None);
+        assert_eq!(AiStreamNotice::from_bytes(&[0u8; 8]), None);
+    }
+
+    #[test]
     fn test_matryoshka_dimensions() {
         assert_eq!(MatryoshkaDim::from_u32(128), Some(MatryoshkaDim::Dim128));
         assert_eq!(MatryoshkaDim::from_u32(256), Some(MatryoshkaDim::Dim256));
