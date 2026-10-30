@@ -7,6 +7,9 @@ use super::TlsError;
 
 pub const SIG_SCHEME_ED25519: u16 = 0x0807;
 pub const SIG_SCHEME_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
+/// `ecdsa_secp384r1_sha384` — the scheme an ECDSA chain link carries when the
+/// certificate below it sits on P-384 and its issuer hashed with SHA-384.
+pub const SIG_SCHEME_ECDSA_SECP384R1_SHA384: u16 = 0x0503;
 pub const SIG_SCHEME_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
 /// `rsa_pkcs1_sha256` — what a CA certificate signed with
 /// `sha256WithRSAEncryption` is verified as, and the scheme a legacy RSA server
@@ -28,15 +31,22 @@ pub const EC_PUBLIC_KEY_OID: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01
 /// `prime256v1` (`1.2.840.10045.3.1.7`) — the curve an EC `AlgorithmIdentifier`
 /// names in its parameters.
 pub const PRIME256V1_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// `secp384r1` (`1.3.132.0.34`) — the other curve name an EC certificate's
+/// parameters may carry, and the one the P-384 arithmetic below is keyed to.
+pub const SECP384R1_OID: [u8; 5] = [0x2b, 0x81, 0x04, 0x00, 0x22];
 /// `ecdsa-with-SHA256` (`1.2.840.10045.4.3.2`).
 pub const ECDSA_WITH_SHA256_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+/// `ecdsa-with-SHA384` (`1.2.840.10045.4.3.3`) — the name a P-384 chain link
+/// declares, and the reason the hash width travels with the scheme.
+pub const ECDSA_WITH_SHA384_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03];
 
 /// The largest leaf public key a client has to hold for `CertificateVerify`.
 ///
-/// An RSA-4096 `RSAPublicKey` is the widest of the three shapes this client can
-/// verify — a 512-byte modulus that DER pads to 513, its INTEGER headers, and the
-/// `65537` exponent — which measures 526 bytes. The 65-byte uncompressed P-256
-/// point and the 32-byte Ed25519 key fit inside it with room to spare.
+/// An RSA-4096 `RSAPublicKey` is the widest of the shapes this client can verify
+/// — a 512-byte modulus that DER pads to 513, its INTEGER headers, and the
+/// `65537` exponent — which measures 526 bytes. The 97-byte uncompressed P-384
+/// point, the 65-byte P-256 point and the 32-byte Ed25519 key fit inside it with
+/// room to spare.
 pub const MAX_LEAF_PUBLIC_KEY_BYTES: usize = 528;
 
 /// The ONLY signature schemes this client advertises in its ClientHello and the
@@ -45,9 +55,11 @@ pub const MAX_LEAF_PUBLIC_KEY_BYTES: usize = 528;
 ///
 /// The order is the client's preference: ECDSA P-256 first because it is what
 /// the public web signs with most and what the verifier reaches fastest, then
-/// Ed25519, then the two RSA readings a legacy endpoint may pick.
-pub const SUPPORTED_SIG_SCHEMES: [u16; 4] = [
+/// P-384 for the chains whose issuer sits on the larger curve, then Ed25519,
+/// then the two RSA readings a legacy endpoint may pick.
+pub const SUPPORTED_SIG_SCHEMES: [u16; 5] = [
     SIG_SCHEME_ECDSA_SECP256R1_SHA256,
+    SIG_SCHEME_ECDSA_SECP384R1_SHA384,
     SIG_SCHEME_ED25519,
     SIG_SCHEME_RSA_PSS_RSAE_SHA256,
     SIG_SCHEME_RSA_PKCS1_SHA256,
@@ -83,8 +95,30 @@ pub fn scheme_for_sig_oid(oid: &[u8]) -> Option<u16> {
         Some(SIG_SCHEME_RSA_PKCS1_SHA256)
     } else if oid == ECDSA_WITH_SHA256_OID {
         Some(SIG_SCHEME_ECDSA_SECP256R1_SHA256)
+    } else if oid == ECDSA_WITH_SHA384_OID {
+        Some(SIG_SCHEME_ECDSA_SECP384R1_SHA384)
     } else {
         None
+    }
+}
+
+/// How many bytes the `Transcript-Hash` a `CertificateVerify` carries is wide
+/// under `scheme`, or `None` for a scheme this client did not advertise.
+///
+/// WHY the scheme rather than the cipher suite decides this: RFC 8446 Section
+/// 4.4.3 defines the handshake hash as the one "appropriate to the signature
+/// algorithm", so a P-384 leaf hashes the transcript with SHA-384 even while the
+/// record layer underneath runs on SHA-256. Advertising a scheme therefore
+/// obliges the client to hold that hash of the transcript, which is what keeps
+/// this predicate and [`SUPPORTED_SIG_SCHEMES`] from drifting apart.
+pub const fn transcript_hash_len(scheme: u16) -> Option<usize> {
+    match scheme {
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256
+        | SIG_SCHEME_RSA_PSS_RSAE_SHA256
+        | SIG_SCHEME_RSA_PKCS1_SHA256 => Some(32),
+        SIG_SCHEME_ECDSA_SECP384R1_SHA384 => Some(48),
+        SIG_SCHEME_ED25519 => Some(64),
+        _ => None,
     }
 }
 
@@ -103,23 +137,37 @@ pub fn declares_advertised_scheme(cert: &ParsedCertificate<'_>) -> bool {
 
 /// True when `cert` carries a public key this client can verify a signature with.
 ///
-/// The EC case checks the curve parameter as well as the key algorithm: an
-/// `ecPublicKey` on P-384 is a key the P-256 arithmetic cannot touch, and
-/// accepting the algorithm while ignoring the curve would refuse it later, in a
-/// place that says nothing about why.
+/// The EC case checks the curve parameter as well as the key algorithm: the
+/// scalar width, the point encoding and the arithmetic all follow the curve, so
+/// accepting `ecPublicKey` while ignoring which curve it names would refuse the
+/// key later, in a place that says nothing about why. The listed curves are the
+/// ones with an implementation behind them, not the ones ASN.1 can spell.
 pub fn spki_is_verifiable(cert: &ParsedCertificate<'_>) -> bool {
     if cert.spki_algorithm_oid == ED25519_SPKI_OID || cert.spki_algorithm_oid == RSA_ENCRYPTION_OID {
         return true;
     }
-    cert.spki_algorithm_oid == EC_PUBLIC_KEY_OID && cert.spki_params == PRIME256V1_OID
+    cert.spki_algorithm_oid == EC_PUBLIC_KEY_OID
+        && (cert.spki_params == PRIME256V1_OID || cert.spki_params == SECP384R1_OID)
 }
 
 /// The key algorithm each advertised scheme requires its signer to carry.
 fn scheme_key_algorithm(scheme: u16) -> &'static [u8] {
     match scheme {
         SIG_SCHEME_ED25519 => &ED25519_SPKI_OID,
-        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => &EC_PUBLIC_KEY_OID,
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 | SIG_SCHEME_ECDSA_SECP384R1_SHA384 => {
+            &EC_PUBLIC_KEY_OID
+        }
         SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => &RSA_ENCRYPTION_OID,
+        _ => &[],
+    }
+}
+
+/// The curve each ECDSA scheme is keyed to, so a scheme cannot be pointed at the
+/// other curve's arithmetic and land on a signature that happens to fit.
+const fn scheme_curve_oid(scheme: u16) -> &'static [u8] {
+    match scheme {
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => &PRIME256V1_OID,
+        SIG_SCHEME_ECDSA_SECP384R1_SHA384 => &SECP384R1_OID,
         _ => &[],
     }
 }
@@ -153,12 +201,18 @@ pub fn verify_signed_by(
     }
     match scheme {
         SIG_SCHEME_ED25519 => super::ed25519::verify_ed25519(bytes, message, signature),
-        SIG_SCHEME_ECDSA_SECP256R1_SHA256 => {
-            if !curve_oid.is_empty() && curve_oid != PRIME256V1_OID {
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 | SIG_SCHEME_ECDSA_SECP384R1_SHA384 => {
+            if !curve_oid.is_empty() && curve_oid != scheme_curve_oid(scheme) {
                 return Err(TlsError::UnsupportedSignatureScheme);
             }
-            let pair = decode_ecdsa_signature(signature)?;
-            if crate::crypto::p256::verify(bytes, message, &pair) {
+            // Each curve gets the scalar width its own order needs, and no other
+            // curve's: a 48-byte `r` is not a P-256 scalar wearing a hat.
+            let verified = if scheme == SIG_SCHEME_ECDSA_SECP384R1_SHA384 {
+                crate::crypto::p384::verify(bytes, message, &decode_ecdsa_signature::<96>(signature)?)
+            } else {
+                crate::crypto::p256::verify(bytes, message, &decode_ecdsa_signature::<64>(signature)?)
+            };
+            if verified {
                 Ok(())
             } else {
                 Err(TlsError::CertificateVerificationFailed)
@@ -186,6 +240,7 @@ fn key_shape_matches(bytes: &[u8], scheme: u16) -> bool {
     match scheme {
         SIG_SCHEME_ED25519 => bytes.len() == 32,
         SIG_SCHEME_ECDSA_SECP256R1_SHA256 => bytes.len() == 65 && bytes[0] == 0x04,
+        SIG_SCHEME_ECDSA_SECP384R1_SHA384 => bytes.len() == 97 && bytes[0] == 0x04,
         SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => {
             !bytes.is_empty() && bytes[0] == TAG_SEQUENCE
         }
@@ -315,12 +370,17 @@ pub fn parse_rsa_public_key(der: &[u8]) -> Result<RsaPublicKey<'_>, TlsError> {
 }
 
 /// Decodes an ECDSA signature — `SEQUENCE { INTEGER r, INTEGER s }` — into the
-/// fixed 64-byte `r || s` pair the P-256 verifier takes.
+/// fixed `r || s` pair a curve's verifier takes: 64 bytes for P-256, 96 for P-384.
 ///
 /// WHY a fixed frame: an integer DER wrote short is left-padded here, which is
 /// where a peer could hide a value that is not the one it signed, so anything
-/// wider than a P-256 scalar is refused.
-pub fn decode_ecdsa_signature(der: &[u8]) -> Result<[u8; 64], TlsError> {
+/// wider than this curve's scalar is refused. The width travels with the caller
+/// because both curves use the same DER shape, and reading a P-384 pair through
+/// the P-256 frame would quietly drop the top of `r`.
+pub fn decode_ecdsa_signature<const PAIR_LEN: usize>(
+    der: &[u8],
+) -> Result<[u8; PAIR_LEN], TlsError> {
+    let scalar_len = PAIR_LEN / 2;
     let (content, _) = read_sequence(der)?;
     let (tag, r, rem) = read_tlv(content)?;
     if tag != TAG_INTEGER {
@@ -330,14 +390,14 @@ pub fn decode_ecdsa_signature(der: &[u8]) -> Result<[u8; 64], TlsError> {
     if tag != TAG_INTEGER {
         return Err(TlsError::CertificateParsingError);
     }
-    let mut pair = [0u8; 64];
+    let mut pair = [0u8; PAIR_LEN];
     let r = unsigned_integer(r);
     let s = unsigned_integer(s);
-    if r.len() > 32 || s.len() > 32 {
+    if r.len() > scalar_len || s.len() > scalar_len {
         return Err(TlsError::CertificateParsingError);
     }
-    pair[32 - r.len()..32].copy_from_slice(r);
-    pair[64 - s.len()..].copy_from_slice(s);
+    pair[scalar_len - r.len()..scalar_len].copy_from_slice(r);
+    pair[PAIR_LEN - s.len()..].copy_from_slice(s);
     Ok(pair)
 }
 
@@ -915,6 +975,9 @@ pub trait CertificateVerifier {
     ///
     /// `context_and_hash` is the exact message specified in RFC 8446 Section 4.4.3:
     ///   64 spaces (0x20) || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+    /// where `transcript_hash` is the hash [`transcript_hash_len`] gives for
+    /// `algorithm` — SHA-384 under P-384, SHA-512 under Ed25519 — not the cipher
+    /// suite's hash.
     fn verify_server_signature(
         &self,
         public_key: &[u8],
@@ -1047,7 +1110,8 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         self.check_validity_window(cert)?;
 
         // Only a key this client can do arithmetic with is accepted at any
-        // position: Ed25519, RSA, or an EC P-256 point on the named curve.
+        // position: Ed25519, RSA, or an EC point on a curve with an
+        // implementation behind it.
         if !spki_is_verifiable(cert) {
             return Err(TlsError::UnsupportedSignatureScheme);
         }
@@ -1140,11 +1204,11 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         }
         // The scheme names its own key type, and `verify_signed_by` requires the
         // leaf key to have that shape before any arithmetic runs: a 32-byte
-        // Ed25519 key, a 65-byte uncompressed P-256 point, or a DER
-        // `RSAPublicKey`. No other key can be made to look like one, so a server
-        // cannot present an RSA leaf and then sign the transcript as if it were
-        // ECDSA. The algorithm OID is left to the chain walk, which read it from
-        // the certificate this key came from.
+        // Ed25519 key, a 65- or 97-byte uncompressed EC point on the curve that
+        // scheme names, or a DER `RSAPublicKey`. No other key can be made to look
+        // like one, so a server cannot present an RSA leaf and then sign the
+        // transcript as if it were ECDSA. The algorithm OID is left to the chain
+        // walk, which read it from the certificate this key came from.
         verify_signed_by(
             public_key,
             &[],

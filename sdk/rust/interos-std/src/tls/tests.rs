@@ -1,10 +1,11 @@
 //! TLS 1.3 Client and Certificate Trust Unit Tests
 
 use super::certificate::{
-    asn1_time_to_unix, hostname_matches, is_supported_sig_scheme, CertificateVerifier,
-    DefaultCertVerifier, ParsedCertificate, SubjectAltNames, INTEROS_ROOT_CA_DER,
-    SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PKCS1_SHA256,
-    SIG_SCHEME_RSA_PSS_RSAE_SHA256, SUPPORTED_SIG_SCHEMES, TAG_INTEGER, TAG_SEQUENCE,
+    asn1_time_to_unix, hostname_matches, is_supported_sig_scheme, transcript_hash_len,
+    CertificateVerifier, DefaultCertVerifier, ParsedCertificate, SubjectAltNames,
+    INTEROS_ROOT_CA_DER, SIG_SCHEME_ECDSA_SECP256R1_SHA256, SIG_SCHEME_ECDSA_SECP384R1_SHA384,
+    SIG_SCHEME_ED25519, SIG_SCHEME_RSA_PKCS1_SHA256, SIG_SCHEME_RSA_PSS_RSAE_SHA256,
+    SUPPORTED_SIG_SCHEMES, TAG_INTEGER, TAG_SEQUENCE,
 };
 use super::client::{TlsClientSession, TlsConfig};
 use super::handshake::{
@@ -473,9 +474,10 @@ fn tls_reject_server_choosing_a_scheme_the_leaf_key_cannot_sign() {
 
 #[test]
 fn tls_reject_server_choosing_an_unadvertised_scheme() {
-    // 0x0503 (ecdsa_secp384r1_sha384) is a code point this client never offers in
-    // its ClientHello, so a server that picks it is refused by the gate itself --
-    // ahead of the verifier, which here would have answered Ok to anything.
+    // 0x0504 (ecdsa_secp521r1_sha512) is a code point this client never offers in
+    // its ClientHello and has no arithmetic behind it, so a server that picks it
+    // is refused by the gate itself -- ahead of the verifier, which here would
+    // have answered Ok to anything.
     let mut hs = HandshakeClient::new([0x11u8; 32]);
     hs.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
@@ -483,7 +485,7 @@ fn tls_reject_server_choosing_an_unadvertised_scheme() {
     let cv_payload = [
         HANDSHAKE_CERTIFICATE_VERIFY,
         0, 0, 6,
-        0x05, 0x03, // ecdsa_secp384r1_sha384: never advertised
+        0x05, 0x04, // ecdsa_secp521r1_sha512: never advertised
         0, 2,
         0xaa, 0xbb,
     ];
@@ -492,9 +494,14 @@ fn tls_reject_server_choosing_an_unadvertised_scheme() {
         Err(TlsError::UnsupportedSignatureScheme)
     );
     assert_eq!(hs.state, HandshakeState::CertificateReceived);
-    assert!(!is_supported_sig_scheme(0x0503));
+    assert!(!is_supported_sig_scheme(0x0504));
+    assert!(transcript_hash_len(0x0504).is_none(), "no hash for a scheme that is not offered");
     for scheme in SUPPORTED_SIG_SCHEMES.iter() {
         assert!(is_supported_sig_scheme(*scheme), "{scheme:#06x} is advertised");
+        assert!(
+            transcript_hash_len(*scheme).is_some(),
+            "{scheme:#06x} is advertised without a transcript hash"
+        );
     }
 }
 
@@ -609,6 +616,7 @@ fn tls_advertised_schemes_are_all_verifiable() {
         SUPPORTED_SIG_SCHEMES,
         [
             SIG_SCHEME_ECDSA_SECP256R1_SHA256,
+            SIG_SCHEME_ECDSA_SECP384R1_SHA384,
             SIG_SCHEME_ED25519,
             SIG_SCHEME_RSA_PSS_RSAE_SHA256,
             SIG_SCHEME_RSA_PKCS1_SHA256,
@@ -621,10 +629,13 @@ fn tls_advertised_schemes_are_all_verifiable() {
     let ed25519_key = [0x09u8; 32];
     let mut p256_point = [0x2au8; 65];
     p256_point[0] = 0x04;
+    let mut p384_point = [0x2au8; 97];
+    p384_point[0] = 0x04;
     let rsa_key = rsa_public_key_der();
-    let cases: [(u16, &[u8]); 4] = [
+    let cases: [(u16, &[u8]); 5] = [
         (SIG_SCHEME_ED25519, &ed25519_key),
         (SIG_SCHEME_ECDSA_SECP256R1_SHA256, &p256_point),
+        (SIG_SCHEME_ECDSA_SECP384R1_SHA384, &p384_point),
         (SIG_SCHEME_RSA_PSS_RSAE_SHA256, &rsa_key),
         (SIG_SCHEME_RSA_PKCS1_SHA256, &rsa_key),
     ];
@@ -1613,13 +1624,13 @@ fn tls_stub_return_path_cannot_turn_a_failed_check_into_a_verified_handshake() {
         Some(TlsError::CertificateVerificationFailed)
     );
 
-    // 3. A signature scheme that was never advertised. 0x0804 became a scheme
-    // this client does offer, so the code point has to be one it still does not:
-    // the gate is the advertised list, whatever is on it.
+    // 3. A signature scheme that was never advertised. 0x0804 and 0x0503 became
+    // schemes this client does offer, so the code point has to be one it still
+    // does not: the gate is the advertised list, whatever is on it.
     let mut hs3 = HandshakeClient::new([0x11u8; 32]);
     hs3.state = HandshakeState::CertificateReceived;
     let cert = ParsedCertificate::parse(RFC8032_CERT_DER).unwrap();
-    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x05, 0x03, 0, 2, 0xaa, 0xbb];
+    let cv = [HANDSHAKE_CERTIFICATE_VERIFY, 0, 0, 6, 0x05, 0x04, 0, 2, 0xaa, 0xbb];
     assert_eq!(
         hs3.process_certificate_verify(&cv, cert.spki_public_key, &AnyPassVerifier),
         Err(TlsError::UnsupportedSignatureScheme)

@@ -11,11 +11,14 @@
 use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_extract};
 use crate::crypto::hmac::HmacSha256;
 use crate::crypto::sha256::Sha256;
+use crate::crypto::sha384::Sha384;
 use crate::crypto::x25519::{x25519, x25519_base};
 use super::certificate::{
-    declares_advertised_scheme, is_supported_sig_scheme, spki_is_verifiable, verify_link,
-    CertificateVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
+    declares_advertised_scheme, is_supported_sig_scheme, spki_is_verifiable, transcript_hash_len,
+    verify_link, CertificateVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN,
+    SUPPORTED_SIG_SCHEMES,
 };
+use super::ed25519::Sha512;
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
 
@@ -106,9 +109,25 @@ pub enum HandshakeState {
     Failed,
 }
 
+/// The handshake messages hashed with the algorithms the non-SHA-256 advertised
+/// signature schemes name.
+///
+/// WHY a second copy of every update: RFC 8446 Section 4.4.3 takes the
+/// `Transcript-Hash` inside `CertificateVerify` from the signature algorithm, not
+/// from the cipher suite, so a P-384 leaf signs a SHA-384 hash of exactly the
+/// bytes the record layer has already absorbed into SHA-256. The messages
+/// themselves are not kept anywhere, so the only way to hold both at the moment
+/// the server picks one is to run both over the stream as it passes.
+#[derive(Clone, Copy)]
+struct SchemeTranscripts {
+    sha384: Sha384,
+    sha512: Sha512,
+}
+
 pub struct HandshakeClient {
     pub state: HandshakeState,
     pub transcript: Sha256,
+    scheme_transcripts: SchemeTranscripts,
     pub client_private_key: [u8; 32],
     pub client_public_key: [u8; 32],
     pub server_public_key: [u8; 32],
@@ -133,6 +152,10 @@ impl HandshakeClient {
         Self {
             state: HandshakeState::Initial,
             transcript: Sha256::new(),
+            scheme_transcripts: SchemeTranscripts {
+                sha384: Sha384::new(),
+                sha512: Sha512::new(),
+            },
             client_private_key,
             client_public_key,
             server_public_key: [0u8; 32],
@@ -149,6 +172,17 @@ impl HandshakeClient {
             server_application_key: [0u8; 32],
             server_application_iv: [0u8; 12],
         }
+    }
+
+    /// Absorbs one handshake message into every transcript this client keeps.
+    ///
+    /// Every message that reaches the key schedule arrives here, so a signature
+    /// scheme whose hash is not SHA-256 cannot find a transcript that has fallen
+    /// behind the one the records were encrypted from.
+    fn update_transcripts(&mut self, message: &[u8]) {
+        self.transcript.update(message);
+        self.scheme_transcripts.sha384.update(message);
+        self.scheme_transcripts.sha512.update(message);
     }
 
     /// Encodes a complete ClientHello handshake message inside a TLS record.
@@ -320,7 +354,7 @@ impl HandshakeClient {
         }
 
         // Add to transcript
-        self.transcript.update(&hs_msg[..total_hs_len]);
+        self.update_transcripts(&hs_msg[..total_hs_len]);
 
         // Wrap in plaintext TLS record
         out[0] = ContentType::Handshake as u8;
@@ -433,7 +467,7 @@ impl HandshakeClient {
         }
 
         // Add complete ServerHello to transcript
-        self.transcript.update(&payload[..4 + hs_len]);
+        self.update_transcripts(&payload[..4 + hs_len]);
 
         // Key Schedule Derivation
         self.derive_handshake_keys()?;
@@ -489,7 +523,7 @@ impl HandshakeClient {
             return Err(TlsError::BadHandshakeMessage);
         }
 
-        self.transcript.update(&payload[..4 + hs_len]);
+        self.update_transcripts(&payload[..4 + hs_len]);
         self.state = HandshakeState::EncryptedExtensionsReceived;
         Ok(())
     }
@@ -640,7 +674,7 @@ impl HandshakeClient {
 
         let leaf = leaf.ok_or(TlsError::BadHandshakeMessage)?;
 
-        self.transcript.update(&payload[..4 + hs_len]);
+        self.update_transcripts(&payload[..4 + hs_len]);
         self.state = HandshakeState::CertificateReceived;
         Ok(leaf)
     }
@@ -686,19 +720,35 @@ impl HandshakeClient {
 
         // Format RFC 8446 Section 4.4.3 signature content:
         // 64 spaces (0x20) || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
-        let th = self.transcript.finalize();
-        let mut context_and_hash = [0u8; 130];
+        // The hash is the scheme's own, not the cipher suite's, so the frame is
+        // sized for the widest advertised scheme and trimmed to the one picked.
+        let hash_len =
+            transcript_hash_len(algorithm).ok_or(TlsError::UnsupportedSignatureScheme)?;
+        let mut hash = [0u8; 64];
+        match hash_len {
+            32 => hash[..32].copy_from_slice(&self.transcript.finalize()),
+            48 => hash[..48].copy_from_slice(&self.scheme_transcripts.sha384.finalize()),
+            // The only width left in the table is Ed25519's SHA-512.
+            _ => hash.copy_from_slice(&self.scheme_transcripts.sha512.finalize()),
+        }
+        let mut context_and_hash = [0u8; 162];
         context_and_hash[..64].fill(0x20);
         let ctx = b"TLS 1.3, server CertificateVerify";
         context_and_hash[64..64 + ctx.len()].copy_from_slice(ctx);
         context_and_hash[64 + ctx.len()] = 0;
-        context_and_hash[65 + ctx.len()..65 + ctx.len() + 32].copy_from_slice(&th);
+        let hash_at = 65 + ctx.len();
+        context_and_hash[hash_at..hash_at + hash_len].copy_from_slice(&hash[..hash_len]);
 
         // A discarded result here would silently downgrade to an unverified
         // channel, so the signature outcome gates the state transition.
-        verifier.verify_server_signature(leaf_public_key, algorithm, &context_and_hash, signature)?;
+        verifier.verify_server_signature(
+            leaf_public_key,
+            algorithm,
+            &context_and_hash[..hash_at + hash_len],
+            signature,
+        )?;
 
-        self.transcript.update(&payload[..4 + hs_len]);
+        self.update_transcripts(&payload[..4 + hs_len]);
         self.state = HandshakeState::CertificateVerifyReceived;
         Ok(())
     }
@@ -735,7 +785,7 @@ impl HandshakeClient {
             return Err(TlsError::VerifyDataMismatch);
         }
 
-        self.transcript.update(&payload[..4 + hs_len]);
+        self.update_transcripts(&payload[..4 + hs_len]);
 
         // Derive Application Keys
         self.derive_application_keys()?;

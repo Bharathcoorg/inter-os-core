@@ -7,10 +7,11 @@
 //! because a PSS signature appears in a TLS `CertificateVerify` rather than in a
 //! certificate, and the salt length it was made with is not carried on the wire.
 
-use interos_std::crypto::{p256, rsa};
+use interos_std::crypto::{p256, p384, rsa};
 use interos_std::tls::certificate::{
-    asn1_time_to_unix, decode_ecdsa_signature, parse_rsa_public_key, DefaultCertVerifier,
-    ParsedCertificate, EC_PUBLIC_KEY_OID, PRIME256V1_OID, RSA_ENCRYPTION_OID, SHA256_WITH_RSA_OID,
+    asn1_time_to_unix, declares_advertised_scheme, decode_ecdsa_signature, parse_rsa_public_key,
+    spki_is_verifiable, verify_link, DefaultCertVerifier, ParsedCertificate, EC_PUBLIC_KEY_OID,
+    ECDSA_WITH_SHA384_OID, PRIME256V1_OID, RSA_ENCRYPTION_OID, SECP384R1_OID, SHA256_WITH_RSA_OID,
 };
 use interos_std::tls::handshake::{HandshakeClient, HandshakeState};
 use interos_std::tls::TlsError;
@@ -202,11 +203,11 @@ fn verifies_an_ecdsa_p256_certificate_under_its_issuer() {
     assert_eq!(leaf.spki_public_key.len(), 65, "an uncompressed point");
     assert_eq!(leaf.spki_public_key[0], 0x04);
 
-    let pair = decode_ecdsa_signature(leaf.signature_value).unwrap();
+    let pair = decode_ecdsa_signature::<64>(leaf.signature_value).unwrap();
     assert!(p256::verify(
         issuer.spki_public_key,
         leaf.tbs_raw,
-        &decode_ecdsa_signature(leaf.signature_value).unwrap()
+        &decode_ecdsa_signature::<64>(leaf.signature_value).unwrap()
     ));
     // The leaf's own key did not sign the leaf: the check is key-specific, not
     // just a shape test on the two scalars.
@@ -219,7 +220,7 @@ fn refuses_tampered_ecdsa_signatures_and_points() {
     let leaf_der = fixture("p256_leaf.der");
     let issuer = ParsedCertificate::parse(&issuer_der).unwrap();
     let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
-    let pair = decode_ecdsa_signature(leaf.signature_value).unwrap();
+    let pair = decode_ecdsa_signature::<64>(leaf.signature_value).unwrap();
     let key = issuer.spki_public_key;
 
     for byte in 0..64 {
@@ -246,21 +247,121 @@ fn refuses_tampered_ecdsa_signatures_and_points() {
 fn decodes_an_ecdsa_signature_and_refuses_garbage() {
     let leaf_der = fixture("p256_leaf.der");
     let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
-    let pair = decode_ecdsa_signature(leaf.signature_value).unwrap();
+    let pair = decode_ecdsa_signature::<64>(leaf.signature_value).unwrap();
     // The two halves are the r and s the DER carried, big-endian and unpadded.
     let r = &pair[..32];
     let s = &pair[32..];
     assert_ne!(r, &[0u8; 32][..]);
     assert_ne!(s, &[0u8; 32][..]);
 
-    assert!(decode_ecdsa_signature(&[]).is_err());
-    assert!(decode_ecdsa_signature(&[0x30, 0x00]).is_err());
+    assert!(decode_ecdsa_signature::<64>(&[]).is_err());
+    assert!(decode_ecdsa_signature::<64>(&[0x30, 0x00]).is_err());
     // An `r` wider than a scalar does not fit the frame the verifier takes.
     let mut oversized = vec![0x30, 0x45, 0x02, 0x21];
     oversized.extend_from_slice(&[0xff; 33]);
     oversized.extend_from_slice(&[0x02, 0x20]);
     oversized.extend_from_slice(&[0x01; 32]);
-    assert!(decode_ecdsa_signature(&oversized).is_err());
+    assert!(decode_ecdsa_signature::<64>(&oversized).is_err());
+}
+
+#[test]
+fn verifies_an_ecdsa_p384_certificate_under_its_issuer() {
+    // OpenSSL signed this pair on the P-384 curve, so what agrees here is this
+    // verifier and a second implementation of FIPS 186-5 — not this verifier and
+    // itself. The chain walk's own entry point is the first call, because it is
+    // the one path that reads the declared OID, the key shape, the DER pair and
+    // the curve arithmetic in that order.
+    let issuer_der = fixture("p384_issuer.der");
+    let leaf_der = fixture("p384_leaf.der");
+    let issuer = ParsedCertificate::parse(&issuer_der).unwrap();
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+
+    assert_eq!(issuer.spki_algorithm_oid, EC_PUBLIC_KEY_OID);
+    assert_eq!(issuer.spki_params, SECP384R1_OID, "the curve is SPKI parameters");
+    assert_eq!(leaf.spki_params, SECP384R1_OID);
+    assert_eq!(leaf.sig_alg_oid, ECDSA_WITH_SHA384_OID);
+    assert_eq!(leaf.spki_public_key.len(), 97, "an uncompressed P-384 point");
+    assert_eq!(leaf.spki_public_key[0], 0x04);
+    assert!(spki_is_verifiable(&issuer) && spki_is_verifiable(&leaf));
+    assert!(
+        declares_advertised_scheme(&leaf),
+        "ecdsa-with-SHA384 is on the advertised list"
+    );
+
+    verify_link(&leaf, &issuer).expect("OpenSSL's own P-384 signature verifies");
+
+    let pair = decode_ecdsa_signature::<96>(leaf.signature_value).unwrap();
+    assert!(p384::verify(issuer.spki_public_key, leaf.tbs_raw, &pair));
+    assert_ne!(&pair[..48], &[0u8; 48][..], "r is a real scalar");
+    assert_ne!(&pair[48..], &[0u8; 48][..], "s is a real scalar");
+    // The leaf's own key did not sign the leaf: the check is key-specific, not
+    // just a shape test on the two scalars.
+    assert!(!p384::verify(leaf.spki_public_key, leaf.tbs_raw, &pair));
+}
+
+#[test]
+fn refuses_tampered_p384_signatures_and_points() {
+    let issuer_der = fixture("p384_issuer.der");
+    let leaf_der = fixture("p384_leaf.der");
+    let issuer = ParsedCertificate::parse(&issuer_der).unwrap();
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    let pair = decode_ecdsa_signature::<96>(leaf.signature_value).unwrap();
+    let key = issuer.spki_public_key;
+
+    for byte in 0..96 {
+        let mut broken = pair;
+        broken[byte] ^= 0x01;
+        assert!(!p384::verify(key, leaf.tbs_raw, &broken), "scalar byte {byte}");
+    }
+
+    let mut tampered = leaf.tbs_raw.to_vec();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    assert!(!p384::verify(key, &tampered, &pair));
+
+    // A point that is not on the curve, and one that is not even P-384 wide, are
+    // both refused: the width is what stops a P-256 key being read as a P-384 one.
+    let mut not_a_point = [0u8; 97];
+    not_a_point[0] = 0x04;
+    assert!(!p384::verify(&not_a_point, leaf.tbs_raw, &pair));
+    let mut p256_sized = key[..65].to_vec();
+    p256_sized[0] = 0x04;
+    assert!(!p384::verify(&p256_sized, leaf.tbs_raw, &pair));
+}
+
+#[test]
+fn each_curve_gets_only_its_own_scalars_and_keys() {
+    // The two curves share a DER shape, so width is the whole defence: a P-384
+    // pair squeezed into the P-256 frame would truncate `r` and then check a
+    // signature nobody made, and a P-256 issuer handed a P-384 leaf's declared
+    // scheme would be the same mistake from the other side.
+    let leaf_der = fixture("p384_leaf.der");
+    let leaf = ParsedCertificate::parse(&leaf_der).unwrap();
+    assert_eq!(
+        decode_ecdsa_signature::<64>(leaf.signature_value),
+        Err(TlsError::CertificateParsingError),
+        "a 48-byte scalar does not fit a 32-byte frame"
+    );
+
+    let p256_der = fixture("p256_leaf.der");
+    let p256_issuer_der = fixture("p256_issuer.der");
+    let p384_issuer_der = fixture("p384_issuer.der");
+    let p256_leaf = ParsedCertificate::parse(&p256_der).unwrap();
+    let p256_issuer = ParsedCertificate::parse(&p256_issuer_der).unwrap();
+    let p384_issuer = ParsedCertificate::parse(&p384_issuer_der).unwrap();
+
+    // Sanity: the P-256 fixture does verify under its own issuer.
+    verify_link(&p256_leaf, &p256_issuer).expect("the P-256 pair still verifies");
+    assert_eq!(
+        verify_link(&p256_leaf, &p384_issuer),
+        Err(TlsError::UnsupportedSignatureScheme),
+        "a P-384 point is not a P-256 key"
+    );
+    assert_eq!(
+        verify_link(&leaf, &p256_issuer),
+        Err(TlsError::UnsupportedSignatureScheme),
+        "a P-256 point is not a P-384 key"
+    );
 }
 
 /// The 24-bit lengths the TLS 1.3 `Certificate` message uses for the handshake
