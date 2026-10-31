@@ -15,10 +15,13 @@ pub use embedding::{
 pub use gguf::{
     find_installable_model, find_metadata_string, find_tensor, find_tensor_stream, listed_size,
     parse_tensor_info, parse_tensor_info_stream, probe_all_models, probe_embedding_model,
-    probe_generative_model, probe_gguf_header, read_gguf_header, scan_file_for_tensor,
-    tensor_byte_size, GgufError, GgufHeader, GgufStream, GgufTensorInfo, ProbedModels,
-    GGUF_MAGIC, MODEL_SOURCE_TREES, PATH_EMBEDDING_MODEL_DATA, PATH_EMBEDDING_MODEL_SYSTEM,
-    PATH_GENERATIVE_MODEL_DATA, PATH_GENERATIVE_MODEL_SYSTEM, PATH_LOCAL_MODEL_DATA,
+    probe_generative_model, probe_gguf_header, read_gguf_header, read_model_info,
+    read_tokenizer_info, scan_file_for_tensor, tensor_byte_size, BufferedSource, GgufError,
+    GgufHeader, GgufStream, GgufTensorInfo, GgufTokenizerInfo, ProbedModels, StringReading,
+    TemplateSource, VocabReading, DEFAULT_CHAT_TEMPLATE, GGUF_MAGIC, MAX_CHAT_TEMPLATE_LEN,
+    MAX_STRING_ARRAY_ELEMENTS, METADATA_WINDOW_BYTES, MODEL_SOURCE_TREES, PATH_EMBEDDING_MODEL_DATA,
+    PATH_EMBEDDING_MODEL_SYSTEM, PATH_GENERATIVE_MODEL_DATA, PATH_GENERATIVE_MODEL_SYSTEM,
+    PATH_LOCAL_MODEL_DATA, PROMPT_MARKER,
 };
 pub use inference::{
     apply_rope, dequantize_q4_0, dequantize_q8_0, extract_embedding, forward_step, gemv,
@@ -689,6 +692,62 @@ enum ModelGap {
     Declaration(&'static str, Option<u32>, usize),
 }
 
+/// Writes what the tokenizer walk reached in the same model file.
+///
+/// WHY it names what the file did not declare: the engine has a built-in template
+/// and a built-in default vocabulary width, and a screen that showed only the
+/// dimensions would leave a person guessing which of the two the answer ran on.
+/// Every clause here is a statement about the file -- read, counted, refused for
+/// length, or absent -- and never a restating of what the engine fell back to as
+/// though the file had said it.
+fn tokenizer_clause(tok: &gguf::GgufTokenizerInfo, notice: &mut Notice) {
+    if tok.declares_no_tokenizer() {
+        notice.word(b", tokenizer absent, built-in template in use");
+        if let Some(key) = tok.truncated_in {
+            notice.word(b", file ended inside ");
+            notice.word(key);
+        }
+        return;
+    }
+    if tok.vocab_counted_not_loaded() {
+        notice.word(b", vocabulary counted not loaded");
+    }
+    match tok.template_reading {
+        gguf::StringReading::Read(len) => {
+            notice.word(b", template ");
+            notice.number(len as u32);
+            notice.word(b" bytes from file");
+        }
+        gguf::StringReading::Absent => notice.word(b", template built-in default"),
+        gguf::StringReading::RefusedTooLong(stated) => {
+            notice.word(b", template ");
+            notice.byte_count(stated);
+            notice.word(b" bytes refused");
+        }
+    }
+    if tok.bos_token_id.is_some() || tok.eos_token_id.is_some() || tok.pad_token_id.is_some() {
+        notice.word(b", bos ");
+        notice.number(tok.bos_token_id.unwrap_or(u32::MAX));
+        notice.word(b" eos ");
+        notice.number(tok.eos_token_id.unwrap_or(u32::MAX));
+        notice.word(b" pad ");
+        notice.number(tok.pad_token_id.unwrap_or(u32::MAX));
+    } else {
+        notice.word(b", no token ids");
+    }
+    if let Some(declared) = tok.add_bos_token {
+        notice.word(if declared { b", add-bos 1" } else { b", add-bos 0" });
+    }
+    if let Some(pre) = tok.pre_name() {
+        notice.word(b", pre ");
+        notice.word(pre.as_bytes());
+    }
+    if let Some(key) = tok.truncated_in {
+        notice.word(b", file ended inside ");
+        notice.word(key);
+    }
+}
+
 /// Builds the notice that answers a generative query when the model file is on
 /// the disk and nothing was run from it.
 ///
@@ -698,10 +757,16 @@ enum ModelGap {
 /// the user is in, and writes down the number the next stage has to satisfy.
 /// Counting the prompt's bytes says the words arrived, which is the one thing
 /// the user can no longer infer from an answer that never came.
+///
+/// WHY the tokenizer is a parameter and not a field of `info`: the two walks stop
+/// for different reasons -- one at the vocabulary, one past it -- and a notice
+/// built without the tokenizer walk still says everything it knows, which is what
+/// the `None` callers are.
 fn model_gap_notice<'a>(
     info: &gguf::GgufModelInfo,
     gap: ModelGap,
     prompt: &[u8],
+    tokenizer: Option<&gguf::GgufTokenizerInfo>,
     out: &'a mut [u8],
 ) -> &'a [u8] {
     let mut notice = Notice::new(out);
@@ -719,9 +784,17 @@ fn model_gap_notice<'a>(
             notice.number(info.hidden_dim.unwrap_or(0));
             notice.word(b" wide over ");
             notice.number(info.num_layers.unwrap_or(0));
-            notice.word(b" blocks, vocabulary ");
-            notice.number(info.vocab_size.unwrap_or(0));
-            notice.word(b" tokens");
+            // WHY the vocabulary is named as undeclared when the file never stated
+            // it: "vocabulary 0 tokens" is a number the file did not give, and a
+            // stripped embedding model is the case that reads it.
+            match info.vocab_size {
+                Some(tokens) => {
+                    notice.word(b" blocks, vocabulary ");
+                    notice.number(tokens);
+                    notice.word(b" tokens");
+                }
+                None => notice.word(b" blocks, vocabulary undeclared"),
+            }
             // WHY two endings for one shape: a file whose tensors the engine cannot
             // read and a file that holds no tensors at all call for different next
             // moves, and only one of them is a placeholder install.
@@ -743,6 +816,9 @@ fn model_gap_notice<'a>(
             notice.word(b", and states no ");
             notice.word(key.as_bytes());
         }
+    }
+    if let Some(tok) = tokenizer {
+        tokenizer_clause(tok, &mut notice);
     }
     notice.word(b"; the prompt's ");
     notice.number(prompt.len() as u32);
@@ -1016,9 +1092,23 @@ pub fn handle_ipc_inference_query(
                                             return;
                                         }
                                     };
-                                    let mut scratch = [0u8; 240];
-                                    let notice =
-                                        model_gap_notice(&info, gap, prompt_text, &mut scratch);
+                                    // The file's own tokenizer declarations, read by
+                                    // the walk that can pass the vocabulary the walk
+                                    // above stops at.
+                                    let tokenizer = gguf::read_tokenizer_info(path).ok();
+                                    // WHY this window is wider than the one the
+                                    // branch below uses: this notice carries the
+                                    // vocabulary's count and where the template came
+                                    // from as well, and the shorter one would cut the
+                                    // sentence off mid-word.
+                                    let mut scratch = [0u8; 320];
+                                    let notice = model_gap_notice(
+                                        &info,
+                                        gap,
+                                        prompt_text,
+                                        tokenizer.as_ref(),
+                                        &mut scratch,
+                                    );
                                     reply_with_answer(
                                         sender_task_id,
                                         std::ai::STATUS_UNSUPPORTED,
@@ -1032,6 +1122,7 @@ pub fn handle_ipc_inference_query(
                                         &info,
                                         ModelGap::Declaration(key, None, 0),
                                         prompt_text,
+                                        None,
                                         &mut scratch,
                                     );
                                     reply_with_answer(
@@ -1061,11 +1152,13 @@ pub fn handle_ipc_inference_query(
                             let prompt_text = extract_prompt_text(payload);
                             match gguf::read_model_info(path) {
                                 Ok(info) => {
-                                    let mut scratch = [0u8; 240];
+                                    let tokenizer = gguf::read_tokenizer_info(path).ok();
+                                    let mut scratch = [0u8; 320];
                                     let notice = model_gap_notice(
                                         &info,
                                         ModelGap::NoTensors,
                                         prompt_text,
+                                        tokenizer.as_ref(),
                                         &mut scratch,
                                     );
                                     reply_with_answer(
@@ -1081,6 +1174,7 @@ pub fn handle_ipc_inference_query(
                                         &info,
                                         ModelGap::Declaration(key, None, 0),
                                         prompt_text,
+                                        None,
                                         &mut scratch,
                                     );
                                     reply_with_answer(
@@ -1787,6 +1881,7 @@ mod tests {
             &info,
             ModelGap::Configured,
             b"Summarize my notifications",
+            None,
             &mut out,
         );
         assert_eq!(
@@ -1801,7 +1896,7 @@ mod tests {
     fn test_model_gap_notice_says_so_when_the_file_holds_no_tensors() {
         let info = declared(b"gemma2", 64, 2, 290);
         let mut out = [0u8; 240];
-        let notice = model_gap_notice(&info, ModelGap::NoTensors, b"hello", &mut out);
+        let notice = model_gap_notice(&info, ModelGap::NoTensors, b"hello", None, &mut out);
         assert_eq!(
             notice,
             b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 290 tokens, and holds no tensors; the prompt's 5 bytes were not answered."
@@ -1816,6 +1911,7 @@ mod tests {
             &info,
             ModelGap::Declaration("<arch>.embedding_length", Some(2304), 256),
             b"hi",
+            None,
             &mut out,
         );
         assert_eq!(
@@ -1831,11 +1927,127 @@ mod tests {
             &gguf::GgufModelInfo::empty(),
             ModelGap::Declaration("<arch>.block_count", None, 0),
             b"",
+            None,
             &mut out,
         );
         assert_eq!(
             notice,
             b"Model file states no architecture, and states no <arch>.block_count; the prompt's 0 bytes were not answered."
+        );
+    }
+
+    /// A tokenizer walk whose vocabulary sits past the reader's load cap and whose
+    /// template the walk held -- the shape a real Gemma file leaves.
+    fn walked_vocab_and_template() -> gguf::GgufTokenizerInfo {
+        let mut tok = gguf::GgufTokenizerInfo::empty();
+        tok.vocab = gguf::VocabReading::Counted { elements: 256_000 };
+        tok.bos_token_id = Some(2);
+        tok.eos_token_id = Some(1);
+        tok.pad_token_id = Some(0);
+        tok.add_bos_token = Some(true);
+        tok.pre[..5].copy_from_slice(b"gemma");
+        tok.pre_reading = gguf::StringReading::Read(5);
+        let template = b"<start_of_turn>user\n{prompt}";
+        tok.chat_template[..template.len()].copy_from_slice(template);
+        tok.template_reading = gguf::StringReading::Read(template.len());
+        tok
+    }
+
+    #[test]
+    fn test_the_notice_carries_the_counted_vocabulary_and_the_template_it_read() {
+        let info = declared(b"gemma2", 64, 2, 256_000);
+        let mut out = [0u8; 320];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Configured,
+            b"hello",
+            Some(&walked_vocab_and_template()),
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 28 bytes from file, bos 2 eos 1 pad 0, add-bos 1, pre gemma; the prompt's 5 bytes were not answered."
+        );
+    }
+
+    /// WHY this is its own case: the platform has a built-in template, and a screen
+    /// that showed a formatted prompt could not tell the person whether the model's
+    /// own formatting or the platform's default ran. The answer names the default.
+    #[test]
+    fn test_the_notice_names_the_built_in_default_when_the_file_declared_no_tokenizer() {
+        let mut info = declared(b"gemma2", 64, 2, 290);
+        info.vocab_size = None;
+        let mut out = [0u8; 320];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::NoTensors,
+            b"hello",
+            Some(&gguf::GgufTokenizerInfo::empty()),
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary undeclared, and holds no tensors, tokenizer absent, built-in template in use; the prompt's 5 bytes were not answered."
+        );
+    }
+
+    #[test]
+    fn test_the_notice_reports_a_refused_template_by_the_length_the_file_stated() {
+        let mut tok = gguf::GgufTokenizerInfo::empty();
+        tok.vocab = gguf::VocabReading::Counted { elements: 256_000 };
+        tok.template_reading = gguf::StringReading::RefusedTooLong(4_096);
+        let mut info = declared(b"gemma2", 64, 2, 256_000);
+        info.intermediate_dim = Some(128);
+        info.num_heads = Some(4);
+        info.head_dim = Some(16);
+        let mut out = [0u8; 320];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Configured,
+            b"",
+            Some(&tok),
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 4096 bytes refused, no token ids; the prompt's 0 bytes were not answered."
+        );
+        // A refused template is not an empty one: the engine runs the default, and
+        // the walk keeps the length the file gave.
+        assert_eq!(
+            tok.active_chat_template().1,
+            gguf::TemplateSource::BuiltInDefault
+        );
+    }
+
+    /// WHY the worst case is measured and not assumed: `Notice` stops at the end of
+    /// its window without complaining, and a notice cut mid-sentence is a sentence
+    /// that no longer says what the file said. Every clause the walk can write is
+    /// set at once here -- the widest numbers, a counted vocabulary, a read
+    /// template, all three token ids, the flag, the pre-name and a truncation --
+    /// because that is the only shape that reaches the window's end.
+    #[test]
+    fn test_the_longest_notice_still_fits_the_window_it_is_written_in() {
+        let mut tok = walked_vocab_and_template();
+        tok.truncated_in = Some(b"tokenizer.ggml.tokens");
+        let info = declared(b"gemma2", 2_048, 26, 256_000);
+        let mut out = [0u8; 320];
+        let window = out.len();
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Configured,
+            b"a prompt of thirty bytes or thereabouts",
+            Some(&tok),
+            &mut out,
+        );
+        let text = core::str::from_utf8(notice).unwrap_or("<unprintable>");
+        assert!(
+            notice.len() < window,
+            "the {window}-byte window is exactly full, so Notice was cutting words off: {text}"
+        );
+        assert!(
+            text.ends_with("bytes were not answered."),
+            "the whole sentence did not survive the walk's clauses: {text}"
         );
     }
 

@@ -114,6 +114,214 @@ def policy_arm(services: str, name: str) -> str:
     raise AssertionError(f"unbalanced braces in the {name} policy arm")
 
 
+def test_the_walk_counts_a_vocabulary_it_refuses_to_load():
+    """The engine needs a vocabulary's width, not its 256,000 strings.
+
+    A real Gemma array is sixty times the reader's load cap, so the cap cannot
+    be raised and the array cannot be held. The walk takes the element count
+    from the array's own header, records it as counted-not-loaded, and says in
+    the notice that the number did not come from bytes it read.
+    """
+    gguf = read("gguf.rs")
+    assert "pub const MAX_TOKENIZER_PRE_LEN: usize = 32;" in gguf
+    assert "pub const MAX_CHAT_TEMPLATE_LEN: usize = 1024;" in gguf
+    assert "pub const METADATA_WINDOW_BYTES: usize = 512;" in gguf
+    assert "pub enum VocabReading {" in gguf
+    for outcome in (
+        "Absent,",
+        "Counted { elements: u32 },",
+        "BeyondCount { stated: u64 },",
+        "Truncated { stated: u32 },",
+    ):
+        assert outcome in gguf, f"VocabReading no longer separates {outcome!r}"
+    assert "pub fn vocab_counted_not_loaded(&self) -> bool" in gguf
+    # The count comes from the array header, and the elements are stepped over by
+    # their length prefixes -- never copied into anything.
+    stepper = function_body(gguf, "fn step_over_string_array")
+    assert "stream.read_u64()" in stepper
+    assert "stream.skip(" in stepper
+    for heap in ("Vec::", "String::", "to_owned(", "copy_from_slice"):
+        assert heap not in stepper, f"the vocabulary step loads bytes with {heap!r}"
+
+
+def test_a_key_declared_after_the_array_is_still_reached():
+    """`tokenizer.chat_template` sits past the vocabulary in a real Gemma file.
+
+    WHY the walk compares whole keys: `metadata_field` matches only the last
+    dotted segment, so a file carrying `some.other.pre` would otherwise set the
+    tokenizer's family name. And WHY a second walk at all: the configuration
+    walk stops at the vocabulary by design, so the template needs a pass that
+    carries on past it.
+    """
+    gguf = read("gguf.rs")
+    walk = function_body(gguf, "fn walk_tokenizer_kv")
+    for key in (
+        'b"tokenizer.ggml.tokens"',
+        'b"tokenizer.ggml.bos_token_id"',
+        'b"tokenizer.ggml.eos_token_id"',
+        'b"tokenizer.ggml.padding_token_id"',
+        'b"tokenizer.ggml.add_bos_token"',
+        'b"tokenizer.ggml.pre"',
+        'b"tokenizer.chat_template"',
+    ):
+        assert key in gguf, f"the walk no longer names {key}"
+    assert "key == KEY_" in walk, "the walk matched a key by suffix instead of whole"
+    assert "metadata_field(" not in walk, "a suffix match would let another family set these"
+    # The count is taken, the array stepped over, and the loop carries on.
+    assert walk.index("VocabReading::Counted { elements }") < walk.index(
+        "step_over_string_array(stream, elements as u64)"
+    )
+    assert walk.index("step_over_string_array(stream, elements as u64)") < walk.index(
+        "key == KEY_CHAT_TEMPLATE"
+    )
+    assert "pub fn read_tokenizer_info(path: &str) -> Result<GgufTokenizerInfo, GgufError>" in gguf
+    body = function_body(gguf, "pub fn read_tokenizer_info(path:")
+    assert "GgufStream::buffered_from_file(fd)" in body
+    assert "std::fs_close(fd)" in body, "the walk leaks the model file's descriptor"
+
+
+def test_a_file_that_ends_inside_the_array_reports_the_key_not_a_panic():
+    """A truncated file still declared what it got to.
+
+    WHY running out is an `Ok`: the walk's job is to say what the file stated,
+    and a file that stopped mid-vocabulary stated a count before it stopped. The
+    reader names the key it ran out inside and keeps every key it had reached;
+    it does not fail the whole read, because the engine's next move with a
+    half-file is to say which half it has.
+    """
+    gguf = read("gguf.rs")
+    assert "pub truncated_in: Option<&'static [u8]>," in gguf
+    reader = function_body(gguf, "pub fn read_tokenizer_info_stream")
+    assert "Err(GgufError::BufferTooShort) | Err(GgufError::ReadFailed) => {}" in reader
+    assert "unwrap()" not in reader and "panic!" not in reader
+    walk = function_body(gguf, "fn walk_tokenizer_kv")
+    assert "$info.truncated_in = Some($key)" in gguf, "the pair macro lost the key's name"
+    assert "info.truncated_in = Some(KEY_TOKENS)" in walk
+    assert "VocabReading::Truncated {" in walk
+    # A read that ran out inside the vocabulary still reports the count the file
+    # gave, so the engine is not told a truncated file declared no vocabulary.
+    assert "stated: elements," in walk
+
+
+def test_an_over_long_template_is_refused_whole_by_the_length_the_file_stated():
+    """A 4000-byte template must not be answered as a 1024-byte one.
+
+    Silently cutting a template to the reader's window would run the model's own
+    formatting wrong and report it as the file's. The reader refuses by the
+    length the file declares, before copying a byte, and reports that number.
+    """
+    gguf = read("gguf.rs")
+    assert "RefusedTooLong(u64)," in gguf
+    body = function_body(gguf, "fn read_bounded_string")
+    assert body.index("if need > dst.len()") < body.index("stream.read_exact("), (
+        "the reader copied into the window before it checked the length"
+    )
+    assert "return Ok(StringReading::RefusedTooLong(stated))" in body
+    # A refused value is stepped past, so the walk reaches the keys after it.
+    assert "stream.skip(need)" in body
+
+
+def test_a_flag_is_read_as_the_one_byte_gguf_type_seven_is():
+    """`add_bos_token` is a bool: type 7, one byte.
+
+    WHY it is its own reader: `read_epsilon` accepts only the two float widths
+    and `read_count` only the integer ones, so a bool routed through either is
+    either rejected out of hand or accepted at any width. And a byte that is
+    neither 0 nor 1 is not a declared flag, so the file gets said so.
+    """
+    gguf = read("gguf.rs")
+    bool_reader = function_body(gguf, "fn read_bool")
+    assert "if val_type != 7" in bool_reader
+    assert "let mut byte = [0u8; 1];" in bool_reader
+    assert "0 => Ok(false)," in bool_reader
+    assert "1 => Ok(true)," in bool_reader
+    assert "_ => Err(GgufError::InvalidMetadata)," in bool_reader
+    assert "read_bool(stream, val_type)" in function_body(gguf, "fn walk_tokenizer_kv")
+    # The float reader was not widened to take a bool: it still names only 6 and 12.
+    epsilon = function_body(gguf, "fn read_epsilon")
+    assert "6 =>" in epsilon and "12 =>" in epsilon
+    assert "7 =>" not in epsilon
+
+
+def test_a_file_with_no_tokenizer_block_loads_and_says_the_default_runs():
+    """A stripped-vocabulary embedding file has no tokenizer, and still loads.
+
+    WHY "absent" is not "empty": the platform has a built-in template, so the
+    reader has to tell a file that named none from one that named an empty
+    string -- and name which template then formatted the prompt.
+    """
+    gguf = read("gguf.rs")
+    assert "pub fn declares_no_tokenizer(&self) -> bool" in gguf
+    assert "pub enum TemplateSource {" in gguf
+    assert "BuiltInDefault," in gguf
+    assert 'pub const DEFAULT_CHAT_TEMPLATE: &str =' in gguf
+    assert "PROMPT_MARKER: &[u8] = b\"{prompt}\";" in gguf
+    # The seven keys the architecture work already made mandatory stay the only
+    # seven. Making a tokenizer string or id mandatory here would turn a file the
+    # engine loads today -- a stripped embedding model, an empty placeholder --
+    # into one it refuses, and would take `ModelGap::NoTensors` away.
+    missing = function_body(gguf, "pub fn missing_key")
+    assert missing.count("return Some(") == 7, (
+        "missing_key demands a key the engine did not require before this walk"
+    )
+    for added in ("chat_template", "bos_token", "eos_token", "padding_token", "add_bos", ".pre"):
+        assert added not in missing, f"missing_key now demands the new key {added!r}"
+    lib = lib_source()
+    assert ", tokenizer absent, built-in template in use" in lib
+
+
+def test_the_notice_carries_what_the_walk_read_counted_and_refused():
+    """The same status line that quotes the architecture now quotes the tokenizer.
+
+    WHY clauses are statements about the file: "template 1024 bytes from file",
+    "template 4096 bytes refused" and "template built-in default" are three
+    different facts about three different files, and only the first is the
+    model's own formatting.
+    """
+    lib = lib_source()
+    clause = function_body(lib, "fn tokenizer_clause")
+    for phrase in (
+        ", vocabulary counted not loaded",
+        " bytes from file",
+        ", template built-in default",
+        " bytes refused",
+        ", no token ids",
+        ", add-bos 1",
+        ", pre ",
+        ", file ended inside ",
+    ):
+        assert phrase in clause, f"the walk no longer says {phrase!r}"
+    arm = generative_arm(lib)
+    assert "gguf::read_tokenizer_info(path)" in arm
+    assert "tokenizer.as_ref()" in arm
+    # The refusals the walk cannot speak about keep their old 240-byte window.
+    assert arm.count("let mut scratch = [0u8; 320];") == 2
+    assert arm.count("let mut scratch = [0u8; 240];") == 2
+
+
+def test_the_real_shape_is_proved_where_a_256k_array_can_be_built():
+    """A committed Python test cannot hold a 256k-entry array.
+
+    `target/verify/` is gitignored, so the byte-level proof that the walk passes
+    a real Gemma vocabulary and reaches the key after it lives as a host-side
+    Rust test that builds the shape itself. This case pins that the proof still
+    has a name, so a future change cannot delete the only test that exercised
+    the array.
+    """
+    gguf = read("gguf.rs")
+    for proof in (
+        "fn test_tokenizer_walk_counts_a_vocabulary_far_beyond_its_own_load_cap",
+        "fn test_tokenizer_walk_reports_a_file_that_ends_inside_the_vocabulary",
+        "fn test_tokenizer_walk_refuses_a_template_over_its_cap_with_the_length_it_stated",
+        "fn test_tokenizer_walk_reads_a_flag_as_bool_type_7_and_refuses_any_other_width",
+        "fn test_tokenizer_walk_reports_a_file_that_declares_no_tokenizer_but_still_loads",
+        "fn test_tokenizer_walk_names_its_keys_whole_and_ignores_another_family",
+        "fn test_prompt_formatting_splices_at_the_marker_and_reports_why_it_could_not",
+    ):
+        assert proof in gguf, f"the walk's real-shape proof {proof!r} is gone"
+    assert "256_000" in gguf, "no test builds a vocabulary past the load cap any more"
+
+
 def test_the_generative_arm_answers_nothing_with_success():
     """The arm used to reply STATUS_SUCCESS from weights it had not loaded."""
     arm = generative_arm(lib_source())
@@ -355,6 +563,109 @@ def test_an_install_mints_no_new_authority():
     assert "pub const SERVICE_STORAGE_TASK_ID: u64 = 0xFFFF_0003;" in sdk
     assert "pub const MSG_TYPE_INSTALL: u32 = 0x494E_534C;" in sdk
     assert "pub const MSG_TYPE_INSTALL_CHUNK: u32 = 0x494E_5343;" in sdk
+
+
+def _tokenizer_defects(gguf: str, lib: str) -> list:
+    """Every way this ticket's walk can go wrong, as a list of what was seen.
+
+    WHY a detector that returns its findings instead of asserting: the same run
+    has to prove the live sources are clean and that a broken source is caught.
+    A file of `assert`s can only do the first.
+    """
+    defects = []
+    walk = function_body(gguf, "fn walk_tokenizer_kv")
+    stepper = function_body(gguf, "fn step_over_string_array")
+    bounded = function_body(gguf, "fn read_bounded_string")
+    bool_reader = function_body(gguf, "fn read_bool")
+    notice = function_body(lib, "fn tokenizer_clause")
+
+    for heap in ("Vec::", "String::", "to_owned(", "copy_from_slice"):
+        if heap in stepper:
+            defects.append(f"the vocabulary step loads bytes into {heap!r}")
+    if "stream.skip(len)" not in stepper:
+        defects.append("the vocabulary is not passed by size arithmetic")
+    if "metadata_field(" in walk:
+        defects.append("a key was matched by its last dotted segment, not whole")
+    if "if need > dst.len()" not in bounded:
+        defects.append("a string was copied before its declared length was refused")
+    if "if val_type != 7" not in bool_reader:
+        defects.append("a bool is no longer read at the one byte GGUF type 7 is")
+    if "$info.truncated_in = Some($key)" not in gguf:
+        defects.append("a file that ends mid-value is no longer named by its key")
+    if "info.truncated_in = Some(KEY_TOKENS)" not in walk:
+        defects.append("a truncated vocabulary is reported as no vocabulary at all")
+    if "VocabReading::Truncated {" not in walk:
+        defects.append("a truncated vocabulary is reported as no vocabulary at all")
+    if ", vocabulary counted not loaded" not in notice:
+        defects.append("the notice calls a counted vocabulary a loaded one")
+    if " bytes refused" not in notice:
+        defects.append("the notice has lost the length a refused template stated")
+    if "tokenizer absent, built-in template in use" not in notice:
+        defects.append("a file with no tokenizer is reported as an empty template")
+    if "let mut scratch = [0u8; 320];" not in generative_arm(lib):
+        defects.append("the notice that carries the walk has no window of its own")
+    if function_body(gguf, "pub fn missing_key").count("return Some(") != 7:
+        defects.append("a tokenizer key was made mandatory, so a loadable file is now refused")
+    return defects
+
+
+def test_the_tokenizer_contract_can_fail():
+    """A walk whose detectors cannot be tripped is a walk nobody has tested.
+
+    Each source below is the live reader with one rule reversed: the vocabulary
+    loaded instead of counted, a key matched by suffix, an over-long template
+    cut to the window, a bool read at a float's width, a truncated file answered
+    as a file with no vocabulary, a notice that calls a refused template a read
+    one. The detector names every one, and stays silent on the tree as it is.
+    """
+    gguf = read("gguf.rs")
+    lib = lib_source()
+    assert _tokenizer_defects(gguf, lib) == []
+
+    live_walk = function_body(gguf, "fn walk_tokenizer_kv")
+
+    loading = gguf.replace(
+        "        stream.skip(len)?;",
+        "        let mut owned = host_std::vec::Vec::new();\n        stream.read_exact(&mut owned)?;",
+    )
+    assert _tokenizer_defects(loading, lib), "a walk that loaded the vocabulary passed"
+
+    suffix = gguf.replace("let key = &key_buf[..key_len];", "let key = metadata_field(&key_buf[..key_len]);")
+    assert _tokenizer_defects(suffix, lib), "a walk matching a key by suffix passed"
+
+    clamped = gguf.replace(
+        "    if need > dst.len() {\n        stream.skip(need)?;\n        return Ok(StringReading::RefusedTooLong(stated));\n    }\n    stream.read_exact(&mut dst[..need])?;",
+        "    let taken = need.min(dst.len());\n    stream.read_exact(&mut dst[..taken])?;",
+    )
+    assert clamped != gguf, "the silent-cut fixture no longer matches the reader"
+    assert _tokenizer_defects(clamped, lib), "a template cut to the window passed"
+
+    wide_bool = gguf.replace("    if val_type != 7 {\n        return Err(GgufError::InvalidMetadata);\n    }\n    let mut byte = [0u8; 1];", "    let mut byte = [0u8; 4];")
+    assert wide_bool != gguf, "the wide-flag fixture no longer matches the reader"
+    assert _tokenizer_defects(wide_bool, lib), "a bool read at four bytes passed"
+
+    lost_truncation = gguf.replace(live_walk, live_walk.replace("info.truncated_in = Some(KEY_TOKENS);\n", ""))
+    assert lost_truncation != gguf, "the truncated-file fixture no longer matches"
+    assert _tokenizer_defects(lost_truncation, lib), "a truncated file reported as clean passed"
+
+    silent_notice = lib.replace(
+        '        gguf::StringReading::RefusedTooLong(stated) => {\n            notice.word(b", template ");\n            notice.byte_count(stated);\n            notice.word(b" bytes refused");\n        }',
+        '        gguf::StringReading::RefusedTooLong(_) => notice.word(b", template built-in default")',
+    )
+    assert silent_notice != lib, "the lying-notice fixture no longer matches"
+    assert _tokenizer_defects(gguf, silent_notice), "a refused template called a default passed"
+
+    demanding = gguf.replace(
+        "pub fn missing_key(&self) -> Option<&'static str> {",
+        "pub fn missing_key(&self) -> Option<&'static str> {\n"
+        '        if self.template_reading == StringReading::Absent {\n'
+        '            return Some("tokenizer.chat_template");\n'
+        "        }",
+    )
+    assert demanding != gguf, "the mandatory-key fixture no longer matches"
+    assert _tokenizer_defects(demanding, lib), (
+        "a file the engine used to load is now refused, and nothing said so"
+    )
 
 
 def test_the_contract_can_fail():

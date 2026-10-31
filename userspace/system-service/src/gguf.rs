@@ -55,6 +55,32 @@ pub const MAX_ARCH_NAME_LEN: usize = 32;
 /// but a dead one. The array's own 12-byte header carries its element count,
 /// so the vocabulary size is read in one step and the elements are left alone.
 pub const MAX_STRING_ARRAY_ELEMENTS: usize = 4096;
+/// Longest `tokenizer.ggml.pre` name the reader will hold.
+///
+/// WHY so short: the value names a tokenizer family out of a fixed set -- `gemma`,
+/// `default`, `nova2` -- and a file stating more than this is not naming a family
+/// the engine could switch on anyway. Refusing it by length, with the length the
+/// file stated, is the honest answer.
+pub const MAX_TOKENIZER_PRE_LEN: usize = 32;
+/// Longest `tokenizer.chat_template` the reader will hold.
+///
+/// WHY a cap at all: the template is a program in a template language, and a real
+/// Gemma file carries one past a kilobyte. The reader holds what it can quote to
+/// the screen and what the prompt formatter can actually apply; a template longer
+/// than the window is reported with its length rather than cut down to something
+/// that reads like the model's own formatting and is not.
+pub const MAX_CHAT_TEMPLATE_LEN: usize = 1024;
+/// How many bytes the buffered reader moves at a time.
+///
+/// WHY a window and not a request per value: a real model file puts its
+/// 256,000-entry vocabulary in front of the keys the engine still needs, and a
+/// string array states no total size -- each element's own length prefix is what
+/// says where the next one starts. Reading a prefix per request would be half a
+/// million requests to pass one key. The window takes this many bytes at a time
+/// from the source and serves every prefix read and every step past it out of
+/// them, so the array is passed by size arithmetic in memory and the source is
+/// touched once per window.
+pub const METADATA_WINDOW_BYTES: usize = 512;
 
 /// Error types for GGUF parsing and model probing.
 ///
@@ -94,6 +120,31 @@ pub enum GgufError {
 pub enum GgufStream<'a> {
     Slice { data: &'a [u8], pos: usize },
     File { fd: u32, pos: usize },
+    /// One source read through a fixed window of `METADATA_WINDOW_BYTES`.
+    ///
+    /// WHY the walk that owns it uses this and not a plain `File`: the reader that
+    /// steps over a vocabulary does not know where the array ends until it has
+    /// passed the last length prefix, so it must be able to pull more bytes than it
+    /// is currently naming. A stream that hands bytes straight to the caller cannot
+    /// over-read; a window that the walk itself owns can, because the bytes it
+    /// pulled early are simply the next bytes it consumes.
+    Buffered {
+        src: BufferedSource<'a>,
+        held: [u8; METADATA_WINDOW_BYTES],
+        used: usize,
+        filled: usize,
+        pos: usize,
+        pulls: usize,
+    },
+}
+
+/// Where a `Buffered` stream's bytes come from.
+pub enum BufferedSource<'a> {
+    /// An in-memory file image, which is what the host-side tests drive the window
+    /// with -- the same stepping code, no syscalls.
+    Slice { data: &'a [u8], pos: usize },
+    /// A descriptor the platform holds, read a window at a time.
+    File { fd: u32 },
 }
 
 impl<'a> GgufStream<'a> {
@@ -105,10 +156,86 @@ impl<'a> GgufStream<'a> {
         Self::File { fd, pos: 0 }
     }
 
+    /// A slice read through the window, so the window's own bookkeeping is testable.
+    pub fn buffered_from_slice(data: &'a [u8]) -> Self {
+        Self::Buffered {
+            src: BufferedSource::Slice { data, pos: 0 },
+            held: [0u8; METADATA_WINDOW_BYTES],
+            used: 0,
+            filled: 0,
+            pos: 0,
+            pulls: 0,
+        }
+    }
+
+    /// A descriptor read through the window.
+    pub fn buffered_from_file(fd: u32) -> Self {
+        Self::Buffered {
+            src: BufferedSource::File { fd },
+            held: [0u8; METADATA_WINDOW_BYTES],
+            used: 0,
+            filled: 0,
+            pos: 0,
+            pulls: 0,
+        }
+    }
+
+    /// How many times the window had to touch its source, and `0` for a stream
+    /// that never buffers.
+    ///
+    /// WHY it is exposed: the claim being made about the window is a claim about
+    /// requests, not about bytes, and a number a test can read is the only way to
+    /// keep that claim honest.
+    pub fn pulls(&self) -> usize {
+        match self {
+            Self::Buffered { pulls, .. } => *pulls,
+            _ => 0,
+        }
+    }
+
+    /// Moves the unread tail to the front of the window and fills what is left of
+    /// the window from the source.
+    ///
+    /// WHY it fills the whole window rather than what was asked for: a request that
+    /// took exactly the eight bytes of the next length prefix would put the source
+    /// back at one request per token, which is the cost this window exists to avoid.
+    fn refill_window(
+        src: &mut BufferedSource<'a>,
+        held: &mut [u8],
+        used: &mut usize,
+        filled: &mut usize,
+        pulls: &mut usize,
+    ) -> Result<(), GgufError> {
+        let rest = *filled - *used;
+        if *used > 0 {
+            held[..*filled].copy_within(*used..*filled, 0);
+            *used = 0;
+        }
+        *filled = rest;
+        if rest >= held.len() {
+            return Ok(());
+        }
+        let pulled = match src {
+            BufferedSource::Slice { data, pos } => {
+                let take = data.len().saturating_sub(*pos).min(held.len() - rest);
+                held[rest..rest + take].copy_from_slice(&data[*pos..*pos + take]);
+                *pos += take;
+                take
+            }
+            BufferedSource::File { fd } => {
+                std::fs_read(*fd, &mut held[rest..]).map_err(|_| GgufError::ReadFailed)?
+            }
+        };
+        *filled += pulled;
+        *pulls += 1;
+        Ok(())
+    }
+
     pub fn position(&self) -> usize {
         match self {
             Self::Slice { pos, .. } => *pos,
             Self::File { pos, .. } => *pos,
+            Self::Buffered { pos, .. } => *pos,
         }
     }
 
@@ -139,6 +266,30 @@ impl<'a> GgufStream<'a> {
                 *pos = pos.checked_add(req_len).ok_or(GgufError::ArithmeticOverflow)?;
                 Ok(())
             }
+            Self::Buffered {
+                src,
+                held,
+                used,
+                filled,
+                pos,
+                pulls,
+            } => {
+                let mut done = 0usize;
+                while done < req_len {
+                    if *used == *filled {
+                        Self::refill_window(src, held, used, filled, pulls)?;
+                        if *filled == 0 {
+                            return Err(GgufError::BufferTooShort);
+                        }
+                    }
+                    let take = (req_len - done).min(*filled - *used);
+                    out[done..done + take].copy_from_slice(&held[*used..*used + take]);
+                    *used += take;
+                    *pos += take;
+                    done += take;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -165,6 +316,28 @@ impl<'a> GgufStream<'a> {
                     }
                     count = count.checked_sub(n).ok_or(GgufError::ArithmeticOverflow)?;
                     *pos = pos.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
+                }
+                Ok(())
+            }
+            Self::Buffered {
+                src,
+                held,
+                used,
+                filled,
+                pos,
+                pulls,
+            } => {
+                while count > 0 {
+                    if *used == *filled {
+                        Self::refill_window(src, held, used, filled, pulls)?;
+                        if *filled == 0 {
+                            return Err(GgufError::BufferTooShort);
+                        }
+                    }
+                    let take = count.min(*filled - *used);
+                    *used += take;
+                    *pos += take;
+                    count -= take;
                 }
                 Ok(())
             }
@@ -734,6 +907,27 @@ fn read_epsilon(stream: &mut GgufStream, val_type: u32) -> Result<f32, GgufError
     }
 }
 
+/// Reads the one-byte flag GGUF type 7 carries.
+///
+/// WHY it is its own reader and not `read_epsilon` or `read_count`: a boolean is
+/// one byte wide and no float width, so routing it through the float reader would
+/// reject every file that declares one, and routing it through the count reader
+/// would accept any byte at all -- including the 17 a corrupt file says is a
+/// flag. A value that is neither 0 nor 1 is not a declared boolean, so the file
+/// gets said so.
+fn read_bool(stream: &mut GgufStream, val_type: u32) -> Result<bool, GgufError> {
+    if val_type != 7 {
+        return Err(GgufError::InvalidMetadata);
+    }
+    let mut byte = [0u8; 1];
+    stream.read_exact(&mut byte)?;
+    match byte[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(GgufError::InvalidMetadata),
+    }
+}
+
 /// Walks the metadata block of a GGUF stream as far as it has to go to configure
 /// the engine, and no further.
 ///
@@ -825,6 +1019,463 @@ pub fn read_model_info(path: &str) -> Result<GgufModelInfo, GgufError> {
     let res = read_model_info_stream(&mut stream);
     let _ = std::fs_close(fd);
     res
+}
+
+/// The keys the tokenizer walk names, matched whole.
+///
+/// WHY whole and not by their last dotted segment: `metadata_field` answers with
+/// the bytes after the last dot, so `tokenizer.ggml.pre` and any other family's
+/// `something.else.pre` are the same name to it. The vocabulary keys are few,
+/// fixed and short, so the walk spends the byte comparison rather than letting a
+/// foreign key configure the tokenizer.
+const KEY_TOKENS: &[u8] = b"tokenizer.ggml.tokens";
+const KEY_BOS_ID: &[u8] = b"tokenizer.ggml.bos_token_id";
+const KEY_EOS_ID: &[u8] = b"tokenizer.ggml.eos_token_id";
+const KEY_PAD_ID: &[u8] = b"tokenizer.ggml.padding_token_id";
+const KEY_ADD_BOS: &[u8] = b"tokenizer.ggml.add_bos_token";
+const KEY_PRE: &[u8] = b"tokenizer.ggml.pre";
+const KEY_CHAT_TEMPLATE: &[u8] = b"tokenizer.chat_template";
+/// What the walk names a pair whose key it never got to read.
+const KEY_PAIR: &[u8] = b"<metadata pair>";
+
+/// The template the platform formats a prompt with when the model file names
+/// none, and the template it reports as the default in that case.
+///
+/// WHY a built-in at all: a generative model that ships without a template is
+/// still going to be asked to answer a turn, and the alternative to a stated
+/// default is each caller inventing one. It is reported as the platform's own,
+/// never as the file's.
+pub const DEFAULT_CHAT_TEMPLATE: &str =
+    "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
+
+/// Where the text the prompt formatter will use came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateSource {
+    /// The bytes the file declared, held whole by the walk.
+    FromFile,
+    /// The file declared no template the reader could hold, so the platform's
+    /// own default is in use -- and says so.
+    BuiltInDefault,
+}
+
+/// Why a prompt could not be formatted into the buffer it was offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptFit {
+    /// The template names no `{prompt}` marker, so the text has nowhere to go.
+    NoMarker,
+    /// Template plus text is longer than the buffer; the size that would have
+    /// fitted is reported.
+    TooLong { needed: usize },
+}
+
+/// What the walk did with a string it reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringReading {
+    /// The file does not name this key in the metadata the walk walked.
+    Absent,
+    /// The value was read whole: this many bytes are held by the reader.
+    Read(usize),
+    /// The file stated this many bytes, more than the reader's cap for this key.
+    /// Nothing was copied; the walk stepped past the value and reports the length.
+    RefusedTooLong(u64),
+}
+
+impl StringReading {
+    pub fn bytes(&self) -> Option<usize> {
+        match self {
+            Self::Read(len) => Some(*len),
+            _ => None,
+        }
+    }
+}
+
+/// What the walk did with `tokenizer.ggml.tokens`.
+///
+/// WHY a count is a complete answer here: the engine needs the vocabulary's width,
+/// and a GGUF string array states that in its own 12-byte header. The elements
+/// themselves are 256,000 strings the platform cannot hold and does not need to
+/// read in order to say how many there are, so they are stepped over by their
+/// length prefixes and never loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VocabReading {
+    /// The file names no vocabulary.
+    Absent,
+    /// The array header stated this many string elements; none were loaded.
+    Counted { elements: u32 },
+    /// The array header stated more elements than a count can name, which no real
+    /// vocabulary does. Nothing was stepped over.
+    BeyondCount { stated: u64 },
+    /// The array header stated this many elements and the file ended before the
+    /// walk had passed all of them.
+    Truncated { stated: u32 },
+}
+
+/// What the service knows about a model file's tokenizer, and how much of it the
+/// file itself said.
+///
+/// Every field starts unset. Nothing here is filled in with the value the engine
+/// was compiled with: a key the file did not declare is reported as a key the file
+/// did not declare, and the prompt formatter then says it is using the platform's
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GgufTokenizerInfo {
+    /// `tokenizer.ggml.tokens`, counted from the array's own header.
+    pub vocab: VocabReading,
+    /// `tokenizer.ggml.bos_token_id`
+    pub bos_token_id: Option<u32>,
+    /// `tokenizer.ggml.eos_token_id`
+    pub eos_token_id: Option<u32>,
+    /// `tokenizer.ggml.padding_token_id`
+    pub pad_token_id: Option<u32>,
+    /// `tokenizer.ggml.add_bos_token`, the one-byte flag of GGUF type 7.
+    pub add_bos_token: Option<bool>,
+    /// `tokenizer.ggml.pre`, the tokenizer family the file names.
+    pub pre: [u8; MAX_TOKENIZER_PRE_LEN],
+    pub pre_reading: StringReading,
+    /// `tokenizer.chat_template`
+    pub chat_template: [u8; MAX_CHAT_TEMPLATE_LEN],
+    pub template_reading: StringReading,
+    /// The key whose value the file did not finish writing, when it did not.
+    ///
+    /// WHY bytes and not `str`: the key the walk was holding is the bytes the file
+    /// wrote, and a notice quoting them has no reason to convert them first.
+    pub truncated_in: Option<&'static [u8]>,
+    /// Metadata pairs the walk stepped through to get here.
+    pub pairs_walked: u64,
+    /// How many times the window touched its source.
+    pub pulls: usize,
+}
+
+impl GgufTokenizerInfo {
+    pub const fn empty() -> Self {
+        Self {
+            vocab: VocabReading::Absent,
+            bos_token_id: None,
+            eos_token_id: None,
+            pad_token_id: None,
+            add_bos_token: None,
+            pre: [0u8; MAX_TOKENIZER_PRE_LEN],
+            pre_reading: StringReading::Absent,
+            chat_template: [0u8; MAX_CHAT_TEMPLATE_LEN],
+            template_reading: StringReading::Absent,
+            truncated_in: None,
+            pairs_walked: 0,
+            pulls: 0,
+        }
+    }
+
+    pub fn vocab_size(&self) -> Option<u32> {
+        match self.vocab {
+            VocabReading::Counted { elements } => Some(elements),
+            VocabReading::Truncated {
+                stated,
+            } => Some(stated),
+            _ => None,
+        }
+    }
+
+    /// Whether the vocabulary is larger than the reader is willing to load.
+    ///
+    /// WHY it is a question and not a failure: every real Gemma vocabulary is over
+    /// that bound, and the reader's answer is a count it got from the array's own
+    /// header, which is the number the engine runs on.
+    pub fn vocab_counted_not_loaded(&self) -> bool {
+        self.vocab_size()
+            .map(|elements| elements as usize > MAX_STRING_ARRAY_ELEMENTS)
+            .unwrap_or(false)
+    }
+
+    /// The template the file declared, when the walk reached and held it whole.
+    pub fn chat_template(&self) -> Option<&[u8]> {
+        match self.template_reading.bytes() {
+            Some(len) => Some(&self.chat_template[..len]),
+            None => None,
+        }
+    }
+
+    pub fn pre_name(&self) -> Option<&str> {
+        match self.pre_reading.bytes() {
+            Some(len) => core::str::from_utf8(&self.pre[..len]).ok(),
+            None => None,
+        }
+    }
+
+    /// The template in use and where it came from: the file's own when the walk
+    /// held it, the platform's default otherwise.
+    pub fn active_chat_template(&self) -> (&[u8], TemplateSource) {
+        match self.chat_template() {
+            Some(template) => (template, TemplateSource::FromFile),
+            None => (DEFAULT_CHAT_TEMPLATE.as_bytes(), TemplateSource::BuiltInDefault),
+        }
+    }
+
+    /// Whether the file named none of the tokenizer keys the walk asks for.
+    ///
+    /// WHY this is its own answer: a model file with no tokenizer block at all is
+    /// a real thing (an embedding model with a stripped vocabulary is one), and it
+    /// loads -- the engine just has no template or token ids of the file's to use,
+    /// which is a different statement from "the template is empty".
+    pub fn declares_no_tokenizer(&self) -> bool {
+        self.vocab == VocabReading::Absent
+            && self.bos_token_id.is_none()
+            && self.eos_token_id.is_none()
+            && self.pad_token_id.is_none()
+            && self.add_bos_token.is_none()
+            && self.pre_reading == StringReading::Absent
+            && self.template_reading == StringReading::Absent
+    }
+
+    /// Whether every key the walk names has been reached, so nothing further is
+    /// worth the cost of stepping through.
+    fn is_satisfied(&self) -> bool {
+        self.vocab != VocabReading::Absent
+            && self.bos_token_id.is_some()
+            && self.eos_token_id.is_some()
+            && self.pad_token_id.is_some()
+            && self.add_bos_token.is_some()
+            && self.pre_reading != StringReading::Absent
+            && self.template_reading != StringReading::Absent
+    }
+
+    /// Formats one user turn into `out` at the template's `{prompt}` marker.
+    ///
+    /// WHY it does not try to run the template: a GGUF chat template is a program
+    /// in a template language, with conditionals and loops over roles. This applies
+    /// the one shape the platform asks for -- a single user turn spliced at the
+    /// marker -- and reports `NoMarker` when the template has no such marker rather
+    /// than guessing where the text goes.
+    pub fn format_prompt(&self, user: &[u8], out: &mut [u8]) -> Result<usize, PromptFit> {
+        let (template, _) = self.active_chat_template();
+        let marker = template
+            .windows(PROMPT_MARKER.len())
+            .position(|window| window == PROMPT_MARKER);
+        let at = match marker {
+            Some(at) => at,
+            None => return Err(PromptFit::NoMarker),
+        };
+        let head = &template[..at];
+        let tail = &template[at + PROMPT_MARKER.len()..];
+        let needed = head.len() + user.len() + tail.len();
+        if needed > out.len() {
+            return Err(PromptFit::TooLong { needed });
+        }
+        out[..head.len()].copy_from_slice(head);
+        out[head.len()..head.len() + user.len()].copy_from_slice(user);
+        let after = head.len() + user.len();
+        out[after..after + tail.len()].copy_from_slice(tail);
+        Ok(needed)
+    }
+}
+
+/// The marker a chat template leaves for the user's own text.
+pub const PROMPT_MARKER: &[u8] = b"{prompt}";
+
+/// Steps over the elements of a string array without loading any of them.
+///
+/// WHY it reads the prefixes rather than the strings: a string array states no
+/// total size, so an element's start is only known once the one before it has been
+/// named. Over a windowed stream that is memory arithmetic -- the window is what
+/// touches the source, once per `METADATA_WINDOW_BYTES` -- and the array is passed
+/// by size instead of by a request per element.
+fn step_over_string_array(stream: &mut GgufStream, elements: u64) -> Result<(), GgufError> {
+    for _ in 0..elements {
+        let len = stream.read_u64()?;
+        let len = usize::try_from(len).map_err(|_| GgufError::ArithmeticOverflow)?;
+        stream.skip(len)?;
+    }
+    Ok(())
+}
+
+/// Reads a declared string into `dst`, refusing it by length before a byte of it
+/// is copied.
+fn read_bounded_string(
+    stream: &mut GgufStream,
+    val_type: u32,
+    dst: &mut [u8],
+) -> Result<StringReading, GgufError> {
+    if val_type != 8 {
+        return Err(GgufError::InvalidMetadata);
+    }
+    let stated = stream.read_u64()?;
+    let need = match usize::try_from(stated) {
+        Ok(need) => need,
+        // A length this wide is not a value the reader could hold or step over, so
+        // it is refused with the number the file stated.
+        Err(_) => return Ok(StringReading::RefusedTooLong(stated)),
+    };
+    if need > dst.len() {
+        stream.skip(need)?;
+        return Ok(StringReading::RefusedTooLong(stated));
+    }
+    stream.read_exact(&mut dst[..need])?;
+    Ok(StringReading::Read(need))
+}
+
+/// Walks a model file's metadata block for the keys the tokenizer needs.
+///
+/// WHY a walk of its own, run through a window: `read_model_info_stream` configures
+/// the engine from scalars and stops at the vocabulary, because the parameters it
+/// wants sit before it and anything past a 256,000-entry array costs the file's
+/// bytes to reach. `tokenizer.chat_template` sits exactly there in a real Gemma
+/// file, so this walk takes the vocabulary's count from the array's header, steps
+/// over the array by its length prefixes without loading it, and keeps going -- and
+/// reports which of its keys the file never named.
+pub fn read_tokenizer_info_stream(stream: &mut GgufStream) -> Result<GgufTokenizerInfo, GgufError> {
+    let header = GgufHeader::parse_stream(stream)?;
+    let mut info = GgufTokenizerInfo::empty();
+    match walk_tokenizer_kv(stream, header.kv_count, &mut info) {
+        Ok(()) => {}
+        // WHY a file that runs out is an `Ok`: the walk's job is to say what the
+        // file declared, and a truncated file declared things before it stopped
+        // having bytes. `truncated_in` names where, and every key reached stays.
+        Err(GgufError::BufferTooShort) | Err(GgufError::ReadFailed) => {}
+        Err(other) => return Err(other),
+    }
+    info.pulls = stream.pulls();
+    Ok(info)
+}
+
+/// Reads the model file at `path` for its tokenizer's declarations.
+///
+/// WHY the file is opened a second time rather than the first stream being shared:
+/// the configuration walk stops at the vocabulary and cannot be asked to carry on
+/// past it, and one pass over the metadata cannot serve two different stopping
+/// rules. The descriptor is opened, walked through a window, and closed.
+pub fn read_tokenizer_info(path: &str) -> Result<GgufTokenizerInfo, GgufError> {
+    let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
+    let mut stream = GgufStream::buffered_from_file(fd);
+    let res = read_tokenizer_info_stream(&mut stream);
+    let _ = std::fs_close(fd);
+    res
+}
+
+/// One pair of the walk's metadata pass.
+///
+/// WHY the truncation handling is a macro: the pair being read is named by the key
+/// the walk is holding at that moment, and a `?` would drop both the key and
+/// everything the walk had already read.
+macro_rules! tokenizer_pair {
+    ($result:expr, $key:expr, $info:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(GgufError::BufferTooShort) | Err(GgufError::ReadFailed) => {
+                $info.truncated_in = Some($key);
+                return Ok(());
+            }
+            Err(other) => return Err(other),
+        }
+    };
+}
+
+fn walk_tokenizer_kv(
+    stream: &mut GgufStream,
+    kv_count: u64,
+    info: &mut GgufTokenizerInfo,
+) -> Result<(), GgufError> {
+    for index in 0..kv_count {
+        if info.is_satisfied() {
+            break;
+        }
+        let key_len = tokenizer_pair!(stream.read_u64(), KEY_PAIR, info) as usize;
+        if key_len == 0 || key_len > MAX_METADATA_KEY_LEN {
+            tokenizer_pair!(stream.skip(key_len), KEY_PAIR, info);
+            let val_type = tokenizer_pair!(stream.read_u32(), KEY_PAIR, info);
+            tokenizer_pair!(
+                skip_metadata_value_stream(stream, val_type),
+                KEY_PAIR,
+                info
+            );
+            info.pairs_walked = index + 1;
+            continue;
+        }
+
+        let mut key_buf = [0u8; MAX_METADATA_KEY_LEN];
+        tokenizer_pair!(
+            stream.read_exact(&mut key_buf[..key_len]),
+            KEY_PAIR,
+            info
+        );
+        let key = &key_buf[..key_len];
+        let val_type = tokenizer_pair!(stream.read_u32(), KEY_PAIR, info);
+
+        if key == KEY_TOKENS {
+            if val_type != 9 {
+                return Err(GgufError::InvalidMetadata);
+            }
+            let elem_type = tokenizer_pair!(stream.read_u32(), KEY_TOKENS, info);
+            let stated = tokenizer_pair!(stream.read_u64(), KEY_TOKENS, info);
+            if elem_type != 8 {
+                return Err(GgufError::InvalidMetadata);
+            }
+            let elements = match u32::try_from(stated) {
+                Ok(elements) => elements,
+                // A vocabulary this wide cannot be stepped over by size either, so
+                // the walk says the count is beyond naming and stops.
+                Err(_) => {
+                    info.vocab = VocabReading::BeyondCount { stated };
+                    info.pairs_walked = index + 1;
+                    return Ok(());
+                }
+            };
+            info.vocab = VocabReading::Counted { elements };
+            if !info.is_satisfied() {
+                if let Err(e) = step_over_string_array(stream, elements as u64) {
+                    match e {
+                        GgufError::BufferTooShort | GgufError::ReadFailed => {
+                            info.truncated_in = Some(KEY_TOKENS);
+                            info.vocab = VocabReading::Truncated {
+                                stated: elements,
+                            };
+                            info.pairs_walked = index + 1;
+                            return Ok(());
+                        }
+                        other => return Err(other),
+                    }
+                }
+            }
+        } else if key == KEY_BOS_ID {
+            info.bos_token_id = Some(tokenizer_pair!(
+                read_count(stream, val_type),
+                KEY_BOS_ID,
+                info
+            ));
+        } else if key == KEY_EOS_ID {
+            info.eos_token_id = Some(tokenizer_pair!(
+                read_count(stream, val_type),
+                KEY_EOS_ID,
+                info
+            ));
+        } else if key == KEY_PAD_ID {
+            info.pad_token_id = Some(tokenizer_pair!(
+                read_count(stream, val_type),
+                KEY_PAD_ID,
+                info
+            ));
+        } else if key == KEY_ADD_BOS {
+            info.add_bos_token = Some(tokenizer_pair!(read_bool(stream, val_type), KEY_ADD_BOS, info));
+        } else if key == KEY_PRE {
+            info.pre_reading = tokenizer_pair!(
+                read_bounded_string(stream, val_type, &mut info.pre),
+                KEY_PRE,
+                info
+            );
+        } else if key == KEY_CHAT_TEMPLATE {
+            info.template_reading = tokenizer_pair!(
+                read_bounded_string(stream, val_type, &mut info.chat_template),
+                KEY_CHAT_TEMPLATE,
+                info
+            );
+        } else {
+            tokenizer_pair!(
+                skip_metadata_value_stream(stream, val_type),
+                KEY_PAIR,
+                info
+            );
+        }
+
+        info.pairs_walked = index + 1;
+    }
+    Ok(())
 }
 
 /// Parses a single GGUF tensor info entry from a streaming reader with checked arithmetic.
@@ -1751,5 +2402,324 @@ mod tests {
             read_model_info_stream(&mut GgufStream::from_slice(&buf[..off])),
             Err(GgufError::InvalidMetadata)
         );
+    }
+
+    // --- the tokenizer walk ---------------------------------------------------
+    //
+    // WHY these builders grow a vector instead of filling a fixed array: the shape
+    // being tested is a real Gemma file's, and a real Gemma file puts 256,000
+    // length-prefixed strings in front of the key the walk has to reach. That is
+    // megabytes of metadata, which no stack window holds -- the walk reads it
+    // through its own window, and only the test fixture needs room.
+    extern crate std as host_std;
+
+    fn v_key(out: &mut host_std::vec::Vec<u8>, key: &[u8]) {
+        out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        out.extend_from_slice(key);
+    }
+
+    fn v_string(out: &mut host_std::vec::Vec<u8>, key: &[u8], value: &[u8]) {
+        v_key(out, key);
+        out.extend_from_slice(&8u32.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(value);
+    }
+
+    fn v_u32(out: &mut host_std::vec::Vec<u8>, key: &[u8], value: u32) {
+        v_key(out, key);
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes GGUF's one-byte boolean, type 7.
+    fn v_bool(out: &mut host_std::vec::Vec<u8>, key: &[u8], value: bool) {
+        v_key(out, key);
+        out.extend_from_slice(&7u32.to_le_bytes());
+        out.push(if value { 1 } else { 0 });
+    }
+
+    /// Writes a string array of `elements` tokens, each `width` bytes, and returns
+    /// how many pairs the file now declares.
+    fn v_vocab(out: &mut host_std::vec::Vec<u8>, elements: u64, width: usize) {
+        v_key(out, KEY_TOKENS);
+        out.extend_from_slice(&9u32.to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes());
+        out.extend_from_slice(&elements.to_le_bytes());
+        for index in 0..elements {
+            out.extend_from_slice(&(width as u64).to_le_bytes());
+            for byte in 0..width {
+                out.push(b'a' + ((index as usize + byte) % 26) as u8);
+            }
+        }
+    }
+
+    fn begin_vec_file(out: &mut host_std::vec::Vec<u8>, kv_count: u64) {
+        let header = GgufHeader {
+            magic: GGUF_MAGIC,
+            version: 3,
+            tensor_count: 0,
+            kv_count,
+        };
+        let mut buf = [0u8; GgufHeader::HEADER_SIZE];
+        header.write_to(&mut buf).expect("header fits");
+        out.extend_from_slice(&buf);
+    }
+
+    /// A file shaped the way a Gemma conversion leaves one: the vocabulary first,
+    /// the chat template after it, and the tokenizer's scalars beside them.
+    fn gemma_shaped_file(elements: u64, template: &[u8]) -> host_std::vec::Vec<u8> {
+        let mut out = host_std::vec::Vec::new();
+        // architecture, 3 token ids, add_bos, pre, tokens, template, one trailing key
+        begin_vec_file(&mut out, 9);
+        v_string(&mut out, b"general.architecture", b"gemma2");
+        v_u32(&mut out, KEY_BOS_ID, 2);
+        v_u32(&mut out, KEY_EOS_ID, 1);
+        v_u32(&mut out, KEY_PAD_ID, 0);
+        v_bool(&mut out, KEY_ADD_BOS, true);
+        v_string(&mut out, KEY_PRE, b"gemma");
+        v_vocab(&mut out, elements, 4);
+        v_string(&mut out, KEY_CHAT_TEMPLATE, template);
+        v_u32(&mut out, b"general.file_type", 2);
+        out
+    }
+
+    #[test]
+    fn test_tokenizer_walk_counts_a_vocabulary_far_beyond_its_own_load_cap() {
+        let data = gemma_shaped_file(256_000, b"<start_of_turn>{{prompt}}");
+        let mut stream = GgufStream::buffered_from_slice(&data);
+        let info = read_tokenizer_info_stream(&mut stream).expect("the walk reaches both keys");
+
+        // The count comes from the array's own header and no element was loaded.
+        assert_eq!(info.vocab, VocabReading::Counted { elements: 256_000 });
+        assert_eq!(info.vocab_size(), Some(256_000));
+        assert!(info.vocab_counted_not_loaded());
+
+        // WHY this is the assertion that carries the ticket: the key sits after
+        // 256,000 strings, and reaching it must not cost a request per string.
+        assert_eq!(
+            info.chat_template(),
+            Some(&b"<start_of_turn>{{prompt}}"[..]),
+            "the template after the vocabulary was not reached"
+        );
+        assert_eq!(info.template_reading, StringReading::Read(25));
+        assert_eq!(info.pre_name(), Some("gemma"));
+        assert_eq!(info.bos_token_id, Some(2));
+        assert_eq!(info.eos_token_id, Some(1));
+        assert_eq!(info.pad_token_id, Some(0));
+        assert_eq!(info.add_bos_token, Some(true));
+        assert_eq!(info.truncated_in, None);
+
+        // One window per 512 bytes, not two requests per token: the array alone is
+        // over 3 megabytes, so the walk that paid per element would be measured in
+        // hundreds of thousands of requests.
+        let array_bytes = 256_000usize * (8 + 4);
+        assert!(
+            info.pulls * METADATA_WINDOW_BYTES >= array_bytes / 2,
+            "the window did not stream the array: {} pulls",
+            info.pulls
+        );
+        assert!(
+            info.pulls < (256_000 / 8) as usize,
+            "the walk paid a request per token: {} pulls",
+            info.pulls
+        );
+    }
+
+    #[test]
+    fn test_tokenizer_walk_reports_a_file_that_ends_inside_the_vocabulary() {
+        let mut data = gemma_shaped_file(256_000, b"{{prompt}}");
+        // Cut the file six bytes into a token's payload, inside the array.
+        let cut = GgufHeader::HEADER_SIZE + 200_000;
+        data.truncate(cut);
+
+        let mut stream = GgufStream::buffered_from_slice(&data);
+        let info = read_tokenizer_info_stream(&mut stream)
+            .expect("a file that stops mid-array is reported, not a panic");
+        assert!(
+            matches!(info.vocab, VocabReading::Truncated { stated } if stated == 256_000),
+            "the walk lost the count the array stated: {:?}",
+            info.vocab
+        );
+        assert_eq!(info.truncated_in, Some(KEY_TOKENS));
+        // Everything reached before the cut stays said.
+        assert_eq!(info.bos_token_id, Some(2));
+        assert_eq!(info.pre_name(), Some("gemma"));
+        // And the template past the cut was not invented.
+        assert_eq!(info.template_reading, StringReading::Absent);
+        assert_eq!(info.chat_template(), None);
+    }
+
+    #[test]
+    fn test_tokenizer_walk_refuses_a_template_over_its_cap_with_the_length_it_stated() {
+        // One byte past what the reader holds, so nothing may be copied.
+        let template = [b'x'; MAX_CHAT_TEMPLATE_LEN + 1];
+        let mut out = host_std::vec::Vec::new();
+        begin_vec_file(&mut out, 3);
+        v_string(&mut out, KEY_PRE, b"gemma");
+        v_string(&mut out, KEY_CHAT_TEMPLATE, &template);
+        v_u32(&mut out, b"general.file_type", 2);
+
+        let mut stream = GgufStream::buffered_from_slice(&out);
+        let info = read_tokenizer_info_stream(&mut stream).expect("a long template is refused, not fatal");
+        assert_eq!(
+            info.template_reading,
+            StringReading::RefusedTooLong(MAX_CHAT_TEMPLATE_LEN as u64 + 1)
+        );
+        assert_eq!(info.chat_template(), None, "a cut template must not be quoted");
+        // The value was stepped past, so the walk kept going and read the next key.
+        assert_eq!(info.pre_name(), Some("gemma"));
+        assert_eq!(info.pairs_walked, 3);
+        // Refused means the platform's own template is in use, and it says so.
+        assert_eq!(
+            info.active_chat_template().1,
+            TemplateSource::BuiltInDefault
+        );
+    }
+
+    #[test]
+    fn test_tokenizer_walk_reads_a_flag_as_bool_type_7_and_refuses_any_other_width() {
+        let mut out = host_std::vec::Vec::new();
+        begin_vec_file(&mut out, 2);
+        v_bool(&mut out, KEY_ADD_BOS, false);
+        v_string(&mut out, KEY_CHAT_TEMPLATE, b"{prompt}");
+        let mut stream = GgufStream::buffered_from_slice(&out);
+        let info = read_tokenizer_info_stream(&mut stream).expect("a declared false is a reading");
+        assert_eq!(info.add_bos_token, Some(false), "type 7 must be read as a flag");
+
+        // The same key declared as a float is not a boolean the reader will guess.
+        let mut wide = host_std::vec::Vec::new();
+        begin_vec_file(&mut wide, 1);
+        v_key(&mut wide, KEY_ADD_BOS);
+        wide.extend_from_slice(&6u32.to_le_bytes());
+        wide.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+        assert_eq!(
+            read_tokenizer_info_stream(&mut GgufStream::buffered_from_slice(&wide)),
+            Err(GgufError::InvalidMetadata)
+        );
+
+        // Nor is a type-7 byte that is neither 0 nor 1.
+        let mut corrupt = host_std::vec::Vec::new();
+        begin_vec_file(&mut corrupt, 1);
+        v_key(&mut corrupt, KEY_ADD_BOS);
+        corrupt.extend_from_slice(&7u32.to_le_bytes());
+        corrupt.push(17);
+        assert_eq!(
+            read_tokenizer_info_stream(&mut GgufStream::buffered_from_slice(&corrupt)),
+            Err(GgufError::InvalidMetadata)
+        );
+    }
+
+    #[test]
+    fn test_tokenizer_walk_reports_a_file_that_declares_no_tokenizer_but_still_loads() {
+        let mut out = host_std::vec::Vec::new();
+        begin_vec_file(&mut out, 2);
+        v_string(&mut out, b"general.architecture", b"gemma2");
+        v_u32(&mut out, b"gemma2.embedding_length", 64);
+
+        let mut stream = GgufStream::buffered_from_slice(&out);
+        let info = read_tokenizer_info_stream(&mut stream).expect("no tokenizer is a reading, not a failure");
+        assert!(info.declares_no_tokenizer());
+        assert_eq!(info.vocab, VocabReading::Absent);
+        assert_eq!(info.truncated_in, None);
+        assert_eq!(
+            info.active_chat_template().1,
+            TemplateSource::BuiltInDefault,
+            "the engine runs the built-in default and must say that is what it runs"
+        );
+    }
+
+    #[test]
+    fn test_tokenizer_walk_names_its_keys_whole_and_ignores_another_family() {
+        // WHY this is its own case: the configuration reader matches a key by the
+        // segment after its last dot, so another family's `.pre` would land in the
+        // tokenizer's field. The walk compares every byte instead.
+        let mut out = host_std::vec::Vec::new();
+        begin_vec_file(&mut out, 2);
+        v_string(&mut out, b"some.other.pre", b"not-the-tokenizer");
+        v_u32(&mut out, b"tokenizer.ggml.something.padding_token_id", 7);
+        let mut stream = GgufStream::buffered_from_slice(&out);
+        let info = read_tokenizer_info_stream(&mut stream).expect("unrelated keys cost a step, not a claim");
+        assert_eq!(info.pre_name(), None);
+        assert_eq!(info.pad_token_id, None);
+        assert!(info.declares_no_tokenizer());
+    }
+
+    #[test]
+    fn test_prompt_formatting_splices_at_the_marker_and_reports_why_it_could_not() {
+        let mut out = [0u8; 256];
+
+        // The file's own template wins when the walk held it.
+        let mut file = host_std::vec::Vec::new();
+        begin_vec_file(&mut file, 1);
+        v_string(&mut file, KEY_CHAT_TEMPLATE, b"[user] {prompt} [/user]");
+        let info = read_tokenizer_info_stream(&mut GgufStream::buffered_from_slice(&file))
+            .expect("one pair is a whole file for this case");
+        assert_eq!(
+            info.active_chat_template().1,
+            TemplateSource::FromFile,
+            "the file's own template is what formats the prompt"
+        );
+        let written = info.format_prompt(b"hello", &mut out).expect("fits");
+        assert_eq!(&out[..written], b"[user] hello [/user]");
+
+        // A template with nowhere for the text to go is reported, not guessed at.
+        let mut markerless = host_std::vec::Vec::new();
+        begin_vec_file(&mut markerless, 1);
+        v_string(&mut markerless, KEY_CHAT_TEMPLATE, b"<user> only a role");
+        let info = read_tokenizer_info_stream(&mut GgufStream::buffered_from_slice(&markerless))
+            .expect("a template without a marker still reads");
+        assert_eq!(info.format_prompt(b"hello", &mut out), Err(PromptFit::NoMarker));
+
+        // The built-in default applies to a file that named none, and says so.
+        let none = GgufTokenizerInfo::empty();
+        assert!(none.declares_no_tokenizer());
+        let written = none.format_prompt(b"hi", &mut out).expect("default fits");
+        assert_eq!(
+            &out[..written],
+            b"<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n"
+        );
+        assert_eq!(
+            none.active_chat_template().0,
+            DEFAULT_CHAT_TEMPLATE.as_bytes()
+        );
+
+        // Too small a buffer is reported with the size that would have fitted.
+        let mut tiny = [0u8; 8];
+        assert_eq!(
+            none.format_prompt(b"a prompt longer than eight bytes", &mut tiny),
+            Err(PromptFit::TooLong {
+                needed: DEFAULT_CHAT_TEMPLATE.len() - PROMPT_MARKER.len() + 32,
+            })
+        );
+    }
+
+    #[test]
+    fn test_buffered_window_steps_by_size_and_counts_its_requests() {
+        let data = [7u8; 3 * METADATA_WINDOW_BYTES + 40];
+        let mut stream = GgufStream::buffered_from_slice(&data);
+
+        let mut head = [0u8; 4];
+        stream.read_exact(&mut head).expect("the window serves a read");
+        assert_eq!(head, [7u8; 4]);
+
+        stream.skip(100).expect("a step is served from the window");
+        assert_eq!(stream.position(), 104);
+
+        // The whole source is 1576 bytes; the window touches it a handful of times.
+        let mut rest = [0u8; 1_000];
+        stream.read_exact(&mut rest).expect("a request past the window still reads");
+        assert_eq!(stream.position(), 1_104);
+        // Between the requests a full window per pull allows and a small margin:
+        // a reader that asked for one value at a time would be off by two orders.
+        assert!(
+            stream.pulls() >= data.len() / METADATA_WINDOW_BYTES
+                && stream.pulls() <= data.len() / METADATA_WINDOW_BYTES + 2,
+            "the window made {} requests for {} bytes",
+            stream.pulls(),
+            data.len()
+        );
+
+        // And past the end of the source the window reports the file ran out.
+        assert_eq!(stream.skip(600), Err(GgufError::BufferTooShort));
     }
 }
