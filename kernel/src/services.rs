@@ -626,10 +626,36 @@ pub(crate) fn heartbeat(id: ServiceId) {
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
 }
 
+/// Reports whether the task a record names is still a live worker.
+fn worker_is_live(task_id: TaskId) -> bool {
+    let Some(scheduler) = SCHEDULER.try_lock() else { return false; };
+    match scheduler.get_task(task_id) {
+        Some(task) => !matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
+        None => false,
+    }
+}
+
 pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static str> {
     let record = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize].ok_or("service not declared")?;
-    if record.task != task_id || record.state != ServiceState::Running { return Err("service task mismatch"); }
+    if record.task != task_id { return Err("service task mismatch"); }
+    // WHY a Failed record answers to its own worker's heartbeat: supervision turns
+    // Running into Failed the moment a heartbeat ages out, and one busy stretch at
+    // boot is enough to age every service out at least once. Refusing the heartbeat
+    // from there made that reading permanent -- the worker kept serving, PID 1 could
+    // not recover it either (recovery demands a terminal task, start demands no task
+    // at all), and anything that gates on the registry stops asking the service at
+    // all. A heartbeat from the very task the record names is the direct evidence
+    // supervision is missing, so it revives that record. A task that actually died
+    // cannot send one, so the real failure path and PID 1's recovery of it are
+    // untouched.
+    if record.state == ServiceState::Failed && !worker_is_live(task_id) {
+        return Err("service task is not live");
+    }
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+    if record.state == ServiceState::Failed {
+        SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] =
+            Some(ServiceRecord { id, task: task_id, state: ServiceState::Running, generation: record.generation });
+    }
     Ok(())
 }
 

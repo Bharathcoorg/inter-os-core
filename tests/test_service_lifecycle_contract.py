@@ -260,6 +260,66 @@ def test_pid1_does_not_duplicate_the_kernel_service_set():
     assert "for service_id in 1u8..=11u8" not in pid1
     assert "seen == 0x07ff" not in pid1
 
+
+def _fn_body(source: str, signature: str) -> str:
+    """Return one function body, so a rule about a function cannot be met by another."""
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"unbalanced body for {signature}")
+
+
+def _latch_defects(heartbeat: str) -> list:
+    defects = []
+    if "record.task != task_id" not in heartbeat:
+        defects.append("a heartbeat from a task other than the recorded worker is accepted")
+    if "record.state != ServiceState::Running" in heartbeat:
+        defects.append("a Failed record refuses its own live worker forever")
+    if "worker_is_live(task_id)" not in heartbeat:
+        defects.append("revival does not require the recorded task still to live")
+    if "state: ServiceState::Running" not in heartbeat:
+        defects.append("a live worker's heartbeat does not restore Running")
+    return defects
+
+
+def test_a_service_latched_failed_can_still_speak_for_itself():
+    """Supervision marks a heartbeat-stale record Failed, so the worker itself has
+    to be able to prove it is still alive -- or a busy stretch at boot reports a
+    working service as failed forever, and every reader that gates on the registry
+    stops asking it. Observed live: inference answered IPC while the registry read
+    "failed", and the app refused to send a prompt."""
+    services = SERVICES.read_text(encoding="utf-8")
+    heartbeat = _fn_body(services, "pub fn heartbeat_for_task")
+    assert _latch_defects(heartbeat) == []
+    # A worker that truly died cannot send a heartbeat, so PID 1's recovery of the
+    # dead remains the only way a service is replaced.
+    recover = _fn_body(services, "pub fn recover_failed")
+    assert 'Err("failed service task is not terminal")' in recover, \
+        "recovery still refuses to replace a live task"
+
+
+def test_the_contract_can_fail():
+    heartbeat = _fn_body(SERVICES.read_text(encoding="utf-8"), "pub fn heartbeat_for_task")
+    re_latched = heartbeat.replace(
+        "if record.state == ServiceState::Failed && !worker_is_live(task_id) {",
+        "if record.state != ServiceState::Running {",
+    ).replace(
+        """    if record.state == ServiceState::Failed {
+        SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] =
+            Some(ServiceRecord { id, task: task_id, state: ServiceState::Running, generation: record.generation });
+    }""",
+        "",
+    )
+    assert _latch_defects(heartbeat) == []
+    assert _latch_defects(re_latched), "a heartbeat rule that re-latches a Failed record was accepted"
+
 def test_boot_recovery_is_durable_and_health_confirmation_is_wired():
     recovery = (ROOT / "kernel/src/recovery.rs").read_text(encoding="utf-8")
     services = SERVICES.read_text(encoding="utf-8")
