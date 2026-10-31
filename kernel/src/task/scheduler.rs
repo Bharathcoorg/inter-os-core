@@ -23,6 +23,11 @@ pub const PRIORITY_SERVICE: u8 = 5;
 pub const PRIORITY_APP: u8 = 6;
 pub const PRIORITY_REALTIME: u8 = 10;
 
+/// Highest task id the boot services occupy. `configure_task_ui_pipeline` pins ids
+/// 2, 3 and 10 as realtime UI tasks, so a task at or below this ceiling is never
+/// demoted when the foreground surface moves away -- only real apps are.
+pub const BOOT_SERVICE_ID_CEILING: u64 = 10;
+
 /// Strict VSync frame deadline budgets.
 /// For 120Hz display modes: <8.3ms (8,333,333 ns).
 pub const VSYNC_BUDGET_120HZ_NS: u64 = 8_333_333;
@@ -478,7 +483,7 @@ impl Scheduler {
         self.active_foreground_task = task;
         if let Some(prev_id) = prev {
             if let Some(t) = self.tasks.iter_mut().find(|t| t.id == prev_id) {
-                if t.name != "displayd" && t.name != "inputd" && t.name != "compositor" && t.id.0 > 10 {
+                if t.name != "displayd" && t.name != "inputd" && t.name != "compositor" && t.id.0 > BOOT_SERVICE_ID_CEILING {
                     t.priority = PRIORITY_APP;
                     t.sched_class = super::SchedulingClass::Normal;
                     t.deadline_ticks = 0;
@@ -1060,7 +1065,12 @@ mod tests {
         assert!(sched.get_task(child_id).is_none());
 
         // Process table record for child is reaped
-        assert!(crate::task::process::process_for_task(child_id).is_none());
+        assert!(
+            crate::task::process::process_for_task(child_id).is_none(),
+            "reap_child left {:?} bound to {:?}",
+            process_leftover(child_id),
+            child_id
+        );
 
         // Clean up parent
         let _ = sched.reap_child(TaskId(0), parent_id);
@@ -1087,6 +1097,19 @@ mod tests {
             total += n;
         }
         total
+    }
+
+    /// The process record still bound to `task`, for assertion messages.
+    ///
+    /// WHY the leftover is named instead of only its absence asserted:
+    /// `TaskId::new()` is one monotone counter for the whole test binary, so a
+    /// record some earlier case leaked against a hand-picked id is still bound
+    /// when a later `spawn` is handed that same id. Reporting the surviving
+    /// record turns that aliasing into a readable failure instead of a bare
+    /// `is_none()` that says nothing about who left it there.
+    fn process_leftover(task: TaskId) -> Option<crate::task::process::ProcessRecord> {
+        crate::task::process::process_for_task(task)
+            .and_then(crate::task::process::record_for_process)
     }
 
     #[test]
@@ -1142,7 +1165,12 @@ mod tests {
         let reaped_child = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped_child, 1);
         assert!(sched.get_task(child_id).is_none());
-        assert!(crate::task::process::process_for_task(child_id).is_none());
+        assert!(
+            crate::task::process::process_for_task(child_id).is_none(),
+            "orphan reaper left {:?} bound to {:?}",
+            process_leftover(child_id),
+            child_id
+        );
     }
 
     #[test]
@@ -1170,8 +1198,18 @@ mod tests {
         assert_eq!(reaped, 2);
         assert!(sched.get_task(child_id).is_none());
         assert!(sched.get_task(parent_id).is_none());
-        assert!(crate::task::process::process_for_task(child_id).is_none());
-        assert!(crate::task::process::process_for_task(parent_id).is_none());
+        assert!(
+            crate::task::process::process_for_task(child_id).is_none(),
+            "orphan reaper left {:?} bound to {:?}",
+            process_leftover(child_id),
+            child_id
+        );
+        assert!(
+            crate::task::process::process_for_task(parent_id).is_none(),
+            "orphan reaper left {:?} bound to {:?}",
+            process_leftover(parent_id),
+            parent_id
+        );
     }
 
     #[test]
@@ -1193,7 +1231,12 @@ mod tests {
         let reaped = reap_orphans_until_quiet(&mut sched);
         assert_eq!(reaped, 1);
         assert!(sched.get_task(dev_task).is_none());
-        assert!(crate::task::process::process_for_task(dev_task).is_none());
+        assert!(
+            crate::task::process::process_for_task(dev_task).is_none(),
+            "the dev bridge app {:?} still binds process {:?}",
+            dev_task,
+            process_leftover(dev_task),
+        );
     }
 
     #[test]
@@ -1330,6 +1373,13 @@ mod tests {
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
 
+        // WHY the ids are spent first: `configure_task_ui_pipeline` pins the boot UI
+        // services by position as well as by name -- ids 2, 3 and 10 -- because those
+        // are the positions the boot sequence gives displayd, inputd and compositor.
+        // Ids come from one process-global counter, so an app spawned by a case that
+        // runs early can be handed one of those positions and is born RealTime.
+        while TaskId::new().0 <= BOOT_SERVICE_ID_CEILING {}
+
         let displayd_id = sched.spawn("displayd", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
         let inputd_id = sched.spawn("inputd", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
         let comp_id = sched.spawn("compositor", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
@@ -1363,6 +1413,14 @@ mod tests {
         let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut sched = Scheduler::new();
         sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        // WHY the ids are spent first: `set_active_foreground_task` only demotes a
+        // task it treats as an app, and the production rule for that is `id.0 > 10`
+        // because task ids 1..10 are the boot services. Ids come from one
+        // process-global counter, so a case that runs early is handed an id inside
+        // that band, the demotion line is skipped, and the last assertion fails for
+        // a reason that has nothing to do with scheduling.
+        while TaskId::new().0 <= BOOT_SERVICE_ID_CEILING {}
 
         let app_id = sched.spawn("vault", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 6);
         assert_eq!(sched.get_task(app_id).unwrap().sched_class, crate::task::SchedulingClass::Normal);
