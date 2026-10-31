@@ -259,6 +259,17 @@ pub struct LauncherState {
     pub date_line: [u8; LOCK_DATE_TEXT_LEN],
     pub notifications: [NotificationRecord; 8],
     pub notification_count: usize,
+    /// Fingerprint of the store answer the cache was last filled from.
+    ///
+    /// WHY the shell carries one: an open shade is painted from the records read
+    /// when it opened, and a notice posted after that -- a retirement, a message
+    /// arriving while the owner reads the feed -- changes the store without
+    /// changing any pixel on the screen. Comparing fingerprints is how the poll
+    /// finds out that it has something to say.
+    pub notification_store_fingerprint: u64,
+    /// Set by the poll when that fingerprint moved, so the paint path can tell a
+    /// real change from the same answer arriving again.
+    pub notification_store_changed: bool,
     /// Which Events filter pill is active: 0 All, 1 Messages, 2 System, 3 Apps.
     ///
     /// WHY this lives on the state rather than in the painter: the Events feed's
@@ -392,6 +403,8 @@ impl LauncherState {
             date_line: [b' '; LOCK_DATE_TEXT_LEN],
             notifications: [NotificationRecord::EMPTY; 8],
             notification_count: 0,
+            notification_store_fingerprint: 0,
+            notification_store_changed: false,
         feed_filter: 0,
             app_drawer_tab: 0,
             recent_apps: [[0u8; 32]; 3],
@@ -1039,11 +1052,17 @@ fn parse_dec_u64(bytes: &[u8]) -> u64 {
 /// Returns how many bytes the store actually wrote, so a caller that opens the
 /// shade can state what it read without asking a second time. Zero means the
 /// record query was refused and only a count came back.
+///
+/// It also records whether that answer differs from the one the cache held
+/// before, in `notification_store_changed`, which is how a shade that is already
+/// on screen learns that the store moved.
 fn refresh_notifications(state: &mut LauncherState) -> usize {
     let uid = std::user_get_current();
     let locked = std::user_get_lock_state(uid).map(|s| s != std::UserLockState::Unlocked).unwrap_or(true);
     let mut buf = [0u8; 2048];
-    if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
+    let mut written = 0usize;
+    let seen = if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
+        written = n;
         state.notification_count = 0;
         state.notifications = [NotificationRecord::EMPTY; 8];
         for line in buf[..n].split(|b| *b == b'\n') {
@@ -1083,11 +1102,57 @@ fn refresh_notifications(state: &mut LauncherState) -> usize {
             state.notifications[state.notification_count] = rec;
             state.notification_count += 1;
         }
-        n
+        store_fingerprint(&buf[..n], state.notification_count)
     } else {
         state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
-        0
+        // Nothing to hash but the count, and the count is what this branch paints.
+        store_fingerprint(&[], state.notification_count)
+    };
+    state.notification_store_changed = seen != state.notification_store_fingerprint;
+    state.notification_store_fingerprint = seen;
+    written
+}
+
+/// A fingerprint of the store's answer, so a poll can tell "nothing happened"
+/// from a notice that arrived while the shade was on screen.
+///
+/// FNV-1a over the record bytes the store wrote plus the count, because the feed
+/// paints from those bytes alone: a store that would paint differently always
+/// fingerprints differently. The count rides along so the fallback branch, where
+/// only a count came back, still moves when the device has more to show.
+fn store_fingerprint(answer: &[u8], count: usize) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let tail = count.to_le_bytes();
+    for byte in answer.iter().chain(tail.iter()) {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
     }
+    hash
+}
+
+/// Repaints an already-open shade, and only when the store moved.
+///
+/// WHY the gesture path is not enough: opening the shade re-reads the store, but
+/// a retirement notice, a message or a reminder posted after that reads nothing
+/// on screen -- the poll had already refilled the cache, and the paint stayed
+/// where the last gesture left it. The device then shows a feed that is behind
+/// its own store, on the one screen whose job is to be current.
+fn refresh_open_shade(surface: u32, state: &mut LauncherState) {
+    if state.current_view != ViewMode::Notifications || !state.notification_store_changed {
+        return;
+    }
+    let mut line = LineBuf::<128>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "[LAUNCHER] Notifications shade repainted: the store moved to {} records",
+            state.notification_count
+        );
+    }
+    std::log(line.as_str()).ok();
+    render_view(surface, &state);
+    surface_flip_display();
 }
 
 /// Opens the notifications shade from a gesture: re-reads the store, then paints.
@@ -3130,6 +3195,7 @@ pub extern "C" fn _start() -> ! {
                                         refresh_schedule(&mut state);
                 }
                 refresh_notifications(&mut state);
+                refresh_open_shade(surface, &mut state);
                 if refresh_ticks % 10 == 0 {
                     if let Ok(volume) = std::audio_query_volume() {
                         let volume_now = volume.min(100) as u8;

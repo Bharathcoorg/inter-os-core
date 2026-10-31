@@ -27,6 +27,12 @@ over a synthetic source carrying the fault and prove it catches it -- and then
 run it over the real sources and require none to fire. A contract that cannot
 fail is a comment.
 
+WHEN THE PERSON SEES IT: a retirement notice arrives while the feed it belongs in
+may already be on screen, so the shell's half is that an open shade repaints when
+the store moves. Reading the store on a gesture is not that: it is the next
+gesture that shows the notice, and the notice is about the launch the person just
+made.
+
 Run it directly, or under pytest.
 """
 
@@ -221,6 +227,42 @@ def _card_fit_defects(notice_src: str) -> list:
     return defects
 
 
+def _shade_live_defects(shell_src: str) -> list:
+    """An open shade has to notice a notice.
+
+    WHY this is the shell's half of the same story: the store can hold the truth
+    and the poll can read it every tick, and the person still sees the feed as it
+    was when the gesture opened it. The retirement is the case that shows it --
+    the device posts the notice while the launch that pays for it is in flight,
+    so the store moves under a shade that is already on screen.
+    """
+    defects = []
+    try:
+        refresh = _body(shell_src, "fn refresh_notifications")
+    except AssertionError:
+        return ["the shell no longer refills its notification cache in one place"]
+    if "notification_store_fingerprint" not in refresh:
+        defects.append("the poll keeps no fingerprint of the answer it cached")
+    if "notification_store_changed =" not in refresh:
+        defects.append("the poll does not record whether the store moved")
+    try:
+        repaint = _body(shell_src, "fn refresh_open_shade")
+    except AssertionError:
+        return defects + ["nothing repaints a shade that is already open"]
+    if "ViewMode::Notifications" not in repaint:
+        defects.append("the shade repaint does not check that the shade is the screen being shown")
+    if "notification_store_changed" not in repaint:
+        defects.append("the shade repaints on every poll rather than when the store moved")
+    if "render_view(surface, &state)" not in repaint or "surface_flip_display()" not in repaint:
+        defects.append("the shade repaint path paints nothing")
+    if not re.search(
+        r"refresh_notifications\(&mut state\);\s*refresh_open_shade\(surface, &mut state\);",
+        _strip_comments(shell_src),
+    ):
+        defects.append("the periodic poll does not ask the open shade whether it moved")
+    return defects
+
+
 def _exit_code_defects(retire: str, kms_src: str) -> list:
     """The retirement is marked by a named code, not the anonymous -1."""
     defects = []
@@ -328,6 +370,21 @@ def test_the_retirement_is_not_blocked_by_the_notice():
     )
 
 
+def test_an_open_shade_repaints_when_the_store_moves():
+    """A notice posted while the feed is on screen reaches the feed.
+
+    WHY pinned here rather than only measured on the device: the shell re-reads
+    the store every poll and re-reads it again when a gesture opens the shade, and
+    both are correct, and neither repaints a shade that is already up. That is the
+    shape the defect hides in -- every part reads the store, no part looks at the
+    screen it is on. The device run has the line
+    `Notifications shade repainted: the store moved to 2 records` beside
+    `Posted #3 from 'system'`, with no gesture between them.
+    """
+    defects = _shade_live_defects(SHELL)
+    assert not defects, defects
+
+
 def test_the_contract_can_fail():
     """A contract that cannot fail is a comment.
 
@@ -421,6 +478,48 @@ def test_the_contract_can_fail():
         ),
     ):
         assert _account_defects(retire, notice), f"the account detector does not catch a notice that {label}"
+
+    def shell_source(refresh, repaint, poll):
+        return f"fn refresh_notifications(state: &mut S) -> usize {{\n{refresh}}}\n" \
+               f"fn refresh_open_shade(surface: u32, state: &mut S) {{\n{repaint}}}\n" \
+               f"fn poll(surface: u32, state: &mut S) {{\n{poll}}}\n"
+
+    current_store = (
+        "  let seen = store_fingerprint(&buf[..n], count);\n"
+        "  state.notification_store_changed = seen != state.notification_store_fingerprint;\n"
+        "  state.notification_store_fingerprint = seen;\n  written\n"
+    )
+    paints_the_open_shade = (
+        "  if state.current_view != ViewMode::Notifications || !state.notification_store_changed { return; }\n"
+        "  render_view(surface, &state);\n  surface_flip_display();\n"
+    )
+    poll_asks = "  refresh_notifications(&mut state);\n  refresh_open_shade(surface, &mut state);\n"
+    assert not _shade_live_defects(
+        shell_source(current_store, paints_the_open_shade, poll_asks)
+    ), "the shade detector fires on a shell that repaints an open shade"
+    for label, source in (
+        ("caches the answer without comparing it",
+         shell_source("  written\n", paints_the_open_shade, poll_asks)),
+        ("compiles no fingerprint at all",
+         shell_source("  state.notification_store_changed = seen != 0;\n  written\n",
+                      paints_the_open_shade, poll_asks)),
+        ("repaints the shade on every poll",
+         shell_source(current_store,
+                      "  if state.current_view != ViewMode::Notifications { return; }\n"
+                      "  render_view(surface, &state);\n  surface_flip_display();\n", poll_asks)),
+        ("repaints whatever screen is up",
+         shell_source(current_store,
+                      "  if !state.notification_store_changed { return; }\n"
+                      "  render_view(surface, &state);\n  surface_flip_display();\n", poll_asks)),
+        ("reads the store and paints nothing",
+         shell_source(current_store, "  if !state.notification_store_changed { return; }\n", poll_asks)),
+        ("has the repaint but never reaches it",
+         shell_source(current_store, paints_the_open_shade, "  refresh_notifications(&mut state);\n")),
+        ("never repaints an open shade",
+         "fn refresh_notifications(state: &mut S) -> usize {\n" + current_store + "}\n"
+         "fn poll(surface: u32, state: &mut S) {\n" + poll_asks + "}\n"),
+    ):
+        assert _shade_live_defects(source), f"the shade detector does not catch a shell that {label}"
 
 
 def main() -> int:
