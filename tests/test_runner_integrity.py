@@ -237,6 +237,14 @@ class TestRunnerIntegrity(unittest.TestCase):
         net cases do. They are a real isolation defect, but not this one, and they
         are named by a filter -- a failing net, capability, vfs or syscall case
         still fails this check.
+
+        WHY the exclusion is about interleaving only, and not about order: `sync::`
+        and `task::` are inside the scope of
+        `test_kernel_suite_passes_under_shuffled_case_order`, which runs the whole
+        `--lib` suite single-threaded under five shuffled seeds and passes there. So
+        what makes them fail here is concurrent threads holding kernel locks, not
+        which case ran first, and this sweep must not be read as evidence that their
+        ordering was ever untested.
         """
         manifest = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "kernel", "Cargo.toml")
@@ -310,6 +318,68 @@ class TestRunnerIntegrity(unittest.TestCase):
             unstable_runs, [],
             "the kernel suite is not order-insensitive under parallel scheduling; "
             f"these sweeps failed: {unstable_runs}",
+        )
+
+    def test_kernel_suite_passes_under_shuffled_case_order(self):
+        """Proves the kernel host suite does not depend on the order its cases run in.
+
+        WHY this is separate from the net check above: that check pins what a family
+        leaves in the global state and then sweeps a fixed filter in one scheduling
+        mode. Declaration order is the order that happened to be green the day it was
+        written, so it cannot see a case that reads a process-global an unrelated case
+        happened to leave behind. libtest's `--shuffle` is the only way that class of
+        bug surfaces at all, which is why it gets its own gate.
+
+        WHY these seeds: 7, 8, 16, 17 and 18 are the orders that actually caught
+        something during a 64-seed sweep, not arbitrary numbers. 7 and 8 failed the
+        foreground-promotion case, whose assertion depends on where the boot-service id
+        band happened to fall for its own `spawn`; 16, 17 and 18 failed the pinned UI
+        pipeline case for the same reason (`configure_task_ui_pipeline` also pins ids
+        2, 3 and 10 by position) and failed a lease case whose hand-picked `TaskId(51)`
+        had already been handed out by an earlier `spawn`, because `TaskId::new()` is a
+        single monotone counter for the whole binary. A random seed would be a weaker
+        regression net than the five that were observed to break.
+
+        WHY single-threaded: the variable under test is order. Mixing in parallel
+        interleaving would make any failure ambiguous between the two causes, and the
+        interleaving half is already measured by the parallel sweeps above.
+
+        WHY the flag order is load-bearing: this pinned nightly rejects `--shuffle`
+        unless `-Z unstable-options` is passed before it, so a tidier-looking argument
+        list makes the whole check report a build error instead of a result.
+
+        WHY the passed-count floor: a run where the filter matched nothing exits 0 and
+        prints "0 failed", which would otherwise read as a pass. 400 is well under the
+        real count so ordinary test churn cannot trip it, and a silent discovery
+        collapse always does.
+        """
+        manifest = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "kernel", "Cargo.toml")
+        )
+
+        bad_runs = []
+        for seed in (7, 8, 16, 17, 18):
+            run = subprocess.run(
+                ["cargo", "test", "--manifest-path", manifest, "--lib", "--",
+                 "-Z", "unstable-options", "--test-threads=1", "--shuffle",
+                 f"--shuffle-seed={seed}"],
+                capture_output=True, text=True, timeout=600,
+            )
+            result_line = next(
+                (line for line in reversed(run.stdout.splitlines())
+                 if line.startswith("test result:")),
+                "",
+            )
+            parts = result_line.split()
+            passed = int(parts[3]) if len(parts) > 6 and parts[4] == "passed;" else None
+            failed = int(parts[5]) if len(parts) > 6 and parts[6] == "failed;" else None
+            if run.returncode != 0 or failed != 0 or not passed or passed < 400:
+                bad_runs.append((seed, run.returncode, passed, failed))
+
+        self.assertEqual(
+            bad_runs, [],
+            "the kernel host suite fails under these shuffled case orders, so at least "
+            f"one case depends on state a neighbour leaves behind: {bad_runs}",
         )
 
 
