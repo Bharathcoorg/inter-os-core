@@ -58,6 +58,14 @@ pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;
 /// IPC message type for streaming generation chunks: `0x4745_4E43` (ASCII `b"GENC"`).
 pub const MSG_TYPE_GENERATE_CHUNK: u32 = 0x4745_4E43;
 
+/// IPC message type naming a retrieval frame waiting on a shared-memory
+/// channel: `0x5352_434B` (ASCII `b"SRCK"`).
+///
+/// WHY it is a type of its own: a retrieval reply is a frame of records, not
+/// text, and an app that reads a chat answer cannot tell one from the other.
+/// The two notices travel apart so each reader takes only what it asked for.
+pub const MSG_TYPE_SEARCH_CHUNK: u32 = 0x5352_434B;
+
 /// IPC message type for cancelling active streaming generation: `0x4341_4E43` (ASCII `b"CANC"`).
 pub const MSG_TYPE_CANCEL: u32 = 0x4341_4E43;
 

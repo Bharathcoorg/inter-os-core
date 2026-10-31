@@ -354,6 +354,27 @@ fn answer_role(status: u32) -> ChatRole {
     }
 }
 
+/// Takes the retrieval frame off the channel a search notice named.
+///
+/// WHY the frame is read whole: the mailbox cuts a message at sixty-four bytes
+/// and a ranked result is 24 bytes of record followed by a path and a snippet,
+/// so the reply that used to arrive by mailbox was always the cut one -- the
+/// card then walked as many hits as the header counted and painted whatever the
+/// buffer held past the bytes that had arrived. One read takes the frame, and a
+/// frame shorter than the notice promised is parsed only as far as it reached.
+fn streamed_search_frame(notice_bytes: &[u8], out: &mut [u8]) -> usize {
+    let Some(notice) = std::ai::AiStreamNotice::from_bytes(notice_bytes) else {
+        return 0;
+    };
+    let want = (notice.streamed_len as usize)
+        .min(notice.total_len as usize)
+        .min(out.len());
+    match std::shm_pipe_receive(notice.pipe_id, &mut out[..want]) {
+        Ok(read) => read.min(want),
+        Err(_) => 0,
+    }
+}
+
 /// Writes text into a line, stopping at the line's end.
 fn put(out: &mut [u8], at: &mut usize, text: &[u8]) {
     for byte in text {
@@ -1644,6 +1665,16 @@ impl AgentManagerApp {
             match std::ipc::receive_any(&mut doc_buf) {
                 Ok((_, std::ai::MSG_TYPE_SEARCH, len)) => {
                     reply_len = len;
+                    break;
+                }
+                Ok((_, std::ai::MSG_TYPE_SEARCH_CHUNK, len)) => {
+                    // WHY the notice is copied before the frame is read: the
+                    // frame lands in the same buffer the mailbox message was
+                    // received into, and the channel is only named inside it.
+                    let mut notice_bytes = [0u8; std::ai::AiStreamNotice::WIRE_LEN];
+                    let take = len.min(notice_bytes.len());
+                    notice_bytes[..take].copy_from_slice(&doc_buf[..take]);
+                    reply_len = streamed_search_frame(&notice_bytes, &mut doc_buf);
                     break;
                 }
                 Ok((_, std::ipc::MSG_INPUT_EVENT, _))

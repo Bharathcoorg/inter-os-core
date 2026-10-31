@@ -34,7 +34,8 @@ pub use tokenizer::{
 };
 pub use std::ai::{
     MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
-    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_SEARCH, STATUS_CANCELLED,
+    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK,
+    STATUS_CANCELLED,
     STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
@@ -467,7 +468,11 @@ fn emit_inference_response(
 /// notice itself was refused; the caller then replies inline as it always did.
 /// A short stream is reported as delivered, because the notice carries the
 /// shortfall, which is the honest answer where an inline reply is a silent cut.
-fn stream_answer(sender_task_id: u64, status: u32, message: &[u8]) -> bool {
+///
+/// WHY the notice type is a parameter: an answer and a retrieval frame are read
+/// by different readers, and a reader that cannot tell which it was handed will
+/// paint a document path as the model's words.
+fn stream_answer(sender_task_id: u64, status: u32, notice_type: u32, message: &[u8]) -> bool {
     if sender_task_id == 0 {
         return false;
     }
@@ -496,7 +501,7 @@ fn stream_answer(sender_task_id: u64, status: u32, message: &[u8]) -> bool {
     if notice.to_bytes(&mut wire) == 0 {
         return false;
     }
-    if std::ipc_send(sender_task_id, MSG_TYPE_GENERATE_CHUNK, &wire).is_err() {
+    if std::ipc_send(sender_task_id, notice_type, &wire).is_err() {
         return false;
     }
     if streamed != total {
@@ -620,7 +625,7 @@ fn reply_with_answer(
     message: &[u8],
     tx_buf: &mut [u8; 1024],
 ) {
-    if !stream_answer(sender_task_id, status, message) {
+    if !stream_answer(sender_task_id, status, MSG_TYPE_GENERATE_CHUNK, message) {
         emit_inference_response(sender_task_id, status, message, tx_buf);
     }
 }
@@ -927,7 +932,20 @@ pub fn handle_ipc_inference_query(
             cursor += snip_len;
         }
 
-        if sender_task_id != 0 {
+        // WHY the frame goes over the channel whole and framed: the mailbox cuts
+        // a message at sixty-four bytes, and a ranked result is 24 bytes of
+        // record followed by a path and a snippet, so every reply that carried
+        // text arrived cut -- the reader then walked the hits the header counted
+        // and read whatever lay past the bytes that had arrived. The frame keeps
+        // its header so the reader parses one layout whether it came by channel
+        // or, when no channel was free, by mailbox.
+        if !stream_answer(
+            sender_task_id,
+            std::ai::STATUS_SUCCESS,
+            MSG_TYPE_SEARCH_CHUNK,
+            &tx_buf[..cursor],
+        ) && sender_task_id != 0
+        {
             let _ = std::ipc_send(sender_task_id, MSG_TYPE_SEARCH, &tx_buf[..cursor]);
         }
         return;

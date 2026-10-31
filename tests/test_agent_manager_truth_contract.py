@@ -614,6 +614,32 @@ def test_the_floating_button_does_not_sit_on_a_value():
         )
 
 
+def test_the_search_card_reads_a_frame_the_service_streamed():
+    """A reply the mailbox cannot hold has to be taken off the channel.
+
+    The kernel cuts an IPC message at sixty-four bytes and says nothing, and a
+    ranked result is twenty-four bytes of record followed by a path and a
+    snippet, so the retrieval frame was always the cut one: the card walked as
+    many hits as the header counted, over a buffer whose tail had never
+    arrived, and showed a document whose name had been clipped. The card reads
+    the notice the service posts and takes the frame off the channel it names.
+    An answer and a frame are different shapes, so they arrive on different
+    message types and only the reader that asked for one takes the other.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        source = _code(lib + main)
+        assert "std::ai::MSG_TYPE_SEARCH_CHUNK" in source, (
+            f"{path} ignores the notice that names a streamed retrieval frame"
+        )
+        assert "streamed_search_frame(" in source, (
+            f"{path} never reads the frame off the channel its notice named"
+        )
+        assert "std::shm_pipe_receive(notice.pipe_id" in source, (
+            f"{path} reads a streamed reply from somewhere other than the "
+            "channel the service named"
+        )
+
+
 def test_the_mirrored_crate_is_the_canonical_crate():
     """The public repository's copy has to be the private one.
 

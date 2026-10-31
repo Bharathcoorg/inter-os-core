@@ -1,10 +1,12 @@
-"""Truth contract for the on-device inference service's generative path.
+"""Truth contract for the on-device inference service's replies.
 
 The service answered a chat prompt with words from weights it never loaded: a
 forward pass over zero-filled tensors at the dimensions a unit test had picked,
 reported with STATUS_SUCCESS. Every assertion below pins one half of the rule
 that replaces it -- the model file on disk is the only thing allowed to size the
-engine, and when the engine cannot be built from that file the reply says so.
+engine, and when the engine cannot be built from that file the reply says so --
+and one half of the rule that carries any reply bigger than a mailbox to the
+reader that asked for it, whole or reported short.
 """
 
 from pathlib import Path
@@ -188,6 +190,31 @@ def test_the_reply_that_names_a_gap_is_still_counted_in_bytes():
     assert "WHY the header counts bytes and not tokens" in doc_comment(
         lib_source(), "fn emit_inference_response"
     )
+
+
+def test_a_retrieval_frame_reaches_the_reader_whole_or_reports_short():
+    """A search reply is a frame of records, and the mailbox holds 64 bytes.
+
+    The service used to post the frame with a bare ipc_send, which the kernel
+    cuts at the mailbox's limit without saying so; the reader then walked as
+    many hits as the header counted over bytes that had never arrived. The
+    frame now goes on the same channel the answers use, and only the inline
+    route -- taken when no channel is free -- sends it by mailbox.
+    """
+    lib = lib_source()
+    start = lib.index(GENERATIVE_END)
+    search_arm = lib[start : start + lib[start:].index("// 4. Embedding inference query")]
+    assert "stream_answer(" in search_arm
+    assert "MSG_TYPE_SEARCH_CHUNK" in search_arm
+    assert "&tx_buf[..cursor]" in search_arm
+    # The two kinds of reply are told apart by the type their notice travels
+    # on, so a frame cannot be read as an answer.
+    sdk = (ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "pub const MSG_TYPE_SEARCH_CHUNK: u32 = 0x5352_434B;" in sdk
+    assert "MSG_TYPE_SEARCH_CHUNK, MSG_TYPE_SEARCH," not in sdk
+    assert "pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;" in sdk
 
 
 def test_the_contract_can_fail():
