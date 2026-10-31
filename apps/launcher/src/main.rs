@@ -1034,7 +1034,12 @@ fn parse_dec_u64(bytes: &[u8]) -> u64 {
     val
 }
 
-fn refresh_notifications(state: &mut LauncherState) {
+/// Repaints nothing: it only refills the shell's cache.
+///
+/// Returns how many bytes the store actually wrote, so a caller that opens the
+/// shade can state what it read without asking a second time. Zero means the
+/// record query was refused and only a count came back.
+fn refresh_notifications(state: &mut LauncherState) -> usize {
     let uid = std::user_get_current();
     let locked = std::user_get_lock_state(uid).map(|s| s != std::UserLockState::Unlocked).unwrap_or(true);
     let mut buf = [0u8; 2048];
@@ -1078,9 +1083,38 @@ fn refresh_notifications(state: &mut LauncherState) {
             state.notifications[state.notification_count] = rec;
             state.notification_count += 1;
         }
+        n
     } else {
         state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
+        0
     }
+}
+
+/// Opens the notifications shade from a gesture: re-reads the store, then paints.
+///
+/// WHY the shade asks again instead of painting the cache the last poll left
+/// behind: a notice posted after that poll -- which is exactly what a memory
+/// retirement does, because the launch that pays for it is what opens the shade
+/// in the person's mind -- would otherwise sit in the store and never be shown,
+/// and the shell would report "All 1" over a device holding two. The count it
+/// read goes into the same log line the gesture already wrote, so the claim and
+/// the measurement that supports it leave the guest together.
+fn open_notifications_shade(surface: u32, state: &mut LauncherState, origin: &str) {
+    state.current_view = ViewMode::Notifications;
+    let uid = std::user_get_current();
+    let bytes = refresh_notifications(state);
+    let mut line = LineBuf::<160>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(
+            line,
+            "[LAUNCHER] Notifications shade opened via {} (uid={} read {} bytes into {} records)",
+            origin, uid, bytes, state.notification_count
+        );
+    }
+    std::log(line.as_str()).ok();
+    render_view(surface, &state);
+    surface_flip_display();
 }
 
 /// Small stack buffer for formatting a log line without an allocator.
@@ -4993,10 +5027,7 @@ pub extern "C" fn _start() -> ! {
                                 && press_y <= EDGE_PULL_ZONE
                             {
                                 if press_x < 360 {
-                                    state.current_view = ViewMode::Notifications;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Notifications shade opened via swipe-down gesture.").ok();
+                                    open_notifications_shade(surface, &mut state, "swipe-down gesture");
                                 } else {
                                     state.current_view = ViewMode::QuickControls;
                                     render_view(surface, &state);
@@ -5079,10 +5110,7 @@ pub extern "C" fn _start() -> ! {
                                 // Tapping top status bar: left opens Notifications, right opens PowerMenu, center opens Quick Controls
                                 if y <= 48 {
                                     if x < 240 {
-                                        state.current_view = ViewMode::Notifications;
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        std::log("[LAUNCHER] Notifications shade opened via top status bar tap.").ok();
+                                        open_notifications_shade(surface, &mut state, "top status bar tap");
                                     } else if x >= 480 {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
@@ -5161,10 +5189,7 @@ pub extern "C" fn _start() -> ! {
 
                                 // Today card Row 1 tap: opens Notifications view
                                 if (385..505).contains(&y) && (60..680).contains(&x) {
-                                    state.current_view = ViewMode::Notifications;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Notifications opened via Today card tap.").ok();
+                                    open_notifications_shade(surface, &mut state, "Today card tap");
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
