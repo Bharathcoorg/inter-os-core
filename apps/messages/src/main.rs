@@ -671,19 +671,83 @@ fn test_text_bold(
 // -----------------------------------------------------------------------------
 // Layout Geometry
 // -----------------------------------------------------------------------------
+
+/// The row the app's own chrome starts at.
+///
+/// WHY not the top of the panel: the platform band owns `0..48` and answers the
+/// pixel function before any header content is reached.
+const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
+
+/// The row the header's controls -- the back button and the status pill -- are
+/// centred on.
+const HEADER_ROW: usize = HEADER_TOP + std::design::back_button::SIZE / 2;
+
+/// The later of two layout edges.
+///
+/// WHY a local helper rather than `Ord::max`: `max` is not callable in a `const`
+/// context on this toolchain -- the platform's own `typeface::line_metrics`
+/// records the same workaround -- and every edge below has to be a compile-time
+/// constant, because the pixel function compares against it once per pixel.
+const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 const HEADER_Y0: usize = 0;
-/// WHY 112: the band owns the first 48 rows and the back control stands 48 tall
-/// from HEADER_TOP, so the header has to reach past 104 before its rule.
-const HEADER_Y1: usize = 112;
 const TITLE_TEXT: &[u8] = b"Messages";
 const TITLE_X: usize = 116;
 const TITLE_SCALE: usize = type_scale::TITLE;
-const TITLE_Y: usize = interos_std::design::viewport::HEADER_TOP + 4;
+
+/// The rows the title's line box reserves: ascent + descent + leading.
+const TITLE_BOX_H: usize = std::design::font::line_height(TITLE_SCALE);
+
+/// The title's line-box top.
+///
+/// WHY the cap height is centred on the control row instead of the box being
+/// dropped at the top of the control band: `TITLE_SCALE` is rung 4, whose line
+/// box is `line_height(4)` = 59 rows (ascent 47, descent 12 at the 45px em the
+/// rung's 32px cap implies), while the back control beside it is 48 rows. The
+/// box used to start at `HEADER_TOP + 4` = 60 and therefore ran to 119 -- seven
+/// rows past the header's hairline and under the search field, which begins
+/// below it. That is the cut-off tail of the "g" in "Messages". Centring the
+/// caps on the control row puts the box at 49..108, wholly inside the band, and
+/// is the placement the dialer already documents and uses
+/// (`apps/dialer/src/main.rs`, `TITLE_Y0`).
+const TITLE_Y: usize = HEADER_ROW
+    - std::design::font::ascent_for_scale(TITLE_SCALE)
+    + std::design::font::cap_for_scale(TITLE_SCALE) as usize / 2;
+
+/// The air between the last row anything in the header may ink and its hairline.
+const HEADER_PAD_BOTTOM: usize = 2;
+/// The header's hairline, drawn on the band's last rows.
+const HEADER_RULE_H: usize = 2;
+
+/// The status pill's height, on the same row as the 48-tall back control.
+const PILL_H: usize = 40;
 
 const PILL_RIGHT: usize = W - 24;
-const PILL_TOP: usize = interos_std::design::viewport::HEADER_TOP + 4;
-const PILL_BOTTOM: usize = PILL_TOP + 40;
+const PILL_TOP: usize = HEADER_ROW - PILL_H / 2;
+const PILL_BOTTOM: usize = PILL_TOP + PILL_H;
 const PILL_PAD_X: usize = spacing::GRID_20;
+
+/// Header band bottom, derived from the tallest thing standing in the band.
+///
+/// WHY derived and not typed as a literal: the band is only correct while it
+/// contains the title's whole line box, the back control and the pill. The
+/// literal held 112 after the title moved to rung 4 and grew past it, and
+/// nothing complained -- the surface under the header simply painted over the
+/// run's descent.
+const HEADER_CONTENT_BOTTOM: usize = later(
+    later(
+        TITLE_Y + TITLE_BOX_H,
+        HEADER_TOP + std::design::back_button::SIZE,
+    ),
+    PILL_BOTTOM,
+);
+const HEADER_Y1: usize = HEADER_CONTENT_BOTTOM + HEADER_PAD_BOTTOM + HEADER_RULE_H;
 
 #[inline]
 fn pill_text(app: &MessagesApp) -> &'static [u8] {
@@ -711,10 +775,38 @@ fn pill_left_for(label: &[u8], scale: usize) -> usize {
     PILL_RIGHT.saturating_sub(w)
 }
 
-// Search field geometry (y 112..164)
-const SEARCH_Y0: usize = 112;
-const SEARCH_Y1: usize = 164;
-const SEARCH_FIELD: (usize, usize, usize, usize) = (24, 114, 672, 48);
+/// The air between the header band and the first band under it.
+///
+/// WHY one named gap: the section below the header used to start on the header's
+/// own bottom row -- a zero-row gap, so the header's hairline doubled as the
+/// search field's top edge -- while the next section started 24 rows further
+/// down. `spacing::GRID_8` is the step the dialer leaves between its header and
+/// the first band under it (`TAB_BAND_Y0 = 120` against `HEADER_H = 112`).
+const SECTION_GAP: usize = spacing::GRID_8;
+
+/// Search / status band geometry (`SEARCH_Y0..SEARCH_Y1`).
+///
+/// WHY the band is named at all: the conversation view reuses this exact strip
+/// for its threat banner, so the two share one edge instead of one of them
+/// drifting.
+const SEARCH_BAND_H: usize = 52;
+const SEARCH_Y0: usize = HEADER_Y1 + SECTION_GAP;
+const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_BAND_H;
+/// The field's margin inside its band: the platform's smallest grid step split
+/// between the two sides, so the field's hairline is not the band's edge.
+const SEARCH_FIELD_DY: usize = spacing::GRID_4 / 2;
+const SEARCH_FIELD: (usize, usize, usize, usize) =
+    (24, SEARCH_Y0 + SEARCH_FIELD_DY, 672, 48);
+/// The centre of the band's leading glyph lane -- the search view's magnifier
+/// and the conversation view's threat mark share it.
+///
+/// WHY derived from the field: it was the literal `130`, which is eight rows
+/// above the middle of the field it sits in, so the mark read as mis-hung
+/// against the text beside it.
+const SEARCH_ICON_CX: usize = 56;
+const SEARCH_ICON_CY: usize = SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2;
+/// The clear control's hit half-height; the mark itself is nine rows tall.
+const SEARCH_CLEAR_HALF_H: usize = 14;
 const SEARCH_TEXT_X: usize = 82;
 const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
@@ -833,11 +925,22 @@ const HOME_X0: usize = 240;
 const HOME_X1: usize = 480;
 const HOME_Y0: usize = 1400;
 
+/// The row every scrollable section of the app starts at, below the search band.
+///
+/// WHY one edge for four screens: the thread list began at 188, the conversation
+/// at 180, and the details and recipient-picker screens at 180 as well -- so the
+/// bubbles were laid out from 180 inside a band the painter opened at 168, and
+/// the list sat eight rows lower than the screen it scrolls past. `GRID_16` is
+/// the step the notes app puts between its search band and the content under it
+/// (`CHIP_Y0 = SEARCH_Y1 + 16`).
+const CONTENT_TOP: usize = SEARCH_Y1 + spacing::GRID_16;
+
 // Thread card geometry
 const CARD_X0: usize = 24;
 const CARD_X1: usize = 696;
-const CARD_Y0: usize = 188;
+const CARD_Y0: usize = CONTENT_TOP;
 const CARD_H: usize = 120;
+/// The card's own body; the remainder of `CARD_H` is the gap to the next card.
 const CARD_BODY_H: usize = 104;
 
 /// The width a thread row's bold peer name may use.
@@ -856,7 +959,7 @@ const PEER_NAME_MAX_W: usize = (CARD_X1 - 92) - (CARD_X0 + 84) - 12;
 const LIST_VIEWPORT_H: usize = BANDS_TOP_IDLE - CARD_Y0;
 
 /// The top of the conversation's visible band.
-const CONVO_TOP: usize = 180;
+const CONVO_TOP: usize = CONTENT_TOP;
 
 /// The height of the conversation's visible band when the keyboard is down.
 const CONVO_VIEWPORT_H: usize = BANDS_TOP_IDLE - CONVO_TOP;
@@ -873,7 +976,12 @@ const BUBBLE_MIN_W: usize = 168;
 const BUBBLE_MAX_W: usize = 488;
 
 /// The gap between two chat bubbles.
-const BUBBLE_GAP: usize = 14;
+///
+/// WHY the platform's step and not 14: 14 is on no grid this app otherwise
+/// uses, and the thread list above it gaps its rows at `GRID_16`. Two lists in
+/// one app that space the same thing two different ways read as one of them
+/// being wrong.
+const BUBBLE_GAP: usize = spacing::GRID_16;
 
 /// The distance from one bubble's top to the next one's top.
 const BUBBLE_STEP: usize = BUBBLE_H + BUBBLE_GAP;
@@ -882,10 +990,17 @@ const BUBBLE_STEP: usize = BUBBLE_H + BUBBLE_GAP;
 const NOTICE_CAP: usize = 96;
 
 // Details and recipient-picker geometry
-const DETAILS_TOP: usize = 180;
+//
+// WHY both screens start at `CONTENT_TOP`: they are the same section as the
+// thread list -- the scrollable body under the search/status band -- and a
+// screen that started eight rows above the list printed its first row over the
+// band's hairline while its siblings did not.
+const DETAILS_TOP: usize = CONTENT_TOP;
+/// The row pitch, and the card it draws: `DETAIL_ROW_H - 8` leaves the
+/// platform's `GRID_8` between two report rows.
 const DETAIL_ROW_H: usize = 96;
 const DETAIL_ROWS: usize = 12;
-const RECIP_ROW_TOP: usize = 180;
+const RECIP_ROW_TOP: usize = CONTENT_TOP;
 const RECIP_ROW_H: usize = 88;
 const RECIP_ROWS: usize = 12;
 const PICK_LABEL: &[u8] = b"PICK";
@@ -1597,26 +1712,31 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Header (y 0..112)
+    // 1. Header (y 0..HEADER_Y1)
     if y < HEADER_Y1 {
-        if y >= HEADER_Y1 - 2 {
+        if y >= HEADER_Y1 - HEADER_RULE_H {
             return THEME.border;
         }
 
-        // Standardized back button squircle (24..72, 24..72)
+        // Standardized back button squircle (x 24..72, y HEADER_TOP..+48)
         if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
             return c;
         }
 
-        // Electric red dot accent at (96, 80) -- on the row the controls stand in.
+        // Electric red dot accent, on the row the controls and the title caps
+        // are centred on (`HEADER_ROW`), not on the box's top.
         let dot_dx = x as i32 - 96;
-        let dot_dy = y as i32 - 80;
+        let dot_dy = y as i32 - HEADER_ROW as i32;
         if dot_dx * dot_dx + dot_dy * dot_dy <= 16 {
             return THEME.error;
         }
 
         // Header Title: already cut to the space left of the status pill.
-        if y >= TITLE_Y && y < TITLE_Y + std::design::font::line_height(TITLE_SCALE) {
+        //
+        // WHY the gate is the box (`TITLE_BOX_H`) and not the run's caps: the
+        // rasteriser answers for the whole line box, descent included, and the
+        // band above now reserves exactly that many rows.
+        if y >= TITLE_Y && y < TITLE_Y + TITLE_BOX_H {
             if let Some(c) = test_text(
                 x,
                 y,
@@ -1659,14 +1779,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     // ViewMode 1: ThreadListView
     // -------------------------------------------------------------------------
     if messages.view_mode == ViewMode::ThreadList {
-        // 2. Search & Filter Bar (y 112..164)
+        // 2. Search & Filter Bar (y SEARCH_Y0..SEARCH_Y1)
         if y >= SEARCH_Y0 && y < SEARCH_Y1 {
             if in_rect(SEARCH_FIELD, x, y) {
                 let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
 
-                // Vector magnifying glass icon at (cx: 56, cy: 130)
-                let cx = 56;
-                let cy = 130;
+                // Vector magnifying glass, centred on the field's leading lane.
+                let cx = SEARCH_ICON_CX;
+                let cy = SEARCH_ICON_CY;
                 let dx = (x as isize - cx as isize).abs();
                 let dy = (y as isize - cy as isize).abs();
                 let d_sq = dx * dx + dy * dy;
@@ -1679,9 +1799,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     return THEME.on_surface_variant;
                 }
 
-                if messages.search_len > 0 && x >= 656 && x < 688 && y >= 116 && y < 144 {
+                if messages.search_len > 0
+                    && x >= 656
+                    && x < 688
+                    && y >= SEARCH_ICON_CY - SEARCH_CLEAR_HALF_H
+                    && y < SEARCH_ICON_CY + SEARCH_CLEAR_HALF_H
+                {
                     let cx = 672isize;
-                    let cy = 130isize;
+                    let cy = SEARCH_ICON_CY as isize;
                     let dx = (x as isize - cx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -1699,10 +1824,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return THEME.surface;
         }
 
-        // 3. Thread List / Empty State (y 168..1288)
+        // 3. Thread List / Empty State (y CONTENT_TOP..the recipient band)
         //
-        // WHY the list band starts at the first card and not at 168: the row
-        // math below subtracts CARD_Y0, so a pixel in the 12-row gap above the
+        // WHY the list band starts at the first card and not at `SEARCH_Y1`: the
+        // row math below subtracts CARD_Y0, so a pixel in the gap above the
         // first card underflowed and killed the task on the first paint of a
         // list that had a thread in it.
         if y >= CARD_Y0 && y < recipient_band_y0(messages) {
@@ -2143,7 +2268,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // ViewMode 2: ConversationView
         // ---------------------------------------------------------------------
 
-        // Threat Warning Banner or clean header info bar (y 112..164)
+        // Threat Warning Banner or clean header info bar (y SEARCH_Y0..SEARCH_Y1)
         if y >= SEARCH_Y0 && y < SEARCH_Y1 {
             let active_id = messages.active_thread_id.unwrap_or(0);
             let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
@@ -2197,9 +2322,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
 
                 if show_threat {
-                    // Warning icon at cx: 56, cy: 130
-                    let cx = 56;
-                    let cy = 130;
+                    // Warning icon, in the band's leading glyph lane.
+                    let cx = SEARCH_ICON_CX;
+                    let cy = SEARCH_ICON_CY;
                     let dx = (x as isize - cx as isize).abs();
                     let dy = (y as isize - cy as isize).abs();
                     if dx <= 2 && dy <= 8 {
@@ -2211,7 +2336,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
 
                 let text_x = if show_threat { 76 } else { 40 };
-                let text_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2).saturating_sub(12);
+                // WHY the line box and not a literal: the run is drawn at scale
+                // 1, so it centres on `line_height(1)` rows -- the same rule the
+                // search field's own text follows in `build_frame`.
+                let text_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2)
+                    .saturating_sub(std::design::font::line_height(1) / 2);
                 if let Some(c) = test_text(
                     x,
                     y,
@@ -2233,7 +2362,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         // Chat Message Bubbles Area (from below the info bar to the bands)
-        if y >= 168 && y < recipient_band_y0(messages) {
+        //
+        // WHY the gate is `CONTENT_TOP` and not the literal 168 it was: the
+        // bubbles are laid out from `CONVO_TOP`, and a gate eight rows above
+        // that painted a dead strip of surface between the band's hairline and
+        // the first bubble.
+        if y >= CONTENT_TOP && y < recipient_band_y0(messages) {
             let active_id = messages.active_thread_id.unwrap_or(0);
             let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
             let count = messages.ledger.get_thread_messages(active_id, &mut msgs);
@@ -3104,11 +3238,10 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[MESSAGES APP] Home gesture pressed. Exiting to launcher.");
     }
 
-    // Header Back button (24..72, 24..72)
+    // Header Back button (x 24..100, y HEADER_TOP..HEADER_TOP + 48): the
+    // platform control plus the slack of the row it stands in.
     if std::design::back_button::contains(x, y)
-        || (x >= 24 && x < 100
-            && y >= interos_std::design::viewport::HEADER_TOP
-            && y < interos_std::design::viewport::HEADER_TOP + 48)
+        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
     {
         match app.view_mode {
             ViewMode::Conversation => {
