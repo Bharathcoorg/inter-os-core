@@ -10,8 +10,9 @@
 use interos_std::crypto::{p256, p384, rsa};
 use interos_std::tls::certificate::{
     asn1_time_to_unix, declares_advertised_scheme, decode_ecdsa_signature, parse_rsa_public_key,
-    spki_is_verifiable, verify_link, DefaultCertVerifier, ParsedCertificate, EC_PUBLIC_KEY_OID,
-    ECDSA_WITH_SHA384_OID, PRIME256V1_OID, RSA_ENCRYPTION_OID, SECP384R1_OID, SHA256_WITH_RSA_OID,
+    spki_is_verifiable, verify_link, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
+    EC_PUBLIC_KEY_OID, ECDSA_WITH_SHA384_OID, PRIME256V1_OID, RSA_ENCRYPTION_OID, SECP384R1_OID,
+    SHA256_WITH_RSA_OID,
 };
 use interos_std::tls::handshake::{HandshakeClient, HandshakeState};
 use interos_std::tls::TlsError;
@@ -407,13 +408,21 @@ fn walk(
     roots: &[&[u8]],
     now: i64,
 ) -> Result<(), TlsError> {
+    walk_as("developer.mozilla.org", message, roots, now)
+}
+
+/// The same walk for a chain whose leaf names a different host.
+fn walk_as(
+    host: &str,
+    message: &[u8],
+    roots: &[&[u8]],
+    now: i64,
+) -> Result<(), TlsError> {
     let mut handshake = HandshakeClient::new([0u8; 32]);
     handshake.state = HandshakeState::EncryptedExtensionsReceived;
-    let verifier = DefaultCertVerifier::for_host("developer.mozilla.org")
-        .with_roots(roots)
-        .with_clock(now);
+    let verifier = DefaultCertVerifier::for_host(host).with_roots(roots).with_clock(now);
     handshake
-        .process_certificate(message, &verifier, "developer.mozilla.org")
+        .process_certificate(message, &verifier, host)
         .map(|_| ())
 }
 
@@ -515,5 +524,118 @@ fn refuses_the_chain_once_the_leaf_has_expired() {
     assert_eq!(
         walk(&message, &roots, not_after + 1),
         Err(TlsError::CertificateExpired)
+    );
+}
+
+/// The clock this fixture pair is judged at: the middle of the leaf's own window,
+/// so the case says the same thing after the leaf has been replaced in the wild.
+fn midpoint_of_leaf_window(leaf_der: &[u8]) -> i64 {
+    let leaf = ParsedCertificate::parse(leaf_der).unwrap();
+    let not_before = asn1_time_to_unix(leaf.not_before).unwrap();
+    let not_after = asn1_time_to_unix(leaf.not_after).unwrap();
+    not_before + (not_after - not_before) / 2
+}
+
+/// example.com's chain as it arrives today, and the shape that made the verifier
+/// refuse it: the last certificate it carries claims to be SSL.com TLS ECC Root
+/// CA 2022 but was signed by Comodo's AAA root, so the bytes an operator pins --
+/// the self-signed copy of that same root -- are not the bytes on the wire.
+#[test]
+fn walks_a_live_ecdsa_chain_that_ends_on_a_cross_signed_root() {
+    let anchor = fixture("sslcom_root_2022.der");
+    let cross = fixture("sslcom_root_2022_under_comodo.der");
+    let transit = fixture("sslcom_transit_ecc_r2.der");
+    let issuing = fixture("cloudflare_ecc_ca3.der");
+    let leaf_der = fixture("leaf_under_cloudflare_ecc.der");
+    let now = midpoint_of_leaf_window(&leaf_der);
+    let roots: [&[u8]; 1] = [&anchor];
+
+    // What separates this from the ISRG chain above: there the anchor signed the
+    // certificate the chain ended on, and the walk could prove it. Here it names
+    // the same root and carries the same key, but a different CA signed it.
+    let pinned = ParsedCertificate::parse(&anchor).unwrap();
+    let wire = ParsedCertificate::parse(&cross).unwrap();
+    assert_ne!(cross, anchor, "the wire copy is byte-for-byte the pinned anchor");
+    assert!(!wire.is_self_signed(), "the wire copy presents itself as issued, not as a root");
+    assert_eq!(wire.subject_raw, pinned.subject_raw, "fixture drift: different root");
+    assert_eq!(
+        wire.spki_public_key, pinned.spki_public_key,
+        "fixture drift: the wire copy must carry the pinned root's key"
+    );
+    assert_ne!(
+        wire.issuer_raw, pinned.subject_raw,
+        "the anchor signed this copy, so the chain is no longer the cross-signed case"
+    );
+
+    let message = certificate_message(&[&leaf_der, &issuing, &transit, &cross]);
+    walk_as("example.com", &message, &roots, now)
+        .expect("the walk refused a chain ending on a cross-signed copy of its pinned root");
+}
+
+#[test]
+fn refuses_a_cross_signed_root_when_its_anchor_is_not_installed() {
+    let cross = fixture("sslcom_root_2022_under_comodo.der");
+    let transit = fixture("sslcom_transit_ecc_r2.der");
+    let issuing = fixture("cloudflare_ecc_ca3.der");
+    let leaf_der = fixture("leaf_under_cloudflare_ecc.der");
+    let now = midpoint_of_leaf_window(&leaf_der);
+
+    let message = certificate_message(&[&leaf_der, &issuing, &transit, &cross]);
+    assert_eq!(
+        walk_as("example.com", &message, &[], now),
+        Err(TlsError::CertificateVerificationFailed),
+        "an empty trust store accepted a public chain"
+    );
+}
+
+/// The name match is only safe together with the key match. This is the forged
+/// case: a certificate with the pinned root's exact subject and issuer and the
+/// real root's validity window, holding a public key nobody ever pinned.
+#[test]
+fn refuses_a_cross_signed_name_carried_on_a_key_that_was_not_pinned() {
+    let anchor = fixture("sslcom_root_2022.der");
+    let forged = fixture("sslcom_root_2022_wrong_key.der");
+    let transit = fixture("sslcom_transit_ecc_r2.der");
+    let issuing = fixture("cloudflare_ecc_ca3.der");
+    let leaf_der = fixture("leaf_under_cloudflare_ecc.der");
+    let now = midpoint_of_leaf_window(&leaf_der);
+    let roots: [&[u8]; 1] = [&anchor];
+
+    let pinned = ParsedCertificate::parse(&anchor).unwrap();
+    let fake = ParsedCertificate::parse(&forged).unwrap();
+    assert_eq!(fake.subject_raw, pinned.subject_raw, "the forgery needs the real name");
+    assert_ne!(
+        fake.spki_public_key, pinned.spki_public_key,
+        "the forgery needs a key the store has never seen"
+    );
+
+    // The transit CA's signature is checked under this certificate's key, so a
+    // path built on a borrowed name dies exactly there rather than terminating.
+    let message = certificate_message(&[&leaf_der, &issuing, &transit, &forged]);
+    assert!(
+        walk_as("example.com", &message, &roots, now).is_err(),
+        "a certificate carrying a pinned root's name and somebody else's key completed a path"
+    );
+}
+
+/// The rule on its own, without the walk, the clock and the hostname around it:
+/// reaching the store is about the key that ends the path, not about whose
+/// signature the last certificate happens to carry.
+#[test]
+fn a_cross_signed_copy_reaches_the_store_only_while_its_key_is_the_pinned_one() {
+    let anchor = fixture("sslcom_root_2022.der");
+    let cross = fixture("sslcom_root_2022_under_comodo.der");
+    let forged = fixture("sslcom_root_2022_wrong_key.der");
+    let roots: [&[u8]; 1] = [&anchor];
+
+    let verifier = DefaultCertVerifier::for_host("example.com").with_roots(&roots);
+    let wire = ParsedCertificate::parse(&cross).unwrap();
+    assert_eq!(verifier.verify_reaches_trust_store(&wire), Ok(()));
+
+    let fake = ParsedCertificate::parse(&forged).unwrap();
+    assert_eq!(
+        verifier.verify_reaches_trust_store(&fake),
+        Err(TlsError::CertificateVerificationFailed),
+        "the store matched on name alone"
     );
 }

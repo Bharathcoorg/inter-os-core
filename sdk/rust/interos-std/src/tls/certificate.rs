@@ -948,8 +948,8 @@ pub trait CertificateVerifier {
     fn verify_trust_anchor(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
 
     /// Judges the entry a chain ends on: it must reach this verifier's trust
-    /// store, either by being a pinned self-signed anchor or by carrying the
-    /// signature of one.
+    /// store, either by being a pinned self-signed anchor, by carrying the
+    /// signature of one, or by being the cross-signed copy of one.
     ///
     /// WHY the chain head needs its own question: a TLS 1.3 server usually sends
     /// the leaf and its intermediates and stops there, because the root is
@@ -957,6 +957,13 @@ pub trait CertificateVerifier {
     /// self-signed and pinned?" would refuse every public chain for omitting the
     /// certificate the client already holds, so the head is judged on whether the
     /// path reaches an anchor, not on whether the server handed one over.
+    ///
+    /// WHY a cross-signed copy is a separate case: a root is often published
+    /// twice -- once self-signed, once signed by another CA so it can already
+    /// anchor chains while its own issuer is still deployed. Servers send the
+    /// second copy. Its bytes therefore differ from the anchor the operator
+    /// installed while its name and key are identical, and insisting that the
+    /// anchor signed it refuses the path at the last step.
     fn verify_reaches_trust_store(&self, cert: &ParsedCertificate) -> Result<(), TlsError>;
 
     /// The reference identity (RFC 6125) this verifier pins names against.
@@ -1143,6 +1150,31 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         }
         if cert.is_self_signed() {
             return self.verify_trust_anchor(cert);
+        }
+
+        // The cross-signed copy of a pinned root: same name and same key, but
+        // signed by a CA the operator has no reason to have installed.
+        //
+        // WHY matching on name *and* key adds no key to what the person trusts:
+        // this branch never checks a signature, so what it relies on is that the
+        // bytes it is comparing are the anchor's own. A copy carrying a different
+        // key falls through and is refused. And the walk that got here has either
+        // already verified the entry below this one under this key, or this entry
+        // is the leaf -- whose key the server then had to sign the handshake
+        // transcript with. Either way the pinned key did work; only the
+        // certificate that carries it was re-issued by somebody else.
+        for root_der in self.trusted_roots {
+            let Ok(root_cert) = ParsedCertificate::parse(root_der) else {
+                continue;
+            };
+            if !root_cert.is_self_signed() {
+                continue;
+            }
+            if root_cert.subject_raw == cert.subject_raw
+                && root_cert.spki_public_key == cert.spki_public_key
+            {
+                return Ok(());
+            }
         }
 
         for root_der in self.trusted_roots {
