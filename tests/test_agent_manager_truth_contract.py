@@ -589,6 +589,7 @@ def _width_defects(lib: str, main: str, notice_bytes: int) -> list:
     held = _const(lib, "CHAT_TEXT_MAX")
     rows = _const(main, "WIDE_ROWS")
     code = _code(main)
+    lib_code = _code(lib)
     defects = []
     if held < notice_bytes:
         defects.append(
@@ -598,6 +599,21 @@ def _width_defects(lib: str, main: str, notice_bytes: int) -> list:
         defects.append("a wide line's buffer is its own number rather than the transcript's")
     if rows * BYTES_PER_ROW < held:
         defects.append(f"{rows} wrapped rows cannot paint the {held} bytes held")
+    # WHY the counters are checked against the buffer's width and not taken on
+    # trust: a byte names lengths up to two hundred and fifty-five, so widening
+    # a buffer past that without widening what counts into it does not fail to
+    # compile -- it reports a full message as a short one, and a row start that
+    # wraps paints the third row over text the first row already carried. This
+    # is the same fault as the two arms above, one layer down, and only this
+    # arm can see it.
+    if held > 255:
+        for pattern, label, where in (
+            (r"pub\s+text_len\s*:\s*u(?:16|32)", "the transcript's length field", lib_code),
+            (r"pub\s+value_len\s*:\s*u(?:16|32)", "the wide line's length field", code),
+            (r"pub\s+row_starts\s*:\s*\[u(?:16|32);\s*WIDE_ROWS\]", "a wide line's row starts", code),
+        ):
+            if not re.search(pattern, where):
+                defects.append(f"{label} cannot count to the {held} bytes the buffers hold")
     return defects
 
 
@@ -956,6 +972,30 @@ def test_the_contract_can_fail():
         "const WIDE_MAX: usize = CHAT_TEXT_MAX;\nconst WIDE_ROWS: usize = 8;",
         240,
     ), "the width detector fires on an app that carries no fault"
+
+    # The counters, over an app whose buffers outgrew a byte. Each arm is
+    # severed on its own so the detector is shown to catch the field it names,
+    # and the whole set is shown to rest on an app that widened both.
+    wide_lib = (
+        "pub const CHAT_TEXT_MAX: usize = 320;\n"
+        "pub struct ChatMessage { pub text: [u8; CHAT_TEXT_MAX], pub text_len: u16 }\n"
+    )
+    wide_main = (
+        "const WIDE_MAX: usize = CHAT_TEXT_MAX;\n"
+        "const WIDE_ROWS: usize = 8;\n"
+        "pub struct WideLine { pub value: [u8; WIDE_MAX], pub value_len: u16,"
+        " pub row_starts: [u16; WIDE_ROWS] }\n"
+    )
+    assert not _width_defects(wide_lib, wide_main, 320), (
+        "the counter detector fires on an app that widened what counts into its buffers"
+    )
+    counter_faults = [
+        ("a byte counting the transcript", wide_lib.replace("text_len: u16", "text_len: u8"), wide_main),
+        ("a byte counting the wide value", wide_lib, wide_main.replace("value_len: u16", "value_len: u8")),
+        ("a byte holding a row start", wide_lib, wide_main.replace("row_starts: [u16;", "row_starts: [u8;")),
+    ]
+    for label, lib, main in counter_faults:
+        assert _width_defects(lib, main, 320), f"the counter detector does not catch {label}"
 
 
 def main() -> int:

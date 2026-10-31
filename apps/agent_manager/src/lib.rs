@@ -182,13 +182,15 @@ impl ChatRole {
 
 /// The longest message the transcript holds.
 ///
-/// WHY two hundred and forty and not ninety-six: the platform builds its
-/// sentence about a model file inside a two-hundred-and-forty-byte scratch,
-/// and a transcript that held less cut that sentence in half and then had to
-/// report the cut its own buffer caused. Two hundred and forty is the whole
-/// sentence, and it is still under the two hundred and fifty-five the
-/// message's own length field counts to.
-pub const CHAT_TEXT_MAX: usize = 240;
+/// WHY three hundred and twenty and not ninety-six: the platform builds its
+/// sentence about a model file inside a scratch of its own, and a transcript
+/// that holds less cuts that sentence in half and then has to report the cut
+/// its own buffer caused. The widest sentence the service builds today is the
+/// one that names a model file's vocabulary count and where its chat template
+/// came from, and it is built in a three-hundred-and-twenty-byte scratch -- so
+/// that is what the transcript holds. The painted line is sized from this
+/// number, so eight wrapped rows of the measured floor still carry it whole.
+pub const CHAT_TEXT_MAX: usize = 320;
 
 /// The longest prompt the composer holds.
 pub const CHAT_PROMPT_MAX: usize = 160;
@@ -215,7 +217,14 @@ pub struct ChatMessage {
     /// The message's text.
     pub text: [u8; CHAT_TEXT_MAX],
     /// How much of the text buffer the message uses.
-    pub text_len: u8,
+    ///
+    /// WHY a u16 and not a byte: a byte counted to two hundred and fifty-five,
+    /// which was room enough while the transcript held two hundred and forty,
+    /// and is not room enough now that it holds the whole three-hundred-and-
+    /// twenty-byte sentence the platform can say about a model file. A length
+    /// field that cannot name the buffer it measures would report a full
+    /// message as a short one.
+    pub text_len: u16,
 }
 
 impl ChatMessage {
@@ -394,7 +403,7 @@ impl ChatSession {
         self.messages[index].role = role;
         let len = text.len().min(CHAT_TEXT_MAX);
         self.messages[index].text[..len].copy_from_slice(&text[..len]);
-        self.messages[index].text_len = len as u8;
+        self.messages[index].text_len = len as u16;
         self.next = (self.next + 1) % CHAT_MAX_MESSAGES as u8;
         if (self.message_count as usize) < CHAT_MAX_MESSAGES {
             self.message_count += 1;
@@ -460,7 +469,7 @@ impl ChatSession {
         let to_copy = chunk.len().min(available);
         if to_copy > 0 {
             msg.text[current_len..current_len + to_copy].copy_from_slice(&chunk[..to_copy]);
-            msg.text_len = (current_len + to_copy) as u8;
+            msg.text_len = (current_len + to_copy) as u16;
         }
         to_copy
     }

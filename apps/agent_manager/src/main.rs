@@ -427,7 +427,12 @@ pub struct Line {
     /// The value in the right column, or the whole text of a wide line.
     pub value: [u8; WIDE_MAX],
     /// The value's length.
-    pub value_len: u8,
+    ///
+    /// WHY a u16 and not a byte: this counts into the same buffer the
+    /// transcript measures, and a byte could not name a length past two
+    /// hundred and fifty-five -- it would have reported a full wide value as
+    /// a sixty-four-byte one and painted the difference as a whole sentence.
+    pub value_len: u16,
     /// How the value is coloured.
     pub tone: Tone,
     /// Whether the value runs the full width under the label.
@@ -437,7 +442,13 @@ pub struct Line {
     /// WHY the row starts are stored and not computed: a wrap that breaks
     /// mid-word reads as a mistake, and finding the break points needs the
     /// whole string. They are found once, when the line is built.
-    pub row_starts: [u8; WIDE_ROWS],
+    ///
+    /// WHY a u16 and not a byte: a start is an offset into the value buffer,
+    /// and a buffer wide enough to hold the platform's whole sentence has row
+    /// starts past the two hundred and fifty-five a byte can name. A byte
+    /// would wrap 288 to 32 and paint the third row over text the first row
+    /// already carried.
+    pub row_starts: [u16; WIDE_ROWS],
     /// How many physical rows the line has.
     pub row_count: u8,
     /// The action this line performs when tapped, or -1.
@@ -501,8 +512,8 @@ impl Line {
 /// WHY the rows are capped: the line's value buffer holds a fixed number of
 /// bytes, and a row that begins past the end of the buffer would be a row
 /// of nothing.
-fn wrap_rows(value: &[u8], cap_px: u32, max_px: usize) -> ([u8; WIDE_ROWS], u8) {
-    let mut starts = [0u8; WIDE_ROWS];
+fn wrap_rows(value: &[u8], cap_px: u32, max_px: usize) -> ([u16; WIDE_ROWS], u8) {
+    let mut starts = [0u16; WIDE_ROWS];
     let mut count = 1usize;
     let mut row_start = 0usize;
 
@@ -540,7 +551,7 @@ fn wrap_rows(value: &[u8], cap_px: u32, max_px: usize) -> ([u8; WIDE_ROWS], u8) 
         if candidate <= row_start {
             // WHY the hard break: a row of text with no space in it has
             // nowhere better to go.
-            starts[count] = limit as u8;
+            starts[count] = limit as u16;
             count += 1;
             row_start = limit;
             continue;
@@ -548,7 +559,7 @@ fn wrap_rows(value: &[u8], cap_px: u32, max_px: usize) -> ([u8; WIDE_ROWS], u8) 
         // WHY the space is left out of the row and the next row starts after
         // it: a row that ends with a space and a row that begins with one
         // both look like the text has a stray character in it.
-        starts[count] = candidate as u8;
+        starts[count] = candidate as u16;
         count += 1;
         row_start = candidate;
     }
@@ -1295,9 +1306,9 @@ impl AgentManagerApp {
             // cut that looks like a whole sentence is a sentence that
             // changed the meaning. The mark says the text continues.
             line.value[WIDE_MAX - 3..WIDE_MAX].copy_from_slice(b"...");
-            line.value_len = WIDE_MAX as u8;
+            line.value_len = WIDE_MAX as u16;
         } else {
-            line.value_len = kept as u8;
+            line.value_len = kept as u16;
         }
         line.tone = tone;
         line.wide = wide;
