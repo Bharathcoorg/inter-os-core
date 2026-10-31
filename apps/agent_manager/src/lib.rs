@@ -181,7 +181,14 @@ impl ChatRole {
 }
 
 /// The longest message the transcript holds.
-pub const CHAT_TEXT_MAX: usize = 96;
+///
+/// WHY two hundred and forty and not ninety-six: the platform builds its
+/// sentence about a model file inside a two-hundred-and-forty-byte scratch,
+/// and a transcript that held less cut that sentence in half and then had to
+/// report the cut its own buffer caused. Two hundred and forty is the whole
+/// sentence, and it is still under the two hundred and fifty-five the
+/// message's own length field counts to.
+pub const CHAT_TEXT_MAX: usize = 240;
 
 /// The longest prompt the composer holds.
 pub const CHAT_PROMPT_MAX: usize = 160;
@@ -623,6 +630,19 @@ pub trait Provider: Sync {
     /// What the device actually holds for this provider.
     fn install_state(&self, device: &DeviceState) -> InstallState;
 
+    /// Whether INSTALL on this screen asks the platform to move a model file the
+    /// device already holds, rather than to install a package.
+    ///
+    /// WHY the app asks instead of writing: the model namespace is held on the
+    /// device and the authority to write there belongs to the storage service. An
+    /// app that wrote the file itself would be taking authority it was never
+    /// granted, and the screen would show a model the platform never placed.
+    /// Defaults to false because a provider delivered as a package is installed
+    /// through the package route, which the platform already answers.
+    fn installs_from_device(&self) -> bool {
+        false
+    }
+
     /// Whether a runtime that can serve the provider is bound.
     fn runtime_binding(&self, device: &DeviceState) -> RuntimeBinding;
 
@@ -819,6 +839,13 @@ impl Provider for LocalGenerative {
             }
             ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => InstallState::Unavailable,
         }
+    }
+
+    /// WHY this one installs from the device: its weights arrive as a file the
+    /// person puts on the device, not as a package the platform ships, so INSTALL
+    /// here asks the platform to move that file into the model namespace.
+    fn installs_from_device(&self) -> bool {
+        true
     }
 
     fn runtime_binding(&self, device: &DeviceState) -> RuntimeBinding {
@@ -3308,9 +3335,27 @@ mod tests {
         assert!(bridge.package_id().is_none());
     }
 
+    /// WHY only one provider asks for a file move: the model namespace is written
+    /// by the storage service, and INSTALL on a provider the platform delivers as a
+    /// package has to go through the package route, where the signature is checked.
     #[test]
-    fn a_new_provider_is_an_implementation_and_not_an_edit_through_the_app() {
-        // WHY this matters: the point of the trait is that adding a model
+    fn only_the_local_weights_provider_installs_from_the_device() {
+        assert!(provider_by_id("local-generative")
+            .unwrap()
+            .installs_from_device());
+        assert!(!provider_by_id("embeddinggemma2")
+            .unwrap()
+            .installs_from_device());
+        assert!(
+            !provider_by_id("host-bridge")
+                .unwrap()
+                .installs_from_device(),
+            "a provider that runs elsewhere has no file for this device to move"
+        );
+    }
+
+    #[test]
+    fn a_new_provider_is_an_implementation_and_not_an_edit_through_the_app() {        // WHY this matters: the point of the trait is that adding a model
         // does not mean editing the screens. The registry is the only list,
         // and the screens read the registry.
         assert_eq!(providers().len(), 3);

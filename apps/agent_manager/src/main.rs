@@ -48,7 +48,7 @@ use agent_manager::{
     PackageRemoveOutcome, ProbeStatus, Provider, RegistryPackageState, RuntimeBinding,
     RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState,
     Surface, ToolAuthority, transact_package_install, transact_package_remove,
-    CAPABILITY_COUNT, CHAT_PROMPT_MAX,
+    CAPABILITY_COUNT, CHAT_PROMPT_MAX, CHAT_TEXT_MAX,
     MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
@@ -210,9 +210,6 @@ const VALUE_W: usize = GUTTER + CONTENT_W - CARD_PAD_X - VALUE_X;
 /// The width of a wide line's text.
 const WIDE_W: usize = GUTTER + CONTENT_W - CARD_PAD_X - (GUTTER + CARD_PAD_X);
 
-/// How many characters a wide line wraps at.
-const WRAP_COLS: usize = 52;
-
 /// The longest run the outline face will draw, in bytes.
 ///
 /// WHY the app knows the face's limit: a run the face refuses is drawn by
@@ -221,7 +218,14 @@ const WRAP_COLS: usize = 52;
 /// like it belongs to another screen.
 const MAX_RUN_BYTES: usize = std::design::outline_text::KEY_MAX;
 /// How many physical rows a wide line can have.
-const WIDE_ROWS: usize = 4;
+///
+/// WHY eight and not four: a wide line's rows are found by measuring, and
+/// the widest glyph the face has advances thirteen pixels at the caption
+/// rung, so the column carries no fewer than forty-eight bytes a row however
+/// the letters fall. Eight rows is what a whole message needs once the space
+/// a wrap leaves at a row's end is paid for; four rows left the tail of a
+/// long sentence unpainted with the bytes still in the line.
+const WIDE_ROWS: usize = 8;
 
 // The type scale rungs the app draws with.
 //
@@ -269,7 +273,13 @@ const LABEL_MAX: usize = TOOL_LABEL_MAX;
 /// The longest value a line carries.
 const VALUE_MAX: usize = 44;
 /// The longest value a wide line carries.
-const WIDE_MAX: usize = WRAP_COLS * 3;
+///
+/// WHY it is the transcript's own length: a chat message is placed on the
+/// body as one wide line, and a line whose buffer is shorter than the
+/// message it was handed paints an ellipsis over the end of a sentence the
+/// transcript says it kept whole. The two limits are the same limit, so one
+/// is written from the other and they cannot drift apart again.
+const WIDE_MAX: usize = CHAT_TEXT_MAX;
 /// The longest action result the app keeps.
 const ACTION_LOG_MAX: usize = 120;
 /// The longest card title.
@@ -373,6 +383,27 @@ fn streamed_search_frame(notice_bytes: &[u8], out: &mut [u8]) -> usize {
         Ok(read) => read.min(want),
         Err(_) => 0,
     }
+}
+
+/// Takes the install sentence off the channel its notice named, with what the
+/// service said about it.
+///
+/// WHY the status travels beside the text: the service answers an install with a
+/// measurement of the model namespace, and whether that measurement says the file
+/// is whole is the platform's statement, not this app's. The app only has to keep
+/// the two together rather than decide on its own what the bytes mean.
+fn streamed_install_notice(
+    notice_bytes: &[u8],
+    out: &mut [u8],
+) -> Option<(u32, usize, u32)> {
+    let notice = std::ai::AiStreamNotice::from_bytes(notice_bytes)?;
+    let want = (notice.streamed_len as usize)
+        .min(notice.total_len as usize)
+        .min(out.len());
+    let read = std::shm_pipe_receive(notice.pipe_id, &mut out[..want])
+        .ok()?
+        .min(want);
+    Some((notice.status, read, notice.total_len))
 }
 
 /// Writes text into a line, stopping at the line's end.
@@ -667,6 +698,14 @@ pub struct AgentManagerApp {
     /// is the model's, and a count would punish a slow service for nothing while
     /// a clock tells the person when the app stopped believing one is coming.
     pub answer_deadline: u64,
+    /// The tick by which the platform must have reported an install this app asked for.
+    ///
+    /// WHY it is separate from the prompt's deadline: an install is answered by the
+    /// storage service copying a file and the inference service measuring the result,
+    /// and the report that comes back is about a file, not an answer to a prompt. A
+    /// reader that took it as the model's reply would paint "installed" in the
+    /// assistant's bubble.
+    pub install_deadline: u64,
     /// The platform band's clock lane, as the RTC answered it.
     ///
     /// WHY it is cached on the app: the read is a syscall and the band is
@@ -714,6 +753,7 @@ impl AgentManagerApp {
             diagnostics: RuntimeDiagnostics::measure(),
             ipc_latency_ticks: 0,
             answer_deadline: 0,
+            install_deadline: 0,
             clock: [b' '; CLOCK_LEN],
             clock_ok: false,
         };
@@ -824,6 +864,10 @@ impl AgentManagerApp {
     /// answer it gives is the answer the screen shows.
     pub fn install_selected(&mut self) {
         let provider = self.selected_provider();
+        if provider.installs_from_device() {
+            self.request_model_install();
+            return;
+        }
         let outcome = transact_package_install(provider, &self.device, std::package_install);
         match outcome {
             PackageInstallOutcome::Installed => {
@@ -873,6 +917,143 @@ impl AgentManagerApp {
         }
         self.device = DeviceState::measure();
         self.rebuild();
+    }
+
+    /// Asks the inference service to install the model file the device already holds.
+    ///
+    /// WHY the service and not the filesystem: the model namespace is written by the
+    /// storage service, which is the one service the platform grants filesystem write
+    /// to, and this app holds no such authority. Asking is the only route that does
+    /// not mint a permission.
+    ///
+    /// WHY the report is not read here: the platform has only just been told, so
+    /// anything already queued predates the request. The event loop reads it once the
+    /// platform says a message is waiting.
+    fn request_model_install(&mut self) {
+        self.discard_stale_answers();
+        if std::ipc_send(
+            std::ai::SERVICE_INFERENCE_TASK_ID,
+            std::ai::MSG_TYPE_INSTALL,
+            b"INSL",
+        )
+        .is_err()
+        {
+            self.set_action(
+                b"INSTALL: the inference service would not take the request.",
+                Tone::Unavailable,
+            );
+            self.rebuild();
+            return;
+        }
+        self.install_deadline =
+            std::get_ticks().unwrap_or(0).saturating_add(ANSWER_TIMEOUT_TICKS);
+        self.set_action(b"Install requested: waiting for the platform's report.", Tone::Muted);
+        self.rebuild();
+    }
+
+    /// Takes the install report the platform sent, if one has arrived.
+    ///
+    /// WHY the message type is read before the body: the mailbox also holds the
+    /// kernel's copy of every input event dispatched to this window, and a touch read
+    /// as an install report would paint a coordinate as the platform's answer about a
+    /// file.
+    ///
+    /// WHY the sentence is shown as it arrived: the service's words are a measurement
+    /// of the model namespace, which is the only statement anyone can make about bytes
+    /// this app did not copy. A sentence written here would be the app claiming a file
+    /// it never saw.
+    pub fn step_install_reply(&mut self) -> bool {
+        let mut rx = [0u8; 64];
+        match std::ipc::receive_any(&mut rx) {
+            Err(_) => {
+                if std::get_ticks().unwrap_or(0) >= self.install_deadline {
+                    self.install_deadline = 0;
+                    self.chat
+                        .push(ChatRole::Notice, b"The platform sent no install report.");
+                    self.set_action(b"No install report received.", Tone::Unavailable);
+                    self.device = DeviceState::measure();
+                    self.rebuild();
+                    return true;
+                }
+                let _ = std::event_poll(
+                    std::EVENT_IPC_MSG | std::EVENT_SHM_READABLE | std::EVENT_TOUCH_INPUT,
+                    ANSWER_POLL_TICKS,
+                );
+                false
+            }
+            Ok((_, std::ai::MSG_TYPE_INSTALL_CHUNK, len)) => {
+                // WHY the notice is copied before the frame is read: the sentence
+                // lands in the same buffer the mailbox message was received into, and
+                // the channel is only named inside it.
+                let mut notice_bytes = [0u8; std::ai::AiStreamNotice::WIRE_LEN];
+                let take = len.min(notice_bytes.len());
+                notice_bytes[..take].copy_from_slice(&rx[..take]);
+                let mut text = [0u8; 256];
+                match streamed_install_notice(&notice_bytes, &mut text) {
+                    Some((status, read, offered)) => {
+                        self.take_install_report(status, &text[..read], offered)
+                    }
+                    None => {
+                        self.install_deadline = 0;
+                        self.chat
+                            .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+                        self.set_action(
+                            b"Unreadable install report from the inference service.",
+                            Tone::Unavailable,
+                        );
+                        self.rebuild();
+                        true
+                    }
+                }
+            }
+            Ok((_, std::ai::MSG_TYPE_INSTALL, len)) => {
+                let hdr = core::mem::size_of::<std::ai::AiInferenceResponse>();
+                if len <= hdr {
+                    self.install_deadline = 0;
+                    self.chat
+                        .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+                    self.set_action(
+                        b"Unreadable install report from the inference service.",
+                        Tone::Unavailable,
+                    );
+                    self.rebuild();
+                    return true;
+                }
+                let resp = unsafe {
+                    core::ptr::read_unaligned(rx.as_ptr() as *const std::ai::AiInferenceResponse)
+                };
+                // WHY the header's length is believed: the mailbox cuts a message at
+                // sixty-four bytes and says nothing, so the number the service wrote
+                // is the only witness that the sentence it sent was longer than what
+                // reached the screen.
+                self.take_install_report(resp.status, &rx[hdr..len], resp.output_dim)
+            }
+            Ok(_) => false,
+        }
+    }
+
+    /// Paints the platform's install sentence as the platform's own words.
+    fn take_install_report(&mut self, status: u32, text: &[u8], offered: u32) -> bool {
+        self.install_deadline = 0;
+        self.chat.push(ChatRole::Notice, text);
+        let arrived = text.len() as u32;
+        if arrived < offered {
+            let mut line = [0u8; 64];
+            let mut n = 0;
+            put(&mut line, &mut n, b"Report cut in transit: ");
+            n += format_u32(arrived, &mut line[n..]);
+            put(&mut line, &mut n, b" of ");
+            n += format_u32(offered, &mut line[n..]);
+            put(&mut line, &mut n, b" bytes reached the app.");
+            self.set_action(&line[..n], Tone::Unavailable);
+        } else if status == std::ai::STATUS_SUCCESS {
+            self.set_action(b"Install report received.", Tone::Good);
+        } else {
+            self.set_action(b"The platform refused the install.", Tone::Unavailable);
+        }
+        self.device = DeviceState::measure();
+        self.rebuild();
+        true
     }
 
     /// Asks the platform to remove the selected provider's package.
@@ -3647,6 +3828,14 @@ pub extern "C" fn _start() -> ! {
         }
         if app.chat.is_streaming {
             if app.step_streaming() {
+                dirty = Dirty::All;
+            }
+        } else if app.install_deadline != 0 {
+            // WHY the install waits beside the prompt: the platform answers an
+            // install when the file has reached the model namespace, and a screen
+            // that slept through the wait would show a file it had just been told
+            // about as though nothing had happened.
+            if app.step_install_reply() {
                 dirty = Dirty::All;
             }
         } else if !handled {

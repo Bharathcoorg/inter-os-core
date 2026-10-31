@@ -19,6 +19,24 @@ pub const PATH_GENERATIVE_MODEL_DATA: &str = "/data/models/gemma4-2b.gguf";
 /// Fallback system path for Gemma 4 2B generative weights in `/system/models`.
 pub const PATH_GENERATIVE_MODEL_SYSTEM: &str = "/system/models/gemma4-2b.gguf";
 
+/// Where a model file the device installed itself is held.
+///
+/// WHY one fixed path: the install is the platform moving bytes the person put
+/// in their own documents into the model namespace, and a namespace that grows
+/// a file per request has no way to answer "which of these is the model?". One
+/// named file, replaced by the next install, is what the screen reports on.
+pub const PATH_LOCAL_MODEL_DATA: &str = "/data/models/local_model.gguf";
+
+/// The trees an installed model file may be taken from.
+///
+/// WHY these and nothing else: an install moves bytes the device already holds
+/// as a document, and there are two ways a model file becomes a document on
+/// this device -- the browser's download directory and the directory the
+/// platform's own delivery channel writes into. A request that names anywhere
+/// else is not pointing at a document the person put there, so it is refused
+/// before a single byte is read.
+pub const MODEL_SOURCE_TREES: &[&str] = &["/storage/downloads", "/data/incoming"];
+
 /// Maximum length for a tensor name in zero-allocation buffer.
 pub const MAX_TENSOR_NAME_LEN: usize = 64;
 /// Longest metadata key the configuration reader will name. A longer key is
@@ -996,6 +1014,92 @@ pub fn read_gguf_header(path: &str) -> Result<GgufHeader, GgufError> {
     res
 }
 
+/// Reports what a directory's own listing states about one of its files.
+///
+/// WHY the listing and not a fresh open: the question being asked is "how many
+/// bytes does the device say it holds", and the answer a directory gives is the
+/// same number a reader of that tree sees. Opening the file to ask would also
+/// create it if it were not there.
+pub fn listed_size(dir: &str, name: &str) -> Option<u64> {
+    let mut listing = [0u8; 512];
+    let Ok(read) = std::fs_list(dir, &mut listing) else {
+        return None;
+    };
+    for line in listing[..read].split(|byte| *byte == b'\n') {
+        let mut fields = line.split(|byte| *byte == b'|');
+        if fields.next() == Some(name.as_bytes()) {
+            return fields
+                .next()
+                .and_then(|text| core::str::from_utf8(text).ok())
+                .and_then(|text| text.parse::<u64>().ok());
+        }
+    }
+    None
+}
+
+/// Reports the bytes the model namespace says it holds for the installed file.
+///
+/// WHY it is spelled out from the directory and the name: a listing answers
+/// about one entry of one directory, while `PATH_LOCAL_MODEL_DATA` names the
+/// whole path the loader opens. Keeping the split here means the measurement and
+/// the path can only ever disagree if someone edits one of the two constants.
+pub fn local_model_size() -> Option<u64> {
+    listed_size("/data/models", "local_model.gguf")
+}
+
+/// The model file an install may take, as a document the device already holds.
+///
+/// Writes the full source path into `out` and reports its length beside the
+/// size the directory's own listing stated, or reports nothing when no file in
+/// either tree is a model file.
+///
+/// WHY the header is read before the file is offered: an install that copied
+/// first would place bytes in the model namespace that the platform then has to
+/// call weights without having read a single one of them. Parsing the header is
+/// the cheapest check that says whether the file claims to be a model at all.
+///
+/// WHY the listing's size is carried rather than measured later: the copy is
+/// finished when the model namespace holds that many bytes, and a report of
+/// "installed" needs a number the device already had.
+pub fn find_installable_model(out: &mut [u8]) -> Option<(usize, u64)> {
+    let mut listing = [0u8; 512];
+    for &tree in MODEL_SOURCE_TREES {
+        let Ok(read) = std::fs_list(tree, &mut listing) else {
+            continue;
+        };
+        let tree_bytes = tree.as_bytes();
+        for line in listing[..read].split(|byte| *byte == b'\n') {
+            // The platform's directory line is `name|size|kind`.
+            let mut fields = line.split(|byte| *byte == b'|');
+            let (Some(name), Some(size)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            if name.len() < 5 || !name.ends_with(b".gguf") {
+                continue;
+            }
+            let total = tree_bytes.len() + 1 + name.len();
+            if total + 1 > out.len() {
+                continue;
+            }
+            out[..tree_bytes.len()].copy_from_slice(tree_bytes);
+            out[tree_bytes.len()] = b'/';
+            out[tree_bytes.len() + 1..total].copy_from_slice(name);
+            let Ok(path) = core::str::from_utf8(&out[..total]) else {
+                continue;
+            };
+            if read_gguf_header(path).is_err() {
+                continue;
+            }
+            let stated = core::str::from_utf8(size)
+                .ok()
+                .and_then(|text| text.parse::<u64>().ok())
+                .unwrap_or(0);
+            return Some((total, stated));
+        }
+    }
+    None
+}
+
 /// Candidate model paths checked in priority order for general model probing.
 pub const MODEL_CANDIDATE_PATHS: &[&str] = &[
     PATH_EMBEDDING_MODEL_DATA,
@@ -1005,6 +1109,7 @@ pub const MODEL_CANDIDATE_PATHS: &[&str] = &[
     PATH_GENERATIVE_MODEL_SYSTEM,
     "/system/models/gemma-2b.gguf",
     "/data/models/gemma-2b.gguf",
+    PATH_LOCAL_MODEL_DATA,
     "/system/models/model.gguf",
     "/data/models/model.gguf",
 ];
@@ -1108,6 +1213,12 @@ pub fn probe_generative_model() -> Result<(GgufHeader, &'static str), GgufError>
         PATH_GENERATIVE_MODEL_SYSTEM,
         "/data/models/gemma-2b.gguf",
         "/system/models/gemma-2b.gguf",
+        // WHY the installed file is a candidate: the Agent Manager's own
+        // removal contract names `/data/models/local_model.gguf` as where a
+        // loose model file sits once the device puts it there. A probe that
+        // never looked at that path would answer "no weights" about a file the
+        // screen had just offered to remove.
+        PATH_LOCAL_MODEL_DATA,
     ];
     for &path in CANDIDATES {
         if let Ok(hdr) = read_gguf_header(path) {

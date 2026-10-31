@@ -140,6 +140,55 @@ def _model_layer(lib: str) -> str:
     return _code(lib.split("#[cfg(test)]")[0])
 
 
+def _body(source: str, signature: str) -> str:
+    """The braced body that follows `signature`, as far as its own braces close.
+
+    WHY the scoping matters: several of the rules below forbid a call in one
+    function and require it in another. Searching the whole file would let a
+    `fs_write` in an unrelated path trip a rule about the install request, and
+    would let the rule pass while the install itself did the writing.
+    """
+    code = _code(source)
+    at = code.find(signature)
+    assert at >= 0, f"the app no longer has {signature}"
+    open_at = code.find("{", at)
+    assert open_at >= 0, f"{signature} has no body"
+    depth = 0
+    for index in range(open_at, len(code)):
+        char = code[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return code[open_at + 1 : index]
+    raise AssertionError(f"{signature} has an unbalanced body")
+
+
+def _device_file_asks(code: str) -> list:
+    """The providers that answer `installs_from_device` with true.
+
+    WHY this is a detector rather than an inline loop: the rule is that exactly
+    one provider -- the one whose weights are a document on the device -- asks
+    for the file move, and a rule with a count in it has to be run over a
+    synthetic source to show that it can fail.
+    """
+    asks = []
+    for opening in re.finditer(
+        r"fn\s+installs_from_device\s*\(\s*&self\s*\)\s*->\s*bool\s*\{", code
+    ):
+        end = code.index("}", opening.end())
+        if "true" not in code[opening.end() : end]:
+            continue
+        owner_at = max(
+            code.rfind("impl Provider for ", 0, opening.start()),
+            code.rfind("pub trait Provider", 0, opening.start()),
+        )
+        assert owner_at >= 0, "an installs_from_device sits outside a provider"
+        asks.append(code[owner_at : owner_at + 80].split("\n")[0])
+    return asks
+
+
 # -----------------------------------------------------------------------------
 # The faults that were removed
 # -----------------------------------------------------------------------------
@@ -513,6 +562,61 @@ def test_the_transcript_and_the_prompt_are_bounded():
         ), f"{path} ignores the composer's refusal"
 
 
+# The bytes a row of a wide line is guaranteed to carry.
+#
+# WHY a measured floor and not a guessed one: the column is six hundred and
+# thirty-two pixels wide, the widest glyph the face has advances thirteen
+# pixels at the caption rung, and a wrap that breaks at a space leaves the
+# end of a row empty. Forty bytes a row is what is left after all three.
+BYTES_PER_ROW = 40
+
+
+def _service_notice_bytes() -> int:
+    """The widest sentence the inference service can say about a model file."""
+    source = (
+        ROOT / "userspace" / "system-service" / "src" / "lib.rs"
+    ).read_text(encoding="utf-8")
+    widths = [
+        int(match.group(1))
+        for match in re.finditer(r"scratch\s*=\s*\[0u8;\s*(\d+)\]", source)
+    ]
+    assert widths, "the inference service builds its notices in no scratch of its own"
+    return max(widths)
+
+
+def _width_defects(lib: str, main: str, notice_bytes: int) -> list:
+    """Every reason a message the transcript holds might never reach the screen."""
+    held = _const(lib, "CHAT_TEXT_MAX")
+    rows = _const(main, "WIDE_ROWS")
+    code = _code(main)
+    defects = []
+    if held < notice_bytes:
+        defects.append(
+            f"the transcript holds {held} bytes and the platform writes a {notice_bytes}-byte sentence"
+        )
+    if not re.search(r"const\s+WIDE_MAX\s*:\s*usize\s*=\s*CHAT_TEXT_MAX\s*;", code):
+        defects.append("a wide line's buffer is its own number rather than the transcript's")
+    if rows * BYTES_PER_ROW < held:
+        defects.append(f"{rows} wrapped rows cannot paint the {held} bytes held")
+    return defects
+
+
+def test_a_message_the_transcript_holds_reaches_the_screen():
+    """The line a message is painted on carries the whole message.
+
+    WHY this matters: the transcript holds what the platform said, and the
+    body puts one message on one wide line. If that line's buffer or its
+    wrapped rows hold less than the transcript does, the screen paints an
+    ellipsis over the end of a sentence the app has already reported as
+    received -- and the sentence cut is the platform's own explanation of the
+    model file, which is built in the service's widest scratch.
+    """
+    notice_bytes = _service_notice_bytes()
+    for path, (lib, main, _theme) in SOURCES.items():
+        defects = _width_defects(lib, main, notice_bytes)
+        assert not defects, f"{path}: {defects}"
+
+
 def test_the_sdk_defines_a_versioned_inference_interface():
     """The interface the chat speaks is named and versioned in the SDK.
 
@@ -640,6 +744,90 @@ def test_the_search_card_reads_a_frame_the_service_streamed():
         )
 
 
+def test_an_install_is_reported_as_the_platforms_own_words():
+    """INSTALL asks the inference service and paints its answer, not the app's.
+
+    The weights this provider is served by arrive as a file the person puts on
+    the device. The only authority to move that file into the model namespace
+    belongs to the storage service, and the only statement anyone can make about
+    the result is the inference service's measurement of the directory the file
+    landed in. So the app asks, waits, and shows the sentence it was given -- as
+    a notice, because a sentence shown in the assistant's voice would read as
+    though the model had said it.
+
+    The app must not write the file itself, and must not address the storage
+    service directly: either one would be authority the app was never granted,
+    and the screen would then be claiming a file the platform never placed.
+    """
+    for path, (_lib, main, _theme) in SOURCES.items():
+        request = _body(main, "fn request_model_install")
+        assert "std::ipc_send" in request, f"{path} does not ask the platform to install"
+        assert "std::ai::SERVICE_INFERENCE_TASK_ID" in request, (
+            f"{path} asks something other than the inference service"
+        )
+        assert "std::ai::MSG_TYPE_INSTALL" in request, (
+            f"{path} asks the inference service for something other than an install"
+        )
+        assert "std::fs_write" not in request and "fs_write" not in request, (
+            f"{path} writes a model file from the app instead of asking for it"
+        )
+        assert "SERVICE_STORAGE_TASK_ID" not in request, (
+            f"{path} addresses the storage service directly, which is a route "
+            "the platform did not open for an app"
+        )
+
+        report = _body(main, "fn take_install_report")
+        assert "ChatRole::Notice" in report, (
+            f"{path} does not show the install sentence as the platform's own"
+        )
+        assert "ChatRole::Assistant" not in report, (
+            f"{path} puts the platform's install sentence in the assistant's mouth"
+        )
+
+        reader = _body(main, "fn step_install_reply")
+        assert "std::ai::MSG_TYPE_INSTALL_CHUNK" in reader, (
+            f"{path} ignores the notice that names a streamed install sentence"
+        )
+        assert "streamed_install_notice(" in reader, (
+            f"{path} never takes the install sentence off the channel its "
+            "notice named"
+        )
+
+        selector = _body(main, "fn install_selected")
+        assert "installs_from_device()" in selector, (
+            f"{path} installs every provider the same way, so a provider whose "
+            "weights are a file on the device is answered with a package"
+        )
+
+
+def test_only_the_local_weights_provider_asks_for_a_file_move():
+    """The device-file route belongs to one provider and to no other.
+
+    A provider delivered as a package already has an install route the platform
+    answers; a provider that runs on another machine has no file for this device
+    to move at all. Only the weights that arrive as a document on the device ask
+    for the move, so the flag has exactly one truth-teller and a default that
+    refuses.
+    """
+    for path, (lib, _main, _theme) in SOURCES.items():
+        code = _model_layer(lib)
+        assert "fn installs_from_device" in code, (
+            f"{path} no longer decides per provider where its weights come from"
+        )
+        asks = _device_file_asks(code)
+        assert "false" in _body(code, "fn installs_from_device"), (
+            f"{path} does not refuse a device file move by default, so a provider "
+            "added without an answer would ask for one"
+        )
+        assert len(asks) == 1, (
+            f"{path} asks for a device file move from {len(asks)} providers: {asks}"
+        )
+        assert "LocalGenerative" in asks[0], (
+            f"{path} asks for a file move from {asks[0]}, which is not the provider "
+            "whose weights are a document on the device"
+        )
+
+
 def test_the_mirrored_crate_is_the_canonical_crate():
     """The public repository's copy has to be the private one.
 
@@ -688,6 +876,86 @@ def test_the_contract_can_fail():
             assert not _hits(_code(lib + main), pattern), (
                 f"{path} trips the detector for {pattern!r}"
             )
+
+    # The install detectors, run over apps that carry the faults they exist to
+    # catch. Each one is a whole fake source, because the detectors read a
+    # function's body and a body has to be inside a source.
+    faulty_sources = [
+        (
+            "an app that writes the model file itself",
+            "fn request_model_install(&mut self) {\n"
+            "    let _ = std::fs_write(\"/data/models/local_model.gguf\", b\"\");\n}\n",
+            lambda source: "fs_write" in _body(source, "fn request_model_install"),
+        ),
+        (
+            "an app that answers an install in the assistant's voice",
+            "fn take_install_report(&mut self) -> bool {\n"
+            "    self.chat.push(ChatRole::Assistant, text);\n    true\n}\n",
+            lambda source: "ChatRole::Assistant"
+            in _body(source, "fn take_install_report"),
+        ),
+        (
+            "an app that asks the storage service past the inference service",
+            "fn request_model_install(&mut self) {\n"
+            "    let _ = std::ipc_send(std::ai::SERVICE_STORAGE_TASK_ID, b\"\", b\"INSL\");\n}\n",
+            lambda source: "SERVICE_STORAGE_TASK_ID"
+            in _body(source, "fn request_model_install"),
+        ),
+        (
+            "an app that reads every message as an install report",
+            "fn step_install_reply(&mut self) -> bool {\n"
+            "    let _ = std::ipc::receive_any(&mut rx);\n    false\n}\n",
+            lambda source: "MSG_TYPE_INSTALL_CHUNK"
+            not in _body(source, "fn step_install_reply"),
+        ),
+    ]
+    for label, synthetic, fired in faulty_sources:
+        assert fired(synthetic), f"the install detector does not catch {label}"
+
+    provider_flags = (
+        "pub trait Provider {\n"
+        "    fn installs_from_device(&self) -> bool {\n        false\n    }\n}\n"
+        "impl Provider for EmbeddingGemma2 {\n"
+        "    fn installs_from_device(&self) -> bool {\n        true\n    }\n}\n"
+        "impl Provider for LocalGenerative {\n"
+        "    fn installs_from_device(&self) -> bool {\n        true\n    }\n}\n"
+    )
+    synthetic_asks = _device_file_asks(provider_flags)
+    assert not (len(synthetic_asks) == 1 and "LocalGenerative" in synthetic_asks[0]), (
+        "the provider detector does not catch a packaged provider asking for a "
+        "device file move"
+    )
+    assert "false" not in _body(
+        "pub trait Provider {\n"
+        "    fn installs_from_device(&self) -> bool {\n        true\n    }\n}\n",
+        "fn installs_from_device",
+    ), "the default-refuses check does not catch a trait that asks by default"
+
+    # The width detectors, over apps that carry each fault they exist to catch.
+    width_cases = [
+        (
+            "a transcript shorter than the sentence it is given",
+            "pub const CHAT_TEXT_MAX: usize = 96;",
+            "const WIDE_MAX: usize = CHAT_TEXT_MAX;\nconst WIDE_ROWS: usize = 8;",
+        ),
+        (
+            "a wide line with a buffer of its own",
+            "pub const CHAT_TEXT_MAX: usize = 240;",
+            "const WIDE_MAX: usize = 156;\nconst WIDE_ROWS: usize = 8;",
+        ),
+        (
+            "too few wrapped rows for the bytes held",
+            "pub const CHAT_TEXT_MAX: usize = 240;",
+            "const WIDE_MAX: usize = CHAT_TEXT_MAX;\nconst WIDE_ROWS: usize = 4;",
+        ),
+    ]
+    for label, lib, main in width_cases:
+        assert _width_defects(lib, main, 240), f"the width detector does not catch {label}"
+    assert not _width_defects(
+        "pub const CHAT_TEXT_MAX: usize = 240;",
+        "const WIDE_MAX: usize = CHAT_TEXT_MAX;\nconst WIDE_ROWS: usize = 8;",
+        240,
+    ), "the width detector fires on an app that carries no fault"
 
 
 def main() -> int:

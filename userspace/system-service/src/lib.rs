@@ -13,11 +13,12 @@ pub use embedding::{
     compute_text_embedding_q7, f32_sqrt, EMBEDDING_DIM, MATRYOSHKA_DIMS,
 };
 pub use gguf::{
-    find_metadata_string, find_tensor, find_tensor_stream, parse_tensor_info,
-    parse_tensor_info_stream, probe_all_models, probe_embedding_model, probe_generative_model,
-    probe_gguf_header, read_gguf_header, scan_file_for_tensor, tensor_byte_size, GgufError,
-    GgufHeader, GgufStream, GgufTensorInfo, ProbedModels, GGUF_MAGIC, PATH_EMBEDDING_MODEL_DATA,
-    PATH_EMBEDDING_MODEL_SYSTEM, PATH_GENERATIVE_MODEL_DATA, PATH_GENERATIVE_MODEL_SYSTEM,
+    find_installable_model, find_metadata_string, find_tensor, find_tensor_stream, listed_size,
+    parse_tensor_info, parse_tensor_info_stream, probe_all_models, probe_embedding_model,
+    probe_generative_model, probe_gguf_header, read_gguf_header, scan_file_for_tensor,
+    tensor_byte_size, GgufError, GgufHeader, GgufStream, GgufTensorInfo, ProbedModels,
+    GGUF_MAGIC, MODEL_SOURCE_TREES, PATH_EMBEDDING_MODEL_DATA, PATH_EMBEDDING_MODEL_SYSTEM,
+    PATH_GENERATIVE_MODEL_DATA, PATH_GENERATIVE_MODEL_SYSTEM, PATH_LOCAL_MODEL_DATA,
 };
 pub use inference::{
     apply_rope, dequantize_q4_0, dequantize_q8_0, extract_embedding, forward_step, gemv,
@@ -34,9 +35,9 @@ pub use tokenizer::{
 };
 pub use std::ai::{
     MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
-    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK,
-    STATUS_CANCELLED,
-    STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
+    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK,
+    MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_CANCELLED, STATUS_ERROR, STATUS_SUCCESS,
+    STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
 pub fn run(service_id: u8, name: &str) -> ! {
@@ -240,16 +241,95 @@ pub fn run_sensor() -> ! {
     }
 }
 
+/// How many bytes of a model file an install moves per filesystem call.
+///
+/// WHY the copy steps rather than taking the whole file at once: the kernel's
+/// per-call ceiling is far below a model file, and a copy that stopped at that
+/// ceiling would report a fragment as a whole model.
+const INSTALL_CHUNK_BYTES: usize = 2048;
+
+/// Moves the model file the device already holds as a document into the model
+/// namespace, and reports the bytes that reached the device.
+///
+/// WHY this service does the copy: `aid` is the service a model's words reach
+/// and it is given the filesystem read-only, so an install that widened that
+/// authority would put a write door in front of everything the model is fed.
+/// The storage service is the one service the platform grants filesystem write
+/// to, and it holds no IPC send authority, so it can neither be told an
+/// arbitrary path nor answer anyone -- which is what keeps this operation to
+/// moving one named file out of the person's own documents.
+///
+/// WHY nothing is reported as installed unless the whole file moved: the record
+/// the model loader reads is a length, and a length that stops part-way through
+/// a copy claims bytes the device never received.
+pub fn install_local_model() -> Option<u64> {
+    let mut source = [0u8; 96];
+    let (path_len, stated_size) = gguf::find_installable_model(&mut source)?;
+    let Ok(path) = core::str::from_utf8(&source[..path_len]) else {
+        return None;
+    };
+    let Ok(source_fd) = std::fs_open(path, std::FS_READ) else {
+        return None;
+    };
+    let Ok(target_fd) = std::fs_open(gguf::PATH_LOCAL_MODEL_DATA, std::FS_WRITE) else {
+        let _ = std::fs_close(source_fd);
+        let _ = std::log("[storaged] the model namespace would not open for writing.");
+        return None;
+    };
+
+    let mut copied = 0u64;
+    loop {
+        let mut chunk = [0u8; INSTALL_CHUNK_BYTES];
+        let read = match std::fs_read(source_fd, &mut chunk) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        match std::fs_write(target_fd, &chunk[..read]) {
+            Ok(written) if written == read => copied += written as u64,
+            _ => break,
+        }
+    }
+    let _ = std::fs_close(source_fd);
+    // WHY the close is where the file becomes visible: the record naming a
+    // device-held payload carries no bytes of its own, and the snapshot that
+    // publishes it is written as the descriptor closes.
+    let _ = std::fs_close(target_fd);
+
+    if copied == 0 || copied < stated_size {
+        let _ = std::log("[storaged] the install stopped part-way through the copy.");
+        return None;
+    }
+    let _ = std::log("[storaged] installed the model file the device holds.");
+    Some(copied)
+}
+
 pub fn run_storage() -> ! {
     let _ = std::log("[storaged] userspace storage manager online.");
     let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
     let write_slot = std::cap_lookup(std::cap_type::FILE_SYSTEM_WRITE, 0).ok();
+    let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
     let mut health = [0u8; 48];
+    let mut request = [0u8; 64];
 
     loop {
         let _ = std::service_heartbeat(3);
+        // WHY an install is taken and not answered: this service holds the
+        // filesystem write the request needs and no send authority, so it has
+        // no way to reply. The requester reads the result off the model
+        // directory, which is the one measurement that says whether the bytes
+        // are on the device.
+        if ipc_slot.is_some() {
+            while let Ok((_, msg_type, _)) = std::ipc::receive_any(&mut request) {
+                if msg_type == std::ai::MSG_TYPE_INSTALL {
+                    let _ = install_local_model();
+                }
+            }
+        }
         let now = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 1000 || last_tick == 0 {
             let msg = b"storaged: userspace storage service heartbeat\n";
@@ -275,7 +355,7 @@ pub fn run_storage() -> ! {
             last_tick = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(now);
         }
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+            let _ = std::event_poll(std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG, 20);
         } else {
             std::yield_now();
         }
@@ -342,7 +422,7 @@ pub fn run_ai() -> ! {
     let mut last_tick = 0u64;
 
     // Probe storage for real physical GGUF model weights on startup
-    let probed_models = gguf::probe_all_models();
+    let mut probed_models = gguf::probe_all_models();
     if let Some((_hdr, _path)) = probed_models.embedding {
         let _ = std::log("[aid] verified physical EmbeddingGemma 2 weights in storage.");
     } else {
@@ -360,6 +440,14 @@ pub fn run_ai() -> ! {
 
     loop {
         let _ = std::service_heartbeat(std::ai::SERVICE_INFERENCE);
+
+        // WHY the probe is re-run here: an install puts a file in the namespace
+        // this probe reads, and a probe only taken at startup keeps answering
+        // "no weights" about a model the service itself just installed.
+        if MODEL_NAMESPACE_CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            probed_models = gguf::probe_all_models();
+            let _ = std::log("[aid] re-probed the model namespace after an install.");
+        }
 
         // Non-allocating IPC listener for AI inference and embedding status requests
         if let Some(_) = ipc_slot {
@@ -434,6 +522,20 @@ fn emit_inference_response(
     message: &[u8],
     tx_buf: &mut [u8; 1024],
 ) {
+    emit_response_as(sender_task_id, status, MSG_TYPE_GENERATE, message, tx_buf);
+}
+
+/// Sends a notice in the answer layout under a message type the reader chose.
+///
+/// WHY the type is a parameter: a reader that cannot tell an install report from
+/// a model's words would paint "installed" as though the model said so.
+fn emit_response_as(
+    sender_task_id: u64,
+    status: u32,
+    msg_type: u32,
+    message: &[u8],
+    tx_buf: &mut [u8; 1024],
+) {
     let resp = std::ai::AiInferenceResponse {
         status,
         output_dim: message.len() as u32,
@@ -449,7 +551,7 @@ fn emit_inference_response(
     if total_len <= tx_buf.len() {
         tx_buf[resp_hdr_len..total_len].copy_from_slice(message);
         if sender_task_id != 0 {
-            let _ = std::ipc_send(sender_task_id, MSG_TYPE_GENERATE, &tx_buf[..total_len]);
+            let _ = std::ipc_send(sender_task_id, msg_type, &tx_buf[..total_len]);
         }
     }
 }
@@ -549,17 +651,39 @@ impl<'a> Notice<'a> {
         self.word(&digits[..written]);
     }
 
+    /// Writes a byte count, which is larger than what `number` can hold.
+    ///
+    /// WHY a second width: a model file is measured in the millions of bytes and
+    /// a number that overflowed its digits would report a smaller install than
+    /// the device actually holds.
+    fn byte_count(&mut self, value: u64) {
+        let mut digits = [0u8; 20];
+        let mut filled = digits.len();
+        let mut remaining = value;
+        loop {
+            filled -= 1;
+            digits[filled] = b'0' + (remaining % 10) as u8;
+            remaining /= 10;
+            if remaining == 0 {
+                break;
+            }
+        }
+        self.word(&digits[filled..]);
+    }
+
     /// Hands the buffer back with its lifetime, not the writer's.
     fn finish(self) -> &'a [u8] {
         let Notice { buf, len } = self;
         &buf[..len]
     }
 }
-
 /// Why the generative path reached the model file and still ran nothing.
 enum ModelGap {
     /// The file configured the engine; its tensors are not what the engine reads.
     Configured,
+    /// The file parsed and declares no tensor at all -- metadata and nothing else,
+    /// which is what a placeholder install leaves on the disk.
+    NoTensors,
     /// The file states a dimension -- or omits one -- the engine cannot be built
     /// from. Carries the key, what the file stated, and the engine's bound.
     Declaration(&'static str, Option<u32>, usize),
@@ -590,14 +714,22 @@ fn model_gap_notice<'a>(
         None => notice.word(b" states no architecture"),
     }
     match gap {
-        ModelGap::Configured => {
+        ModelGap::Configured | ModelGap::NoTensors => {
             notice.word(b" at ");
             notice.number(info.hidden_dim.unwrap_or(0));
             notice.word(b" wide over ");
             notice.number(info.num_layers.unwrap_or(0));
             notice.word(b" blocks, vocabulary ");
             notice.number(info.vocab_size.unwrap_or(0));
-            notice.word(b" tokens, whose tensors the engine does not read");
+            notice.word(b" tokens");
+            // WHY two endings for one shape: a file whose tensors the engine cannot
+            // read and a file that holds no tensors at all call for different next
+            // moves, and only one of them is a placeholder install.
+            if matches!(gap, ModelGap::NoTensors) {
+                notice.word(b", and holds no tensors");
+            } else {
+                notice.word(b", whose tensors the engine does not read");
+            }
         }
         ModelGap::Declaration(key, Some(stated), limit) => {
             notice.word(b", and states ");
@@ -633,6 +765,130 @@ fn reply_with_answer(
 static ACTIVE_GENERATION_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static CANCEL_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Set when a model file has reached the model namespace since the last probe.
+///
+/// WHY a flag and not a re-probe inside the answer: the probe parses a header at
+/// each candidate path, and the install answer is a measurement of a directory,
+/// not of an engine. The service loop re-probes on its next pass, so an install
+/// takes effect without the service being restarted -- which is the difference
+/// between the screen saying "no weights" about a file it installed a moment ago.
+static MODEL_NAMESPACE_CHANGED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// How many times an install answer re-reads the model namespace before it
+/// reports what it found.
+///
+/// WHY a bound: the service that copies the file holds no send authority and
+/// cannot acknowledge, so the only sign that bytes arrived is the directory's own
+/// listing -- and this service answers every other query from the same loop, so
+/// waiting for one install cannot become an unbounded wait.
+const INSTALL_WAIT_PASSES: usize = 512;
+
+/// Asks the storage service to move a model file, then answers with what the
+/// model namespace is measured to hold.
+///
+/// WHY the answer is a measurement rather than a relay: nothing comes back from
+/// the storage service, so any reason given here -- no space, permission denied,
+/// a bad path -- would be invented. What can be stated is how many bytes the
+/// model namespace holds against how many the source file's listing stated, which
+/// is the whole difference between "the file is on the device" and "the copy
+/// stopped part-way through".
+fn install_model_file(sender_task_id: u64, tx_buf: &mut [u8; 1024]) {
+    let mut source = [0u8; 96];
+    let outcome = match gguf::find_installable_model(&mut source) {
+        None => InstallOutcome::NothingToInstall,
+        Some((_path_len, stated_size)) => {
+            if std::ipc_send(std::ai::SERVICE_STORAGE_TASK_ID, MSG_TYPE_INSTALL, b"INSL").is_err()
+            {
+                InstallOutcome::RequestRefused
+            } else {
+                let mut measured = gguf::local_model_size();
+                for _ in 1..INSTALL_WAIT_PASSES {
+                    if measured == Some(stated_size) {
+                        break;
+                    }
+                    std::yield_now();
+                    measured = gguf::local_model_size();
+                }
+                match measured {
+                    Some(size) if size == stated_size => InstallOutcome::Installed(size),
+                    Some(size) => InstallOutcome::Short(size, stated_size),
+                    None => InstallOutcome::Absent(stated_size),
+                }
+            }
+        }
+    };
+
+    if matches!(outcome, InstallOutcome::Installed(_)) {
+        MODEL_NAMESPACE_CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    let mut text = [0u8; 256];
+    let (status, message) = install_notice(outcome, &mut text);
+    if !stream_answer(sender_task_id, status, MSG_TYPE_INSTALL_CHUNK, message) {
+        emit_response_as(sender_task_id, status, MSG_TYPE_INSTALL, message, tx_buf);
+    }
+}
+
+/// What an install can honestly say about the model namespace.
+enum InstallOutcome {
+    /// No source tree holds a file whose header parses as a model.
+    NothingToInstall,
+    /// The kernel would not deliver the request to the storage service.
+    RequestRefused,
+    /// The namespace reports exactly the bytes the source file stated.
+    Installed(u64),
+    /// The namespace reports fewer bytes than the source file stated.
+    Short(u64, u64),
+    /// The namespace reports no model file at all.
+    Absent(u64),
+}
+
+/// Pairs an install outcome with the status code and sentence it is reported as.
+///
+/// WHY the pairing is one function: the two numbers it puts next to each other --
+/// what the source file's listing stated and what the model namespace now reports
+/// -- are the entire claim, and a sentence that said "installed" over a copy that
+/// stopped part-way is exactly the lie the Platform Truth Contract forbids.
+fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
+    let mut notice = Notice::new(out);
+    let status = match &outcome {
+        InstallOutcome::NothingToInstall => {
+            notice.word(
+                b"Nothing to install: the download and incoming folders hold no readable .gguf.",
+            );
+            std::ai::STATUS_UNAVAILABLE
+        }
+        InstallOutcome::RequestRefused => {
+            notice.word(b"Install refused: the storage service would not take the request.");
+            std::ai::STATUS_ERROR
+        }
+        InstallOutcome::Installed(size) => {
+            notice.word(b"Model file installed: ");
+            notice.byte_count(*size);
+            notice.word(b" bytes at /data/models/local_model.gguf.");
+            std::ai::STATUS_SUCCESS
+        }
+        InstallOutcome::Short(measured, stated) => {
+            notice.word(b"Install incomplete: the model namespace holds ");
+            notice.byte_count(*measured);
+            notice.word(b" of the ");
+            notice.byte_count(*stated);
+            notice.word(b" bytes the file states.");
+            std::ai::STATUS_ERROR
+        }
+        InstallOutcome::Absent(stated) => {
+            notice.word(
+                b"Install did not reach the device: the model namespace holds no file of the ",
+            );
+            notice.byte_count(*stated);
+            notice.word(b" bytes the source states.");
+            std::ai::STATUS_ERROR
+        }
+    };
+    (status, notice.finish())
+}
+
 /// Dispatches incoming IPC queries for `SERVICE_INFERENCE` (#12) with zero heap allocation.
 pub fn handle_ipc_inference_query(
     sender_task_id: u64,
@@ -641,6 +897,13 @@ pub fn handle_ipc_inference_query(
     probed_models: &gguf::ProbedModels,
     tx_buf: &mut [u8; 1024],
 ) {
+    // WHY the install is answered before anything is read as a prompt: the
+    // request is four bytes long, and a reader that fell through to the query
+    // paths would answer it with a model notice about an empty prompt.
+    if msg_type == MSG_TYPE_INSTALL || (payload.len() >= 4 && &payload[..4] == b"INSL") {
+        install_model_file(sender_task_id, tx_buf);
+        return;
+    }
     if msg_type == std::ai::MSG_TYPE_CANCEL || (payload.len() >= 4 && &payload[..4] == b"CANC") {
         let active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::Relaxed);
         if active != 0 && (sender_task_id == 0 || sender_task_id == active) {
@@ -789,12 +1052,53 @@ pub fn handle_ipc_inference_query(
                             }
                         }
                         Ok(_) => {
-                            reply_with_answer(
-                                sender_task_id,
-                                std::ai::STATUS_UNSUPPORTED,
-                                b"Generative model error: unsupported architecture or tensor configuration.",
-                                tx_buf,
-                            );
+                            // The header parsed and the file names no tensor at all.
+                            // WHY that is not "unsupported architecture": the engine
+                            // was never offered a tensor to reject, and a person who
+                            // just installed a file deserves to be told the file
+                            // holds metadata and no weights, which is what a
+                            // placeholder leaves behind.
+                            let prompt_text = extract_prompt_text(payload);
+                            match gguf::read_model_info(path) {
+                                Ok(info) => {
+                                    let mut scratch = [0u8; 240];
+                                    let notice = model_gap_notice(
+                                        &info,
+                                        ModelGap::NoTensors,
+                                        prompt_text,
+                                        &mut scratch,
+                                    );
+                                    reply_with_answer(
+                                        sender_task_id,
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        notice,
+                                        tx_buf,
+                                    );
+                                }
+                                Err(gguf::GgufError::MissingMetadata(key, info)) => {
+                                    let mut scratch = [0u8; 240];
+                                    let notice = model_gap_notice(
+                                        &info,
+                                        ModelGap::Declaration(key, None, 0),
+                                        prompt_text,
+                                        &mut scratch,
+                                    );
+                                    reply_with_answer(
+                                        sender_task_id,
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        notice,
+                                        tx_buf,
+                                    );
+                                }
+                                Err(_) => {
+                                    reply_with_answer(
+                                        sender_task_id,
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        b"Generative model error: unsupported architecture or tensor configuration.",
+                                        tx_buf,
+                                    );
+                                }
+                            }
                         }
                         Err(gguf::GgufError::BufferTooShort | gguf::GgufError::ReadFailed | gguf::GgufError::FileNotFound) => {
                             reply_with_answer(
@@ -1491,6 +1795,19 @@ mod tests {
         );
     }
 
+    /// A file that parses and holds no tensor is not an unsupported architecture;
+    /// it is a file with nothing in it yet, and the answer has to say so.
+    #[test]
+    fn test_model_gap_notice_says_so_when_the_file_holds_no_tensors() {
+        let info = declared(b"gemma2", 64, 2, 290);
+        let mut out = [0u8; 240];
+        let notice = model_gap_notice(&info, ModelGap::NoTensors, b"hello", &mut out);
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 290 tokens, and holds no tensors; the prompt's 5 bytes were not answered."
+        );
+    }
+
     #[test]
     fn test_model_gap_notice_reports_a_declaration_beyond_the_engine() {
         let info = declared(b"gemma2", 2304, 26, 256_000);
@@ -1519,6 +1836,66 @@ mod tests {
         assert_eq!(
             notice,
             b"Model file states no architecture, and states no <arch>.block_count; the prompt's 0 bytes were not answered."
+        );
+    }
+
+    #[test]
+    fn test_install_notice_calls_only_a_whole_file_installed() {
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::Installed(4096), &mut out);
+        assert_eq!(status, std::ai::STATUS_SUCCESS);
+        assert_eq!(
+            notice,
+            b"Model file installed: 4096 bytes at /data/models/local_model.gguf."
+        );
+
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::Short(1024, 4096), &mut out);
+        assert_ne!(status, std::ai::STATUS_SUCCESS);
+        assert_eq!(
+            notice,
+            b"Install incomplete: the model namespace holds 1024 of the 4096 bytes the file states."
+        );
+        assert!(!notice.starts_with(b"Model file installed"), "a part copy is not an install");
+
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::Absent(4096), &mut out);
+        assert_ne!(status, std::ai::STATUS_SUCCESS);
+        assert_eq!(
+            notice,
+            b"Install did not reach the device: the model namespace holds no file of the 4096 bytes the source states."
+        );
+    }
+
+    #[test]
+    fn test_install_notice_reports_what_was_never_asked_for() {
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::NothingToInstall, &mut out);
+        assert_eq!(status, std::ai::STATUS_UNAVAILABLE);
+        assert_eq!(
+            notice,
+            b"Nothing to install: the download and incoming folders hold no readable .gguf."
+        );
+
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::RequestRefused, &mut out);
+        assert_eq!(status, std::ai::STATUS_ERROR);
+        assert_eq!(
+            notice,
+            b"Install refused: the storage service would not take the request."
+        );
+    }
+
+    /// WHY this is tested on its own: a model file is larger than a `u32` can
+    /// count, and an install that reported `4_294_967_296` as `0` would tell the
+    /// person the device received nothing when it received everything.
+    #[test]
+    fn test_install_notice_counts_bytes_past_a_u32() {
+        let mut out = [0u8; 256];
+        let (_, notice) = install_notice(InstallOutcome::Installed(5_000_000_000), &mut out);
+        assert_eq!(
+            notice,
+            b"Model file installed: 5000000000 bytes at /data/models/local_model.gguf."
         );
     }
 }

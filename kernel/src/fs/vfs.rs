@@ -2790,6 +2790,12 @@ pub fn init() {
     vfs.mkdir("/packages");
     vfs.mkdir("/data");
     vfs.mkdir("/data/models");
+    // WHY the platform creates the folder a model file arrives in: the inference
+    // service only takes a file from a directory the device already holds, and a
+    // directory nothing ever creates is a place no file can ever be put. The
+    // download tree is filled by the browser; this one is for a file a companion
+    // tool hands to the device.
+    vfs.mkdir("/data/incoming");
     vfs.mkdir("/user");
     vfs.mkdir("/storage");
     vfs.mkdir("/storage/photos");

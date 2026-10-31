@@ -6,7 +6,10 @@ reported with STATUS_SUCCESS. Every assertion below pins one half of the rule
 that replaces it -- the model file on disk is the only thing allowed to size the
 engine, and when the engine cannot be built from that file the reply says so --
 and one half of the rule that carries any reply bigger than a mailbox to the
-reader that asked for it, whole or reported short.
+reader that asked for it, whole or reported short -- and one half of the rule
+that lets a model file reach the device at all: the copy is made by the service
+that already holds the write, from a tree the platform names, and the answer is
+a measurement of what arrived.
 """
 
 from pathlib import Path
@@ -14,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 SERVICE = ROOT / "userspace" / "system-service" / "src"
+KERNEL_SERVICES = ROOT / "kernel" / "src" / "services.rs"
 
 GENERATIVE_START = "// 2. Generative token stream queries"
 GENERATIVE_END = "// 3. Semantic Search / RAG document retrieval query"
@@ -88,6 +92,26 @@ def doc_comment(source: str, signature: str) -> str:
             continue
         break
     return "\n".join(reversed(lines))
+
+
+def policy_arm(services: str, name: str) -> str:
+    """The capability list the kernel's service policy gives to service `name`.
+
+    WHY it is read out on its own: an install has to be served by the authority
+    that already exists, so the contract has to look at one service's grant list
+    rather than at the file, where a widened grant would read as ordinary code.
+    """
+    start = services.index(f"ServiceId::{name} => {{")
+    brace = services.index("{", start)
+    depth = 0
+    for index in range(brace, len(services)):
+        if services[index] == "{":
+            depth += 1
+        elif services[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return services[start:index]
+    raise AssertionError(f"unbalanced braces in the {name} policy arm")
 
 
 def test_the_generative_arm_answers_nothing_with_success():
@@ -173,6 +197,22 @@ def test_the_notice_names_the_file_and_counts_the_prompt():
     assert "model_gap_notice(" in generative_arm(lib)
 
 
+def test_a_file_holding_no_tensors_is_not_called_an_unsupported_architecture():
+    """A header that parses and names no tensor is a file with metadata and no
+    weights yet -- which is exactly what a placeholder install leaves behind.
+
+    WHY this is its own answer: the engine was never offered a tensor to reject,
+    so "unsupported architecture" sends a reader looking for a model format
+    problem when the device is holding an empty file. The notice quotes what the
+    file declares and says the tensors are missing.
+    """
+    lib = lib_source()
+    arm = generative_arm(lib)
+    assert "ModelGap::NoTensors" in arm, "the zero-tensor branch no longer says what the file holds"
+    assert "and holds no tensors" in lib, "the notice lost the ending that names an empty file"
+    assert "ModelGap::Configured" in lib, "the two endings must stay distinguishable"
+
+
 def test_the_notice_is_built_without_a_heap():
     """The service has no allocator, so the notice is written into a stack array."""
     lib = lib_source()
@@ -185,10 +225,14 @@ def test_the_notice_is_built_without_a_heap():
 def test_the_reply_that_names_a_gap_is_still_counted_in_bytes():
     """A reader can tell a whole answer from a cut one only by the length the
     header carries, and every answer counts bytes."""
-    helper = function_body(lib_source(), "fn emit_inference_response")
+    lib = lib_source()
+    helper = function_body(lib, "fn emit_response_as")
     assert "output_dim: message.len() as u32" in helper
+    # The generative reply keeps its own entry point, and it is the same writer.
+    wrapper = function_body(lib, "fn emit_inference_response")
+    assert "emit_response_as(" in wrapper
     assert "WHY the header counts bytes and not tokens" in doc_comment(
-        lib_source(), "fn emit_inference_response"
+        lib, "fn emit_inference_response"
     )
 
 
@@ -217,6 +261,102 @@ def test_a_retrieval_frame_reaches_the_reader_whole_or_reports_short():
     assert "pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;" in sdk
 
 
+def test_an_install_moves_only_a_file_whose_header_parsed():
+    """A model file is copied by the storage service, and only after its own
+    header has been read.
+
+    An install that copied first would put bytes in the model namespace that the
+    platform then has to call weights without having read one of them.
+    """
+    body = function_body(lib_source(), "pub fn install_local_model")
+    assert "gguf::find_installable_model" in body
+    assert body.index("find_installable_model") < body.index("std::fs_write")
+    finder = function_body(read("gguf.rs"), "pub fn find_installable_model")
+    assert "read_gguf_header(path)" in finder, "the file is offered without a parsed header"
+
+
+def test_the_install_request_carries_no_path():
+    """Nobody outside the platform names which file an install moves.
+
+    The request is four bytes, the source is one of two fixed trees, and the
+    service that copies reads only the message type -- so an install cannot be
+    pointed at a file the person never put in their own documents.
+    """
+    lib = lib_source()
+    assert 'b"INSL"' in function_body(lib, "fn install_model_file")
+    gguf = read("gguf.rs")
+    assert (
+        'pub const MODEL_SOURCE_TREES: &[&str] = &["/storage/downloads", "/data/incoming"];'
+        in gguf
+    )
+    assert "for &tree in MODEL_SOURCE_TREES" in function_body(
+        gguf, "pub fn find_installable_model"
+    )
+    intake = function_body(lib, "pub fn run_storage")
+    assert "msg_type == std::ai::MSG_TYPE_INSTALL" in intake
+    assert "install_local_model()" in intake
+
+
+def test_the_copy_is_bounded_and_takes_no_heap():
+    """The copy steps through the file, and a part copy is never a whole model."""
+    body = function_body(lib_source(), "pub fn install_local_model")
+    assert "let mut chunk = [0u8; INSTALL_CHUNK_BYTES];" in body
+    assert "copied < stated_size" in body
+    for heap in ("Vec::", "String::", "to_owned("):
+        assert heap not in body, f"the install allocates with {heap!r}"
+
+
+def test_the_install_is_answered_from_a_measurement():
+    """The service says what the model namespace reports, because nothing else
+    can tell it.
+
+    The storage service holds the write and no send authority, so it cannot
+    answer; a reason given here would be invented. The listing's byte count is
+    the one statement available, and only a namespace holding exactly the bytes
+    the source stated is called installed.
+    """
+    lib = lib_source()
+    body = function_body(lib, "fn install_model_file")
+    assert "gguf::local_model_size()" in body
+    assert "std::ipc::receive" not in body, "the install answer relays a reply that cannot arrive"
+    notice = function_body(lib, "fn install_notice")
+    assert notice.count("STATUS_SUCCESS") == 1, "more than one outcome claims an install"
+    assert "InstallOutcome::Installed(size)" in notice
+    for refused in ("STATUS_UNAVAILABLE", "STATUS_ERROR"):
+        assert refused in notice, f"the install answer never reports {refused}"
+
+
+def test_an_install_refreshes_the_probe():
+    """A probe taken once at startup keeps denying a file the service installed."""
+    lib = lib_source()
+    run_ai = function_body(lib, "pub fn run_ai")
+    assert "let mut probed_models = gguf::probe_all_models();" in run_ai
+    assert "MODEL_NAMESPACE_CHANGED.swap" in run_ai
+    assert "MODEL_NAMESPACE_CHANGED.store(true" in function_body(
+        lib, "fn install_model_file"
+    )
+
+
+def test_an_install_mints_no_new_authority():
+    """The write stays with the one service the platform already grants it to.
+
+    Widening the AI service's filesystem authority to serve an install would put
+    a write door in front of everything the model is fed.
+    """
+    services = KERNEL_SERVICES.read_text(encoding="utf-8")
+    inference = policy_arm(services, "Inference")
+    assert "FileSystemWrite" not in inference, "the AI service was given the model namespace"
+    assert "CapabilityType::IpcSend" in inference, "the install cannot be asked for"
+    storage = policy_arm(services, "Storage")
+    assert "CapabilityType::FileSystemWrite" in storage
+    sdk = (ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "pub const SERVICE_STORAGE_TASK_ID: u64 = 0xFFFF_0003;" in sdk
+    assert "pub const MSG_TYPE_INSTALL: u32 = 0x494E_534C;" in sdk
+    assert "pub const MSG_TYPE_INSTALL_CHUNK: u32 = 0x494E_5343;" in sdk
+
+
 def test_the_contract_can_fail():
     """A contract that cannot fail is a comment.
 
@@ -243,6 +383,55 @@ def test_the_contract_can_fail():
     assert "std::ai::STATUS_SUCCESS" not in live_arm
     assert "default_test_config" not in live_arm
     assert "inference::generate(" not in without_comments(live_arm)
+
+    # A file whose header parses and holds no tensor, answered as an architecture
+    # problem, is what the empty-file detector exists to catch.
+    assert live_arm.count("ModelGap::NoTensors") == 1
+    blamed_on_the_architecture = live_arm.replace("ModelGap::NoTensors", "ModelGap::Configured")
+    assert "ModelGap::NoTensors" not in blamed_on_the_architecture, \
+        "the empty-file detector has nothing left to trip on"
+
+    # An install that names a part copy installed, takes its source from the
+    # wire, or is served by a service holding the write, each trips its detector.
+    lying_install = "\n".join(
+        [
+            "fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {",
+            "match &outcome {",
+            "InstallOutcome::Installed(size) => { std::ai::STATUS_SUCCESS }",
+            "InstallOutcome::Short(_, _) => { std::ai::STATUS_SUCCESS }",
+            "InstallOutcome::Absent(_) => { std::ai::STATUS_ERROR }",
+            "}",
+            "}",
+        ]
+    )
+    notice = function_body(lying_install, "fn install_notice")
+    assert notice.count("STATUS_SUCCESS") == 2, "the counter no longer sees two claims"
+    assert "STATUS_UNAVAILABLE" not in notice, "the refusal detector has lost its target"
+
+    path_from_wire = "\n".join(
+        [
+            "pub fn install_local_model(payload: &[u8]) -> Option<u64> {",
+            "let path = core::str::from_utf8(&payload[..]).ok()?;",
+            "let fd = std::fs_open(path, std::FS_WRITE).ok()?;",
+            "let _ = std::fs_write(fd, payload);",
+            "}",
+        ]
+    )
+    body = function_body(path_from_wire, "pub fn install_local_model")
+    assert "gguf::find_installable_model" not in body
+    assert "copied < stated_size" not in body
+
+    widened = "\n".join(
+        [
+            "ServiceId::Inference => {",
+            "policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });",
+            "}",
+        ]
+    )
+    assert "FileSystemWrite" in policy_arm(widened, "Inference")
+    assert "FileSystemWrite" not in policy_arm(
+        KERNEL_SERVICES.read_text(encoding="utf-8"), "Inference"
+    )
 
 
 def main() -> int:

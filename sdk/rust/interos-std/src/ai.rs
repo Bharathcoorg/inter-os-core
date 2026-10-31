@@ -40,6 +40,16 @@ pub const SERVICE_INFERENCE_TASK_ID: u64 = 0xFFFF_000C;
 /// Virtual TaskId used to route IPC directly to the semantic search service (Service #13).
 pub const SERVICE_SEARCH_TASK_ID: u64 = 0xFFFF_000D;
 
+/// Virtual TaskId used to route IPC directly to the storage service (Service #3).
+///
+/// WHY the storage service and not the inference service writes a model file:
+/// `aid` is the service a model's words reach, and it holds the filesystem
+/// read-only on purpose. Placing bytes in the model namespace is a storage
+/// operation, and the one service the platform grants filesystem write to is
+/// the storage service, so an install asks the service that already owns the
+/// authority instead of widening the AI service's.
+pub const SERVICE_STORAGE_TASK_ID: u64 = 0xFFFF_0003;
+
 /// IPC message type for vector embedding queries: `0x454D_4244` (ASCII `b"EMBD"`).
 pub const MSG_TYPE_EMBED: u32 = 0x454D_4244;
 
@@ -65,6 +75,23 @@ pub const MSG_TYPE_GENERATE_CHUNK: u32 = 0x4745_4E43;
 /// text, and an app that reads a chat answer cannot tell one from the other.
 /// The two notices travel apart so each reader takes only what it asked for.
 pub const MSG_TYPE_SEARCH_CHUNK: u32 = 0x5352_434B;
+
+/// IPC message type asking the platform to install the model file the device
+/// already holds: `0x494E_534C` (ASCII `b"INSL"`).
+///
+/// WHY a request of its own: a model file arrives as a document the person
+/// downloaded, and moving it into the model namespace is a write the asking
+/// application is not allowed to do. The request therefore names an operation
+/// on the platform rather than a path the caller may touch.
+pub const MSG_TYPE_INSTALL: u32 = 0x494E_534C;
+
+/// IPC message type naming an install outcome waiting on a shared-memory
+/// channel: `0x494E_5343` (ASCII `b"INSC"`).
+///
+/// WHY it is a type of its own: an install answer is the platform's own report
+/// about a file, and a reader that cannot tell it from a model's words would
+/// paint "installed" as though the model said so.
+pub const MSG_TYPE_INSTALL_CHUNK: u32 = 0x494E_5343;
 
 /// IPC message type for cancelling active streaming generation: `0x4341_4E43` (ASCII `b"CANC"`).
 pub const MSG_TYPE_CANCEL: u32 = 0x4341_4E43;
