@@ -822,9 +822,17 @@ mod tcp_reliability_tests {
     fn active_close_holds_connection_until_time_wait_expiry() {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
+        // WHY this case's owner is drawn from the task counter rather than named: the
+        // host suite runs every case in one process, so `TaskId::new()` hands out an id
+        // that depends on how many cases ran first, and a hand-picked id such as `7` can
+        // land on a task an earlier `spawn` left a process record for. `open` then bills
+        // that stranger process's sixteen-socket allowance and refuses with `QueueFull`,
+        // which says nothing about the connection table. A freshly drawn id has never
+        // been seen by anything, so no record binds it and the case tests the table.
+        let owner = crate::task::TaskId::new();
         let mut table = TcpConnectionTable::new();
         let id = table
-            .open(7, 41000, Ipv4Address::LOCALHOST, 41001, 100)
+            .open(owner.0 as u32, 41000, Ipv4Address::LOCALHOST, 41001, 100)
             .expect("connection should open");
 
         {
@@ -852,9 +860,10 @@ mod tcp_reliability_tests {
     fn a_fin_acknowledged_in_last_ack_frees_the_slot_without_a_hold() {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
+        let owner = crate::task::TaskId::new();
         let mut table = TcpConnectionTable::new();
         let id = table
-            .open(7, 41_100, Ipv4Address::LOCALHOST, 41_101, 100)
+            .open(owner.0 as u32, 41_100, Ipv4Address::LOCALHOST, 41_101, 100)
             .expect("connection should open");
         table.get_mut(id).expect("connection exists").state = crate::net::TcpState::CloseWait;
 
@@ -876,8 +885,9 @@ mod tcp_reliability_tests {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
+        let owner = crate::task::TaskId::new();
         let id = table
-            .open(7, 41_200, Ipv4Address::LOCALHOST, 41_201, 100)
+            .open(owner.0 as u32, 41_200, Ipv4Address::LOCALHOST, 41_201, 100)
             .expect("connection should open");
         table.get_mut(id).expect("connection exists").state = crate::net::TcpState::Established;
         table.arm_fin(id, 0).expect("FIN should arm");
@@ -889,7 +899,7 @@ mod tcp_reliability_tests {
         assert_eq!(table.reap_closed(), 1);
 
         table
-            .open(7, 41_200, Ipv4Address::LOCALHOST, 41_201, 200)
+            .open(owner.0 as u32, 41_200, Ipv4Address::LOCALHOST, 41_201, 200)
             .expect("the freed tuple is open again");
     }
 
@@ -902,14 +912,15 @@ mod tcp_reliability_tests {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
+        let owner = crate::task::TaskId::new();
         let mut ids = [0u32; MAX_TCP_CONNECTIONS];
         for index in 0..MAX_TCP_CONNECTIONS {
             ids[index] = table
-                .open(7, 41_000 + index as u16, Ipv4Address::LOCALHOST, 4300, 100)
+                .open(owner.0 as u32, 41_000 + index as u16, Ipv4Address::LOCALHOST, 4300, 100)
                 .expect("a page's worth of connections fits the table");
         }
         assert_eq!(
-            table.open(7, 42_000, Ipv4Address::LOCALHOST, 4300, 100).err(),
+            table.open(owner.0 as u32, 42_000, Ipv4Address::LOCALHOST, 4300, 100).err(),
             Some(NetError::QueueFull),
             "one past the table is still refused"
         );
@@ -920,7 +931,7 @@ mod tcp_reliability_tests {
         finished.time_wait_until = now;
 
         table
-            .open(7, 42_000, Ipv4Address::LOCALHOST, 4300, 100)
+            .open(owner.0 as u32, 42_000, Ipv4Address::LOCALHOST, 4300, 100)
             .expect("an expired TIME-WAIT slot is reclaimed by the connect itself");
         assert_eq!(
             table
@@ -946,13 +957,14 @@ mod tcp_reliability_tests {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
+        let owner = crate::task::TaskId::new();
         let mut active_ids = [0u32; 22];
         let mut total_opened = 0;
         let mut rejected_at_saturation = 0;
 
         // Phase 1: Rapid burst fills table model to capacity (16 slots)
         for i in 0..16 {
-            let id = table.open(7, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
+            let id = table.open(owner.0 as u32, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
                 .expect("connection fits within 16-slot table");
             active_ids[i] = id;
             total_opened += 1;
@@ -962,7 +974,7 @@ mod tcp_reliability_tests {
         assert_eq!(table.entries().iter().filter(|s| s.is_some()).count(), 16, "all 16 slots occupied");
 
         // Attempting connection #17 while all 16 are unclosed MUST be refused by table model
-        let saturated_res = table.open(7, 46_000, Ipv4Address::LOCALHOST, 443, 2000);
+        let saturated_res = table.open(owner.0 as u32, 46_000, Ipv4Address::LOCALHOST, 443, 2000);
         assert_eq!(saturated_res.err(), Some(NetError::QueueFull));
         rejected_at_saturation += 1;
 
@@ -984,7 +996,7 @@ mod tcp_reliability_tests {
         // Phase 3: Model issues remaining 6 connection requests (#17..#22)
         // open() must automatically reclaim the 6 closed slots and succeed
         for i in 16..22 {
-            let id = table.open(7, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
+            let id = table.open(owner.0 as u32, 45_000 + i as u16, Ipv4Address::LOCALHOST, 443, 1000 + i as u32)
                 .expect("reclaimed slots accommodate remaining burst in model");
             active_ids[i] = id;
             total_opened += 1;
@@ -1009,8 +1021,9 @@ mod tcp_reliability_tests {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
+        let owner = crate::task::TaskId::new();
         let id = table
-            .open(7, 40000, Ipv4Address::LOCALHOST, 40001, 100)
+            .open(owner.0 as u32, 40000, Ipv4Address::LOCALHOST, 40001, 100)
             .expect("connection should open");
 
         table.get_mut(id).expect("connection exists").state = crate::net::TcpState::Established;
@@ -1038,7 +1051,11 @@ mod tcp_reliability_tests {
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
-        let task_id = TaskId(999);
+        // WHY the case needs its own debit target: `send_udp_datagram` bills the
+        // background network allowance to whatever task the global scheduler is
+        // pointed at, which is not a state this case controls. Without the guard the
+        // first send here succeeds or fails on how many unrelated cases ran first.
+        let (task_id, _caller) = crate::net::SendCallerGuard::fresh();
         let now = crate::interrupts::get_system_ticks();
 
         let parent_sock = Capability {
@@ -1108,7 +1125,12 @@ mod tcp_reliability_tests {
         let send_res1 = crate::net::send_udp_datagram(
             Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"TEST", &caps,
         );
-        assert!(send_res1.is_ok(), "first send_udp_datagram must succeed: {:?}", send_res1.err());
+        assert!(
+            send_res1.is_ok(),
+            "first send_udp_datagram must succeed: {:?}, debit target {:?}",
+            send_res1.err(),
+            crate::net::background_debit_state()
+        );
         assert!(!caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
         let send_res2 = crate::net::send_udp_datagram(
             Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"TEST", &caps,
@@ -1248,7 +1270,13 @@ mod tcp_reliability_tests {
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
-        let task_id = TaskId(999);
+        // WHY both ids are drawn from the counter: this case owns two tasks -- the
+        // connection owner and the wrong-owner caller -- and each must be a task no
+        // process record is bound to, because `table.open` bills the ambient process's
+        // socket allowance when one exists. Named ids also collide with the ids other
+        // cases are handed, which is how a capability case starts failing on capacity.
+        let task_id = TaskId::new();
+        let intruder_task = TaskId::new();
 
         let parent_recv = Capability {
             id: CapabilityId(301),
@@ -1358,11 +1386,14 @@ mod tcp_reliability_tests {
             assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Exhausted lease must be denied");
         }
 
-        // 7. Wrong grantee: lease granted to TaskId(555) cannot be authorized by TaskId(999)
+        // 7. Wrong grantee: a lease granted to a different task cannot be authorized
+        // by this case's owner. The grantee id is drawn, not named, so that it can
+        // never coincide with the drawn owner id and turn the refusal into a grant.
         {
             let wg_now = crate::interrupts::get_system_ticks();
+            let other_grantee = TaskId::new();
             let wg_lease = delegation::DelegatedLease::new(
-                9041, &parent_recv, TaskId(1), TaskId(555), Rights::READ, 5, 100_000, wg_now,
+                9041, &parent_recv, TaskId(1), other_grantee, Rights::READ, 5, 100_000, wg_now,
             ).expect("wg_lease");
             delegation::register_lease(wg_lease.clone());
 
@@ -1385,8 +1416,7 @@ mod tcp_reliability_tests {
             let mut valid_caps = CapabilityTable::new_for_task(task_id, 4);
             valid_caps.insert(valid_lease.to_capability()).unwrap();
 
-            let other_task = (task_id.0 + 1) as u32;
-            let res = table.recv_owned(conn_id, other_task, &mut out, &valid_caps);
+            let res = table.recv_owned(conn_id, intruder_task.0 as u32, &mut out, &valid_caps);
             assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Wrong connection owner must be denied");
         }
 
@@ -1434,7 +1464,10 @@ mod tcp_reliability_tests {
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
-        let task_id = TaskId(998);
+        // WHY the owner is drawn here as well: an id this case picks by name can
+        // already carry another case's process record, which `open` then bills. See
+        // `tcp_receive_capability_and_lease_enforcement`.
+        let task_id = TaskId::new();
         let mut table = TcpConnectionTable::new();
 
         let conn_a = table.open(task_id.0 as u32, 53000, Ipv4Address::LOCALHOST, 53001, 1000)
@@ -1484,8 +1517,13 @@ mod tcp_reliability_tests {
         let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
+        // WHY the drawn owner here too: `open` bills the ambient process's socket
+        // allowance when a record is bound to the owner id, so a named id can put this
+        // case on the wrong table. See
+        // `active_close_holds_connection_until_time_wait_expiry`.
+        let owner = crate::task::TaskId::new();
         let id = table
-            .open(7, 42000, Ipv4Address::LOCALHOST, 42001, 100)
+            .open(owner.0 as u32, 42000, Ipv4Address::LOCALHOST, 42001, 100)
             .expect("connection should open");
 
         let initial_recv_seq = 5000u32;
@@ -1553,7 +1591,7 @@ mod tcp_reliability_tests {
 
         // (a) zero-length FIN at seq == recv_seq -> CloseWait and recv_seq + 1
         let id2 = table
-            .open(7, 43000, Ipv4Address::LOCALHOST, 43001, 100)
+            .open(owner.0 as u32, 43000, Ipv4Address::LOCALHOST, 43001, 100)
             .expect("connection 2 should open");
         let initial_recv_seq_2 = 8000u32;
         {

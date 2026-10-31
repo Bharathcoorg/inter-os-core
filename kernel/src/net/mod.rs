@@ -322,8 +322,9 @@ pub fn send_udp_datagram(
 /// held and unrevoked, but must not spend a second invocation of a
 /// single-invocation lease.
 ///
-/// `caller_task` is the scheduler's current task; it is `None` outside a
-/// scheduled context, where no process budget exists to debit.
+/// `caller_task` comes from [`caller_task_id`], which is the scheduler's current
+/// task; it is `None` outside a scheduled context, where no process budget
+/// exists to debit.
 pub(crate) fn authorize_and_debit_network_send(
     caps: &CapabilityTable,
     caller_task: Option<TaskId>,
@@ -343,6 +344,26 @@ pub(crate) fn authorize_and_debit_network_send(
             .map_err(|_| NetError::QueueFull)?;
     }
     Ok(())
+}
+
+/// The task whose background-network allowance the next send is billed to.
+///
+/// WHY the scheduler's current task and not the capability table's owner: the
+/// budget is a per-process resource limit, and the process that puts bytes on the
+/// wire is the one executing, whatever table it happens to be holding. A caller
+/// outside any scheduled context (`None`) has no process to bill, which is why the
+/// debit is skipped rather than failed.
+///
+/// WHY a function instead of the inline read at both call sites: the host unit-test
+/// process has no scheduled context it can hand a case, so a test-only override sits
+/// behind `#[cfg(test)]` here and compiles out of the guest binary entirely. See
+/// `SendCallerGuard`.
+fn caller_task_id() -> Option<TaskId> {
+    #[cfg(test)]
+    if let Some(task) = *TEST_SEND_CALLER.lock() {
+        return Some(task);
+    }
+    crate::task::SCHEDULER.lock().current_task_id()
 }
 
 /// Sends a UDP datagram over the network stack with explicit control over lease quota consumption.
@@ -403,7 +424,7 @@ pub fn send_udp_datagram_authorized(
 
     // 6. Authorize capability FIRST, then debit the process-scoped background
     //    network budget. A refused send must never consume byte allowance.
-    let caller_task = crate::task::SCHEDULER.lock().current_task_id();
+    let caller_task = caller_task_id();
     authorize_and_debit_network_send(caps, caller_task, eth_len, consume_quota)?;
 
     // 7. Transmit into the loopback queue or the hardware NIC
@@ -448,7 +469,7 @@ fn transmit_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: 
     let frame = EthernetFrame { dst_mac, src_mac: NETWORK_DEVICE.lock().info().mac, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len] };
     let mut eth_buf = [0u8; 1514];
     let n = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
-    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
+    if let Some(task) = caller_task_id() {
         crate::task::process::consume_background_network(task, n)
             .map_err(|_| NetError::QueueFull)?;
     }
@@ -972,6 +993,85 @@ impl Drop for SystemTicksGuard {
     }
 }
 
+/// The task the background-network debit keys to, while a guard holds it.
+///
+/// `None` means "no override", which is the guest behaviour: read the scheduler.
+#[cfg(test)]
+pub(crate) static TEST_SEND_CALLER: spin::Mutex<Option<TaskId>> = spin::Mutex::new(None);
+
+/// Gives a case a process the send budget can bill, and points the budget at it.
+///
+/// WHY the case needs one: `send_udp_datagram_authorized` bills the background
+/// network allowance to `SCHEDULER.current_task_id()` -- a process-global the case
+/// neither spawns nor owns. As soon as any case has initialized the global scheduler
+/// (the syscall 161 dispatch case does), that is the primordial `TaskId(0)`, and
+/// `register_leader` refuses `TaskId(0)` by design because it is the "no task"
+/// sentinel. The debit then answers "process not found", which the send path reports
+/// as `QueueFull` -- so whether a network case could send at all depended on which
+/// cases happened to run before it.
+///
+/// WHY an override rather than a real scheduled context: `current_idx` only moves
+/// through `switch_context`, which would switch the host thread's own CPU context,
+/// and the alternative to pointing the debit somewhere is for every network case to
+/// replay the boot sequence.
+///
+/// The process itself comes from `task::process::OwnedLeader`, which is what keeps
+/// the case's registration from outliving the case.
+#[cfg(test)]
+pub(crate) struct SendCallerGuard {
+    _leader: crate::task::process::OwnedLeader,
+    prev: Option<TaskId>,
+}
+
+#[cfg(test)]
+impl SendCallerGuard {
+    /// Bills sends to a freshly allocated process leader until the guard is dropped.
+    ///
+    /// WHY the id is allocated rather than picked by the case: `OwnedLeader` frees
+    /// what it registers, but a hand-picked id can already be bound by an earlier
+    /// case's `spawn`, and the guard would then refuse to start.
+    pub(crate) fn fresh() -> (TaskId, Self) {
+        let (task, leader) = crate::task::process::OwnedLeader::fresh();
+        let prev = *TEST_SEND_CALLER.lock();
+        *TEST_SEND_CALLER.lock() = Some(task);
+        (task, Self { _leader: leader, prev })
+    }
+}
+
+#[cfg(test)]
+impl Drop for SendCallerGuard {
+    fn drop(&mut self) {
+        *TEST_SEND_CALLER.lock() = self.prev;
+    }
+}
+
+/// The state the background-network budget debit sees right now, as
+/// `(current task, its process, that process's state, bytes debited, allowance)`.
+///
+/// WHY a case has to be able to print this: `send_udp_datagram_authorized` keys its
+/// budget debit to the running task rather than to the capability holder it was
+/// handed, and every refusal on that path is reported as `NetError::QueueFull`, which
+/// is also what a full transmit ring returns. So an assert that says only "must be
+/// authorized: QueueFull" leaves a reader unable to tell a refused budget from a
+/// broken send predicate, and the two have nothing to do with each other.
+///
+/// WHY it reads `caller_task_id()` and not the scheduler directly: that is the
+/// function the debit actually uses, and a diagnostic that names a different task
+/// than the one that refused is worse than none.
+#[cfg(test)]
+pub(crate) fn background_debit_state() -> (Option<TaskId>, Option<crate::task::process::ProcessId>, Option<crate::task::process::ProcessState>, u32, u32) {
+    let caller = caller_task_id();
+    let process = caller.and_then(crate::task::process::process_for_task);
+    let record = process.and_then(crate::task::process::record_for_process);
+    (
+        caller,
+        process,
+        record.map(|r| r.state),
+        record.map(|r| r.background_network_bytes).unwrap_or(0),
+        record.map(|r| r.limits.max_background_network_bytes).unwrap_or(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1071,9 +1171,8 @@ mod tests {
     fn test_send_udp_datagram_authorized_quota_policy() {
         let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_net_state();
-        let grantor = TaskId(70);
-        let grantee = TaskId(71);
-        crate::task::process::register_leader(grantee, TaskId(1));
+        let grantor = TaskId::new();
+        let (grantee, _caller) = SendCallerGuard::fresh();
 
         let mut grantor_caps = CapabilityTable::new_for_task(grantor, 4);
         grantor_caps.insert(Capability {
@@ -1121,15 +1220,25 @@ mod tests {
         // in the registry, it is revoked there, it is exhausted there) and the bare
         // "must succeed" gave a reader none of them, so a failure here looked like a
         // bug in the retransmission predicate rather than in the shared state.
+        //
+        // WHY the debit state is in it too: the frame leaves through the same
+        // function that spends the ambient process's background allowance, so a
+        // `QueueFull` here is not necessarily about the lease at all.
+        let (caller, caller_process, caller_state, debited, allowance) = background_debit_state();
         assert!(
             check_res.is_ok(),
-            "Non-consuming datagram authorization must succeed: identity {}, in the revocation store {}, live in the registry {}",
+            "Non-consuming datagram authorization must succeed: identity {}, in the revocation store {}, live in the registry {}; the budget debit targeted current task {:?} -> process {:?} in state {:?}, {}/{} background bytes used",
             lease_cap.id.0,
             crate::capability::revocation::is_revoked(lease_cap.id),
             crate::capability::delegation::is_lease_active(
                 lease_id,
                 crate::interrupts::get_system_ticks()
             ),
+            caller,
+            caller_process,
+            caller_state,
+            debited,
+            allowance,
         );
 
         // 2. Now perform an authorized send with consume_quota: true (initial transmission)
@@ -1142,7 +1251,7 @@ mod tests {
             &grantee_caps,
             true, // consume quota
         );
-        assert!(send_res1.is_ok(), "First consuming send must succeed");
+        assert!(send_res1.is_ok(), "First consuming send must succeed: {:?}, debit target {:?}", send_res1.err(), background_debit_state());
 
         // 3. Second consuming send must fail closed because lease quota is exhausted
         let send_res2 = send_udp_datagram_authorized(
@@ -1222,8 +1331,7 @@ mod tests {
     fn dns_retransmission_is_authorized_after_the_logical_lease_is_spent() {
         let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_net_state();
-        let grantee = TaskId(72);
-        crate::task::process::register_leader(grantee, TaskId(1));
+        let (grantee, _caller) = SendCallerGuard::fresh();
         let caps = single_use_send_lease(grantee);
 
         // Initial transmission spends the single invocation.
@@ -1231,7 +1339,12 @@ mod tests {
             Ipv4Address::LOCALHOST, 5000, Ipv4Address::LOCALHOST, 4242,
             b"DNS_INITIAL", &caps, true,
         );
-        assert!(initial.is_ok(), "initial transmission must be authorized: {:?}", initial.err());
+        assert!(
+            initial.is_ok(),
+            "initial transmission must be authorized: {:?}, debit target {:?}",
+            initial.err(),
+            background_debit_state()
+        );
 
         // Retransmission of the same in-flight logical query must still be authorized
         // even though the lease now reports zero remaining invocations.
@@ -1263,16 +1376,18 @@ mod tests {
     /// actually put on the wire, so a refused send must leave it untouched.
     ///
     /// This drives `authorize_and_debit_network_send` directly, passing an
-    /// explicit caller task, because the budget debit is keyed to the scheduler's
-    /// current task and that is `None` outside a scheduled context. Driving the
-    /// helper is what makes the ordering observable at all: it is the ordering
+    /// explicit caller task, because the budget debit in the public send path is
+    /// keyed to the running task rather than to a task the case can name. Driving
+    /// the helper is what makes the ordering observable at all: it is the ordering
     /// this test pins, not the frame serialization around it.
+    ///
+    /// `SendCallerGuard` is here for the process record, not the override: the byte
+    /// budget only exists on a process, and the guard reaps the one it registers.
     #[test]
     fn denied_send_does_not_debit_background_network_budget() {
         let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_net_state();
-        let grantee = TaskId(73);
-        crate::task::process::register_leader(grantee, TaskId(1));
+        let (grantee, _caller) = SendCallerGuard::fresh();
         // Background state is what makes the byte budget actually accounted.
         crate::task::process::set_background(grantee, 0).unwrap();
         let caps = single_use_send_lease(grantee);
