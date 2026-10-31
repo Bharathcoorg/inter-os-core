@@ -707,10 +707,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // a studio header standing over an absent device.
   const studioVeil = document.getElementById('studio-boot-veil');
   const studioVeilDeadline = performance.now() + 6000;
-  // Recorded by the status poller rather than guessed at: whether the guest is
-  // known to be down. Set on the first answer, so an absent device is a fact the
-  // gate can act on instead of a frame nobody is coming to paint.
-  let studioGuestIsDown = false;
 
   function studioLayoutIsReady() {
     // Webfonts re-measure the header and can re-wrap the action row; waiting for
@@ -738,21 +734,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (rect.left < -1 || rect.right > vw + 1) return false;
     }
     if (studioHeader && screenRect.top < studioHeader.getBoundingClientRect().bottom - 1) return false;
-    // Geometry alone is not a rendered page: every box above measures correctly
-    // while the chassis is still an empty shell, and that is the reload the
-    // complaint was about. So the veil also waits for the guest's first painted
-    // scanout. A guest that is known to be down will never produce one, and its
-    // honest standby card is the finished page — so only that case passes
-    // without a frame.
-    if (!hasLiveFrame && !studioGuestIsDown) return false;
     return true;
   }
 
   function revealStudioWhenReady() {
     if (!studioVeil) return;
     // The deadline is not a pass: it is the refusal to trap a visitor behind a
-    // gate that some unforeseen layout never opens, or that a frame keeps not
-    // arriving because no status reply ever landed. The stylesheet mirrors it
+    // gate that some unforeseen layout never opens. The stylesheet mirrors it
     // with an 8s CSS-only failsafe in case this script never ran at all.
     if (studioLayoutIsReady() || performance.now() > studioVeilDeadline) {
       studioVeil.classList.add('is-hidden');
@@ -1135,7 +1123,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // is not presenting, the monitor shows nothing rather than a Studio-owned
   // screen that could be mistaken for the guest's.
   function updateDeviceDisplay(isAlive) {
-    studioGuestIsDown = !isAlive;
     if (isAlive) {
       // The monitor must never invent a readiness screen. As soon as QEMU is alive,
       // expose its real scanout; boot/lock/off pixels are guest-owned. Until the

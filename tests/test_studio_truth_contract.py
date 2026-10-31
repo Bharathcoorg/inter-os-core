@@ -219,17 +219,20 @@ class StudioClientTruthTests(unittest.TestCase):
         self.assertIn("statActiveTasks.textContent", self.js)
         self.assertIn("procCountBadge", self.js)
 
-    def test_reload_gate_waits_for_a_guest_frame_not_only_for_geometry(self):
-        # WHY: the veil that hides the studio until the page is ready measured
-        # only boxes, and every box is correct while the chassis is still an
-        # empty shell. Reloading therefore flashed a header and control rail
-        # around a device with nothing in it. The gate now also requires the
-        # first painted scanout, with one honest exception -- a guest the status
-        # poll reports as down will never produce a frame, and the standby card
-        # shown there is the finished page.
-        self.assertIn("if (!hasLiveFrame && !studioGuestIsDown) return false;", self.js)
-        self.assertIn("studioGuestIsDown = !isAlive;", self.js)
-        # The deadline is what keeps a gate that a frame never opens from
+    def test_reload_gate_is_geometry_only_and_never_waits_on_a_guest_probe(self):
+        # WHY geometry and not a frame: the veil hides a page whose boxes are
+        # wrong (a chassis collapsed to 18x37, a back button past the right edge
+        # at 390px, a focus stage under a wrapped header) and every one of those
+        # is measurable without talking to the guest. Gating on the first painted
+        # scanout was tried and cost more than it saved -- the status poll answers
+        # 1.6 to 5.5 s after a reload while a guest runs, so a finished page sat
+        # behind a black veil for the length of a network round trip. A device
+        # with no frame carries its own honest standby card inside the chassis,
+        # so what the veil reveals is a complete page either way.
+        self.assertNotIn("studioGuestIsDown", self.js)
+        self.assertIn("if (chassisRect.height < 150 || chassisRect.width < 70) return false;", self.js)
+        self.assertIn("if (screenRect.height < 120 || screenRect.width < 50) return false;", self.js)
+        # The deadline is what keeps a gate that geometry never opens from
         # trapping the visitor, so it must not be turned into a permanent wait.
         self.assertIn("performance.now() > studioVeilDeadline", self.js)
 
