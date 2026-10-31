@@ -9,6 +9,7 @@
 //! - Native portrait mobile scanout at the 720x1440 authoring size (1440x720 landscape), so
 //!   platform surfaces composite 1:1 instead of being resampled
 
+use alloc::format;
 use alloc::vec::Vec;
 use alloc::vec;
 use spin::Mutex;
@@ -697,6 +698,92 @@ impl DrmKmsController {
             .filter(|s| !s.visible && (200..1000).contains(&s.z_order) && s.owner_task != caller)
             .min_by_key(|s| s.z_order)
             .map(|s| (s.owner_task, surface_bytes(s.pixels.len())))
+    }
+
+    /// The exit code a backgrounded application is retired with when the device
+    /// reclaims its surfaces to pay for the application being opened.
+    ///
+    /// WHY it is not the generic `-1`: `-1` is what every other lifecycle
+    /// termination already reports -- the service supervisor and a launch whose
+    /// IPC endpoint could not be allocated both pass it -- so a process record
+    /// reading `-1` cannot tell "the device needed your memory" from "stop, for
+    /// a reason nobody recorded". This one reserved number is that difference.
+    ///
+    /// WHY the exit code and not a message to the app: the honest signal is the
+    /// one the runtime can actually honour. A retired task is a Zombie before it
+    /// observes anything, so no IPC notice or in-app callback can reach it, and
+    /// posting one would claim a delivery the platform cannot make. The exit code
+    /// survives the reap into the process record, which is the only place the
+    /// reason can be read without lying about telling the app.
+    pub const EXIT_CODE_MEMORY_RETIRE: i32 = -200;
+
+    /// Posts the one notice the person is owed when the device retires an app to
+    /// free surfaces for another app, and reports whether the store accepted it.
+    ///
+    /// WHY exactly one: a retirement is a single decision, and the notice the
+    /// person is owed is about that one app going away. This helper is the only
+    /// place the wording is built, so a second call site cannot post a second
+    /// notice and the syscall layer has nothing to reformat at the point of use.
+    ///
+    /// WHY the numbers are the arguments and not the surface state: `freed_bytes`
+    /// and `MAX_SURFACE_BYTES` are what the retire path already measured -- the
+    /// bytes the chosen victim's reclaimable surface holds and the ceiling every
+    /// surface shares -- so the notice can only repeat what was measured. It never
+    /// invents a percentage or a "low memory" claim the device did not make.
+    ///
+    /// WHY it takes the manager rather than locking the singleton itself: the
+    /// retire site holds no scheduler lock when it posts (the notice's own
+    /// `wake_package` path re-enters the scheduler, so posting under the scheduler
+    /// lock would deadlock). The caller owns the `try_lock`, decides whether the
+    /// store is reachable, and lets the retirement proceed either way. Taking the
+    /// manager as an argument is also what lets the retire-path unit test build a
+    /// store, call this once, and count exactly one record without touching global
+    /// state.
+    ///
+    /// WHY it is owned by "system" and not by the retired package: the deferred
+    /// reclaim that runs when the retired task is finally reaped calls
+    /// `cancel_all_for_package` for that package, so a notice left under the
+    /// retired app's own name would delete itself a tick after it appeared and the
+    /// person would never read it. This is a lifecycle event the operating system
+    /// caused, so it is posted under the system package the way boot posts its own
+    /// notices -- while still naming the app that went away.
+    ///
+    /// `user_id` is the account whose shade the person is looking at, not a fixed
+    /// owner constant: the store hands a record only to the account it is filed
+    /// under, and the shell asks for the active one. Filed anywhere else the
+    /// retirement is announced to an empty screen.
+    pub fn post_retirement_notice(
+        manager: &mut crate::notification::NotificationManager,
+        victim_package: &str,
+        user_id: u32,
+        freed_bytes: usize,
+        current_tick: u64,
+    ) -> Result<u64, crate::notification::NotificationError> {
+        let title = format!("{} was closed", victim_package);
+        // WHY the sentence is this short: the shell caches a body in 64 bytes and
+        // clips the row to the card, and the first painted retirement ended
+        // "bytes of di..." with the budget figure cut off mid-claim. The title
+        // already names the app, so the body spends its room on the two numbers
+        // the retire path measured and nothing else.
+        let body = format!(
+            "The device closed it to free {} of {} bytes.",
+            freed_bytes, MAX_SURFACE_BYTES,
+        );
+        // The "general" channel does not bypass Do Not Disturb, so the store's own
+        // DND, rate and capacity limits are honoured: this returns Err under DND or
+        // when the retired package's quota is spent, and the caller lets the
+        // retirement proceed regardless.
+        manager.post(
+            "system",
+            user_id,
+            "general",
+            &title,
+            &body,
+            crate::notification::NotificationPriority::Default,
+            crate::notification::LockscreenVisibility::Public,
+            0,
+            current_tick,
+        )
     }
 
     /// Allocates a new client surface for application rendering.
@@ -1982,6 +2069,70 @@ mod tests {
         assert_eq!(kms.evictable_app_owner(15).map(|(owner, _)| owner), Some(16));
         kms.surfaces.retain(|s| s.owner_task != 16 && s.owner_task != 18);
         assert_eq!(kms.evictable_app_owner(15), None);
+    }
+
+    #[test]
+    fn a_retirement_posts_one_notice_naming_the_app_and_the_bytes_it_measured() {
+        // WHY this test exists: when the device retires a backgrounded app to pay
+        // for another app's surface, the person used to get no notice and the app
+        // never learned why it went away. The notice is the person's half and the
+        // exit code is the half the runtime can honestly carry. What this pins is
+        // that a retirement posts *exactly one* notice, that it names the victim,
+        // and that the two numbers it states are the ones the retire path measured
+        // -- not a percentage or a "low memory" claim the device did not make.
+        let mut manager = crate::notification::NotificationManager::new();
+        manager.seed_standard_channels();
+        let freed = surface_bytes(720 * 1440);
+        // An account that is NOT the owner, so a hard-coded owner inside the
+        // helper cannot pass: the notice has to land where the shade will look.
+        let account = crate::user::UserId::GUEST.0;
+        let posted = DrmKmsController::post_retirement_notice(&mut manager, "com.example.gallery", account, freed, 42)
+            .expect("the notice is accepted on a fresh store");
+
+        let active = manager.query_active(account, false);
+        assert_eq!(active.len(), 1, "a retirement must post exactly one notice");
+        assert!(
+            manager.query_active(crate::user::UserId::OWNER.0, false).is_empty(),
+            "the notice was filed under a fixed account instead of the one it was given"
+        );
+        let record = &active[0];
+        assert_eq!(record.id, posted);
+        assert_eq!(record.package_id, "system", "the notice is owned by the system, not the retired app");
+        assert!(record.title.contains("com.example.gallery"), "the notice must name the app that went away");
+        // The claim is only honest if the numbers it states are the ones measured.
+        assert!(record.body.contains(&alloc::string::ToString::to_string(&freed)), "the notice must state the bytes freed");
+        assert!(record.body.contains(&alloc::string::ToString::to_string(&MAX_SURFACE_BYTES)), "the notice must state the budget");
+        assert_eq!(record.timestamp_ticks, 42, "the notice is stamped with the tick it was posted");
+
+        // The exit code is the named one, so a reader of the process record can
+        // tell a memory retirement from the generic -1 every other path passes.
+        assert_ne!(DrmKmsController::EXIT_CODE_MEMORY_RETIRE, -1, "the retirement must be distinguishable from -1");
+        assert_eq!(DrmKmsController::EXIT_CODE_MEMORY_RETIRE, -200);
+    }
+
+    #[test]
+    fn a_notice_refused_by_the_store_does_not_stop_the_retirement() {
+        // WHY this test exists: the retirement pays for a launch the person asked
+        // for, and a notification store that is full, on DND, or has spent the
+        // quota must never hold the launch hostage. This helper returns the store's
+        // own refusal instead of panicking; the caller ignores the value and the
+        // retire path proceeds. A DND-suppressed post returns Err and adds nothing.
+        let mut manager = crate::notification::NotificationManager::new();
+        manager.seed_standard_channels();
+        manager.set_dnd_enabled(true);
+        let freed = surface_bytes(100);
+        let result = DrmKmsController::post_retirement_notice(
+            &mut manager,
+            "com.example.gallery",
+            crate::user::UserId::OWNER.0,
+            freed,
+            1,
+        );
+        assert!(
+            matches!(result, Err(crate::notification::NotificationError::DndSuppressed)),
+            "a general-channel notice under DND must be refused, not forced through"
+        );
+        assert!(manager.query_active(crate::user::UserId::OWNER.0, false).is_empty());
     }
 
     #[test]

@@ -4584,10 +4584,53 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
             "[LIFECYCLE] task {} asked for a {}x{} surface; retiring task {}, backgrounded longest, which holds {} bytes of surface",
             owner.0, width, height, victim, held
         );
+        // WHY the notice goes out before the retirement rather than after: the
+        // person is owed one line naming the app that went away and the real
+        // numbers -- the bytes retiring frees (`held`) measured against the surface
+        // budget it is bounded by. Once the task is a Zombie its surfaces are gone
+        // and `held` no longer describes what was reclaimed, so the honest moment to
+        // state the figures is here. The victim's package id is its task name, read
+        // while the task is still live.
+        let victim_package = SCHEDULER.lock().get_task(TaskId(victim)).map(|task| task.name).unwrap_or("");
+        if !victim_package.is_empty() {
+            // The account whose shade the person is looking at. The store hands a
+            // record only to the account it is filed under and the shell queries
+            // the active one, so filing it under a fixed owner would announce the
+            // retirement to an empty screen for anybody else.
+            let account = crate::user::USER_MANAGER.lock().active_user().0;
+            // The KMS lock is released and the scheduler is not held at this line,
+            // which is what makes the post safe: posting re-enters the scheduler
+            // through the store's own `wake_package`, so it must not be called under
+            // the scheduler lock. The order is the one `notification::init` and the
+            // deferred reclaim already use -- notification, then scheduler. The
+            // manager is taken with `try_lock`, not `lock`, so a store held by
+            // another path can never stall the launch the retirement is paying for.
+            // A busy store, a DND-suppressed post, a spent quota or a full shelf all
+            // mean the notice is skipped and the retirement still happens: a missing
+            // notice is unfortunate, but a screen held up behind it is the worse of
+            // the two, and nothing here may panic the kernel over a notification.
+            if let Some(mut manager) = crate::notification::NOTIFICATION_MANAGER.try_lock() {
+                if crate::drivers::display_kms::DrmKmsController::post_retirement_notice(
+                    &mut manager,
+                    victim_package,
+                    account,
+                    held,
+                    crate::interrupts::get_system_ticks(),
+                )
+                .is_err()
+                {
+                    crate::serial_println!(
+                        "[LIFECYCLE] task {} was retired but its notice was refused by the store",
+                        victim
+                    );
+                }
+            }
+        }
         // The scheduler is taken with the KMS lock released: reclaiming a task
         // destroys its surfaces, and holding both here would invert the order the
-        // exit path takes.
-        if let Err(why) = SCHEDULER.lock().terminate_task(TaskId(victim), -1) {
+        // exit path takes. The retirement's exit code is the reserved sentinel, not
+        // the generic -1, so the process record can tell the device needed memory.
+        if let Err(why) = SCHEDULER.lock().terminate_task(TaskId(victim), crate::drivers::display_kms::DrmKmsController::EXIT_CODE_MEMORY_RETIRE) {
             crate::serial_println!("[LIFECYCLE] task {} could not be retired: {}", victim, why);
         }
         let reclaimed = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(victim);

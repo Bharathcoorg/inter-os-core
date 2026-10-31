@@ -221,10 +221,11 @@ impl NotificationManager {
         // scheduler still enforces its background CPU quota after delivery.
         let _ = crate::task::process::wake_package(package_id, user_id);
         crate::serial_println!(
-            "[NOTIFICATION] Posted #{} from '{}' on channel '{}' (priority={:?})",
+            "[NOTIFICATION] Posted #{} from '{}' on channel '{}' for user {} (priority={:?})",
             id,
             package_id,
             channel_id,
+            user_id,
             priority
         );
         Ok(id)
