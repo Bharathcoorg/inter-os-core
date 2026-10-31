@@ -155,12 +155,21 @@ def test_events_header_bands_cannot_overlap_each_other_or_the_feed():
     filter_note_y = _const_usize(source, "FILTER_NOTE_Y")
     section_head_y = _const_usize(source, "SECTION_HEAD_Y")
 
-    # A caption run inks GLYPH_H (24) rows from its baseline; a body run is
-    # scaled 2, so 48. These are `launcher::font`'s own numbers.
-    caption_h, body_h = 24, 48
+    # The rows each band reserves: `font::line_height` at the rung that band
+    # draws at -- ascent plus descent, which is the box `LabelRun` clips its ink
+    # to. The old pair here was the bitmap cell's (24 for a caption, 48 for a
+    # body), which under-reserved the HEADING title by 32 rows and so passed the
+    # very overlap this test was written to catch.
+    #
+    # WHY the numbers are written down rather than computed: the authority for
+    # them is the Rust side, where `TITLE_ADVANCE` and `SUBTITLE_ADVANCE` are
+    # each pinned by a `const _: () = assert!(...)` to the SDK's own
+    # `line_height` at the rung the paint site uses. Changing a rung therefore
+    # fails the build, not just this file.
+    heading_h, body_h, caption_h = 80, 32, 22
 
-    assert title_y + body_h <= subtitle_y, "title runs into the subtitle"
-    assert subtitle_y + caption_h <= source_note_y, "subtitle runs into the source note"
+    assert title_y + heading_h <= subtitle_y, "title runs into the subtitle"
+    assert subtitle_y + body_h <= source_note_y, "subtitle runs into the source note"
     assert source_note_y + caption_h <= pills_y, "source note runs into the pill row"
     assert filter_note_y >= pills_y + pill_h, "filter note starts inside the pill row"
     assert filter_note_y + caption_h <= section_head_y, "filter note runs into the first section head"

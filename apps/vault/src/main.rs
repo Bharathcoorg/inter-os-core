@@ -493,10 +493,6 @@ const CARD_BORDER: u32 = match CARD.border {
 const CARD_R: usize = CARD.radius;
 const INNER_W: usize = CARD_W - PAD * 2; // 624
 
-/// WHY the row reaches 112: the band owns the first 48 rows, the back control
-/// stands 48 tall from HEADER_TOP, and the subtitle's line box has to end below
-/// that control before the header's own rule is drawn.
-const HEAD_BOTTOM: usize = 112;
 const TITLE_X: usize = 88;
 const BACK_X: usize = 24;
 const BACK_Y: usize = interos_std::design::viewport::HEADER_TOP;
@@ -508,8 +504,123 @@ const ACTION_H: usize = 44;
 /// 48-tall control, and centring them is what keeps the row from reading crooked.
 const ACTION_Y: usize = BACK_Y + 2;
 
-const TITLE_Y0: usize = BACK_Y;
-const SUBTITLE_Y0: usize = BACK_Y + 26;
+/// The later of two layout edges.
+///
+/// WHY a local helper rather than `Ord::max`: `max` is not callable in a `const`
+/// context on this toolchain, and every edge below has to be a compile-time
+/// constant, because the pixel function compares against it once per pixel.
+const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The rung both header lines are drawn at, on every one of the three screens
+/// that carries this header.
+const HEAD_RUNG: usize = 2;
+
+/// Rows the title's line box reserves: ascent plus descent at its rung.
+const TITLE_BOX_H: usize = std::design::font::line_height(HEAD_RUNG);
+/// Rows the subtitle's line box reserves.
+const SUBTITLE_BOX_H: usize = std::design::font::line_height(HEAD_RUNG);
+
+/// The air between the two header lines' boxes.
+const HEAD_LINE_GAP: usize = spacing::GRID_8;
+/// The air between the last row the header may ink and its hairline.
+const HEAD_PAD_BOTTOM: usize = 2;
+/// The header's hairline, drawn on the band's last row.
+const HEAD_RULE_H: usize = 1;
+
+/// The title's line-box top.
+///
+/// WHY the caps are centred on the back control's row rather than the box being
+/// dropped on the row's top edge: the box at this rung is
+/// `line_height(HEAD_RUNG)` rows, and the control beside it is 48, so a box
+/// authored at `BACK_Y` ran past the control and straight into the subtitle
+/// under it. Centring the cap height is the placement the dialer and messages
+/// already document.
+const TITLE_Y0: usize = BACK_Y
+    + BACK_S / 2
+    - std::design::font::ascent_for_scale(HEAD_RUNG)
+    + std::design::font::cap_for_scale(HEAD_RUNG) as usize / 2;
+
+/// The subtitle's line-box top: the whole of the title's box, then the gap.
+///
+/// WHY from the title's box and not from a literal offset on `BACK_Y`: the old
+/// `BACK_Y + 26` put this box six rows inside the title's, so the two runs inked
+/// over each other and the pair's tail ran past the band's rule.
+const SUBTITLE_Y0: usize = TITLE_Y0 + TITLE_BOX_H + HEAD_LINE_GAP;
+
+/// Header band bottom, derived from the tallest thing standing in the band.
+///
+/// WHY derived and not typed as a literal: the band is only correct while it
+/// contains both line boxes, the 48-tall back control and the action pill. The
+/// literal held 112 after `font::line_height` began returning ascent plus
+/// descent, and nothing complained -- the two rows past the band simply painted
+/// over the content underneath it, and the rule at `HEAD_BOTTOM - 1` overwrote
+/// the line above that.
+const HEAD_CONTENT_BOTTOM: usize = later(
+    later(
+        TITLE_Y0 + TITLE_BOX_H,
+        SUBTITLE_Y0 + SUBTITLE_BOX_H,
+    ),
+    later(BACK_Y + BACK_S, ACTION_Y + ACTION_H),
+);
+const HEAD_BOTTOM: usize = HEAD_CONTENT_BOTTOM + HEAD_PAD_BOTTOM + HEAD_RULE_H;
+
+/// The row the content under the header starts at, on every screen.
+///
+/// WHY one shared edge: the PIN modal, the credential list and the storage
+/// manager each used to type their own first-row literal (116), so growing the
+/// header meant finding three numbers that were the same number. Every band
+/// below now derives from here, and the header's bottom is no longer also the
+/// first card's top edge.
+const CONTENT_TOP: usize = HEAD_BOTTOM + spacing::GRID_4;
+
+/// The "UNLOCK VAULT" pill, directly under the last row of keypad discs.
+///
+/// WHY at module level and derived from the keypad: the ink path and the tap
+/// path each used to type this literal into their own function, so moving the
+/// pill on screen left the hit rectangle where it was and the taps landed on
+/// blank canvas. Deriving it from the discs' own bottom row means the two cannot
+/// disagree and the gap under the keypad cannot change by accident.
+const UNLOCK_BTN_Y: usize = PIN_ROWS[3] + PIN_DISC_RADIUS + 28;
+const UNLOCK_BTN_H: usize = 56;
+
+/// The line under the unlock pill, and the rung it is drawn at.
+const PIN_NOTE_Y: usize = UNLOCK_BTN_Y + UNLOCK_BTN_H + spacing::GRID_16 + 4;
+const PIN_NOTE_RUNG: usize = 1;
+
+/// WHY the note stays above the gesture strip: `GESTURE_Y0` and the indicator
+/// rows under it are the system's, bottom-anchored, and this app does not own
+/// them -- the whole stack above only ever grows downward toward them.
+const _: () = assert!(
+    PIN_NOTE_Y + std::design::font::line_height(PIN_NOTE_RUNG) < GESTURE_Y0
+);
+
+/// The credential screen's stack: session card, keystore probes, audit card and
+/// the return pill, each band starting below the whole box of the one above it.
+///
+/// WHY the stack is derived from `CONTENT_TOP` rather than typed: the pill at the
+/// foot of it is hit-tested by `handle_vault_touch` from a second copy of the same
+/// literal, and the two copies only stayed in step while nobody moved the header.
+/// Naming the gaps is what makes the next move a one-line change in one place.
+const AUTH_CARD_Y: usize = CONTENT_TOP;
+const AUTH_CARD_H: usize = 120;
+/// The air between two bands of the credential screen's stack.
+const CRED_CARD_GAP: usize = 12;
+const SECRETS_CARD_Y: usize = AUTH_CARD_Y + AUTH_CARD_H + CRED_CARD_GAP;
+const SECRETS_CARD_H: usize = 370;
+/// The air between the secrets card, the audit card and the return pill -- a
+/// step wider than `CRED_CARD_GAP`, because each of these is a section rather
+/// than a continuation of the card above it.
+const CRED_SECTION_GAP: usize = 14;
+const AUDIT_CARD_Y: usize = SECRETS_CARD_Y + SECRETS_CARD_H + CRED_SECTION_GAP;
+const AUDIT_CARD_H: usize = 210;
+const CRED_BTN_Y: usize = AUDIT_CARD_Y + AUDIT_CARD_H + CRED_SECTION_GAP;
+const CRED_BTN_H: usize = 56;
 const ACTION_X1: usize = W - MARGIN;
 const ACTION: &[u8] = b"RE-PROBE";
 
@@ -630,16 +741,16 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
     }
 
-    const PROMPT_Y: usize = 116;
+    const PROMPT_Y: usize = CONTENT_TOP;
     const PROMPT_H: usize = 124;
     if let Some(fill) = card_pixel(x, y, MARGIN, PROMPT_Y, CARD_W, PROMPT_H) {
         if let Some(c) = caption_pixel(x, y, MARGIN + PAD, PROMPT_Y + 18, b"CREDENTIAL VAULT ACCESS", INNER_W) {
@@ -661,7 +772,8 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const DOT_Y: usize = 264;
+    /// The PIN dots, one box under the prompt card.
+    const DOT_Y: usize = PROMPT_Y + PROMPT_H + 24;
     const DOT_R: usize = 8;
     const DOT_SIZE: usize = 16;
     const DOT_GAP: usize = 20;
@@ -684,8 +796,6 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return c;
     }
 
-    const UNLOCK_BTN_Y: usize = 796;
-    const UNLOCK_BTN_H: usize = 56;
     if let Some(c) = button_pixel(
         x,
         y,
@@ -707,8 +817,8 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         x,
         y,
         MARGIN,
-        872,
-        1,
+        PIN_NOTE_Y,
+        PIN_NOTE_RUNG,
         b"The PIN opens this session; it does not release a keystore key",
         CARD_W,
         THEME.on_surface_variant,
@@ -733,17 +843,18 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     }
     if y < HEAD_BOTTOM {
         let text_max = W - TITLE_X - MARGIN;
-        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
     }
 
-    const AUTH_CARD_Y: usize = 116;
-    const AUTH_CARD_H: usize = 120;
+    // This screen's whole stack is declared once, at module level, below the
+    // header block; the "RETURN TO STORAGE" pill's rectangle is read from there
+    // by the tap path as well as from here by the painter.
     if let Some(fill) = card_pixel(x, y, MARGIN, AUTH_CARD_Y, CARD_W, AUTH_CARD_H) {
         if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 18, b"VAULT SESSION", INNER_W) {
             return c;
@@ -773,8 +884,6 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const SECRETS_CARD_Y: usize = 248;
-    const SECRETS_CARD_H: usize = 370;
     if let Some(fill) = card_pixel(x, y, MARGIN, SECRETS_CARD_Y, CARD_W, SECRETS_CARD_H) {
         // WHY the caption changed: the card used to list three secrets whose
         // values were typed into the painter, and no code in this app ever
@@ -841,8 +950,6 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const AUDIT_CARD_Y: usize = 632;
-    const AUDIT_CARD_H: usize = 210;
     if let Some(fill) = card_pixel(x, y, MARGIN, AUDIT_CARD_Y, CARD_W, AUDIT_CARD_H) {
         // WHY these two rows replaced the absolutes: the card used to assert
         // that authority and memory protection were enforced, with no probe
@@ -905,8 +1012,6 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return fill;
     }
 
-    const CRED_BTN_Y: usize = 856;
-    const CRED_BTN_H: usize = 56;
     if let Some(c) = button_pixel(
         x,
         y,
@@ -923,32 +1028,57 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     THEME.surface
 }
 
-const STATUS_Y: usize = 1324;
 /// Rows the status line owns: one scale-2 run at `STATUS_Y`.
 const STATUS_H: usize = std::design::font::line_height(2);
+/// The system's home-gesture strip: the indicator below it is the platform's,
+/// bottom-anchored, and this app's stack grows toward it rather than over it.
 const GESTURE_Y0: usize = 1400;
 
 /// Card A: hardware keystore probes.
-const CARD_A_Y: usize = 116;
+///
+/// WHY the whole storage stack hangs off `CONTENT_TOP`: these were five literals
+/// that happened to be the header's bottom edge plus four, plus four more gaps
+/// that happened to be twelve. The header is now taller than the literal that
+/// used to bound it, and a stack of literals would have had to be found and
+/// nudged by hand -- which is exactly how a band ends up painted under a rule.
+const CARD_A_Y: usize = CONTENT_TOP;
 const CARD_A_H: usize = 296;
 
+/// The air between two cards of the storage stack.
+const CARD_GAP: usize = 12;
+
 /// Card B: managed sector grid, 2 columns x 3 rows of 304x114 tiles.
-const CARD_B_Y: usize = 424;
+const CARD_B_Y: usize = CARD_A_Y + CARD_A_H + CARD_GAP;
 const CARD_B_H: usize = 456;
 const TILE_W: usize = 304;
 const TILE_H: usize = 114;
 const TILE_COL_X: [usize; 2] = [48, 368];
-const TILE_ROW_Y: [usize; 3] = [484, 608, 732];
+/// The tiles' inset from the top of their card, and the pitch the grid advances.
+const TILE_INSET: usize = 60;
+const TILE_PITCH: usize = TILE_H + 10;
+const TILE_ROW_Y: [usize; 3] = [
+    CARD_B_Y + TILE_INSET,
+    CARD_B_Y + TILE_INSET + TILE_PITCH,
+    CARD_B_Y + TILE_INSET + 2 * TILE_PITCH,
+];
 
 /// Card C: backup export and entropy.
-const CARD_C_Y: usize = 892;
+const CARD_C_Y: usize = CARD_B_Y + CARD_B_H + CARD_GAP;
 const CARD_C_H: usize = 348;
 
 /// Action row: two 328px buttons on the 2-column grid (2*328 + 16 + 2*24 = 720).
-const BTN_Y: usize = 1252;
+const BTN_Y: usize = CARD_C_Y + CARD_C_H + CARD_GAP;
 const BTN_H: usize = 56;
 const BTN_W: usize = 328;
 const BTN_X: [usize; 2] = [24, 368];
+
+/// The status line, under the action row.
+const STATUS_Y: usize = BTN_Y + BTN_H + spacing::GRID_16;
+
+/// WHY checked at compile time: `repaint` re-rasterises `STATUS_Y..STATUS_Y +
+/// STATUS_H`, and the gesture strip below it is the platform's -- a stack that
+/// grew past that row would be repainted over the system's own indicator.
+const _: () = assert!(STATUS_Y + STATUS_H < GESTURE_Y0);
 
 fn tile_origin(index: usize) -> (usize, usize) {
     (TILE_COL_X[index % 2], TILE_ROW_Y[index / 2])
@@ -1223,10 +1353,10 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     }
     let (pill_x, _, _, _) = action_rect(ACTION);
     let text_max = pill_x.saturating_sub(TITLE_X + 16);
-    if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, 2, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
-    if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, 2, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
         return c;
     }
     THEME.surface
@@ -1861,8 +1991,6 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             }
         }
 
-        const UNLOCK_BTN_Y: usize = 796;
-        const UNLOCK_BTN_H: usize = 56;
         if in_round(x, y, MARGIN, UNLOCK_BTN_Y, CARD_W, UNLOCK_BTN_H, 14) {
             let entered_pin = &vault.pin_buf[..vault.pin_len];
             let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
@@ -1897,8 +2025,6 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             std::audio_haptic_click().ok();
             return Tap::Redraw(Dirty::All);
         }
-        const CRED_BTN_Y: usize = 856;
-        const CRED_BTN_H: usize = 56;
         if in_round(x, y, MARGIN, CRED_BTN_Y, CARD_W, CRED_BTN_H, 14) {
             vault.show_credentials = false;
             status(vault, b"returned to storage manager");

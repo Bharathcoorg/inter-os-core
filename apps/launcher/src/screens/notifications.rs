@@ -34,14 +34,42 @@ const HEADER_X: usize = 36;
 
 /// Tops of the header block's lines, in order.
 ///
-/// WHY these moved down: `LabelRun` places the outline face by its baseline,
-/// and a HEADING run at 56 inks through about row 120. The old subtitle top of
-/// 108 put the two lines on top of each other. These offsets give every line
-/// its own line box plus a body-scale gap, so the title, subtitle, source note
-/// and pill row read as four separate bands.
+/// WHY every one of these is an advance rather than a second literal: a
+/// `LabelRun` reserves its whole line box from its top -- ascent plus descent
+/// at the rung, which is what `launcher::font::line_height` answers -- and a
+/// HEADING run's box is 80 rows, not the 48 the bitmap cell used to reserve.
+/// The subtitle's old top of 134 sat two rows inside the title's box, so the
+/// title's descenders were painted over by the line below them. Each line
+/// starts at the line above it plus that line's own box plus one gap, so
+/// changing a rung moves everything under it instead of colliding with it.
+///
+/// WHY the advances are literals pinned by an `assert!`: the events-header
+/// contract reads TITLE_Y, SUBTITLE_Y and SOURCE_NOTE_Y back with a restricted
+/// expression parser that resolves an integer, a name declared in this file, or
+/// exactly two such terms joined by one operator. A call expression there makes
+/// the contract fail to parse rather than fail on geometry, so the number is
+/// written down and tied to the SDK's own metrics beside it.
 pub const TITLE_Y: usize = 56;
-pub const SUBTITLE_Y: usize = 134;
-pub const SOURCE_NOTE_Y: usize = 170;
+const _: () = assert!(TITLE_Y == interos_std::design::viewport::HEADER_TOP);
+
+/// `TITLE_Y` to `SUBTITLE_Y`: the HEADING title's box plus one GRID_8 gap.
+const TITLE_ADVANCE: usize = 88;
+const _: () = assert!(
+    TITLE_ADVANCE == launcher::font::line_height(type_scale::HEADING) + space::GRID_8,
+);
+pub const SUBTITLE_Y: usize = TITLE_Y + TITLE_ADVANCE;
+
+/// `SUBTITLE_Y` to `SOURCE_NOTE_Y`: the BODY subtitle's box plus one GRID_4 gap.
+const SUBTITLE_ADVANCE: usize = 36;
+const _: () = assert!(
+    SUBTITLE_ADVANCE == launcher::font::line_height(type_scale::BODY) + space::GRID_4,
+);
+pub const SOURCE_NOTE_Y: usize = SUBTITLE_Y + SUBTITLE_ADVANCE;
+
+const _: () = assert!(
+    SOURCE_NOTE_Y + launcher::font::line_height(type_scale::CAPTION) <= PILLS_Y,
+    "the source note's line box must end above the filter pill row",
+);
 
 /// Filter note line placed below the pill row.
 pub const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
@@ -77,7 +105,36 @@ const FILTER_NAMES: [&[u8]; 4] = [b"All", b"Messages", b"System", b"Apps"];
 const SECTION_NAMES: [&[u8]; 4] = [b"Last minute", b"Last hour", b"Since boot", b"Undated"];
 
 /// Header "Clear all" button (48px height touch target).
-pub const HEADER_CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH - 168, 44, 136, 48);
+///
+/// WHY its top is the platform's header edge and not a literal above it: the
+/// status band owns `0..STATUS_BAR_HEIGHT` and answers the pixel function before
+/// any header content is reached, so the pill's old top of 44 had its first four
+/// rows -- the crown of its rounded arc -- painted over by a surface that was
+/// never its own. Keyed to `viewport::HEADER_TOP` it starts where the app's
+/// chrome is allowed to start, and moves if the band ever does.
+pub const HEADER_CLEAR_BTN: Rect = Rect::new(
+    SCREEN_WIDTH - 168,
+    interos_std::design::viewport::HEADER_TOP,
+    136,
+    48,
+);
+
+/// The rows the pill's own label reserves at the rung it is drawn at.
+const CLEAR_LABEL_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
+
+/// Where the "Clear all" label starts: centred in the pill by its line box.
+///
+/// WHY derived and not the old hand-typed 36: the label was centred against a
+/// box height that no longer matched the rung it draws at -- the real BODY line
+/// box is 32 -- so the ink sat two rows high and the gap beneath it read as
+/// twice the gap above.
+const HEADER_CLEAR_LABEL_Y: usize =
+    HEADER_CLEAR_BTN.y + (HEADER_CLEAR_BTN.h - CLEAR_LABEL_BOX_H) / 2;
+
+const _: () = assert!(
+    CLEAR_LABEL_BOX_H <= HEADER_CLEAR_BTN.h,
+    "the Clear all label's line box must fit the pill it is centred in",
+);
 
 /// Bottom Clear All pill: matches the hit-test and serial harness (360, 720).
 pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 702, 200, 48);
@@ -815,7 +872,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 
     let header_clear_label = LabelRun::centred(
         HEADER_CLEAR_BTN.x,
-        HEADER_CLEAR_BTN.y + (HEADER_CLEAR_BTN.h.saturating_sub(36)) / 2,
+        HEADER_CLEAR_LABEL_Y,
         HEADER_CLEAR_BTN.w,
         type_scale::BODY,
         b"Clear all",

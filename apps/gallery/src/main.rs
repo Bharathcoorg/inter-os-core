@@ -324,20 +324,46 @@ const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
 const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 // Inspection view geometry.
-/// The app bar's own box. WHY 120 and not 112: the back control stands 48 tall
-/// from `HEADER_TOP` because the band owns the rows above it, and the meta line
-/// under the title reaches two rows past the old bottom -- the rule this bar draws
-/// would have cut its descent off.
-const DETAIL_BAR_H: usize = 120;
-/// The title and meta lines, stacked from the control row's top. WHY the meta
-/// overlaps the title's line box: the box carries the descent the title's own
-/// glyphs rarely reach, so the two cap bands still clear each other.
-const DETAIL_TITLE_Y: usize = HEADER_TOP;
-const DETAIL_META_Y: usize = HEADER_TOP + 28;
+/// Where the title's line box starts, in the app bar.
+///
+/// WHY centred in the back control's row rather than dropped at its top, and
+/// why that row is the reference: this is the same idiom the home header uses
+/// above. The bar used to author the title at `HEADER_TOP` itself, and once
+/// `font::line_height` began answering with a run's ascent plus descent the 32
+/// rows the title reserves hung below the 48-tall control it is supposed to sit
+/// on, so the pair read as a title sliding off the row it belonged to.
+const DETAIL_TITLE_Y: usize =
+    HEADER_TOP + (std::design::back_button::SIZE - font::line_height(2)) / 2;
+/// The file's one meta line, under the title.
+///
+/// WHY a full line box plus a gap: the two runs are both at rung 2, and the old
+/// offset of 28 put this box 4 rows inside the title's, so the title's descenders
+/// were overpainted by the meta line's first rows.
+const DETAIL_META_Y: usize = DETAIL_TITLE_Y + font::line_height(2) + spacing::GRID_4;
+/// Rows of air under the last line box, and the rule the bar draws on its own
+/// last row.
+const DETAIL_BAR_PAD_BOTTOM: usize = 2;
+const DETAIL_BAR_RULE_H: usize = 1;
+/// The app bar's own box, derived from the lowest thing standing in it.
+///
+/// WHY derived rather than typed: this branch answers every pixel below the
+/// bottom, so a bar shorter than its content does not clip -- it paints the
+/// surplus straight over the preview underneath. The old literal 120 was already
+/// two rows short of the meta line's box before the type ladder moved, and 30
+/// rows short of it after.
+const DETAIL_BAR_H: usize =
+    DETAIL_META_Y + font::line_height(2) + DETAIL_BAR_PAD_BOTTOM + DETAIL_BAR_RULE_H;
+const _: () = assert!(
+    DETAIL_TITLE_Y + font::line_height(2) <= DETAIL_META_Y + font::line_height(2)
+        && std::design::back_button::Y + std::design::back_button::SIZE
+            <= DETAIL_META_Y + font::line_height(2),
+    "the meta line must be the lowest occupant of the bar",
+);
 /// WHY at compile time: the bar paints its rule on the row before its bottom, so
 /// a meta line whose box reached that row would lose its last pixels to a border.
 const _: () = assert!(DETAIL_META_Y + font::line_height(2) < DETAIL_BAR_H);
-const DETAIL_VIEW_Y0: usize = 128;
+/// The preview's first row: clear of the bar, with one grid step of air.
+const DETAIL_VIEW_Y0: usize = DETAIL_BAR_H + spacing::GRID_8;
 const DETAIL_VIEW_Y1: usize = 800;
 const DETAIL_VIEW_H: usize = DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0;
 const DETAIL_VIEW_W: usize = (W - 2 * MARGIN) / 2;

@@ -214,7 +214,14 @@ pub const PIN_MIN_TOUCH_TARGET: usize = 48;
 pub const PIN_COLS: [usize; 3] = [160, 360, 560];
 
 /// Row centers for the 4 rows of the circular PIN keypad.
-pub const PIN_ROWS: [usize; 4] = [360, 480, 600, 720];
+///
+/// WHY these sit 26 rows lower than the grid this pad was first laid out on: the
+/// rows are measured from the top of the screen, and the app's header band had to
+/// grow by 26 rows before it could hold the whole line box of its own title and
+/// subtitle. The keypad is the band under the header, so the header growing moved
+/// the pad down with it. The 120-row pitch and the disc radius are the platform's
+/// touch geometry and did not move.
+pub const PIN_ROWS: [usize; 4] = [386, 506, 626, 746];
 
 /// Key matrix for the circular keypad.
 /// Row 3 contains Clear ('C'), Zero ('0'), and Backspace ('B').
