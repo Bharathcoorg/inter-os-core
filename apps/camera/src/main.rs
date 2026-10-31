@@ -293,7 +293,21 @@ fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
     Some((chrome::SURFACE, on_border))
 }
 
+/// The inset a top-row pill keeps between its border and the label's ink.
+///
+/// WHY a named inset rather than the 12 the scale ladder used to divide by:
+/// the same room is what decides whether an over-long label is trimmed, so a
+/// number that only appeared in the ladder test let the label be measured
+/// against the pill's full width and painted onto its own border.
+const TOP_ROW_TEXT_PAD_X: usize = 6;
+
 /// Draws a label centred in `rect`, upgrading to Scale 2 Body where it fits.
+///
+/// WHY the label is trimmed instead of dropped: every `*_pixel` here answers
+/// one pixel of the blit, so a label wider than its pill used to report that
+/// it had nothing to draw and the pill rendered as bare chrome. An empty
+/// control cannot be told apart from a control that is off, so the leading
+/// word now stays and an ellipsis states that there was more.
 #[inline(always)]
 fn top_row_label(
     x: usize,
@@ -303,22 +317,35 @@ fn top_row_label(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    let scale = if std::design::font::measure(label, 2) <= rect.w.saturating_sub(12) {
+    let room = rect.w.saturating_sub(TOP_ROW_TEXT_PAD_X * 2);
+    if room == 0 {
+        return None;
+    }
+    let scale = if std::design::font::measure(label, 2) <= room {
         2
     } else {
         1
     };
-    let w = std::design::font::measure(label, scale);
-    if w > rect.w {
+    let mut buf = [0u8; 96];
+    let len = std::design::font::ellipsize(label, scale, room, &mut buf);
+    if len == 0 {
         return None;
     }
-    let x0 = rect.x + (rect.w - w) / 2;
+    let text = &buf[..len];
+    let drawn = outline_text::drawn_advance(text, scale, None)
+        .unwrap_or_else(|| std::design::font::measure(text, scale))
+        .min(room);
+    let x0 = rect.x + (rect.w - drawn) / 2;
     let lh = std::design::font::line_height(scale);
     let y0 = rect.y + (rect.h.saturating_sub(lh)) / 2;
-    test_text(x, y, x0, y0, scale, label, rect.w, color, bg)
+    test_text(x, y, x0, y0, scale, text, room, color, bg)
 }
 
 /// Draws a label right of the flash pictogram, upgrading to Scale 2 Body where it fits.
+///
+/// Trimmed under the same rule as [`top_row_label`]: `pill_label()` is the
+/// flash mode's own name and the modes are not the same length, so a label the
+/// pill cannot hold at Scale 2 must say what it is rather than disappear.
 #[inline(always)]
 fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<u32> {
     let scale = if std::design::font::measure(label, 2) <= FLASH_TEXT_W {
@@ -326,14 +353,19 @@ fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<
     } else {
         1
     };
-    let w = std::design::font::measure(label, scale);
-    if w > FLASH_TEXT_W {
+    let mut buf = [0u8; 96];
+    let len = std::design::font::ellipsize(label, scale, FLASH_TEXT_W, &mut buf);
+    if len == 0 {
         return None;
     }
-    let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - w) / 2;
+    let text = &buf[..len];
+    let drawn = outline_text::drawn_advance(text, scale, None)
+        .unwrap_or_else(|| std::design::font::measure(text, scale))
+        .min(FLASH_TEXT_W);
+    let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - drawn) / 2;
     let lh = std::design::font::line_height(scale);
     let y0 = FLASH_RECT.y + (FLASH_RECT.h.saturating_sub(lh)) / 2;
-    test_text(x, y, x0, y0, scale, label, FLASH_TEXT_W, color, bg)
+    test_text(x, y, x0, y0, scale, text, FLASH_TEXT_W, color, bg)
 }
 
 /// The ink of the thirds grid: a quiet hairline on the well.
