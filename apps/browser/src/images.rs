@@ -96,6 +96,10 @@ pub enum ImageRefusal {
     SourceTooLong,
     /// The URL uses a scheme this browser does not fetch for images.
     UnsupportedSource,
+    /// The document on screen arrived over a verified TLS channel and this
+    /// reader carries no subresource over TLS, so the picture was blocked as
+    /// mixed content rather than fetched in the open.
+    InsecureSubresource,
     /// The body (or the declared length) exceeded the cap.
     TooLarge { bytes: usize, limit: usize },
     /// The bytes are not one of the supported formats (PNG, JPEG, GIF, WebP, SVG, ICO).
@@ -127,6 +131,7 @@ impl ImageRefusal {
             ImageRefusal::NoSource => b"Image not shown: no source",
             ImageRefusal::SourceTooLong => b"Image not shown: source address too long",
             ImageRefusal::UnsupportedSource => b"Image not shown: unsupported source",
+            ImageRefusal::InsecureSubresource => b"Image not shown: plaintext on a verified page",
             ImageRefusal::TooLarge { .. } => b"Image not shown: too large",
             ImageRefusal::UnsupportedType => b"Image not shown: unsupported type",
             ImageRefusal::DimensionsTooLarge { .. } => b"Image not shown: dimensions too large",
@@ -163,6 +168,33 @@ impl ImageStatus {
     pub fn is_decoded(self) -> bool {
         self == ImageStatus::Decoded
     }
+}
+
+/// The reader's one mixed-content rule, asked of it once per subresource.
+///
+/// WHY a verified document blocks a plaintext subresource: the padlock in the
+/// address field is a claim about the channel that delivered the document, and
+/// #83 pinned it to exactly that observation. A page carrying that mark whose
+/// pictures and stylesheets arrive over an unencrypted hop is not the page the
+/// mark describes -- anything on that path can rewrite them, and the person
+/// reading the lock has no way to see it. The honest options were to stop
+/// claiming the page is protected or to stop fetching it in the open, and the
+/// browser keeps its claim by refusing the fetch and drawing why.
+///
+/// WHY the rule runs in one direction only: a document that itself arrived over
+/// the same plaintext hop is claiming no protection, so blocking its
+/// subresources would report a security the page never had and would break the
+/// gateway pages this reader is built for. The refusal is a downgrade of a
+/// promise, and only a verified document made one.
+///
+/// WHY the caller passes the transport and not the address: every subresource
+/// this reader fetches -- inline image, page icon, linked stylesheet -- goes out
+/// on the plaintext gateway hop, whatever the URL says, because each of those
+/// sites calls its transport with `use_tls` false. A subresource addressed
+/// `https://` is no more encrypted here than one addressed `http://`, so the
+/// scheme cannot be the test and the transport has to be.
+pub fn mixed_content_block(document_tls_verified: bool, subresource_is_plaintext: bool) -> bool {
+    document_tls_verified && subresource_is_plaintext
 }
 
 /// Identifies a format from the body's own magic bytes.
@@ -989,5 +1021,42 @@ mod tests {
             resolve_subresource(b"https://example.com/a", b"ftp://host/x.png", &mut out),
             Err(ResolveError::UnsupportedScheme)
         );
+    }
+
+    /// The whole mixed-content table, in both directions.
+    ///
+    /// WHY all four corners are asserted: a rule stated as
+    /// `document_tls_verified` alone passes today's suite and silently blocks
+    /// every gateway page's pictures, and a rule stated as
+    /// `subresource_is_plaintext` alone blocks nothing on the page that needs
+    /// blocking. The refusal is a downgrade of a promise, so both halves have
+    /// to be present and both have to be tested.
+    #[test]
+    fn only_a_verified_document_blocks_a_plaintext_subresource() {
+        assert!(mixed_content_block(true, true));
+        assert!(!mixed_content_block(false, true));
+        assert!(!mixed_content_block(false, false));
+        assert!(!mixed_content_block(true, false));
+    }
+
+    #[test]
+    fn a_blocked_subresource_is_refused_for_its_own_reason_and_says_so() {
+        // The reason is its own and not borrowed from a fetch that failed: the
+        // transport was never asked, and a placeholder that said "fetch failed"
+        // would send the reader to a gateway that was never dialled.
+        assert_ne!(
+            ImageRefusal::InsecureSubresource,
+            ImageRefusal::FetchFailed { code: -5 }
+        );
+        assert_ne!(
+            ImageRefusal::InsecureSubresource.placeholder(),
+            ImageRefusal::FetchFailed { code: -5 }.placeholder()
+        );
+        assert!(ImageRefusal::InsecureSubresource
+            .placeholder()
+            .starts_with(b"Image not shown:"));
+        // The card is measured from this text and drawn beside the address
+        // field's own mark, so the words have to fit the page's column.
+        assert!(ImageRefusal::InsecureSubresource.placeholder().len() <= 48);
     }
 }

@@ -61,6 +61,15 @@ use interos_std::design::scroll::ScrollState;
 /// reports that as `SyscallResult::NotReady`.
 const NOT_READY: i64 = -30;
 
+/// The app's own marker for "the entropy read was refused, so no connection was
+/// opened".
+///
+/// WHY it is not a code from the transport: the transport was never reached --
+/// the sequence number is chosen before `tcp_connect` -- and every other number
+/// this field carries came back from a connection. A marker that did not is
+/// labelled as the app's own rather than dressed up as a peer's answer.
+const ENTROPY_REFUSED: i64 = -1100;
+
 /// The largest HTTP response the browser will hold.
 ///
 /// WHY this is large: the Device Studio gateway serves a real page, and a
@@ -412,6 +421,28 @@ struct FetchOutcome {
     kind: FetchErrorKind,
 }
 
+/// The initial sequence number for one connection.
+///
+/// WHY a refused read ends the connection instead of standing in for it: the
+/// value used to fall back to was written at the desk and is the same number on
+/// every connection this device opens, so anyone who has read one connection has
+/// read the next. That is not a fallback, it is a guessable value presented as a
+/// choice. The kernel grants this app `CryptoEntropyRead` in its own spawn table
+/// -- the same narrow read that seeds the TLS handshake's key material -- so a
+/// refusal here means the entropy service said no, and the honest answer to that
+/// is a connection that was never opened and a screen that says so.
+///
+/// WHY no strength is claimed: these are the bytes `sys_get_random` handed back.
+/// What they are worth is the kernel's answer, not this function's, and nothing
+/// here says they are anything more than that.
+fn connection_sequence_number() -> Option<u32> {
+    let mut seq_bytes = [0u8; 4];
+    match std::get_random(&mut seq_bytes) {
+        Ok(4) => Some(u32::from_le_bytes(seq_bytes)),
+        _ => None,
+    }
+}
+
 /// Fetches an HTTP response over a TLS 1.3 encrypted transport.
 ///
 /// An `https` hop wraps its request in a TLS 1.3 ClientHello record and never
@@ -436,10 +467,12 @@ fn fetch_over_tls(
         kind: FetchErrorKind::None,
     };
 
-    let mut seq_bytes = [0u8; 4];
-    let seq = match std::get_random(&mut seq_bytes) {
-        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
-        _ => 0x1F2E_3D4C,
+    let seq = match connection_sequence_number() {
+        Some(seq) => seq,
+        None => {
+            outcome.kind = FetchErrorKind::TlsEntropyRefused;
+            return outcome;
+        }
     };
 
     let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
@@ -701,10 +734,14 @@ fn fetch_over_tcp(
 
     // The initial sequence number is the device's choice, and a fresh one
     // per connection is what the protocol asks for.
-    let mut seq_bytes = [0u8; 4];
-    let seq = match std::get_random(&mut seq_bytes) {
-        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
-        _ => 0x1F2E_3D4C,
+    let seq = match connection_sequence_number() {
+        Some(seq) => seq,
+        None => {
+            // Nothing has been put on the wire: the refusal is what stops the
+            // connection, not an answer the gateway gave.
+            outcome.kind = FetchErrorKind::EntropyRefused;
+            return outcome;
+        }
     };
 
     let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
@@ -894,10 +931,15 @@ fn upload_over_tcp(
         error: 0,
     };
 
-    let mut seq_bytes = [0u8; 4];
-    let seq = match std::get_random(&mut seq_bytes) {
-        Ok(n) if n == 4 => u32::from_le_bytes(seq_bytes),
-        _ => 0x2A3B_4C5D,
+    let seq = match connection_sequence_number() {
+        Some(seq) => seq,
+        None => {
+            // The number is the app's own marker for the refusal, not a code
+            // the transport answered with: no transport was asked. The upload
+            // screen shows the code it holds, and holds no byte count.
+            outcome.error = ENTROPY_REFUSED;
+            return outcome;
+        }
     };
 
     let connection = match std::tcp_connect(dst_ip, dst_port, local_port, seq) {
@@ -1259,7 +1301,11 @@ but no network transport is bound to this app: no request was sent and no page w
 const BODY_NETWORK_DOWN: &[u8] = b"The network interface is down or unreachable. \
 The device could not route packets to the destination.";
 const BODY_DNS_FAILED: &[u8] = b"The host name could not be resolved by the system DNS \
-service. Check the address and network connection.";
+service. No address was dialled and no request was sent.";
+const BODY_NO_ENTROPY: &[u8] = b"The device's entropy service refused the read that chooses a \
+connection's starting number, so the browser had no number to open with and opened nothing. \
+The value it used to fall back to was the same on every connection, so one the person could \
+have seen would have disclosed the next; a fixed number was dropped rather than used.";
 const BODY_CONNECTION_REFUSED: &[u8] = b"The connection to the gateway at 10.0.2.2:4300 \
 was refused. The proxy service may not be running on the host or the port is closed.";
 const BODY_CONNECTION_TIMEOUT: &[u8] = b"The connection to the gateway at 10.0.2.2:4300 \
@@ -1275,10 +1321,10 @@ the peer's certificate. The browser failed closed: no plaintext was sent.";
 const BODY_TLS_NAME_REFUSED: &[u8] = b"The host name in the address was refused before the secure \
 connection was opened, so no certificate could be checked against it. The browser \
 failed closed: no plaintext was sent.";
-const BODY_TLS_ENTROPY_REFUSED: &[u8] = b"The device's random-number service refused the two reads \
-that seed a secure connection, so the browser had no key to offer. The connection was closed \
-before a single handshake byte was sent; a key folded out of the boot clock was refused rather \
-than used, because both peers could have derived it.";
+const BODY_TLS_ENTROPY_REFUSED: &[u8] = b"The device's random-number service refused the reads \
+that seed a secure connection, so the browser had no starting number and no key to offer. The \
+connection was closed before a single handshake byte was sent; a key folded out of the boot \
+clock was refused rather than used, because both peers could have derived it.";
 const BODY_TLS_CLOCK_UNAVAILABLE: &[u8] = b"The device's clock answered no instant, so the browser \
 had nothing to measure a certificate's expiry against. The connection was closed before the \
 handshake: accepting a key whose validity window cannot be judged would carry the padlock past \
@@ -2749,6 +2795,15 @@ impl BrowserApp {
         if declared.is_empty() || room == 0 {
             return 0;
         }
+        // The same rule the pictures are held to, and for the same reason: a
+        // stylesheet carried in plaintext under a verified document is bytes a
+        // middlebox may choose, and the page is being shown as though it was
+        // not. This transport passes `false` for TLS, so the file would go out
+        // in the open whatever its address says.
+        if images::mixed_content_block(self.document_tls_verified, true) {
+            self.log_stylesheet_blocked_as_insecure();
+            return 0;
+        }
         // Copied out of the document before anything is fetched: the reply
         // lands in the same transport buffer the page's own bytes came
         // through, and the address is read out of the text arena that buffer
@@ -2958,6 +3013,21 @@ impl BrowserApp {
         }
     }
 
+    /// Says that a linked stylesheet was blocked as mixed content.
+    ///
+    /// WHY it is said separately and not as another code on the line above:
+    /// every other code on that line is something that happened to a request
+    /// this reader sent. No request was sent here, and a reader scanning the
+    /// log for a gateway fault would chase one that never occurred.
+    fn log_stylesheet_blocked_as_insecure(&self) {
+        std::log(
+            "[BROWSER APP] Linked stylesheet blocked: this reader carries no \
+             stylesheet over TLS, and the document on screen arrived over a \
+             verified channel, so the file was not fetched in plaintext.",
+        )
+        .ok();
+    }
+
     /// Says that a page linked a stylesheet that did not become rules.
     ///
     /// WHY this is logged at all: an unstyled page looks like a broken
@@ -3001,6 +3071,20 @@ impl BrowserApp {
         &mut self,
         url: &[u8],
     ) -> (images::ImageStatus, Option<std::image::Bitmap<'static>>, u32, u32) {
+        // A document whose own bytes came off a channel whose TLS handshake
+        // completed is shown with the mark that says so. This transport is
+        // plaintext -- the `false` below is the whole of it -- so fetching the
+        // picture here would put it on an unencrypted hop under a padlock, and
+        // anything on that path could hand back different bytes. Refuse the
+        // fetch, and let the placeholder card on the page say why.
+        if images::mixed_content_block(self.document_tls_verified, true) {
+            return (
+                images::ImageStatus::Refused(images::ImageRefusal::InsecureSubresource),
+                None,
+                0,
+                0,
+            );
+        }
         // WHY this is wide: the address goes on the wire percent-encoded,
         // and a query string of separators alone triples it. A request
         // buffer that ran out would send half an address and be answered
@@ -5084,15 +5168,41 @@ impl BrowserApp {
                 if let Ok(h) = core::str::from_utf8(hop_parsed.host) {
                     set_current_server_name(h.as_bytes());
                 }
+                // A name this device cannot resolve is a destination the person
+                // did not reach, and the fallback that used to sit here answered
+                // a failed lookup with the QEMU gateway's own address. That is an
+                // invented answer: it opens a connection to a peer nobody named
+                // while the address field still shows the name they typed, and it
+                // makes a resolution failure indistinguishable from a resolution.
+                // The refusal is the honest one, and the screen already has a
+                // name for it.
+                //
+                // WHY an IPv4 literal needs no lookup: the address is the answer,
+                // so there is nothing to resolve and nothing to refuse.
                 let ip = if let Some(ip) = parse_ipv4(hop_parsed.host) {
                     ip
-                } else if let Ok(h) = core::str::from_utf8(hop_parsed.host) {
-                    std::dns_resolve(h).unwrap_or([10, 0, 2, 2])
                 } else {
-                    [10, 0, 2, 2]
+                    let name = core::str::from_utf8(hop_parsed.host);
+                    match name.ok().and_then(|h| std::dns_resolve(h).ok()) {
+                        Some(ip) => ip,
+                        None => {
+                            self.loading_progress = 0;
+                            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+                            self.status = PageStatus::NoTransport;
+                            self.transport_failure = TransportFailure::DnsFailed;
+                            std::log("[BROWSER APP] The host name was not resolved; no address was dialled and no request was sent.").ok();
+                            let _ = std::audio_play_tone(220);
+                            let _ = std::audio_silence();
+                            let _ = std::audio_haptic_click();
+                            return false;
+                        }
+                    }
                 };
                 (ip, if hop_parsed.port != 0 { hop_parsed.port } else { 443 })
             } else {
+                // The gateway is a configured proxy, not a resolved host: this
+                // address is where the plaintext hop goes by design and the
+                // origin it fetches is named inside the request.
                 ([10, 0, 2, 2], 4300)
             };
 
@@ -5181,6 +5291,11 @@ impl BrowserApp {
                             TransportFailure::NetworkDown
                         };
                         std::log("[BROWSER APP] Network transport unavailable; no connection could be initiated.").ok();
+                    }
+                    FetchErrorKind::EntropyRefused => {
+                        self.status = PageStatus::NoTransport;
+                        self.transport_failure = TransportFailure::NoEntropy;
+                        std::log("[BROWSER APP] The entropy read that picks the connection's sequence number was refused; no socket was opened.").ok();
                     }
                     FetchErrorKind::ConnectionRefused => {
                         self.status = PageStatus::ConnectionFailed;
@@ -5972,6 +6087,7 @@ impl Frame {
             PageStatus::NoTransport => match app.transport_failure {
                 TransportFailure::NetworkDown => (b"Network unavailable", BODY_NETWORK_DOWN),
                 TransportFailure::DnsFailed => (b"Address cannot be resolved", BODY_DNS_FAILED),
+                TransportFailure::NoEntropy => (b"No starting number", BODY_NO_ENTROPY),
                 _ => (b"Navigation unavailable", BODY_NO_TRANSPORT),
             },
             PageStatus::ConnectionFailed => match app.connection_failure {
@@ -7773,6 +7889,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                     TransportFailure::NoCapability => b"NO TRANSPORT CAPABILITY",
                     TransportFailure::NetworkDown => b"NETWORK DOWN",
                     TransportFailure::DnsFailed => b"DNS RESOLUTION FAILED",
+                    TransportFailure::NoEntropy => b"ENTROPY REFUSED",
                     TransportFailure::None => b"NO TRANSPORT",
                 },
                 PageStatus::ConnectionFailed => match app.connection_failure {

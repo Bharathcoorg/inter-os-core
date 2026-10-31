@@ -61,6 +61,19 @@ pub enum FetchErrorKind {
     /// against, and reporting it as a rejected certificate would describe a
     /// fault that did not happen.
     TlsNameRefused,
+    /// The TRNG refused the read that picks the initial sequence number, so no
+    /// connection was opened.
+    ///
+    /// WHY this is not `TlsEntropyRefused`: that names a fault inside a secure
+    /// handshake. Here the hop is plaintext and the handshake is a TCP one that
+    /// never began -- a sequence number the device could not choose, which is a
+    /// different question from a key it could not generate.
+    ///
+    /// WHY this is not `NoTransport`: that says the network could not carry a
+    /// connection. The network was never asked. The refusal came from this
+    /// device, one call before the socket, and a screen that blamed the path
+    /// would send the operator to check a gateway that was never dialled.
+    EntropyRefused,
     /// The TRNG refused the reads that seed the handshake, so no hello was sent.
     ///
     /// WHY this is not a handshake failure: nothing was put on the wire. The

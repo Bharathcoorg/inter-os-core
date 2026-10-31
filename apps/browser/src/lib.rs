@@ -1237,6 +1237,18 @@ pub enum TransportFailure {
     NetworkDown,
     /// Host name could not be resolved by system DNS.
     DnsFailed,
+    /// The device's entropy service refused the read that picks a connection's
+    /// initial sequence number, so no connection was opened.
+    ///
+    /// WHY this is not folded into `NetworkDown`: the network was never asked.
+    /// The refusal is this device's own, one syscall before the socket, and a
+    /// screen that said "network down" would send the person to check a cable
+    /// that was not the problem.
+    ///
+    /// WHY there is no fallback number: the value this replaces was a constant,
+    /// so every connection the device opened shared it and one observed
+    /// connection disclosed the next. A refused read is reported as refused.
+    NoEntropy,
 }
 
 /// Why connection to the gateway failed.

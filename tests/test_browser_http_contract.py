@@ -352,6 +352,46 @@ def function_body(code: str, name: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def method_body(code: str, name: str) -> str:
+    """One method inside an `impl` block, sliced the same way.
+
+    WHY this is not `function_body`: that matcher is anchored at column zero
+    because every transport it has ever cut is a free function. The navigation
+    loop and the two subresource fetches live inside `impl BrowserApp`, so a
+    contract about where *those* calls happen needs the indented form -- and
+    needs it to end at the next method of the same indent rather than at the
+    next line that merely mentions `fn`.
+    """
+    lines = code.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"[ \t]+(pub )?fn %s\b" % re.escape(name), line)
+    )
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if len(lines[index]) - len(lines[index].lstrip()) == indent
+            and re.match(r"(pub )?fn \w", lines[index].strip())
+        ),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def images_code() -> str:
+    """The inline-image policy module with its comments removed.
+
+    WHY read separately: the mixed-content rule lives where the picture
+    refusals already live, and pulling the file into `browser_code()` would
+    move every call-site count this file already pins.
+    """
+    return code_only((ROOT / "apps/browser/src/images.rs").read_text(encoding="utf-8"))
+
+
+
 def test_the_hop_scheme_decides_tls_wrapping_and_never_the_port():
     """Wrapping is decided by the scheme of the hop, not by the port it lands on.
 
@@ -613,4 +653,243 @@ def test_the_screen_separates_a_missing_trust_anchor_from_a_refused_certificate(
     assert "ConnectionFailure::TlsNameRefused => (b\"Address refused\"" in code, (
         "the status line does not name the refused address"
     )
+
+
+def test_an_unresolved_host_name_is_refused_and_never_dialled_as_the_gateway():
+    """A failed lookup used to answer with the QEMU slirp gateway's own address.
+
+    WHY this is a truth defect and not a convenience: `dns_resolve` returns a
+    `Result`, and `unwrap_or([10, 0, 2, 2])` threw the error away. So a name that
+    resolved to nothing was dialled at port 443 on the development host while the
+    address field still showed the name the person typed, and a peer who never
+    held that certificate answered. The two facts this browser is built to keep
+    apart -- "I could not find it" and "I found it" -- collapsed into one, and
+    the one it reported was the success.
+
+    The screen already had the right words and no way to reach them:
+    `TransportFailure::DnsFailed` was declared, given a title, a body and a
+    banner, and never assigned. The fix hands the refusal to the channel the app
+    already built for it.
+    """
+    code = browser_code()
+    navigate = method_body(code, "navigate_again")
+
+    # The scan has to be able to fail: if the loop no longer resolves anything,
+    # every ordering assertion below reads a function that cannot hold the
+    # defect this contract watches.
+    assert "std::dns_resolve(" in navigate, (
+        "the navigation loop holds no DNS lookup -- this contract is slicing "
+        "empty air and would pass against any source at all"
+    )
+
+    # The invented answer is gone, in both spacings the literal was written with.
+    for invented in ("unwrap_or([10, 0, 2, 2])", "unwrap_or([10,0,2,2])"):
+        assert invented not in code, (
+            f"a failed resolution is being answered with {invented!r} again, "
+            "which dials the development gateway under whatever name was typed"
+        )
+
+    # Inside the loop the gateway address appears exactly once, and only after
+    # the lookup: it is the configured plaintext proxy hop, never a stand-in for
+    # a host the resolver could not find.
+    assert navigate.count("[10, 0, 2, 2]") == 1, (
+        "the gateway literal has come back to more than the proxy hop, so a "
+        "resolution failure has somewhere to be quietly sent"
+    )
+    lookup = navigate.index("std::dns_resolve(")
+    assert navigate.index("[10, 0, 2, 2]") > lookup, (
+        "an address sits inside the lookup rather than after it"
+    )
+
+    # The refusal ends the navigation before the transport is ever asked, and
+    # names itself as a transport that was not used rather than a peer that
+    # refused.
+    refused = navigate.index("TransportFailure::DnsFailed")
+    dialled = navigate.index("fetch_over_tcp(")
+    assert lookup < refused < dialled, "an unresolvable name still reaches the transport"
+    assert "return false;" in navigate[lookup:dialled], (
+        "the refused lookup falls through instead of ending the navigation"
+    )
+    assert "PageStatus::NoTransport" in navigate[lookup:dialled], (
+        "the refused lookup is not put on the screen as its own page"
+    )
+
+    # And the screen says what was and was not done.
+    main_code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
+    assert (
+        'TransportFailure::DnsFailed => (b"Address cannot be resolved", BODY_DNS_FAILED)'
+        in main_code
+    ), "an unresolved name has no status line of its own"
+    assert 'TransportFailure::DnsFailed => b"DNS RESOLUTION FAILED"' in main_code, (
+        "an unresolved name has no banner of its own"
+    )
+    bodies = dict(
+        re.findall(r'const (BODY_\w+): &\[u8\] = b"((?:[^"\\]|\\[\s\S])*)"', main_code)
+    )
+    dns_body = bodies.get("BODY_DNS_FAILED", "").lower()
+    assert "no address was dialled" in dns_body and "no request was sent" in dns_body, (
+        "the resolution-failure page claims more than the browser did: it must "
+        "say that nothing was opened, not invite the person to check a network"
+    )
+
+
+def test_a_connection_is_not_opened_with_a_starting_number_written_at_the_desk():
+    """The initial sequence number used to have a hardcoded fallback.
+
+    WHY a constant is not a fallback: `0x1F2E_3D4C` and `0x2A3B_4C5D` are the
+    same value on every connection the device opens, so anyone who has seen one
+    connection knows the starting number of the next. A number the protocol asks
+    to be unpredictable was made entirely predictable by a value typed in at the
+    desk, and nothing on the screen or in the log said so.
+
+    The kernel already answers this: `CryptoEntropyRead` is granted to the
+    browser in the kernel's own spawn table -- the same narrow read that has
+    seeded its TLS key material since the entropy gate was narrowed. So a refusal
+    means the entropy service said no, and the honest answer to that is a
+    connection that never opened, named as such.
+    """
+    code = browser_code()
+
+    # The scan has to be able to fail.
+    helper = function_body(code, "connection_sequence_number")
+    assert "std::get_random(&mut seq_bytes)" in helper, (
+        "the sequence number is no longer read from the entropy service, so the "
+        "three clauses below are comparing nothing to anything"
+    )
+    assert "-> Option<u32>" in helper, "the helper no longer has a way to say it obtained no number"
+
+    for invented in ("0x1F2E_3D4C", "0x2A3B_4C5D", "0x1F2E3D4C", "0x2A3B4C5D"):
+        assert invented not in code, (
+            f"the fixed initial sequence number {invented!r} is back, and every "
+            "connection the device opens shares it"
+        )
+
+    # Every transport asks the one helper, and ends before the socket when the
+    # read is refused -- so no connection is opened with an invented number.
+    for name, marker in (
+        ("fetch_over_tls", "FetchErrorKind::TlsEntropyRefused"),
+        ("fetch_over_tcp", "FetchErrorKind::EntropyRefused"),
+        ("upload_over_tcp", "ENTROPY_REFUSED"),
+    ):
+        body = function_body(code, name)
+        assert "connection_sequence_number()" in body, (
+            f"{name} chooses its starting number without the shared helper"
+        )
+        gate = body.index("connection_sequence_number()")
+        opened = body.index("std::tcp_connect(")
+        assert gate < opened, f"{name} opens a socket before it has a number"
+        assert body.index(marker) < opened, (
+            f"{name} reports its refusal after opening the connection it refused"
+        )
+        assert "return outcome;" in body[gate:opened], (
+            f"{name} continues with a number it did not get"
+        )
+
+    # One read per connection, not three copies of a block that could drift.
+    # The match is what identifies a call: the helper's own definition spells the
+    # bare name, so counting the name alone would credit it with opening a socket.
+    assert code.count("match connection_sequence_number() {") == 3, (
+        "the sequence number is being chosen in more places than the transports"
+    )
+
+    # The plaintext refusal is its own outcome, not a network fault: the network
+    # was never asked, and blaming the path sends the operator to a gateway that
+    # was never dialled.
+    main_code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
+    assert "FetchErrorKind::EntropyRefused => {" in main_code, (
+        "a refused entropy read on a plaintext hop is not carried to the screen"
+    )
+    assert (
+        'TransportFailure::NoEntropy => (b"No starting number", BODY_NO_ENTROPY)' in main_code
+    ), "an entropy refusal on a plaintext hop has no status line of its own"
+    assert 'TransportFailure::NoEntropy => b"ENTROPY REFUSED"' in main_code, (
+        "an entropy refusal on a plaintext hop has no banner of its own"
+    )
+    assert "get_ticks" not in helper, (
+        "the starting number is being manufactured from the tick counter, which "
+        "is a per-connection variation at best and must not be written as if it "
+        "were entropy"
+    )
+
+
+def test_a_verified_document_does_not_pull_a_plaintext_subresource_in_silence():
+    """A page shown under the padlock had every one of its pictures fetched in
+    the open.
+
+    WHY this is the other half of #83: the secure mark was fixed to report the
+    transport that delivered the *document* and nothing more. That made the mark
+    true and the page around it false -- the document's own bytes were verified
+    while its images, its page icon and its linked stylesheets were dialled at
+    the gateway with TLS switched off, so a middlebox could restyle the page or
+    replace its pictures and the lock would not move.
+
+    The chosen honest behaviour is to refuse the plaintext subresource of a
+    verified document and to say so where the reader can see it: the layout
+    engine already draws a typed placeholder for every picture it did not load,
+    and the refusal is given its own reason on that card. The rule runs one way
+    only -- a document that itself arrived over the plaintext hop claimed no
+    protection, so blocking its subresources would report a security it never had
+    and would break every gateway page this reader is built for.
+    """
+    code = browser_code()
+    policy = images_code()
+
+    # The scan has to be able to fail: the rule is a conjunction of two facts,
+    # and if either half disappears the checks below silently stop meaning.
+    assert (
+        "pub fn mixed_content_block(document_tls_verified: bool, "
+        "subresource_is_plaintext: bool) -> bool" in policy
+    ), "the mixed-content rule is no longer a decision between the document's channel and the subresource's"
+    assert "document_tls_verified && subresource_is_plaintext" in policy, (
+        "the rule no longer requires both halves, so it either blocks every "
+        "gateway page or blocks nothing"
+    )
+
+    # The refusal is its own reason, with its own words on the card.
+    assert "InsecureSubresource," in policy, (
+        "a blocked subresource has no reason of its own to show"
+    )
+    assert (
+        'ImageRefusal::InsecureSubresource => b"Image not shown: plaintext on a verified page"'
+        in policy
+    ), "the placeholder card no longer says why the picture was not fetched"
+
+    # Both subresource transports ask before either is opened, and read the
+    # document's own transport rather than a constant -- so the block can never
+    # become unconditional, and can never be dropped without failing here.
+    image = method_body(code, "fetch_inline_image")
+    stylesheet = method_body(code, "fetch_stylesheet")
+    assert "fetch_over_tcp(" in image and "fetch_over_tcp(" in stylesheet, (
+        "a subresource transport no longer fetches over TCP, so the ordering "
+        "checks below have stopped testing the path this contract is about"
+    )
+    for name, body in (("image", image), ("stylesheet", stylesheet)):
+        assert "images::mixed_content_block(self.document_tls_verified, true)" in body, (
+            f"the {name} transport no longer consults the mixed-content rule "
+            "with the document's own observed transport"
+        )
+        assert body.index("mixed_content_block") < body.index("fetch_over_tcp("), (
+            f"the {name} transport fetches in plaintext and only then decides"
+        )
+
+    # The refusal reaches the reader: a typed placeholder for the picture, and a
+    # line of its own for the stylesheet, because no request went out for either.
+    assert "ImageRefusal::InsecureSubresource" in image, (
+        "a blocked picture is refused with some other reason, or not refused"
+    )
+    assert "log_stylesheet_blocked_as_insecure" in stylesheet, (
+        "a blocked stylesheet returns no rules and says nothing about why"
+    )
+    main_code = code_only((ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8"))
+    assert "Linked stylesheet blocked" in main_code, (
+        "the stylesheet refusal is not in the log the page author can read"
+    )
+
+    # The padlock itself did not move: it is still the document's transport and
+    # nothing else, which is what makes the refusal above the right answer.
+    toolbar = function_body(code, "toolbar_pixel")
+    assert (
+        "let is_https = parsed.scheme == UriScheme::Https && app.document_tls_verified;"
+        in toolbar
+    ), "the secure mark changed instead of the page's subresources being held to it"
 
