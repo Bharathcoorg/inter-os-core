@@ -1,3 +1,13 @@
+"""WHAT THIS FILE IS FOR: it proves the contract runner itself is trustworthy.
+
+WHY: the runner is the gate every other suite depends on, so a bug that lets a
+zero-discovery run, a shrunken test floor, a timed-out script, or an unexecuted
+suite report success would silently green-light broken code. Each case here drives
+run_all_contracts.py against deliberately broken inputs and asserts it fails closed.
+The last case is different in kind: it guards kernel-ordering integrity rather than
+the runner, because the ordering property has no other home in the contract tree.
+"""
+
 import os
 import subprocess
 import sys
@@ -181,6 +191,126 @@ class TestRunnerIntegrity(unittest.TestCase):
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+
+    def test_kernel_net_cases_are_independent_of_execution_order(self):
+        """Proves the kernel net:: cases neither need a predecessor nor poison a neighbour.
+
+        WHY two different runs are needed: the net cases mutate process-global
+        kernel state (the system tick clock, the delegation registry, the
+        ARP/socket/TCP tables, the loopback ring and the drop counters), and
+        libtest runs cases on parallel threads. Running each net case alone in
+        its own process proves only the first half -- that a case does not depend
+        on something an earlier case left behind. It cannot see the second half,
+        and the second half is the one that actually shipped broken once: a case
+        that zeroes the global clock or clears the delegation registry at entry
+        passes its own isolated run and still deletes authority a capability,
+        revocation, vfs or syscall case is mid-flight on, because those cases take
+        no part of the lock the net cases take. An isolation-only check is green on
+        exactly that design. So the property is measured two ways, and both have to
+        hold:
+
+          1. every net case passes alone, in its own process, single-threaded;
+          2. the case that holds foreign global state across a reset survives it,
+             which is the poisoning half measured deterministically;
+          3. the rest of the suite passes repeatedly under the parallel scheduling
+             that lets the cases interleave.
+
+        Half two is the one that matters, and it exists because of a measurement
+        rather than taste: with the reset deliberately re-broken to clear the
+        delegation registry and rewind the tick clock and the lease id counter, a
+        full default-thread suite run passed 3/3 times and the parallel sweeps here
+        passed 3/3. The race is real but only fires in the run that loses it, so a
+        check that leans on repeated parallel runs can be green on the broken design
+        -- which is the exact failure mode this check was written to catch. So the
+        poisoning half is pinned by `net::tests::
+        net_state_reset_leaves_foreign_process_globals_alone`, a case that registers
+        a lease, moves the clock, calls the reset and requires all three to be
+        untouched. Each of its three arms was verified to fail on the matching
+        sabotage, so half three stays as a broad net rather than the evidence.
+
+        Half three excludes `sync::` and `task::` for a reason that is separate and
+        stated here rather than hidden: those families assert on the process-global
+        PREEMPT_COUNT and SCHEDULER state, which every other case in this binary
+        also writes through the kernel mutex wrapper, so their result depends on how
+        many neighbours happen to hold a lock at the same instant no matter what the
+        net cases do. They are a real isolation defect, but not this one, and they
+        are named by a filter -- a failing net, capability, vfs or syscall case
+        still fails this check.
+        """
+        manifest = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "kernel", "Cargo.toml")
+        )
+
+        listed = subprocess.run(
+            ["cargo", "test", "--manifest-path", manifest, "net::", "--", "--list"],
+            capture_output=True, text=True, timeout=280,
+        )
+        self.assertEqual(listed.returncode, 0, f"net:: discovery failed: {listed.stderr}")
+        net_cases = sorted(
+            line.split(": test")[0].strip()
+            for line in listed.stdout.splitlines()
+            if line.startswith("net::") and line.endswith(": test")
+        )
+        # Fail closed on vacuous discovery: an empty list must never read as a pass.
+        self.assertGreaterEqual(len(net_cases), 20, f"net:: discovery found too few cases: {net_cases}")
+
+        did_not_pass_alone = []
+        for case in net_cases:
+            single = subprocess.run(
+                ["cargo", "test", "--manifest-path", manifest, "--no-fail-fast", "--",
+                 "--exact", case, "--test-threads=1"],
+                capture_output=True, text=True, timeout=120,
+            )
+            ran_alone = "1 passed" in single.stdout and "0 failed" in single.stdout
+            if single.returncode != 0 or not ran_alone:
+                did_not_pass_alone.append(case)
+
+        self.assertEqual(
+            did_not_pass_alone, [],
+            "these net:: cases pass as a group but fail when run alone, so the suite "
+            f"is still order-dependent: {did_not_pass_alone}",
+        )
+
+        # Half two: the interleaving half, deterministically. A reset that wipes a
+        # global another subsystem owns cannot be found by running the suite in a
+        # lucky order, so it is measured by a case that holds the state across it.
+        canary = "net::tests::net_state_reset_leaves_foreign_process_globals_alone"
+        probe = subprocess.run(
+            ["cargo", "test", "--manifest-path", manifest, "--no-fail-fast", "--",
+             "--exact", canary, "--test-threads=1"],
+            capture_output=True, text=True, timeout=280,
+        )
+        self.assertEqual(
+            probe.returncode, 0,
+            f"{canary} pins that the net reset cannot delete a lease, rewind the tick clock or "
+            f"rewind the lease id counter that cases outside net:: rely on; it failed:\n{probe.stdout}",
+        )
+
+        # Half three: the broad net. Three ordered sweeps at the default thread
+        # count, because an ordering bug is probabilistic and one green run proves
+        # nothing -- and, measured above, three green runs prove less than that.
+        unstable_runs = []
+        for attempt in range(1, 4):
+            sweep = subprocess.run(
+                ["cargo", "test", "--manifest-path", manifest, "--no-fail-fast", "--",
+                 "--format", "terse", "--test-threads=8", "--skip", "sync::", "--skip", "task::"],
+                capture_output=True, text=True, timeout=280,
+            )
+            failed = sorted(
+                line.strip()
+                for line in sweep.stdout.splitlines()
+                if line.strip().endswith("... FAILED")
+            )
+            totals = [line for line in sweep.stdout.splitlines() if "passed;" in line]
+            if sweep.returncode != 0 or failed:
+                unstable_runs.append((attempt, failed, totals))
+
+        self.assertEqual(
+            unstable_runs, [],
+            "the kernel suite is not order-insensitive under parallel scheduling; "
+            f"these sweeps failed: {unstable_runs}",
+        )
 
 
 if __name__ == "__main__":

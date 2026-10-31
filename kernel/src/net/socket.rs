@@ -820,6 +820,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn active_close_holds_connection_until_time_wait_expiry() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let id = table
             .open(7, 41000, Ipv4Address::LOCALHOST, 41001, 100)
@@ -848,6 +850,8 @@ mod tcp_reliability_tests {
     /// timer and the next requester is refused.
     #[test]
     fn a_fin_acknowledged_in_last_ack_frees_the_slot_without_a_hold() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let id = table
             .open(7, 41_100, Ipv4Address::LOCALHOST, 41_101, 100)
@@ -869,6 +873,8 @@ mod tcp_reliability_tests {
     /// back on the next poll, not after the retry budget has run out.
     #[test]
     fn a_peer_reset_returns_the_slot_to_the_next_requester() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let id = table
             .open(7, 41_200, Ipv4Address::LOCALHOST, 41_201, 100)
@@ -893,6 +899,8 @@ mod tcp_reliability_tests {
     /// requester without waiting for the bounded network poll to notice.
     #[test]
     fn connection_table_holds_a_page_burst_and_reclaims_a_finished_hold() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let mut ids = [0u32; MAX_TCP_CONNECTIONS];
         for index in 0..MAX_TCP_CONNECTIONS {
@@ -935,6 +943,8 @@ mod tcp_reliability_tests {
     /// hosts.
     #[test]
     fn tcp_connection_table_state_machine_model_saturation_peer_abort_fin_ack_time_wait_reap_slot_reclaim() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let mut active_ids = [0u32; 22];
         let mut total_opened = 0;
@@ -996,6 +1006,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn payload_retransmit_exhaustion_closes_connection_and_releases_slot() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let id = table
             .open(7, 40000, Ipv4Address::LOCALHOST, 40001, 100)
@@ -1021,6 +1033,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn delegated_leases_network_paths_expiry_revocation_exhaustion_and_valid() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
@@ -1119,39 +1133,46 @@ mod tcp_reliability_tests {
         }
 
         // 2. Expired delegated leases across create_socket, send_udp_datagram, recv_from
+        // WHY the duration is one tick: expiry is `now >= start + duration`, so the
+        // cheapest lease the registry accepts is the smallest clock move this case
+        // can require. The clock is process-global and read by cases that never take
+        // `NET_TEST_LOCK`, so every tick of the window below is visible to them.
         let lease_start = crate::interrupts::get_system_ticks();
         let exp_sock = delegation::DelegatedLease::new(
-            8011, &parent_sock, TaskId(1), task_id, Rights::WRITE, 5, 10, lease_start,
+            8011, &parent_sock, TaskId(1), task_id, Rights::WRITE, 5, 1, lease_start,
         ).expect("exp_sock");
         delegation::register_lease(exp_sock.clone());
         let exp_send = delegation::DelegatedLease::new(
-            8012, &parent_send, TaskId(1), task_id, Rights::WRITE, 5, 10, lease_start,
+            8012, &parent_send, TaskId(1), task_id, Rights::WRITE, 5, 1, lease_start,
         ).expect("exp_send");
         delegation::register_lease(exp_send.clone());
         let exp_recv = delegation::DelegatedLease::new(
-            8013, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 10, lease_start,
+            8013, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 1, lease_start,
         ).expect("exp_recv");
         delegation::register_lease(exp_recv.clone());
 
-        // Advance system ticks past the 10-tick duration to expire the leases
-        let prev_ticks = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::SeqCst);
-        crate::interrupts::SYSTEM_TICKS.store(lease_start + 50, core::sync::atomic::Ordering::SeqCst);
+        // Move the clock the single tick that puts these three leases past their
+        // expiry, then read authority back. The guard owns the tick write and
+        // restores it on the way out — including if an assertion below panics — so
+        // a failed expiry check cannot leave the clock advanced for the cases that
+        // follow, and the leases every other case anchors to the live clock stay
+        // comfortably inside their own windows.
+        {
+            let _ticks = crate::net::SystemTicksGuard::set(lease_start + 1);
 
-        let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
-        exp_caps.insert(exp_sock.to_capability()).unwrap();
-        exp_caps.insert(exp_send.to_capability()).unwrap();
-        exp_caps.insert(exp_recv.to_capability()).unwrap();
+            let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
+            exp_caps.insert(exp_sock.to_capability()).unwrap();
+            exp_caps.insert(exp_send.to_capability()).unwrap();
+            exp_caps.insert(exp_recv.to_capability()).unwrap();
 
-        assert!(!exp_caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
-        assert!(!exp_caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
-        assert!(!exp_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
+            assert!(!exp_caps.has_capability(CapabilityType::NetworkSocket, Rights::WRITE));
+            assert!(!exp_caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+            assert!(!exp_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
 
-        assert_eq!(sock_table.create_socket(task_id.0 as u32, 45002, &exp_caps).err(), Some(NetError::CapabilityDenied));
-        assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exp_caps).err(), Some(NetError::CapabilityDenied));
-        assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exp_caps).err(), Some(NetError::CapabilityDenied));
-
-        // Restore system ticks to avoid inter-test side effects
-        crate::interrupts::SYSTEM_TICKS.store(prev_ticks, core::sync::atomic::Ordering::SeqCst);
+            assert_eq!(sock_table.create_socket(task_id.0 as u32, 45002, &exp_caps).err(), Some(NetError::CapabilityDenied));
+            assert_eq!(crate::net::send_udp_datagram(Ipv4Address::LOCALHOST, 45000, Ipv4Address::LOCALHOST, 45000, b"X", &exp_caps).err(), Some(NetError::CapabilityDenied));
+            assert_eq!(sock_table.get_mut(sock_id).unwrap().recv_from(&mut rx_buf, &exp_caps).err(), Some(NetError::CapabilityDenied));
+        }
 
         // 3. Revoked delegated leases across create_socket, send_udp_datagram, recv_from
         let current_now = crate::interrupts::get_system_ticks();
@@ -1222,6 +1243,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn tcp_receive_capability_and_lease_enforcement() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
@@ -1279,14 +1302,19 @@ mod tcp_reliability_tests {
 
         // 4. Expired delegated lease: lease whose ticks expired must be denied
         {
+            // WHY one tick: the lease expires at `start + 1`, so this is the whole
+            // clock move the case needs, and the window is the only part of this
+            // case another test could observe through the shared clock.
             let lease_start = crate::interrupts::get_system_ticks();
             let exp_lease = delegation::DelegatedLease::new(
-                9011, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 10, lease_start,
+                9011, &parent_recv, TaskId(1), task_id, Rights::READ, 5, 1, lease_start,
             ).expect("exp_lease");
             delegation::register_lease(exp_lease.clone());
 
-            let prev_ticks = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::SeqCst);
-            crate::interrupts::SYSTEM_TICKS.store(lease_start + 50, core::sync::atomic::Ordering::SeqCst);
+            // The guard owns this tick write and undoes it when the block ends, so
+            // a failed assertion below cannot leave the clock advanced for the rest
+            // of the process.
+            let _ticks = crate::net::SystemTicksGuard::set(lease_start + 1);
 
             let mut exp_caps = CapabilityTable::new_for_task(task_id, 4);
             exp_caps.insert(exp_lease.to_capability()).unwrap();
@@ -1294,8 +1322,6 @@ mod tcp_reliability_tests {
             assert!(!exp_caps.has_capability(CapabilityType::NetworkReceive, Rights::READ));
             let res = table.recv_owned(conn_id, task_id.0 as u32, &mut out, &exp_caps);
             assert_eq!(res.err(), Some(NetError::CapabilityDenied), "Expired lease must be denied");
-
-            crate::interrupts::SYSTEM_TICKS.store(prev_ticks, core::sync::atomic::Ordering::SeqCst);
         }
 
         // 5. Revoked delegated lease: revoked lease must be denied
@@ -1403,6 +1429,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn tcp_recv_connection_object_scoping() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         use crate::capability::{delegation, Capability, CapabilityId};
         use crate::task::TaskId;
 
@@ -1453,6 +1481,8 @@ mod tcp_reliability_tests {
 
     #[test]
     fn accept_rx_segment_fin_and_overlap_handling() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
         let mut table = TcpConnectionTable::new();
         let id = table
             .open(7, 42000, Ipv4Address::LOCALHOST, 42001, 100)

@@ -70,6 +70,17 @@ impl NetDropStats {
         }
     }
 
+    #[cfg(test)]
+    pub fn net_drop_stats_reset(&self) {
+        self.non_ipv4_ethertype.store(0, Ordering::Relaxed);
+        self.malformed_checksum_length.store(0, Ordering::Relaxed);
+        self.unknown_l4_protocol.store(0, Ordering::Relaxed);
+        self.port_conn_mismatch.store(0, Ordering::Relaxed);
+        self.rx_backpressure.store(0, Ordering::Relaxed);
+        self.ipv4_fragment.store(0, Ordering::Relaxed);
+        self.logged_mask.store(0, Ordering::Relaxed);
+    }
+
     pub fn record_drop(&self, kind: NetDropKind, detail: &str) {
         let counter = match kind {
             NetDropKind::NonIpv4Ethertype => &self.non_ipv4_ethertype,
@@ -884,10 +895,88 @@ pub fn init() {
 }
 
 #[cfg(test)]
+pub(crate) static NET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores, before a network case runs, only the process globals that the
+/// network cases themselves are the only writers and readers of.
+///
+/// WHY the tables, the ring and the counters: they outlive a single `#[test]`, so
+/// whatever one case leaves behind is what the next reads. The loopback ring in
+/// particular is `LOOPBACK_RING_SLOTS` frames deep and nothing in the unit-test
+/// process ever drains it, so the frames earlier cases transmitted stay queued,
+/// and a later case's send fails with `QueueFull` for a reason that has nothing to
+/// do with what that case tests.
+///
+/// WHY the system tick clock and the delegation registry are deliberately NOT
+/// touched here: they are read and written by cases outside `net::` that take no
+/// part of `NET_TEST_LOCK` -- the capability, revocation, vfs and syscall suites
+/// mint leases against the live clock and consult the registry afterwards, and
+/// `interrupts::SYSTEM_TICKS` is read by anything that ages a record. Zeroing the
+/// clock or clearing the registry between network cases does not make those cases
+/// deterministic; it lets a network case delete authority an unrelated case is
+/// mid-flight on, which turns an ordering dependence into a genuine race. A
+/// partial lock serialises nothing, because an unguarded neighbour is free to
+/// interleave with a guarded one.
+///
+/// So each network case is made immune to whatever is already in the clock and the
+/// registry instead: unique lease ids and task ids per case, a lease start anchored
+/// to the live clock, and expiry windows far wider than any tick a case can move.
+/// The two cases that must observe an expired lease move the clock through
+/// `SystemTicksGuard`, which advances it the single tick their own lease needs and
+/// puts it back.
+///
+/// WHY `NET_TEST_LOCK` is still taken by every case that reaches here: two guards
+/// running at once would save and restore over each other and leave the clock at
+/// the advanced value permanently. Any case outside `net::` that starts driving
+/// these tables must take the same lock, or this reset has to go.
+#[cfg(test)]
+pub(crate) fn reset_net_state() {
+    *TCP_TABLE.lock() = TcpConnectionTable::new();
+    *SOCKET_TABLE.lock() = SocketTable::new();
+    *ARP_TABLE.lock() = ArpTable::new();
+    *LOOPBACK_DEVICE.lock() = LoopbackDevice::new();
+    DROP_STATS.net_drop_stats_reset();
+}
+
+/// Moves the global tick clock forward for the lifetime of the guard.
+///
+/// WHY a guard rather than a hand-written store/restore: a lease case advances
+/// `SYSTEM_TICKS` to push a short lease past its expiry, and any assertion that
+/// fires between the write and the restore line would leave the clock advanced for
+/// every later case in the process. `Drop` runs even while unwinding a panic, so
+/// the clock returns to exactly what it was whether the case passes or fails.
+///
+/// WHY the case moves it one tick and not fifty: every other test in this process
+/// reads the same clock without taking `NET_TEST_LOCK`, so the window is visible to
+/// all of them. A single tick is what a real timer interrupt would do and stays
+/// inside every other case's lease window, which is hundreds of ticks wide; a
+/// larger leap can expire a neighbour's lease while it is being checked.
+#[cfg(test)]
+pub(crate) struct SystemTicksGuard {
+    prev: u64,
+}
+
+#[cfg(test)]
+impl SystemTicksGuard {
+    pub(crate) fn set(now: u64) -> Self {
+        let prev = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::SeqCst);
+        crate::interrupts::SYSTEM_TICKS.store(now, core::sync::atomic::Ordering::SeqCst);
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SystemTicksGuard {
+    fn drop(&mut self) {
+        crate::interrupts::SYSTEM_TICKS.store(self.prev, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::capability::{Capability, CapabilityId, CapabilityType, Rights, CapabilityTable, DelegatedLease};
-    use crate::capability::delegation::{allocate_lease_id, register_lease};
+    use crate::capability::delegation::{allocate_lease_id, register_lease, MAX_DELEGATION_DURATION_TICKS};
     use crate::task::TaskId;
 
     #[test]
@@ -909,7 +998,79 @@ mod tests {
     }
 
     #[test]
+    fn net_state_reset_leaves_foreign_process_globals_alone() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // WHY this case exists: `reset_net_state()` runs between network cases, and
+        // the tempting version of it also zeroes the tick clock and clears the
+        // delegation registry "so nothing stale is left". Those two are process
+        // globals that cases outside `net::` mint and consume without ever taking
+        // `NET_TEST_LOCK`, so a reset that touches them deletes authority another
+        // case is mid-flight on. That is not an ordering quirk to be found by
+        // running the suite in a lucky order -- it is a race, and a race only shows
+        // up in the run that loses it. So this case does not wait for one: it holds
+        // a foreign lease and an advanced clock itself, calls the reset, and checks
+        // the reset left both alone. It fails every time on the design that wipes
+        // them, and never touches the globals beyond what the guard puts back.
+        //
+        // WHY the grantee is a task id no case uses: the lease has to stay in the
+        // registry to be looked at, and one wide-window lease for a pid nothing else
+        // addresses cannot authorize anything for anybody else.
+        let grantor = TaskId(0x9100);
+        let grantee = TaskId(0x9101);
+        let parent = Capability {
+            id: CapabilityId(0x9100_0001),
+            cap_type: CapabilityType::NetworkSend,
+            rights: Rights::WRITE | Rights::GRANT,
+            object_id: 0,
+        };
+        let first_lease_id = allocate_lease_id();
+        let lease = DelegatedLease::new(
+            first_lease_id,
+            &parent,
+            grantor,
+            grantee,
+            Rights::WRITE,
+            4,
+            MAX_DELEGATION_DURATION_TICKS,
+            crate::interrupts::get_system_ticks(),
+        )
+        .expect("a wide-window send lease is constructible");
+        assert!(register_lease(lease), "the foreign lease must reach the registry");
+
+        let advanced = crate::interrupts::get_system_ticks() + 7;
+        let _tick_guard = SystemTicksGuard::set(advanced);
+
+        reset_net_state();
+
+        assert!(
+            crate::capability::delegation::is_lease_active(first_lease_id, advanced),
+            "reset_net_state() must not clear a lease another subsystem registered: lease {} was live at tick {} and is gone from the registry",
+            first_lease_id,
+            advanced
+        );
+        assert_eq!(
+            crate::interrupts::get_system_ticks(),
+            advanced,
+            "reset_net_state() must not rewind the process tick clock: other cases anchor lease expiry to it, so a rewind silently expires or un-expires their authority"
+        );
+
+        // WHY the id counter is checked last: handing out an id that is already in
+        // use puts two leases under one name, and the quota of one would be spent by
+        // the other's calls -- which reads as a lease that "should" still work.
+        let second_lease_id = allocate_lease_id();
+        assert!(
+            second_lease_id > first_lease_id,
+            "reset_net_state() must not rewind the lease id counter: it handed out {} after {}, so a fresh lease can collide with one already registered",
+            second_lease_id,
+            first_lease_id
+        );
+    }
+
+    #[test]
     fn test_send_udp_datagram_authorized_quota_policy() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
         let grantor = TaskId(70);
         let grantee = TaskId(71);
         crate::task::process::register_leader(grantee, TaskId(1));
@@ -923,6 +1084,9 @@ mod tests {
         }).unwrap();
 
         // Create a single-use delegated lease for NetworkSend
+        // WHY the base is the live clock: expiry is judged against
+        // `get_system_ticks()`, so anchoring at `0` would let the process's uptime
+        // decide whether this lease is usable, making the case order-dependent.
         let parent_cap = grantor_caps.get(0).unwrap();
         let lease = DelegatedLease::new(
             allocate_lease_id(),
@@ -932,13 +1096,14 @@ mod tests {
             Rights::WRITE,
             1, // 1 invocation quota
             10_000,
-            0,
+            crate::interrupts::get_system_ticks(),
         ).unwrap();
         let lease_cap = lease.to_capability();
-        register_lease(lease);
+        let lease_id = lease.lease_id;
+        assert!(register_lease(lease), "single-use send lease must register");
 
         let mut grantee_caps = CapabilityTable::new_for_task(grantee, 4);
-        grantee_caps.insert(lease_cap).unwrap();
+        grantee_caps.insert(lease_cap.clone()).unwrap();
 
         // 1. When consume_quota is false (e.g. DNS resolver retransmission of already-authorized query),
         // authority must be verified without consuming the single invocation quota!
@@ -951,7 +1116,21 @@ mod tests {
             &grantee_caps,
             false, // do not consume quota
         );
-        assert!(check_res.is_ok(), "Non-consuming datagram authorization must succeed");
+        // WHY the refusal is named in the message: this gate has four independent
+        // ways to say no (the identity is in the revocation store, the lease is not
+        // in the registry, it is revoked there, it is exhausted there) and the bare
+        // "must succeed" gave a reader none of them, so a failure here looked like a
+        // bug in the retransmission predicate rather than in the shared state.
+        assert!(
+            check_res.is_ok(),
+            "Non-consuming datagram authorization must succeed: identity {}, in the revocation store {}, live in the registry {}",
+            lease_cap.id.0,
+            crate::capability::revocation::is_revoked(lease_cap.id),
+            crate::capability::delegation::is_lease_active(
+                lease_id,
+                crate::interrupts::get_system_ticks()
+            ),
+        );
 
         // 2. Now perform an authorized send with consume_quota: true (initial transmission)
         let send_res1 = send_udp_datagram_authorized(
@@ -1002,6 +1181,11 @@ mod tests {
             object_id: 0,
         }).unwrap();
 
+        // WHY the lease is anchored to the live clock and not to zero:
+        // `is_lease_valid` compares expiry against `get_system_ticks()`, not
+        // against the case's own notion of now. A lease minted at `0` is born
+        // already expired once the process clock has advanced past its duration,
+        // so a passing run would depend on how many ticks earlier cases consumed.
         let lease = DelegatedLease::new(
             allocate_lease_id(),
             grantor_caps.get(0).unwrap(),
@@ -1010,9 +1194,13 @@ mod tests {
             Rights::WRITE,
             1,
             10_000,
-            0,
+            crate::interrupts::get_system_ticks(),
         ).unwrap();
-        register_lease(lease.clone());
+        // WHY this is checked: `register_lease` refuses once the registry is at
+        // capacity, and a silently-dropped refusal leaves the grantee holding a
+        // capability the registry has never heard of — every later authorization
+        // then fails for a reason that has nothing to do with what the case tests.
+        assert!(register_lease(lease.clone()), "single-use send lease must register");
 
         let mut grantee_caps = CapabilityTable::new_for_task(grantee, 4);
         grantee_caps.insert(lease.to_capability()).unwrap();
@@ -1032,6 +1220,8 @@ mod tests {
     /// policy is void and every retry fails closed.
     #[test]
     fn dns_retransmission_is_authorized_after_the_logical_lease_is_spent() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
         let grantee = TaskId(72);
         crate::task::process::register_leader(grantee, TaskId(1));
         let caps = single_use_send_lease(grantee);
@@ -1079,6 +1269,8 @@ mod tests {
     /// this test pins, not the frame serialization around it.
     #[test]
     fn denied_send_does_not_debit_background_network_budget() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
         let grantee = TaskId(73);
         crate::task::process::register_leader(grantee, TaskId(1));
         // Background state is what makes the byte budget actually accounted.
@@ -1132,6 +1324,8 @@ mod tests {
 
     #[test]
     fn test_net_drop_stats_accounting() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
         let prev_non_ip = DROP_STATS.non_ipv4_ethertype.load(Ordering::Relaxed);
         let prev_malformed = DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed);
         let prev_unknown_l4 = DROP_STATS.unknown_l4_protocol.load(Ordering::Relaxed);
