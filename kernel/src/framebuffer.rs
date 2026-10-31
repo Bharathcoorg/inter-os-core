@@ -2586,18 +2586,37 @@ mod present_band_tests {
     /// reaches its target through `info` + `buffer_ptr`. Writing those two
     /// fields is exactly what `init` does, so the present path under test is
     /// the production one, including the raw-pointer blit.
+    /// WHY the mapping is withdrawn on drop rather than restored: `bytes` is a
+    /// heap buffer that dies with the test, but `FRAMEBUFFER_WRITER` is
+    /// process-global and outlives it, so leaving the mapping behind hands every
+    /// later case a pointer to freed memory. That is what made the suite depend
+    /// on execution order: in declaration order the display cases ran before
+    /// these, so the dangling pointer had nothing left to corrupt, and any
+    /// reordering made `composite_and_flip`'s present write through it and fault
+    /// the process -- access violation, heap corruption or a stack-buffer
+    /// overrun, whichever the reused pages happened to serve.
+    ///
+    /// WHY withdrawal is ownership-checked: a test may install a second stand-in
+    /// over the first and re-install the first (`band_saturates_at_both_ends_of_
+    /// the_scanout` does, because the writer holds one buffer at a time and the
+    /// comparison needs it pointed back at the buffer being measured). Restoring
+    /// "whatever was there before" would then hand the writer the *other*
+    /// stand-in's buffer, which is freed as its own test scope ends.
     struct FakeFb {
         bytes: Vec<u8>,
         width: usize,
         height: usize,
         stride: usize,
         bpp: usize,
+        /// The pointer this stand-in last installed, or `None` while it is not
+        /// the mapping the writer holds.
+        installed: Option<*mut u8>,
     }
 
     impl FakeFb {
         fn new(width: usize, height: usize, bpp: usize) -> Self {
             let stride = width;
-            Self { bytes: vec![0u8; height * stride * bpp], width, height, stride, bpp }
+            Self { bytes: vec![0u8; height * stride * bpp], width, height, stride, bpp, installed: None }
         }
 
         /// Fills with a deterministic non-uniform pattern so that any stray
@@ -2609,16 +2628,23 @@ mod present_band_tests {
         }
 
         fn install(&mut self) {
-            let mut fb = FRAMEBUFFER_WRITER.lock();
-            fb.info = Some(FrameBufferInfo {
-                byte_len: self.bytes.len(),
-                width: self.width,
-                height: self.height,
-                pixel_format: PixelFormat::Bgr,
-                bytes_per_pixel: self.bpp,
-                stride: self.stride,
-            });
-            fb.buffer_ptr = Some(self.bytes.as_mut_ptr());
+            let ptr = self.bytes.as_mut_ptr();
+            {
+                let mut fb = FRAMEBUFFER_WRITER.lock();
+                fb.info = Some(FrameBufferInfo {
+                    byte_len: self.bytes.len(),
+                    width: self.width,
+                    height: self.height,
+                    pixel_format: PixelFormat::Bgr,
+                    bytes_per_pixel: self.bpp,
+                    stride: self.stride,
+                });
+                fb.buffer_ptr = Some(ptr);
+                // A stand-in always describes a brand-new viewport, so the
+                // letterbox cache must not carry a previous test's bounds.
+                *LAST_CLEAR_BOUNDS.lock() = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+            }
+            self.installed = Some(ptr);
         }
 
         /// The part of row `y` inside the scaled viewport.
@@ -2638,6 +2664,25 @@ mod present_band_tests {
         fn reassert_ptr(&mut self) {
             let fb = FRAMEBUFFER_WRITER.lock();
             assert_eq!(fb.buffer_ptr, Some(self.bytes.as_mut_ptr()));
+        }
+    }
+
+    impl Drop for FakeFb {
+        fn drop(&mut self) {
+            // A stand-in that never installed owns nothing, and `buffer_ptr` is
+            // `None` both when the writer is genuinely unset and when this
+            // instance was never the one that set it. Comparing the two `None`s
+            // as equal would let a non-installing drop clear globals -- and the
+            // remembered clear bounds -- that belong to nobody or to somebody
+            // else, so the absence of an installation returns before the write.
+            let Some(ptr) = self.installed else { return };
+            let mut fb = FRAMEBUFFER_WRITER.lock();
+            if fb.buffer_ptr != Some(ptr) {
+                return;
+            }
+            fb.info = None;
+            fb.buffer_ptr = None;
+            *LAST_CLEAR_BOUNDS.lock() = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
         }
     }
 
