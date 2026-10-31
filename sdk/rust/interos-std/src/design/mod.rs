@@ -115,11 +115,16 @@ pub mod typography {
     /// copies when it asks for "a caption", so a style that reserved the
     /// bitmap cell's multiples reserved two and a half times the space a
     /// reader expects and pushed the neighbouring content out of the way.
-    /// The line boxes and baselines are the ones the document names, and
-    /// the baseline is the row the renderer sits the ink on at that rung.
+    /// WHY the line box is the face's own and not a number of its own: it was
+    /// 16, carried over from before the ladder moved to the typeface metrics,
+    /// while a run at this rung reserves 22. A style is what an app copies to
+    /// lay a badge out, so the stale box let the ink run into whatever sat
+    /// under the icon -- and the badge sits in the corner of the icon, which
+    /// is the one place with no room to spare. `CAPTION` is the same rung, and
+    /// two names for one size must not reserve two different boxes for it.
     pub const BADGE: TextStyle = TextStyle {
         scale: BADGE_SCALE,
-        line_height_px: 16,
+        line_height_px: font::line_height(BADGE_SCALE),
         baseline_offset_px: font::ascent_for_scale(BADGE_SCALE),
     };
 
@@ -161,6 +166,29 @@ pub mod typography {
         line_height_px: font::line_height(6),
         baseline_offset_px: font::ascent_for_scale(6),
     };
+
+    /// WHY this is checked where the styles are written: a `TextStyle` is what
+    /// an app copies to lay a label out, and the box it reserves is only
+    /// honest if it is the box the face actually takes at that rung. `BADGE`
+    /// carried 16 for a rung that reserves 22, and the ink ran into whatever
+    /// sat under the icon it was badgeing. A hand-written number now fails to
+    /// compile instead of failing on a screen.
+    const _: () = assert!(
+        BADGE.line_height_px == font::line_height(BADGE.scale)
+            && CAPTION.line_height_px == font::line_height(CAPTION.scale)
+            && BODY.line_height_px == font::line_height(BODY.scale)
+            && SECTION.line_height_px == font::line_height(SECTION.scale)
+            && TITLE.line_height_px == font::line_height(TITLE.scale)
+            && HEADING.line_height_px == font::line_height(HEADING.scale)
+            && DISPLAY.line_height_px == font::line_height(DISPLAY.scale)
+            && BADGE.baseline_offset_px == font::ascent_for_scale(BADGE.scale)
+            && CAPTION.baseline_offset_px == font::ascent_for_scale(CAPTION.scale)
+            && BODY.baseline_offset_px == font::ascent_for_scale(BODY.scale)
+            && SECTION.baseline_offset_px == font::ascent_for_scale(SECTION.scale)
+            && TITLE.baseline_offset_px == font::ascent_for_scale(TITLE.scale)
+            && HEADING.baseline_offset_px == font::ascent_for_scale(HEADING.scale)
+            && DISPLAY.baseline_offset_px == font::ascent_for_scale(DISPLAY.scale)
+    );
 }
 
 /// Canonical display unit: Logical Density-independent Pixels (dp).

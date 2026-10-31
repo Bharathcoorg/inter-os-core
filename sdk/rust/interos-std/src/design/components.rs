@@ -451,12 +451,25 @@ impl<'a> ListRow<'a> {
     }
 }
 
+/// The longest label a row's column can hold before it is trimmed.
+///
+/// WHY a fixed stack buffer: the widget paints a row per call with no heap on
+/// the platform's render path, and a label this long is already wider than any
+/// row the platform lays out, so it reaches the trim stage rather than this
+/// bound in practice.
+const LIST_LABEL_MAX: usize = 96;
+
 /// Draws a list row: a title, an optional subtitle, an optional trailing value
 /// and a hairline divider under the row.
 ///
 /// WHY the divider is drawn by the row and not by the list: a divider that
 /// belongs to the list is a divider that the last row also draws, and the last
 /// row of a list is the one that shows the edge of the list.
+///
+/// WHY each column is measured before its label is drawn: [`draw_label`] inks
+/// the run it is handed and nothing clips it to the row, so a title longer than
+/// the row used to run under the trailing value, and a trailing value wider
+/// than the row was moved to the title's own x and painted straight over it.
 pub fn list_row(surface: &mut Surface, theme: &Theme, rect: Rect, row: &ListRow<'_>) {
     let style = list_row_style(theme, row.selected);
     surface.draw_aa_rounded_rect(
@@ -476,40 +489,70 @@ pub fn list_row(surface: &mut Surface, theme: &Theme, rect: Rect, row: &ListRow<
     let title_h = font::line_height(title_scale);
     let caption_h = font::line_height(caption_scale);
 
+    let inner = rect.w.saturating_sub(pad * 2);
+    // The least the leading label may be left with and still read as the row's
+    // name. WHY the value yields instead of both columns shrinking: a row that
+    // shows two clipped strings names nothing, and the label is the half a
+    // reader scans for.
+    let min_leading = inner / 3;
+    let trailing_room = match row.trailing {
+        Some(trailing) => {
+            let wanted = font::measure(trailing, caption_scale);
+            if wanted + pad <= inner - min_leading {
+                wanted
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    let leading_room = inner - trailing_room - usize::from(trailing_room > 0) * pad;
+
     let title_y = if row.subtitle.is_some() {
         rect.y + (rect.h.saturating_sub(title_h + caption_h)) / 2
     } else {
         rect.y + (rect.h.saturating_sub(title_h)) / 2
     };
+    let mut title_buf = [0u8; LIST_LABEL_MAX];
+    let title_len = font::ellipsize(row.title, title_scale, leading_room, &mut title_buf);
     draw_label(
         surface,
         rect.x + pad,
         title_y,
         title_scale,
-        row.title,
+        &title_buf[..title_len],
         theme.on_surface,
     );
 
     if let Some(subtitle) = row.subtitle {
+        let mut sub_buf = [0u8; LIST_LABEL_MAX];
+        let sub_len = font::ellipsize(subtitle, caption_scale, leading_room, &mut sub_buf);
         draw_label(
             surface,
             rect.x + pad,
             title_y + title_h,
             caption_scale,
-            subtitle,
+            &sub_buf[..sub_len],
             theme.muted,
         );
     }
 
     if let Some(trailing) = row.trailing {
-        let w = font::measure(trailing, caption_scale);
-        let x = if w >= rect.w.saturating_sub(pad * 2) {
-            rect.x + pad
-        } else {
-            rect.x + rect.w - pad - w
-        };
-        let y = rect.y + (rect.h.saturating_sub(caption_h)) / 2;
-        draw_label(surface, x, y, caption_scale, trailing, theme.on_surface_variant);
+        if trailing_room > 0 {
+            let mut trail_buf = [0u8; LIST_LABEL_MAX];
+            let trail_len =
+                font::ellipsize(trailing, caption_scale, trailing_room, &mut trail_buf);
+            let drawn = font::measure(&trail_buf[..trail_len], caption_scale).min(trailing_room);
+            let y = rect.y + (rect.h.saturating_sub(caption_h)) / 2;
+            draw_label(
+                surface,
+                rect.x + rect.w - pad - drawn,
+                y,
+                caption_scale,
+                &trail_buf[..trail_len],
+                theme.on_surface_variant,
+            );
+        }
     }
 
     // The divider sits on the last row of the surface, so a list that ends
@@ -745,6 +788,47 @@ mod tests {
         assert!(
             pixels.iter().any(|p| *p != theme.surface && *p != theme.on_surface),
             "the row drew no divider"
+        );
+    }
+
+    #[test]
+    fn a_rows_two_labels_never_share_a_column() {
+        let theme = Theme::LIGHT;
+        // WHY this measures the columns the ink lands in: `draw_label` clips
+        // nothing to the row, so before the columns were settled a title longer
+        // than the row ran under the trailing value, and a value wider than its
+        // own column was moved to the title's leading edge and painted over it.
+        // Both are one string read through another.
+        let pixels = paint(160, 64, |surface| {
+            let row = ListRow::new(b"Volksthuerstrasse 6 Berlin")
+                .with_subtitle(b"Saved 12 minutes ago")
+                .with_trailing(b"42 GB");
+            list_row(surface, &theme, Rect::new(0, 0, 160, 64), &row);
+        });
+        let columns_of = |ink: u32| -> (usize, usize) {
+            let mut first = usize::MAX;
+            let mut last = 0usize;
+            for y in 0..64 {
+                for x in 0..160 {
+                    if pixels[y * 160 + x] == ink {
+                        first = first.min(x);
+                        last = last.max(x);
+                    }
+                }
+            }
+            (first, last)
+        };
+        let (title_first, title_last) = columns_of(theme.on_surface);
+        let (value_first, value_last) = columns_of(theme.on_surface_variant);
+        assert_ne!(title_first, usize::MAX, "the row drew no title");
+        assert_ne!(value_first, usize::MAX, "the row dropped its trailing value");
+        assert!(
+            title_last < value_first,
+            "the title reaches column {title_last} but the value starts at {value_first}"
+        );
+        assert!(
+            value_last + theme.spacing.md <= 160,
+            "the value runs past the row's trailing padding to column {value_last}"
         );
     }
 }
