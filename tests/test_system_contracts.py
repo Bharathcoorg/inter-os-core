@@ -263,6 +263,31 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("checked_add", aarch)
         self.assertIn("checked_add", riscv)
 
+    def test_sdk_syscall_wrappers_zero_the_arguments_they_do_not_pass(self):
+        sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+        # sys_dispatch receives six argument registers whatever the caller used,
+        # and handlers such as NotificationQuery choose between a count and a
+        # buffer write from a trailing pair. A wrapper that named only its own
+        # arguments therefore let the kernel decide from registers the calling
+        # code had no part in the syscall.
+        by_arch = (
+            ("x86_64", ("rdi", "rsi", "rdx", "r10", "r8", "r9")),
+            ("aarch64", ("x0", "x1", "x2", "x3", "x4", "x5")),
+            ("riscv64", ("a0", "a1", "a2", "a3", "a4", "a5")),
+        )
+        for arity in range(7):
+            head = f"pub unsafe fn syscall{arity}("
+            start = sdk.index(head)
+            body = sdk[start : sdk.index("\n}\n", start)]
+            for arch, registers in by_arch:
+                for position, register in enumerate(registers):
+                    operand = f'a{position + 1},' if position < arity else "0u64,"
+                    self.assertIn(
+                        f'in("{register}") {operand}',
+                        body,
+                        f"syscall{arity} leaves {register} ({arch}) unconstrained",
+                    )
+
     def test_service_memory_budget_is_enforced_before_scheduler_registration(self):
         user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
         services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")

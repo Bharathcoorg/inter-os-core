@@ -269,6 +269,15 @@ pub enum SyscallNumber {
 
 // -----------------------------------------------------------------------------
 // Low-Level Fast System Call Wrappers (Multi-Architecture: AMD64, AArch64 & RISC-V 64)
+//
+// WHY every wrapper also names the argument registers it does not use and puts
+// zero in them: the kernel reads a1..a6 whenever it likes, and some of them pick
+// their behaviour from a trailing argument -- NotificationQuery answers with a
+// count when a3 and a4 are zero and writes a3 for a4 bytes otherwise. A `syscall2`
+// that left rdx and r10 alone therefore hands the kernel whatever the calling code
+// happened to leave in them, and a stale non-zero pair is an address and a length
+// no caller agreed to pass. Zeroing the rest makes a wrapper's arity the whole of
+// what the kernel can see.
 // -----------------------------------------------------------------------------
 
 #[inline(always)]
@@ -278,6 +287,12 @@ pub unsafe fn syscall0(num: SyscallNumber) -> i64 {
     core::arch::asm!(
         "syscall",
         in("rax") num as u64,
+        in("rdi") 0u64,
+        in("rsi") 0u64,
+        in("rdx") 0u64,
+        in("r10") 0u64,
+        in("r8") 0u64,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -287,6 +302,12 @@ pub unsafe fn syscall0(num: SyscallNumber) -> i64 {
     core::arch::asm!(
         "svc #0",
         in("x8") num as u64,
+        in("x0") 0u64,
+        in("x1") 0u64,
+        in("x2") 0u64,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -294,6 +315,12 @@ pub unsafe fn syscall0(num: SyscallNumber) -> i64 {
     core::arch::asm!(
         "ecall",
         in("a7") num as u64,
+        in("a0") 0u64,
+        in("a1") 0u64,
+        in("a2") 0u64,
+        in("a3") 0u64,
+        in("a4") 0u64,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
@@ -317,6 +344,11 @@ pub unsafe fn syscall1(num: SyscallNumber, a1: u64) -> i64 {
         "syscall",
         in("rax") num as u64,
         in("rdi") a1,
+        in("rsi") 0u64,
+        in("rdx") 0u64,
+        in("r10") 0u64,
+        in("r8") 0u64,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -327,6 +359,11 @@ pub unsafe fn syscall1(num: SyscallNumber, a1: u64) -> i64 {
         "svc #0",
         in("x8") num as u64,
         in("x0") a1,
+        in("x1") 0u64,
+        in("x2") 0u64,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -335,6 +372,11 @@ pub unsafe fn syscall1(num: SyscallNumber, a1: u64) -> i64 {
         "ecall",
         in("a7") num as u64,
         in("a0") a1,
+        in("a1") 0u64,
+        in("a2") 0u64,
+        in("a3") 0u64,
+        in("a4") 0u64,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
@@ -359,6 +401,10 @@ pub unsafe fn syscall2(num: SyscallNumber, a1: u64, a2: u64) -> i64 {
         in("rax") num as u64,
         in("rdi") a1,
         in("rsi") a2,
+        in("rdx") 0u64,
+        in("r10") 0u64,
+        in("r8") 0u64,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -370,6 +416,10 @@ pub unsafe fn syscall2(num: SyscallNumber, a1: u64, a2: u64) -> i64 {
         in("x8") num as u64,
         in("x0") a1,
         in("x1") a2,
+        in("x2") 0u64,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -379,6 +429,10 @@ pub unsafe fn syscall2(num: SyscallNumber, a1: u64, a2: u64) -> i64 {
         in("a7") num as u64,
         in("a0") a1,
         in("a1") a2,
+        in("a2") 0u64,
+        in("a3") 0u64,
+        in("a4") 0u64,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
@@ -404,6 +458,9 @@ pub unsafe fn syscall3(num: SyscallNumber, a1: u64, a2: u64, a3: u64) -> i64 {
         in("rdi") a1,
         in("rsi") a2,
         in("rdx") a3,
+        in("r10") 0u64,
+        in("r8") 0u64,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -416,6 +473,9 @@ pub unsafe fn syscall3(num: SyscallNumber, a1: u64, a2: u64, a3: u64) -> i64 {
         in("x0") a1,
         in("x1") a2,
         in("x2") a3,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -426,6 +486,9 @@ pub unsafe fn syscall3(num: SyscallNumber, a1: u64, a2: u64, a3: u64) -> i64 {
         in("a0") a1,
         in("a1") a2,
         in("a2") a3,
+        in("a3") 0u64,
+        in("a4") 0u64,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
@@ -452,6 +515,8 @@ pub unsafe fn syscall4(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64) -
         in("rsi") a2,
         in("rdx") a3,
         in("r10") a4,
+        in("r8") 0u64,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -465,6 +530,8 @@ pub unsafe fn syscall4(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64) -
         in("x1") a2,
         in("x2") a3,
         in("x3") a4,
+        in("x4") 0u64,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -476,6 +543,8 @@ pub unsafe fn syscall4(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64) -
         in("a1") a2,
         in("a2") a3,
         in("a3") a4,
+        in("a4") 0u64,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
@@ -503,6 +572,7 @@ pub unsafe fn syscall5(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a
         in("rdx") a3,
         in("r10") a4,
         in("r8") a5,
+        in("r9") 0u64,
         lateout("rax") ret,
         lateout("rcx") _,
         lateout("r11") _,
@@ -517,6 +587,7 @@ pub unsafe fn syscall5(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a
         in("x2") a3,
         in("x3") a4,
         in("x4") a5,
+        in("x5") 0u64,
         lateout("x0") ret,
         options(nostack)
     );
@@ -529,6 +600,7 @@ pub unsafe fn syscall5(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a
         in("a2") a3,
         in("a3") a4,
         in("a4") a5,
+        in("a5") 0u64,
         lateout("a0") ret,
         options(nostack)
     );
