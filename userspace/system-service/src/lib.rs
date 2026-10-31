@@ -423,6 +423,10 @@ fn extract_prompt_text(payload: &[u8]) -> &[u8] {
 }
 
 /// Emits an inference response with given status code and message payload with zero heap allocation.
+///
+/// WHY the header counts bytes and not tokens: every answer this service sends
+/// reports the length of what it attached, and a reader can tell a whole answer
+/// from a cut one only by comparing that number with what arrived.
 fn emit_inference_response(
     sender_task_id: u64,
     status: u32,
@@ -509,6 +513,104 @@ fn stream_answer(sender_task_id: u64, status: u32, message: &[u8]) -> bool {
 fn claim_answer_pipe(consumer_task_id: u32) -> Option<u32> {
     let last = std::ai::ANSWER_PIPE_FIRST + std::ai::ANSWER_PIPE_COUNT;
     (std::ai::ANSWER_PIPE_FIRST..last).find(|pipe_id| std::shm_pipe_create(*pipe_id, 1, consumer_task_id).is_ok())
+}
+
+/// Bounded writer for the plain-text notices the service answers with.
+///
+/// WHY it exists: an honest notice names numbers -- the dimensions a model file
+/// states and the bounds the engine is compiled to -- and formatting those by
+/// hand at each call site is one chance per site to get a unit wrong.
+struct Notice<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> Notice<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, len: 0 }
+    }
+
+    fn word(&mut self, text: &[u8]) {
+        let take = text
+            .len()
+            .min(self.buf.len().saturating_sub(self.len));
+        self.buf[self.len..self.len + take].copy_from_slice(&text[..take]);
+        self.len += take;
+    }
+
+    fn number(&mut self, value: u32) {
+        let mut digits = [0u8; 10];
+        let written = rag::format_u32(value, &mut digits);
+        self.word(&digits[..written]);
+    }
+
+    /// Hands the buffer back with its lifetime, not the writer's.
+    fn finish(self) -> &'a [u8] {
+        let Notice { buf, len } = self;
+        &buf[..len]
+    }
+}
+
+/// Why the generative path reached the model file and still ran nothing.
+enum ModelGap {
+    /// The file configured the engine; its tensors are not what the engine reads.
+    Configured,
+    /// The file states a dimension -- or omits one -- the engine cannot be built
+    /// from. Carries the key, what the file stated, and the engine's bound.
+    Declaration(&'static str, Option<u32>, usize),
+}
+
+/// Builds the notice that answers a generative query when the model file is on
+/// the disk and nothing was run from it.
+///
+/// WHY it quotes the file: "no local model weights loaded" was the reply a real
+/// Gemma got too, because the code that loads weights was never reached. Naming
+/// the architecture and the dimensions the file declares says which of the cases
+/// the user is in, and writes down the number the next stage has to satisfy.
+/// Counting the prompt's bytes says the words arrived, which is the one thing
+/// the user can no longer infer from an answer that never came.
+fn model_gap_notice<'a>(
+    info: &gguf::GgufModelInfo,
+    gap: ModelGap,
+    prompt: &[u8],
+    out: &'a mut [u8],
+) -> &'a [u8] {
+    let mut notice = Notice::new(out);
+    notice.word(b"Model file");
+    match info.architecture() {
+        Some(arch) => {
+            notice.word(b" declares ");
+            notice.word(arch.as_bytes());
+        }
+        None => notice.word(b" states no architecture"),
+    }
+    match gap {
+        ModelGap::Configured => {
+            notice.word(b" at ");
+            notice.number(info.hidden_dim.unwrap_or(0));
+            notice.word(b" wide over ");
+            notice.number(info.num_layers.unwrap_or(0));
+            notice.word(b" blocks, vocabulary ");
+            notice.number(info.vocab_size.unwrap_or(0));
+            notice.word(b" tokens, whose tensors the engine does not read");
+        }
+        ModelGap::Declaration(key, Some(stated), limit) => {
+            notice.word(b", and states ");
+            notice.word(key.as_bytes());
+            notice.word(b" as ");
+            notice.number(stated);
+            notice.word(b" against the engine's bound of ");
+            notice.number(limit as u32);
+        }
+        ModelGap::Declaration(key, None, _) => {
+            notice.word(b", and states no ");
+            notice.word(key.as_bytes());
+        }
+    }
+    notice.word(b"; the prompt's ");
+    notice.number(prompt.len() as u32);
+    notice.word(b" bytes were not answered.");
+    notice.finish()
 }
 
 /// Answers a generative query, streaming the bytes when the mailbox cannot hold them.
@@ -624,81 +726,58 @@ pub fn handle_ipc_inference_query(
 
                     match parse_res {
                         Ok(hdr) if hdr.version <= 3 && hdr.tensor_count > 0 => {
-                            // Extract prompt from payload and tokenize
+                            // The file's own declaration says what the engine is
+                            // sized to, and the answer says what stopped it.
                             let prompt_text = extract_prompt_text(payload);
-                            let mut prompt_tokens = [0u32; 64];
-                            let num_prompt = tokenizer::encode(prompt_text, &mut prompt_tokens, true);
-
-                            // Real neural generation configuration and execution
-                            let config = inference::ModelConfig::default_test_config();
-                            let ones_norm = [1.0f32; inference::MAX_HIDDEN_DIM];
-                            let id_w = [0u8; 64 * 64 * 4];
-                            let ffn_gate_w = [0u8; 128 * 64 * 4];
-                            let ffn_down_w = [0u8; 64 * 128 * 4];
-                            let head_w = [0u8; 290 * 64 * 4];
-
-                            let layer = inference::LayerWeights {
-                                attn_norm: &ones_norm[..config.hidden_dim],
-                                attn_q: &id_w,
-                                attn_k: &id_w,
-                                attn_v: &id_w,
-                                attn_o: &id_w,
-                                post_attn_norm: &ones_norm[..config.hidden_dim],
-                                ffn_norm: &ones_norm[..config.hidden_dim],
-                                ffn_gate: &ffn_gate_w,
-                                ffn_up: &ffn_gate_w,
-                                ffn_down: &ffn_down_w,
-                                post_ffn_norm: &ones_norm[..config.hidden_dim],
-                                weight_type: 0,
-                            };
-                            let model = inference::ModelWeights {
-                                token_embd: &[],
-                                token_embd_type: 0,
-                                layers: [Some(layer), None],
-                                final_norm: &ones_norm[..config.hidden_dim],
-                                output_weight: &head_w,
-                                output_weight_type: 0,
-                            };
-
-                            let mut decoded_chunk = [0u8; 256];
-                            let mut chunk_len = 0usize;
-
-                            CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
-                            let gen_res = inference::generate(
-                                &prompt_tokens[..num_prompt],
-                                &model,
-                                &config,
-                                8,
-                                0.0,
-                                &|| CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed),
-                                |tok| {
-                                    let written = tokenizer::decode_token(tok, &mut decoded_chunk[chunk_len..]);
-                                    chunk_len += written;
-                                    true
-                                },
-                            );
-
-                            match gen_res {
-                                Ok(_tokens_generated) => {
-                                    let answer = &decoded_chunk[..chunk_len];
-                                    // WHY the reply counts bytes and not tokens: every other answer this
-                                    // service sends reports the length of what it attached, and a reader
-                                    // can tell a whole answer from a cut one only by comparing that number
-                                    // with what arrived.
-                                    if !stream_answer(sender_task_id, std::ai::STATUS_SUCCESS, answer) {
-                                        emit_inference_response(
-                                            sender_task_id,
-                                            std::ai::STATUS_SUCCESS,
-                                            answer,
-                                            tx_buf,
-                                        );
-                                    }
+                            match gguf::read_model_info(path) {
+                                Ok(info) => {
+                                    let gap = match inference::ModelConfig::from_gguf(&info) {
+                                        Ok(_) => ModelGap::Configured,
+                                        Err(inference::InferenceError::ModelDeclaration(
+                                            key,
+                                            stated,
+                                            limit,
+                                        )) => ModelGap::Declaration(key, stated, limit),
+                                        Err(_) => {
+                                            reply_with_answer(
+                                                sender_task_id,
+                                                std::ai::STATUS_UNSUPPORTED,
+                                                b"Generative model error: unsupported architecture or tensor configuration.",
+                                                tx_buf,
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    let mut scratch = [0u8; 240];
+                                    let notice =
+                                        model_gap_notice(&info, gap, prompt_text, &mut scratch);
+                                    reply_with_answer(
+                                        sender_task_id,
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        notice,
+                                        tx_buf,
+                                    );
+                                }
+                                Err(gguf::GgufError::MissingMetadata(key, info)) => {
+                                    let mut scratch = [0u8; 240];
+                                    let notice = model_gap_notice(
+                                        &info,
+                                        ModelGap::Declaration(key, None, 0),
+                                        prompt_text,
+                                        &mut scratch,
+                                    );
+                                    reply_with_answer(
+                                        sender_task_id,
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        notice,
+                                        tx_buf,
+                                    );
                                 }
                                 Err(_) => {
                                     reply_with_answer(
                                         sender_task_id,
-                                        std::ai::STATUS_ERROR,
-                                        b"[Inference cancelled by user]",
+                                        std::ai::STATUS_UNSUPPORTED,
+                                        b"Generative model error: the model file's metadata could not be read.",
                                         tx_buf,
                                     );
                                 }
@@ -1364,6 +1443,65 @@ mod tests {
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[No active inference session to cancel]");
         assert!(!CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// A file that states the architecture the notice can quote it; one that does
+    /// not must not be answered as if it had.
+    fn declared(arch: &[u8], hidden: u32, layers: u32, vocab: u32) -> gguf::GgufModelInfo {
+        let mut info = gguf::GgufModelInfo::empty();
+        info.architecture[..arch.len()].copy_from_slice(arch);
+        info.architecture_len = arch.len();
+        info.hidden_dim = Some(hidden);
+        info.num_layers = Some(layers);
+        info.vocab_size = Some(vocab);
+        info
+    }
+
+    #[test]
+    fn test_model_gap_notice_quotes_the_file_and_counts_the_prompt() {
+        let info = declared(b"gemma2", 64, 2, 290);
+        let mut out = [0u8; 240];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Configured,
+            b"Summarize my notifications",
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
+        );
+    }
+
+    #[test]
+    fn test_model_gap_notice_reports_a_declaration_beyond_the_engine() {
+        let info = declared(b"gemma2", 2304, 26, 256_000);
+        let mut out = [0u8; 240];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Declaration("<arch>.embedding_length", Some(2304), 256),
+            b"hi",
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2, and states <arch>.embedding_length as 2304 against the engine's bound of 256; the prompt's 2 bytes were not answered."
+        );
+    }
+
+    #[test]
+    fn test_model_gap_notice_names_the_key_a_file_omitted() {
+        let mut out = [0u8; 240];
+        let notice = model_gap_notice(
+            &gguf::GgufModelInfo::empty(),
+            ModelGap::Declaration("<arch>.block_count", None, 0),
+            b"",
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file states no architecture, and states no <arch>.block_count; the prompt's 0 bytes were not answered."
+        );
     }
 }
 

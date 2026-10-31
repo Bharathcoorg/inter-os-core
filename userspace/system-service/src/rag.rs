@@ -574,7 +574,7 @@ pub fn format_rag_prompt(
 }
 
 /// Helper to format a u32 into an ASCII buffer without heap allocations.
-fn format_u32(mut val: u32, buf: &mut [u8]) -> usize {
+pub(crate) fn format_u32(mut val: u32, buf: &mut [u8]) -> usize {
     if val == 0 {
         if !buf.is_empty() {
             buf[0] = b'0';

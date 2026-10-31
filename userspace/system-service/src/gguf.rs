@@ -21,9 +21,28 @@ pub const PATH_GENERATIVE_MODEL_SYSTEM: &str = "/system/models/gemma4-2b.gguf";
 
 /// Maximum length for a tensor name in zero-allocation buffer.
 pub const MAX_TENSOR_NAME_LEN: usize = 64;
+/// Longest metadata key the configuration reader will name. A longer key is
+/// not one of the keys it recognises, so it costs nothing to step over it.
+pub const MAX_METADATA_KEY_LEN: usize = 48;
+/// Architecture names are short, and the engine only ever reports this one
+/// back to the user, so it is held in a fixed window.
+pub const MAX_ARCH_NAME_LEN: usize = 32;
+/// How many elements of a string array the reader is willing to step over.
+///
+/// WHY the vocabulary is not walked the way every other value is: a GGUF
+/// string array is one length-prefixed string per element, and a Gemma
+/// vocabulary is 256,000 of them -- two reads each, so half a million syscalls
+/// to pass one key. On a model file the kernel holds on the data disk, where
+/// every read remounts and rescans the inode table, that is not a slow path
+/// but a dead one. The array's own 12-byte header carries its element count,
+/// so the vocabulary size is read in one step and the elements are left alone.
+pub const MAX_STRING_ARRAY_ELEMENTS: usize = 4096;
 
 /// Error types for GGUF parsing and model probing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// WHY no `Eq`: a refusal to configure the engine carries what the file did
+/// declare, and a declared float is comparable without being an equivalence.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GgufError {
     /// Provided buffer is smaller than the minimum 24-byte header prefix or required record.
     BufferTooShort,
@@ -43,6 +62,10 @@ pub enum GgufError {
     ArithmeticOverflow,
     /// Tensor descriptor or block data structure corruption.
     CorruptedTensor,
+    /// A parameter the engine cannot run without was not declared in the part of
+    /// the metadata this reader can reach. Names the key and carries everything
+    /// the file did declare, so the answer can quote the model rather than guess.
+    MissingMetadata(&'static str, GgufModelInfo),
 }
 
 /// Bounded sequential GGUF data stream reader (zero heap allocation).
@@ -551,6 +574,239 @@ pub fn skip_all_kv_pairs_stream(stream: &mut GgufStream, kv_count: u64) -> Resul
         skip_metadata_value_stream(stream, val_type)?;
     }
     Ok(())
+}
+
+/// What a model file declares about its own architecture.
+///
+/// Every field is `Option`: a file that does not name a parameter is reported as
+/// not naming it, rather than being filled in with the value the engine happens
+/// to have been compiled with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GgufModelInfo {
+    /// `general.architecture`, e.g. `gemma2`.
+    pub architecture: [u8; MAX_ARCH_NAME_LEN],
+    pub architecture_len: usize,
+    /// `<arch>.embedding_length` -- the width every residual stream has.
+    pub hidden_dim: Option<u32>,
+    /// `<arch>.feed_forward_length`
+    pub intermediate_dim: Option<u32>,
+    /// `<arch>.block_count`
+    pub num_layers: Option<u32>,
+    /// `<arch>.attention.head_count`
+    pub num_heads: Option<u32>,
+    /// `<arch>.attention.head_count_kv`
+    pub num_kv_heads: Option<u32>,
+    /// `<arch>.attention.head_length`, or `key_head_length` where the file names
+    /// the query head width separately.
+    pub head_dim: Option<u32>,
+    /// Length of `tokenizer.ggml.tokens`, read from the array's own header.
+    pub vocab_size: Option<u32>,
+    /// `<arch>.attention.layer_norm_rms_epsilon`
+    pub rms_norm_eps: Option<f32>,
+    /// `<arch>.rope.freq_base`
+    pub rope_theta: Option<f32>,
+}
+
+impl GgufModelInfo {
+    pub const fn empty() -> Self {
+        Self {
+            architecture: [0u8; MAX_ARCH_NAME_LEN],
+            architecture_len: 0,
+            hidden_dim: None,
+            intermediate_dim: None,
+            num_layers: None,
+            num_heads: None,
+            num_kv_heads: None,
+            head_dim: None,
+            vocab_size: None,
+            rms_norm_eps: None,
+            rope_theta: None,
+        }
+    }
+
+    pub fn architecture(&self) -> Option<&str> {
+        if self.architecture_len == 0 {
+            return None;
+        }
+        core::str::from_utf8(&self.architecture[..self.architecture_len]).ok()
+    }
+
+    /// The first parameter the file has not declared, named by the key it would
+    /// have been declared under. `None` means the engine has everything it asks
+    /// the file for.
+    pub fn missing_key(&self) -> Option<&'static str> {
+        if self.architecture_len == 0 {
+            return Some("general.architecture");
+        }
+        if self.hidden_dim.is_none() {
+            return Some("<arch>.embedding_length");
+        }
+        if self.intermediate_dim.is_none() {
+            return Some("<arch>.feed_forward_length");
+        }
+        if self.num_layers.is_none() {
+            return Some("<arch>.block_count");
+        }
+        if self.num_heads.is_none() {
+            return Some("<arch>.attention.head_count");
+        }
+        if self.head_dim.is_none() {
+            return Some("<arch>.attention.head_length");
+        }
+        if self.vocab_size.is_none() {
+            return Some("tokenizer.ggml.tokens");
+        }
+        None
+    }
+
+    /// Whether the engine can stop reading the metadata: every parameter it
+    /// requires is known, so nothing further is worth the cost of reaching.
+    fn is_complete(&self) -> bool {
+        self.missing_key().is_none()
+    }
+}
+
+/// The last dotted segment of a metadata key, which is where GGUF puts the
+/// parameter name and the architecture prefix puts the model it belongs to.
+fn metadata_field(key: &[u8]) -> &[u8] {
+    match key.iter().rposition(|&b| b == b'.') {
+        Some(dot) => &key[dot + 1..],
+        None => key,
+    }
+}
+
+/// Reads one metadata value as a count, whatever width the file declared it in.
+fn read_count(stream: &mut GgufStream, val_type: u32) -> Result<u32, GgufError> {
+    let wide = match val_type {
+        0 | 1 | 7 => {
+            let mut b = [0u8; 1];
+            stream.read_exact(&mut b)?;
+            b[0] as u64
+        }
+        2 | 3 => {
+            let mut b = [0u8; 2];
+            stream.read_exact(&mut b)?;
+            u16::from_le_bytes(b) as u64
+        }
+        4 | 5 => {
+            let mut b = [0u8; 4];
+            stream.read_exact(&mut b)?;
+            u32::from_le_bytes(b) as u64
+        }
+        10 | 11 => stream.read_u64()?,
+        _ => return Err(GgufError::InvalidMetadata),
+    };
+    u32::try_from(wide).map_err(|_| GgufError::InvalidMetadata)
+}
+
+/// Reads one metadata value as a float, whether the file declared f32 or f64.
+fn read_epsilon(stream: &mut GgufStream, val_type: u32) -> Result<f32, GgufError> {
+    match val_type {
+        6 => {
+            let mut b = [0u8; 4];
+            stream.read_exact(&mut b)?;
+            Ok(f32::from_le_bytes(b))
+        }
+        12 => {
+            let mut b = [0u8; 8];
+            stream.read_exact(&mut b)?;
+            Ok(f64::from_le_bytes(b) as f32)
+        }
+        _ => Err(GgufError::InvalidMetadata),
+    }
+}
+
+/// Walks the metadata block of a GGUF stream as far as it has to go to configure
+/// the engine, and no further.
+///
+/// WHY it stops early: the parameters the engine asks for are scalars, and the
+/// one large value it asks for -- the vocabulary -- states its own length in a
+/// 12-byte header. Continuing past that to reach anything else would mean
+/// paying for the array, so a parameter a file declares after its vocabulary is
+/// reported as unreachable instead of being read half-way.
+pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, GgufError> {
+    let header = GgufHeader::parse_stream(stream)?;
+    let mut info = GgufModelInfo::empty();
+
+    for _ in 0..header.kv_count {
+        let key_len = stream.read_u64()? as usize;
+        if key_len == 0 || key_len > MAX_METADATA_KEY_LEN {
+            stream.skip(key_len)?;
+            let val_type = stream.read_u32()?;
+            skip_metadata_value_stream(stream, val_type)?;
+            continue;
+        }
+
+        let mut key_buf = [0u8; MAX_METADATA_KEY_LEN];
+        stream.read_exact(&mut key_buf[..key_len])?;
+        let key = &key_buf[..key_len];
+        let val_type = stream.read_u32()?;
+
+        if key == b"general.architecture" {
+            let str_len = stream.read_u64()? as usize;
+            let copy_len = str_len.min(MAX_ARCH_NAME_LEN);
+            stream.read_exact(&mut info.architecture[..copy_len])?;
+            info.architecture_len = copy_len;
+            if str_len > copy_len {
+                stream.skip(str_len - copy_len)?;
+            }
+        } else if key == b"tokenizer.ggml.tokens" {
+            let elem_type = stream.read_u32()?;
+            let elem_count = stream.read_u64()?;
+            if elem_type != 8 {
+                return Err(GgufError::InvalidMetadata);
+            }
+            info.vocab_size = u32::try_from(elem_count).ok();
+            if !info.is_complete() {
+                if elem_count > MAX_STRING_ARRAY_ELEMENTS as u64 {
+                    let missing = info
+                        .missing_key()
+                        .expect("incomplete by the branch above");
+                    return Err(GgufError::MissingMetadata(missing, info));
+                }
+                for _ in 0..elem_count {
+                    let s_len = stream.read_u64()? as usize;
+                    stream.skip(s_len)?;
+                }
+            }
+        } else {
+            match metadata_field(key) {
+                b"embedding_length" => info.hidden_dim = Some(read_count(stream, val_type)?),
+                b"feed_forward_length" => {
+                    info.intermediate_dim = Some(read_count(stream, val_type)?)
+                }
+                b"block_count" => info.num_layers = Some(read_count(stream, val_type)?),
+                b"head_count" => info.num_heads = Some(read_count(stream, val_type)?),
+                b"head_count_kv" => info.num_kv_heads = Some(read_count(stream, val_type)?),
+                b"head_length" | b"key_head_length" => {
+                    info.head_dim = Some(read_count(stream, val_type)?)
+                }
+                b"layer_norm_rms_epsilon" => {
+                    info.rms_norm_eps = Some(read_epsilon(stream, val_type)?)
+                }
+                b"freq_base" => info.rope_theta = Some(read_epsilon(stream, val_type)?),
+                _ => skip_metadata_value_stream(stream, val_type)?,
+            }
+        }
+
+        if info.is_complete() {
+            return Ok(info);
+        }
+    }
+
+    match info.missing_key() {
+        Some(missing) => Err(GgufError::MissingMetadata(missing, info)),
+        None => Ok(info),
+    }
+}
+
+/// Reads the declaring metadata of the model file at `path`.
+pub fn read_model_info(path: &str) -> Result<GgufModelInfo, GgufError> {
+    let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
+    let mut stream = GgufStream::from_file(fd);
+    let res = read_model_info_stream(&mut stream);
+    let _ = std::fs_close(fd);
+    res
 }
 
 /// Parses a single GGUF tensor info entry from a streaming reader with checked arithmetic.
@@ -1202,5 +1458,187 @@ mod tests {
         let t = found.unwrap();
         assert_eq!(t.name_as_bytes(), b"blk.0.attn_k.weight");
         assert_eq!(t.offset, 16384);
+    }
+
+    fn put_u32_at(buf: &mut [u8], off: &mut usize, value: u32) {
+        buf[*off..*off + 4].copy_from_slice(&value.to_le_bytes());
+        *off += 4;
+    }
+
+    fn put_u64_at(buf: &mut [u8], off: &mut usize, value: u64) {
+        buf[*off..*off + 8].copy_from_slice(&value.to_le_bytes());
+        *off += 8;
+    }
+
+    fn put_key(buf: &mut [u8], off: &mut usize, key: &[u8]) {
+        put_u64_at(buf, off, key.len() as u64);
+        buf[*off..*off + key.len()].copy_from_slice(key);
+        *off += key.len();
+    }
+
+    fn put_string(buf: &mut [u8], off: &mut usize, key: &[u8], value: &[u8]) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 8);
+        put_u64_at(buf, off, value.len() as u64);
+        buf[*off..*off + value.len()].copy_from_slice(value);
+        *off += value.len();
+    }
+
+    fn put_count(buf: &mut [u8], off: &mut usize, key: &[u8], value: u32) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 4);
+        put_u32_at(buf, off, value);
+    }
+
+    fn put_float(buf: &mut [u8], off: &mut usize, key: &[u8], value: f32) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 6);
+        put_u32_at(buf, off, value.to_bits());
+    }
+
+    /// Writes a string array declaring `count` elements, whose element bytes the
+    /// caller may leave unwritten when the reader is expected to stop at it.
+    fn put_vocab(buf: &mut [u8], off: &mut usize, key: &[u8], count: u64, tokens: &[&[u8]]) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 9);
+        put_u32_at(buf, off, 8);
+        put_u64_at(buf, off, count);
+        for token in tokens {
+            put_u64_at(buf, off, token.len() as u64);
+            buf[*off..*off + token.len()].copy_from_slice(token);
+            *off += token.len();
+        }
+    }
+
+    /// Starts a metadata-only GGUF file with `kv_count` pairs to follow.
+    fn begin_file(buf: &mut [u8], kv_count: u64) -> usize {
+        let header = GgufHeader {
+            magic: GGUF_MAGIC,
+            version: 3,
+            tensor_count: 0,
+            kv_count,
+        };
+        header.write_to(buf).expect("header fits");
+        GgufHeader::HEADER_SIZE
+    }
+
+    #[test]
+    fn test_read_model_info_takes_the_dimensions_from_the_file() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 10);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_string(&mut buf, &mut off, b"general.name", b"Gemma 4 2B It");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count_kv", 1);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_length", 32);
+        put_float(&mut buf, &mut off, b"gemma2.attention.layer_norm_rms_epsilon", 1e-6);
+        // The vocabulary is declared as 290 entries and none of them are written:
+        // the reader takes the width from the array's header and stops, so a file
+        // whose token list is absent past that header still configures the engine.
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the file declares every dimension the engine asks for");
+        assert_eq!(info.architecture(), Some("gemma2"));
+        assert_eq!(info.hidden_dim, Some(64));
+        assert_eq!(info.intermediate_dim, Some(128));
+        assert_eq!(info.num_layers, Some(2));
+        assert_eq!(info.num_heads, Some(2));
+        assert_eq!(info.num_kv_heads, Some(1));
+        assert_eq!(info.head_dim, Some(32));
+        assert_eq!(info.rms_norm_eps, Some(1e-6));
+        assert_eq!(info.vocab_size, Some(290));
+        assert_eq!(info.missing_key(), None);
+    }
+
+    #[test]
+    fn test_read_model_info_takes_a_head_width_named_by_the_key_file() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 8);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma");
+        put_count(&mut buf, &mut off, b"gemma.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma.block_count", 1);
+        put_count(&mut buf, &mut off, b"gemma.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma.attention.key_head_length", 32);
+        put_float(&mut buf, &mut off, b"gemma.rope.freq_base", 1_000_000.0);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("a Gemma file names its head width per key");
+        assert_eq!(info.head_dim, Some(32));
+        assert_eq!(info.rope_theta, Some(1_000_000.0));
+        assert_eq!(info.missing_key(), None);
+    }
+
+    #[test]
+    fn test_read_model_info_names_the_key_a_file_never_declares() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 5);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_length", 32);
+        put_vocab(
+            &mut buf,
+            &mut off,
+            b"tokenizer.ggml.tokens",
+            2,
+            &[b"hello", b"world"],
+        );
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        match result {
+            Err(GgufError::MissingMetadata(key, partial)) => {
+                assert_eq!(key, "<arch>.feed_forward_length");
+                assert_eq!(partial.architecture(), Some("gemma2"));
+                assert_eq!(partial.hidden_dim, Some(64));
+                assert_eq!(partial.vocab_size, Some(2));
+            }
+            other => panic!("a file that states no feed-forward width must say so, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_read_model_info_refuses_to_walk_a_vocabulary_to_reach_a_later_key() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 4);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 256_000, &[]);
+        let after_vocab_header = off;
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 26);
+
+        let mut stream = GgufStream::from_slice(&buf[..off]);
+        let result = read_model_info_stream(&mut stream);
+        match result {
+            Err(GgufError::MissingMetadata(key, partial)) => {
+                assert_eq!(key, "<arch>.feed_forward_length");
+                assert_eq!(partial.vocab_size, Some(256_000));
+            }
+            other => panic!("256,000 tokens must not be walked to reach one key, got {:?}", other),
+        }
+        // WHY this is the assertion that matters: the walk would cost two reads per
+        // token, and on a file the kernel holds on the data disk every one of those
+        // remounts and rescans the inode table.
+        assert_eq!(stream.position(), after_vocab_header);
+    }
+
+    #[test]
+    fn test_read_model_info_rejects_a_vocabulary_that_is_not_strings() {
+        let mut buf = [0u8; 256];
+        let mut off = begin_file(&mut buf, 1);
+        put_key(&mut buf, &mut off, b"tokenizer.ggml.tokens");
+        put_u32_at(&mut buf, &mut off, 9);
+        put_u32_at(&mut buf, &mut off, 4);
+        put_u64_at(&mut buf, &mut off, 8);
+
+        assert_eq!(
+            read_model_info_stream(&mut GgufStream::from_slice(&buf[..off])),
+            Err(GgufError::InvalidMetadata)
+        );
     }
 }

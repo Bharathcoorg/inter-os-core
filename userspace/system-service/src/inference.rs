@@ -16,6 +16,9 @@ pub const MAX_INTERMEDIATE_DIM: usize = 512;
 pub const MAX_VOCAB_SIZE: usize = 320;
 pub const MAX_SEQ_LEN: usize = 64;
 pub const MAX_LAYERS: usize = 2;
+/// Width of one KV cache row. The cache is `[[f32; 32]; MAX_SEQ_LEN]`, so a
+/// head the file declares wider than this has nowhere to be stored.
+pub const MAX_HEAD_DIM: usize = 32;
 
 /// Error types for inference execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +29,10 @@ pub enum InferenceError {
     ContextLengthExceeded,
     Cancelled,
     ModelUnavailable,
+    /// A declaration in the model file the engine cannot be built from: the key
+    /// it was declared under, what the file stated (`None` when the file states
+    /// no such key), and the bound the engine is compiled to.
+    ModelDeclaration(&'static str, Option<u32>, usize),
 }
 
 // -----------------------------------------------------------------------------
@@ -449,6 +456,13 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// The dimensions the engine's own tests are written against.
+    ///
+    /// WHY this is not a fallback the service may reach for: these numbers
+    /// describe a 64-wide graph over a 290-token vocabulary, which is a property
+    /// of the fixture and not of anything the user installed. Reporting them as
+    /// the model's configuration would let an answer computed at 64 wide be
+    /// presented as an answer from the model on the disk.
     pub const fn default_test_config() -> Self {
         Self {
             hidden_dim: 64,
@@ -461,6 +475,80 @@ impl ModelConfig {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
         }
+    }
+
+    /// Builds the engine's parameters from what the model file declares about
+    /// itself, refusing a declaration the engine's static buffers cannot hold.
+    ///
+    /// WHY the file is the only source of these numbers: the alternative is the
+    /// engine running at whatever it was compiled with and describing the result
+    /// as the installed model's answer. A refusal is the honest outcome when the
+    /// two disagree, and it names the key that disagrees so the gap is legible.
+    ///
+    /// `rms_norm_eps` and `rope_theta` take the GGUF format's own defaults when
+    /// the file states neither, which is what the format specifies for an absent
+    /// key; every dimension comes from the file or the engine does not run.
+    pub fn from_gguf(info: &crate::gguf::GgufModelInfo) -> Result<Self, InferenceError> {
+        fn fits(key: &'static str, declared: Option<u32>, limit: usize) -> Result<usize, InferenceError> {
+            let Some(declared) = declared else {
+                return Err(InferenceError::ModelDeclaration(key, None, limit));
+            };
+            let Ok(size) = usize::try_from(declared) else {
+                return Err(InferenceError::ModelDeclaration(key, Some(declared), limit));
+            };
+            if size == 0 || size > limit {
+                return Err(InferenceError::ModelDeclaration(key, Some(declared), limit));
+            }
+            Ok(size)
+        }
+
+        let hidden_dim = fits("<arch>.embedding_length", info.hidden_dim, MAX_HIDDEN_DIM)?;
+        let intermediate_dim = fits(
+            "<arch>.feed_forward_length",
+            info.intermediate_dim,
+            MAX_INTERMEDIATE_DIM,
+        )?;
+        let num_layers = fits("<arch>.block_count", info.num_layers, MAX_LAYERS)?;
+        let head_dim = fits("<arch>.attention.head_length", info.head_dim, MAX_HEAD_DIM)?;
+        let num_heads = fits("<arch>.attention.head_count", info.num_heads, MAX_HIDDEN_DIM)?;
+        let vocab_size = fits("tokenizer.ggml.tokens", info.vocab_size, MAX_VOCAB_SIZE)?;
+
+        // The head loop walks `num_heads` slices of `head_dim` out of a buffer
+        // that is `hidden_dim` long, so a file whose heads do not tile its
+        // residual stream would index past it.
+        let heads_span = num_heads
+            .checked_mul(head_dim)
+            .ok_or(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count",
+                info.num_heads,
+                hidden_dim,
+            ))?;
+        if heads_span > hidden_dim {
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count x head_length",
+                u32::try_from(heads_span).ok(),
+                hidden_dim,
+            ));
+        }
+
+        let num_kv_heads = match info.num_kv_heads {
+            Some(kv) if kv > 0 && usize::try_from(kv).unwrap_or(usize::MAX) <= num_heads => {
+                kv as usize
+            }
+            _ => num_heads,
+        };
+
+        Ok(Self {
+            hidden_dim,
+            intermediate_dim,
+            num_layers,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            vocab_size,
+            rms_norm_eps: info.rms_norm_eps.unwrap_or(1e-6),
+            rope_theta: info.rope_theta.unwrap_or(10000.0),
+        })
     }
 }
 
@@ -967,5 +1055,121 @@ pub mod tests {
         for &tok in &generated_tokens[..num_gen] {
             assert!(tok < config.vocab_size as u32);
         }
+    }
+
+    /// A model file that states every dimension the engine asks it for.
+    fn declared(
+        hidden: u32,
+        ffn: u32,
+        layers: u32,
+        heads: u32,
+        head_dim: u32,
+        vocab: u32,
+    ) -> crate::gguf::GgufModelInfo {
+        let mut info = crate::gguf::GgufModelInfo::empty();
+        let arch = b"gemma2";
+        info.architecture[..arch.len()].copy_from_slice(arch);
+        info.architecture_len = arch.len();
+        info.hidden_dim = Some(hidden);
+        info.intermediate_dim = Some(ffn);
+        info.num_layers = Some(layers);
+        info.num_heads = Some(heads);
+        info.head_dim = Some(head_dim);
+        info.vocab_size = Some(vocab);
+        info
+    }
+
+    #[test]
+    fn test_model_config_is_built_from_what_the_file_declares() {
+        let mut info = declared(64, 128, 2, 2, 32, 290);
+        info.num_kv_heads = Some(1);
+        info.rms_norm_eps = Some(2.5e-5);
+        info.rope_theta = Some(1_000_000.0);
+
+        let config = ModelConfig::from_gguf(&info).expect("the file configures the engine");
+        assert_eq!(config.hidden_dim, 64);
+        assert_eq!(config.intermediate_dim, 128);
+        assert_eq!(config.num_layers, 2);
+        assert_eq!(config.num_heads, 2);
+        assert_eq!(config.num_kv_heads, 1);
+        assert_eq!(config.head_dim, 32);
+        assert_eq!(config.vocab_size, 290);
+        assert_eq!(config.rms_norm_eps, 2.5e-5);
+        assert_eq!(config.rope_theta, 1_000_000.0);
+
+        // A file that states neither epsilon nor theta takes the format's own
+        // defaults, which is what GGUF specifies for an absent key.
+        info.rms_norm_eps = None;
+        info.rope_theta = None;
+        let defaulted = ModelConfig::from_gguf(&info).expect("the two floats are optional");
+        assert_eq!(defaulted.rms_norm_eps, 1e-6);
+        assert_eq!(defaulted.rope_theta, 10000.0);
+    }
+
+    #[test]
+    fn test_model_config_refuses_a_dimension_the_engine_cannot_hold() {
+        // The real Gemma 2B: 2304 wide over 26 blocks with a 256,000 vocabulary.
+        let info = declared(2304, 4608, 26, 8, 256, 256_000);
+        assert_eq!(
+            ModelConfig::from_gguf(&info),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.embedding_length",
+                Some(2304),
+                MAX_HIDDEN_DIM
+            ))
+        );
+    }
+
+    #[test]
+    fn test_model_config_refuses_a_file_that_states_no_dimension() {
+        let mut info = declared(64, 128, 1, 2, 32, 290);
+        info.num_layers = None;
+        assert_eq!(
+            ModelConfig::from_gguf(&info),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.block_count",
+                None,
+                MAX_LAYERS
+            ))
+        );
+
+        let mut zeroed = declared(64, 128, 0, 2, 32, 290);
+        zeroed.hidden_dim = Some(0);
+        assert_eq!(
+            ModelConfig::from_gguf(&zeroed),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.embedding_length",
+                Some(0),
+                MAX_HIDDEN_DIM
+            ))
+        );
+    }
+
+    #[test]
+    fn test_model_config_refuses_heads_that_overrun_the_residual_stream() {
+        // The head loop walks num_heads slices of head_dim out of a buffer that is
+        // hidden_dim long, so four heads of 32 do not fit inside 64.
+        let info = declared(64, 128, 1, 4, 32, 290);
+        assert_eq!(
+            ModelConfig::from_gguf(&info),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count x head_length",
+                Some(128),
+                64
+            ))
+        );
+    }
+
+    #[test]
+    fn test_model_config_bounds_a_head_wider_than_the_kv_cache_row() {
+        let info = declared(64, 128, 1, 1, 64, 290);
+        assert_eq!(
+            ModelConfig::from_gguf(&info),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_length",
+                Some(64),
+                MAX_HEAD_DIM
+            ))
+        );
     }
 }
