@@ -7803,9 +7803,8 @@ mod tests {
         use crate::capability::delegation::{allocate_lease_id, register_lease};
         use crate::fs::vfs::Vfs;
 
-        let grantor = TaskId(50);
-        let grantee = TaskId(51);
-        crate::task::process::register_leader(grantee, TaskId(1));
+        let grantor = TaskId::new();
+        let (grantee, _leader) = crate::task::process::OwnedLeader::fresh();
 
         let mut vfs = Vfs::new();
         vfs.mkdir("/test_dir");
@@ -7894,9 +7893,8 @@ mod tests {
         use crate::capability::delegation::{allocate_lease_id, register_lease};
         use crate::fs::vfs::Vfs;
 
-        let grantor = TaskId(80);
-        let grantee = TaskId(81);
-        crate::task::process::register_leader(grantee, TaskId(1));
+        let grantor = TaskId::new();
+        let (grantee, _leader) = crate::task::process::OwnedLeader::fresh();
 
         let mut vfs = Vfs::new();
         vfs.mkdir("/packages");

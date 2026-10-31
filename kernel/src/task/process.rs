@@ -522,6 +522,75 @@ pub fn is_leader(task: TaskId) -> bool {
     process_for_task(task).and_then(record_for_process).map(|r| r.leader_task == task).unwrap_or(false)
 }
 
+/// A process record a single test case owns, reclaimed when the guard goes away.
+///
+/// WHY this exists instead of a bare `register_leader` call: both tables are
+/// process-global and nothing else ever frees what a case leaves behind. A leaked
+/// record costs one of `MAX_PROCESSES` slots for the rest of the process, and it
+/// leaks the *identity* too -- `TaskId::new()` is one monotone counter, so a case
+/// that hand-picks `TaskId(51)` and never reaps it is still binding that id when a
+/// later case's `spawn` is handed 51. The later case then sees a process record it
+/// did not create, and a lifecycle case that asserts its own task is gone after the
+/// reaper runs fails depending on which order the suite happened to run in.
+///
+/// WHY the guard refuses an id that is already bound: reaping it would delete the
+/// other case's process out from under it, which is the same defect wearing a
+/// different name.
+#[cfg(test)]
+pub(crate) struct OwnedLeader {
+    task: TaskId,
+}
+
+#[cfg(test)]
+impl OwnedLeader {
+    /// Registers `task` as the leader of its own process, child of the init task.
+    pub(crate) fn new(task: TaskId) -> Self {
+        assert!(
+            process_for_task(task).is_none(),
+            "TaskId {:?} is already bound to a process, so another case owns that id",
+            task
+        );
+        assert!(
+            register_leader(task, TaskId(1)).is_some(),
+            "the case's own process must get a slot in the process table, {} of {} are held",
+            PROCESS_TABLE.lock().iter().flatten().count(),
+            MAX_PROCESSES,
+        );
+        Self { task }
+    }
+
+    /// Registers a leader whose id is drawn from the same monotone counter
+    /// `Scheduler::spawn` uses, so no other case can already hold it.
+    pub(crate) fn fresh() -> (TaskId, Self) {
+        let task = TaskId::new();
+        (task, Self::new(task))
+    }
+
+    /// Takes responsibility for a record the case did not create, such as the one
+    /// `Scheduler::spawn` registers for the task it launches.
+    ///
+    /// WHY this needs to exist: a case that spawns and then calls `register_leader`
+    /// again gives the same task two records, and only one of them is ever freed.
+    pub(crate) fn adopted(task: TaskId) -> Self {
+        assert!(
+            process_for_task(task).is_some(),
+            "TaskId {:?} has no process record to adopt",
+            task
+        );
+        Self { task }
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnedLeader {
+    fn drop(&mut self) {
+        // `reap` rather than `try_reap`: a case must not abandon the record because
+        // a table happened to be busy, and `Drop` runs on the panic path too, so an
+        // asserting case still cleans up after itself.
+        let _ = reap(self.task);
+    }
+}
+
 pub fn set_limits(process: ProcessId, limits: ResourceLimits) -> Result<(), &'static str> {
     let mut table = PROCESS_TABLE.lock();
     let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;

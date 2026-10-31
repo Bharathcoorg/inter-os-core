@@ -463,6 +463,17 @@ mod tests {
     #[test]
     fn revoking_a_source_kills_its_delegated_lease() {
         let parent_id = CapabilityId(0x5A11_0007);
+        // WHY the grantee is drawn from the task counter instead of named: the lease
+        // goes into the process-global `DELEGATION_REGISTRY` under its grantee, and
+        // `capability::cleanup_task` -- which every task-exit path runs -- revokes
+        // every lease whose grantee matches the departing task. One monotone counter
+        // hands ids to every case in this suite, so a hand-picked grantee can be an id
+        // an earlier `spawn` was handed, and that task's exit then strips the lease
+        // this case is mid-flight on: the check below answers `RevokedHandle` and says
+        // nothing about the stranger. A drawn id is one no other case can hold. The
+        // grantor id stays a literal because `grantor_task` is stored and never read,
+        // and its table is local to this case.
+        let grantee_task = TaskId::new();
         let mut parent = CapabilityTable::new_for_task(TaskId(46), 2);
         let mut parent_cap = cap(parent_id.0, CapabilityType::IpcSend);
         parent_cap.rights = Rights::WRITE | Rights::GRANT;
@@ -476,7 +487,7 @@ mod tests {
                 borrowed
             },
             TaskId(46),
-            TaskId(47),
+            grantee_task,
             Rights::WRITE,
             5,
             10_000,
@@ -485,7 +496,7 @@ mod tests {
         .expect("lease");
         crate::capability::delegation::register_lease(lease.clone());
         let derived_id = lease.to_capability().id;
-        let mut grantee = CapabilityTable::new_for_task(TaskId(47), 2);
+        let mut grantee = CapabilityTable::new_for_task(grantee_task, 2);
         let slot = grantee.insert(lease.to_capability()).expect("slot");
         assert!(grantee.verify_object(slot, CapabilityType::IpcSend, Rights::WRITE, 7).is_ok());
 
@@ -508,13 +519,18 @@ mod tests {
     fn revoked_lease_is_inactive_and_unusable() {
         let lease_id = crate::capability::delegation::allocate_lease_id();
         let now = crate::interrupts::get_system_ticks();
+        // Same reason as in `revoking_a_source_kills_its_delegated_lease`: this
+        // grantee is written into the global registry and is asked back by name at the
+        // invocation check below, so a literal id lets another case's exit revoke the
+        // lease -- or lets the lease this case registers be revoked on their behalf.
+        let grantee_task = TaskId::new();
         let mut parent = cap(0x5A11_0008, CapabilityType::NetworkSend);
         parent.rights = Rights::WRITE | Rights::GRANT;
         let lease = crate::capability::DelegatedLease::new(
             lease_id,
             &parent,
             TaskId(48),
-            TaskId(49),
+            grantee_task,
             Rights::WRITE,
             3,
             10_000,
@@ -532,7 +548,12 @@ mod tests {
             "the identity a revoked lease minted must be revoked as well",
         );
         assert_eq!(
-            crate::capability::delegation::consume_invocation(lease_id, Some(TaskId(49)), now, Rights::WRITE),
+            crate::capability::delegation::consume_invocation(
+                lease_id,
+                Some(grantee_task),
+                now,
+                Rights::WRITE
+            ),
             Err(crate::capability::CapError::RevokedHandle),
         );
     }
@@ -559,7 +580,19 @@ mod tests {
     /// ran out") is delivered by the store that is built to keep it.
     #[test]
     fn exiting_task_takes_its_delegations_with_it() {
-        let gone = TaskId(50);
+        // WHY this task id is drawn from the counter instead of named:
+        // `capability::cleanup_task` is not a local operation. For the id it is given
+        // it revokes every lease in the global delegation registry naming that grantee,
+        // prunes the registry, drops that task's consent records from the global
+        // `PERMISSION_MANAGER`, and clears its ephemeral-suspension and background-pill
+        // entries -- and each revocation it publishes lands in `REVOKED`, which is
+        // never evicted. Hand-pick the id and it can be one a `spawn` in another case
+        // was handed: this cleanup then strips a live case's authority, and the
+        // reverse -- a stranger leaving records under the same id -- makes this cleanup
+        // revoke more than the one lease the case created. Drawing the id takes it out
+        // of everyone else's reach, which is also the only way this case can be sure
+        // the exit it is simulating is its own.
+        let gone = TaskId::new();
         let mut parent = cap(0x5A11_0009, CapabilityType::ShmProducer);
         parent.rights = Rights::WRITE | Rights::GRANT;
         let now = crate::interrupts::get_system_ticks();
@@ -656,7 +689,15 @@ mod tests {
             "the permission id base must not set the delegated-lease tag bit"
         );
 
-        let task = TaskId(4242);
+        // WHY the task is drawn from the counter instead of named: a permission id is
+        // a deterministic function of `(task, permission)`, so naming the task names
+        // four capability identities for the whole process. `verify_object` consults
+        // the revoked store, which is never evicted, and `suspend_ephemeral_for_task`
+        // writes into it by task -- so if the counter ever handed another case the
+        // literal id this case picked, that case's backgrounding or exit would leave
+        // these four identities revoked and this case would fail on an authority some
+        // other task lost.
+        let task = TaskId::new();
         let mut table = CapabilityTable::new_for_task(task, 4);
 
         for perm in [
@@ -733,8 +774,21 @@ mod tests {
             t
         };
 
-        // First launch: works, because nothing has revoked these ids yet.
+        // First launch: usable, because the spawn funnel re-keys every table it
+        // builds (`task::user`), and this mirrors that.
+        //
+        // WHY re-keying is in the fixture rather than an assumption: the revoked set
+        // is process-global and never evicted, and `CapabilityId(2601..2604)` are the
+        // constants this case shares with
+        // `unrekeyed_relaunch_reproduces_the_revoked_capability_defect`, which
+        // publishes them into that set. Asserting the first launch is usable without
+        // re-keying therefore only passed while this case happened to run first.
         let mut first = build_table(TaskId(24));
+        assert_eq!(
+            first.rekey_all(),
+            4,
+            "the spawn funnel re-keys every capability in a freshly built table"
+        );
         let first_count = first.count();
         assert!(first_count > 0, "first launch must have usable capabilities");
         assert!(first.find_slot(CapabilityType::SerialOutput, Rights::WRITE).is_some());
@@ -806,7 +860,17 @@ mod tests {
 
     #[test]
     fn test_ephemeral_background_revocation_and_reinstatement() {
-        let task = TaskId(88);
+        // WHY the task is drawn from the counter instead of named: the suspension
+        // store and the pill list are process-global and keyed by task id, and the
+        // permission identities this case reads back are `(task, permission)`
+        // derivations of exactly that id. A literal can be an id the shared counter
+        // handed to some other case's `spawn`, and then two things go wrong at once:
+        // the opening `!is_revoked` checks only hold while nobody else has suspended
+        // that task, and `suspend_ephemeral_for_task` walks the scheduler entry the id
+        // does have and suspends a live task's real camera, microphone and network
+        // tokens. Drawing the id leaves the case with a task nobody else can reach, so
+        // no lock is needed: every write below is keyed to an id only this case holds.
+        let task = TaskId::new();
         use crate::capability::permission::SensitivePermission;
         let cam_id = SensitivePermission::CameraCapture.capability_id(task);
         let mic_id = SensitivePermission::Microphone.capability_id(task);
@@ -957,7 +1021,11 @@ mod tests {
 
     #[test]
     fn test_background_pill_preserves_network_while_camera_mic_suspended() {
-        let task = TaskId(89);
+        // Drawn for the two reasons laid out in
+        // `test_ephemeral_background_revocation_and_reinstatement`: the pill list is a
+        // global keyed by task id, and the "network stays live" assertion below is only
+        // about a task no other case can have backgrounded or handed a pill of its own.
+        let task = TaskId::new();
         use crate::capability::permission::SensitivePermission;
         let cam_id = SensitivePermission::CameraCapture.capability_id(task);
         let mic_id = SensitivePermission::Microphone.capability_id(task);

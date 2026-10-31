@@ -3000,8 +3000,7 @@ mod tests {
         let mut vfs = Vfs::new();
         vfs.create_file("/test.txt", b"vfs payload", false);
 
-        let task_id = TaskId(888);
-        crate::task::process::register_leader(task_id, TaskId(1));
+        let (task_id, _leader) = crate::task::process::OwnedLeader::fresh();
 
         let current_ticks = crate::interrupts::get_system_ticks();
         let parent_cap = Capability {
@@ -3145,8 +3144,7 @@ mod tests {
     #[test]
     fn vfs_object_scoping_and_slot_fallback_prevention() {
         let mut vfs = Vfs::new();
-        let task_id = TaskId(88);
-        crate::task::process::register_leader(task_id, TaskId(1));
+        let (task_id, _leader) = crate::task::process::OwnedLeader::fresh();
 
         vfs.create_file("/scoped_a.txt", b"secret a", false);
         vfs.create_file("/scoped_b.txt", b"secret b", false);
@@ -3820,8 +3818,7 @@ mod tests {
         vfs.mkdir("/data/models");
         vfs.mkdir("/storage");
         vfs.mkdir("/storage/downloads");
-        let task_id = TaskId(1308);
-        crate::task::process::register_leader(task_id, TaskId(1));
+        let (task_id, _leader) = crate::task::process::OwnedLeader::fresh();
         let caps = stream_caps(task_id);
 
         let model_fd = vfs
@@ -4080,7 +4077,16 @@ mod tests {
     #[test]
     fn vfs_generation_dirty_tracking_and_close_no_op() {
         let mut vfs = Vfs::new();
-        let task_id = TaskId(777);
+        // WHY the id is drawn from the task counter instead of named: `close` bills
+        // the open-file allowance of whatever process that id resolves to
+        // (`process::process_for_task` -> `release_open_file`), and every case in the
+        // host suite shares one process table and one monotone id counter. A
+        // hand-picked id can land on a task an earlier `spawn` was handed and left
+        // registered, so this close would quietly spend a stranger process's budget
+        // while the case itself -- which only asserts on generations -- reported
+        // nothing about it. A freshly drawn id belongs to nobody, which is what this
+        // case wants: no process record, so the release path is skipped.
+        let task_id = TaskId::new();
 
         // Synchronize initial generations
         vfs.persisted_data_generation.set(vfs.data_generation.get());
@@ -4259,7 +4265,10 @@ mod tests {
         let app_task = sched.spawn("org.interos.notes", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 1);
         drop(sched);
 
-        crate::task::process::register_leader(app_task, TaskId(1));
+        // WHY adopted rather than registered: `Scheduler::spawn` already gave this
+        // task its process record, so a second `register_leader` here put two
+        // records on one task and only ever freed one.
+        let _leader = crate::task::process::OwnedLeader::adopted(app_task);
         crate::task::process::bind_user_for_task(app_task, 1).unwrap();
 
         let mut caps = CapabilityTable::new_for_task(app_task, 4);
@@ -4291,7 +4300,18 @@ mod tests {
         assert_eq!(res_system, Err(FsError::PermissionDenied));
 
         // 4. Task without app storage root attempting to mkdir outside /storage
-        let non_app_task = TaskId(9999);
+        // WHY this id is drawn from the task counter and then left unbound: the
+        // expected `FileNotFound` below is only what a task with no scheduler entry
+        // and no process record gets -- `enforce_app_path` lets it through because
+        // `app_storage_root` resolves to nothing, and `mkdir_for_task` then refuses
+        // for want of a root. Binding an `OwnedLeader` here would supply the very
+        // record whose absence the case tests and turn the answer into
+        // `PermissionDenied`. What the literal id did cost was order dependence: one
+        // monotone counter is shared by every case in the host suite, so a
+        // hand-picked id could land on a task an earlier `spawn` was handed, complete
+        // with name and uid, and this assertion failed for a reason it does not
+        // mention.
+        let non_app_task = TaskId::new();
         let res_no_root = vfs.mkdir_for_task(non_app_task, &caps, 0, "/user/1/apps/org.interos.notes/leak");
         assert_eq!(res_no_root, Err(FsError::FileNotFound));
 
@@ -4328,7 +4348,13 @@ mod tests {
     fn vfs_mkdir_for_task_existing_path_fails() {
         let mut vfs = Vfs::new();
         vfs.mkdir("/storage");
-        let task_id = TaskId(905);
+        // WHY drawn and left unbound, as in `vfs_mkdir_for_task_sandbox_root_escape`:
+        // the first call below asks for `/storage` with no trailing slash, which is
+        // not the storage branch, so it is answered by `app_storage_root` -- and the
+        // `FileNotFound` this case asserts is precisely the answer a task with no
+        // process record gets. A literal id could be one an earlier `spawn` was
+        // handed, and then a stranger's app root decides what this case sees.
+        let task_id = TaskId::new();
 
         let mut caps = CapabilityTable::new_for_task(task_id, 4);
         caps.insert(Capability {
@@ -4338,7 +4364,8 @@ mod tests {
             object_id: 0,
         }).unwrap();
 
-        // /storage without trailing slash requires app root, which task 905 lacks -> FileNotFound
+        // /storage without trailing slash requires app root, which this unbound task
+        // lacks -> FileNotFound
         let res1 = vfs.mkdir_for_task(task_id, &caps, 0, "/storage");
         assert_eq!(res1, Err(FsError::FileNotFound));
 
