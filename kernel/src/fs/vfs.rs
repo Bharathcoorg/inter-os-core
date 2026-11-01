@@ -2532,6 +2532,167 @@ pub fn read_file_for_task(
         }
     }
 
+    /// Adds the model payloads a provisioning tool left on the device to the
+    /// filesystem tree, without reading a byte of any of them.
+    ///
+    /// WHY a manifest and not a walk of the block filesystem: the bytes of a
+    /// device-held file are named by a digest of the VFS path that owns them,
+    /// and a digest does not run backwards -- an inode on the device says how
+    /// many bytes and where, never which file they belong to. The manifest is
+    /// the one device-side record that carries the path, so it is what an
+    /// import has to read.
+    ///
+    /// WHY the length comes from the device and not from the manifest: the
+    /// manifest is a promise about bytes a tool meant to copy, and the extent
+    /// is those bytes. A disk that filled mid-copy, or a tool that wrote a
+    /// header and nothing after it, changes the promise's truth but not the
+    /// device's, and a restore that took the device's length cannot hand a
+    /// loader more bytes than exist. The manifest's own figure is still
+    /// reported when it disagrees, because the disagreement is the only sign
+    /// an interrupted copy left.
+    ///
+    /// WHY only the model namespace is imported: the manifest arrives from
+    /// whatever wrote the disk, and a channel that could name any path would be
+    /// a way to make `/data/keystore/state` or `/system/bin/init` exist without
+    /// the kernel having created them. Restricting the prefix to the one
+    /// directory the inference service reads cannot be a way to inject a file
+    /// anywhere else.
+    ///
+    /// WHY this costs a device nothing when nothing was provisioned: one mount
+    /// and one inode-table lookup, and the import stops there. The read is of
+    /// the manifest record, never of a payload, so no boot grows with the size
+    /// of the model on the disk.
+    fn import_provisioned_models(&mut self) {
+        let mut window = [0u8; crate::storage::filesystem::PROVISION_MANIFEST_WINDOW];
+        let len = match crate::storage::filesystem::load_provision_manifest(&mut window) {
+            Ok(len) => len,
+            Err(_) => return,
+        };
+        if len == window.len() {
+            crate::serial_println!(
+                "[VFS PROVISION] the manifest is larger than the {} byte window; the entries past it are not read",
+                window.len()
+            );
+        }
+        let store = self.spill;
+        self.apply_provisioned_manifest(&window[..len], store);
+    }
+
+    /// Imports the entries of `manifest`, reading the payloads they name from
+    /// `store`.
+    ///
+    /// WHY the manifest arrives as bytes and the store as a parameter: the half
+    /// that decides what a provisioned entry becomes has to be observable
+    /// without a block device, and the only code that names the device is the
+    /// one that builds the store.
+    fn apply_provisioned_manifest(&mut self, manifest: &[u8], store: SpillStore) {
+        for line in manifest.split(|byte| *byte == b'\n') {
+            let line = match line.split_last() {
+                Some((&b'\r', head)) => head,
+                _ => line,
+            };
+            if line.is_empty() {
+                continue;
+            }
+            let entry = match core::str::from_utf8(line) {
+                Ok(text) => text,
+                Err(_) => {
+                    crate::serial_println!("[VFS PROVISION] a manifest entry is not text; it is skipped");
+                    continue;
+                }
+            };
+            let Some((path, claimed)) = entry.split_once('|') else {
+                crate::serial_println!(
+                    "[VFS PROVISION] '{}' names no payload length; it is skipped",
+                    entry
+                );
+                continue;
+            };
+            // WHY the path is checked against its own normalised form: a name
+            // that normalisation would move -- a directory, a doubled slash, a
+            // traversal out of the namespace -- is a name the writer did not
+            // mean, and importing it would create a file at a path no tool
+            // could later remove by the name it asked for.
+            let normalized = normalize_path(path);
+            if normalized != path {
+                crate::serial_println!(
+                    "[VFS PROVISION] '{}' is not a file path as the tree holds one; it is skipped",
+                    path
+                );
+                continue;
+            }
+            if !is_model_namespace(path) {
+                crate::serial_println!(
+                    "[VFS PROVISION] {} is outside {}; only model payloads are provisioned",
+                    path,
+                    MODEL_NAMESPACE
+                );
+                continue;
+            }
+            if path.len() > MAX_PATH_LEN {
+                crate::serial_println!(
+                    "[VFS PROVISION] {} is longer than the {} bytes a path may be; it is skipped",
+                    path,
+                    MAX_PATH_LEN
+                );
+                continue;
+            }
+            let Some(claimed_bytes) = parse_provisioned_size(claimed) else {
+                crate::serial_println!(
+                    "[VFS PROVISION] {}'s length '{}' is not a byte count; it is skipped",
+                    path,
+                    claimed
+                );
+                continue;
+            };
+            if let Some(&existing_id) = self.path_to_inode.get(&normalized) {
+                // A device-held inode already at that name is the outcome this
+                // import exists to reach -- the sealed snapshot restored it and
+                // said so -- so it adds nothing and needs no second line. A
+                // file the kernel holds in its own heap is a different matter:
+                // a host copy does not get to replace what the tree already
+                // carries, and the person who put it there is owed the report.
+                let held_by_device = self
+                    .inodes
+                    .get(&existing_id)
+                    .map(|inode| inode.block_backed)
+                    .unwrap_or(false);
+                if !held_by_device {
+                    crate::serial_println!(
+                        "[VFS PROVISION] {} already holds a file of the kernel's own; the provisioned copy is not used",
+                        path
+                    );
+                }
+                continue;
+            }
+            let size = (store.file_len)(&spill_path_for(path)).unwrap_or(0);
+            if size == 0 {
+                crate::serial_println!(
+                    "[VFS PROVISION] the device holds no payload for {}; it is not added",
+                    path
+                );
+                continue;
+            }
+            if size != claimed_bytes {
+                crate::serial_println!(
+                    "[VFS PROVISION] {} was provisioned as {} bytes but the device holds {}; the copy looks interrupted",
+                    path,
+                    claimed_bytes,
+                    size
+                );
+            }
+            let parent = parent_path(path);
+            if parent != "/" {
+                self.ensure_dir_path(parent);
+            }
+            crate::serial_println!("[VFS PROVISION] Added provisioned file: {} ({} bytes)", path, size);
+            let id = self.create_block_backed_file(path);
+            if let Some(inode) = self.inodes.get_mut(&id) {
+                inode.size = size as usize;
+            }
+        }
+    }
+
     /// Creates each missing directory along `dir`, one component at a time.
     fn ensure_dir_path(&mut self, dir: &str) {
         let norm = normalize_path(dir);
@@ -2686,6 +2847,28 @@ fn spill_path_for(vfs_path: &str) -> String {
 /// Whether a path names a file the device holds and the kernel never does.
 fn is_model_namespace(path: &str) -> bool {
     path.starts_with(MODEL_NAMESPACE)
+}
+
+/// Reads the byte count a provisioning entry claims for its payload.
+///
+/// WHY digits only and no separators: the writer is a build tool and the
+/// reader is the kernel, so the format is the shortest one both can be certain
+/// about. A sign, a space, a unit suffix or a hex prefix is a manifest this
+/// build did not mean to accept, and the entry that carries it is skipped and
+/// named rather than read as something near it.
+fn parse_provisioned_size(text: &str) -> Option<u64> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for byte in text.bytes() {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(digit as u64)?;
+    }
+    Some(value)
 }
 
 /// Normalizes a path string.
@@ -2870,6 +3053,12 @@ pub fn init() {
 
     vfs.restore_metadata_snapshot();
     vfs.restore_data_snapshot();
+    // WHY between the restore and the rebuild: a model the sealed snapshot
+    // already carries is restored first and wins, so an import never overwrites
+    // what the device's own record describes; and a file added here has to be
+    // in the tree before the parent/child links are derived from paths, or it
+    // would exist but be unreachable from the directory it names.
+    vfs.import_provisioned_models();
     vfs.rebuild_children();
     let _ = vfs.persist_metadata_snapshot();
     vfs.persisted_data_generation.set(vfs.data_generation.get());
@@ -4470,6 +4659,182 @@ mod tests {
         let restored_inode = restored.lookup("/storage/persisted_dir");
         assert!(restored_inode.is_some(), "persisted directory must exist in restored VFS");
         assert_eq!(restored_inode.unwrap(), created_id);
+    }
+
+    /// Puts a provisioned payload in the store under the name its VFS path
+    /// digests to, the way a host tool writing the disk puts it there.
+    fn provision_payload(vfs_path: &str, bytes: usize) {
+        let name = spill_path_for(vfs_path);
+        let payload = alloc::vec![0x4Au8; bytes];
+        assert!(memory_write(&name, &payload), "the store takes the provisioned bytes");
+    }
+
+    #[test]
+    fn vfs_a_provisioned_entry_becomes_a_device_held_file_holding_no_bytes() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        provision_payload("/data/models/provision_visible.gguf", 4096);
+        vfs.apply_provisioned_manifest(
+            b"/data/models/provision_visible.gguf|4096\n",
+            memory_store(),
+        );
+
+        let file = vfs
+            .lookup("/data/models/provision_visible.gguf")
+            .expect("a provisioned model is in the tree");
+        let inode = &vfs.inodes[&file];
+        assert!(inode.block_backed, "a provisioned model is device-held");
+        assert_eq!(inode.size, 4096, "the tree reports the payload's length");
+        assert!(
+            inode.data.as_slice().is_empty(),
+            "the kernel holds none of it: the import is metadata, not a read"
+        );
+    }
+
+    #[test]
+    fn vfs_provisioning_never_adds_a_path_outside_the_model_namespace() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        // The bytes exist at the digested names, so the only thing refusing
+        // these entries is the path they name.
+        provision_payload("/data/keystore/state", 256);
+        provision_payload("/system/bin/init", 256);
+        vfs.apply_provisioned_manifest(
+            b"/data/keystore/state|256\n/system/bin/init|256\n",
+            memory_store(),
+        );
+
+        assert!(
+            vfs.lookup("/data/keystore/state").is_none(),
+            "a manifest cannot make a keystore record exist"
+        );
+        assert!(
+            vfs.lookup("/system/bin/init").is_none(),
+            "a manifest cannot make a launchable binary exist"
+        );
+    }
+
+    #[test]
+    fn vfs_provisioning_takes_the_length_the_device_publishes_over_the_length_claimed() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        // The copy a tool meant to write was 1 MiB; the extent the disk holds
+        // is 4 KiB of it. The tree must describe the bytes that are there.
+        provision_payload("/data/models/provision_short.gguf", 4096);
+        vfs.apply_provisioned_manifest(
+            b"/data/models/provision_short.gguf|1048576\n",
+            memory_store(),
+        );
+
+        let file = vfs
+            .lookup("/data/models/provision_short.gguf")
+            .expect("the interrupted copy is still the file the device holds");
+        assert_eq!(
+            vfs.inodes[&file].size,
+            4096,
+            "a length no bytes back is never reported to a reader"
+        );
+    }
+
+    #[test]
+    fn vfs_provisioning_does_not_resurrect_a_model_the_device_no_longer_holds() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        // The manifest names it; the unlink that removed the model also removed
+        // the extent, so nothing on the device backs the entry any more.
+        vfs.apply_provisioned_manifest(
+            b"/data/models/provision_removed.gguf|1048576\n",
+            memory_store(),
+        );
+
+        assert!(
+            vfs.lookup("/data/models/provision_removed.gguf").is_none(),
+            "a deleted model stays deleted across a reboot"
+        );
+    }
+
+    #[test]
+    fn vfs_provisioning_twice_adds_one_file_and_a_held_file_owns_its_name() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        provision_payload("/data/models/provision_idempotent.gguf", 8192);
+        let manifest = b"/data/models/provision_idempotent.gguf|8192\n";
+        vfs.apply_provisioned_manifest(manifest, memory_store());
+        let before = vfs.inodes.len();
+        vfs.apply_provisioned_manifest(manifest, memory_store());
+        assert_eq!(vfs.inodes.len(), before, "a second import adds nothing");
+
+        // A file the kernel holds in its own heap at that name is not replaced
+        // by a host copy, however many boots the manifest survives.
+        vfs.create_file("/data/models/provision_squatter.gguf", b"the device wrote this", false);
+        provision_payload("/data/models/provision_squatter.gguf", 8192);
+        vfs.apply_provisioned_manifest(
+            b"/data/models/provision_squatter.gguf|8192\n",
+            memory_store(),
+        );
+        let held = vfs
+            .lookup("/data/models/provision_squatter.gguf")
+            .expect("the file already at that name is still there");
+        assert!(
+            !vfs.inodes[&held].block_backed,
+            "a provisioned copy does not take over a path the kernel already filled"
+        );
+        assert_eq!(
+            vfs.inodes[&held].data.as_slice(),
+            b"the device wrote this",
+            "and its bytes are the bytes that were there"
+        );
+    }
+
+    #[test]
+    fn vfs_a_malformed_provisioning_entry_is_skipped_rather_than_guessed() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        provision_payload("/data/models/provision_wellformed.gguf", 512);
+        provision_payload("/data/models/provision_traversal.gguf", 512);
+        vfs.apply_provisioned_manifest(
+            b"/data/models/provision_wellformed.gguf|512\n\
+              /data/models/provision_no_length\n\
+              /data/models/provision_hex.gguf|0x200\n\
+              /data/models/provision_signed.gguf|-1\n\
+              /data/models/\n\
+              /data/models/provision_traversal.gguf/../escape.gguf|512\n",
+            memory_store(),
+        );
+
+        assert!(
+            vfs.lookup("/data/models/provision_wellformed.gguf").is_some(),
+            "one bad line does not discard the entries after it"
+        );
+        for rejected in [
+            "/data/models/provision_no_length",
+            "/data/models/provision_hex.gguf",
+            "/data/models/provision_signed.gguf",
+            "/data/models/provision_traversal.gguf",
+            "/data/models/escape.gguf",
+        ] {
+            assert!(
+                vfs.lookup(rejected).is_none(),
+                "'{}' is not a form the import agrees to read",
+                rejected
+            );
+        }
+    }
+
+    #[test]
+    fn vfs_provisioning_parent_directories_are_created_from_the_manifest_path() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        provision_payload("/data/models/subdir/provision_nested.gguf", 1024);
+        vfs.apply_provisioned_manifest(
+            b"/data/models/subdir/provision_nested.gguf|1024\n",
+            memory_store(),
+        );
+
+        let file = vfs
+            .lookup("/data/models/subdir/provision_nested.gguf")
+            .expect("a nested provisioned model is in the tree");
+        let parent = vfs
+            .lookup("/data/models/subdir")
+            .expect("the directory the manifest names is created");
+        assert_eq!(vfs.inodes[&parent].file_type, FileType::Directory);
+        assert!(
+            vfs.inodes[&parent].children.contains(&file),
+            "and the model is reachable from it"
+        );
     }
 }
 

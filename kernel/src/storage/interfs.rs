@@ -65,7 +65,13 @@ pub const MAX_INODES: u32 = (INODE_SECTORS as usize * INODES_PER_SECTOR) as u32;
 /// WHY 46 and not 47: the version 2 inode carries the file size as a 64-bit
 /// count, which costs two bytes of the 64-byte record, and the path field
 /// takes the rest.
-const MAX_PATH: usize = 46;
+///
+/// WHY this is published: a file the kernel looks up by name on the device is
+/// only findable if its name fits, and the code that chooses such a name is not
+/// the code that packs the record. The provisioning manifest's path is one of
+/// those names, and a gate on it is the only way a later rename cannot silently
+/// make the file unfindable.
+pub const MAX_PATH: usize = 46;
 /// Smallest region that can hold a superblock, a bitmap, the inode table and
 /// one data sector.
 pub const MIN_REGION_SECTORS: u32 = SUPERBLOCK_SECTORS + 1 + INODE_SECTORS + 1;

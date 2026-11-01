@@ -79,6 +79,46 @@ def main() -> None:
     # the same statement, now spelled with spaces around the equals sign.
     must(vfs, 'inode.sha256_digest = digest;', "persisted inode integrity metadata")
 
+    # A model a companion tool copied onto the data disk reaches the filesystem
+    # tree through the provisioning manifest, and the import that reads the
+    # manifest carries no payload: a boot costs what the record costs, never
+    # what the weights cost.
+    must(filesystem,
+         'pub const PROVISION_MANIFEST_PATH: &str = "/provision/models.list";',
+         "device-side provisioning manifest path")
+    must(filesystem, "pub const PROVISION_MANIFEST_WINDOW: usize",
+         "bounded provisioning manifest read window")
+    must(filesystem, "pub fn load_provision_manifest", "provisioning manifest read API")
+    must(vfs, "fn import_provisioned_models", "provisioning import entry point")
+    must(vfs, "fn apply_provisioned_manifest", "provisioning manifest decoder")
+    must(vfs, "fn parse_provisioned_size", "provisioning length parser")
+    must(vfs, "vfs.import_provisioned_models();", "provisioning import during initialization")
+    restored_at = vfs.index("vfs.restore_data_snapshot();")
+    imported_at = vfs.index("vfs.import_provisioned_models();")
+    rebuilt_at = vfs.index("vfs.rebuild_children();")
+    assert restored_at < imported_at < rebuilt_at, (
+        "a provisioned model is imported after the sealed snapshot has been read, so the "
+        "device's own record wins, and before the parent-child links are derived from paths"
+    )
+    # WHY the namespace is asserted here and not only in the code: the manifest
+    # arrives from whatever wrote the disk, and an import that could name any
+    # path would be a way to make a keystore record or a launchable binary
+    # exist without the kernel having created either.
+    must(vfs, "if !is_model_namespace(path)", "provisioning confined to the model namespace")
+    import_body = vfs[vfs.index("fn apply_provisioned_manifest"):vfs.index("fn ensure_dir_path")]
+    # WHY a ban rather than an absence of evidence: the read that would belong
+    # here -- taking a few header bytes to see whether the file is really a
+    # model -- is the one that would put the boot path in the hands of whatever
+    # size the tool left on the disk, and it is the exact mistake the streamed
+    # design exists to prevent.
+    for forbidden in ("read_at", "load_data_file", "store_data_file", "create_file_owned"):
+        assert forbidden not in import_body, (
+            f"the provisioning import touches payload bytes ({forbidden!r}); the boot path "
+            "must not"
+        )
+    must(import_body, "(store.file_len)", "the import takes the length the device publishes")
+    must(import_body, "create_block_backed_file", "the import registers a device-held inode")
+
     # A real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")
     must(interfs, "pub fn format", "filesystem format operation")

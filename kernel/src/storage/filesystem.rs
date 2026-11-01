@@ -300,6 +300,63 @@ pub fn remove_data_file(path: &str) -> Result<(), FsBackendError> {
     }
 }
 
+/// The device-side file a provisioning tool leaves the list of model payloads at.
+///
+/// WHY a device-side name and not a VFS path: a file the kernel can only see
+/// once something tells it the file exists cannot be discovered by looking for
+/// it, and the VFS's own record of what exists is sealed in the keystore, so a
+/// host tool cannot write one. This path lives in the block filesystem alone,
+/// which is the one place a companion tool and the kernel both can reach, and
+/// no application opens files on the block filesystem directly.
+///
+/// WHY it is not under `/data`: every `/data/` name the kernel owns is either a
+/// VFS payload spill or a snapshot, and a fourth kind of file sharing those
+/// prefixes would be read as one of them by the restore. `/provision/` is a
+/// namespace the VFS never creates, so a file here is only ever the manifest.
+pub const PROVISION_MANIFEST_PATH: &str = "/provision/models.list";
+
+/// The most manifest bytes the kernel reads at boot.
+///
+/// WHY a window and not the file's length: the point of the read is that a
+/// provisioning record costs a bounded amount of work no matter what else the
+/// device holds. A line the window cut short fails the entry's own validation
+/// and is reported, so a manifest this side of the limit is imported in full
+/// and one past it is imported as far as it was read, with the difference said
+/// out loud.
+pub const PROVISION_MANIFEST_WINDOW: usize = 1024;
+
+// WHY a compile-time gate on a string that names a place on the block device:
+// the record packs the path into a fixed field and refuses a longer one, so a
+// manifest renamed past that bound would not be missing -- it would be
+// unaskable, and every boot would report no provisioned model forever.
+const _: () = assert!(
+    PROVISION_MANIFEST_PATH.len() <= super::interfs::MAX_PATH,
+    "the provisioning manifest path must fit one InterFS inode record"
+);
+
+/// Reads the head of the provisioning manifest, if the device holds one.
+///
+/// WHY the missing-manifest case is not an error worth a console line: the
+/// ordinary device has no provisioned model, and a boot-time line saying so on
+/// every boot would train anyone reading the log to ignore it. The caller acts
+/// on the refusal and says nothing.
+pub fn load_provision_manifest(out: &mut [u8]) -> Result<usize, FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    load_provision_manifest_with_device(device, out)
+}
+
+/// Reads the head of the provisioning manifest from `device`.
+pub fn load_provision_manifest_with_device(
+    device: &mut dyn BlockDevice,
+    out: &mut [u8],
+) -> Result<usize, FsBackendError> {
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    fs.read_at(PROVISION_MANIFEST_PATH, 0, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
