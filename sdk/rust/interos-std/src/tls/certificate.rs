@@ -690,11 +690,18 @@ impl<'a> ParsedCertificate<'a> {
         extract_cn(self.subject_raw)
     }
 
-    /// Matches the certificate SAN (dNSName) or CN against `expected_hostname`.
+    /// Matches the certificate's SAN (or, failing that, its CN) against
+    /// `expected_hostname`.
     ///
     /// Following RFC 6125 / RFC 5280:
     /// - A subjectAltName extension of any type disables the Common Name fallback:
-    ///   once a SAN extension is present, only its dNSNames can authorize identity.
+    ///   once a SAN extension is present, only its own entries can authorize
+    ///   identity. A SAN whose only entry is an iPAddress is therefore a rejection
+    ///   for a DNS identity, never an invitation to read the CN.
+    /// - The reference identity is exactly one kind, and is compared only against
+    ///   the matching name type (see [`SubjectAltNames::scan`]): an IPv4 literal
+    ///   against `iPAddress` entries only, a DNS name against `dNSName` entries
+    ///   only. A `dNSName` spelled "10.0.2.2" cannot authorize the address.
     /// - Only when the certificate carries no SAN extension at all does the CN
     ///   become the identifier.
     /// - Exact and single-label wildcard (`*.example.com`) matching, case-insensitive.
@@ -706,7 +713,9 @@ impl<'a> ParsedCertificate<'a> {
 
         let san = SubjectAltNames::scan(self.tbs_raw, expected_hostname);
         if san.extension_present {
-            // SAN dominates: a non-matching or DNS-name-free SAN is a rejection,
+            // SAN dominates: a non-matching SAN — whatever name types it
+            // carries, and whether or not any of them is the type this
+            // reference identity is allowed to compare — is a rejection,
             // never a reason to consult the Common Name.
             return san.matched;
         }
@@ -801,32 +810,115 @@ pub fn extract_cn<'a>(subject: &'a [u8]) -> Option<&'a str> {
 /// than silently truncated or dropped from the ClientHello.
 pub const MAX_REFERENCE_IDENTITY_LEN: usize = 255;
 
+/// Parses one decimal IPv4 octet: 1 to 3 ASCII digits, value 0..=255, and no
+/// leading zero (so `010` is refused rather than silently read as octal).
+fn parse_ipv4_octet(part: &str) -> Option<u8> {
+    let bytes = part.as_bytes();
+    if bytes.is_empty() || bytes.len() > 3 {
+        return None;
+    }
+    if bytes.len() > 1 && bytes[0] == b'0' {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + (b - b'0') as u32;
+    }
+    if value > 255 {
+        return None;
+    }
+    Some(value as u8)
+}
+
+/// Parses a dotted-quad IPv4 reference identity into its four octets.
+///
+/// WHY this narrow grammar: the reference identity arrives as the same `&str`
+/// the hostname/SNI policy already uses, and a zero-alloc build cannot carry a
+/// general address parser. What is accepted is exactly RFC 3986's
+/// `IPv4-address` — four decimal octets, each 0..=255, no leading zeros — and
+/// anything else returns `None`, so it is treated as a DNS name and never
+/// coerced into an address.
+///
+/// DELIBERATELY NOT SUPPORTED (returns `None`, recorded here rather than
+/// hidden): IPv6 in any form (compressed `::`, bracketed, zone-indexed), and
+/// the short resolver shorthands like `10.1` or the single-number
+/// `3232236166`. A peer dialled by an IPv6 literal therefore cannot match an
+/// `iPAddress` SAN on this client today.
+///
+/// Rejected as malformed: empty and whitespace, a wrong octet count
+/// (`1.2.3`, `1.2.3.4.5`), empty segments and the leading/trailing/double
+/// dots they imply (`..`, `.1.2.3`, `1.2.3.`), any non-digit, a leading zero
+/// (`010`), and any octet over 255 (`256`, `999`).
+pub fn parse_ipv4(identity: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in identity.split('.') {
+        if count >= 4 {
+            return None;
+        }
+        octets[count] = parse_ipv4_octet(part)?;
+        count += 1;
+    }
+    if count != 4 {
+        return None;
+    }
+    Some(octets)
+}
+
+/// True when a reference identity is an IPv4 literal this client recognises.
+///
+/// RFC 6125 (§6) and RFC 6066 both key off this single decision: an address
+/// identity is verified only against `iPAddress` SAN entries and is never
+/// advertised in the ClientHello's `server_name`, while a DNS name is the
+/// mirror image.
+pub fn is_ip_reference(identity: &str) -> bool {
+    parse_ipv4(identity).is_some()
+}
+
 /// Result of the single shared pass over a TBSCertificate's subjectAltName
 /// extensions. One walk feeds both the "is a SAN present" decision and the
-/// dNSName match, so no two callers can disagree about the SAN's meaning.
+/// name match, so no two callers can disagree about the SAN's meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SubjectAltNames {
     /// A subjectAltName extension was found, whatever name types it carries.
     pub extension_present: bool,
     /// Number of decodable dNSNames found.
     pub dns_name_count: usize,
-    /// At least one dNSName authorizes the reference identity.
+    /// Number of iPAddress general names found, whichever address family they
+    /// encode. Their presence suppresses the Common Name fallback exactly like
+    /// a dNSName does; only an IPv4 one can ever match, because that is the
+    /// only reference-identity grammar this client parses.
+    pub ip_address_count: usize,
+    /// At least one entry of the type the reference identity is authorises it.
     pub matched: bool,
 }
 
 impl SubjectAltNames {
     /// Scans TBSCertificate extensions for `id-ce-subjectAltName` (OID 2.5.29.17)
-    /// and matches each dNSName against `reference_identity`.
+    /// and matches each general name against `reference_identity`.
+    ///
+    /// RFC 6125 gates the comparison by the type of the reference identity: an
+    /// IPv4 literal is compared only to `iPAddress` entries, a DNS name only to
+    /// `dNSName` entries. The two never cross, so a `dNSName` spelling
+    /// "10.0.2.2" cannot authorise the address `10.0.2.2` and an `iPAddress`
+    /// cannot authorise a name.
     pub fn scan(tbs_raw: &[u8], reference_identity: &str) -> Self {
         let mut out = Self {
             extension_present: false,
             dns_name_count: 0,
+            ip_address_count: 0,
             matched: false,
         };
         if reference_identity.is_empty() || reference_identity.len() > MAX_REFERENCE_IDENTITY_LEN {
             return out;
         }
 
+        // The identity is exactly one kind, and that single decision gates both
+        // name branches below.
+        let reference_ip = parse_ipv4(reference_identity);
         let Ok((tbs_tag, tbs_content, _)) = read_tlv(tbs_raw) else {
             return out;
         };
@@ -905,18 +997,44 @@ impl SubjectAltNames {
                         break;
                     };
                     cur_name = rem_name;
-                    // [2] IMPLICIT = dNSName: tag 0x82
-                    if tag_name != 0x82 {
-                        continue;
-                    }
-                    // An undecodable or over-long dNSName still counts as a SAN
-                    // entry (it suppresses the CN fallback) but can never match.
-                    out.dns_name_count += 1;
-                    if let Ok(dns_str) = core::str::from_utf8(name_val) {
-                        if hostname_matches(dns_str, reference_identity) {
-                            out.matched = true;
-                            return out;
+                    match tag_name {
+                        // [2] IMPLICIT = dNSName: tag 0x82.
+                        0x82 => {
+                            // An undecodable or over-long dNSName still counts as
+                            // a SAN entry (it suppresses the CN fallback) but can
+                            // never match. And it can never match an address
+                            // identity either: a name is not an address.
+                            out.dns_name_count += 1;
+                            if reference_ip.is_none() {
+                                if let Ok(dns_str) = core::str::from_utf8(name_val) {
+                                    if hostname_matches(dns_str, reference_identity) {
+                                        out.matched = true;
+                                        return out;
+                                    }
+                                }
+                            }
                         }
+                        // [7] IMPLICIT = iPAddress: tag 0x87.
+                        0x87 => {
+                            // `read_tlv` has already bounded `name_val`, so a
+                            // 16-byte IPv6 entry advances the walk cleanly and
+                            // simply has no IPv4 octets to compare: it counts as
+                            // a SAN entry, and can never match, because this
+                            // client parses no IPv6 reference identity.
+                            out.ip_address_count += 1;
+                            if let Some(octets) = reference_ip {
+                                if name_val.len() == 4 && name_val == &octets[..] {
+                                    out.matched = true;
+                                    return out;
+                                }
+                            }
+                        }
+                        // Any other general-name choice (rfc822Name [1],
+                        // directoryName [4], uniformResourceIdentifier [6], ...)
+                        // is not an identity this client compares, so it is
+                        // skipped. It still lives inside the SAN extension, so
+                        // `extension_present` keeps the CN fallback disabled.
+                        _ => {}
                     }
                 }
             }

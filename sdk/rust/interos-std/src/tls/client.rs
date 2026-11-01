@@ -4,7 +4,8 @@
 //! as well as sans-I/O `TlsClientSession` for direct buffer processing. Pure `#![no_std]`.
 
 use super::certificate::{
-    CertificateVerifier, DefaultCertVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN,
+    is_ip_reference, CertificateVerifier, DefaultCertVerifier, ParsedCertificate,
+    MAX_REFERENCE_IDENTITY_LEN,
 };
 use super::handshake::{
     HandshakeClient, HandshakeState, HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY,
@@ -304,7 +305,17 @@ impl<'a> TlsClientSession<'a> {
     /// Emits ClientHello into `out`. Returns total record length.
     pub fn start_handshake(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
         let host = self.require_live_identity()?;
-        self.handshake.encode_client_hello(&self.config.random, Some(host), out)
+        // RFC 6066 §3: the `server_name` extension carries a hostname, and a
+        // literal IPv4/IPv6 address "must not" be put in it. The identity is
+        // still verified against the certificate's iPAddress entries -- that is
+        // the `matches_hostname` decision in the handshake walk, which needs no
+        // SNI -- but nothing of it is advertised on the wire.
+        let sni = if is_ip_reference(host) {
+            None
+        } else {
+            Some(host)
+        };
+        self.handshake.encode_client_hello(&self.config.random, sni, out)
     }
 
     /// Feeds ServerHello record.
