@@ -1313,6 +1313,20 @@ const FILTER_H: usize = 44;
 /// The first row below the filter row.
 const LIST_Y: usize = 236;
 
+/// The stride between two bookmark rows.
+const BOOKMARK_ROW_PITCH: usize = 80;
+
+/// The gap left between one bookmark card and the next.
+const BOOKMARK_ROW_GAP: usize = 10;
+
+/// The height of a bookmark card.
+///
+/// WHY the hit test uses this and not the pitch: the card is drawn inside the
+/// pitch, so the ten rows of gap at its foot belonged to the card above -- eight
+/// rows of nothing between two history cards answered the visit they were not
+/// drawn for. Both sheets now test the box they paint.
+const BOOKMARK_CARD_H: usize = BOOKMARK_ROW_PITCH - BOOKMARK_ROW_GAP;
+
 // -----------------------------------------------------------------------------
 // The history sheet's rows
 //
@@ -6637,12 +6651,42 @@ fn draw_chevron_down(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Op
 }
 
 // -----------------------------------------------------------------------------
-// Soft Keyboard Layout & Geometry (Docked at Screen Bottom: y 980..1408)
+// Soft Keyboard Layout & Geometry (Docked above the navigation bar)
 // -----------------------------------------------------------------------------
 const KB_Y0: usize = 980;
-const KB_Y1: usize = 1408;
+/// Bottom edge of the docked keyboard.
+///
+/// WHY it is the navigation bar's own top and not a remembered 1408: the bar is
+/// tested before the keyboard when the surface is painted, so its buttons were
+/// drawn -- but the press path tested them in the other order, and the keyboard
+/// branch answered any row inside its own band with a redraw whether or not it
+/// held a key. The bar's rows 1350..1408 were inside that band and held no key,
+/// so with a field focused Back / Forward / Home / Bookmarks / Tabs were visible
+/// and completely dead. The keyboard now stops where the bar starts.
+const KB_Y1: usize = NAV_BAR_Y0;
 const KB_ACC_Y0: usize = 918;
 const KB_ACC_Y1: usize = 974;
+
+/// The top inset that centres a line at rung `rung` inside a box `h` rows tall.
+const fn centred_text_top(h: usize, rung: usize) -> usize {
+    (h - font::line_height(rung)) / 2
+}
+
+/// The column that centres a run inside a key, by the run's own measured width.
+///
+/// WHY measured and not remembered: every key placed its label at a fixed column
+/// of a box whose centre the glyph cannot know about, so a narrow cap sat four
+/// rows left of its key's middle while a wide one sat three right of it, and the
+/// "Space" label sat eleven rows left of the widest key on the board.
+#[inline(always)]
+fn centred_text_left(rect: Rect, text: &[u8], rung: usize) -> usize {
+    rect.x + rect.w.saturating_sub(text_width(text, rung)) / 2
+}
+
+const _: () = assert!(
+    1312 <= KB_Y1,
+    "the keyboard's last key row must sit inside the panel it is drawn on",
+);
 
 /// The keyboard's column rhythm: rows 0, 1 and 2 are runs of caps `KB_COL_PITCH`
 /// apart, starting at each row's own left edge and `KB_KEY_W` wide.
@@ -6663,6 +6707,11 @@ const KB_KEY_W: usize = 60;
 const KB_KEY_INSET: usize = 3;
 
 /// The left edge of the keyboard's three run-of-caps rows.
+///
+/// WHY the tap handler tests a column against it before dividing: `x` minus the
+/// row's edge, saturated at zero, folds the blank panel to the left of every row
+/// into that row's first column -- so a tap well outside the drawn caps, in the
+/// margin between the keyboard card and its own edge, inserted `q` or `a`.
 const KB_ROW_X0: [usize; 3] = [15, 46, 105];
 
 /// How many caps each of those rows draws, and so how many columns answer it.
@@ -6674,10 +6723,14 @@ const KB_BACKSPACE_X0: usize = 620;
 /// Row 0's letters and digits, and row 1's and row 2's symbols: one table per
 /// row per layout, each exactly as long as the row draws caps, so no glyph is
 /// reachable without a key drawn for it and no drawn key is inert.
+/// Row 1's symbols put `=` where a `$` used to sit: no key on either layout
+/// produced an `=`, so a query-string address -- the shape most of today's links
+/// actually are -- could not be typed at all, and a form field could not submit a
+/// key=value pair.
 const KB_ROW0_LETTERS: &[u8] = b"QWERTYUIOP";
 const KB_ROW0_SYMBOLS: &[u8] = b"1234567890";
 const KB_ROW1_LETTERS: &[u8] = b"ASDFGHJKL";
-const KB_ROW1_SYMBOLS: &[u8] = b"-/:;()$&@";
+const KB_ROW1_SYMBOLS: &[u8] = b"-/:;()=&@";
 const KB_ROW2_LETTERS: &[u8] = b"ZXCVBNM";
 const KB_ROW2_SYMBOLS: &[u8] = b"?!'#%*+";
 
@@ -6700,14 +6753,14 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
         // Row 0: 1 2 3 4 5 6 7 8 9 0 (y: 994..1066)
         if y >= 994 && y <= 1066 {
             let col = (x.saturating_sub(KB_ROW_X0[0])) / KB_COL_PITCH;
-            if col < KB_ROW_KEYS[0] {
+            if x >= KB_ROW_X0[0] && col < KB_ROW_KEYS[0] {
                 return Some(KB_ROW0_SYMBOLS[col]);
             }
         }
-        // Row 1: - / : ; ( ) $ & @ (y: 1076..1148)
+        // Row 1: - / : ; ( ) = & @ (y: 1076..1148)
         if y >= 1076 && y <= 1148 {
             let col = (x.saturating_sub(KB_ROW_X0[1])) / KB_COL_PITCH;
-            if col < KB_ROW_KEYS[1] {
+            if x >= KB_ROW_X0[1] && col < KB_ROW_KEYS[1] {
                 return Some(KB_ROW1_SYMBOLS[col]);
             }
         }
@@ -6720,7 +6773,7 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
                 return Some(8); // Backspace
             }
             let col = (x.saturating_sub(KB_ROW_X0[2])) / KB_COL_PITCH;
-            if col < KB_ROW_KEYS[2] {
+            if x >= KB_ROW_X0[2] && col < KB_ROW_KEYS[2] {
                 return Some(KB_ROW2_SYMBOLS[col]);
             }
         }
@@ -6749,7 +6802,7 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
     // Row 0: Q W E R T Y U I O P (y: 994..1066)
     if y >= 994 && y <= 1066 {
         let col = (x.saturating_sub(KB_ROW_X0[0])) / KB_COL_PITCH;
-        if col < KB_ROW_KEYS[0] {
+        if x >= KB_ROW_X0[0] && col < KB_ROW_KEYS[0] {
             let ch = KB_ROW0_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
@@ -6757,7 +6810,7 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
     // Row 1: A S D F G H J K L (y: 1076..1148)
     if y >= 1076 && y <= 1148 {
         let col = (x.saturating_sub(KB_ROW_X0[1])) / KB_COL_PITCH;
-        if col < KB_ROW_KEYS[1] {
+        if x >= KB_ROW_X0[1] && col < KB_ROW_KEYS[1] {
             let ch = KB_ROW1_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
@@ -6771,7 +6824,7 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
             return Some(8); // Backspace
         }
         let col = (x.saturating_sub(KB_ROW_X0[2])) / KB_COL_PITCH;
-        if col < KB_ROW_KEYS[2] {
+        if x >= KB_ROW_X0[2] && col < KB_ROW_KEYS[2] {
             let ch = KB_ROW2_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
@@ -6815,7 +6868,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1006, 2, &ch_buf, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, &ch_buf, 2), rect.y + centred_text_top(rect.h, 2), 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6837,7 +6890,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1088, 2, &ch_buf, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, &ch_buf, 2), rect.y + centred_text_top(rect.h, 2), 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6853,7 +6906,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                 let fill = if app.kb_shift { THEME.primary } else { THEME.surface_container };
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, fill, None, 0) {
                     let txt = if app.kb_symbols { b"ABC" as &[u8] } else { b"^" as &[u8] };
-                    if let Some(px) = text_px(x, y, 42, 1182, 1, txt, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, txt, 1), rect.y + centred_text_top(rect.h, 1), 1, txt, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6873,7 +6926,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
-                    if let Some(px) = text_px(x, y, kx + 25, 1170, 2, &ch_buf, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, &ch_buf, 2), rect.y + centred_text_top(rect.h, 2), 2, &ch_buf, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6884,7 +6937,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if x >= KB_BACKSPACE_X0 && x <= 705 {
                 let rect = Rect::new(KB_BACKSPACE_X0, 1158, 85, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container, None, 0) {
-                    if let Some(px) = text_px(x, y, 646, 1182, 1, b"<X]", THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, b"<X]", 1), rect.y + centred_text_top(rect.h, 1), 1, b"<X]", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6899,7 +6952,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                 let rect = Rect::new(15, 1240, 100, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container, None, 0) {
                     let txt = if app.kb_symbols { b"ABC" as &[u8] } else { b"?123" as &[u8] };
-                    if let Some(px) = text_px(x, y, 42, 1264, 1, txt, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, txt, 1), rect.y + centred_text_top(rect.h, 1), 1, txt, THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6910,7 +6963,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if x >= 125 && x <= 195 {
                 let rect = Rect::new(125, 1240, 70, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
-                    if let Some(px) = text_px(x, y, 155, 1252, 2, b",", THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, b",", 2), rect.y + centred_text_top(rect.h, 2), 2, b",", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6921,7 +6974,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if x >= 205 && x <= 515 {
                 let rect = Rect::new(205, 1240, 310, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
-                    if let Some(px) = text_px(x, y, 328, 1264, 1, b"Space", THEME.on_surface_variant, c, false) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, b"Space", 1), rect.y + centred_text_top(rect.h, 1), 1, b"Space", THEME.on_surface_variant, c, false) {
                         return px;
                     }
                     return c;
@@ -6932,7 +6985,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if x >= 525 && x <= 595 {
                 let rect = Rect::new(525, 1240, 70, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
-                    if let Some(px) = text_px(x, y, 555, 1252, 2, b".", THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, b".", 2), rect.y + centred_text_top(rect.h, 2), 2, b".", THEME.on_surface, c, true) {
                         return px;
                     }
                     return c;
@@ -6943,7 +6996,7 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             if x >= 605 && x <= 705 {
                 let rect = Rect::new(605, 1240, 100, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.primary, None, 0) {
-                    if let Some(px) = text_px(x, y, 642, 1264, 1, b"Go", THEME.on_primary, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, b"Go", 1), rect.y + centred_text_top(rect.h, 1), 1, b"Go", THEME.on_primary, c, true) {
                         return px;
                     }
                     return c;
@@ -6962,7 +7015,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Clear button (x: 24..104)
             let c_clear = Rect::new(24, KB_ACC_Y0 + 6, 80, 44);
             if let Some(c) = draw_rounded_rect(x, y, c_clear, R_CHIP, THEME.surface_container_high, None, 0) {
-                if let Some(px) = text_px(x, y, 42, KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(x, y, centred_text_left(c_clear, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 return c;
@@ -6971,7 +7024,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Done button (x: 600..694)
             let c_done = Rect::new(600, KB_ACC_Y0 + 6, 94, 44);
             if let Some(c) = draw_rounded_rect(x, y, c_done, R_CHIP, THEME.primary, None, 0) {
-                if let Some(px) = text_px(x, y, 630, KB_ACC_Y0 + 16, 1, b"Done", THEME.on_primary, c, true) {
+                if let Some(px) = text_px(x, y, centred_text_left(c_done, b"Done", 1), KB_ACC_Y0 + 16, 1, b"Done", THEME.on_primary, c, true) {
                     return px;
                 }
                 return c;
@@ -6983,7 +7036,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // Chip 1: "https://" (x 24..134)
         let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
         if let Some(c) = draw_rounded_rect(x, y, c1, R_CHIP, THEME.surface_container_high, None, 0) {
-            if let Some(px) = text_px(x, y, 36, KB_ACC_Y0 + 16, 1, b"https://", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c1, b"https://", 1), KB_ACC_Y0 + 16, 1, b"https://", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -6992,7 +7045,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // Chip 2: ".com" (x 144..224)
         let c2 = Rect::new(144, KB_ACC_Y0 + 6, 80, 44);
         if let Some(c) = draw_rounded_rect(x, y, c2, R_CHIP, THEME.surface_container_high, None, 0) {
-            if let Some(px) = text_px(x, y, 164, KB_ACC_Y0 + 16, 1, b".com", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c2, b".com", 1), KB_ACC_Y0 + 16, 1, b".com", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -7001,7 +7054,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // Chip 3: ".org" (x 234..314)
         let c3 = Rect::new(234, KB_ACC_Y0 + 6, 80, 44);
         if let Some(c) = draw_rounded_rect(x, y, c3, R_CHIP, THEME.surface_container_high, None, 0) {
-            if let Some(px) = text_px(x, y, 254, KB_ACC_Y0 + 16, 1, b".org", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c3, b".org", 1), KB_ACC_Y0 + 16, 1, b".org", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
@@ -7010,7 +7063,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // Chip 4: "Clear" (x 324..404)
         let c4 = Rect::new(324, KB_ACC_Y0 + 6, 80, 44);
         if let Some(c) = draw_rounded_rect(x, y, c4, R_CHIP, THEME.surface_container_high, None, 0) {
-            if let Some(px) = text_px(x, y, 342, KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c4, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
@@ -8835,7 +8888,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     return Some(px);
                 }
             } else {
-                let row_h = 80;
+                let row_h = BOOKMARK_ROW_PITCH;
                 let mut shown = 0usize;
                 for i in 0..count {
                     if let Some(rec) = app.bookmarks.record(i) {
@@ -8845,7 +8898,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                             continue;
                         }
                         let r_y = LIST_Y + shown * row_h;
-                        let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                        let r_rect = Rect::new(24, r_y, W - 48, BOOKMARK_CARD_H);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                             if star_glyph(x, y, 48, r_y + 35, true) {
                                 return Some(THEME.primary);
@@ -9739,7 +9792,7 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
     // but clearly behind.
 
     // Soft Keyboard and Accessory Strip overlay when keyboard is open
-    if app.keyboard_open() && y >= KB_ACC_Y0 && y <= KB_Y1 {
+    if app.keyboard_open() && y >= KB_ACC_Y0 && y < KB_Y1 {
         if y <= KB_ACC_Y1 {
             return render_accessory_bar(x, y, app);
         } else {
@@ -10075,7 +10128,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
 
         // 2. Keyboard keys (y: KB_Y0..KB_Y1)
-        if y >= KB_Y0 && y <= KB_Y1 {
+        if y >= KB_Y0 && y < KB_Y1 {
             if let Some(ch) = get_soft_keyboard_char(x, y, app.kb_shift, app.kb_symbols) {
                 let _ = std::audio_haptic_click();
                 match ch {
@@ -10192,7 +10245,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
 
         // 2. Keyboard keys (y: KB_Y0..KB_Y1)
-        if y >= KB_Y0 && y <= KB_Y1 {
+        if y >= KB_Y0 && y < KB_Y1 {
             if let Some(ch) = get_soft_keyboard_char(x, y, app.kb_shift, app.kb_symbols) {
                 let _ = std::audio_haptic_click();
                 match ch {
@@ -10275,6 +10328,13 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 // edge at 116. The two origins are fourteen pixels apart, so every
                 // row answered the item above the one under the finger.
                 let row = (y.saturating_sub(MENU_ROW_Y0)) / MENU_ROW_H;
+                // WHY the card's head strip answers no item: the first row's ink
+                // starts fourteen rows below the card's own top edge, and a tap on
+                // that empty padding saturated to row 0 -- it opened a new tab from
+                // pixels that draw nothing and answer nothing.
+                if y < MENU_ROW_Y0 {
+                    return Tap::Redraw;
+                }
                 let _ = std::audio_haptic_click();
                 match row {
                     0 => {
@@ -10377,7 +10437,6 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.filter_clear();
                 return Tap::Redraw;
             }
-            let row_h = 80;
             let filter = app.filter_bytes();
             let mut shown = 0usize;
             for i in 0..app.bookmarks.len() {
@@ -10387,8 +10446,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     {
                         continue;
                     }
-                    let r_y = LIST_Y + shown * row_h;
-                    if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                    let r_y = LIST_Y + shown * BOOKMARK_ROW_PITCH;
+                    if y >= r_y && y < r_y + BOOKMARK_CARD_H && x >= 24 && x < W - 24 {
                         let _ = std::audio_haptic_click();
                         let mut url = [0u8; 64];
                         let u = rec.url_bytes();
@@ -10424,7 +10483,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 };
                 let r_y = LIST_Y + row * HISTORY_ROW_PITCH;
                 if y >= r_y
-                    && y < r_y + HISTORY_ROW_PITCH
+                    && y < r_y + HISTORY_CARD_H
                     && x >= HISTORY_CARD_X
                     && x < HISTORY_CARD_X + HISTORY_CARD_W
                 {
@@ -11162,9 +11221,18 @@ pub extern "C" fn _start() -> ! {
                         // WHY the platform's scroll model handles the drag: a
                         // bare offset grew without bound, so a long page
                         // could be dragged past its last line.
+                        //
+                        // WHY the delta goes in as the kernel measured it: the
+                        // reader draws a document row at `screen = top + doc_y -
+                        // offset`, so the page follows the finger only when a
+                        // finger moving up the screen deepens the offset -- which
+                        // is what `apply_drag` does with the negative `dy` the
+                        // pan gesture reports. Negating it made the page travel
+                        // against the finger, and against the top stop it simply
+                        // refused to move.
                         if input.kind == 2 && browser.status == PageStatus::Loaded {
                             if input.dy != 0 {
-                                browser.scroll.apply_drag(-(input.dy as i32));
+                                browser.scroll.apply_drag(input.dy);
                                 dirty = Dirty::All;
                             }
                         }
