@@ -402,12 +402,23 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             binder_left || binder_right || (in_sheet && !in_cutout) || divider
         }
         IconKind::Notes => {
+            // WHY the sheet is drawn: the glyph was three rules and a margin line
+            // with nothing holding them, which at tile size reads as a music staff
+            // rather than as a page of notes. The outline is the same hollow sheet
+            // the calendar tile draws, at the same wall thickness.
+            let ox = if fx.abs() > 120 { fx.abs() - 120 } else { 0 };
+            let oy = if fy.abs() > 150 { fy.abs() - 150 } else { 0 };
+            let outer = fx.abs() <= 140 && fy.abs() <= 170 && ox * ox + oy * oy <= 400;
+            let ix = if fx.abs() > 100 { fx.abs() - 100 } else { 0 };
+            let iy = if fy.abs() > 130 { fy.abs() - 130 } else { 0 };
+            let inner = fx.abs() <= 120 && fy.abs() <= 150 && ix * ix + iy * iy <= 400;
+            let page = outer && !inner;
             let in_sheet = fx.abs() <= 135 && fy.abs() <= 165;
             let l1 = in_sheet && fx >= -85 && fx <= 85 && (fy >= -60 && fy <= -42);
             let l2 = in_sheet && fx >= -85 && fx <= 85 && (fy >= 0 && fy <= 18);
             let l3 = in_sheet && fx >= -85 && fx <= 35 && (fy >= 60 && fy <= 78);
             let margin = in_sheet && fx >= -105 && fx <= -90 && fy.abs() <= 135;
-            l1 || l2 || l3 || margin
+            page || l1 || l2 || l3 || margin
         }
         IconKind::Contacts => {
             let head = fx * fx + (fy + 55) * (fy + 55) <= 2500;
