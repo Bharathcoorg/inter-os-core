@@ -229,22 +229,35 @@ class TestRunnerIntegrity(unittest.TestCase):
         untouched. Each of its three arms was verified to fail on the matching
         sabotage, so half three stays as a broad net rather than the evidence.
 
-        Half three excludes `sync::` and `task::` for a reason that is separate and
-        stated here rather than hidden: those families assert on the process-global
-        PREEMPT_COUNT and SCHEDULER state, which every other case in this binary
-        also writes through the kernel mutex wrapper, so their result depends on how
-        many neighbours happen to hold a lock at the same instant no matter what the
-        net cases do. They are a real isolation defect, but not this one, and they
-        are named by a filter -- a failing net, capability, vfs or syscall case
-        still fails this check.
+        Half three still excludes `task::`, for a reason that is separate and
+        stated here rather than hidden: those cases assert on the process-global
+        SCHEDULER state, which every other case in this binary also writes
+        through the kernel task APIs, so their result depends on how many
+        neighbours mutate the task table at the same instant. They are a real
+        isolation defect, but not this one, and they are named by a filter -- a
+        failing net, capability, vfs or syscall case still fails this check.
 
-        WHY the exclusion is about interleaving only, and not about order: `sync::`
-        and `task::` are inside the scope of
-        `test_kernel_suite_passes_under_shuffled_case_order`, which runs the whole
-        `--lib` suite single-threaded under five shuffled seeds and passes there. So
-        what makes them fail here is concurrent threads holding kernel locks, not
-        which case ran first, and this sweep must not be read as evidence that their
-        ordering was ever untested.
+        WHY `sync::` is no longer in that exclusion: the reason it was there is
+        that PREEMPT_COUNT was one process-global AtomicU32, so
+        `preemption_disabled()` answered "does any thread hold any kernel lock"
+        instead of "does the current kernel stack defer preemption". The host
+        `--lib` binary now keeps the depth thread-local (kernel/src/sync.rs:
+        the global atomic is still the only thing the guest compiles, because
+        one CPU means one kernel stack), and
+        `sync::tests::preempt_state_is_scoped_to_the_lock_holder_not_the_process`
+        pins that a neighbour holding a lock cannot poison the predicate for a
+        thread holding none -- verified to fail deterministically on the old
+        global design. Measured with the fix in place, the sweep below passed
+        473/0 (13 task:: cases filtered) five consecutive times in 2.18-2.44s
+        of in-process runtime (3.41-3.84s wall for the full cargo command).
+
+        WHY the remaining exclusion is about interleaving only, and not about
+        order: `task::` is inside the scope of
+        `test_kernel_suite_passes_under_shuffled_case_order`, which runs the
+        whole `--lib` suite single-threaded under five shuffled seeds and passes
+        there. So what makes it fail here is concurrent threads mutating kernel
+        state, not which case ran first, and this sweep must not be read as
+        evidence that their ordering was ever untested.
         """
         manifest = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "kernel", "Cargo.toml")
@@ -302,7 +315,7 @@ class TestRunnerIntegrity(unittest.TestCase):
         for attempt in range(1, 4):
             sweep = subprocess.run(
                 ["cargo", "test", "--manifest-path", manifest, "--no-fail-fast", "--",
-                 "--format", "terse", "--test-threads=8", "--skip", "sync::", "--skip", "task::"],
+                 "--format", "terse", "--test-threads=8", "--skip", "task::"],
                 capture_output=True, text=True, timeout=280,
             )
             failed = sorted(

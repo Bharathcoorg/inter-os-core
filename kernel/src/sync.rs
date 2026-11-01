@@ -16,9 +16,66 @@
 //! a VFS disk commit) still lets the UART and input IRQs be serviced.
 
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU32, Ordering};
 
-static PREEMPT_COUNT: AtomicU32 = AtomicU32::new(0);
+// The counter behind `preemption_disabled()` lives where the current execution
+// context lives. In the guest that is one global: `main.rs` runs one kernel
+// stack on one CPU, so "this context's depth" and "the machine's depth" are
+// the same number, and the scheduler gates (task::scheduler tick and
+// yield_now) read exactly what the lock holder raised.
+//
+// The host `--lib` binary has no such coincidence: libtest runs cases on many
+// threads and every kernel `Mutex::lock` in any case bumps the same global, so
+// "is preemption disabled for me" became "does anyone in the process hold any
+// lock". That made the `sync::` assertions on `!preemption_disabled()` a race
+// against unrelated neighbours' critical sections, which is why
+// tests/test_runner_integrity.py's parallel sweep had to skip `sync::`. On the
+// host the faithful model of one kernel stack per CPU is one counter per
+// thread, so the test build gets a thread-local depth and the guest keeps the
+// global verbatim — the `cfg(test)` path is compiled out of the bare-metal
+// binary entirely. `std` is linked only for tests (see lib.rs), so this costs
+// the guest nothing: no TLS machinery, no extra load, same `Relaxed` atomics.
+#[cfg(not(test))]
+mod preempt_depth {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+
+    pub fn acquire() {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn release() {
+        COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn held() -> bool {
+        COUNT.load(Ordering::Relaxed) != 0
+    }
+}
+
+#[cfg(test)]
+mod preempt_depth {
+    use std::cell::Cell;
+    use std::thread_local;
+
+    // `const` init: no lazy-init allocation, and `Cell<u32>` has no destructor,
+    // so thread exit cannot re-spawn TLS state mid-run.
+    thread_local! {
+        static COUNT: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub fn acquire() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub fn release() {
+        COUNT.with(|c| c.set(c.get() - 1));
+    }
+
+    pub fn held() -> bool {
+        COUNT.with(|c| c.get()) != 0
+    }
+}
 
 /// Defers scheduler preemption until the returned guard is dropped.
 #[derive(Debug)]
@@ -26,7 +83,7 @@ pub struct PreemptGuard(());
 
 impl PreemptGuard {
     pub fn new() -> Self {
-        PREEMPT_COUNT.fetch_add(1, Ordering::Relaxed);
+        preempt_depth::acquire();
         Self(())
     }
 }
@@ -39,7 +96,7 @@ impl Default for PreemptGuard {
 
 impl Drop for PreemptGuard {
     fn drop(&mut self) {
-        PREEMPT_COUNT.fetch_sub(1, Ordering::Relaxed);
+        preempt_depth::release();
     }
 }
 
@@ -47,7 +104,7 @@ impl Drop for PreemptGuard {
 /// interrupted by a context switch.
 #[inline]
 pub fn preemption_disabled() -> bool {
-    PREEMPT_COUNT.load(Ordering::Relaxed) != 0
+    preempt_depth::held()
 }
 
 /// Spin mutex whose critical section is protected from scheduler preemption.
@@ -129,5 +186,40 @@ mod tests {
         assert!(preemption_disabled());
         drop(g);
         assert!(!preemption_disabled());
+    }
+
+    /// Deterministic pin for the host threading model: a neighbour thread
+    /// holding a kernel lock must not disable preemption for a thread that
+    /// holds none, and must not stop it from observing its own depth as 0
+    /// once its own guards are gone. On the old process-global counter this
+    /// case fails every time (the holder's +1 is visible everywhere); on the
+    /// guest the two threads are the same kernel stack and the assertion
+    /// pair collapses to the single-CPU semantics above.
+    #[test]
+    fn preempt_state_is_scoped_to_the_lock_holder_not_the_process() {
+        use std::sync::mpsc;
+
+        let m = Mutex::new(0u32);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let holder = std::thread::spawn(move || {
+            let g = m.lock();
+            assert!(preemption_disabled(), "the holder must see its own guard");
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert!(preemption_disabled(), "the guard must stay live until release");
+            drop(g);
+            assert!(!preemption_disabled(), "dropping the last guard restores depth 0");
+        });
+
+        held_rx.recv().unwrap();
+        assert!(
+            !preemption_disabled(),
+            "a thread holding no lock must not inherit another thread's deferred preemption"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(!preemption_disabled(), "no guard survives the join");
     }
 }
