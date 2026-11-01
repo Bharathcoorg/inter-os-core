@@ -430,6 +430,76 @@ def test_the_browsers_focus_release_leaves_the_painted_bar_answerable():
     )
 
 
+def test_the_gallery_names_the_screen_it_is_showing():
+    """The gallery's header, chips and empty states all describe the tab in front.
+
+    WHY: the app has four destinations behind one tab row, and three of them
+    were described by the first. The header said "Photos" on every tab, with the
+    same wallpaper-and-photo count line under it, so the Videos, Albums and
+    Screenshots screens each opened under a title and a subtitle naming a
+    different screen. The four filter chips, which select a set the timeline
+    holds, were painted and answered taps on the three tabs whose grids ignore
+    the filter entirely, so choosing one moved the pill and stored a preference
+    while the screen behind it did not change; the row still stands on all four
+    destinations -- a chip jumps to the timeline with that set chosen -- but only
+    the timeline may show one of them filled. And every empty state was pinned
+    120 rows under the tab row, which left nine hundred rows of blank panel
+    beneath a two-line answer -- the same "is that a fault or an empty list"
+    reading the ledger note already avoids by centring itself in the band.
+
+    WHY a source gate: the gallery's bin target carries `test = false`, so
+    neither the painter nor the press path can be called from a host test.
+    """
+    source = _code_only(read("apps/gallery/src/main.rs"))
+
+    header = _fn_body(source, "fn gallery_pixel")
+    at = header.find("TITLE_Y,")
+    assert at >= 0, "the header's title run is gone, so this gate has lost its subject"
+    assert "TAB_LABELS[app.tab as usize]" in header[at : at + 120], (
+        "the header names a screen other than the tab in front of it"
+    )
+
+    taps = _fn_body(source, "fn handle_tap")
+    chip_at = taps.find("if let Some(index) = chip_at(x, y, app)")
+    assert chip_at >= 0, "the chip row's press branch is gone, so this gate lost its subject"
+    chip_branch = taps[chip_at : taps.find("if y >= TAB_Y", chip_at)]
+    assert "app.select_tab(GalleryTab::Photos)" in chip_branch, (
+        "a chip can be chosen on a tab whose grid the filter does not reach"
+    )
+
+    chips = _fn_body(source, "fn chip_row_pixel")
+    fill_at = chips.find("let (fill, ink, border) = if")
+    assert fill_at >= 0, "the chip row's selected style is gone, so this gate lost its subject"
+    assert "app.tab == GalleryTab::Photos" in chips[fill_at : fill_at + 200], (
+        "a filled chip claims the screen in front of the user is filtered by it, "
+        "on the three destinations whose grids ignore the filter"
+    )
+
+    subtitle = _fn_body(source, "fn refresh_subtitle")
+    for arm in (
+        "GalleryTab::Photos",
+        "GalleryTab::Videos",
+        "GalleryTab::Albums",
+        "GalleryTab::Screenshots",
+    ):
+        assert arm in subtitle, (
+            "the subtitle quotes the timeline's wallpaper and photo counts on a "
+            "destination that holds neither"
+        )
+
+    assert "app.tab = " not in taps, (
+        "a press branch changes the destination without re-stating the header, "
+        "so the counts above the new grid still describe the old one"
+    )
+
+    assert "GRID_TOP + 120" not in source, (
+        "an empty state is pinned under the tab row again instead of filling the band"
+    )
+    assert source.count("empty_block_y0(") >= 4, (
+        "the empty states no longer share the one placement the band gives them"
+    )
+
+
 def _code_only(source: str) -> str:
     """Strips `//` line comments and doc comments from Rust source.
 

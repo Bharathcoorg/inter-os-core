@@ -14,8 +14,8 @@
 //!   state quotes the measured counts and names the paths it could not read
 //! - Full-screen photo inspection view (light themed) driven by a media record,
 //!   reaching its previously unreachable state over the wallpaper catalogue
-//! - Segmented filter chips (All / Wallpapers / Photos) and a bottom section bar,
-//!   both bound to real sets - see `filters_available`
+//! - Segmented filter chips (All / Wallpapers / Photos / Videos), each counting a
+//!   real set, and a tab bar whose four destinations each hold their own
 //! - Every drawn affordance and its hit region come from the same `Rect`, so a
 //!   tap is accepted exactly where something is painted
 //! - Every string is measured with `interos_std::design::font::measure` /
@@ -308,9 +308,6 @@ const CHIP_MIN_W: usize = 64;
 /// made it a second, undrawn copy of the tab bar.
 const CHIP_LABELS: [&[u8]; 4] = [b"All", b"Wallpapers", b"Photos", b"Videos"];
 
-const PILL_Y: usize = 152;
-const PILL_H: usize = 48;
-
 const GRID_TOP: usize = 264;
 const ROW_STRIDE: usize = CELL + GUTTER;
 const ROWS: usize = 5;
@@ -337,11 +334,6 @@ const CAPTION_H: usize = 46;
 /// so its right edge stays at least 8px inside the card.
 const CAPTION_INSET: usize = (CAPTION_H - font::line_height(1)) / 2;
 const _: () = assert!(CAPTION_INSET >= radius::SMALL);
-
-const NAV_Y0: usize = 1290;
-const NAV_Y1: usize = 1400;
-const NAV_ICON_CY: usize = 1330;
-const NAV_LABEL_Y: usize = 1356;
 
 /// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
 ///
@@ -405,8 +397,6 @@ const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 // inside the band that answers the pixel function first.
 const CAPTURE_BTN: Rect = Rect::new(540, HEADER_TOP, 144, 48);
 const HEADER_BACK: Rect = Rect::new(MARGIN, HEADER_TOP, 48, 48);
-const DETAIL_FAV: Rect = Rect::new(W - 140, 32, 48, 48);
-const DETAIL_DEL: Rect = Rect::new(W - 80, 32, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
 const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
 /// The scrub track's touch region.
@@ -476,7 +466,14 @@ const VIDEO_COL_W: usize = (W - 2 * MARGIN - 16) / 2;
 const VIDEO_COL_X: [usize; 2] = [MARGIN, MARGIN + VIDEO_COL_W + 16];
 const VIDEO_ROW_H: usize = 230;
 
-const NAV_LABELS: [&[u8]; 3] = [b"Photos", b"Albums", b"Places"];
+/// How many album cards the Albums destination holds.
+///
+/// WHY named: the grid paints two rows of two and the header has to say the same
+/// number, so the count is stated once here rather than as a bare `2` in the
+/// painter, a bare `2` in the tap router and a bare `4` in the subtitle.
+const ALBUM_CELLS: usize = 4;
+const ALBUM_ROWS: usize = ALBUM_CELLS / 2;
+const _: () = assert!(ALBUM_CELLS % 2 == 0);
 
 // -----------------------------------------------------------------------------
 // Text rendering helpers - the gate always matches the glyph line box, so
@@ -687,49 +684,6 @@ pub struct PhotoItem {
 /// header reports. The wallpapers are shown through `Media::Wallpaper` and
 /// `walls::SCENES`, which is what they actually are.
 pub static PHOTOS: [PhotoItem; 0] = [];
-
-/// Whether the photo ledger holds no record.
-#[inline]
-fn ledger_is_empty() -> bool {
-    PHOTOS.is_empty()
-}
-
-/// Whether the device offers any wallpaper at all.
-#[inline]
-fn wallpapers_available() -> bool {
-    !walls::SCENES.is_empty()
-}
-
-/// Whether the segmented filter chips can select anything at all.
-///
-/// WHY derived from the collections and not a hand-set flag: the row filters
-/// real sets -- the wallpaper catalogue and the photo ledger -- so it is live
-/// while either of them holds something. Both empty would mean there is nothing
-/// on this device to filter, and the chips would only select the same empty set
-/// three ways; in that state they are drawn recessed and are not hit-tested,
-/// exactly as they were when the ledger was the only source.
-#[inline]
-fn filters_available(app: &GalleryApp) -> bool {
-    wallpapers_available() || !ledger_is_empty() || app.storage_count > 0
-}
-
-/// How many bottom-bar destinations this build can actually reach.
-///
-/// WHY the bar is gone and not shrunk: the platform's document index holds
-/// documents and nothing else - there is no album record and no place record
-/// in it, and no service on this device answers for one - so `Albums` and
-/// `Places` had no screen behind them. The old bar drew them recessed and
-/// hit-tested nothing at all, so two of its three entries were dead and the
-/// third duplicated the tab bar above. The tab bar is the navigation, and the
-/// space the dead bar held is the grid's.
-const REAL_SECTIONS: usize = 0;
-
-/// Ink for an affordance that is painted but has no capability behind it.
-///
-/// WHY the border tone and not a grey invented here: it is the design system's
-/// own hairline, so an unavailable control reads as recessed chrome against both
-/// the page fill and a card, and it stays in step with the rest of the shell if
-/// the hairline token ever moves.
 
 // -----------------------------------------------------------------------------
 // Media model
@@ -1724,15 +1678,72 @@ impl GalleryApp {
         count
     }
 
-    /// Rebuilds the header subtitle from the media the gallery holds now.
+    /// Rebuilds the header subtitle from the media the destination in front holds.
     ///
     /// WHY this is not left at its boot value: the subtitle is a count of the
     /// media list, and the list changes when the user deletes a document. A
     /// sentence built once would keep quoting a photo the grid no longer has,
     /// which is exactly the kind of stale number the truth contract forbids.
+    ///
+    /// WHY it is built per tab: the same run used to quote the wallpaper and
+    /// photo counts on all four destinations, so the Albums and Screenshots
+    /// screens announced a timeline the user was not looking at -- the header
+    /// naming one screen while the grid under it held another. Each arm counts
+    /// the set its own grid paints, from the same functions that grid calls.
     pub fn refresh_subtitle(&mut self) {
         let photos = self.device_photos_count();
-        self.subtitle_len = build_subtitle(&mut self.subtitle, walls::SCENES.len(), photos);
+        let videos = self.videos_count();
+        let screenshots = self.screenshots_count();
+        let buf = &mut self.subtitle;
+        self.subtitle_len = match self.tab {
+            GalleryTab::Photos => build_subtitle(buf, walls::SCENES.len(), photos),
+            GalleryTab::Videos => {
+                let n = append_u64(buf, 0, videos as u64);
+                append(
+                    buf,
+                    n,
+                    if videos == 1 {
+                        b" video on this device"
+                    } else {
+                        b" videos on this device"
+                    },
+                )
+            }
+            GalleryTab::Albums => {
+                let n = append_u64(buf, 0, ALBUM_CELLS as u64);
+                append(
+                    buf,
+                    n,
+                    if ALBUM_CELLS == 1 {
+                        b" album on this device"
+                    } else {
+                        b" albums on this device"
+                    },
+                )
+            }
+            GalleryTab::Screenshots => {
+                let n = append_u64(buf, 0, screenshots as u64);
+                append(
+                    buf,
+                    n,
+                    if screenshots == 1 {
+                        b" screenshot on this device"
+                    } else {
+                        b" screenshots on this device"
+                    },
+                )
+            }
+        };
+    }
+
+    /// Moves to a destination and re-states the header for it.
+    ///
+    /// WHY the assignment is not left inline: the subtitle is now a function of
+    /// the tab, so every site that changes the tab without rebuilding it would
+    /// paint the previous destination's counts above the new one.
+    pub fn select_tab(&mut self, tab: GalleryTab) {
+        self.tab = tab;
+        self.refresh_subtitle();
     }
 
     /// Rebuilds the four counts and the chip labels that carry them.
@@ -2567,7 +2578,12 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
     let text_y = y0 + card_img_h + CAPTION_INSET;
     let mut buf = [0u8; 32];
     let n = font::ellipsize(&item.name[..item.name_len], 1, CELL - 16, &mut buf);
-    if let Some(c) = text(x, y, x0 + 8, text_y, 1, &buf[..n], THEME.on_surface, THEME.surface_container) {
+    // WHY the caption is centred on the card's own axis: the wallpaper cells
+    // above centre theirs, and a timeline that mixes the two kinds put a
+    // left-flush name under a centred one in the same column, so the row read as
+    // two different lists. The inset box is the one the run is ellipsized to, so
+    // its centre is the card's centre.
+    if let Some(c) = text_centered(x, y, x0 + 8, text_y, CELL - 16, 1, &buf[..n], THEME.on_surface, THEME.surface_container) {
         return c;
     }
     THEME.surface_container
@@ -2630,7 +2646,16 @@ fn chip_row_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
             continue;
         }
         let label = chip_label(app, i);
-        let (fill, ink, border) = if app.filter == Filter::from_index(i) {
+        // WHY the fill waits for the timeline: the chips select a set the
+        // timeline holds, and the three other destinations draw their own grid
+        // regardless of the stored filter. A filled pill on those screens read
+        // as "this screen is showing Wallpapers" while it was showing videos,
+        // albums or screenshots. The row stays live -- a chip still jumps to
+        // the timeline with that set chosen -- but it stops claiming a filter
+        // the screen in front of the user is not applying.
+        let (fill, ink, border) = if app.tab == GalleryTab::Photos
+            && app.filter == Filter::from_index(i)
+        {
             (THEME.on_surface, THEME.on_primary, None)
         } else {
             (THEME.surface_container_high, THEME.on_surface, Some(THEME.border))
@@ -3114,6 +3139,27 @@ fn section_header_pixel(x: usize, y: usize, app: &GalleryApp, row: usize, y0: us
     THEME.surface
 }
 
+/// The height of a two-line empty answer: title box, the gap, note box.
+const EMPTY_BLOCK_H: usize = font::line_height(2) + 8 + font::line_height(1);
+/// The same block when it carries the measured scan line under the note.
+const EMPTY_BLOCK_SCANNED_H: usize = EMPTY_BLOCK_H + 24;
+
+/// Where a block of empty-state lines sits inside the grid band.
+///
+/// WHY centred in the band it is given: the ledger note this app draws when the
+/// photo set is empty is already placed that way by `ledger_block_y0`, and the
+/// four other empties were pinned 120 rows under the tab row -- a two-line
+/// answer with nine hundred rows of blank panel beneath it, which reads as a
+/// painting fault rather than as an empty collection.
+const fn empty_block_y0(block_h: usize) -> usize {
+    GRID_TOP + (GRID_BOTTOM - GRID_TOP).saturating_sub(block_h) / 2
+}
+
+/// WHY checked at compile time: the block is placed by subtracting its own
+/// height from the band, so a block taller than the band would park its title
+/// above the grid the empty state is supposed to fill.
+const _: () = assert!(EMPTY_BLOCK_SCANNED_H < GRID_BOTTOM - GRID_TOP);
+
 /// The honest state for a filter that selects nothing.
 ///
 /// WHY it names the filter: each of these sentences is about a different set,
@@ -3137,7 +3183,12 @@ fn empty_filter_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             b"Files the document index names will appear here.",
         ),
     };
-    let y0 = GRID_TOP + 120;
+    let shows_scan_line = app.filter == Filter::All || app.filter == Filter::Videos;
+    let y0 = empty_block_y0(if shows_scan_line {
+        EMPTY_BLOCK_SCANNED_H
+    } else {
+        EMPTY_BLOCK_H
+    });
     if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, title, THEME.on_surface, THEME.surface) {
         return c;
     }
@@ -3145,7 +3196,7 @@ fn empty_filter_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         x,
         y,
         MARGIN,
-        y0 + 40,
+        y0 + font::line_height(2) + 8,
         W - 2 * MARGIN,
         1,
         note,
@@ -3154,12 +3205,12 @@ fn empty_filter_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
     ) {
         return c;
     }
-    if app.filter == Filter::All || app.filter == Filter::Videos {
+    if shows_scan_line {
         if let Some(c) = text_centered(
             x,
             y,
             MARGIN,
-            y0 + 64,
+            y0 + EMPTY_BLOCK_H + 2,
             W - 2 * MARGIN,
             1,
             &app.scan_line[..app.scan_line_len],
@@ -3174,7 +3225,7 @@ fn empty_filter_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
 /// The document index's own two states: still reading, or unreadable.
 fn scan_state_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
-    let y0 = GRID_TOP + 120;
+    let y0 = empty_block_y0(EMPTY_BLOCK_H);
     let (title, note): (&[u8], &[u8]) = if app.scan_state == ScanState::Loading {
         (
             b"Reading the document index",
@@ -3193,7 +3244,7 @@ fn scan_state_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         x,
         y,
         MARGIN,
-        y0 + 40,
+        y0 + font::line_height(2) + 8,
         W - 2 * MARGIN,
         1,
         note,
@@ -3233,12 +3284,12 @@ fn photos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 fn videos_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     let count = app.videos_count();
     if count == 0 {
-        let y0 = GRID_TOP + 120;
+        let y0 = empty_block_y0(EMPTY_BLOCK_H);
         if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No videos found", THEME.on_surface, THEME.surface) {
             return Some(c);
         }
         let note = b"Saved videos in /storage/videos will appear here.";
-        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + font::line_height(2) + 8, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
             return Some(c);
         }
         return Some(THEME.surface);
@@ -3266,7 +3317,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 
     let rel_y = y - GRID_TOP + app.scroll.offset;
     let row = rel_y / 200;
-    if row >= 2 || rel_y % 200 >= 180 {
+    if row >= ALBUM_ROWS || rel_y % 200 >= 180 {
         return Some(THEME.surface);
     }
 
@@ -3339,7 +3390,7 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     let count = app.screenshots_count();
     if count == 0 {
-        let y0 = GRID_TOP + 120;
+        let y0 = empty_block_y0(EMPTY_BLOCK_H);
         if let Some(c) = text_centered(x, y, MARGIN, y0, W - 2 * MARGIN, 2, b"No screenshots yet", THEME.on_surface, THEME.surface) {
             return Some(c);
         }
@@ -3347,7 +3398,7 @@ fn screenshots_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         // handler, so the old note that told the user to press 'S' named a
         // shortcut that does not exist.
         let note = b"Capture a screen with the + Shot button.";
-        if let Some(c) = text_centered(x, y, MARGIN, y0 + 40, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
+        if let Some(c) = text_centered(x, y, MARGIN, y0 + font::line_height(2) + 8, W - 2 * MARGIN, 1, note, THEME.on_surface_variant, THEME.surface) {
             return Some(c);
         }
         return Some(THEME.surface);
@@ -4536,7 +4587,21 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             return THEME.surface_container_high;
         }
         let title_x = if app.launched_from_caller { MARGIN + 56 } else { MARGIN };
-        if let Some(c) = text_bold(x, y, title_x, TITLE_Y, 2, b"Photos", THEME.on_surface, THEME.surface) {
+        // WHY the title is the tab's own word: the bar used to say "Photos"
+        // whatever was underneath it, so the Videos, Albums and Screenshots
+        // destinations each opened under a header naming a different screen --
+        // and the tab row one band lower was already answering that header
+        // wrongly. `TAB_LABELS` is that row's source, so the two cannot disagree.
+        if let Some(c) = text_bold(
+            x,
+            y,
+            title_x,
+            TITLE_Y,
+            2,
+            TAB_LABELS[app.tab as usize],
+            THEME.on_surface,
+            THEME.surface,
+        ) {
             return c;
         }
         // WHY one subtitle line and not the old pair: the catalogue count and
@@ -5282,7 +5347,20 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     // A chip that is drawn but cannot be chosen is an affordance that lies.
     if let Some(index) = chip_at(x, y, app) {
         let filter = Filter::from_index(index);
+        // WHY the chip also lands on the timeline: the four chips filter the
+        // timeline, and the Videos, Albums and Screenshots grids ignore the
+        // filter entirely -- each holds its own set. Choosing a chip from one of
+        // those tabs used to move the pill and store a preference while the
+        // screen behind it did not change at all, which is the lying affordance
+        // this row exists to avoid. The album cards already answer this way.
+        let landed_from_elsewhere = app.tab != GalleryTab::Photos;
+        app.select_tab(GalleryTab::Photos);
         if filter == app.filter {
+            if landed_from_elsewhere {
+                app.reset_scroll();
+                std::log("[GALLERY] Gallery filter chip switched; the selection was stored.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
             std::log("[GALLERY] Gallery filter chip switched; the selection was stored.").ok();
             return Tap::None;
         }
@@ -5296,7 +5374,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         let tab_idx = (x * 4 / W).min(3);
         let new_tab = GalleryTab::from_index(tab_idx);
         if new_tab != app.tab {
-            app.tab = new_tab;
+            app.select_tab(new_tab);
             // WHY the filter is kept: it is a stored preference, and a tab is
             // a destination. Resetting it on every tab switch would forget the
             // choice the user made one tap earlier.
@@ -5347,20 +5425,20 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
                 if let Some(col) = video_col_of(x) {
                     let rel_y = y - GRID_TOP + app.scroll.offset;
                     let row = rel_y / 200;
-                    if row < 2 && rel_y % 200 < 180 {
+                    if row < ALBUM_ROWS && rel_y % 200 < 180 {
                         let album_idx = row * 2 + col;
                         match album_idx {
                             0 => {
-                                app.tab = GalleryTab::Photos;
+                                app.select_tab(GalleryTab::Photos);
                                 app.apply_filter(Filter::All);
                             }
-                            1 => app.tab = GalleryTab::Screenshots,
+                            1 => app.select_tab(GalleryTab::Screenshots),
                             2 => {
-                                app.tab = GalleryTab::Photos;
+                                app.select_tab(GalleryTab::Photos);
                                 app.apply_filter(Filter::All);
                             }
                             3 => {
-                                app.tab = GalleryTab::Photos;
+                                app.select_tab(GalleryTab::Photos);
                                 app.apply_filter(Filter::Wallpapers);
                             }
                             _ => {}
