@@ -95,6 +95,34 @@ const CARD_ROWS: usize = 3;
 /// Type scale for a deck tile's name: scale 3 (SECTION) with outline anti-aliasing for clean, prominent mobile readability.
 const LABEL_SCALE: usize = type_scale::SECTION;
 
+/// The rows a run at the search field's rung reserves on the outline face.
+///
+/// WHY the ladder and not `text::line_height`: the search text draws at
+/// `LABEL_SCALE` with the outline face, whose SECTION line box is
+/// `launcher::font::line_height` (44 rows) rather than the bitmap cell's
+/// `GLYPH_H * scale` (72 rows). Centring the taller bitmap box inside the
+/// 62-row field underflowed the reserve to zero and pressed the text against
+/// the field's top edge, so it no longer shared the magnifier's centre row.
+const SEARCH_LABEL_BOX_H: usize = launcher::font::line_height(LABEL_SCALE);
+const _: () = assert!(
+    SEARCH_LABEL_BOX_H <= 62,
+    "the search field's label box must fit inside the field it is centred in",
+);
+
+/// Inset from a system-card row's top to the row name's line box.
+const CARD_NAME_TOP: usize = 16;
+/// The rows the row name reserves at its rung, on the outline face.
+const CARD_NAME_BOX_H: usize = launcher::font::line_height(CARD_ROW_LABEL);
+/// The rows the row detail reserves at its rung, on the outline face.
+const CARD_DETAIL_BOX_H: usize = launcher::font::line_height(CARD_ROW_DETAIL);
+/// Where the detail's line box starts: clear of the name's whole box, not a
+/// remembered stride that sat inside it.
+const CARD_DETAIL_TOP: usize = CARD_NAME_TOP + CARD_NAME_BOX_H;
+const _: () = assert!(
+    CARD_DETAIL_TOP + CARD_DETAIL_BOX_H <= 120,
+    "a system-card row must hold its name box and its detail box",
+);
+
 /// Largest and smallest icon scale a deck tile will draw its badge word at.
 ///
 /// WHY a ceiling as well as a floor: the registry gives three or four letters
@@ -813,14 +841,14 @@ fn build(state: &LauncherState) -> Paint {
                 rect,
                 name: Run::whole(
                     rect.x + 80,
-                    rect.y + 16,
+                    rect.y + CARD_NAME_TOP,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.on_surface,
                 ),
                 detail: Run::whole(
                     rect.x + 80,
-                    rect.y + 54,
+                    rect.y + CARD_DETAIL_TOP,
                     CARD_ROW_DETAIL,
                     &buf[..len],
                     theme.on_surface_variant,
@@ -837,7 +865,7 @@ fn build(state: &LauncherState) -> Paint {
     let search_magnifier = (magnifier_x, f.search.center_y(), magnifier_r);
     let search_text_x = f.search.x + 64;
     let search_room = (f.search.x + f.search.w).saturating_sub(search_text_x).saturating_sub(space::LG);
-    let search_y = f.search.y + f.search.h.saturating_sub(text::line_height(LABEL_SCALE)) / 2;
+    let search_y = f.search.y + f.search.h.saturating_sub(SEARCH_LABEL_BOX_H) / 2;
     let search = if f.search.w > 0 && f.search.h > 0 {
         Run::fitted(
             search_text_x,

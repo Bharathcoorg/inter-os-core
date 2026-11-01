@@ -58,13 +58,12 @@ pub(super) fn run_left(
     run: &[u8],
     color: u32,
 ) -> Option<u32> {
-    let h = text::line_height(scale);
+    let h = run_line_box(scale);
     let y0 = rect.y + rect.h.saturating_sub(h) / 2;
     if y < y0 || y >= y0 + h || x < rect.x {
         return None;
     }
-    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
-    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
+    let w = text::measure(run, scale);
     if x >= rect.x + w {
         return None;
     }
@@ -80,13 +79,12 @@ pub(super) fn run_right(
     run: &[u8],
     color: u32,
 ) -> Option<u32> {
-    let h = text::line_height(scale);
+    let h = run_line_box(scale);
     let y0 = rect.y + rect.h.saturating_sub(h) / 2;
     if y < y0 || y >= y0 + h {
         return None;
     }
-    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
-    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
+    let w = text::measure(run, scale);
     if w > rect.w {
         return None;
     }
@@ -103,19 +101,36 @@ pub(super) fn run_center(
     run: &[u8],
     color: u32,
 ) -> Option<u32> {
-    let h = text::line_height(scale);
+    let h = run_line_box(scale);
     let y0 = rect.y + rect.h.saturating_sub(h) / 2;
     if y < y0 || y >= y0 + h {
         return None;
     }
-    let em = if scale == 1 { 24u32 } else { (scale * 24) as u32 };
-    let w = interos_std::design::typeface::text_advance_px(run, em) as usize;
+    let w = text::measure(run, scale);
     if w > rect.w {
         return None;
     }
     let cx = (rect.w.saturating_sub(w)) / 2;
     let placed = Rect::new(rect.x + cx, rect.y, w, rect.h);
     run_left(x, y, &placed, scale, run, color)
+}
+
+/// The height of the line box the painter actually inks for a run at `scale`.
+///
+/// WHY the two faces are named apart: a run at scale two and above is drawn
+/// with the outline face, whose box is the ladder's ascent plus descent; the
+/// bitmap face at scale one draws its whole `GLYPH_H` cell. The old helpers
+/// measured the run's width with `scale * 24`, an em roughly double the ladder
+/// one the outline is placed at, so a run that fitted its card measured as
+/// overflowing and was dropped, and centring put the rest off to one side.
+/// [`text::measure`] walks the same advances the rasteriser steps by, so the
+/// bound and the ink cannot drift apart.
+fn run_line_box(scale: usize) -> usize {
+    if scale >= 2 {
+        launcher::font::line_height(scale)
+    } else {
+        text::line_height(scale)
+    }
 }
 
 /// A settings value or absence reason.

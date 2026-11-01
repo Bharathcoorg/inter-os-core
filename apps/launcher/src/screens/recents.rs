@@ -55,6 +55,38 @@ pub const CLOSE_ALL_Y: usize = 1090;
 pub const CLOSE_ALL_W: usize = 224;
 pub const CLOSE_ALL_H: usize = 52;
 
+// --- Line-box geometry, derived from the type ladder -----------------------
+// WHY these are derived and not the old per-pixel literals: the card painted its
+// title inside a 26-row band while a BODY run reserves 32 on the outline face, so
+// every title with a descender ('p', 'g', 'y') lost its tail to the band, and it
+// started the state line at a stride of 28 -- inside the title's own box. The
+// "Clear All" label was centred against a remembered offset rather than its line
+// box, and the empty state's hint sat over the title's descenders for the same
+// reason. Each pair now reserves the box its rung actually draws.
+
+/// The rows a task card's title reserves on the outline face at its rung.
+const CARD_NAME_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
+/// The rows a task card's state line reserves on the bitmap face at its rung.
+const CARD_STATE_BOX_H: usize = launcher::font::GLYPH_H * type_scale::CAPTION;
+/// Inset from a card's top to the title's line box.
+const CARD_NAME_TOP: usize = 24;
+/// Inset from a card's top to the state line: below the title's whole box.
+const CARD_STATE_TOP: usize = CARD_NAME_TOP + CARD_NAME_BOX_H;
+const _: () = assert!(
+    CARD_STATE_TOP + CARD_STATE_BOX_H < 84,
+    "the card's title and state lines must sit above the snapshot well",
+);
+
+/// The rows the "Clear All" pill's label reserves on the outline face.
+const CLOSE_ALL_LABEL_H: usize = launcher::font::line_height(type_scale::BODY);
+const _: () = assert!(
+    CLOSE_ALL_LABEL_H <= CLOSE_ALL_H,
+    "the Clear All label's line box must fit the pill it is centred in",
+);
+
+/// The rows the empty-state title reserves on the outline face at its rung.
+const EMPTY_TITLE_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+
 // ============================================================================
 // Hit Testing & Interaction Actions
 // ============================================================================
@@ -444,9 +476,10 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
     }
 
     let close_all = close_all_rect();
+    let clear_all_w = launcher::text::measure(b"Clear All", type_scale::BODY);
     let close_all_label = Label::at(
-        close_all.x + 60,
-        close_all.y + 16,
+        close_all.x + (close_all.w.saturating_sub(clear_all_w)) / 2,
+        close_all.y + (close_all.h - CLOSE_ALL_LABEL_H) / 2,
         type_scale::BODY,
         b"Clear All",
         theme.on_surface,
@@ -461,7 +494,7 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
     );
     let empty_hint = Label::at(
         SCREEN_WIDTH / 2 - 140,
-        648,
+        600 + EMPTY_TITLE_BOX_H + interos_std::design::spacing::GRID_8,
         type_scale::CAPTION,
         b"Apps you open will appear here",
         theme.on_surface_variant,
@@ -663,12 +696,17 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
 
         // C. Title label
-        if card.name_len > 0 && px >= (card_x + 78) && px < (card_x + 380) && py >= (card_y + 24) && py < (card_y + 50) {
+        if card.name_len > 0
+            && px >= (card_x + 78)
+            && px < (card_x + 380)
+            && py >= (card_y + CARD_NAME_TOP as i32)
+            && py < (card_y + (CARD_NAME_TOP + CARD_NAME_BOX_H) as i32)
+        {
             if let Some(c) = crate::test_text_aa(
                 x,
                 y,
                 (card_x + 78) as usize,
-                (card_y + 24) as usize,
+                (card_y + CARD_NAME_TOP as i32) as usize,
                 type_scale::BODY,
                 &card.name[..card.name_len],
                 theme.on_surface,
@@ -679,12 +717,17 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
 
         // D. Subtitle (state: "Active" / "Running" / "Last frame")
-        if card.state_len > 0 && px >= (card_x + 78) && px < (card_x + 380) && py >= (card_y + 52) && py < (card_y + 74) {
+        if card.state_len > 0
+            && px >= (card_x + 78)
+            && px < (card_x + 380)
+            && py >= (card_y + CARD_STATE_TOP as i32)
+            && py < (card_y + (CARD_STATE_TOP + CARD_STATE_BOX_H) as i32)
+        {
             if let Some(c) = crate::test_text_aa(
                 x,
                 y,
                 (card_x + 78) as usize,
-                (card_y + 52) as usize,
+                (card_y + CARD_STATE_TOP as i32) as usize,
                 type_scale::CAPTION,
                 &card.state_label[..card.state_len],
                 theme.on_surface_variant,

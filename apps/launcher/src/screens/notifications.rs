@@ -119,8 +119,18 @@ pub const HEADER_CLEAR_BTN: Rect = Rect::new(
     48,
 );
 
-/// The rows the pill's own label reserves at the rung it is drawn at.
-const CLEAR_LABEL_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
+/// The rows a BODY label reserves on the outline face -- the rung every pill's
+/// label on this surface is drawn at.
+///
+/// WHY one const and not three literals: the action and Clear pills centred
+/// their label against a remembered `36`, which was neither the outline BODY
+/// line box (32) nor the old bitmap cell (48). A label centred in a box the
+/// painter never fills puts the ink above the pill's middle and leaves the gap
+/// below twice the gap above -- the header pill already fixed for exactly this.
+const BODY_LABEL_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
+
+/// The rows the Clear all pill's own label reserves -- the BODY line box.
+const CLEAR_LABEL_BOX_H: usize = BODY_LABEL_BOX_H;
 
 /// Where the "Clear all" label starts: centred in the pill by its line box.
 ///
@@ -134,6 +144,10 @@ const HEADER_CLEAR_LABEL_Y: usize =
 const _: () = assert!(
     CLEAR_LABEL_BOX_H <= HEADER_CLEAR_BTN.h,
     "the Clear all label's line box must fit the pill it is centred in",
+);
+const _: () = assert!(
+    BODY_LABEL_BOX_H == 32,
+    "the pill label box must be the outline BODY line box, not a remembered cell",
 );
 
 /// Bottom Clear All pill: matches the hit-test and serial harness (360, 720).
@@ -776,7 +790,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     let action1 = Rect::new(ROW_TEXT_X, y + 120, 130, 48);
     let action1_label = LabelRun::centred(
         action1.x,
-        action1.y + (action1.h.saturating_sub(36)) / 2,
+        action1.y + (action1.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,
         action1.w,
         type_scale::BODY,
         act1_name,
@@ -786,7 +800,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     let action2 = Rect::new(ROW_TEXT_X + 142, y + 120, 130, 48);
     let action2_label = LabelRun::centred(
         action2.x,
-        action2.y + (action2.h.saturating_sub(36)) / 2,
+        action2.y + (action2.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,
         action2.w,
         type_scale::BODY,
         act2_name,
@@ -1017,7 +1031,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 
     let clear_label = LabelRun::centred(
         CLEAR_BTN.x,
-        CLEAR_BTN.y + (CLEAR_BTN.h.saturating_sub(36)) / 2,
+        CLEAR_BTN.y + (CLEAR_BTN.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,
         CLEAR_BTN.w,
         type_scale::BODY,
         b"Clear all",

@@ -45,6 +45,26 @@ const APP_LABEL_CAPACITY: usize = 16;
 const LABEL_SCALE: usize = type_scale::BODY;
 const BADGE_SCALE: usize = type_scale::BADGE;
 
+/// The rows an app name reserves on the outline face at its rung.
+///
+/// WHY the ladder and not `text::line_height`: the tile name draws with the
+/// outline face, whose BODY line box is 32 rows; `text::line_height` answers the
+/// bitmap cell's `GLYPH_H * scale` (48 here). Reserving the cell the face does
+/// not paint made the icon-plus-name group taller than its content, so every
+/// tile's name floated below the centre of the cell it was centred in.
+const TILE_LABEL_BOX_H: usize = launcher::font::line_height(LABEL_SCALE);
+const _: () = assert!(
+    TILE_LABEL_BOX_H == 32,
+    "the tile name must reserve the outline BODY line box, not the bitmap cell",
+);
+
+/// The rows the empty-state heading reserves on the outline face at its rung.
+const EMPTY_HEAD_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+const _: () = assert!(
+    EMPTY_HEAD_BOX_H == 59,
+    "the empty-state heading must reserve the outline TITLE line box, not the bitmap cell",
+);
+
 /// Icon badge: at most three glyphs, which is what the icon field in
 /// `LauncherState::app_icons` is there to hold.
 const BADGE_GLYPHS: usize = 3;
@@ -833,7 +853,7 @@ fn build(state: &LauncherState) -> Paint {
             continue;
         };
         let icon_d = 80usize;
-        let group_h = icon_d + 10 + text::line_height(LABEL_SCALE);
+        let group_h = icon_d + 10 + TILE_LABEL_BOX_H;
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
         let badge = app_badge(state, index);
@@ -891,7 +911,7 @@ fn build(state: &LauncherState) -> Paint {
             }
         };
         let head_y = f.grid.y + 32;
-        let body_y = head_y + text::line_height(type_scale::TITLE) + 20;
+        let body_y = head_y + EMPTY_HEAD_BOX_H + 20;
         Some(EmptyPlan {
             head: Run::whole(f.grid.x, head_y, type_scale::TITLE, head_bytes, theme.on_surface),
             body: [

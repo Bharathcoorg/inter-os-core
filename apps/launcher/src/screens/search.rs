@@ -37,6 +37,18 @@ const ROWS_Y: usize = 216;
 /// The height of one result row.
 const ROW_H: usize = 96;
 
+/// The rows the query field's text reserves on the outline face at its rung.
+///
+/// WHY the ladder and not `text::line_height`: the query and its placeholder
+/// draw with the outline face, whose BODY line box is `launcher::font::line_height`
+/// (32 rows), not the bitmap cell's 48. Centring the taller bitmap box inside
+/// the 64-row field left the ink high, the gap below twice the gap above.
+const FIELD_TEXT_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
+const _: () = assert!(
+    FIELD_TEXT_BOX_H <= FIELD_H,
+    "the query field's label box must fit inside the field it is centred in",
+);
+
 /// The card the per-source verdicts are drawn in.
 const STATUS_X: usize = 32;
 const STATUS_Y: usize = 812;
@@ -174,7 +186,7 @@ fn build(state: &LauncherState) -> Plan {
     };
 
     // The query field's text.
-    let field_text_y = FIELD_Y + (FIELD_H - launcher::text::line_height(type_scale::BODY)) / 2;
+    let field_text_y = FIELD_Y + (FIELD_H - FIELD_TEXT_BOX_H) / 2;
     if state.search_query_len > 0 {
         plan.query = Label::at(
             FIELD_X + 56,
