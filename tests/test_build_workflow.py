@@ -1,4 +1,5 @@
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -83,6 +84,45 @@ Set-Location '{ROOT_DIR}'
         self.assertEqual(r2.returncode, 0, f"Second no-op build failed: {r2.stderr}\n{r2.stdout}")
         self.assertIn("cached/up-to-date", r2.stdout)
         self.assertIn("BIOS image verified", r2.stdout)
+
+    def test_embedded_images_are_all_declared_as_build_inputs(self):
+        """Proves the kernel's declared build inputs are exactly the images it embeds.
+
+        `src/task/images.rs` reaches its Ring-3 images through `include_bytes!`,
+        which cargo does not track, so `kernel/build.rs` is the only thing that
+        makes those bytes a build dependency. A name missing from that declaration
+        lets an edited app ship the previously embedded image, and a name present
+        in it whose file no longer exists dirties the kernel on every build --
+        cargo cannot fingerprint a path it cannot stat. Both failures are silent
+        and both belong to the list rather than to the compiler, so the parity of
+        the two lists is the guarantee under test.
+        """
+        with open(os.path.join(ROOT_DIR, "kernel", "src", "task", "images.rs"), encoding="utf-8") as handle:
+            images_source = handle.read()
+        with open(os.path.join(ROOT_DIR, "kernel", "build.rs"), encoding="utf-8") as handle:
+            build_source = handle.read()
+
+        embedded = set(re.findall(
+            r'include_bytes!\(concat!\(env!\("CARGO_MANIFEST_DIR"\), '
+            r'"/\.\./target/x86_64-unknown-none/debug/([a-z0-9_]+)"\)\)',
+            images_source,
+        ))
+        declaration = build_source[
+            build_source.index("EMBEDDED_USER_IMAGES"):build_source.index("fn main")
+        ]
+        declared = set(re.findall(r'"([a-z0-9_]+)"', declaration))
+
+        self.assertTrue(embedded, "no embedded user image was found to check")
+        self.assertEqual(
+            embedded - declared, set(),
+            "embedded images the kernel will not rebuild when they change: "
+            f"{sorted(embedded - declared)}",
+        )
+        self.assertEqual(
+            declared - embedded, set(),
+            "declared build inputs that no longer exist, which recompile the "
+            f"kernel on every build: {sorted(declared - embedded)}",
+        )
 
     def test_cargo_artifact_verification_rejects_missing_file(self):
         """Proves Verify-KernelBinaryArtifact fails closed when binary does not exist on disk."""

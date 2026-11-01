@@ -6,6 +6,13 @@
 //! last compiled and silently ship a stale launcher, compositor or service after
 //! its source changed. Emitting `rerun-if-changed` for every embedded image makes
 //! that dependency explicit.
+//!
+//! WHY the list must be exactly the embedded set, and not merely a superset:
+//! `rerun-if-changed` for a path that does not exist makes cargo dirty the crate
+//! on every build -- it cannot fingerprint what it cannot stat. An entry for an
+//! image that was removed therefore costs a full kernel recompile on every
+//! no-op rebuild, while a missing entry lets an edited image ship the bytes the
+//! previous build embedded. Both are silent, and both are this list's only job.
 
 use std::path::Path;
 
@@ -13,7 +20,6 @@ use std::path::Path;
 const EMBEDDED_USER_IMAGES: &[&str] = &[
     "init",
     "settings",
-    "terminal",
     "displayd",
     "inputd",
     "storaged",
@@ -38,6 +44,7 @@ const EMBEDDED_USER_IMAGES: &[&str] = &[
     "notes",
     "agent_manager",
     "video_player",
+    "webview_demo",
     "aid",
 ];
 
