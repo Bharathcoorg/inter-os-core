@@ -854,6 +854,13 @@ impl Scheduler {
         self.terminate_task(child_id, exit_code)
     }
 
+    /// Reaps a terminated child owned by `parent_id`, returning its exit code.
+    ///
+    /// Success means both sides are gone: the task control block and whatever the
+    /// process tables still held for that task -- its thread binding, and its
+    /// process record when no sibling thread kept it alive. A caller that gets
+    /// `Err` back while the child is still a zombie saw the process side refuse to
+    /// commit and may retry.
     pub fn reap_child(&mut self, parent_id: TaskId, child_id: TaskId) -> Result<i32, &'static str> {
         if child_id == TaskId(0) || child_id == self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0)) {
             return Err("child cannot be reaped");
@@ -864,7 +871,20 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
         }).ok_or("child not ready or not owned by caller")?;
         let exit_code = self.tasks[index].exit_code;
-        let _ = crate::task::process::reap(child_id);
+        // WHY the task control block is dropped only after this match commits:
+        // `reap` gives up with `TablesBusy` once its bounded spin is spent, and
+        // removing the block before the process side releases its record leaves a
+        // `PROCESS_TABLE` entry owned by nobody. Task ids come from one monotone
+        // counter, so the next spawn handed this id inherits that record. The
+        // match is exhaustive over [`ReapError`] for the same reason as
+        // `reap_task_now_or_defer`: a guessed arm would have to choose between
+        // this leak and an unreapable zombie. A deferred child stays a zombie and
+        // stays owned by its parent, so the parent's next `waitpid` retries it.
+        match crate::task::process::reap(child_id) {
+            Ok(()) => {}
+            Err(ReapError::ThreadNotRegistered) | Err(ReapError::ProcessRecordMissing) => {}
+            Err(ReapError::TablesBusy) => return Err("child process record still held"),
+        }
         self.tasks.remove(index);
         if index < self.current_idx {
             self.current_idx -= 1;
@@ -1365,6 +1385,70 @@ mod tests {
         // Further ticks must not re-count a zombie that is already gone.
         assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
         assert_eq!(sched.reap_orphans(), 0, "a reclaimed zombie must not be counted twice");
+    }
+
+    /// A deferred child stays a zombie and stays owned, so its parent can retry.
+    ///
+    /// WHY this case exists at all: `reap_child` drives `waitpid`, `app_stop` and
+    /// `app_restart`, and it used to drop the task control block after a `let _ =`
+    /// on the process side. `process::reap` reports `TablesBusy` after its 10,000
+    /// spins run out, so a parent could be told a child was reaped while
+    /// `PROCESS_TABLE` still held that child's record and `THREAD_TABLE` still
+    /// bound its id. Because task ids come from one monotone counter, the next
+    /// spawn handed that id inherits a record it did not create -- a leak of one
+    /// of `MAX_PROCESSES` = 128 slots plus an aliased identity, which is what the
+    /// assertions below name. Restore the `let _ =` and the first attempt fails:
+    /// it returns `Ok(42)` and drops the child while its record is still held.
+    #[test]
+    fn reap_child_that_cannot_release_the_process_record_reports_no_success() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("waitpid_parent", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1);
+        let child_id = sched.spawn_with_parent("waitpid_child", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 1, parent_id);
+        let _child_leader = crate::task::process::OwnedLeader::adopted(child_id);
+        let _parent_leader = crate::task::process::OwnedLeader::adopted(parent_id);
+
+        sched.terminate_child(parent_id, child_id, 42).expect("terminate child");
+        let task_count_before = sched.task_count();
+
+        {
+            // The hold stands in for the interrupted table owner: on this port the
+            // guest cannot be preempted out of a table critical section, so the
+            // only thread-context caller that reaches `TablesBusy` is one whose
+            // bounded spin genuinely ran out.
+            let _busy = crate::task::process::PROCESS_TABLE.lock();
+            let deferred = sched.reap_child(parent_id, child_id);
+            let Err(reason) = deferred else {
+                panic!("a reap that did not release the process record must not report success, got {:?}", deferred);
+            };
+            assert!(
+                reason.contains("process record"),
+                "the error must name what failed, got {:?}",
+                reason
+            );
+            assert_eq!(
+                sched.get_task(child_id).map(|task| task.state),
+                Some(TaskState::Zombie),
+                "a deferred child must keep its task table entry so its parent can retry"
+            );
+            assert_eq!(sched.task_count(), task_count_before, "a deferred reap must not remove a task");
+        }
+
+        assert_eq!(
+            sched.reap_child(parent_id, child_id),
+            Ok(42),
+            "the retry once the table is free must reap the child"
+        );
+        assert!(sched.get_task(child_id).is_none(), "the reaped task control block must be dropped");
+        assert_eq!(sched.task_count(), task_count_before - 1);
+        assert!(
+            crate::task::process::process_for_task(child_id).is_none(),
+            "the committed reap must leave {:?} bound to nothing, still holding {:?}",
+            child_id,
+            process_leftover(child_id),
+        );
     }
 
     #[test]
