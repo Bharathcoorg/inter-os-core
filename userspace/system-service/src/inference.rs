@@ -2,7 +2,7 @@
 //!
 //! Strictly `#![no_std]` and zero heap allocation in all execution paths.
 //! Implements real tensor operations:
-//! - Dequantization (F32, F16, Q4_0, Q8_0 to F32); any other type id is refused by number
+//! - Dequantization (F32, F16, Q4_0, Q8_0, Q4_K to F32); any other type id is refused by number
 //! - Matrix-vector multiplication (GEMV) with on-the-fly row dequantization
 //! - RMSNorm (Root Mean Square Layer Normalization)
 //! - RoPE (Rotary Positional Embeddings)
@@ -23,9 +23,10 @@ pub const MAX_HEAD_DIM: usize = 32;
 /// Error types for inference execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceError {
-    /// The GGML type id the tensor declares. Only the four ids `gemv` dequantizes
-    /// reach the arithmetic, so a K-quant file is refused here rather than read
-    /// with a layout the engine has not been given authoritatively.
+    /// The GGML type id the tensor declares. Only the ids `gemv` dequantizes reach
+    /// the arithmetic, so a type whose layout the engine has not been given
+    /// authoritatively is refused by number instead of read with a guess.
+    /// Q4_K is the fifth id it knows; Q4_1, Q5_K and Q6_K are not among them.
     UnsupportedQuantization(u32),
     CorruptedWeights,
     BufferTooSmall,
@@ -210,6 +211,75 @@ pub fn dequantize_q8_0(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceEr
     Ok(num_elements)
 }
 
+/// Weights per Q4_K super-block, and the bytes that super-block occupies.
+///
+/// WHY the size is asserted rather than typed at each use: `2 halves + 12 scale
+/// bytes + one nibble per two weights` is the layout the format fixes, and a
+/// reader that got the byte count wrong would silently read the next block's
+/// header as quants.
+const Q4_K_WEIGHTS: usize = 256;
+const Q4_K_BLOCK_BYTES: usize = 144;
+const _: () = assert!(Q4_K_BLOCK_BYTES == 2 * 2 + 12 + Q4_K_WEIGHTS / 2);
+
+/// The 6-bit scale and min that the 12 `scales` bytes pack for sub-block `k`.
+///
+/// WHY the arithmetic is here instead of a straight array: the eight sub-blocks
+/// do not get a byte each. Four of their six bits come from bytes 0..4 (scales)
+/// and 4..8 (mins), and the remaining four borrow their two top bits from the
+/// high half of those same bytes -- byte `8+j` holds scale `4+j` in its low
+/// nibble and min `4+j` in its high nibble, while `S[j] >> 6` and `S[4+j] >> 6`
+/// carry the two bits neither nibble could hold.
+fn q4_k_scale_min(scales: &[u8], k: usize) -> (u32, u32) {
+    let j = k % 4;
+    if k < 4 {
+        ((scales[j] & 0x3f) as u32, (scales[4 + j] & 0x3f) as u32)
+    } else {
+        let scale = (scales[8 + j] & 0x0f) | ((scales[j] >> 6) << 4);
+        let min = (scales[8 + j] >> 4) | ((scales[4 + j] >> 6) << 4);
+        (scale as u32, min as u32)
+    }
+}
+
+/// Dequantizes Q4_K super-blocks (256 values per 144 bytes) into an f32 buffer.
+///
+/// WHY the nibbles are read out of byte order: within each 64-weight group the
+/// low nibble of byte `i` is that group's element `i` and its high nibble is
+/// element `i + 32`, so the sub-blocks alternate low-half/high-half down the
+/// bytes rather than following them. ggml's own portable dot product unpacks
+/// them this way, and a loop that walked the bytes in order would answer with
+/// the right shapes and the wrong numbers.
+pub fn dequantize_q4_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    let num_blocks = raw.len() / Q4_K_BLOCK_BYTES;
+    let num_elements = num_blocks * Q4_K_WEIGHTS;
+    if out.len() < num_elements {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    for b in 0..num_blocks {
+        let blk = &raw[b * Q4_K_BLOCK_BYTES..(b + 1) * Q4_K_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let dmin = f16_to_f32(u16::from_le_bytes([blk[2], blk[3]]));
+        let scales = &blk[4..16];
+        let qs = &blk[16..144];
+        let out_base = b * Q4_K_WEIGHTS;
+        for k in 0..8 {
+            let (scale, min) = q4_k_scale_min(scales, k);
+            let group = k / 2;
+            let hi_half = k % 2;
+            for i in 0..32 {
+                let byte = qs[group * 32 + i];
+                let q = if hi_half == 0 {
+                    (byte & 0x0f) as u32
+                } else {
+                    (byte >> 4) as u32
+                };
+                out[out_base + k * 32 + i] =
+                    d * (scale as f32) * (q as f32) - dmin * (min as f32);
+            }
+        }
+    }
+    Ok(num_elements)
+}
+
 /// Computes General Matrix-Vector Multiplication: y = W * x.
 ///
 /// Handles on-the-fly dequantization directly from raw weight bytes, avoiding large
@@ -321,6 +391,54 @@ pub fn gemv(
                         b_sum += (q as f32) * x[x_base + j];
                     }
                     sum += b_sum * d;
+                }
+                out[i] = sum;
+            }
+            Ok(())
+        }
+        // GGML_TYPE_Q4_K
+        12 => {
+            if cols % Q4_K_WEIGHTS != 0 {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            let blocks_per_row = cols / Q4_K_WEIGHTS;
+            let row_stride_bytes = blocks_per_row * Q4_K_BLOCK_BYTES;
+            if w_bytes.len() < rows * row_stride_bytes {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            for i in 0..rows {
+                let row_slice = &w_bytes[i * row_stride_bytes..(i + 1) * row_stride_bytes];
+                let mut sum = 0.0f32;
+                for b in 0..blocks_per_row {
+                    let blk = &row_slice[b * Q4_K_BLOCK_BYTES..(b + 1) * Q4_K_BLOCK_BYTES];
+                    let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+                    let dmin = f16_to_f32(u16::from_le_bytes([blk[2], blk[3]]));
+                    let scales = &blk[4..16];
+                    let qs = &blk[16..144];
+                    // WHY two accumulators per sub-block: the min offsets every
+                    // weight in it, so its contribution is the min times the sum
+                    // of the activations, not times the quant products. Folding
+                    // it into one loop keeps the row on the fly -- dequantizing
+                    // into a buffer first would cost the whole row's width.
+                    for k in 0..8 {
+                        let (scale, min) = q4_k_scale_min(scales, k);
+                        let group = k / 2;
+                        let hi_half = k % 2;
+                        let x_base = b * Q4_K_WEIGHTS + k * 32;
+                        let mut products = 0.0f32;
+                        let mut activations = 0.0f32;
+                        for e in 0..32 {
+                            let byte = qs[group * 32 + e];
+                            let q = if hi_half == 0 {
+                                (byte & 0x0f) as f32
+                            } else {
+                                (byte >> 4) as f32
+                            };
+                            products += q * x[x_base + e];
+                            activations += x[x_base + e];
+                        }
+                        sum += d * (scale as f32) * products - dmin * (min as f32) * activations;
+                    }
                 }
                 out[i] = sum;
             }
@@ -959,6 +1077,97 @@ pub mod tests {
         gemv(&w_f32, 0, &x, &mut out, 2, 2).unwrap();
         assert_eq!(out[0], 5.0); // 1*1 + 2*2 = 5
         assert_eq!(out[1], 11.0); // 3*1 + 4*2 = 11
+    }
+
+    #[test]
+    fn test_dequantize_q4_k_puts_each_nibble_in_the_sub_block_the_format_puts_it_in() {
+        // One super-block: d = 1.0, dmin = 1.0, every sub-block scale 1, every min 0.
+        let mut blk = [0u8; Q4_K_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        blk[2..4].copy_from_slice(&0x3c00u16.to_le_bytes());
+        for i in 0..4 {
+            blk[4 + i] = 1; // scales 0..3
+            blk[12 + i] = 1; // low nibbles of scales 4..7
+        }
+        // Byte 0 of the quants: nibble 1 then 2. Byte 32 of the quants: 3 then 4.
+        blk[16] = 0x21;
+        blk[48] = 0x43;
+        let mut out = [0.0f32; Q4_K_WEIGHTS];
+        assert_eq!(dequantize_q4_k(&blk, &mut out).unwrap(), Q4_K_WEIGHTS);
+        // The low nibbles of both bytes are the first elements of sub-blocks 0 and 2,
+        // the high nibbles land 32 weights later in sub-blocks 1 and 3 -- not in the
+        // next byte, which is what a loop over the bytes in order would answer.
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[32], 2.0);
+        assert_eq!(out[64], 3.0);
+        assert_eq!(out[96], 4.0);
+        assert_eq!(out.iter().filter(|&&v| v != 0.0).count(), 4);
+    }
+
+    #[test]
+    fn test_dequantize_q4_k_borrows_the_two_top_scale_bits_the_six_bit_pair_cannot_hold() {
+        let mut blk = [0u8; Q4_K_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        blk[2..4].copy_from_slice(&0x3c00u16.to_le_bytes());
+        blk[4] = 0xc1; // scale 0 = 1, and the top bits 3 that extend scale 4
+        blk[8] = 0xc3; // min 0 = 3, and the top bits 3 that extend min 4
+        blk[12] = 0x02; // scale 4 = 2 | 48, min 4 = 0 | 48
+        blk[16] = 0x01; // sub-block 0, element 0: quant 1
+        blk[80] = 0x01; // sub-block 4, element 0: the same nibble, 64-weight group 2
+        let mut out = [0.0f32; Q4_K_WEIGHTS];
+        dequantize_q4_k(&blk, &mut out).unwrap();
+        // Every value here is a small integer, and d and dmin are exactly 1.0, so
+        // the reference arithmetic and this one agree to the last bit: no tolerance.
+        assert_eq!(out[0], 1.0 * 1.0 * 1.0 - 1.0 * 3.0); // -2
+        for e in 1..32 {
+            assert_eq!(out[e], -3.0, "sub-block 0 offsets an unset quant");
+        }
+        for e in 32..128 {
+            assert_eq!(out[e], 0.0, "the six bytes that state no bits ink nothing");
+        }
+        assert_eq!(out[128], 50.0 - 48.0);
+        for e in 129..160 {
+            assert_eq!(out[e], -48.0);
+        }
+        for e in 160..Q4_K_WEIGHTS {
+            assert_eq!(out[e], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_gemv_reads_a_q4_k_row_without_materializing_it() {
+        // Two rows of 256 weights, every quant nibble set, scale 1, min 0, d 1.0:
+        // the row is the all-ones vector, so the product is the sum of x.
+        let mut w = [0u8; 2 * Q4_K_BLOCK_BYTES];
+        for r in 0..2 {
+            let base = r * Q4_K_BLOCK_BYTES;
+            w[base..base + 2].copy_from_slice(&0x3c00u16.to_le_bytes());
+            w[base + 2..base + 4].copy_from_slice(&0x3c00u16.to_le_bytes());
+            for i in 0..4 {
+                w[base + 4 + i] = 1;
+                w[base + 12 + i] = 1;
+            }
+            for q in 0..Q4_K_WEIGHTS / 2 {
+                w[base + 16 + q] = 0x11;
+            }
+        }
+        let x: [f32; Q4_K_WEIGHTS] = core::array::from_fn(|i| i as f32);
+        let mut out = [0.0f32; 2];
+        gemv(&w, 12, &x, &mut out, 2, Q4_K_WEIGHTS).unwrap();
+        assert_eq!(out[0], 32640.0); // 0 + 1 + ... + 255
+        assert_eq!(out[1], 32640.0);
+
+        // A row that is not a whole number of super-blocks has nowhere for the
+        // trailing weights to sit, and an id the engine was not given the layout
+        // of is refused by number rather than read as if it were known.
+        assert_eq!(
+            gemv(&w, 12, &x, &mut out, 1, 128),
+            Err(InferenceError::CorruptedWeights)
+        );
+        assert_eq!(
+            gemv(&w, 3, &x, &mut out, 1, 1),
+            Err(InferenceError::UnsupportedQuantization(3))
+        );
     }
 
     #[test]
