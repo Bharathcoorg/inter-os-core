@@ -558,6 +558,139 @@ const ACTION_BTN_Y0: usize = 800;
 const ACTION_BTN_X1: usize = ACTION_BTN_X0 + ACTION_BTN_W;
 const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;
 
+/// WHY the button is one box for every view: Week, Day and Agenda painted and
+/// hit-tested it from the literals `816` and `872` while Month painted it from
+/// these constants at `800..856`, so the same control sat sixteen rows lower in
+/// three of the four views, and the cards stacked above it -- which are capped
+/// by this band's top edge -- were measured against a box the button no longer
+/// occupied. Every view now reads the same two numbers.
+const _: () = assert!(ACTION_BTN_Y1 <= H);
+
+// -----------------------------------------------------------------------------
+// The card chains the four views stack above the action button
+//
+// WHY each chain is capped: a per-pixel painter has no clip, so a card whose
+// box runs past the top of the button does not stop at the button -- the first
+// branch to claim the pixel wins, and the card branch is written before the
+// button branch. Day view drew a fifth card at `810..870`, six rows of it above
+// the button and the rest of it untappable, and the tap handler measured the
+// same chain with no band at all, so the visible "+ New Event" opened the event
+// instead. Agenda view did the same with its sixth card. A chain now reserves
+// exactly the cards that end at or above the button, and the gates beside each
+// count fail the build if a card is ever made to overlap the control.
+// -----------------------------------------------------------------------------
+
+/// The top of the Day view's timeline cards.
+const DAY_CARDS_Y0: usize = 266;
+
+/// The height of a Day view card.
+const DAY_CARD_H: usize = 120;
+
+/// The stride between two Day view cards.
+const DAY_CARD_PITCH: usize = 136;
+
+/// How many Day view cards fit above the action button.
+const DAY_CARD_MAX: usize =
+    (ACTION_BTN_Y0 - DAY_CARDS_Y0 - DAY_CARD_H) / DAY_CARD_PITCH + 1;
+
+const _: () = assert!(DAY_CARD_H <= ACTION_BTN_Y0 - DAY_CARDS_Y0);
+const _: () = assert!((DAY_CARD_MAX - 1) * DAY_CARD_PITCH + DAY_CARD_H <= ACTION_BTN_Y0 - DAY_CARDS_Y0);
+
+/// The Day view's "nothing scheduled" card.
+///
+/// WHY the card's corners, hairline and fill all read this one box: the window
+/// that let the painter claim the card's pixels ran from `276` to `536` while
+/// the maths inside it measured the card from `260` to `519`, so the card's top
+/// sixteen rows were never painted, sixteen rows below its bottom border were
+/// painted as fill, and `519 - y` subtracted past zero for every row of that
+/// tail -- a border that closed the card on three sides only, with a slab of
+/// its own background hanging off the fourth.
+const DAY_EMPTY_X0: usize = 24;
+const DAY_EMPTY_W: usize = W - 2 * DAY_EMPTY_X0;
+const DAY_EMPTY_Y0: usize = 276;
+const DAY_EMPTY_H: usize = 260;
+const DAY_EMPTY_Y1: usize = DAY_EMPTY_Y0 + DAY_EMPTY_H;
+const DAY_EMPTY_HEAD_Y: usize = 356;
+const DAY_EMPTY_BODY_Y: usize = DAY_EMPTY_HEAD_Y + std::design::font::line_height(2);
+
+const _: () = assert!(DAY_EMPTY_BODY_Y + std::design::font::line_height(2) < DAY_EMPTY_Y1);
+const _: () = assert!(DAY_EMPTY_Y1 <= ACTION_BTN_Y0);
+
+// -----------------------------------------------------------------------------
+// The Month view's section band and its event-count pill
+//
+// WHY the pill's radius comes from the band's height: the corner test asks
+// whether a pixel lies inside a circle of the radius, centred one radius in
+// from each edge. The band is twenty-eight rows tall and the platform's soft
+// pill radius is sixteen, so the two corner circles of one end overlapped and
+// their union covered the whole end of the box: at the first column the test
+// dropped every row, at the second all but six of them, and the count pill read
+// as torn rather than round. The platform's own primitive clamps a radius to
+// half the box it is given; this box is drawn by hand, so it now asks the same
+// question the clamp asks.
+// -----------------------------------------------------------------------------
+
+/// The top of the Month view's "Events on <date>" band.
+const SECTION_BAND_Y0: usize = 516;
+
+/// The height of that band.
+const SECTION_BAND_H: usize = 28;
+
+/// Where the band's title sits inside it.
+///
+/// WHY both of the band's runs use it: the section title and the count beside
+/// it are one line of text, and the count was centred from the band's line box
+/// while the title was set six rows down, so the two sat on baselines three rows
+/// apart and the line read as two unrelated labels.
+const SECTION_TEXT_Y: usize = (SECTION_BAND_H - std::design::font::line_height(1)) / 2;
+
+/// The left edge of the event-count pill.
+const BADGE_X0: usize = 540;
+
+/// The width of the event-count pill, to the content column's right edge.
+const BADGE_W: usize = W - 24 - BADGE_X0;
+
+/// The pill's corner radius: half the band that holds it.
+const BADGE_R: usize = SECTION_BAND_H / 2;
+
+const _: () = assert!(2 * BADGE_R <= SECTION_BAND_H);
+const _: () = assert!(SECTION_TEXT_Y + std::design::font::line_height(1) <= SECTION_BAND_H);
+const _: () = assert!(BADGE_X0 + BADGE_W <= W);
+
+/// The top of the Agenda view's chronological cards.
+const AGENDA_CARDS_Y0: usize = 232;
+
+/// The height of an Agenda view card.
+const AGENDA_CARD_H: usize = 104;
+
+/// The stride between two Agenda view cards.
+const AGENDA_CARD_PITCH: usize = 116;
+
+/// How many Agenda view cards fit above the action button.
+const AGENDA_CARD_MAX: usize =
+    (ACTION_BTN_Y0 - AGENDA_CARDS_Y0 - AGENDA_CARD_H) / AGENDA_CARD_PITCH + 1;
+
+const _: () = assert!(AGENDA_CARD_H <= ACTION_BTN_Y0 - AGENDA_CARDS_Y0);
+const _: () = assert!(
+    (AGENDA_CARD_MAX - 1) * AGENDA_CARD_PITCH + AGENDA_CARD_H <= ACTION_BTN_Y0 - AGENDA_CARDS_Y0
+);
+
+/// The band the Month view's saved-day list is drawn and tapped in.
+const MONTH_LIST_Y0: usize = 546;
+const MONTH_LIST_Y1: usize = 1360;
+/// The height and stride of one card in that list.
+const MONTH_CARD_H: usize = 114;
+const MONTH_CARD_PITCH: usize = 130;
+
+/// How many whole cards the band holds.
+const MONTH_CARD_MAX: usize =
+    (MONTH_LIST_Y1 - MONTH_LIST_Y0 - MONTH_CARD_H) / MONTH_CARD_PITCH + 1;
+
+const _: () = assert!(MONTH_CARD_H <= MONTH_LIST_Y1 - MONTH_LIST_Y0);
+const _: () = assert!(
+    (MONTH_CARD_MAX - 1) * MONTH_CARD_PITCH + MONTH_CARD_H <= MONTH_LIST_Y1 - MONTH_LIST_Y0
+);
+
 // Segmented Navigation Tabs (y: 100..152) - comfortable >= 48px touch targets
 const TAB_SCALE: usize = type_scale::BODY;
 const TAB_BAND_Y0: usize = 116;
@@ -1259,8 +1392,8 @@ fn month_view_pixel(
     }
 
     // Section Divider & Header (y: 516..544)
-    if y >= 516 && y < 544 {
-        if y >= 518 && y < 520 && x >= 24 && x < W - 24 {
+    if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + SECTION_BAND_H {
+        if y >= SECTION_BAND_Y0 + 2 && y < SECTION_BAND_Y0 + 4 && x >= 24 && x < W - 24 {
             return THEME.border;
         }
 
@@ -1269,25 +1402,37 @@ fn month_view_pixel(
         // WHY the header is caption scale: the band is 28 px tall and a
         // body-scale run reserves 32 px, so a larger run could only ever be
         // clipped by the band it is drawn in.
-        if y >= 522 && y < 522 + std::design::font::line_height(1) {
-            if let Some(c) = test_text(x, y, 28, 522, 1, section_title, 540 - 28, THEME.on_surface_variant, THEME.surface) {
+        if y >= SECTION_BAND_Y0 + SECTION_TEXT_Y
+            && y < SECTION_BAND_Y0 + SECTION_TEXT_Y + std::design::font::line_height(1)
+        {
+            if let Some(c) = test_text(
+                x,
+                y,
+                28,
+                SECTION_BAND_Y0 + SECTION_TEXT_Y,
+                1,
+                section_title,
+                BADGE_X0 - 28,
+                THEME.on_surface_variant,
+                THEME.surface,
+            ) {
                 return c;
             }
         }
 
-        // Event Count Pill at x: 540..696, y: 516..544
-        if x >= 540 && x < 696 && y >= 516 && y < 544 {
+        // Event Count Pill
+        if x >= BADGE_X0 && x < BADGE_X0 + BADGE_W && y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + SECTION_BAND_H {
             let mut on_badge_border = false;
-            let rx = (x - 540).min(695 - x);
-            let ry = (y - 516).min(543 - y);
-            if rx < R_SOFT && ry < R_SOFT {
-                let cdx = (R_SOFT - rx) as isize;
-                let cdy = (R_SOFT - ry) as isize;
+            let rx = (x - BADGE_X0).min(BADGE_X0 + BADGE_W - 1 - x);
+            let ry = (y - SECTION_BAND_Y0).min(SECTION_BAND_Y0 + SECTION_BAND_H - 1 - y);
+            if rx < BADGE_R && ry < BADGE_R {
+                let cdx = (BADGE_R - rx) as isize;
+                let cdy = (BADGE_R - ry) as isize;
                 let d2 = cdx * cdx + cdy * cdy;
-                if d2 >= (R_SOFT * R_SOFT) as isize {
+                if d2 >= (BADGE_R * BADGE_R) as isize {
                     return THEME.surface;
                 }
-                if d2 >= ((R_SOFT - 2) * (R_SOFT - 2)) as isize {
+                if d2 >= ((BADGE_R - 2) * (BADGE_R - 2)) as isize {
                     on_badge_border = true;
                 }
             } else if rx < 2 || ry < 2 {
@@ -1297,9 +1442,19 @@ fn month_view_pixel(
             let mut badge = [0u8; 12];
             let badge_n = fmt_count(&mut badge, agenda.len);
             let badge_str = &badge[..badge_n];
-            let badge_x = centered_x(badge_str, 1, 540, 156);
-            let badge_y = 516 + (28 - std::design::font::line_height(1)) / 2;
-            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 156, THEME.primary, THEME.surface_container_high) {
+            let badge_x = centered_x(badge_str, 1, BADGE_X0, BADGE_W);
+            let badge_y = SECTION_BAND_Y0 + SECTION_TEXT_Y;
+            if let Some(c) = test_text(
+                x,
+                y,
+                badge_x,
+                badge_y,
+                1,
+                badge_str,
+                BADGE_W,
+                THEME.primary,
+                THEME.surface_container_high,
+            ) {
                 return c;
             }
 
@@ -1436,9 +1591,9 @@ fn week_view_pixel(
         }
     }
 
-    // Action button "+ New Event" at bottom (y: 816..872)
-    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
-        return action_button_pixel(x, y, 816, 872);
+    // Action button "+ New Event": the one box every view paints and taps.
+    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+        return action_button_pixel(x, y, ACTION_BTN_Y0, ACTION_BTN_Y1);
     }
 
     THEME.surface
@@ -1501,13 +1656,18 @@ fn day_view_pixel(
         return THEME.surface;
     }
 
-    // Day Schedule / Timeline Cards (y: 250..800)
-    if y >= 266 && y < 816 {
+    // Day Schedule / Timeline Cards: the band ends where the action button
+    // begins, so no card can be drawn over it.
+    if y >= DAY_CARDS_Y0 && y < ACTION_BTN_Y0 {
         if agenda.len == 0 {
-            // Day empty card (y: 260..520)
-            if x >= 24 && x < W - 24 && y >= 276 && y < 536 {
-                let rx = (x - 24).min(W - 25 - x);
-                let ry = (y - 260).min(519 - y);
+            // Day empty card
+            if x >= DAY_EMPTY_X0
+                && x < DAY_EMPTY_X0 + DAY_EMPTY_W
+                && y >= DAY_EMPTY_Y0
+                && y < DAY_EMPTY_Y1
+            {
+                let rx = (x - DAY_EMPTY_X0).min(DAY_EMPTY_W - 1 - (x - DAY_EMPTY_X0));
+                let ry = (y - DAY_EMPTY_Y0).min(DAY_EMPTY_H - 1 - (y - DAY_EMPTY_Y0));
                 if rx < R_CARD && ry < R_CARD {
                     let cdx = (R_CARD - rx) as isize;
                     let cdy = (R_CARD - ry) as isize;
@@ -1515,12 +1675,32 @@ fn day_view_pixel(
                         return THEME.surface;
                     }
                 }
-                let hx = centered_x(b"No Events on this Day", 2, 24, 672);
-                if let Some(c) = test_text_bold(x, y, hx, 356, 2, b"No Events on this Day", 672, THEME.on_surface, THEME.surface_container) {
+                let hx = centered_x(b"No Events on this Day", 2, DAY_EMPTY_X0, DAY_EMPTY_W);
+                if let Some(c) = test_text_bold(
+                    x,
+                    y,
+                    hx,
+                    DAY_EMPTY_HEAD_Y,
+                    2,
+                    b"No Events on this Day",
+                    DAY_EMPTY_W,
+                    THEME.on_surface,
+                    THEME.surface_container,
+                ) {
                     return c;
                 }
-                let dx0 = centered_x(b"Your schedule is clear", 2, 24, 672);
-                if let Some(c) = test_text(x, y, dx0, 400, 2, b"Your schedule is clear", 672, THEME.on_surface_variant, THEME.surface_container) {
+                let dx0 = centered_x(b"Your schedule is clear", 2, DAY_EMPTY_X0, DAY_EMPTY_W);
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    dx0,
+                    DAY_EMPTY_BODY_Y,
+                    2,
+                    b"Your schedule is clear",
+                    DAY_EMPTY_W,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
                     return c;
                 }
                 if rx < 2 || ry < 2 {
@@ -1529,12 +1709,13 @@ fn day_view_pixel(
                 return THEME.surface_container;
             }
         } else {
-            // Day event timeline cards
-            for (i, item) in agenda.items[..agenda.len].iter().enumerate() {
-                let card_y = 266 + i * 136;
-                if y >= card_y && y < card_y + 120 && x >= 24 && x < W - 24 {
+            // Day event timeline cards: only the cards the band above the
+            // action button can hold.
+            for (i, item) in agenda.items[..agenda.len.min(DAY_CARD_MAX)].iter().enumerate() {
+                let card_y = DAY_CARDS_Y0 + i * DAY_CARD_PITCH;
+                if y >= card_y && y < card_y + DAY_CARD_H && x >= 24 && x < W - 24 {
                     let rx = (x - 24).min(W - 25 - x);
-                    let ry = (y - card_y).min(card_y + 119 - y);
+                    let ry = (y - card_y).min(card_y + DAY_CARD_H - 1 - y);
                     if rx < R_SOFT && ry < R_SOFT {
                         let cdx = (R_SOFT - rx) as isize;
                         let cdy = (R_SOFT - ry) as isize;
@@ -1593,9 +1774,9 @@ fn day_view_pixel(
         }
     }
 
-    // Action button "+ New Event" at bottom (y: 816..872)
-    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
-        return action_button_pixel(x, y, 816, 872);
+    // Action button "+ New Event": the one box every view paints and taps.
+    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+        return action_button_pixel(x, y, ACTION_BTN_Y0, ACTION_BTN_Y1);
     }
 
     THEME.surface
@@ -1653,12 +1834,12 @@ fn agenda_view_pixel(
             return THEME.surface_container;
         }
     } else {
-        // Chronological cards
-        for (i, item) in all_items[..total].iter().enumerate() {
-            let card_y = 232 + i * 116;
-            if y >= card_y && y < card_y + 104 && x >= 24 && x < W - 24 {
+        // Chronological cards: only the ones that end above the action button.
+        for (i, item) in all_items[..total.min(AGENDA_CARD_MAX)].iter().enumerate() {
+            let card_y = AGENDA_CARDS_Y0 + i * AGENDA_CARD_PITCH;
+            if y >= card_y && y < card_y + AGENDA_CARD_H && x >= 24 && x < W - 24 {
                 let rx = (x - 24).min(W - 25 - x);
-                let ry = (y - card_y).min(card_y + 103 - y);
+                let ry = (y - card_y).min(card_y + AGENDA_CARD_H - 1 - y);
                 if rx < R_SOFT && ry < R_SOFT {
                     let cdx = (R_SOFT - rx) as isize;
                     let cdy = (R_SOFT - ry) as isize;
@@ -1711,9 +1892,9 @@ fn agenda_view_pixel(
         }
     }
 
-    // Action button "+ New Event" at bottom (y: 816..872)
-    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
-        return action_button_pixel(x, y, 816, 872);
+    // Action button "+ New Event": the one box every view paints and taps.
+    if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+        return action_button_pixel(x, y, ACTION_BTN_Y0, ACTION_BTN_Y1);
     }
 
     THEME.surface
@@ -1843,11 +2024,15 @@ fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
 }
 
 fn event_list_pixel(x: usize, y: usize, items: &[EventRecord], len: usize) -> u32 {
-    let card_idx = (y - 546) / 130;
-    let card_offset_y = (y - 546) % 130;
-    if card_idx < len && card_offset_y < 114 && x >= 24 && x < W - 24 {
+    let card_idx = (y - MONTH_LIST_Y0) / MONTH_CARD_PITCH;
+    let card_offset_y = (y - MONTH_LIST_Y0) % MONTH_CARD_PITCH;
+    if card_idx < len.min(MONTH_CARD_MAX)
+        && card_offset_y < MONTH_CARD_H
+        && x >= 24
+        && x < W - 24
+    {
         let rx = (x - 24).min(W - 25 - x);
-        let ry = card_offset_y.min(113 - card_offset_y);
+        let ry = card_offset_y.min(MONTH_CARD_H - 1 - card_offset_y);
         if rx < R_SOFT && ry < R_SOFT {
             let cdx = (R_SOFT - rx) as isize;
             let cdy = (R_SOFT - ry) as isize;
@@ -1860,7 +2045,7 @@ fn event_list_pixel(x: usize, y: usize, items: &[EventRecord], len: usize) -> u3
             return THEME.primary;
         }
 
-        let card_y = 546 + card_idx * 130;
+        let card_y = MONTH_LIST_Y0 + card_idx * MONTH_CARD_PITCH;
         let item = &items[card_idx];
         let line_h2 = std::design::font::line_height(2);
         if y >= card_y + 14 && y < card_y + 14 + line_h2 {
@@ -3009,18 +3194,22 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             // Empty state action button "+ New Event"
             debug_assert_eq!(ACTION_BTN_Y0, 800);
             debug_assert_eq!(ACTION_BTN_Y1, 856);
-            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 800 && y < 856 {
+            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 std::log("[CALENDAR APP] Create-event flow opened: title entry.").ok();
                 return Tap::Redraw(Dirty::CONTENT);
             }
 
             // Tapping an event card to open details
-            if y >= 546 && y < 1360 {
+            if y >= MONTH_LIST_Y0 && y < MONTH_LIST_Y1 {
                 let agenda = app.agenda_view();
-                let card_idx = (y - 546) / 130;
-                let card_offset_y = (y - 546) % 130;
-                if card_idx < agenda.len && card_offset_y < 114 && x >= 24 && x < W - 24 {
+                let card_idx = (y - MONTH_LIST_Y0) / MONTH_CARD_PITCH;
+                let card_offset_y = (y - MONTH_LIST_Y0) % MONTH_CARD_PITCH;
+                if card_idx < agenda.len.min(MONTH_CARD_MAX)
+                    && card_offset_y < MONTH_CARD_H
+                    && x >= 24
+                    && x < W - 24
+                {
                     app.details_event = Some(agenda.items[card_idx]);
                     return Tap::Redraw(Dirty::CONTENT);
                 }
@@ -3050,7 +3239,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             }
 
             // "+ New Event" button
-            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
+            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 return Tap::Redraw(Dirty::CONTENT);
             }
@@ -3077,18 +3266,21 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
                 }
             }
 
-            // Event cards in Day view
+            // Event cards in Day view: the same capped chain the painter draws.
             let agenda = app.agenda_view();
-            for (i, item) in agenda.items[..agenda.len].iter().enumerate() {
-                let card_y = 266 + i * 136;
-                if y >= card_y && y < card_y + 120 && x >= 24 && x < W - 24 {
+            for (i, item) in agenda.items[..agenda.len.min(DAY_CARD_MAX)]
+                .iter()
+                .enumerate()
+            {
+                let card_y = DAY_CARDS_Y0 + i * DAY_CARD_PITCH;
+                if y >= card_y && y < card_y + DAY_CARD_H && x >= 24 && x < W - 24 {
                     app.details_event = Some(*item);
                     return Tap::Redraw(Dirty::CONTENT);
                 }
             }
 
             // "+ New Event" button
-            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
+            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 return Tap::Redraw(Dirty::CONTENT);
             }
@@ -3097,16 +3289,16 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             let mut all_items = [EventRecord::EMPTY; MAX_EVENTS];
             let total = app.store.all_events_sorted(&mut all_items);
 
-            for (i, item) in all_items[..total].iter().enumerate() {
-                let card_y = 232 + i * 116;
-                if y >= card_y && y < card_y + 104 && x >= 24 && x < W - 24 {
+            for (i, item) in all_items[..total.min(AGENDA_CARD_MAX)].iter().enumerate() {
+                let card_y = AGENDA_CARDS_Y0 + i * AGENDA_CARD_PITCH;
+                if y >= card_y && y < card_y + AGENDA_CARD_H && x >= 24 && x < W - 24 {
                     app.details_event = Some(*item);
                     return Tap::Redraw(Dirty::CONTENT);
                 }
             }
 
             // "+ New Event" button
-            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= 816 && y < 872 {
+            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 return Tap::Redraw(Dirty::CONTENT);
             }

@@ -667,7 +667,18 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     assert "cy + ROW_CAP2_DY," in settings
     assert "centered_x(detail_str, 1, 24, 672)" in calendar
     assert "760," in calendar
-    assert "y >= 800 && y < 856" in calendar
+    # WHY this assertion names the constants now: the calendar's four views did
+    # not share a number for "+ New Event". Month painted and tapped the band
+    # these constants state; Week, Day and Agenda painted and tapped 816..872, so
+    # the same control sat sixteen rows lower in three of the four screens and the
+    # cards stacked above it -- capped by this band's top edge -- were measured
+    # against a box the button no longer occupied. The invariant is unchanged and
+    # is now carried by the one box every view reads: the button is hit where it
+    # is painted, at rows 800..856, on every view.
+    assert "const ACTION_BTN_Y0: usize = 800;" in calendar
+    assert "const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;" in calendar
+    assert calendar.count("y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1") == 8
+    assert "y >= 816 && y < 872" not in calendar
     assert 'test_text(x, y, 48, 64, 3, b"Files"' in file_manager
     assert 'b"Messaging unavailable: no transport"' in messages
 
