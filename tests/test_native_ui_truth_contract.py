@@ -174,6 +174,60 @@ def test_events_header_bands_cannot_overlap_each_other_or_the_feed():
     assert filter_note_y >= pills_y + pill_h, "filter note starts inside the pill row"
     assert filter_note_y + caption_h <= section_head_y, "filter note runs into the first section head"
 
+    # The section heading and the first card of its own group.
+    #
+    # WHY this is a separate pair of assertions: the header runs above all end
+    # at the pill row's note, and the feed below begins at a card. Between them
+    # sits a heading with a line box of its own, which nothing here used to
+    # account for. The advance from the heading to its cards was `space::MD`
+    # measured from the heading's box *top*, so the card began six rows before
+    # the box ended -- and with no clipper on this surface the card won the
+    # pixels and printed the heading's baseline out. "Last hour" reached the
+    # device missing its bottom four rows.
+    label_box_h = _const_usize(source, "SECTION_LABEL_BOX_H")
+    head_advance = _const_usize(source, "SECTION_HEAD_ADVANCE")
+    row_h = _const_usize(source, "ROW_H")
+    feed_bottom = _const_usize(source, "FEED_BOTTOM")
+
+    assert label_box_h == caption_h, (
+        "the section heading's box is no longer the caption line box this test assumes"
+    )
+    assert head_advance > label_box_h, (
+        "the section advance is measured from the heading's box top, so the card "
+        "starts inside the heading it names"
+    )
+    assert section_head_y + head_advance + row_h <= feed_bottom, (
+        "the first section's card does not fit between its own heading and the action bar"
+    )
+
+
+def test_the_shade_asks_to_clear_its_notifications_once():
+    """One destructive control, in one place, on the notifications shade.
+
+    WHY this needs a gate: the shade carried two pills that both read "Clear
+    all" and both emptied the event store -- the header's own, and a wider one
+    fixed at row 702 in the middle of the feed. Nothing on the surface says
+    which of two identical answers the machine meant, and the second one sat
+    below a feed that fits two cards, so it read as an item in the list rather
+    than as a control over it.
+
+    WHY a source gate: the shell is `#![no_main]` and its bin target carries
+    `test = false`, so a `#[cfg(test)]` module under `screens/` never runs on
+    the host. The label the painter draws is the detectable fact -- that string
+    appears once per control that carries it.
+    """
+    code = _code_only(read("apps/launcher/src/screens/notifications.rs"))
+    assert code.count('b"Clear all"') == 1, (
+        "the shade draws the same destructive question more than once"
+    )
+    # A second rectangle laid out for it would be a second control even if its
+    # label were reworded, so the old binding's name is what stays banned. The
+    # feed's own edge is pinned against the home indicator by a `const _: () =
+    # assert!(...)` in the source, which is where the screen height lives.
+    assert "CLEAR_BTN" not in code.replace("HEADER_CLEAR_BTN", ""), (
+        "a second clear control is still laid out on this surface"
+    )
+
 
 def test_events_header_does_not_print_platform_diagnostics_to_the_reader():
     """The header may state where the rows come from, in plain language.
@@ -268,6 +322,61 @@ def test_the_search_offers_only_destinations_that_exist():
     # And the model-backed ranking seam is marked as such.
     assert "pub trait Ranker" in read("apps/launcher/src/search.rs")
     assert "fn search_ranker()" in _code_only(shell)
+
+
+def _fn_body(source: str, signature: str) -> str:
+    """The braced body that follows `signature`, as far as its own braces close.
+
+    WHY this exists: a gate written against a whole file can be satisfied from
+    a comment or from a different function, and the launcher screens carry both
+    in quantity. Cutting the one function out keeps the gate about the code.
+    """
+    at = source.find(signature)
+    assert at >= 0, f"the source no longer has {signature}"
+    open_at = source.find("{", at)
+    assert open_at >= 0, f"{signature} has no body"
+    depth = 0
+    for index in range(open_at, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_at + 1 : index]
+    raise AssertionError(f"{signature} has an unbalanced body")
+
+
+def test_the_search_fields_magnifier_draws_a_lens_and_not_a_hook():
+    """The query field's pictogram has to read as the thing it names.
+
+    WHY: the lens was a radius band with a quadrant test bolted onto it --
+    `d2 >= 64 && d2 <= 144 && dx <= 0 && dy <= 0` -- so three quarters of the
+    circle were never painted, and the handle was a
+    `|dx - 8| + |dy - 8| <= 10` band, which fills a lozenge rather than drawing
+    a stem. On the device the field showed a stray arc sitting over a blob,
+    while the home screen's field one tap upstream -- the same control, opening
+    the same query -- drew a closed ring over a diagonal stem. A pictogram that
+    changes shape between the two screens that carry it reads as a rendering
+    fault, not as a style.
+
+    WHY a source gate: the shell is `#![no_main]` and its bin target carries
+    `test = false`, so nothing inside `screens/` can be reached from a host
+    test. The detector is the quadrant itself -- a ring band that names `dx` or
+    `dy` at all is an arc, and a stem that does not bound `dx - dy` is a blob.
+    """
+    search = _code_only(read("apps/launcher/src/screens/search.rs"))
+    body = _fn_body(search, "fn magnifier")
+    ring = [line for line in body.splitlines() if line.strip().startswith("if") and "d2" in line]
+    assert ring, "the lens is no longer a radius band, so this gate has lost its subject"
+    for line in ring:
+        assert "dx" not in line and "dy" not in line, (
+            "the lens band is quadrant-limited, so the ring cannot close: "
+            f"{line.strip()}"
+        )
+    assert "(dx - dy).abs()" in body, (
+        "the handle is no longer a diagonal stem, so it is filling a shape again"
+    )
 
 
 def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():

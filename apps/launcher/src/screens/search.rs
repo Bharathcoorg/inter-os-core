@@ -559,15 +559,24 @@ fn row_icon(x: usize, y: usize, row: &RowPlan) -> Option<u32> {
     )
 }
 
-/// The magnifier in the query field.
+/// The magnifier in the query field: a closed ring and one handle.
+///
+/// WHY the ring is every quadrant and not one: this test also asked for
+/// `dx <= 0 && dy <= 0`, so three quarters of the lens were never painted and
+/// the pictogram read as a stray arc sitting over a diamond. The handle was a
+/// `|dx-8| + |dy-8| <= 10` band, which is a filled lozenge rather than a stem.
+/// The home screen's field draws a closed ring over a narrow diagonal handle,
+/// and the two fields open onto the same query, so they have to carry the same
+/// pictogram -- an icon that changes shape between screens reads as a
+/// rendering fault, not as a style choice.
 fn magnifier(x: usize, y: usize, cx: usize, cy: usize, ink: u32) -> Option<u32> {
     let dx = x as i32 - cx as i32;
     let dy = y as i32 - cy as i32;
     let d2 = dx * dx + dy * dy;
-    if d2 >= 64 && d2 <= 144 && dx <= 0 && dy <= 0 {
+    if (64..=144).contains(&d2) {
         return Some(ink);
     }
-    if dx >= 0 && dx <= 8 && dy >= 0 && dy <= 8 && (dx - 8).abs() + (dy - 8).abs() <= 10 {
+    if (9..=16).contains(&dx) && dy >= 9 && (dx - dy).abs() <= 2 {
         return Some(ink);
     }
     None

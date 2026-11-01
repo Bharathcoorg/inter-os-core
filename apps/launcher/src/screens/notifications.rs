@@ -12,7 +12,7 @@
 //!   - Bold title (Scale 2 Body) and clean body text (Scale 2 Body).
 //!   - Action pills (>= 48px touch targets, Scale 2 Body, e.g. "Reply", "Details", "Dismiss").
 //! - Empty state: Flagship "No new notifications", "All caught up" illustration.
-//! - Bottom Clear All button (>= 48px touch target) & Home indicator bar.
+//! - Home indicator bar.
 
 #![allow(dead_code)]
 
@@ -79,10 +79,57 @@ const ROW_H: usize = 176;
 const ROW_PITCH: usize = 184;
 
 /// First row of the first section's stack: below the filter note's line box.
-pub const SECTION_HEAD_Y: usize = 312;
+///
+/// WHY 296 and not 312: the heading placed at this row owns a line box of its
+/// own, and the cards used to start `space::MD` below the box's *top* -- which
+/// is inside the 22 rows the box reserves. This surface has no clipper, so the
+/// card a heading introduces simply claimed the pixels first and painted the
+/// heading's bottom four rows out: on the device "Last hour" arrived with its
+/// baseline shaved off by the card it names. 296 is the lowest this can sit
+/// without touching the filter note's box, which ends at 292.
+pub const SECTION_HEAD_Y: usize = 296;
 
-/// Bottom cutoff for feed rows above the bottom action bar.
-const FEED_BOTTOM: usize = 700;
+/// Rows a section heading's line box reserves on the outline face -- the rung
+/// `SectionPlan::label` draws at.
+///
+/// WHY written down and pinned beside it: the same reason `TITLE_ADVANCE` is.
+/// A call expression here would make the contract fail to parse rather than
+/// fail on geometry, so the number is stated and tied to the SDK's own metric.
+const SECTION_LABEL_BOX_H: usize = 22;
+const _: () = assert!(
+    SECTION_LABEL_BOX_H == launcher::font::line_height(type_scale::CAPTION),
+    "the section heading's box must be the outline caption line box, not a remembered cell",
+);
+
+/// Air between a section heading's line box and the first card of its group.
+const SECTION_HEAD_GAP: usize = 8;
+const _: () = assert!(SECTION_HEAD_GAP == space::GRID_8);
+
+/// Rows from a section heading's line-box top to the first card it names.
+///
+/// WHY the box plus the gap, and not the gap: an advance measured from the top
+/// of a box has to pay for the box before it can start reserving air. The old
+/// `space::MD` paid for neither, which is how the heading lost its baseline.
+const SECTION_HEAD_ADVANCE: usize = SECTION_LABEL_BOX_H + SECTION_HEAD_GAP;
+
+/// Bottom cutoff for feed rows.
+///
+/// WHY keyed to the home indicator and not the remembered 700: 700 was the top
+/// of the second "Clear all" pill that used to sit in the middle of this
+/// surface. With that control gone the feed was still stopping at its old edge,
+/// so two cards arrived and then seven hundred rows of nothing before the
+/// indicator -- a feed that reads as broken rather than as short. The cutoff is
+/// the bottom chrome minus one card, so the stack ends where the surface does.
+const FEED_BOTTOM: usize = 1240;
+const _: () = assert!(
+    FEED_BOTTOM + ROW_H == HOME_PILL.y,
+    "the feed must stop one card clear of the home indicator it is stacked above",
+);
+
+const _: () = assert!(
+    SECTION_HEAD_Y + SECTION_HEAD_ADVANCE + ROW_H <= FEED_BOTTOM,
+    "a section's first card must clear its own heading and still fit above the bottom chrome",
+);
 
 /// Height of the pill row, and the gap between pills.
 pub const PILLS_Y: usize = 214;
@@ -112,6 +159,12 @@ const SECTION_NAMES: [&[u8]; 4] = [b"Last minute", b"Last hour", b"Since boot", 
 /// rows -- the crown of its rounded arc -- painted over by a surface that was
 /// never its own. Keyed to `viewport::HEADER_TOP` it starts where the app's
 /// chrome is allowed to start, and moves if the band ever does.
+///
+/// WHY it is the only one: this pill and a second, wider one at y 702 both read
+/// "Clear all" and both emptied the store, so the surface asked the same
+/// destructive question twice and left the person to work out which answer the
+/// machine meant. The second one sat below a feed that holds two cards, which
+/// made it look like an object in the list rather than a control over it.
 pub const HEADER_CLEAR_BTN: Rect = Rect::new(
     SCREEN_WIDTH - 168,
     interos_std::design::viewport::HEADER_TOP,
@@ -149,9 +202,6 @@ const _: () = assert!(
     BODY_LABEL_BOX_H == 32,
     "the pill label box must be the outline BODY line box, not a remembered cell",
 );
-
-/// Bottom Clear All pill: matches the hit-test and serial harness (360, 720).
-pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 702, 200, 48);
 
 /// Home gesture indicator pill.
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 24, 180, 6);
@@ -654,8 +704,6 @@ struct EventsFrame {
     hidden: usize,
     empty_head: LabelRun,
     empty_body: LabelRun,
-    clear_btn: Rect,
-    clear_label: LabelRun,
     home_pill: Rect,
 }
 
@@ -959,6 +1007,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let mut row_count = 0usize;
     let mut section_count = 0usize;
     let mut y = SECTION_HEAD_Y;
+    let mut feed_end = SECTION_HEAD_Y;
     let mut current_bucket = usize::MAX;
 
     for k in 0..total {
@@ -969,7 +1018,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         }
         let bucket = bucket_of(rec.timestamp_ticks, now);
         let row_y = if bucket != current_bucket {
-            y + space::MD
+            y + SECTION_HEAD_ADVANCE
         } else {
             y
         };
@@ -988,6 +1037,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         if row_count < rows.len() {
             rows[row_count] = row_plan(&rec, row_y, cat, now, &theme);
             row_count += 1;
+            feed_end = row_y + ROW_H;
         }
         y = row_y + ROW_PITCH;
     }
@@ -1009,16 +1059,21 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         0
     };
 
-    let note_y = CLEAR_BTN.y + CLEAR_BTN.h + space::MD;
+    let note_y = feed_end + SECTION_HEAD_GAP;
     let more_note = LabelRun::new(36, note_y, type_scale::CAPTION, &more[..more_len], theme.on_surface_variant);
 
     // 5. Empty State
     let (empty_head, empty_body) = if total == 0 {
         (
             LabelRun::centred(ROW_X, 420, ROW_W, type_scale::HEADING, b"No new notifications", theme.on_surface),
+            // WHY the outline box and not `text::line_height`: the heading draws
+            // with the outline face at rung HEADING, which reserves 80 rows here
+            // while the bitmap cell the second line was advanced by reserves 120.
+            // The pair is one statement, and it read as two because the second
+            // line started 56 rows below the box the first one actually owns.
             LabelRun::centred(
                 ROW_X,
-                420 + text::line_height(type_scale::HEADING) + space::MD,
+                420 + launcher::font::line_height(type_scale::HEADING) + space::MD,
                 ROW_W,
                 type_scale::BODY,
                 b"All caught up with apps and system updates.",
@@ -1028,15 +1083,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     } else {
         (LabelRun::EMPTY, LabelRun::EMPTY)
     };
-
-    let clear_label = LabelRun::centred(
-        CLEAR_BTN.x,
-        CLEAR_BTN.y + (CLEAR_BTN.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,
-        CLEAR_BTN.w,
-        type_scale::BODY,
-        b"Clear all",
-        theme.on_surface,
-    );
 
     EventsFrame {
         clock: status_clock,
@@ -1055,8 +1101,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         hidden,
         empty_head,
         empty_body,
-        clear_btn: CLEAR_BTN,
-        clear_label,
         home_pill: HOME_PILL,
     }
 }
@@ -1361,21 +1405,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         }
     }
 
-    // 7. Bottom Clear All Button (CLEAR_BTN, 48px height, radius 24)
-    if f.clear_btn.contains(x, y) {
-        if rounded_contains(f.clear_btn, x, y, 24) {
-            if rounded_outline(f.clear_btn, x, y, 24) {
-                return theme.border;
-            }
-            if let Some(c) = f.clear_label.pixel_on(x, y, theme.surface_container_low) {
-                return c;
-            }
-            return theme.surface_container_low;
-        }
-        return theme.surface;
-    }
-
-    // 8. Home Indicator Pill
+    // 7. Home Indicator Pill
     if rounded_contains(f.home_pill, x, y, 3) {
         return theme.on_surface_variant;
     }

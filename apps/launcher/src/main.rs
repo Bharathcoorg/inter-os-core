@@ -4690,12 +4690,14 @@ pub extern "C" fn _start() -> ! {
                                 // WHY exactly the drawn pill: the old bands
                                 // ((300..355)/(690..750) with swapped axes) cleared
                                 // from pixels that draw no control -- a destructive
-                                // action on a phantom band. The drawn CLEAR_BTN in
-                                // screens/notifications.rs (x 260..460, y 708..752)
-                                // is the only pixel region that clears.
-                                if screens::notifications::CLEAR_BTN.contains(x, y)
-                                    || screens::notifications::HEADER_CLEAR_BTN.contains(x, y)
-                                {
+                                // action on a phantom band. The drawn header pill is
+                                // the only pixel region that clears, and it is the
+                                // only control that says "Clear all": a second one
+                                // used to sit mid-canvas under a two-card feed, so
+                                // the surface asked the same destructive question
+                                // twice and the answer depended on which one the
+                                // person happened to find.
+                                if screens::notifications::HEADER_CLEAR_BTN.contains(x, y) {
                                     let _ = std::notification_cancel("", 0);
                                     state.notifications = [NotificationRecord::EMPTY; 8];
                                     state.notification_count = 0;

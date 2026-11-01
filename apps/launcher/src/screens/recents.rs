@@ -70,12 +70,34 @@ const CARD_NAME_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
 const CARD_STATE_BOX_H: usize = launcher::font::GLYPH_H * type_scale::CAPTION;
 /// Inset from a card's top to the title's line box.
 const CARD_NAME_TOP: usize = 24;
+/// The bytes a card's title line can hold.
+const CARD_NAME_CAP: usize = 32;
 /// Inset from a card's top to the state line: below the title's whole box.
 const CARD_STATE_TOP: usize = CARD_NAME_TOP + CARD_NAME_BOX_H;
 const _: () = assert!(
     CARD_STATE_TOP + CARD_STATE_BOX_H < 84,
     "the card's title and state lines must sit above the snapshot well",
 );
+
+/// Inset from a card's left edge to the column its title and state lines share.
+const CARD_TEXT_X: usize = 78;
+/// Inset from a card's left edge to the right edge of that column.
+const CARD_TEXT_RIGHT: usize = 380;
+/// The columns the card's title and state lines are painted into.
+///
+/// WHY the copy is fitted to this and not left to the guard: the guard ends the
+/// run at the column, so a name wider than it stopped halfway through a glyph --
+/// half a letter with nothing to say the rest was gone.
+const CARD_TEXT_W: usize = CARD_TEXT_RIGHT - CARD_TEXT_X;
+
+/// Inset from the snapshot well's edge to the reason line it centres.
+const WELL_TEXT_X: usize = 24;
+/// The bytes the well's reason line can hold.
+const REASON_CAP: usize = 32;
+/// The columns the well's reason line is painted into, both insets removed.
+const WELL_TEXT_W: usize = SNAPSHOT_W - 2 * WELL_TEXT_X;
+/// The rows the well's reason line reserves on the bitmap face at its rung.
+const REASON_BOX_H: usize = launcher::font::GLYPH_H * type_scale::CAPTION;
 
 /// The rows the "Clear All" pill's label reserves on the outline face.
 const CLOSE_ALL_LABEL_H: usize = launcher::font::line_height(type_scale::BODY);
@@ -86,6 +108,30 @@ const _: () = assert!(
 
 /// The rows the empty-state title reserves on the outline face at its rung.
 const EMPTY_TITLE_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+
+// --- Header geometry --------------------------------------------------------
+// WHY the count line is derived from the title above it: the title is a TITLE run
+// and reserves 59 rows from its box top, but the count line started at a
+// remembered 112 -- eleven rows inside the title's own box. Nothing collided on
+// the day this was written only because the one descender in "Recent Apps" lands
+// to the right of where "2 active tasks" happens to end, so a longer count, a
+// different app name, or a rename of the screen would have eaten the count's top
+// rows with no other change. Each line now reserves the box its rung draws.
+
+/// Left inset shared by the header's title and count lines.
+const HEADER_X: usize = 32;
+/// Top of the header title's line box.
+const TITLE_Y: usize = 64;
+/// The rows the header title reserves on the outline face at its rung.
+const TITLE_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+/// The rows the header count line reserves on the bitmap face at its rung.
+const COUNT_BOX_H: usize = launcher::font::GLYPH_H * type_scale::CAPTION;
+/// Top of the count line: below the whole box of the title stacked above it.
+const COUNT_Y: usize = TITLE_Y + TITLE_BOX_H;
+const _: () = assert!(
+    COUNT_Y + COUNT_BOX_H <= CARD_Y,
+    "the header's count line must sit above the card carousel it is stacked over",
+);
 
 // ============================================================================
 // Hit Testing & Interaction Actions
@@ -326,11 +372,11 @@ struct CardPlan {
     icon: Option<IconKind>,
     badge: [u8; 4],
     badge_len: usize,
-    name: [u8; 24],
+    name: [u8; CARD_NAME_CAP],
     name_len: usize,
     state_label: [u8; 16],
     state_len: usize,
-    reason: [u8; 32],
+    reason: [u8; REASON_CAP],
     reason_len: usize,
 }
 
@@ -340,6 +386,7 @@ struct Plan {
     title: Label,
     count_buf: [u8; 32],
     count_len: usize,
+    count_w: usize,
     cards: [CardPlan; MAX_CARDS],
     card_count: usize,
     scroll_offset: i32,
@@ -391,11 +438,16 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         if state.clock_source_ok { &state.clock_time } else { b"" },
         theme.on_surface,
     );
-    let title = Label::at(32, 64, type_scale::TITLE, b"Recent Apps", theme.on_surface);
+    let title = Label::at(HEADER_X, TITLE_Y, type_scale::TITLE, b"Recent Apps", theme.on_surface);
 
     // Count label: e.g. "2 active tasks"
     let mut count_buf = [0u8; 32];
     let count_len = format_count(state.recents_count, &mut count_buf);
+    // WHY measured once here: the per-pixel guard below needs the run's painted
+    // width, and `count_len * 12` was a guessed advance per character that the
+    // rasteriser never agreed with -- it cut the last glyph's columns off one
+    // string length and left spare claim on another.
+    let count_w = launcher::text::measure(&count_buf[..count_len], type_scale::CAPTION);
 
     let mut cards = [CardPlan {
         card_x: 0,
@@ -403,11 +455,11 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         icon: None,
         badge: [0; 4],
         badge_len: 0,
-        name: [0; 24],
+        name: [0; CARD_NAME_CAP],
         name_len: 0,
         state_label: [0; 16],
         state_len: 0,
-        reason: [0; 32],
+        reason: [0; REASON_CAP],
         reason_len: 0,
     }; MAX_CARDS];
 
@@ -418,9 +470,11 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         let icon = icons::match_icon_kind(card.package());
 
         // Name
-        let mut name = [0u8; 24];
-        let nlen = card.label().len().min(24);
-        name[..nlen].copy_from_slice(&card.label()[..nlen]);
+        let mut name = [0u8; CARD_NAME_CAP];
+        let (fitted_name, fitted_name_len) =
+            launcher::text::ellipsize(card.label(), type_scale::BODY, CARD_TEXT_W);
+        let nlen = fitted_name_len.min(CARD_NAME_CAP);
+        name[..nlen].copy_from_slice(&fitted_name[..nlen]);
 
         // State label
         let mut state_label = [0u8; 16];
@@ -433,11 +487,12 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         state_label[..slen].copy_from_slice(&state_bytes[..slen]);
 
         // Reason (if unavailable)
-        let mut reason = [0u8; 32];
+        let mut reason = [0u8; REASON_CAP];
         let rlen = if let Some(r) = card.preview.reason() {
-            let b = r.as_bytes();
-            let l = b.len().min(32);
-            reason[..l].copy_from_slice(&b[..l]);
+            let (fitted, fitted_len) =
+                launcher::text::ellipsize(r.as_bytes(), type_scale::CAPTION, WELL_TEXT_W);
+            let l = fitted_len.min(REASON_CAP);
+            reason[..l].copy_from_slice(&fitted[..l]);
             l
         } else {
             0
@@ -485,15 +540,24 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         theme.on_surface,
     );
 
+    // WHY measured rather than guessed half-widths: both lines were placed at
+    // `SCREEN_WIDTH / 2 - 110` and `- 140`, which are remembered ink widths, not
+    // the ones the face produces. A run narrower than its remembered width sits
+    // left of the centre of the surface it claims to be centred on, and nothing
+    // here fails when the copy is edited -- it just quietly stops being centred.
     let empty_title = Label::at(
-        SCREEN_WIDTH / 2 - 110,
+        launcher::text::center_x(b"No Recent Apps", type_scale::TITLE, SCREEN_WIDTH),
         600,
         type_scale::TITLE,
         b"No Recent Apps",
         theme.on_surface,
     );
     let empty_hint = Label::at(
-        SCREEN_WIDTH / 2 - 140,
+        launcher::text::center_x(
+            b"Apps you open will appear here",
+            type_scale::CAPTION,
+            SCREEN_WIDTH,
+        ),
         600 + EMPTY_TITLE_BOX_H + interos_std::design::spacing::GRID_8,
         type_scale::CAPTION,
         b"Apps you open will appear here",
@@ -505,6 +569,7 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         title,
         count_buf,
         count_len,
+        count_w,
         cards,
         card_count: count,
         scroll_offset: motion.scroll_offset,
@@ -628,12 +693,16 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if let Some(c) = plan.title.pixel(x, y, theme.surface) {
         return c;
     }
-    if py >= 112 && py < 136 && px >= 32 && px < 32 + (plan.count_len * 12) as i32 {
+    if py >= COUNT_Y as i32
+        && py < (COUNT_Y + COUNT_BOX_H) as i32
+        && px >= HEADER_X as i32
+        && px < (HEADER_X + plan.count_w) as i32
+    {
         if let Some(c) = crate::test_text_aa(
             x,
             y,
-            32,
-            112,
+            HEADER_X,
+            COUNT_Y,
             type_scale::CAPTION,
             &plan.count_buf[..plan.count_len],
             theme.on_surface_variant,
@@ -697,15 +766,15 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // C. Title label
         if card.name_len > 0
-            && px >= (card_x + 78)
-            && px < (card_x + 380)
+            && px >= (card_x + CARD_TEXT_X as i32)
+            && px < (card_x + CARD_TEXT_RIGHT as i32)
             && py >= (card_y + CARD_NAME_TOP as i32)
             && py < (card_y + (CARD_NAME_TOP + CARD_NAME_BOX_H) as i32)
         {
             if let Some(c) = crate::test_text_aa(
                 x,
                 y,
-                (card_x + 78) as usize,
+                (card_x + CARD_TEXT_X as i32) as usize,
                 (card_y + CARD_NAME_TOP as i32) as usize,
                 type_scale::BODY,
                 &card.name[..card.name_len],
@@ -718,15 +787,15 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // D. Subtitle (state: "Active" / "Running" / "Last frame")
         if card.state_len > 0
-            && px >= (card_x + 78)
-            && px < (card_x + 380)
+            && px >= (card_x + CARD_TEXT_X as i32)
+            && px < (card_x + CARD_TEXT_RIGHT as i32)
             && py >= (card_y + CARD_STATE_TOP as i32)
             && py < (card_y + (CARD_STATE_TOP + CARD_STATE_BOX_H) as i32)
         {
             if let Some(c) = crate::test_text_aa(
                 x,
                 y,
-                (card_x + 78) as usize,
+                (card_x + CARD_TEXT_X as i32) as usize,
                 (card_y + CARD_STATE_TOP as i32) as usize,
                 type_scale::CAPTION,
                 &card.state_label[..card.state_len],
@@ -755,14 +824,20 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
                 // Placeholder well if no real snapshot frame
                 let well_bg = theme.surface_container_low;
-                if card.reason_len > 0 && py >= snap_y + snap_h / 2 - 12 && py < snap_y + snap_h / 2 + 16 {
-                    let rx = (snap_x + 24) as usize;
-                    let ry = (snap_y + snap_h / 2) as usize;
+                let rx = (snap_x + WELL_TEXT_X as i32) as usize;
+                let ry = snap_y + snap_h / 2;
+                // WHY the band is the run's own box: it used to reach twelve rows
+                // above the line's top -- rows no glyph is ever drawn on -- and
+                // stop sixteen rows below it, eight rows short of the cell. Every
+                // descender and every row the bitmap face still paints in that
+                // cell was cut off at the guard, so the well answered the question
+                // "why is this one stopped" with a word missing its tail.
+                if card.reason_len > 0 && py >= ry && py < ry + REASON_BOX_H as i32 {
                     if let Some(c) = crate::test_text_aa(
                         x,
                         y,
                         rx,
-                        ry,
+                        ry as usize,
                         type_scale::CAPTION,
                         &card.reason[..card.reason_len],
                         theme.on_surface_variant,
