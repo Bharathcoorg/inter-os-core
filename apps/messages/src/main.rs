@@ -24,8 +24,8 @@ use interos_std::design::scroll::ScrollState;
 
 use messages::gsm;
 use messages::keyboard::{
-    Editor, Editors, Field, KeyAction, Keyboard, BANDS_H, BANDS_TOP_IDLE, KB_Y0, KB_Y1,
-    RECIPIENT_BAND_H,
+    Editor, Editors, Field, KeyAction, Keyboard, BANDS_H, BANDS_TOP_IDLE, BANDS_TOP_KEYBOARD,
+    KB_Y0, KB_Y1, RECIPIENT_BAND_H,
 };
 use messages::privacy;
 use messages::publish;
@@ -807,8 +807,19 @@ const SEARCH_ICON_CX: usize = 56;
 const SEARCH_ICON_CY: usize = SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2;
 /// The clear control's hit half-height; the mark itself is nine rows tall.
 const SEARCH_CLEAR_HALF_H: usize = 14;
+/// The centre of the clear mark that ends the search field.
+const SEARCH_CLEAR_CX: usize = 672;
+/// The half-width of the band the clear mark answers taps in.
+const SEARCH_CLEAR_HALF_W: usize = 16;
 const SEARCH_TEXT_X: usize = 82;
-const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
+/// The columns the typed query may use.
+///
+/// WHY it stops short of the mark: the budget used to run to the field's own edge
+/// minus 20, which is 676 -- inside the nine columns the clear mark paints. A
+/// query long enough to reach it lost its last letters under the cross, and the
+/// cross lost its right arm to them.
+const SEARCH_TEXT_MAX_W: usize =
+    SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W - spacing::GRID_8 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
 const SEARCH_TEXT_SCALE: usize = type_scale::BODY;
 
@@ -864,6 +875,22 @@ const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
 const COMPOSE_TEXT_SCALE: usize = type_scale::BODY;
 /// The composer field's inset from its band's top edge.
 const COMPOSE_FIELD_DY: usize = 14;
+/// The clear control both editors carry at the right end of their field.
+///
+/// WHY one band for the mark and the press: the painter clipped the mark to
+/// `574..606` while the tap path clipped it to `570..610`, and `570` is inside
+/// the character counter's own right edge at 572 -- so the two columns at the
+/// end of the count cleared the draft instead of focusing the field.
+const FIELD_CLEAR_CX: usize = 590;
+const FIELD_CLEAR_HALF_W: usize = 16;
+const FIELD_CLEAR_X0: usize = FIELD_CLEAR_CX - FIELD_CLEAR_HALF_W;
+const FIELD_CLEAR_X1: usize = FIELD_CLEAR_CX + FIELD_CLEAR_HALF_W;
+/// WHY gated: the mark lives inside the field, and the field's edge is also the
+/// lane the send control and the recipient picker are drawn in. A wider mark
+/// would answer presses that belong to those controls.
+const _: () = assert!(
+    FIELD_CLEAR_X1 <= 24 + COMPOSE_FIELD_W && FIELD_CLEAR_X1 <= 24 + RECIPIENT_FIELD_W
+);
 /// The send disc, and the lane of the compose band it is drawn in.
 ///
 /// WHY the lane is named at all: the painter clipped the disc to
@@ -1156,7 +1183,24 @@ const PICK_LABEL: &[u8] = b"PICK";
 const INFO_LABEL: &[u8] = b"INFO";
 
 // Empty-state card
-const EMPTY_CARD: (usize, usize, usize, usize) = (24, 560, 672, 340);
+//
+// WHY its foot is the keyboard-up band: the card was a remembered 340 rows tall,
+// which put its bottom edge at 900 while the list band ends at 850 the moment the
+// keyboard is up. The empty state then lost its own bottom border and both bottom
+// corners -- a card with no bottom reads as a painting cut off rather than as a
+// list with nothing in it, and it happened on the screen that appears only when
+// there is nothing else to look at.
+const EMPTY_CARD_TOP: usize = 560;
+const EMPTY_CARD: (usize, usize, usize, usize) = (
+    24,
+    EMPTY_CARD_TOP,
+    672,
+    BANDS_TOP_KEYBOARD - spacing::GRID_8 - EMPTY_CARD_TOP,
+);
+const _: () = assert!(
+    832 <= EMPTY_CARD.1 + EMPTY_CARD.3,
+    "the empty state's last line has to sit inside the card that holds it",
+);
 
 #[inline(always)]
 fn in_rect(r: (usize, usize, usize, usize), x: usize, y: usize) -> bool {
@@ -1949,14 +1993,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
 
                 if messages.search_len > 0
-                    && x >= 656
-                    && x < 688
+                    && x >= SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W
+                    && x < SEARCH_CLEAR_CX + SEARCH_CLEAR_HALF_W
                     && y >= SEARCH_ICON_CY - SEARCH_CLEAR_HALF_H
                     && y < SEARCH_ICON_CY + SEARCH_CLEAR_HALF_H
                 {
-                    let cx = 672isize;
+                    let ccx = SEARCH_CLEAR_CX as isize;
                     let cy = SEARCH_ICON_CY as isize;
-                    let dx = (x as isize - cx).abs();
+                    let dx = (x as isize - ccx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
                         return THEME.on_surface_variant;
@@ -2341,9 +2385,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
 
                 // Clear 'x' indicator when recipient has text
-                if messages.recip_len > 0 && x >= 574 && x < 606 && y >= recipient_band_y0(messages) + 6 && y < recipient_band_y1(messages) - 6 {
-                    let cx = 590isize;
-                    let cy = (recipient_band_y0(messages) + 22) as isize;
+                if messages.recip_len > 0 && x >= FIELD_CLEAR_X0 && x < FIELD_CLEAR_X1
+                    && y >= recipient_band_y0(messages) + 6
+                    && y < recipient_band_y1(messages) - 6
+                {
+                    let cx = FIELD_CLEAR_CX as isize;
+                    let cy = (rfield.1 + rfield.3 / 2) as isize;
                     let dx = (x as isize - cx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -2367,9 +2414,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             if in_rect(cfield, x, y) {
                 let rect = primitives::Rect::new(cfield.0, cfield.1, cfield.2, cfield.3);
                 // Clear 'x' indicator when compose has text
-                if messages.compose_len > 0 && x >= 574 && x < 606 && y >= cfield.1 + 10 && y < cfield.1 + 50 {
-                    let cx = 590isize;
-                    let cy = (cfield.1 + 30) as isize;
+                if messages.compose_len > 0
+                    && x >= FIELD_CLEAR_X0
+                    && x < FIELD_CLEAR_X1
+                    && y >= cfield.1 + 10
+                    && y < cfield.1 + 50
+                {
+                    let cx = FIELD_CLEAR_CX as isize;
+                    let cy = (cfield.1 + cfield.3 / 2) as isize;
                     let dx = (x as isize - cx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -2685,9 +2737,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
 
                 // Clear 'x' indicator when recipient has text
-                if messages.recip_len > 0 && x >= 574 && x < 606 && y >= recipient_band_y0(messages) + 6 && y < recipient_band_y1(messages) - 6 {
-                    let cx = 590isize;
-                    let cy = (recipient_band_y0(messages) + 22) as isize;
+                if messages.recip_len > 0 && x >= FIELD_CLEAR_X0 && x < FIELD_CLEAR_X1
+                    && y >= recipient_band_y0(messages) + 6
+                    && y < recipient_band_y1(messages) - 6
+                {
+                    let cx = FIELD_CLEAR_CX as isize;
+                    let cy = (rfield.1 + rfield.3 / 2) as isize;
                     let dx = (x as isize - cx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -2711,9 +2766,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             if in_rect(cfield, x, y) {
                 let rect = primitives::Rect::new(cfield.0, cfield.1, cfield.2, cfield.3);
                 // Clear 'x' indicator when compose has text
-                if messages.compose_len > 0 && x >= 574 && x < 606 && y >= cfield.1 + 10 && y < cfield.1 + 50 {
-                    let cx = 590isize;
-                    let cy = (cfield.1 + 30) as isize;
+                if messages.compose_len > 0
+                    && x >= FIELD_CLEAR_X0
+                    && x < FIELD_CLEAR_X1
+                    && y >= cfield.1 + 10
+                    && y < cfield.1 + 50
+                {
+                    let cx = FIELD_CLEAR_CX as isize;
+                    let cy = (cfield.1 + cfield.3 / 2) as isize;
                     let dx = (x as isize - cx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -3611,7 +3671,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     // still being laid out: a press on a notice card used to clip half of that
     // screen's report.
     if compose_controls_shown(app) && in_rect(compose_field(app), x, y) {
-        if app.compose_len > 0 && x >= 570 && x < 610 {
+        if app.compose_len > 0 && x >= FIELD_CLEAR_X0 && x < FIELD_CLEAR_X1 {
             app.compose = [0; COMPOSE_CAP];
             app.compose_len = 0;
             app.compose_select_all = false;
@@ -3629,7 +3689,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
 
     // Recipient text field, same band as the composer.
     if compose_controls_shown(app) && in_rect(recipient_field(app), x, y) {
-        if app.recip_len > 0 && x >= 570 && x < 610 {
+        if app.recip_len > 0 && x >= FIELD_CLEAR_X0 && x < FIELD_CLEAR_X1 {
             app.recip = [0; RECIP_CAP];
             app.recip_len = 0;
             app.recip_select_all = false;
@@ -3647,7 +3707,10 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     if app.view_mode == ViewMode::ThreadList {
         // Search field
         if in_rect(SEARCH_FIELD, x, y) {
-            if app.search_len > 0 && x >= 650 && x < 696 {
+            if app.search_len > 0
+                && x >= SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W
+                && x < SEARCH_CLEAR_CX + SEARCH_CLEAR_HALF_W
+            {
                 app.search = [0; SEARCH_CAP];
                 app.search_len = 0;
                 app.search_select_all = false;
