@@ -12,6 +12,7 @@ that already holds the write, from a tree the platform names, and the answer is
 a measurement of what arrived.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -666,6 +667,184 @@ def test_the_tokenizer_contract_can_fail():
     assert _tokenizer_defects(demanding, lib), (
         "a file the engine used to load is now refused, and nothing said so"
     )
+
+
+def _segment(source: str, start: str, end: str) -> str:
+    """The text from `start` up to the next `end` after it -- one match arm."""
+    head = source.index(start)
+    tail = source[head:]
+    stop = tail.index(end) if end in tail else len(tail)
+    return tail[:stop]
+
+
+SDK = ROOT / "sdk" / "rust" / "interos-std" / "src" / "lib.rs"
+KERNEL_SYSCALL = ROOT / "kernel" / "src" / "syscall" / "mod.rs"
+
+
+def _ranged_read_defects(gguf: str, lib: str, sdk: str, kernel: str) -> list[str]:
+    """What would make the file-backed reader pay for bytes it only steps over.
+
+    A model file puts its tensor records after a vocabulary it will not load, so
+    reaching the last tensor used to mean pushing every byte before it through a
+    syscall and throwing it away. Reading at a named position is the whole of the
+    fix, and a step is only free if the reader asks for nothing.
+    """
+    defects = []
+
+    skip_body = function_body(gguf, "pub fn skip(&mut self, mut count: usize)")
+    stepped = _segment(skip_body, "Self::File { pos, .. } => {", "Self::Buffered")
+    if "std::" in stepped:
+        defects.append("a step past a file still pays for the bytes it discards")
+
+    read_body = function_body(gguf, "pub fn read_exact(&mut self, out: &mut [u8])")
+    if "std::fs_read(" in read_body:
+        defects.append("a file read moved the descriptor instead of naming a position")
+    if "if n > remaining" not in read_body:
+        defects.append("a count wider than the buffer it names is treated as bytes read")
+
+    window_body = function_body(gguf, "fn refill_window(")
+    if "if pulled > asked" not in window_body:
+        defects.append("the window accepts more bytes than the space it asked for")
+    if "std::fs_read(" in window_body:
+        defects.append("the window reads forward instead of at its own position")
+
+    # A step that costs nothing also never meets the end of the file, so the walk
+    # that is about to speak about what a file declares asks for one byte first --
+    # at both of the exits it can take.
+    info_walk = function_body(gguf, "pub fn read_model_info_stream")
+    if info_walk.count("source_ends_early(") != 2 or "stepped_past_the_end" not in gguf:
+        defects.append("a walk that stepped past the end reports the file as if it read it")
+
+    if "pub fn fs_read_at(" not in sdk:
+        defects.append("the platform offers no positioned read to walk a file with")
+    else:
+        sdk_call = function_body(sdk, "pub fn fs_read_at(")
+        if "SyscallNumber::FsReadAt" not in sdk_call:
+            defects.append("the SDK's positioned read names a different call")
+
+    if "FsReadAt = 164," not in kernel or "FsReadAt = 164," not in sdk:
+        defects.append("the positioned read is not the same number on both sides")
+    dispatch_marker = "164 => {"
+    if dispatch_marker not in kernel:
+        defects.append("nothing dispatches the positioned read")
+    else:
+        arm = function_body(kernel, dispatch_marker)
+        if "sys_fs_read_at(" not in arm:
+            defects.append("164 does not reach the positioned read")
+        if not re.search(r"let\s+offset\s*=\s*a5\s+as\s+usize", arm):
+            defects.append("the positioned read binds its offset from another register")
+        if "MAX_FS_IO_BYTES" not in arm:
+            defects.append("the positioned read is bounded by nothing")
+
+    marker = "Err(gguf::GgufError::BufferTooShort"
+    if marker not in lib:
+        defects.append("a failed read no longer has an arm of its own")
+    else:
+        arm = _segment(lib, marker, "Err(_) =>")
+        for variant in ("BufferTooShort", "ReadFailed", "FileNotFound"):
+            if variant not in arm:
+                defects.append(f"an unreadable file answers with {variant} unhandled")
+        if "STATUS_UNAVAILABLE" not in arm:
+            defects.append("a file that could not be read claims an unsupported architecture")
+    return defects
+
+
+def test_a_step_past_a_file_costs_no_request_and_a_read_names_its_position():
+    """The walk reaches the last tensor without reading the bytes before it."""
+    defects = _ranged_read_defects(
+        read("gguf.rs"),
+        lib_source(),
+        SDK.read_text(encoding="utf-8"),
+        KERNEL_SYSCALL.read_text(encoding="utf-8"),
+    )
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_ranged_read_contract_can_fail():
+    """Each detector is tripped by the fault it exists for.
+
+    The sources below are the live reader with one rule reversed: a step that
+    reads the bytes it throws away, a read that moves the cursor, a count the
+    reader accepts without bounding, a window that takes more than it asked for,
+    a walk that never asks whether the file reaches where it stopped, the call
+    taken out of the SDK, the number moved on one side of the boundary, the arm
+    that answers it removed, its offset read from the wrong register, and a
+    failed read answered as a corrupted model.
+    """
+    gguf = read("gguf.rs")
+    lib = lib_source()
+    sdk = SDK.read_text(encoding="utf-8")
+    kernel = KERNEL_SYSCALL.read_text(encoding="utf-8")
+    assert _ranged_read_defects(gguf, lib, sdk, kernel) == []
+
+    stepping = gguf.replace(
+        "                *pos = pos.checked_add(count).ok_or(GgufError::ArithmeticOverflow)?;\n                Ok(())",
+        "                let mut scratch = [0u8; 512];\n"
+        "                while count > 0 {\n"
+        "                    let chunk = count.min(512);\n"
+        "                    std::fs_read(*fd, &mut scratch[..chunk])?;\n"
+        "                    count -= chunk;\n"
+        "                }\n"
+        "                Ok(())",
+    )
+    assert stepping != gguf, "the reading-step fixture no longer matches the reader"
+    assert _ranged_read_defects(stepping, lib, sdk, kernel), "a step that paid for its bytes passed"
+
+    cursor = gguf.replace("let n = std::fs_read_at(", "let n = std::fs_read(")
+    assert cursor != gguf, "the cursor-moving fixture no longer matches the reader"
+    assert _ranged_read_defects(cursor, lib, sdk, kernel), "a read that moved the descriptor passed"
+
+    unbounded = gguf.replace(
+        "                    if n > remaining {\n                        return Err(GgufError::ReadFailed);\n                    }\n",
+        "",
+    )
+    assert unbounded != gguf, "the unbounded-count fixture no longer matches the reader"
+    assert _ranged_read_defects(unbounded, lib, sdk, kernel), "an impossible byte count passed"
+
+    greedy = gguf.replace(
+        "                if pulled > asked {\n                    return Err(GgufError::ReadFailed);\n                }\n",
+        "",
+    )
+    assert greedy != gguf, "the greedy-window fixture no longer matches the reader"
+    assert _ranged_read_defects(greedy, lib, sdk, kernel), "a window overfilled past its buffer passed"
+
+    unquestioning = gguf.replace(
+        "        if info.is_complete() {\n            if source_ends_early(stream, header.tensor_count) {",
+        "        if info.is_complete() {\n            if false {",
+    )
+    assert unquestioning != gguf, "the unquestioning-walk fixture no longer matches the reader"
+    assert _ranged_read_defects(unquestioning, lib, sdk, kernel), (
+        "a walk that stepped past a truncated file and said nothing passed"
+    )
+
+    no_position = sdk.replace("pub fn fs_read_at(", "pub fn fs_read_at_removed(")
+    assert no_position != sdk, "the missing-call fixture no longer matches the SDK"
+    assert _ranged_read_defects(gguf, lib, no_position, kernel), "a walk with no positioned read passed"
+
+    renamed = sdk.replace("FsReadAt = 164,", "FsReadAt = 165,")
+    assert renamed != sdk, "the moved-number fixture no longer matches the SDK"
+    assert _ranged_read_defects(gguf, lib, renamed, kernel), (
+        "the two sides naming different numbers for one call passed"
+    )
+
+    undispatched = kernel.replace("164 => {", "164_removed => {")
+    assert undispatched != kernel, "the removed-arm fixture no longer matches the kernel"
+    assert _ranged_read_defects(gguf, lib, sdk, undispatched), (
+        "a call number no handler answers passed"
+    )
+
+    wrong_register = kernel.replace("let offset = a5 as usize;", "let offset = a4 as usize;")
+    assert wrong_register != kernel, "the wrong-register fixture no longer matches the kernel"
+    assert _ranged_read_defects(gguf, lib, sdk, wrong_register), (
+        "an offset read from the length register passed"
+    )
+
+    blamed = lib.replace(
+        "Err(gguf::GgufError::BufferTooShort | gguf::GgufError::ReadFailed | gguf::GgufError::FileNotFound) => {",
+        "Err(gguf::GgufError::BufferTooShort | gguf::GgufError::FileNotFound) => {",
+    )
+    assert blamed != lib, "the misreported-fault fixture no longer matches the service"
+    assert _ranged_read_defects(gguf, blamed, sdk, kernel), "an unreadable file called corrupt passed"
 
 
 def test_the_contract_can_fail():

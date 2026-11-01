@@ -31,6 +31,7 @@ SLOT_CALLS = (
     "fs_list",
     "fs_open",
     "fs_read",
+    "fs_read_at",
     "fs_stat",
     "fs_unlink",
     "fs_write",

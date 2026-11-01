@@ -305,6 +305,8 @@ pub enum SyscallNumber {
     TlsTrustCount = 162,
     /// Copies one installed TLS trust anchor's DER into the caller's buffer.
     TlsTrustRead = 163,
+    /// Reads bytes from a named position of an open file, leaving its cursor.
+    FsReadAt = 164,
 }
 
 /// System call result status codes.
@@ -937,6 +939,34 @@ pub fn sys_fs_read(
         })
 }
 
+/// Reads bytes from `offset` of an open file, leaving the cursor where it was.
+///
+/// Requires exactly the authority [`sys_fs_read`] requires: a caller that could
+/// not read the file from its start cannot read it from anywhere else.
+pub fn sys_fs_read_at(
+    cap_slot: usize,
+    fd: FileDescriptor,
+    offset: usize,
+    buf: &mut [u8],
+) -> Result<usize, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return Err(SyscallResult::PermissionDenied),
+    };
+    let task_id = current.id;
+    let cap_table = current.cap_table.clone();
+    drop(sched);
+
+    let mut vfs = VFS.lock();
+    vfs.read_at(task_id, &cap_table, cap_slot, fd, offset, buf)
+        .map_err(|e| match e {
+            FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::InvalidFd => SyscallResult::InvalidFd,
+            _ => SyscallResult::InvalidArguments,
+        })
+}
+
 /// Writes data to an open file descriptor.
 ///
 /// Requires `FileSystemWrite` capability in `cap_slot`.
@@ -1391,6 +1421,49 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             while done < buf_len {
                 let want = (buf_len - done).min(kbuf.len());
                 match sys_fs_read(cap_slot, fd, &mut kbuf[..want]) {
+                    Ok(0) => break,
+                    Ok(bytes) => {
+                        if copy_to_user(a3 + done as u64, &kbuf[..bytes]).is_err() {
+                            return SyscallResult::InvalidArguments as i64;
+                        }
+                        done += bytes;
+                    }
+                    Err(err) => {
+                        if done == 0 {
+                            return err as i64;
+                        }
+                        break;
+                    }
+                }
+            }
+            done as i64
+        }
+        164 => {
+            // FsReadAt: a1 = cap_slot, a2 = fd, a3 = buf_ptr, a4 = buf_len, a5 = offset
+            //
+            // WHY the position travels as a plain register: the capability, the
+            // descriptor and the object scope are checked exactly as `FsRead`
+            // checks them, so a positioned read cannot reach one byte of a file
+            // its caller could not already read from the start. The offset adds
+            // authority over nothing; it removes the need to walk to a position
+            // through the bytes before it.
+            //
+            // WHY this is chunked like `FsRead`: the kernel copies through a
+            // 4 KiB stack buffer, and a model loader asks for more than that per
+            // tensor. Each chunk is read at its own position, so one call reads
+            // a run of bytes that spans bounce buffers.
+            let cap_slot = a1 as usize;
+            let fd = FileDescriptor(a2 as u32);
+            let buf_len = a4 as usize;
+            let offset = a5 as usize;
+            if buf_len > MAX_FS_IO_BYTES {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; 4096];
+            let mut done = 0usize;
+            while done < buf_len {
+                let want = (buf_len - done).min(kbuf.len());
+                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {
                     Ok(0) => break,
                     Ok(bytes) => {
                         if copy_to_user(a3 + done as u64, &kbuf[..bytes]).is_err() {

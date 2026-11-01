@@ -265,6 +265,8 @@ pub enum SyscallNumber {
     TlsTrustCount = 162,
     /// Reads one installed TLS trust anchor's DER into the caller's buffer.
     TlsTrustRead = 163,
+    /// Reads bytes from a named position of an open file, leaving its cursor.
+    FsReadAt = 164,
 }
 
 // -----------------------------------------------------------------------------
@@ -2732,6 +2734,27 @@ pub fn fs_read(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
             fd as u64,
             buf.as_mut_ptr() as u64,
             buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Reads from `offset` without moving the descriptor's own cursor, so a caller
+/// that mixes `fs_read` and `fs_read_at` on the same fd must not expect the two
+/// to agree on position.
+pub fn fs_read_at(fd: u32, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::FsReadAt,
+            RESERVED_CAP_SLOT,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            offset,
         )
     };
     if ret >= 0 {

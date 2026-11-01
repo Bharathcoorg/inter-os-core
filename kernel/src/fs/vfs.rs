@@ -184,6 +184,8 @@ pub enum FsError {
     FileTooLarge,
     DirectoryNotEmpty,
     InvalidPath,
+    /// A positioned read was asked of an object that has no positions.
+    NotSeekable,
 }
 
 /// The block-store operations the VFS uses for the payloads that are too
@@ -1805,9 +1807,42 @@ pub fn read_file_for_task(
         &mut self,
         task_id: TaskId,
         task_caps: &CapabilityTable,
+        cap_slot: usize,
+        fd: FileDescriptor,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        self.read_positioned(task_id, task_caps, cap_slot, fd, buf, None)
+    }
+
+    /// Reads `buf` from `offset` of an open descriptor, leaving its cursor alone.
+    ///
+    /// WHY a positioned read rather than a seek: a model loader walks the tensor
+    /// records in the order the file declares them, which is not the order it
+    /// needs them, so a cursor that has to be walked back to a far offset costs
+    /// every byte in between. The weights of one large file sit behind each
+    /// other, so reaching the last tensor would sweep the whole file. Here the
+    /// caller names the position, the descriptor's own cursor stays where it
+    /// was, and the bytes handed over are the bytes asked for.
+    pub fn read_at(
+        &mut self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        cap_slot: usize,
+        fd: FileDescriptor,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        self.read_positioned(task_id, task_caps, cap_slot, fd, buf, Some(offset))
+    }
+
+    fn read_positioned(
+        &mut self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
         _cap_slot: usize,
         fd: FileDescriptor,
         buf: &mut [u8],
+        at: Option<usize>,
     ) -> Result<usize, FsError> {
         // WHY the capability is found by type and not at the caller's slot:
         // a slot is a position in the table, and the position depends on the
@@ -1847,36 +1882,52 @@ pub fn read_file_for_task(
             })
             .ok_or(FsError::PermissionDenied)?;
 
+        let offset = at.unwrap_or(handle.offset);
         let inode = self.inodes.get(&handle.inode_id).ok_or(FsError::FileNotFound)?;
 
         if inode.file_type == FileType::DeviceNode {
+            // WHY a positioned read is refused here instead of quietly falling
+            // back to a plain one: a device node keeps no stored positions, so
+            // answering a request for byte 4000 with whatever the device hands
+            // over next would give the caller a length it can trust and bytes
+            // it cannot.
+            if at.is_some() {
+                return Err(FsError::NotSeekable);
+            }
             return crate::fs::devfs::device_read(&inode.path, buf);
         }
 
         if inode.block_backed {
             let name = spill_path_for(&inode.path);
             let size = inode.size;
-            let offset = handle.offset;
             // The inode borrow above has to be over before this call: streaming
             // from the device is a call on the filesystem, not on one field of
             // it.
             let count = self.stream_read(&name, offset, size, buf)?;
+            if at.is_some() {
+                return Ok(count);
+            }
             let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
             let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
             handle.offset += count;
             return Ok(count);
         }
 
-        if handle.offset >= inode.data.len() {
+        if offset >= inode.data.len() {
             return Ok(0); // EOF
         }
 
         let slice = inode.data.as_slice();
-        let available = slice.len() - handle.offset;
+        let available = slice.len() - offset;
         let count = core::cmp::min(available, buf.len());
 
-        buf[..count].copy_from_slice(&slice[handle.offset..handle.offset + count]);
-        handle.offset += count;
+        buf[..count].copy_from_slice(&slice[offset..offset + count]);
+
+        if at.is_none() {
+            let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+            let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
+            handle.offset += count;
+        }
 
         Ok(count)
     }
@@ -4835,6 +4886,518 @@ mod tests {
             vfs.inodes[&parent].children.contains(&file),
             "and the model is reachable from it"
         );
+    }
+
+    /// The payload the positioned-read tests are cut from.
+    ///
+    /// WHY the bytes name their own position: a window served from the wrong
+    /// offset has to disagree with the bytes it is compared against, and a
+    /// payload of repeated `0xAA` would let an off-by-4096 pass for a correct
+    /// read. Every four-byte group holds the little-endian index of the byte it
+    /// starts at, so no two windows of this file are the same shape.
+    fn positioned_payload(len: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(len);
+        let mut index = 0usize;
+        while index < len {
+            bytes.extend_from_slice(&(index as u32).to_le_bytes());
+            index += 4;
+        }
+        bytes.truncate(len);
+        bytes
+    }
+
+    /// A device-held file of `len` bytes, installed through the ordinary write
+    /// path, with the payload, the inode and the capabilities that read it.
+    ///
+    /// WHY one fixture for every positioned test: the bytes a reader is judged
+    /// on have to have arrived the way an installer's would -- streamed to the
+    /// device, never resident in the inode -- and a test that built its file
+    /// differently would be testing a different file.
+    fn device_held_read_target(
+        vfs_path: &str,
+        task_id: TaskId,
+        len: usize,
+    ) -> (Vfs, InodeId, Vec<u8>, CapabilityTable) {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let id = vfs.create_block_backed_file(vfs_path);
+        let caps = stream_caps(task_id);
+        let install_fd = vfs
+            .allocate_fd(task_id, id, Rights::READ | Rights::WRITE)
+            .expect("a descriptor to install the payload");
+        let payload = positioned_payload(len);
+        let written = vfs
+            .write(task_id, &caps, 0, install_fd, &payload)
+            .expect("the payload streams to the device");
+        assert_eq!(written, len, "the whole payload is accepted");
+        assert!(
+            vfs.inodes[&id].data.as_slice().is_empty(),
+            "the kernel holds none of the bytes it is about to read back"
+        );
+        (vfs, id, payload, caps)
+    }
+
+    /// The cursor one descriptor is sitting at.
+    ///
+    /// WHY the test reads the table directly: "does not move the cursor" is a
+    /// statement about the descriptor's stored position, and the only honest
+    /// way to check it is to look at the position itself and not only at what
+    /// the next read happens to return.
+    fn descriptor_cursor(vfs: &Vfs, task_id: TaskId, fd: FileDescriptor) -> usize {
+        vfs.task_file_tables
+            .get(&task_id)
+            .and_then(|table| table[fd.0 as usize].as_ref())
+            .map(|handle| handle.offset)
+            .expect("the descriptor is open")
+    }
+
+    /// What `read_at` was added for: the bytes it hands over are the bytes at
+    /// the position the caller named, taken off the device, and not whatever
+    /// the descriptor's cursor happened to be pointing at.
+    #[test]
+    fn vfs_a_positioned_read_returns_the_bytes_at_the_offset_it_names() {
+        const SIZE: usize = 64 * 1024;
+        let task_id = TaskId(1401);
+        let (mut vfs, id, payload, caps) =
+            device_held_read_target("/data/models/readat_window.gguf", task_id, SIZE);
+        let fd = vfs
+            .allocate_fd(task_id, id, Rights::READ)
+            .expect("a descriptor to read the device-held file");
+
+        let mut head = [0u8; 32];
+        let got = vfs
+            .read_at(task_id, &caps, 0, fd, 0, &mut head)
+            .expect("a positioned read at the start of the file");
+        assert_eq!(got, head.len(), "the whole named window is handed over");
+        assert_eq!(&head[..], &payload[..32], "the first bytes are the first bytes");
+        assert_eq!(&head[8..12], &8u32.to_le_bytes(), "position 8 really came from position 8");
+
+        // A middle window, deliberately off the four-byte grid, so a reader
+        // that rounded the position down to a block would be caught by the
+        // very first byte it compared.
+        const MIDDLE: usize = 40 * 1024 + 13;
+        let mut window = [0u8; 64];
+        let got = vfs
+            .read_at(task_id, &caps, 0, fd, MIDDLE, &mut window)
+            .expect("a positioned read of the middle of the file");
+        assert_eq!(got, window.len(), "a window wholly inside the file is filled");
+        assert_eq!(
+            &window[..],
+            &payload[MIDDLE..MIDDLE + 64],
+            "the window holds the bytes that sit at its own offset"
+        );
+        assert_eq!(
+            &window[3..7],
+            &((MIDDLE + 3) as u32).to_le_bytes(),
+            "and the position it names is the position it was read from"
+        );
+
+        // The same position read twice gives the same bytes twice: the device
+        // is addressed by position, not by whatever a cursor last did.
+        let mut again = [0u8; 64];
+        vfs.read_at(task_id, &caps, 0, fd, MIDDLE, &mut again)
+            .expect("the position is repeatable");
+        assert_eq!(&again[..], &window[..], "a positioned read is idempotent");
+
+        // A window that runs past the last byte gives the bytes that exist and
+        // no error: the tail is short, not missing.
+        const TAIL: usize = SIZE - 8;
+        let mut tail = [0u8; 512];
+        let got = vfs
+            .read_at(task_id, &caps, 0, fd, TAIL, &mut tail)
+            .expect("a window that over-runs the end is a short read, not a fault");
+        assert_eq!(got, 8, "only the bytes that exist past the position are given");
+        assert_eq!(&tail[..8], &payload[TAIL..], "and they are the last bytes of the file");
+    }
+
+    /// The other half of the contract, and the half a length-only check cannot
+    /// show: naming a position must not move anything. A loader that reads
+    /// tensor nine and then expects tensor ten to be wherever it left the
+    /// cursor would silently skip every byte in between if the positioned read
+    /// advanced it.
+    #[test]
+    fn vfs_a_positioned_read_leaves_the_descriptors_cursor_where_it_was() {
+        const SIZE: usize = 64 * 1024;
+        const CHUNK: usize = 1024;
+        let task_id = TaskId(1402);
+        let (mut vfs, id, payload, caps) =
+            device_held_read_target("/data/models/readat_cursor.gguf", task_id, SIZE);
+        let fd = vfs
+            .allocate_fd(task_id, id, Rights::READ)
+            .expect("a descriptor on the device-held file");
+
+        let mut first = [0u8; CHUNK];
+        vfs.read(task_id, &caps, 0, fd, &mut first)
+            .expect("the ordinary read at the start");
+        assert_eq!(descriptor_cursor(&vfs, task_id, fd), CHUNK, "the ordinary read moved the cursor");
+
+        const FAR: usize = 48 * 1024;
+        let mut jumped = [0u8; 256];
+        vfs.read_at(task_id, &caps, 0, fd, FAR, &mut jumped)
+            .expect("a positioned read far into the file");
+        assert_eq!(&jumped[..], &payload[FAR..FAR + 256], "the far bytes are the far bytes");
+        assert_eq!(
+            descriptor_cursor(&vfs, task_id, fd),
+            CHUNK,
+            "and the positioned read left the cursor exactly where it found it"
+        );
+
+        // The read after the positioned one continues from the cursor, not from
+        // the position -- which is what "leaves it alone" has to mean in
+        // practice, since the stored position is not otherwise observable.
+        let mut next = [0u8; CHUNK];
+        let got = vfs
+            .read(task_id, &caps, 0, fd, &mut next)
+            .expect("the read after a positioned read");
+        assert_eq!(got, CHUNK);
+        assert_eq!(
+            &next[..],
+            &payload[CHUNK..2 * CHUNK],
+            "the cursor resumed behind the positioned read instead of following it"
+        );
+        assert_eq!(descriptor_cursor(&vfs, task_id, fd), 2 * CHUNK);
+
+        // The same promise on a file the kernel holds in RAM. The two branches
+        // reach the bytes differently -- one streams from the device, one copies
+        // out of the inode -- and a positioned read is a positioned read either
+        // way, so both have to leave the cursor where it was.
+        const RESIDENT_SIZE: usize = 4 * 1024;
+        let resident = positioned_payload(RESIDENT_SIZE);
+        let resident_id = vfs.create_file("/readat_cursor_resident.bin", &resident, false);
+        assert!(
+            !vfs.inodes[&resident_id].block_backed,
+            "the fixture is a file the kernel itself holds"
+        );
+        let resident_fd = vfs
+            .allocate_fd(task_id, resident_id, Rights::READ)
+            .expect("a descriptor on the resident file");
+
+        let mut resident_head = [0u8; 512];
+        vfs.read(task_id, &caps, 0, resident_fd, &mut resident_head)
+            .expect("the ordinary read of the resident file");
+        assert_eq!(descriptor_cursor(&vfs, task_id, resident_fd), 512);
+
+        let mut resident_window = [0u8; 64];
+        vfs.read_at(task_id, &caps, 0, resident_fd, 3 * 1024, &mut resident_window)
+            .expect("a positioned read of the resident file");
+        assert_eq!(
+            &resident_window[..],
+            &resident[3 * 1024..3 * 1024 + 64],
+            "the resident file answers its own position"
+        );
+        assert_eq!(
+            descriptor_cursor(&vfs, task_id, resident_fd),
+            512,
+            "and its cursor did not move"
+        );
+
+        let mut resident_next = [0u8; 512];
+        vfs.read(task_id, &caps, 0, resident_fd, &mut resident_next)
+            .expect("the read after the positioned one on the resident file");
+        assert_eq!(
+            &resident_next[..],
+            &resident[512..1024],
+            "the resident cursor resumes from 512, not from 3 KiB"
+        );
+    }
+
+    /// WHY this is pinned next to the positioned reads: `read` and `read_at`
+    /// now share one body, so a change that made the shared path forget to
+    /// advance the cursor would leave every positioned test green and break
+    /// every ordinary reader in the OS. The guard is that the old behaviour is
+    /// still the behaviour.
+    #[test]
+    fn vfs_sequential_reads_still_walk_the_cursor_from_chunk_to_chunk() {
+        const SIZE: usize = 64 * 1024;
+        const CHUNK: usize = 2048;
+        let task_id = TaskId(1403);
+        let (mut vfs, id, payload, caps) =
+            device_held_read_target("/data/models/readat_sequential.gguf", task_id, SIZE);
+        let fd = vfs
+            .allocate_fd(task_id, id, Rights::READ)
+            .expect("a descriptor on the device-held file");
+
+        let mut one = [0u8; CHUNK];
+        let got = vfs.read(task_id, &caps, 0, fd, &mut one).expect("the first chunk");
+        assert_eq!(got, CHUNK);
+        assert_eq!(&one[..], &payload[..CHUNK], "the first chunk starts at the start");
+
+        let mut two = [0u8; CHUNK];
+        let got = vfs.read(task_id, &caps, 0, fd, &mut two).expect("the second chunk");
+        assert_eq!(got, CHUNK);
+        assert_eq!(
+            &two[..],
+            &payload[CHUNK..2 * CHUNK],
+            "the second chunk begins where the first one ended"
+        );
+        assert_ne!(&two[..], &one[..], "a stuck cursor would hand back the same bytes twice");
+        assert_eq!(
+            descriptor_cursor(&vfs, task_id, fd),
+            2 * CHUNK,
+            "and the descriptor has walked on by exactly two chunks"
+        );
+
+        const RESIDENT_SIZE: usize = 4 * 1024;
+        let resident = positioned_payload(RESIDENT_SIZE);
+        let resident_id = vfs.create_file("/readat_sequential_resident.bin", &resident, false);
+        let resident_fd = vfs
+            .allocate_fd(task_id, resident_id, Rights::READ)
+            .expect("a descriptor on the resident file");
+
+        let mut resident_one = [0u8; CHUNK];
+        vfs.read(task_id, &caps, 0, resident_fd, &mut resident_one)
+            .expect("the resident first chunk");
+        let mut resident_two = [0u8; CHUNK];
+        vfs.read(task_id, &caps, 0, resident_fd, &mut resident_two)
+            .expect("the resident second chunk");
+        assert_eq!(
+            &resident_two[..],
+            &resident[CHUNK..2 * CHUNK],
+            "the resident second chunk follows the first as it always did"
+        );
+        assert_eq!(descriptor_cursor(&vfs, task_id, resident_fd), 2 * CHUNK);
+    }
+
+    /// A position at or beyond the last byte has no bytes to give, and that is
+    /// an empty read rather than a fault -- the same answer a reader walking
+    /// off the end of a file gets. A loader probing for the next record has to
+    /// be able to tell "there is nothing here" from "this filesystem is
+    /// broken", and an error at the end of file would look like the second.
+    #[test]
+    fn vfs_a_positioned_read_at_or_past_the_end_reports_no_bytes_and_no_error() {
+        const SIZE: usize = 64 * 1024;
+        let task_id = TaskId(1404);
+        let (mut vfs, id, _payload, caps) =
+            device_held_read_target("/data/models/readat_end.gguf", task_id, SIZE);
+        let fd = vfs
+            .allocate_fd(task_id, id, Rights::READ)
+            .expect("a descriptor on the device-held file");
+
+        for (position, what) in [
+            (SIZE, "the byte just past the last one"),
+            (SIZE + 1, "one beyond that"),
+            (SIZE * 64, "far past the recorded length"),
+        ] {
+            let mut buf = [0xF0u8; 128];
+            let got = vfs
+                .read_at(task_id, &caps, 0, fd, position, &mut buf)
+                .unwrap_or_else(|err| panic!("a positioned read at {} must not be an error, got {:?}", what, err));
+            assert_eq!(got, 0, "{} gives no bytes", what);
+            assert!(
+                buf.iter().all(|&byte| byte == 0xF0),
+                "and nothing is written into the caller's buffer at {}",
+                what
+            );
+            assert_eq!(
+                descriptor_cursor(&vfs, task_id, fd),
+                0,
+                "reading past the end does not move the cursor either"
+            );
+        }
+
+        // The empty position is not a permanent state: the same descriptor
+        // still answers a real read afterwards.
+        let mut back = [0u8; 16];
+        vfs.read_at(task_id, &caps, 0, fd, SIZE - 16, &mut back)
+            .expect("a position inside the file after the past-the-end ones");
+
+        const RESIDENT_SIZE: usize = 4 * 1024;
+        let resident = positioned_payload(RESIDENT_SIZE);
+        let resident_id = vfs.create_file("/readat_end_resident.bin", &resident, false);
+        let resident_fd = vfs
+            .allocate_fd(task_id, resident_id, Rights::READ)
+            .expect("a descriptor on the resident file");
+
+        for position in [RESIDENT_SIZE, RESIDENT_SIZE + 1, usize::MAX / 4] {
+            let mut buf = [0xF0u8; 32];
+            let got = vfs
+                .read_at(task_id, &caps, 0, resident_fd, position, &mut buf)
+                .expect("a resident read at or past the end is not an error");
+            assert_eq!(got, 0, "the resident file gives no bytes at {}", position);
+        }
+    }
+
+    /// A device node has no stored positions. `/dev/zero` answers with whatever
+    /// it produces next, so the position a caller named is not the bytes it
+    /// would be handed -- the call would report a length the caller can trust
+    /// and bytes it cannot. The honest answer is that this object is not
+    /// seekable; the un-positioned read is untouched, because nothing about the
+    /// device changed except the promise of a position.
+    #[test]
+    fn vfs_a_positioned_read_of_a_device_node_is_refused_as_not_seekable() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/dev");
+        let zero = vfs.create_device_node("/dev/zero");
+        assert_eq!(
+            vfs.inodes[&zero].file_type,
+            FileType::DeviceNode,
+            "the fixture is a device node, not a file with no bytes"
+        );
+
+        let task_id = TaskId(1405);
+        let caps = stream_caps(task_id);
+        let fd = vfs
+            .allocate_fd(task_id, zero, Rights::READ)
+            .expect("a descriptor on the device node");
+
+        let mut buf = [0xAAu8; 128];
+        assert_eq!(
+            vfs.read_at(task_id, &caps, 0, fd, 4096, &mut buf).err(),
+            Some(FsError::NotSeekable),
+            "a position asked of a device is refused, not guessed at"
+        );
+        assert!(
+            buf.iter().all(|&byte| byte == 0xAA),
+            "the refusal writes nothing into the caller's buffer"
+        );
+        assert_eq!(
+            vfs.read_at(task_id, &caps, 0, fd, 0, &mut buf).err(),
+            Some(FsError::NotSeekable),
+            "even position zero is refused: the call promises a position it cannot keep"
+        );
+        assert_eq!(
+            descriptor_cursor(&vfs, task_id, fd),
+            0,
+            "a refused positioned read leaves the descriptor alone"
+        );
+
+        // The device itself is still readable, with the authority this task
+        // holds: the refusal is about the position, not about the caller.
+        let mut live = [0xAAu8; 128];
+        assert_eq!(
+            vfs.read(task_id, &caps, 0, fd, &mut live),
+            Ok(128),
+            "an un-positioned read of the same descriptor still works"
+        );
+        assert!(
+            live.iter().all(|&byte| byte == 0),
+            "and still returns what the device produced"
+        );
+    }
+
+    /// The security claim of the new entry point: it is no wider than the old
+    /// one. The capability prelude is shared code between `read` and `read_at`,
+    /// and shared code is only provably shared if the denials are compared, so
+    /// every case below makes the same call twice -- once from the cursor and
+    /// once from a named position -- and asserts the two answers are the same
+    /// failure. A `read_at` that let one of them through would be a new way to
+    /// read a file its caller cannot read at all.
+    #[test]
+    fn vfs_a_positioned_read_demands_exactly_the_authority_a_read_demands() {
+        const SIZE: usize = 4 * 1024;
+        let mut vfs = Vfs::new();
+        let payload = positioned_payload(SIZE);
+        let target = vfs.create_file("/readat_authority_target.bin", &payload, false);
+        let other = vfs.create_file("/readat_authority_other.bin", b"another file entirely", false);
+        let task_id = TaskId(1406);
+        let fd = vfs
+            .allocate_fd(task_id, target, Rights::READ)
+            .expect("a descriptor on the target file");
+
+        // 1. A task that holds no filesystem capability at all. The denial
+        // arrives before the descriptor is even looked at, so a positioned
+        // read cannot use an offset as a way of learning what is in the file.
+        let no_caps = CapabilityTable::new_for_task(task_id, 8);
+        let plain = vfs.read(task_id, &no_caps, 0, fd, &mut [0u8; 16]).err();
+        let positioned = vfs.read_at(task_id, &no_caps, 0, fd, 1024, &mut [0u8; 16]).err();
+        assert!(
+            matches!(plain, Some(FsError::CapabilityError(_))),
+            "a cursor read with no filesystem authority is a capability failure, got {:?}",
+            plain
+        );
+        assert_eq!(
+            plain, positioned,
+            "a task with no filesystem capability is refused both ways with the same error"
+        );
+
+        // 2. A capability scoped to a different inode. Holding authority over
+        // one file is not authority over another, at any position.
+        let mut scoped_elsewhere = CapabilityTable::new_for_task(task_id, 8);
+        scoped_elsewhere
+            .insert(Capability {
+                id: CapabilityId(14060),
+                cap_type: CapabilityType::FileSystemRead,
+                rights: Rights::READ,
+                object_id: other.0,
+            })
+            .expect("a read capability scoped to another inode");
+        let plain = vfs.read(task_id, &scoped_elsewhere, 0, fd, &mut [0u8; 16]).err();
+        let positioned = vfs
+            .read_at(task_id, &scoped_elsewhere, 0, fd, 1024, &mut [0u8; 16])
+            .err();
+        assert_eq!(plain, Some(FsError::PermissionDenied));
+        assert_eq!(
+            positioned,
+            Some(FsError::PermissionDenied),
+            "a capability scoped elsewhere grants no position in this file"
+        );
+
+        // 3. The same through the write capability, which is the other arm the
+        // prelude tries: it too is matched against the object, not merely
+        // present in the table.
+        let mut write_scoped_elsewhere = CapabilityTable::new_for_task(task_id, 8);
+        write_scoped_elsewhere
+            .insert(Capability {
+                id: CapabilityId(14061),
+                cap_type: CapabilityType::FileSystemWrite,
+                rights: Rights::WRITE | Rights::READ,
+                object_id: other.0,
+            })
+            .expect("a write capability scoped to another inode");
+        let plain = vfs.read(task_id, &write_scoped_elsewhere, 0, fd, &mut [0u8; 16]).err();
+        let positioned = vfs
+            .read_at(task_id, &write_scoped_elsewhere, 0, fd, 1024, &mut [0u8; 16])
+            .err();
+        assert_eq!(plain, Some(FsError::PermissionDenied));
+        assert_eq!(plain, positioned, "and it is refused the same way from a position");
+
+        // 4. A descriptor that was opened without read rights, held by a task
+        // that does have the capability. The descriptor's own rights are
+        // checked before the position is ever used, so naming an offset is not
+        // a way around a descriptor that cannot read.
+        let write_only_fd = vfs
+            .allocate_fd(task_id, target, Rights::WRITE)
+            .expect("a descriptor with no read right");
+        let mut reads_here = CapabilityTable::new_for_task(task_id, 8);
+        reads_here
+            .insert(Capability {
+                id: CapabilityId(14062),
+                cap_type: CapabilityType::FileSystemRead,
+                rights: Rights::READ,
+                object_id: target.0,
+            })
+            .expect("a read capability scoped to this very inode");
+        let plain = vfs
+            .read(task_id, &reads_here, 0, write_only_fd, &mut [0u8; 16])
+            .err();
+        let positioned = vfs
+            .read_at(task_id, &reads_here, 0, write_only_fd, 1024, &mut [0u8; 16])
+            .err();
+        assert_eq!(plain, Some(FsError::PermissionDenied));
+        assert_eq!(
+            positioned,
+            Some(FsError::PermissionDenied),
+            "a descriptor that cannot read cannot read_at either"
+        );
+
+        // 5. The control that keeps every denial above honest: a capability
+        // scoped to this inode does answer a positioned read, and does not
+        // disturb the cursor read that follows it. Without this, four passing
+        // denials would only prove the fixture refuses everything.
+        let mut window = [0u8; 32];
+        let got = vfs
+            .read_at(task_id, &reads_here, 0, fd, 2048, &mut window)
+            .expect("authority over this inode does answer a positioned read");
+        assert_eq!(got, 32);
+        assert_eq!(&window[..], &payload[2048..2048 + 32], "and answers it with the right bytes");
+
+        let mut head = [0u8; 16];
+        let got = vfs
+            .read(task_id, &reads_here, 0, fd, &mut head)
+            .expect("the same table still serves the cursor read");
+        assert_eq!(got, 16);
+        assert_eq!(&head[..], &payload[..16], "from the start, which the positioned read left alone");
     }
 }
 

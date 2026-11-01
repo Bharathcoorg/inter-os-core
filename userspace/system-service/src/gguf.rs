@@ -144,7 +144,11 @@ pub enum BufferedSource<'a> {
     /// with -- the same stepping code, no syscalls.
     Slice { data: &'a [u8], pos: usize },
     /// A descriptor the platform holds, read a window at a time.
-    File { fd: u32 },
+    ///
+    /// WHY it carries its own position: the window pulls from the source ahead of
+    /// where the reader has got to, and a descriptor that only ever moves forward
+    /// would tie the two together. Reading at a named position keeps them apart.
+    File { fd: u32, pos: usize },
 }
 
 impl<'a> GgufStream<'a> {
@@ -171,7 +175,7 @@ impl<'a> GgufStream<'a> {
     /// A descriptor read through the window.
     pub fn buffered_from_file(fd: u32) -> Self {
         Self::Buffered {
-            src: BufferedSource::File { fd },
+            src: BufferedSource::File { fd, pos: 0 },
             held: [0u8; METADATA_WINDOW_BYTES],
             used: 0,
             filled: 0,
@@ -222,8 +226,20 @@ impl<'a> GgufStream<'a> {
                 *pos += take;
                 take
             }
-            BufferedSource::File { fd } => {
-                std::fs_read(*fd, &mut held[rest..]).map_err(|_| GgufError::ReadFailed)?
+            BufferedSource::File { fd, pos } => {
+                let asked = held.len() - rest;
+                let pulled = std::fs_read_at(*fd, *pos as u64, &mut held[rest..])
+                    .map_err(|_| GgufError::ReadFailed)?;
+                // The window may only treat as present the bytes that fit the space it
+                // asked for; see `GgufStream::read_exact` for why a wider count is a
+                // failed read rather than a larger read.
+                if pulled > asked {
+                    return Err(GgufError::ReadFailed);
+                }
+                *pos = pos
+                    .checked_add(pulled)
+                    .ok_or(GgufError::ArithmeticOverflow)?;
+                pulled
             }
         };
         *filled += pulled;
@@ -257,9 +273,26 @@ impl<'a> GgufStream<'a> {
             Self::File { fd, pos } => {
                 let mut filled = 0usize;
                 while filled < req_len {
-                    let n = std::fs_read(*fd, &mut out[filled..]).map_err(|_| GgufError::ReadFailed)?;
+                    let remaining = req_len - filled;
+                    let n = std::fs_read_at(
+                        *fd,
+                        pos.checked_add(filled).ok_or(GgufError::ArithmeticOverflow)? as u64,
+                        &mut out[filled..],
+                    )
+                    .map_err(|_| GgufError::ReadFailed)?;
                     if n == 0 {
                         return Err(GgufError::BufferTooShort);
+                    }
+                    // WHY the count is bounded as well as tested for zero: the kernel
+                    // never hands back more than it was asked for, but this parser is
+                    // also built for the host, where the syscall number names no
+                    // InterOS call and what comes back is the host's own status -- a
+                    // positive one reads as a byte count, and the buffer it "filled"
+                    // still holds what the caller filled it with. A header parsed out
+                    // of that is answered as corrupt weights for a file that was never
+                    // readable at all.
+                    if n > remaining {
+                        return Err(GgufError::ReadFailed);
                     }
                     filled = filled.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
                 }
@@ -306,17 +339,17 @@ impl<'a> GgufStream<'a> {
                 *pos = next_pos;
                 Ok(())
             }
-            Self::File { fd, pos } => {
-                let mut scratch = [0u8; 512];
-                while count > 0 {
-                    let chunk = count.min(scratch.len());
-                    let n = std::fs_read(*fd, &mut scratch[..chunk]).map_err(|_| GgufError::ReadFailed)?;
-                    if n == 0 {
-                        return Err(GgufError::BufferTooShort);
-                    }
-                    count = count.checked_sub(n).ok_or(GgufError::ArithmeticOverflow)?;
-                    *pos = pos.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
-                }
+            Self::File { pos, .. } => {
+                // WHY a skip now costs no reads at all: bytes are fetched from the
+                // position the caller names, so stepping over what sits between two
+                // records no longer has to push every one of them through a syscall
+                // and throw it away. Walking to the last tensor of a large file used to
+                // read the whole file to get there. What the walk gave up is the end of
+                // the file, which used to turn up on the way: the next read reports it,
+                // and where the walk is about to report a verdict about the file
+                // instead, `source_ends_early` asks the one question the step can no
+                // longer answer on its own.
+                *pos = pos.checked_add(count).ok_or(GgufError::ArithmeticOverflow)?;
                 Ok(())
             }
             Self::Buffered {
@@ -355,6 +388,41 @@ impl<'a> GgufStream<'a> {
         self.read_exact(&mut b)?;
         Ok(u64::from_le_bytes(b))
     }
+
+    /// Whether the source stops at the position this stream has stepped to.
+    ///
+    /// WHY only a descriptor is asked: a step over a slice is bounded by the slice
+    /// and a step through a window pulls the bytes it steps over, so both meet the
+    /// end of the source on the way and cannot report a position the source does not
+    /// hold. A stepped descriptor moves a number and never sees the edge it passes,
+    /// so it is the one that has to be asked.
+    ///
+    /// WHY a successful probe costs nothing: the byte it takes is the one the walk
+    /// stepped onto, and every caller asks here only when it is about to hand back
+    /// its verdict and stop reading.
+    fn stepped_past_the_end(&mut self) -> bool {
+        if !matches!(self, Self::File { .. }) {
+            return false;
+        }
+        let mut probe = [0u8; 1];
+        self.read_exact(&mut probe).is_err()
+    }
+}
+
+/// Whether the walk stopped somewhere the file does not reach.
+///
+/// WHY the tensor count gates the question: a file that declares no tensor is
+/// allowed to end with its metadata, and asking whether one more byte follows
+/// would call a complete placeholder a truncated one. A file that declares tensors
+/// promises a tensor section after the metadata, so a walk that stepped to the end
+/// of the declared pairs and finds no byte there is looking at a file that stops
+/// early -- and saying so is the answer, rather than the walk's own verdict about
+/// what the file does or does not declare.
+///
+/// WHY it costs one read: before a step could leave the file behind without anyone
+/// noticing, the walk reached a position by reading every byte up to it.
+fn source_ends_early(stream: &mut GgufStream, tensors: u64) -> bool {
+    tensors > 0 && stream.stepped_past_the_end()
 }
 
 /// GGUF file header prefix representation (24 bytes).
@@ -1002,10 +1070,16 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
         }
 
         if info.is_complete() {
+            if source_ends_early(stream, header.tensor_count) {
+                return Err(GgufError::BufferTooShort);
+            }
             return Ok(info);
         }
     }
 
+    if source_ends_early(stream, header.tensor_count) {
+        return Err(GgufError::BufferTooShort);
+    }
     match info.missing_key() {
         Some(missing) => Err(GgufError::MissingMetadata(missing, info)),
         None => Ok(info),
