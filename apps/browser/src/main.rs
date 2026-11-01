@@ -10222,7 +10222,15 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         if !PILL.contains(x, y) {
             app.address_focused = false;
             app.select_all = false;
-            return Tap::Redraw;
+            // WHY the navigation bar answers anyway: the keyboard docks above the
+            // bar, so its five buttons are painted while this field is focused,
+            // and swallowing the tap here left a row of controls on screen that
+            // answered nothing -- the same defect the bar's own band used to have,
+            // one branch later. Below the bar the press path continues to them
+            // after the focus is cleared.
+            if y < NAV_BAR_Y0 {
+                return Tap::Redraw;
+            }
         }
     }
 

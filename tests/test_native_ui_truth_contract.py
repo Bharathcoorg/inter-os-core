@@ -403,6 +403,33 @@ def test_browser_start_page_does_not_render_a_hardcoded_news_feed_or_ranking():
     assert "app.history.visit(" in source
 
 
+def test_the_browsers_focus_release_leaves_the_painted_bar_answerable():
+    """A tap that dismisses the keyboard may not also dismiss the bar under it.
+
+    WHY: the keyboard docks at the navigation bar's own top edge, so with the
+    omnibox focused the bar's five controls are painted and nothing covers
+    them. The press path still ended its focus block with "any tap outside the
+    pill clears the focus", and that branch returned before the bar's handlers
+    were reached -- so Back, Forward, Home, Bookmarks and Tabs were visible,
+    legible and dead while a person was typing an address. The bar is drawn
+    first, so the bar answers first; the release only consumes rows above it.
+
+    WHY a source gate: the browser's bin target carries `test = false`, so
+    `handle_tap` cannot be reached from a host test. The detector is the shape
+    of the release branch itself -- a `!PILL.contains` early return that never
+    names the bar's top edge is the bug.
+    """
+    source = _code_only(read("apps/browser/src/main.rs"))
+    body = _fn_body(source, "fn handle_tap")
+    at = body.find("if !PILL.contains(x, y)")
+    assert at >= 0, "the omnibox's release branch is gone, so this gate has lost its subject"
+    release = body[at : body.find("}", body.find("return Tap::Redraw", at))]
+    assert "NAV_BAR_Y0" in release, (
+        "the release branch swallows every row below the pill, including the "
+        "navigation bar it paints beside"
+    )
+
+
 def _code_only(source: str) -> str:
     """Strips `//` line comments and doc comments from Rust source.
 
