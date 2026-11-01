@@ -3,9 +3,10 @@
 //! - A capture engine that takes a still photograph and writes it into the
 //!   shared storage area as a PPM (P6), and publishes it into the platform's
 //!   document index, so the gallery can open the photo the user just took
-//! - A mode carousel of Photo, Video and Document framing with Scale 2 Body
-//!   typography and touch targets >= 48px
-//! - An image signal processor (ISP) providing 6 calibrated filter presets:
+//! - A mode carousel of Photo, Video and Document framing: three 216x48 pills,
+//!   each painted at Scale 2 Body when the slot holds its label and at Scale 1
+//!   when it does not, so no slot is ever taller than the pill it is drawn on
+//! - A tone curve applied to the frame the platform returns, with six presets:
 //!   Normal, Vivid, Warm, Cool, Mono, and Vintage
 //! - Rule-of-Thirds 3x3 framing grid and Aspect Ratio selection (4:3, 16:9, 1:1)
 //! - Flash modes (Auto, On, Off) with responsive visual pill indicators
@@ -19,7 +20,7 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use camera::theme::{chrome, radius, spacing, typography, Theme, THEME};
+use camera::theme::{chrome, radius, spacing, typography, Theme, MIN_TOUCH_TARGET, THEME};
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
 
@@ -59,6 +60,7 @@ const TOP_BAND_Y1: usize = 112;
 
 /// The viewfinder and the dock take their geometry from the model, so the
 /// rectangles the renderer paints are the rectangles the touch handler taps.
+/// The mode carousel and the home strip below now obey the same rule.
 const VIEWFINDER_Y0: usize = camera::VIEWFINDER_TOP;
 const VIEWFINDER_Y1: usize = camera::VIEWFINDER_BOTTOM;
 
@@ -78,18 +80,94 @@ const GRID_RECT: Rect = camera::chip_rect(1);
 /// Self-timer mode toggle.
 const TIMER_RECT: Rect = camera::chip_rect(2);
 
-const MODE_STRIP_Y0: usize = 1144;
-const MODE_STRIP_Y1: usize = 1204;
+/// The preview cut each aspect ratio letterboxes to, as (top, height) inside
+/// the viewfinder the model owns.
+///
+/// WHY the three are named: the card the platform's verdict rides on is placed
+/// at the frame's centre, and a centre that moved with the aspect ratio would
+/// move the card under the user's thumb. All three cuts are centred, so they
+/// share [`FRAME_CENTRE_Y`] -- the gate below is what keeps them sharing it.
+const FRAME_16_9_Y: usize = VIEWFINDER_Y0;
+const FRAME_16_9_H: usize = 1000;
+const FRAME_4_3_Y: usize = VIEWFINDER_Y0 + 47;
+const FRAME_4_3_H: usize = 906;
+const FRAME_1_1_Y: usize = VIEWFINDER_Y0 + 160;
+const FRAME_1_1_H: usize = 680;
 
-/// Three equal mode slots, 12px apart, inside the 24px gutters.
+/// The active frame's centre row, the same for every cut.
+const FRAME_CENTRE_Y: usize = FRAME_16_9_Y + FRAME_16_9_H / 2;
+
+/// WHY checked at compile time: the letterbox is the one thing the aspect chip
+/// changes that the rest of the viewfinder is measured against. Grow a cut
+/// asymmetrically, or shrink the viewfinder, and the first gate fails; a cut
+/// that no longer ends inside the well fails the second.
+const _: () = assert!(FRAME_4_3_Y + FRAME_4_3_H / 2 == FRAME_CENTRE_Y);
+const _: () = assert!(FRAME_1_1_Y + FRAME_1_1_H / 2 == FRAME_CENTRE_Y);
+const _: () = assert!(FRAME_16_9_Y + FRAME_16_9_H <= VIEWFINDER_Y1);
+const _: () = assert!(FRAME_4_3_Y + FRAME_4_3_H <= VIEWFINDER_Y1);
+const _: () = assert!(FRAME_1_1_Y + FRAME_1_1_H <= VIEWFINDER_Y1);
+
+/// The three mode slots, as one box each: the pill the painter fills is the
+/// box the tap handler answers.
+///
+/// WHY the box and not the band: the strip used to be tested as `1144..1204`
+/// while the pill was drawn at `1144 + 6` for 48 rows, so the six rows above
+/// and the six below every slot answered a mode change at a pixel that holds
+/// chassis, and the 12px gap between two slots answered a haptic click and a
+/// full redraw that changed nothing at all.
 const MODE_SLOT_W: usize = 216;
+const MODE_SLOT_H: usize = 48;
+const MODE_SLOT_Y: usize = 1150;
 const MODE_SLOT_GAP: usize = 12;
 const MODE_X0: usize = GUTTER;
 const MODE_X1: usize = MODE_X0 + MODE_SLOT_W + MODE_SLOT_GAP;
 const MODE_X2: usize = MODE_X1 + MODE_SLOT_W + MODE_SLOT_GAP;
 
+/// The three slots, in the order the carousel shows them.
+const MODE_SLOTS: [Rect; 3] = [
+    Rect::new(MODE_X0, MODE_SLOT_Y, MODE_SLOT_W, MODE_SLOT_H),
+    Rect::new(MODE_X1, MODE_SLOT_Y, MODE_SLOT_W, MODE_SLOT_H),
+    Rect::new(MODE_X2, MODE_SLOT_Y, MODE_SLOT_W, MODE_SLOT_H),
+];
+
+/// The modes the slots select, indexed with [`MODE_SLOTS`].
+const MODE_ORDER: [CameraMode; 3] = [
+    CameraMode::DocumentVision,
+    CameraMode::Photo,
+    CameraMode::Video,
+];
+
+/// The label each slot carries, indexed with [`MODE_SLOTS`].
+const MODE_LABELS: [&[u8]; 3] = [b"DOCUMENT", b"PHOTO", b"VIDEO"];
+
+/// What the carousel logs when each slot is chosen, indexed with
+/// [`MODE_SLOTS`].
+const MODE_FEEDBACK: [&'static str; 3] = [
+    "[CAMERA APP] Switched to Document Vision mode.",
+    "[CAMERA APP] Switched to Photo mode.",
+    "[CAMERA APP] Switched to Video mode.",
+];
+
+/// The strip's painted extent, read off the slots that make it up.
+const MODE_STRIP_Y0: usize = MODE_SLOT_Y;
+const MODE_STRIP_Y1: usize = MODE_SLOT_Y + MODE_SLOT_H;
+
+/// WHY checked at compile time: the three slots are only "equal slots inside
+/// the 24px gutters" while the chain reaches the right gutter exactly, and the
+/// strip is only a strip while it sits between the viewfinder and the dock.
+/// Widen a slot, or add a fourth, and the first gate fails; move the dock or
+/// the viewfinder and the last two do.
+const _: () = assert!(MODE_X2 + MODE_SLOT_W == W - GUTTER);
+const _: () = assert!(MODE_SLOT_H >= MIN_TOUCH_TARGET);
+const _: () = assert!(MODE_STRIP_Y0 >= VIEWFINDER_Y1);
+const _: () = assert!(MODE_STRIP_Y1 <= camera::DOCK_Y0);
+
 const DOCK_Y0: usize = camera::DOCK_Y0;
 const DOCK_Y1: usize = H;
+
+/// The last row the dock band paints: everything under it is the system's home
+/// strip, which the fall-through below draws.
+const DOCK_BAND_Y1: usize = DOCK_Y1 - 30;
 
 // -----------------------------------------------------------------------------
 // Top control row geometry (height 48px, all >= 48px touch affordance)
@@ -114,11 +192,113 @@ const SHOTS_RECT: Rect = Rect::new(540, TOP_ROW_Y, 156, TOP_ROW_H);
 /// Corner radius of the floating pills.
 const TOP_PILL_RADIUS: usize = radius::SOFT_PILL;
 
+/// WHY checked at compile time: the header row is a chain of boxes whose edges
+/// are four literals each, and the band that owns it ends two rows above the
+/// row's own foot. Widen one control and the first gate to fail names the
+/// neighbour it would have painted over; grow the row and the last two fail.
+const _: () = assert!(BACK_RECT.x + BACK_RECT.w <= FLASH_RECT.x);
+const _: () = assert!(FLASH_RECT.x + FLASH_RECT.w <= FRAME_RECT.x);
+const _: () = assert!(FRAME_RECT.x + FRAME_RECT.w <= FILTER_RECT.x);
+const _: () = assert!(FILTER_RECT.x + FILTER_RECT.w <= SHOTS_RECT.x);
+const _: () = assert!(SHOTS_RECT.x + SHOTS_RECT.w <= W - GUTTER);
+const _: () = assert!(TOP_ROW_Y >= STATUS_BAR_HEIGHT);
+const _: () = assert!(TOP_ROW_Y + TOP_ROW_H <= TOP_BAND_Y1 - 2);
+const _: () = assert!(TOP_ROW_H >= MIN_TOUCH_TARGET);
+/// The flash pictogram keeps its own room, clear of the label beside it.
+const _: () = assert!(FLASH_ICON_CX + 10 < FLASH_TEXT_X);
+const _: () = assert!(FLASH_TEXT_X + FLASH_TEXT_W <= FLASH_RECT.x + FLASH_RECT.w);
+
 /// The status card that carries the platform's own verdict on the camera.
 const STATUS_CARD_W: usize = 520;
 const STATUS_CARD_H: usize = 124;
-/// The card's text column: a 64px icon gutter and a 24px right margin.
-const STATUS_TEXT_W: usize = STATUS_CARD_W - 88;
+/// The card, centred on the active frame's centre row inside the well.
+const STATUS_CARD: Rect = Rect::new(
+    VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
+    FRAME_CENTRE_Y - STATUS_CARD_H / 2,
+    STATUS_CARD_W,
+    STATUS_CARD_H,
+);
+/// The gutter the card's status dot lives in.
+const STATUS_ICON_GUTTER: usize = 64;
+/// The margin the card keeps on its right.
+const STATUS_TEXT_MARGIN: usize = 24;
+/// The card's text column: the card's width, less the gutter and the margin.
+const STATUS_TEXT_W: usize = STATUS_CARD_W - STATUS_ICON_GUTTER - STATUS_TEXT_MARGIN;
+/// Where the card's two runs start.
+const STATUS_TEXT_X: usize = STATUS_CARD.x + STATUS_ICON_GUTTER;
+
+/// The card's headline, as the line box of the face it is drawn with.
+const STATUS_HEAD_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
+/// The line under it, likewise.
+const STATUS_SUB_BOX: usize = std::design::font::line_height(typography::CAPTION_SCALE);
+/// Air between the two runs, kept as one knob.
+const STATUS_STACK_GAP: usize = 8;
+/// The two runs as one block, so the block -- not either line -- is centred.
+const STATUS_STACK_H: usize = STATUS_HEAD_BOX + STATUS_STACK_GAP + STATUS_SUB_BOX;
+/// The air above the block, which is the air below it.
+const STATUS_STACK_PAD: usize = (STATUS_CARD_H - STATUS_STACK_H) / 2;
+/// The headline's line box top.
+const STATUS_HEAD_Y: usize = STATUS_CARD.y + STATUS_STACK_PAD;
+/// The second run's box top: below the whole box of the run above it.
+const STATUS_SUB_Y: usize = STATUS_HEAD_Y + STATUS_HEAD_BOX + STATUS_STACK_GAP;
+
+/// The status dot, on the headline's cap centre inside the icon gutter.
+const STATUS_DOT_CX: usize = STATUS_CARD.x + 30;
+const STATUS_DOT_CY: usize = STATUS_HEAD_Y
+    + std::design::font::ascent_for_scale(typography::BODY_SCALE)
+    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize / 2;
+/// The dot's core and the halo around it.
+const STATUS_DOT_R: usize = 6;
+const STATUS_DOT_HALO_R: usize = 11;
+
+/// WHY checked at compile time: the card is dropped on the tightest letterbox
+/// the aspect chip can select, so the first gate is the one a taller stack or a
+/// shorter 1:1 cut breaks; the second is what a widened gutter, a deeper right
+/// margin or a longer name would break, and the third keeps the halo from
+/// reaching the card's own hairline.
+const _: () = assert!(STATUS_STACK_PAD * 2 + STATUS_STACK_H <= STATUS_CARD_H);
+const _: () = assert!(STATUS_SUB_Y + STATUS_SUB_BOX <= STATUS_CARD.y + STATUS_CARD_H);
+const _: () = assert!(STATUS_CARD.y >= FRAME_1_1_Y);
+const _: () = assert!(STATUS_CARD.y + STATUS_CARD_H <= FRAME_1_1_Y + FRAME_1_1_H);
+const _: () = assert!(STATUS_TEXT_X + STATUS_TEXT_W <= STATUS_CARD.x + STATUS_CARD_W);
+const _: () = assert!(STATUS_DOT_CX - STATUS_DOT_HALO_R >= STATUS_CARD.x);
+
+/// The self-timer ring's outer and inner radius; the digit lives inside the
+/// inner one.
+const TIMER_RING_OUTER_R: usize = 52;
+const TIMER_RING_INNER_R: usize = 44;
+
+/// The video mode's record chip, dropped this many rows below the top of the
+/// active cut.
+const REC_CHIP_W: usize = 120;
+const REC_CHIP_H: usize = 36;
+const REC_CHIP_TOP: usize = 16;
+/// The dot's centre, measured into the chip, and its radius.
+const REC_DOT_CX_OFF: usize = 16;
+const REC_DOT_R: usize = 4;
+/// Where the chip's run starts, and the margin it keeps from the hairline.
+const REC_TEXT_OFF: usize = 32;
+const REC_TEXT_MARGIN: usize = 8;
+/// The column the run is measured against: the chip, less the run's start and
+/// the margin on its far side.
+const REC_TEXT_W: usize = REC_CHIP_W - REC_TEXT_OFF - REC_TEXT_MARGIN;
+
+/// WHY checked at compile time: the chip's run used to be measured against
+/// `w - 32`, which reached the chip's own right edge, so a time the face set
+/// even a few rows wider inked the border. These two gates are what a wider
+/// dot gutter, a deeper run start or a raised body rung would break.
+const _: () = assert!(REC_TEXT_OFF + REC_TEXT_W + REC_TEXT_MARGIN <= REC_CHIP_W);
+const _: () = assert!(
+    centred_text_top(REC_CHIP_H, typography::BODY_SCALE)
+        + std::design::font::line_height(typography::BODY_SCALE)
+        <= REC_CHIP_H
+);
+/// WHY: the chip hangs from the top of the cut, so it has to clear the shortest
+/// one the aspect chip offers, and it stands to the right of the chip row that
+/// floats over the same well -- a wider chip or a longer chip row would put the
+/// two on top of each other.
+const _: () = assert!(REC_CHIP_TOP + REC_CHIP_H <= FRAME_1_1_H);
+const _: () = assert!(TIMER_RECT.x + TIMER_RECT.w <= SHUTTER_CX - REC_CHIP_W / 2);
 
 /// Centre of the flash pictogram inside `FLASH_RECT`.
 const FLASH_ICON_CX: usize = FLASH_RECT.x + 24;
@@ -127,9 +307,27 @@ const FLASH_ICON_CY: usize = FLASH_RECT.y + FLASH_RECT.h / 2;
 const FLASH_TEXT_X: usize = FLASH_RECT.x + 36;
 const FLASH_TEXT_W: usize = FLASH_RECT.w.saturating_sub(44);
 
-/// The system home gesture strip: a 200x6 indicator drawn inside a 240x48 box.
-const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
-const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
+/// The system's home indicator, as the pill this app draws.
+///
+/// WHY the tap band starts at the mark: the hit box used to be a 240x48 rect at
+/// `y = 1392`, which began 26 rows above the 6-row indicator and inside the
+/// dock band this app paints, so a press on blank chassis well above the pill
+/// closed the app. The mark's own rows to the foot of the canvas are the strip
+/// the app gives up to the system, and the pan and fling the event loop
+/// recognises still carry the platform's wider gesture.
+const HOME_MARK_X0: usize = 260;
+const HOME_MARK_W: usize = 200;
+const HOME_MARK_Y: usize = 1418;
+const HOME_MARK_H: usize = 6;
+const HOME_PILL: Rect = Rect::new(HOME_MARK_X0, HOME_MARK_Y, HOME_MARK_W, HOME_MARK_H);
+const HOME_HIT: Rect = Rect::new(HOME_MARK_X0, HOME_MARK_Y, HOME_MARK_W, H - HOME_MARK_Y);
+
+/// WHY checked at compile time: the indicator is bottom-anchored, so a taller
+/// mark or a shorter canvas puts it off the surface, and a dock band that grew
+/// past its own last row would paint over it.
+const _: () = assert!(HOME_MARK_X0 + HOME_MARK_W <= W);
+const _: () = assert!(HOME_MARK_Y + HOME_MARK_H <= H);
+const _: () = assert!(DOCK_BAND_Y1 <= HOME_MARK_Y);
 
 // Shutter button (r=48 core, outer ring 64px), as the model places it.
 const SHUTTER_CX: usize = camera::SHUTTER_CX;
@@ -145,18 +343,89 @@ const SETTINGS_CX: usize = 610;
 /// Half-extent of the dock's side buttons (diameter 64px >= 48px).
 const DOCK_SIDEBTN_HALF: usize = 32;
 
+/// WHY checked at compile time: the three dock controls share one row and are
+/// tested as circles around it, so a wider disc or a moved centre would put the
+/// gallery control under the shutter's ring -- a tap that answers one control
+/// while the eye reads another. The last gate is the band's own: the dock must
+/// keep painting the whole shutter, and stop above the home strip.
+const _: () = assert!(PHOTOS_CX + DOCK_SIDEBTN_HALF < SHUTTER_CX - SHUTTER_RING_OUTER);
+const _: () = assert!(SETTINGS_CX - DOCK_SIDEBTN_HALF > SHUTTER_CX + SHUTTER_RING_OUTER);
+const _: () = assert!(PHOTOS_CX >= DOCK_SIDEBTN_HALF + GUTTER);
+const _: () = assert!(SETTINGS_CX + DOCK_SIDEBTN_HALF <= W - GUTTER);
+const _: () = assert!(SHUTTER_CY + SHUTTER_RING_OUTER < DOCK_BAND_Y1);
+const _: () = assert!(SHUTTER_CY - SHUTTER_RING_OUTER >= DOCK_Y0);
+
 // -----------------------------------------------------------------------------
 // The settings surface.
 // -----------------------------------------------------------------------------
+/// The sheet the rows live on.
 const SHEET_RECT: Rect = Rect::new(24, 140, 672, 960);
 const SHEET_TITLE_Y0: usize = 160;
 const SHEET_ROW_Y0: usize = 200;
+/// The pitch two plates stand on: a plate and the gap under it.
 const SHEET_ROW_H: usize = 96;
-const SHEET_TEXT_X: usize = 48;
-const SHEET_TEXT_W: usize = camera::SETTINGS_TEXT_MAX;
+const SHEET_ROW_GAP: usize = 8;
+/// A plate's own height -- the box its runs are centred in, and the box the
+/// tap answers.
+///
+/// WHY the plate and not the pitch: the row used to be tapped on the 96-row
+/// pitch it is laid out on, so the 8 gap rows under a plate answered that
+/// plate although no pixel of it is drawn there.
+const SHEET_PLATE_H: usize = SHEET_ROW_H - SHEET_ROW_GAP;
 const SHEET_ROW_X0: usize = 36;
 const SHEET_ROW_W: usize = 648;
-const SHEET_ROW_GAP: usize = 8;
+const SHEET_TEXT_X: usize = 48;
+const SHEET_TEXT_W: usize = camera::SETTINGS_TEXT_MAX;
+
+/// The row's runs, as the line boxes of the faces they are drawn with.
+const SHEET_TITLE_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
+const SHEET_VALUE_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
+const SHEET_NOTE_BOX: usize = std::design::font::line_height(typography::CAPTION_SCALE);
+/// The three runs as one block, so the block -- not either line -- is centred.
+const SHEET_STACK_H: usize = SHEET_TITLE_BOX + SHEET_VALUE_BOX + SHEET_NOTE_BOX;
+/// The air above the block, which is the air below it.
+const SHEET_STACK_PAD: usize = (SHEET_PLATE_H - SHEET_STACK_H) / 2;
+/// Each run's offset from the top of its plate.
+const SHEET_TITLE_OFF: usize = SHEET_STACK_PAD;
+const SHEET_VALUE_OFF: usize = SHEET_TITLE_OFF + SHEET_TITLE_BOX;
+const SHEET_NOTE_OFF: usize = SHEET_VALUE_OFF + SHEET_VALUE_BOX;
+
+/// The hairline under the sheet's title.
+const SHEET_HAIRLINE_Y: usize = SHEET_ROW_Y0 - 6;
+/// The amber accent beside the title: exactly the height of the title's caps,
+/// so the bar reads as a rule against the word rather than a stripe of its own.
+const SHEET_ACCENT_X: usize = SHEET_ROW_X0;
+const SHEET_ACCENT_W: usize = 4;
+const SHEET_ACCENT_TOP: usize = SHEET_TITLE_Y0
+    + std::design::font::ascent_for_scale(typography::BODY_SCALE)
+    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize;
+const SHEET_ACCENT_H: usize = std::design::font::cap_for_scale(typography::BODY_SCALE) as usize;
+
+/// The plate of the row at `index`: the box the painter fills and the tap
+/// handler answers, named once.
+const fn settings_row_rect(index: usize) -> Rect {
+    Rect::new(
+        SHEET_ROW_X0,
+        SHEET_ROW_Y0 + index * SHEET_ROW_H,
+        SHEET_ROW_W,
+        SHEET_PLATE_H,
+    )
+}
+
+/// WHY checked at compile time: the stack is only legal while the note's line
+/// box still ends inside its plate -- raise a rung and that is the first gate
+/// to fail. The chain gates are what a ninth row, a taller plate or a shorter
+/// sheet breaks, and they are the difference between a list that fits and one
+/// whose last plate runs under the sheet's own hairline.
+const _: () = assert!(SHEET_NOTE_OFF + SHEET_NOTE_BOX <= SHEET_PLATE_H);
+const _: () = assert!(SHEET_TITLE_Y0 + SHEET_TITLE_BOX <= SHEET_HAIRLINE_Y);
+const _: () = assert!(SHEET_ROW_Y0 + camera::SETTINGS_ROWS * SHEET_ROW_H <= SHEET_RECT.y + SHEET_RECT.h);
+const _: () = assert!(
+    settings_row_rect(camera::SETTINGS_ROWS - 1).y + SHEET_PLATE_H <= SHEET_RECT.y + SHEET_RECT.h
+);
+const _: () = assert!(SHEET_TEXT_X + SHEET_TEXT_W <= SHEET_ROW_X0 + SHEET_ROW_W);
+const _: () = assert!(SHEET_ROW_X0 + SHEET_ROW_W <= SHEET_RECT.x + SHEET_RECT.w);
+const _: () = assert!(SHEET_RECT.y + SHEET_RECT.h <= MODE_STRIP_Y0);
 
 const RETICLE_ARM: usize = 40;
 
@@ -301,6 +570,40 @@ fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, bool)> {
 /// against the pill's full width and painted onto its own border.
 const TOP_ROW_TEXT_PAD_X: usize = 6;
 
+/// The top of a run whose caps block is centred in a box `h` rows tall, drawn
+/// at rung `rung` with the outline face.
+///
+/// WHY the caps and not the line box: a run's line box carries the face's
+/// ascender above the caps and its descender below the baseline, and the
+/// ascender is the taller of the two. Centring the box therefore sits every
+/// capitalised label a row or two low in its control, which on a 48-row pill
+/// reads as a label that fell out of the capsule it is standing in.
+///
+/// WHY a subtraction that can be refused: a control shorter than the run's own
+/// ascent has no centred placement, and answering zero leaves the run in the
+/// box's top rows where the gate below can see it, rather than wrapping a
+/// `usize` around the canvas.
+const fn centred_text_top(h: usize, rung: usize) -> usize {
+    let box_top = h / 2 + std::design::font::cap_for_scale(rung) as usize / 2;
+    let ascent = std::design::font::ascent_for_scale(rung);
+    if ascent > box_top {
+        0
+    } else {
+        box_top - ascent
+    }
+}
+
+/// WHY checked at compile time: the pills are one height and every label in
+/// this app is centred in one, so a rung raised above what a 48-row capsule
+/// holds would fail here rather than spill ink onto the chassis. The gates say
+/// the run's whole line box stays inside the box it is dropped into.
+const _: () = assert!(centred_text_top(TOP_ROW_H, typography::CAPTION_SCALE)
+    + std::design::font::line_height(typography::CAPTION_SCALE)
+    <= TOP_ROW_H);
+const _: () = assert!(centred_text_top(TOP_ROW_H, typography::BODY_SCALE)
+    + std::design::font::line_height(typography::BODY_SCALE)
+    <= TOP_ROW_H);
+
 /// Draws a label centred in `rect`, upgrading to Scale 2 Body where it fits.
 ///
 /// WHY the label is trimmed instead of dropped: every `*_pixel` here answers
@@ -336,8 +639,7 @@ fn top_row_label(
         .unwrap_or_else(|| std::design::font::measure(text, scale))
         .min(room);
     let x0 = rect.x + (rect.w - drawn) / 2;
-    let lh = std::design::font::line_height(scale);
-    let y0 = rect.y + (rect.h.saturating_sub(lh)) / 2;
+    let y0 = rect.y + centred_text_top(rect.h, scale);
     test_text(x, y, x0, y0, scale, text, room, color, bg)
 }
 
@@ -363,8 +665,7 @@ fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<
         .unwrap_or_else(|| std::design::font::measure(text, scale))
         .min(FLASH_TEXT_W);
     let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - drawn) / 2;
-    let lh = std::design::font::line_height(scale);
-    let y0 = FLASH_RECT.y + (FLASH_RECT.h.saturating_sub(lh)) / 2;
+    let y0 = FLASH_RECT.y + centred_text_top(FLASH_RECT.h, scale);
     test_text(x, y, x0, y0, scale, text, FLASH_TEXT_W, color, bg)
 }
 
@@ -441,20 +742,12 @@ fn viewfinder_header_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32
 
 /// The mode carousel: the selected mode sits in an amber capsule.
 fn mode_strip_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32> {
-    const DOC: &[u8] = b"DOCUMENT";
-    const PHO: &[u8] = b"PHOTO";
-    const VID: &[u8] = b"VIDEO";
-    let slots = [
-        (MODE_X0, DOC, CameraMode::DocumentVision),
-        (MODE_X1, PHO, CameraMode::Photo),
-        (MODE_X2, VID, CameraMode::Video),
-    ];
-    for (x0, label, mode) in slots {
-        let rect = Rect::new(x0, MODE_STRIP_Y0 + 6, MODE_SLOT_W, 48);
+    for index in 0..MODE_SLOTS.len() {
+        let rect = MODE_SLOTS[index];
         if !rect.contains(x, y) {
             continue;
         }
-        let selected = camera.mode == mode;
+        let selected = camera.mode == MODE_ORDER[index];
         let fill = if selected { chrome::tint(chrome::AMBER, 14) } else { chrome::BODY };
         let border = if selected { chrome::tint(chrome::AMBER, 60) } else { chrome::BORDER };
         let ink = if selected { chrome::AMBER } else { chrome::TEXT_MUTED };
@@ -467,7 +760,19 @@ fn mode_strip_pixel(x: usize, y: usize, camera: &CameraApp) -> Option<u32> {
             Some(border),
             1,
         )?;
-        return Some(top_row_label(x, y, rect, label, ink, fill).unwrap_or(c));
+        return Some(top_row_label(x, y, rect, MODE_LABELS[index], ink, fill).unwrap_or(c));
+    }
+    None
+}
+
+/// The mode slot under `(x, y)`, on the box [`mode_strip_pixel`] fills.
+fn mode_slot_at(x: usize, y: usize) -> Option<usize> {
+    let mut index = 0usize;
+    while index < MODE_SLOTS.len() {
+        if MODE_SLOTS[index].contains(x, y) {
+            return Some(index);
+        }
+        index += 1;
     }
     None
 }
@@ -554,7 +859,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             return chrome::SURFACE;
         }
 
-        // ISP filter pill (170x48px): an informational control, so sky.
+        // ISP filter pill (170x48px): a toggle whose name is a setting, so it
+        // carries the sky ink of an adjustable control rather than the amber
+        // of the capture row.
         if let Some((fill, on_border)) = top_pill_body(x, y, FILTER_RECT) {
             let filter_name: &[u8] = match camera.filter {
                 CameraFilter::Normal => b"NORMAL",
@@ -612,9 +919,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         ) {
             // Dynamic aspect ratio framing bounds
             let (active_y0, active_h) = match camera.aspect_ratio {
-                CameraAspectRatio::Ratio16_9 => (VIEWFINDER_Y0, 1000),
-                CameraAspectRatio::Ratio4_3 => (VIEWFINDER_Y0 + 47, 906),
-                CameraAspectRatio::Square => (VIEWFINDER_Y0 + 160, 680),
+                CameraAspectRatio::Ratio16_9 => (FRAME_16_9_Y, FRAME_16_9_H),
+                CameraAspectRatio::Ratio4_3 => (FRAME_4_3_Y, FRAME_4_3_H),
+                CameraAspectRatio::Square => (FRAME_1_1_Y, FRAME_1_1_H),
             };
             let active_y1 = active_y0 + active_h;
 
@@ -674,16 +981,26 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 let c_dx = x as isize - center_x as isize;
                 let c_dy = y as isize - center_y as isize;
                 let dist_sq = (c_dx * c_dx + c_dy * c_dy) as usize;
-                if dist_sq <= 52 * 52 && dist_sq >= 44 * 44 {
+                if dist_sq <= TIMER_RING_OUTER_R * TIMER_RING_OUTER_R
+                    && dist_sq >= TIMER_RING_INNER_R * TIMER_RING_INNER_R
+                {
                     return chrome::AMBER;
                 }
-                if dist_sq < 44 * 44 {
+                if dist_sq < TIMER_RING_INNER_R * TIMER_RING_INNER_R {
                     let sec = ((camera.countdown_ticks + 9) / 10).clamp(1, 9) as u8;
                     let digit = [b'0' + sec];
-                    let lw = std::design::font::measure(&digit, typography::BODY_SCALE);
-                    let lh = std::design::font::line_height(typography::BODY_SCALE);
-                    let lx = center_x.saturating_sub(lw / 2);
-                    let ly = center_y.saturating_sub(lh / 2);
+                    // WHY the disc is the centring box: the digit used to be
+                    // clipped to 64 columns measured from its own centred left
+                    // edge, which ran eight columns past the ring's outer edge,
+                    // and its box was centred by half a remembered line height
+                    // rather than by the caps. The disc is what the eye reads
+                    // the number inside, so the disc is the box now.
+                    let disc = TIMER_RING_INNER_R * 2;
+                    let lx =
+                        camera::centred_x(&digit, typography::BODY_SCALE, center_x - TIMER_RING_INNER_R, disc);
+                    let ly = center_y
+                        - TIMER_RING_INNER_R
+                        + centred_text_top(disc, typography::BODY_SCALE);
                     if let Some(tc) = test_text(
                         x,
                         y,
@@ -691,7 +1008,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                         ly,
                         typography::BODY_SCALE,
                         &digit,
-                        64,
+                        disc,
                         chrome::AMBER,
                         chrome::SURFACE,
                     ) {
@@ -704,8 +1021,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // 3.3 Video mode indicator / readout. The readout stays 00:00:
             // this platform exposes no video stream, so nothing is invented.
             if camera.mode == CameraMode::Video && camera.countdown_ticks == 0 {
-                let rec_rect =
-                    Rect::new(VIEWFINDER_X0 + VIEWFINDER_W / 2 - 60, active_y0 + 16, 120, 36);
+                let rec_rect = Rect::new(
+                    VIEWFINDER_X0 + VIEWFINDER_W / 2 - REC_CHIP_W / 2,
+                    active_y0 + REC_CHIP_TOP,
+                    REC_CHIP_W,
+                    REC_CHIP_H,
+                );
                 if rec_rect.contains(x, y) {
                     if let Some(rc) = std::design::primitives::draw_rounded_rect(
                         x,
@@ -716,17 +1037,16 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                         Some(chrome::RECORD),
                         1,
                     ) {
-                        let dot_cx = rec_rect.x + 16;
+                        let dot_cx = rec_rect.x + REC_DOT_CX_OFF;
                         let dot_cy = rec_rect.y + rec_rect.h / 2;
                         let dot_dx = x as isize - dot_cx as isize;
                         let dot_dy = y as isize - dot_cy as isize;
-                        if (dot_dx * dot_dx + dot_dy * dot_dy) <= 16 {
+                        if (dot_dx * dot_dx + dot_dy * dot_dy) <= (REC_DOT_R * REC_DOT_R) as isize {
                             return chrome::RECORD;
                         }
                         let text = b"00:00";
-                        let lh = std::design::font::line_height(typography::BODY_SCALE);
-                        let lx = rec_rect.x + 32;
-                        let ly = rec_rect.y + (rec_rect.h.saturating_sub(lh)) / 2;
+                        let lx = rec_rect.x + REC_TEXT_OFF;
+                        let ly = rec_rect.y + centred_text_top(REC_CHIP_H, typography::BODY_SCALE);
                         if let Some(tc) = test_text(
                             x,
                             y,
@@ -734,7 +1054,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                             ly,
                             typography::BODY_SCALE,
                             text,
-                            rec_rect.w - 32,
+                            REC_TEXT_W,
                             chrome::TEXT,
                             chrome::SURFACE,
                         ) {
@@ -750,44 +1070,43 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // authority, so the card states the platform's own answer. It is
             // not a live image, not sensor telemetry and not a capture.
             if camera.total_photos == 0 && camera.countdown_ticks == 0 {
-                let abs_mid = active_y0 + active_h / 2;
-                let card = Rect::new(
-                    VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
-                    abs_mid - STATUS_CARD_H / 2,
-                    STATUS_CARD_W,
-                    STATUS_CARD_H,
-                );
                 let ink = status_ink(camera.status);
-                if card.contains(x, y) {
+                if STATUS_CARD.contains(x, y) {
                     if let Some(card_c) = std::design::primitives::draw_rounded_rect(
                         x,
                         y,
-                        card,
+                        STATUS_CARD,
                         R_CARD,
                         chrome::SURFACE,
                         Some(chrome::tint(ink, 45)),
                         1,
                     ) {
                         // Icon-like status dot with a quiet halo.
-                        let dot_cx = card.x + 30;
-                        let dot_cy = abs_mid - 19;
-                        let dot_dx = x as isize - dot_cx as isize;
-                        let dot_dy = y as isize - dot_cy as isize;
+                        let dot_dx = x as isize - STATUS_DOT_CX as isize;
+                        let dot_dy = y as isize - STATUS_DOT_CY as isize;
                         let dot_r2 = dot_dx * dot_dx + dot_dy * dot_dy;
-                        if dot_r2 <= 121 {
-                            if dot_r2 <= 36 {
+                        if dot_r2 <= (STATUS_DOT_HALO_R * STATUS_DOT_HALO_R) as isize {
+                            if dot_r2 <= (STATUS_DOT_R * STATUS_DOT_R) as isize {
                                 return ink;
                             }
                             return chrome::tint(ink, 26);
                         }
 
-                        let text_x = card.x + 64;
-                        if y < abs_mid + 15 {
+                        // WHY the bands are the two line boxes: the card used
+                        // to split itself at rows counted off its own middle
+                        // (`abs_mid + 15`, `abs_mid + 20`), which were neither
+                        // the runs' boxes nor a gap of their own -- the
+                        // headline's band reached eighteen rows past its box,
+                        // five rows belonged to neither run, and the pair sat
+                        // with 27 rows of air above it and 18 below. Each band
+                        // is now the box its run is drawn into, and the air
+                        // between them is STATUS_STACK_GAP.
+                        if y >= STATUS_HEAD_Y && y < STATUS_HEAD_Y + STATUS_HEAD_BOX {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
-                                text_x,
-                                abs_mid.saturating_sub(35),
+                                STATUS_TEXT_X,
+                                STATUS_HEAD_Y,
                                 typography::BODY_SCALE,
                                 &camera.head[..camera.head_len],
                                 STATUS_TEXT_W,
@@ -796,12 +1115,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                             ) {
                                 return tc;
                             }
-                        } else if y >= abs_mid + 20 {
+                        } else if y >= STATUS_SUB_Y && y < STATUS_SUB_Y + STATUS_SUB_BOX {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
-                                text_x,
-                                abs_mid + 22,
+                                STATUS_TEXT_X,
+                                STATUS_SUB_Y,
                                 typography::CAPTION_SCALE,
                                 &camera.sub[..camera.sub_len],
                                 STATUS_TEXT_W,
@@ -820,7 +1139,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
     }
 
-    // 4. Mode Selector Carousel (three 216px slots, 60px tall, >=48px touch)
+    // 4. Mode Selector Carousel (three 216x48 slots, 12px apart)
     if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
         if let Some(c) = mode_strip_pixel(x, y, camera) {
             return c;
@@ -828,8 +1147,8 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return chrome::BODY;
     }
 
-    // 5. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
-    if (DOCK_Y0..DOCK_Y1 - 30).contains(&y) {
+    // 5. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_BAND_Y1)
+    if (DOCK_Y0..DOCK_BAND_Y1).contains(&y) {
         // 5.0 What the last press of the shutter answered, in the platform's
         // own words, in the strip above the ring. Painted first because the
         // caption is the answer the control owes the user.
@@ -928,7 +1247,8 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return chrome::BODY;
     }
 
-    // Home gesture bar at bottom
+    // The system's home indicator: the pill, and the strip below it the tap
+    // handler answers, both read off HOME_MARK_*.
     if HOME_PILL.contains(x, y) {
         return chrome::TEXT_DIM;
     }
@@ -948,16 +1268,16 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         1,
     ) {
         // Amber accent bar beside the title.
-        if x >= SHEET_ROW_X0
-            && x < SHEET_ROW_X0 + 4
-            && y >= SHEET_TITLE_Y0 + 4
-            && y < SHEET_TITLE_Y0 + 28
+        if x >= SHEET_ACCENT_X
+            && x < SHEET_ACCENT_X + SHEET_ACCENT_W
+            && y >= SHEET_ACCENT_TOP
+            && y < SHEET_ACCENT_TOP + SHEET_ACCENT_H
         {
             return chrome::AMBER;
         }
 
-        // Title, on the Body scale.
-        if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + 36 {
+        // Title, on the Body scale, inside its own line box.
+        if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + SHEET_TITLE_BOX {
             if let Some(tc) = test_text(
                 x,
                 y,
@@ -974,44 +1294,45 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // Hairline between the title and the first row.
-        if y >= SHEET_ROW_Y0 - 6 && y < SHEET_ROW_Y0 - 4 {
+        if y >= SHEET_HAIRLINE_Y && y < SHEET_HAIRLINE_Y + 2 {
             if x >= SHEET_ROW_X0 && x < SHEET_ROW_X0 + SHEET_ROW_W {
                 return chrome::BORDER;
             }
         }
 
-        // The rows (height 96px >= 48px)
-        for (index, row) in SETTINGS_ROW_ORDER.iter().enumerate() {
-            let row_y = SHEET_ROW_Y0 + index * SHEET_ROW_H;
-            if y < row_y || y >= row_y + SHEET_ROW_H {
+        // The rows: each one's plate is the box `settings_row_rect` names, so
+        // the painter fills exactly what the tap handler answers.
+        for index in 0..SETTINGS_ROW_ORDER.len() {
+            let plate = settings_row_rect(index);
+            if !plate.contains(x, y) {
                 continue;
             }
-            let plate = std::design::primitives::draw_rounded_rect(
+            let row = SETTINGS_ROW_ORDER[index];
+            let row_y = plate.y;
+            let plate_c = std::design::primitives::draw_rounded_rect(
                 x,
                 y,
-                std::design::primitives::Rect::new(
-                    SHEET_ROW_X0,
-                    row_y,
-                    SHEET_ROW_W,
-                    SHEET_ROW_H - SHEET_ROW_GAP,
-                ),
+                plate,
                 radius::CHIP,
                 chrome::SURFACE_HIGH,
                 Some(chrome::BORDER),
                 1,
             );
-            let title = camera.settings_row_title(*row);
-            // WHY the bands are the line boxes themselves: the title and the
-            // value are body-scale runs (32 px) and the note is a caption
-            // (22 px), so a 34/60 split clipped the value's descenders and let
-            // the note start inside the value's box.
-            if y < row_y + 34 {
-                let title_scale = if std::design::font::measure(title, 2) <= SHEET_TEXT_W { 2 } else { 1 };
+            let title = camera.settings_row_title(row);
+            // WHY the bands are the line boxes and the block is centred: the
+            // title and the value are body-scale runs (32 rows each) and the
+            // note is a caption (22), so 86 rows of type stand in a plate 88
+            // tall. The plate used to start them at row 2, which left no air
+            // under the block at all and let the note's descenders ink the
+            // plate's own bottom hairline.
+            if y < row_y + SHEET_VALUE_OFF {
+                let title_scale =
+                    if std::design::font::measure(title, 2) <= SHEET_TEXT_W { 2 } else { 1 };
                 if let Some(tc) = test_text(
                     x,
                     y,
                     SHEET_TEXT_X,
-                    row_y + 2,
+                    row_y + SHEET_TITLE_OFF,
                     title_scale,
                     title,
                     SHEET_TEXT_W,
@@ -1020,15 +1341,16 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 ) {
                     return tc;
                 }
-            } else if y < row_y + 66 {
+            } else if y < row_y + SHEET_NOTE_OFF {
                 let len = camera.settings_value_lens[index];
                 let value = &camera.settings_values[index][..len];
-                let val_scale = if std::design::font::measure(value, 2) <= SHEET_TEXT_W { 2 } else { 1 };
+                let val_scale =
+                    if std::design::font::measure(value, 2) <= SHEET_TEXT_W { 2 } else { 1 };
                 if let Some(tc) = test_text(
                     x,
                     y,
                     SHEET_TEXT_X,
-                    row_y + 34,
+                    row_y + SHEET_VALUE_OFF,
                     val_scale,
                     value,
                     SHEET_TEXT_W,
@@ -1038,13 +1360,13 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                     return tc;
                 }
             } else {
-                let note = camera.settings_row_note(*row);
+                let note = camera.settings_row_note(row);
                 if !note.is_empty() {
                     if let Some(tc) = test_text(
                         x,
                         y,
                         SHEET_TEXT_X,
-                        row_y + 66,
+                        row_y + SHEET_NOTE_OFF,
                         typography::CAPTION_SCALE,
                         note,
                         SHEET_TEXT_W,
@@ -1055,8 +1377,8 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                     }
                 }
             }
-            if let Some(plate) = plate {
-                return plate;
+            if let Some(plate_c) = plate_c {
+                return plate_c;
             }
         }
         return c;
@@ -1187,17 +1509,23 @@ fn log_capture_code(prefix: &[u8], code: i64) {
     }
 }
 
+/// The row whose plate is under `(x, y)`, on the box [`settings_pixel`] fills.
+fn settings_row_at(x: usize, y: usize) -> Option<usize> {
+    let mut index = 0usize;
+    while index < SETTINGS_ROW_ORDER.len() {
+        if settings_row_rect(index).contains(x, y) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
 fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize) -> Tap {
-    if !SHEET_RECT.contains(x, y) {
-        return Tap::None;
-    }
-    if y < SHEET_ROW_Y0 {
-        return Tap::None;
-    }
-    let index = (y - SHEET_ROW_Y0) / SHEET_ROW_H;
-    if index >= SETTINGS_ROW_ORDER.len() {
-        return Tap::None;
-    }
+    let index = match settings_row_at(x, y) {
+        Some(index) => index,
+        None => return Tap::None,
+    };
     let row = SETTINGS_ROW_ORDER[index];
     match row {
         SettingsRow::Filter => {
@@ -1329,18 +1657,11 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
         return Tap::Redraw(Dirty::Viewfinder);
     }
 
-    // 6. Mode Selector Carousel: three equal 216px slots in 24..696 (60px tall, >=48px touch)
-    if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
-        if x >= MODE_X0 && x < MODE_X0 + MODE_SLOT_W {
-            camera.mode = CameraMode::DocumentVision;
-            std::log("[CAMERA APP] Switched to Document Vision mode.").ok();
-        } else if x >= MODE_X1 && x < MODE_X1 + MODE_SLOT_W {
-            camera.mode = CameraMode::Photo;
-            std::log("[CAMERA APP] Switched to Photo mode.").ok();
-        } else if x >= MODE_X2 && x < MODE_X2 + MODE_SLOT_W {
-            camera.mode = CameraMode::Video;
-            std::log("[CAMERA APP] Switched to Video mode.").ok();
-        }
+    // 6. Mode Selector Carousel: the slot under the finger, on the box the
+    // strip paints.
+    if let Some(index) = mode_slot_at(x, y) {
+        camera.mode = MODE_ORDER[index];
+        std::log(MODE_FEEDBACK[index]).ok();
         std::audio_haptic_click().ok();
         return Tap::Redraw(Dirty::All);
     }
