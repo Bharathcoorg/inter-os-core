@@ -11,6 +11,7 @@ import sys
 RUNTIME_DEPENDENT_SKIPPED_FILES = frozenset({
     "tests/qemu/test_boot_image_immutable.py",
     "tests/qemu/test_qemu_boot.py",
+    "tests/qemu/test_tls_trust_runtime.py",
     "tests/qemu/test_vault_persistence.py",
     "tests/test_crash_watchdog.py",
     "tests/test_interactive_lifecycle.py",
