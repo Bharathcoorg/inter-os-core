@@ -517,9 +517,62 @@ const fn later(a: usize, b: usize) -> usize {
     }
 }
 
+/// Rows from a band's top edge to the line-box top that stands a rung's caps
+/// in the middle of a band `h` rows tall.
+///
+/// WHY the caps and not the line box: a run's box reaches `ascent` rows above
+/// its baseline and `descent` below it, and only the cap block is visible on a
+/// digit or a capitalised label. Centring the box therefore leaves the whole
+/// descent's worth of empty rows below the ink and lifts the ink off the
+/// middle of the control it is supposed to name. The header's title already
+/// uses this placement; a control and the label standing in it must agree or
+/// the row reads crooked.
+///
+/// WHY a subtraction that can be refused: a rung taller than its band has no
+/// centred placement, and answering zero leaves the run in the band's top rows
+/// where the caller's own gate can see it rather than wrapping a `usize`
+/// around the canvas.
+const fn centred_text_top(h: usize, rung: usize) -> usize {
+    let box_top = h / 2 + std::design::font::cap_for_scale(rung) as usize / 2;
+    let ascent = std::design::font::ascent_for_scale(rung);
+    if ascent > box_top {
+        0
+    } else {
+        box_top - ascent
+    }
+}
+
+/// WHY the rungs stay inside the bands they are dropped into: a control that
+/// is shorter than its own label's line box cannot hold it, and on a per-pixel
+/// surface the label simply paints over the control's hairline.
+const _: () = assert!(centred_text_top(ACTION_H, 1) + std::design::font::line_height(1) <= ACTION_H);
+const _: () = assert!(centred_text_top(BTN_H, 2) + std::design::font::line_height(2) <= BTN_H);
+const _: () = assert!(centred_text_top(2 * PIN_DISC_RADIUS, 3) + std::design::font::line_height(3) <= 2 * PIN_DISC_RADIUS);
+
 /// The rung both header lines are drawn at, on every one of the three screens
 /// that carries this header.
 const HEAD_RUNG: usize = 2;
+
+/// The air between the header's runs and the first pill standing to their
+/// right.
+///
+/// WHY the runs are bounded by the pill and not by the panel's inset: the
+/// header paints its pills before it paints its text, and on this surface the
+/// branch that claims a pixel wins -- so a run that reaches into a pill does not
+/// overlap it, it loses the reach. A bound that only holds while the strings
+/// happen to be short is the same defect one rename away.
+///
+/// WHY the back control is checked against the same gutter: the runs start to
+/// its right, and `TITLE_X` is the only number keeping the two apart.
+const HEAD_TEXT_GUTTER: usize = 16;
+const _: () = assert!(BACK_X + BACK_S + HEAD_TEXT_GUTTER <= TITLE_X);
+
+/// The widest a header run may be when a band edge `right_of` stands at the
+/// right of it: the space up to that edge, less the gutter.
+#[inline]
+const fn head_text_max(right_of: usize) -> usize {
+    right_of.saturating_sub(TITLE_X + HEAD_TEXT_GUTTER)
+}
 
 /// Rows the title's line box reserves: ascent plus descent at its rung.
 const TITLE_BOX_H: usize = std::design::font::line_height(HEAD_RUNG);
@@ -636,6 +689,25 @@ const TITLE: &[u8] = b"Vault";
 /// asked anything.
 const SUBTITLE: &[u8] = b"Sovereign storage manager";
 
+/// The label of the header's second pill. Which of the two it carries is the
+/// session's answer, so the header's runs are bounded by the wider of them --
+/// see `CRED_PILL_WIDEST`.
+#[inline]
+fn cred_pill_label(authenticated: bool) -> &'static [u8] {
+    if authenticated {
+        b"SECRETS"
+    } else {
+        b"CREDENTIALS"
+    }
+}
+
+/// The wider of the two labels the second pill can carry, and therefore the
+/// left edge the header's runs have to clear whichever one is drawn.
+const CRED_PILL_WIDEST: &[u8] = b"CREDENTIALS";
+
+/// The credential screen's way out, painted as a header pill and hit as one.
+const SIGN_OUT: &[u8] = b"SIGN OUT";
+
 fn cred_action_rect(label: &[u8]) -> (usize, usize, usize, usize) {
     let re_probe_w = action_w(ACTION);
     let x1 = ACTION_X1 - re_probe_w - 12;
@@ -649,11 +721,7 @@ fn cred_action_contains(x: usize, y: usize, label: &[u8]) -> bool {
 }
 
 fn cred_action_pixel(x: usize, y: usize, vault: &VaultApp) -> Option<u32> {
-    let label: &[u8] = if vault.is_authenticated {
-        b"SECRETS"
-    } else {
-        b"CREDENTIALS"
-    };
+    let label: &[u8] = cred_pill_label(vault.is_authenticated);
     let (x0, y0, w, h) = cred_action_rect(label);
     if !in_round(x, y, x0, y0, w, h, h / 2) {
         return None;
@@ -665,7 +733,7 @@ fn cred_action_pixel(x: usize, y: usize, vault: &VaultApp) -> Option<u32> {
         x,
         y,
         x0,
-        y0 + (h - 24) / 2,
+        y0 + centred_text_top(h, 1),
         1,
         label,
         w,
@@ -708,9 +776,12 @@ fn pin_keypad_pixel(x: usize, y: usize) -> Option<u32> {
                     _ => return None,
                 };
                 let w = font::width(label, scale, true);
-                let dy_text = if scale == 3 { 12 } else { 8 };
+                // WHY the disc's own diameter centres the run: the literals
+                // this used were 12 rows for a digit and 8 for a chip label,
+                // against 23 and 17 that place the caps on the centre row, so
+                // every key sat its label in the lower half of its disc.
                 let tx = cx.saturating_sub(w / 2);
-                let ty = cy.saturating_sub(dy_text);
+                let ty = (cy - PIN_DISC_RADIUS) + centred_text_top(2 * PIN_DISC_RADIUS, scale);
                 if let Some(c) = font::ink(
                     x,
                     y,
@@ -733,14 +804,16 @@ fn pin_keypad_pixel(x: usize, y: usize) -> Option<u32> {
 }
 
 fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
         return THEME.on_surface_variant;
     }
     if let Some(c) = back_button_pixel(x, y) {
         return c;
     }
     if y < HEAD_BOTTOM {
-        let text_max = W - TITLE_X - MARGIN;
+        // No pill stands in this screen's header row, so the runs may use the
+        // whole panel up to its inset -- and no further.
+        let text_max = head_text_max(W - MARGIN);
         if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
@@ -832,17 +905,19 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 }
 
 fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
         return THEME.on_surface_variant;
     }
     if let Some(c) = back_button_pixel(x, y) {
         return c;
     }
-    if let Some(c) = action_pixel(x, y, b"SIGN OUT") {
+    if let Some(c) = action_pixel(x, y, SIGN_OUT) {
         return c;
     }
     if y < HEAD_BOTTOM {
-        let text_max = W - TITLE_X - MARGIN;
+        // The SIGN OUT pill is painted before these runs and stands in the same
+        // row, so they stop a gutter short of it (see `header_pixel`).
+        let text_max = head_text_max(action_rect(SIGN_OUT).0);
         if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
@@ -1034,6 +1109,30 @@ const STATUS_H: usize = std::design::font::line_height(2);
 /// bottom-anchored, and this app's stack grows toward it rather than over it.
 const GESTURE_Y0: usize = 1400;
 
+/// The indicator this app draws for that strip, and the rows its own tap
+/// gesture owns from.
+///
+/// WHY the mark is named: three painters spelled it `1418..1424, 260..460` as
+/// literals while the tap path owned every column from 1400 down -- eighteen
+/// rows above the mark and two hundred columns outside it. A press on blank
+/// surface beside the indicator closed the app, which is a control that is
+/// tappable where it is not drawn.
+///
+/// WHY the gesture still owns the rows under the mark: from the mark to the
+/// bottom of the canvas this app paints nothing of its own, and the strip is
+/// the system's; the tap keeps its thumb-height without claiming a card.
+const GESTURE_MARK_X0: usize = 260;
+const GESTURE_MARK_X1: usize = 460;
+const GESTURE_MARK_Y: usize = 1418;
+const GESTURE_MARK_H: usize = 6;
+const GESTURE_MARK_Y1: usize = GESTURE_MARK_Y + GESTURE_MARK_H;
+
+/// WHY checked at compile time: the mark belongs to the strip the stack above
+/// is not allowed to grow into, and it has to be inside the canvas. Grow the
+/// stack and the first fact fails; grow the mark and the second does.
+const _: () = assert!(GESTURE_Y0 <= GESTURE_MARK_Y);
+const _: () = assert!(GESTURE_MARK_Y1 <= H);
+
 /// Card A: hardware keystore probes.
 ///
 /// WHY the whole storage stack hangs off `CONTENT_TOP`: these were five literals
@@ -1061,6 +1160,34 @@ const TILE_ROW_Y: [usize; 3] = [
     CARD_B_Y + TILE_INSET + TILE_PITCH,
     CARD_B_Y + TILE_INSET + 2 * TILE_PITCH,
 ];
+
+/// A tile's own three-row stack: name, verdict pill, hint.
+///
+/// WHY each row is placed after the previous row's LINE BOX rather than after
+/// the caps it visibly carries: `font::ink` answers for every pixel of the box
+/// it is handed, and the title's branch is tried first, so the title reserves
+/// `line_height(2)` rows whether or not it paints in them. The pill used to
+/// start two rows inside that reservation, which cost it its top border across
+/// the whole inner width -- and any descender in a sector name read through the
+/// hairline that was supposed to be there.
+const TILE_PAD: usize = 16;
+const TILE_INNER_W: usize = TILE_W - 2 * TILE_PAD;
+const TILE_TITLE_Y: usize = 14;
+const TILE_BADGE_H: usize = 36;
+/// Air between two stacked boxes of the tile, kept as one knob.
+const TILE_STACK_GAP: usize = 2;
+const TILE_BADGE_Y: usize = TILE_TITLE_Y + font::line_height(2) + TILE_STACK_GAP;
+const TILE_HINT_Y: usize = TILE_BADGE_Y + TILE_BADGE_H + TILE_STACK_GAP;
+
+/// WHY checked at compile time: the stack is only legal while the hint's line
+/// box still ends inside the tile. Raising a rung, the pill or the gap pushes
+/// the last row past `TILE_H` and the gate fails; today it passes with six rows
+/// of air, so it is a limit and not a tautology.
+const _: () = assert!(TILE_HINT_Y + font::line_height(1) <= TILE_H);
+/// WHY: the grid is allowed to grow only while its last row still sits inside
+/// card B. This is the same chain from the other end -- it is what a taller
+/// tile or a bigger inset would break first.
+const _: () = assert!(TILE_ROW_Y[2] + TILE_H <= CARD_B_Y + CARD_B_H);
 
 /// Card C: backup export and entropy.
 const CARD_C_Y: usize = CARD_B_Y + CARD_B_H + CARD_GAP;
@@ -1191,7 +1318,7 @@ fn action_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
     // subtracting another 16 centred the text in a box inset 16 from the right
     // alone and sat the run 8px left of the pill's true centre. Measured on the
     // guest: label ink 570..669 against a 560..696 pill, centre 619.5 vs 628.
-    if let Some(c) = font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, THEME.on_surface, THEME.surface_container_high, true) {
+    if let Some(c) = font::ink_center(x, y, x0, y0 + centred_text_top(h, 1), 1, label, w, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
     Some(THEME.surface_container_high)
@@ -1281,14 +1408,14 @@ fn tile_pixel(
     if !in_round(x, y, tx + 1, ty + 1, TILE_W - 2, TILE_H - 2, 13) {
         return Some(THEME.border);
     }
-    let iw = TILE_W - 32;
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 14, 2, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
+    let iw = TILE_INNER_W;
+    if let Some(c) = font::ink(x, y, tx + TILE_PAD, ty + TILE_TITLE_Y, 2, title, iw, THEME.on_surface, THEME.surface_container_high, true) {
         return Some(c);
     }
     // Cryptographic status badge: pill container with indicator dot and status verdict
-    let badge_x = tx + 16;
-    let badge_y = ty + 44;
-    let badge_h = 36;
+    let badge_x = tx + TILE_PAD;
+    let badge_y = ty + TILE_BADGE_Y;
+    let badge_h = TILE_BADGE_H;
     let v_w = font::width(verdict, 1, true);
     let badge_w = (v_w + 34).min(iw);
     if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
@@ -1308,7 +1435,7 @@ fn tile_pixel(
         }
         return Some(THEME.surface_container);
     }
-    if let Some(c) = font::ink(x, y, tx + 16, ty + 82, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, true) {
+    if let Some(c) = font::ink(x, y, tx + TILE_PAD, ty + TILE_HINT_Y, 1, hint, iw, THEME.on_surface_variant, THEME.surface_container_high, true) {
         return Some(c);
     }
     Some(THEME.surface_container_high)
@@ -1334,7 +1461,12 @@ fn button_pixel(
     }
     let fill = if primary { THEME.primary } else { THEME.surface_container_high };
     let ink_c = if primary { THEME.surface_container } else { THEME.on_surface };
-    if let Some(c) = font::ink_center(x, y, bx, by + (bh - 28) / 2, 2, label, bw, ink_c, fill, true) {
+    // WHY the ladder places it and not the literal 28: `(bh - 28) / 2` centred
+    // a rung-2 box of 32 rows in the band, which hung the caps three rows below
+    // the button's own middle -- the box's descent is empty space above the
+    // baseline for a capitalised label. `centred_text_top` is the placement the
+    // gate above this function checks, so paint and gate now name one number.
+    if let Some(c) = font::ink_center(x, y, bx, by + centred_text_top(bh, 2), 2, label, bw, ink_c, fill, true) {
         return Some(c);
     }
     Some(fill)
@@ -1351,8 +1483,16 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     if y >= HEAD_BOTTOM {
         return THEME.surface;
     }
-    let (pill_x, _, _, _) = action_rect(ACTION);
-    let text_max = pill_x.saturating_sub(TITLE_X + 16);
+    // Both pills stand in this row, and both are painted before the runs: the
+    // runs therefore stop a gutter short of whichever reaches further left.
+    // The bound used to be the RE-PROBE pill alone, so the CREDENTIALS pill --
+    // which sits to its left -- was inside the space the title was allowed to
+    // use, and a longer name than "Vault" would lose its tail to the pill
+    // rather than show it.
+    let leftmost_pill = action_rect(ACTION)
+        .0
+        .min(cred_action_rect(CRED_PILL_WIDEST).0);
+    let text_max = head_text_max(leftmost_pill);
     if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
@@ -1398,7 +1538,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return credentials_view_pixel(x, y, vault);
     }
     // Home gesture pill.
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
         return THEME.on_surface_variant;
     }
     if let Some(c) = cred_action_pixel(x, y, vault) {
@@ -1928,8 +2068,17 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     let x = x as usize;
     let y = y as usize;
 
-    // Back button, or the home gesture strip: exit to the launcher.
-    if std::design::back_button::contains(x, y) || in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) || y >= GESTURE_Y0 {
+    // Back button, or a tap on the home indicator: exit to the launcher.
+    //
+    // WHY the indicator's own rectangle: this used to be `y >= GESTURE_Y0`,
+    // which took every column of the strip from eighteen rows above the mark
+    // the app draws, so a press on blank surface next to the indicator closed
+    // the vault. The pan and fling the event loop recognises keeps the
+    // platform's wider strip -- see `tests/test_vault_truth_contract.py`.
+    if std::design::back_button::contains(x, y)
+        || in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14)
+        || (x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 && y >= GESTURE_MARK_Y)
+    {
         if vault.pin_modal_open {
             vault.pin_modal_open = false;
             vault.pin_len = 0;
@@ -2017,7 +2166,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     }
 
     if vault.show_credentials {
-        let (ax, ay, aw, ah) = action_rect(b"SIGN OUT");
+        let (ax, ay, aw, ah) = action_rect(SIGN_OUT);
         if in_round(x, y, ax, ay, aw, ah, ah / 2) {
             vault.show_credentials = false;
             vault.is_authenticated = false;
@@ -2034,11 +2183,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         return Tap::None;
     }
 
-    let cred_label: &[u8] = if vault.is_authenticated {
-        b"SECRETS"
-    } else {
-        b"CREDENTIALS"
-    };
+    let cred_label: &[u8] = cred_pill_label(vault.is_authenticated);
     if cred_action_contains(x, y, cred_label) {
         if vault.is_authenticated {
             vault.show_credentials = true;
