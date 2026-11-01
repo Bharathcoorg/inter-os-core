@@ -91,12 +91,34 @@ def test_the_design_goals_hold_the_values_the_apps_are_measured_against():
         assert declaration in sdk, f"the design tokens no longer hold {declaration}"
 
 
+def _holds_the_surface(text, name, platform_const, literal):
+    """Whether an app declares its surface edge as the canonical one.
+
+    Either the literal the apps were measured against, or the platform constant
+    that carries that same number -- and nothing else, which is the point: an
+    app that writes its own size is the offender this test names.
+    """
+    return (
+        f"const {name}: usize = {literal};" in text
+        or f"const {name}: usize = viewport::{platform_const};" in text
+    )
+
+
 def test_every_app_paints_the_canonical_logical_surface():
     """Every app paints the 720x1440 logical surface, which is also the scanout.
 
     WHY: the compositor presents the authoring space 1:1, so an app that
     invented its own surface size would be resampled and its one-pixel
     strokes would soften.
+
+    WHY the platform's own constants answer as well as the literals did: an app
+    that writes `const W: usize = viewport::LOGICAL_WIDTH;` cannot disagree with
+    the surface the compositor presents, which is the fact this test is really
+    about -- and `test_the_design_goals_hold_the_values_the_apps_are_measured_
+    against` pins those two constants to 720 and 1440, so accepting the
+    reference does not loosen the bound. The literal-only form of this assertion
+    is what made webview_demo's own 720/1440 look like a fixed point when the
+    app was painting a band inside a surface it had invented.
     """
     offenders = []
     for app_dir in sorted(APPS.iterdir()):
@@ -109,9 +131,9 @@ def test_every_app_paints_the_canonical_logical_surface():
         if app_dir.name in ("compositor", "launcher"):
             continue
         text = "\n".join(source.read_text(encoding="utf-8") for source in sources)
-        if "const W: usize = 720;" not in text:
+        if not _holds_the_surface(text, "W", "LOGICAL_WIDTH", "720"):
             offenders.append(f"{app_dir.name}: no logical width")
-        elif "const H: usize = 1440;" not in text:
+        elif not _holds_the_surface(text, "H", "LOGICAL_HEIGHT", "1440"):
             offenders.append(f"{app_dir.name}: no logical height")
     assert not offenders, "an app does not paint the canonical logical surface:\n  " + "\n  ".join(
         offenders
