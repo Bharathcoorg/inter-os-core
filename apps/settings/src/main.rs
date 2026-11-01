@@ -1908,12 +1908,18 @@ const BACK_R: usize = CONTROL_R;
 const HEADER_X: usize = BACK_X + BACK_S + std::design::spacing::GRID_16;
 /// Y of the header's title.
 ///
-/// WHY 32 rather than the back control's own 24: a 48px cell's cap ink occupies
-/// rows 3..19, so a cell starting at 24 puts that ink eleven pixels above the
-/// chevron's centre and the title reads as drifting away from its own control.
-/// 32 lands the cap-ink centre five pixels above it, the closest optical
-/// centring the 8-point grid allows.
-const HEADER_Y: usize = std::design::spacing::GRID_32;
+/// WHY the content boundary and not a grid step: the status band owns every
+/// row above `viewport::STATUS_BAR_HEIGHT`, and the app's content boundary is
+/// `viewport::HEADER_TOP`. A title authored at `GRID_32` (32) reserves a
+/// scale-three box whose cap crown sits eleven rows below the box top, so the
+/// crown (row 43) landed inside the band (rows under 48) and the band painted
+/// over it. The platform's back control is authored at this same boundary, so
+/// placing the title here both clears the band and lines the word up with its
+/// own button.
+const HEADER_Y: usize = std::design::viewport::HEADER_TOP;
+/// WHY the gate: the title's whole scale-three box has to sit on the content
+/// side of the band the shell paints over, so the box top itself clears it.
+const _: () = assert!(HEADER_Y >= std::design::viewport::STATUS_BAR_HEIGHT);
 /// Y of a panel header's subtitle: one 8px step below the title's line box.
 const HEADER_SUB_Y: usize = HEADER_Y + std::design::font::line_height(TYPE_DISPLAY) + std::design::spacing::GRID_8;
 /// The header rule: a hairline closing the header block, one 16px step below the
@@ -2075,8 +2081,32 @@ const RUN_CAP: usize = 96;
 /// Top of the preview strip: the shared content top, so the panel's body begins
 /// on the same line as every other screen's.
 const WP_PREVIEW_Y: usize = DETAIL_TOP;
+/// What the wallpaper panel's chain below the preview costs, in rows: three 32px
+/// steps and one 16px step, the target selector, the scene grid, two action
+/// buttons, a card gap and the outcome line's own box.
+const WP_FOOTER_H: usize = std::design::spacing::GRID_32
+    + std::design::touch::PRIMARY_ACTION
+    + std::design::spacing::GRID_32
+    + WP_GALLERY_H
+    + std::design::spacing::GRID_32
+    + BUTTON_H
+    + std::design::spacing::GRID_16
+    + BUTTON_H
+    + CARD_GAP
+    + LINE_H;
 /// Height of the preview strip.
-const WP_PREVIEW_H: usize = 664;
+///
+/// WHY it is the room the panel has left and not a number written down: every
+/// element under the strip is a fixed control one grid step from the last, and
+/// the chain ends in the outcome line -- the row that tells the owner whether
+/// the wallpaper was applied or refused. The strip is the only element on the
+/// screen with room to give, and while it carried a literal the chain ran past
+/// `CONTENT_BOTTOM`, which put the outcome line and the lower rows of the
+/// "Choose from Gallery" button below the canvas: ink that was never painted and
+/// rows a tap could not reach, while every row above them looked right. Deriving
+/// it also means a control added to the chain takes its rows from the strip
+/// rather than from the bottom of the screen.
+const WP_PREVIEW_H: usize = CONTENT_BOTTOM - DETAIL_TOP - WP_FOOTER_H;
 /// Preview radius: the doc's sheet rung, because the preview is this panel's one
 /// large surface rather than a card in a list.
 const WP_PREVIEW_R: usize = std::design::radius::SHEET;
@@ -2118,6 +2148,14 @@ const WP_CHOOSE_GALLERY_Y: usize = WP_ACTION_Y + WP_ACTION_H + std::design::spac
 const WP_CHOOSE_GALLERY_H: usize = BUTTON_H;
 /// Top of the outcome line: one 16px step below the choose gallery button.
 const WP_STATUS_Y: usize = WP_CHOOSE_GALLERY_Y + WP_CHOOSE_GALLERY_H + CARD_GAP;
+/// WHY checked at compile time: this line is the end of the chain, and while the
+/// preview strip above it carried a literal the chain ended with this box's top
+/// 52 rows below the bottom of the canvas -- the outcome line was authored,
+/// painted nowhere and untappable, and the lower half of the button above it with
+/// it. The gate is the reason the strip's height is derived: it holds the whole
+/// chain on the canvas whatever the strip is given, so a control added below
+/// costs rows from the preview and not from the bottom of the screen.
+const _: () = assert!(WP_STATUS_Y + LINE_H <= CONTENT_BOTTOM);
 
 // Screen lock panel layout
 // -----------------------------------------------------------------------------
@@ -5243,9 +5281,10 @@ fn wp_segment_rect(i: usize) -> (usize, usize, usize, usize) {
 /// integer step, not a text metric.
 fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // WHY there is no "y < 104 is empty" early return: the header below is drawn
-    // at y 32 and y 88, so this return was erasing the panel's own title and
-    // subtitle. It survives as the last few rows of the subtitle, which is why
-    // the header looked clipped rather than missing.
+    // at `HEADER_Y` and `HEADER_SUB_Y`, so a return on a number in that range
+    // was erasing the panel's own title and the top of its subtitle. That is why
+    // the header looked clipped rather than missing. The panel fills its own
+    // background at the end of this function instead.
     // Header, on the shared header geometry the detail screens use, so the title
     // of a panel and the title of the screen it was opened from line up.
     if let Some(c) = run_ink(
@@ -5755,9 +5794,9 @@ fn sl_write_line(app: &SettingsApp) -> &'static [u8] {
 /// The screen-lock panel, answering per pixel like every other surface here.
 fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // WHY there is no "y < 104 is empty" early return here: the header lives at
-    // y 32 and y 88, so such a return erases the title and the subtitle and left
-    // only the subtitle's top rows visible above the card. The panel fills its
-    // own background at the end of this function instead.
+    // `HEADER_Y` and `HEADER_SUB_Y`, so such a return erases the title whole and
+    // leaves the subtitle stranded over the card. The panel fills its own
+    // background at the end of this function instead.
     // Header on the shared header geometry, so a panel opened from a detail row
     // keeps that row's title on the same line.
     if let Some(c) = run_ink(
