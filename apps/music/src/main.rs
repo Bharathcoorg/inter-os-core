@@ -1412,11 +1412,37 @@ fn text_centered(
     if y < band_top || y >= band_bottom {
         return None;
     }
+    // WHY a run wider than the column is cut and marked rather than refused:
+    // this surface answers pixels, so a run the column cannot show in full is
+    // still a run the reader needs the start of, and the ellipsis is where the
+    // trim happened. Dropping it instead left a long notice -- a platform
+    // refusal, a track name -- as a blank row that reads as nothing happening.
+    //
+    // WHY the centring is done with the drawn advance: the trimmed run is what
+    // the column centres, and centring on the run that was asked for would put
+    // the cut end past the margin the column was measured against.
     let w = font::measure(s, scale);
-    if w > CONTENT_W {
-        return None;
-    }
-    text(x, y, (W - w) / 2, y0, scale, s, color, bg)
+    let mut buf = [0u8; 96];
+    let (s_disp, drawn) = if w > CONTENT_W {
+        let n = font::ellipsize(s, scale, CONTENT_W, &mut buf);
+        let el = if n > 0 { &buf[..n] } else { s };
+        let ew = font::measure(el, scale);
+        let drawn = outline_text::drawn_advance(el, scale, None).unwrap_or(ew);
+        (el, drawn)
+    } else {
+        let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
+        (s, drawn)
+    };
+    text(
+        x,
+        y,
+        MARGIN + (CONTENT_W.saturating_sub(drawn)) / 2,
+        y0,
+        scale,
+        s_disp,
+        color,
+        bg,
+    )
 }
 
 #[inline(always)]
@@ -1433,11 +1459,31 @@ fn text_centered_bold(
     if y < band_top || y >= band_bottom {
         return None;
     }
+    // Cut and marked rather than refused: see [`text_centered`]. A bold run is
+    // measured with the dilate the renderer applies, so the bound and the ink
+    // name the same width.
     let w = font::measure_bold(s, scale);
-    if w > CONTENT_W {
-        return None;
-    }
-    text_bold(x, y, (W - w) / 2, y0, scale, s, color, bg)
+    let mut buf = [0u8; 96];
+    let (s_disp, drawn) = if w > CONTENT_W {
+        let n = font::ellipsize(s, scale, CONTENT_W, &mut buf);
+        let el = if n > 0 { &buf[..n] } else { s };
+        let ew = font::measure_bold(el, scale);
+        let drawn = outline_text::drawn_advance(el, scale, None).unwrap_or(ew);
+        (el, drawn)
+    } else {
+        let drawn = outline_text::drawn_advance(s, scale, None).unwrap_or(w);
+        (s, drawn)
+    };
+    text_bold(
+        x,
+        y,
+        MARGIN + (CONTENT_W.saturating_sub(drawn)) / 2,
+        y0,
+        scale,
+        s_disp,
+        color,
+        bg,
+    )
 }
 
 #[inline(always)]

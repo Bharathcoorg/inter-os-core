@@ -2381,6 +2381,21 @@ const TITLE_Y0: usize = HEADER_ROW
     - std::design::font::ascent_for_scale(TITLE_SCALE)
     + std::design::font::cap_for_scale(TITLE_SCALE) as usize / 2;
 
+/// The header title's column, named so the ringtone caption can be bounded
+/// against its right edge rather than against a number written down beside it.
+const HEADER_TITLE_X0: usize = 120;
+const HEADER_TITLE_MAX_W: usize = 240;
+/// The ringtone caption's trailing edge: the signal bars begin just right of it.
+const RINGTONE_X1: usize = 600;
+/// WHY derived from the title: the caption is right-aligned to `RINGTONE_X1`, so
+/// a caption no wider than the gap between that edge and the title's right edge
+/// can never start where the title's ink is. This is the one bound both the
+/// placer and the drawer use, so a name neither silently re-faces at another
+/// size nor lands inside the title.
+const RINGTONE_MAX_W: usize = RINGTONE_X1 - (HEADER_TITLE_X0 + HEADER_TITLE_MAX_W);
+const _: () =
+    assert!(RINGTONE_X1 - RINGTONE_MAX_W >= HEADER_TITLE_X0 + HEADER_TITLE_MAX_W);
+
 // Segmented navigation tabs (y: 120..164). Symmetrically balanced pills across
 // the 720px viewport (48px margins, 12px gaps).
 //
@@ -2547,6 +2562,25 @@ const SETTINGS_ROW_Y0: usize = 452;
 const SETTINGS_ROW_H: usize = 96;
 const SETTINGS_TEXT_X: usize = 48;
 
+/// The settings row's two columns: the title on the leading edge, the value on
+/// the trailing edge.
+///
+/// WHY the value is bounded by the title's right edge: the value is
+/// right-aligned to the row's trailing padding, so a value wider than the gap
+/// between that edge and the title's column drops left into the title's ink.
+/// One bound, named from the title, is used by both the trim and the draw, so a
+/// long value loses its tail (with an ellipsis) rather than its place.
+const SETTINGS_ROW_PAD: usize = std::design::spacing::MD;
+const SETTINGS_TITLE_MAX_W: usize = 300;
+const SETTINGS_COL_GAP: usize = 12;
+const SETTINGS_VALUE_X1: usize = DISPLAY_X1 - SETTINGS_ROW_PAD;
+const SETTINGS_TITLE_X1: usize = DISPLAY_X0 + SETTINGS_ROW_PAD + SETTINGS_TITLE_MAX_W;
+const SETTINGS_VALUE_MAX_W: usize =
+    SETTINGS_VALUE_X1 - SETTINGS_TITLE_X1 - SETTINGS_COL_GAP;
+const _: () = assert!(
+    SETTINGS_VALUE_X1 - SETTINGS_VALUE_MAX_W >= SETTINGS_TITLE_X1 + SETTINGS_COL_GAP
+);
+
 /// The ringtone picker's rows and the window they are shown in.
 const RINGTONE_ROW_H: usize = 72;
 const RINGTONE_ROW_Y0: usize = 452;
@@ -2554,6 +2588,28 @@ const RINGTONE_VIEWPORT_Y1: usize = 1028;
 /// The row that leaves the picker.
 const RINGTONE_BACK_Y0: usize = 1040;
 const RINGTONE_BACK_H: usize = 64;
+/// The column each picker run is drawn in: the row's inner width between its
+/// two leading paddings. Both the name and its path are measured and trimmed to
+/// this one bound so neither drops to the bitmap face at an unmeasured width.
+const RINGTONE_TEXT_MAX_W: usize = DISPLAY_W - 2 * SETTINGS_ROW_PAD;
+
+/// The contact editor's field: the value run is bounded by the space left of
+/// the first control disc, so a long number never paints under the Clear disc
+/// and its tap target.
+///
+/// WHY derived from the disc: the clear disc's centre is inset from the row's
+/// trailing edge and its outer extent is its touch radius, so the value's right
+/// edge has to stop at that left extent. Writing the number down is how the two
+/// came to overlap.
+const FIELD_TEXT_X0: usize = DISPLAY_X0 + 24;
+const FIELD_CLEAR_DX: usize = 88;
+const FIELD_DISC_R: usize = 22;
+const FIELD_VALUE_GAP: usize = 12;
+const FIELD_VALUE_MAX_W: usize =
+    (DISPLAY_X1 - FIELD_CLEAR_DX) - FIELD_DISC_R - FIELD_TEXT_X0 - FIELD_VALUE_GAP;
+const _: () = assert!(
+    FIELD_TEXT_X0 + FIELD_VALUE_MAX_W <= (DISPLAY_X1 - FIELD_CLEAR_DX) - FIELD_DISC_R
+);
 
 /// The scroll extents of the ringtone picker's list.
 fn ringtone_scroll_extents(rows: usize) -> ScrollState {
@@ -2725,7 +2781,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // would sit with half its box inside the band that paints over it.
     let title_rows = run_rows(TITLE_SCALE);
     if y >= TITLE_Y0 && y < TITLE_Y0 + title_rows {
-        if let Some(c) = test_text(x, y, 120, TITLE_Y0, TITLE_SCALE, b"Phone", 240, THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, HEADER_TITLE_X0, TITLE_Y0, TITLE_SCALE, b"Phone", HEADER_TITLE_MAX_W, THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
@@ -2736,22 +2792,29 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // a user who has chosen a ringtone must be able to see which one the
     // device will play. A user who has not chosen one sees nothing, because
     // the slot is empty and there is nothing to name.
+    //
+    // WHY ellipsize and one bound: the name is measured, trimmed to the column
+    // the title leaves it, and right-aligned from that trimmed run, so a long
+    // name loses its tail rather than its place -- it never jumps to the bitmap
+    // face at a different size and never reaches back into the title's ink.
     if dialer.ringtone_len > 0 {
         let label = &dialer.ringtone[..dialer.ringtone_len];
-        let width = std::design::font::measure(label, 1);
-        if width < 380 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                600 - width,
-                HEADER_TOP + 8,
-                1,
-                label,200, 
-                THEME.on_surface_variant,
-                THEME.surface_container,
-            ) {
-                return c;
-            }
+        let mut rbuf = [0u8; 64];
+        let n = std::design::font::ellipsize(label, 1, RINGTONE_MAX_W, &mut rbuf);
+        let disp = if n > 0 { &rbuf[..n] } else { label };
+        let width = std::design::font::measure(disp, 1);
+        if let Some(c) = test_text(
+            x,
+            y,
+            RINGTONE_X1 - width,
+            HEADER_TOP + 8,
+            1,
+            disp,
+            RINGTONE_MAX_W,
+            THEME.on_surface_variant,
+            THEME.surface_container,
+        ) {
+            return c;
         }
     }
 
@@ -3375,7 +3438,10 @@ fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // The value, at the trailing edge, in the platform's list-row position.
         let len = dialer.settings_value_lens[index];
         let value = &dialer.settings_values[index][..len];
-        let value_w = std::design::font::measure(value, 1);
+        let mut vbuf = [0u8; 64];
+        let vn = std::design::font::ellipsize(value, 1, SETTINGS_VALUE_MAX_W, &mut vbuf);
+        let vdisp = if vn > 0 { &vbuf[..vn] } else { value };
+        let value_w = std::design::font::measure(vdisp, 1);
         let value_x = DISPLAY_X1.saturating_sub(style.pad + value_w);
         if let Some(c) = test_text(
             x,
@@ -3383,7 +3449,8 @@ fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             value_x,
             row_y + (SETTINGS_ROW_H - run_rows(1)) / 2,
             1,
-            value,160, 
+            vdisp,
+            SETTINGS_VALUE_MAX_W,
             THEME.on_surface_variant,
             style.fill,
         ) {
@@ -3398,7 +3465,8 @@ fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 DISPLAY_X0 + style.pad,
                 row_y + 8,
                 1,
-                row.title(),300, 
+                row.title(),
+                SETTINGS_TITLE_MAX_W,
                 THEME.on_surface,
                 style.fill,
             ) {
@@ -3513,13 +3581,17 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         let choice = &dialer.ringtone_choices[i];
         let name = &choice.name[..choice.name_len];
+        let mut nbuf = [0u8; 64];
+        let nn = std::design::font::ellipsize(name, 1, RINGTONE_TEXT_MAX_W, &mut nbuf);
+        let ndisp = if nn > 0 { &nbuf[..nn] } else { name };
         if let Some(c) = test_text(
             x,
             y,
             DISPLAY_X0 + style.pad,
             scrolled_y + 8,
             1,
-            name,DISPLAY_W - 2 * style.pad, 
+            ndisp,
+            RINGTONE_TEXT_MAX_W,
             THEME.on_surface,
             style.fill,
         ) {
@@ -3527,7 +3599,7 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         let path = &choice.path[..choice.path_len];
         let mut pbuf = [0u8; 64];
-        let n = std::design::font::ellipsize(path, 1, DISPLAY_W - 2 * style.pad, &mut pbuf);
+        let n = std::design::font::ellipsize(path, 1, RINGTONE_TEXT_MAX_W, &mut pbuf);
         if n > 0 {
             if let Some(c) = test_text(
                 x,
@@ -3535,7 +3607,8 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 DISPLAY_X0 + style.pad,
                 scrolled_y + 34,
                 1,
-                &pbuf[..n],DISPLAY_W - 2 * style.pad, 
+                &pbuf[..n],
+                RINGTONE_TEXT_MAX_W,
                 THEME.on_surface_variant,
                 style.fill,
             ) {
@@ -3661,17 +3734,17 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             let mut vbuf = [0u8; 64];
-            let vn = std::design::font::ellipsize(&buf[..len], 2, DISPLAY_W - 120, &mut vbuf);
+            let vn = std::design::font::ellipsize(&buf[..len], 2, FIELD_VALUE_MAX_W, &mut vbuf);
             let vy = fy + 36;
             if vn > 0 {
                 if let Some(c) = test_text(
                     x,
                     y,
-                    DISPLAY_X0 + 24,
+                    FIELD_TEXT_X0,
                     vy,
                     2,
                     &vbuf[..vn],
-                    DISPLAY_W - 120, 
+                    FIELD_VALUE_MAX_W,
                     THEME.on_surface,
                     fill,
                 ) {
@@ -3679,13 +3752,13 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             if focused {
-                let cx = DISPLAY_X0 + 24 + std::design::font::measure(&vbuf[..vn], 2);
+                let cx = FIELD_TEXT_X0 + std::design::font::measure(&vbuf[..vn], 2);
                 if x >= cx && x < cx + 2 && (vy..vy + run_rows(2)).contains(&y) {
                     return THEME.primary;
                 }
 
                 // Touch Clear (X) button at DISPLAY_X1 - 88
-                let clr_cx = DISPLAY_X1 - 88;
+                let clr_cx = DISPLAY_X1 - FIELD_CLEAR_DX;
                 let clr_cy = fy + 48;
                 let clr_dx = (x as i32) - clr_cx as i32;
                 let clr_dy = (y as i32) - clr_cy as i32;

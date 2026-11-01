@@ -50,7 +50,8 @@ const CARD_BORDER: u32 = match CARD.border {
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
-const CHARS_PER_LINE: usize = 36;
+/// The scale the editor draws its body text at, and the column it wraps to.
+const EDITOR_BODY_SCALE: usize = 2;
 
 /// The note card's height.
 const CARD_H: usize = 216;
@@ -130,6 +131,15 @@ const RULE_X0: usize = 44;
 
 /// The ruled page's right edge: the note's text column.
 const RULE_X1: usize = W - 44;
+
+/// The width the editor wraps a body line to: the distance between the rule's
+/// two edges, the column every line is drawn in.
+///
+/// WHY the column and not a character count: the body is drawn with the outline
+/// face at `EDITOR_BODY_SCALE`, whose glyphs vary in width, so a line has to
+/// break where its measured advance reaches this edge rather than after a fixed
+/// number of characters that never measures anything.
+const EDITOR_TEXT_COL_W: usize = RULE_X1 - RULE_X0;
 
 /// The distance from a line's top to the rule drawn under it.
 
@@ -252,8 +262,11 @@ impl AppState {
     }
 
     pub fn update_editor_layout(&mut self) {
-        self.line_spans_count = self.editor_buf.compute_lines(CHARS_PER_LINE, &mut self.line_spans);
-        self.cursor_pos = self.editor_buf.cursor_line_col(CHARS_PER_LINE);
+        self.line_spans_count =
+            self.editor_buf.compute_lines(EDITOR_BODY_SCALE, EDITOR_TEXT_COL_W, &mut self.line_spans);
+        self.cursor_pos = self
+            .editor_buf
+            .cursor_line_col(EDITOR_BODY_SCALE, EDITOR_TEXT_COL_W);
     }
 
     pub fn sync_editor_to_note(&mut self) {

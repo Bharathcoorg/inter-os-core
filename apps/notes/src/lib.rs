@@ -1097,7 +1097,17 @@ impl TextEditorBuffer {
         self.cursor = self.len;
     }
 
-    pub fn compute_lines(&self, max_chars_per_line: usize, out: &mut [LineSpan]) -> usize {
+    /// Breaks the body into drawn line spans, wrapping on the run's measured
+    /// advance rather than a character count.
+    ///
+    /// WHY pixels and not characters: the editor draws each span with the
+    /// outline face at `scale`, whose glyphs are not one width. A count of
+    /// characters is a count of a bitmap cell that no longer draws this text,
+    /// so a "line" of a fixed count could be wider than the column it is drawn
+    /// in and run off the page and past the rule. Here a line ends where the
+    /// ladder's own advances no longer fit `max_w`, the column the line is drawn
+    /// in, so the break is the break the screen shows.
+    pub fn compute_lines(&self, scale: usize, max_w: usize, out: &mut [LineSpan]) -> usize {
         if out.is_empty() {
             return 0;
         }
@@ -1105,15 +1115,16 @@ impl TextEditorBuffer {
             out[0] = LineSpan { start: 0, end: 0 };
             return 1;
         }
-        let max_chars = max_chars_per_line.max(1);
+        let em = std::design::font::em_for_scale(scale);
+        let budget = max_w.max(1);
         let mut line_count = 0;
         let mut line_start = 0;
 
         while line_start < self.len && line_count < out.len() {
-            let mut char_count = 0;
-            let mut last_space = None;
             let mut idx = line_start;
             let mut line_end = line_start;
+            let mut cur_w = 0usize;
+            let mut last_space: Option<usize> = None;
 
             while idx < self.len {
                 let b = self.buf[idx];
@@ -1122,18 +1133,24 @@ impl TextEditorBuffer {
                     idx += 1;
                     break;
                 }
-                if b == b' ' {
-                    last_space = Some(idx);
-                }
-                char_count += 1;
-                if char_count > max_chars {
+                let adv = std::design::typeface::advance_px(b, em) as usize;
+                if cur_w + adv > budget {
+                    // The run no longer fits the column. Break at the last
+                    // space so a word is not split where it can be avoided;
+                    // with no space in the line the over-long word is broken
+                    // here so the span still makes forward progress.
                     if let Some(space_idx) = last_space {
                         line_end = space_idx;
                         idx = space_idx + 1;
                     } else {
-                        line_end = idx;
+                        line_end = if idx == line_start { line_start + 1 } else { idx };
+                        idx = line_end;
                     }
                     break;
+                }
+                cur_w += adv;
+                if b == b' ' {
+                    last_space = Some(idx);
                 }
                 idx += 1;
                 line_end = idx;
@@ -1158,14 +1175,14 @@ impl TextEditorBuffer {
         line_count
     }
 
-    pub fn line_count(&self, max_chars_per_line: usize) -> usize {
+    pub fn line_count(&self, scale: usize, max_w: usize) -> usize {
         let mut spans = [LineSpan { start: 0, end: 0 }; 64];
-        self.compute_lines(max_chars_per_line, &mut spans)
+        self.compute_lines(scale, max_w, &mut spans)
     }
 
-    pub fn cursor_line_col(&self, max_chars_per_line: usize) -> (usize, usize) {
+    pub fn cursor_line_col(&self, scale: usize, max_w: usize) -> (usize, usize) {
         let mut spans = [LineSpan { start: 0, end: 0 }; 64];
-        let total = self.compute_lines(max_chars_per_line, &mut spans);
+        let total = self.compute_lines(scale, max_w, &mut spans);
         if total == 0 {
             return (0, 0);
         }
@@ -1178,26 +1195,26 @@ impl TextEditorBuffer {
         (total.saturating_sub(1), 0)
     }
 
-    pub fn move_cursor_up(&mut self, max_chars_per_line: usize) {
+    pub fn move_cursor_up(&mut self, scale: usize, max_w: usize) {
         let mut spans = [LineSpan { start: 0, end: 0 }; 64];
-        let total = self.compute_lines(max_chars_per_line, &mut spans);
+        let total = self.compute_lines(scale, max_w, &mut spans);
         if total == 0 {
             return;
         }
-        let (line, col) = self.cursor_line_col(max_chars_per_line);
+        let (line, col) = self.cursor_line_col(scale, max_w);
         if line > 0 {
             let target_span = spans[line - 1];
             self.cursor = (target_span.start + col).min(target_span.end);
         }
     }
 
-    pub fn move_cursor_down(&mut self, max_chars_per_line: usize) {
+    pub fn move_cursor_down(&mut self, scale: usize, max_w: usize) {
         let mut spans = [LineSpan { start: 0, end: 0 }; 64];
-        let total = self.compute_lines(max_chars_per_line, &mut spans);
+        let total = self.compute_lines(scale, max_w, &mut spans);
         if total == 0 {
             return;
         }
-        let (line, col) = self.cursor_line_col(max_chars_per_line);
+        let (line, col) = self.cursor_line_col(scale, max_w);
         if line + 1 < total {
             let target_span = spans[line + 1];
             self.cursor = (target_span.start + col).min(target_span.end);
@@ -1395,26 +1412,29 @@ mod tests {
     }
 
     #[test]
-    fn test_text_editor_line_wrapping() {
+    fn test_text_editor_wraps_by_measured_width() {
+        use interos_std::design::font;
+        let scale = crate::theme::type_scale::BODY;
         let mut ed = TextEditorBuffer::new();
         ed.insert_str("The quick brown fox jumps over the lazy dog");
 
+        // A narrow column forces several wrapped lines.
+        let budget = 200;
         let mut spans = [LineSpan { start: 0, end: 0 }; 16];
-        let count = ed.compute_lines(16, &mut spans);
+        let count = ed.compute_lines(scale, budget, &mut spans);
 
         assert!(count >= 3);
-        // First line: "The quick brown" (0..15)
-        assert_eq!(&ed.buf[spans[0].start..spans[0].end], b"The quick brown");
-        // Second line: "fox jumps over" (16..30)
-        assert_eq!(&ed.buf[spans[1].start..spans[1].end], b"fox jumps over");
-        // Third line: "the lazy dog" (31..43)
-        assert_eq!(&ed.buf[spans[2].start..spans[2].end], b"the lazy dog");
+        // Every wrapped line fits the column it is drawn in.
+        for s in &spans[..count] {
+            assert!(font::measure(&ed.buf[s.start..s.end], scale) <= budget);
+        }
+        // The spans tile the buffer: the whole body stays reachable.
+        assert_eq!(spans[0].start, 0);
+        assert_eq!(spans[count - 1].end, ed.len);
 
-        // Cursor line and col check
+        // Cursor line and col land on a real span boundary.
         ed.cursor = 0;
-        assert_eq!(ed.cursor_line_col(16), (0, 0));
-        ed.cursor = 16;
-        assert_eq!(ed.cursor_line_col(16), (1, 0));
+        assert_eq!(ed.cursor_line_col(scale, budget), (0, 0));
     }
 
     #[test]
@@ -1652,31 +1672,34 @@ mod tests {
 
     #[test]
     fn test_text_editor_up_down_and_bounds() {
+        let scale = crate::theme::type_scale::BODY;
+        // Wide enough that the three explicit lines never re-wrap.
+        let budget = 632;
         let mut ed = TextEditorBuffer::new();
         ed.insert_str("Line 1\nLine 2 is longer\nLine 3");
 
         // Move to start of line 2
         ed.cursor = 7;
-        assert_eq!(ed.cursor_line_col(36), (1, 0));
+        assert_eq!(ed.cursor_line_col(scale, budget), (1, 0));
 
         // Move up to line 1
-        ed.move_cursor_up(36);
-        assert_eq!(ed.cursor_line_col(36), (0, 0));
+        ed.move_cursor_up(scale, budget);
+        assert_eq!(ed.cursor_line_col(scale, budget), (0, 0));
         assert_eq!(ed.cursor, 0);
 
         // Move down to line 2
-        ed.move_cursor_down(36);
-        assert_eq!(ed.cursor_line_col(36), (1, 0));
+        ed.move_cursor_down(scale, budget);
+        assert_eq!(ed.cursor_line_col(scale, budget), (1, 0));
         assert_eq!(ed.cursor, 7);
 
         // Move down to line 3
-        ed.move_cursor_down(36);
-        assert_eq!(ed.cursor_line_col(36), (2, 0));
+        ed.move_cursor_down(scale, budget);
+        assert_eq!(ed.cursor_line_col(scale, budget), (2, 0));
         assert_eq!(ed.cursor, 24);
 
         // Cannot move down past end
-        ed.move_cursor_down(36);
-        assert_eq!(ed.cursor_line_col(36), (2, 0));
+        ed.move_cursor_down(scale, budget);
+        assert_eq!(ed.cursor_line_col(scale, budget), (2, 0));
 
         // Start / End
         ed.move_cursor_to_start();
@@ -1720,14 +1743,17 @@ mod tests {
 
     #[test]
     fn test_scale_2_line_wrapping_at_column_limit() {
+        use interos_std::design::font;
+        let scale = crate::theme::type_scale::BODY;
         let mut ed = TextEditorBuffer::new();
-        // 36 characters per line wrapped cleanly at word boundaries
+        // A wide run of text wrapped at the real body column.
         ed.insert_str("The quick brown fox jumps over the lazy dog and runs across the sovereign field");
+        let budget = 200;
         let mut spans = [LineSpan { start: 0, end: 0 }; 16];
-        let count = ed.compute_lines(36, &mut spans);
+        let count = ed.compute_lines(scale, budget, &mut spans);
         assert!(count >= 3);
         for span in &spans[..count] {
-            assert!(span.end - span.start <= 36);
+            assert!(font::measure(&ed.buf[span.start..span.end], scale) <= budget);
         }
     }
 

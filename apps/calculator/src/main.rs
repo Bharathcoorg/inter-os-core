@@ -138,6 +138,52 @@ const CAP_RESULT: u32 = typography::DISPLAY_CAP_PX;
 const CAP_LABEL: u32 = typography::SECTION_CAP_PX;
 const CAP_SECTION: u32 = typography::TITLE_CAP_PX;
 
+/// The cap a key label is drawn at.
+///
+/// WHY it comes from the engine and not the section rung: `lib.rs` declares
+/// `KEY_LABEL_CAP_PX` as the body rung, and the reference calculator's key
+/// faces stand a body's height. A label drawn at the section rung is a third
+/// larger than the size the engine names for it, so the two ladders drift.
+/// The keypad honours the engine's declaration.
+const CAP_KEY_LABEL: u32 = calculator::KEY_LABEL_CAP_PX;
+
+/// The band the history drawer's Clear and Close controls are drawn in, and the
+/// offset their label starts at inside it.
+///
+/// WHY the band is one name and not the six numbers it was: the painter, the
+/// corner rounding and the press all test the same rows, and the label was
+/// centred from the cap rather than the box -- a scale-two run reserves
+/// `run_rows(BODY_CAP_PX)` = 32 rows, so centring from an 18-row cap stood the
+/// box seven rows below the fill's middle and ran its last three rows past the
+/// pill's own bottom edge. On a per-pixel blit those rows are not clipped: they
+/// are painted on whatever the drawer puts under the pill.
+const PILL_TOP: usize = 130;
+const PILL_H: usize = 40;
+const PILL_BOTTOM: usize = PILL_TOP + PILL_H;
+const PILL_INK_DY: usize = (PILL_H - run_rows(typography::BODY_CAP_PX)) / 2;
+
+/// The history drawer's ledger geometry, all derived from the two runs a row
+/// stacks so the result cannot be drawn through the expression.
+///
+/// WHY a stride and not two offsets: the expression box and the result box
+/// are neighbours in one column, and the row's height has to close around
+/// the pair. A literal offset fitted to the old bitmap cell let the result's
+/// cap start inside the expression's box.
+const HIST_ROW_H: usize = 125;
+const HIST_LIST_Y0: usize = 195;
+const HIST_ROW_PITCH: usize = 140;
+const HIST_EXPR_DY: usize = 16;
+const HIST_LINE_STRIDE: usize = run_rows(CAP_LABEL);
+const HIST_RES_DY: usize = HIST_EXPR_DY + HIST_LINE_STRIDE;
+
+// WHY these gates exist: the two runs above share the row's column and the
+// row's own height, so the relations that keep them off each other and off
+// the row's bottom edge are checked where the numbers are set, not hoped for.
+const _: () = assert!(HIST_RES_DY >= HIST_EXPR_DY + run_rows(CAP_LABEL));
+const _: () = assert!(HIST_RES_DY + run_rows(CAP_SECTION) <= HIST_ROW_H);
+const _: () = assert!(run_rows(typography::BODY_CAP_PX) <= PILL_H);
+const _: () = assert!(run_rows(CAP_KEY_LABEL) <= 140);
+
 /// The rungs the result comes down when it does not fit the card.
 const RESULT_LADDER: [u32; 4] = [
     CAP_RESULT,
@@ -582,10 +628,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     return c;
                 }
 
-                // Clear button pill: x: 440..530, y: 130..170
-                if x >= 440 && x < 530 && y >= 130 && y < 170 {
+                // Clear button pill: x: 440..530, y: `PILL_TOP..PILL_BOTTOM`
+                if x >= 440 && x < 530 && y >= PILL_TOP && y < PILL_BOTTOM {
                     let prx = (x - 440).min(529 - x);
-                    let pry = (y - 130).min(169 - y);
+                    let pry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
                     if prx < R_CHIP && pry < R_CHIP {
                         let cdx = (R_CHIP - prx) as isize;
                         let cdy = (R_CHIP - pry) as isize;
@@ -598,17 +644,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     }
                     let cw = calculator::text_width(b"CLEAR", typography::BODY_CAP_PX);
                     let cx0 = 440 + (90 - cw) / 2;
-                    let cy0 = 130 + (40 - typography::BODY_CAP_PX as usize) / 2;
+                    let cy0 = PILL_TOP + PILL_INK_DY;
                     if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
                         return c;
                     }
                     return THEME.surface_container_high;
                 }
 
-                // Close button pill: x: 550..660, y: 130..170
-                if x >= 550 && x < 660 && y >= 130 && y < 170 {
+                // Close button pill: x: 550..660, y: `PILL_TOP..PILL_BOTTOM`
+                if x >= 550 && x < 660 && y >= PILL_TOP && y < PILL_BOTTOM {
                     let prx = (x - 550).min(659 - x);
-                    let pry = (y - 130).min(169 - y);
+                    let pry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
                     if prx < R_CHIP && pry < R_CHIP {
                         let cdx = (R_CHIP - prx) as isize;
                         let cdy = (R_CHIP - pry) as isize;
@@ -621,7 +667,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     }
                     let cw = calculator::text_width(b"CLOSE", typography::BODY_CAP_PX);
                     let cx0 = 550 + (110 - cw) / 2;
-                    let cy0 = 130 + (40 - typography::BODY_CAP_PX as usize) / 2;
+                    let cy0 = PILL_TOP + PILL_INK_DY;
                     if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
                         return c;
                     }
@@ -650,8 +696,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 }
             } else {
                 for i in 0..count.min(8) {
-                    let row_y0 = 195 + i * 140;
-                    let row_y1 = row_y0 + 125;
+                    let row_y0 = HIST_LIST_Y0 + i * HIST_ROW_PITCH;
+                    let row_y1 = row_y0 + HIST_ROW_H;
                     if y >= row_y0 && y < row_y1 && x >= 40 && x < 680 {
                         let erx = (x - 40).min(679 - x);
                         let ery = (y - row_y0).min(row_y1 - 1 - y);
@@ -671,7 +717,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                                 let elen = calculator::ellipsize_cap(expr_bytes, CAP_LABEL, 590, &mut ebuf);
                                 let ew = calculator::text_width(&ebuf[..elen], CAP_LABEL);
                                 let ex0 = 650usize.saturating_sub(ew).max(60);
-                                if let Some(c) = test_text(x, y, ex0, row_y0 + 16, CAP_LABEL, &ebuf[..elen], THEME.on_surface_variant, row_style.fill, false) {
+                                if let Some(c) = test_text(x, y, ex0, row_y0 + HIST_EXPR_DY, CAP_LABEL, &ebuf[..elen], THEME.on_surface_variant, row_style.fill, false) {
                                     return c;
                                 }
                             }
@@ -681,7 +727,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             let rlen = entry.result.format(&mut res_buf);
                             let rw = calculator::text_width(&res_buf[..rlen], CAP_SECTION);
                             let rx0 = 650usize.saturating_sub(rw).max(60);
-                            if let Some(c) = test_text(x, y, rx0, row_y0 + 58, CAP_SECTION, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
+                            if let Some(c) = test_text(x, y, rx0, row_y0 + HIST_RES_DY, CAP_SECTION, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
                                 return c;
                             }
                         }
@@ -902,10 +948,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             'C' | 'E' | 'B' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
                             _ => &[act as u8],
                         };
-                        let w = calculator::text_width(label, CAP_LABEL);
+                        let w = calculator::text_width(label, CAP_KEY_LABEL);
                         let x0 = center_x.saturating_sub(w / 2);
-                        let y0 = center_y.saturating_sub((CAP_LABEL / 2) as usize);
-                        if let Some(c) = test_text(x, y, x0, y0, CAP_LABEL, label, text_color, btn_bg, true) {
+                        // WHY the box and not the cap: a run reserves its line
+                        // box, so centring the box puts the run's middle on the
+                        // keycap's middle. Centring from the cap left a scale-two
+                        // box hanging ten rows below the key it labels.
+                        let y0 = center_y.saturating_sub(run_rows(CAP_KEY_LABEL) / 2);
+                        if let Some(c) = test_text(x, y, x0, y0, CAP_KEY_LABEL, label, text_color, btn_bg, true) {
                             return c;
                         }
                     }
@@ -1116,21 +1166,21 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
 
     // History Drawer active interactions
     if calc.show_history {
-        // Close button: x: 550..660, y: 130..170
-        if x >= 550 && x < 660 && y >= 130 && y < 170 {
+        // Close button: x: 550..660, y: `PILL_TOP..PILL_BOTTOM`
+        if x >= 550 && x < 660 && y >= PILL_TOP as u32 && y < PILL_BOTTOM as u32 {
             calc.show_history = false;
             return Tap::Redraw(Dirty::All);
         }
-        // Clear history button: x: 440..530, y: 130..170
-        if x >= 440 && x < 530 && y >= 130 && y < 170 {
+        // Clear history button: x: 440..530, y: `PILL_TOP..PILL_BOTTOM`
+        if x >= 440 && x < 530 && y >= PILL_TOP as u32 && y < PILL_BOTTOM as u32 {
             calc.history.clear();
             return Tap::Redraw(Dirty::All);
         }
         // History rows hit test
         let count = calc.history.count();
         for i in 0..count.min(8) {
-            let row_y0 = 195 + i * 140;
-            let row_y1 = row_y0 + 125;
+            let row_y0 = HIST_LIST_Y0 + i * HIST_ROW_PITCH;
+            let row_y1 = row_y0 + HIST_ROW_H;
             if (y as usize) >= row_y0 && (y as usize) < row_y1 && x >= 40 && x < 680 {
                 calc.load_history_entry(i);
                 calc.show_history = false;
