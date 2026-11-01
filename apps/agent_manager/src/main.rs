@@ -94,6 +94,21 @@ const ICON_BTN: usize = 44;
 const ICON_BTN_GAP: usize = 8;
 /// The app bar's title's left edge.
 const APPBAR_TITLE_X: usize = 88;
+/// The app bar's title's width, in pixels.
+///
+/// WHY it is solved from the controls and not written down: the two buttons to
+/// the title's right are themselves placed from `W`, `GUTTER`, `ICON_BTN` and
+/// `ICON_BTN_GAP`, and a title with no bound put its last letters on the search
+/// button's circle. Deriving the span from the same numbers the rects use is
+/// what keeps the word and the chrome it stops before in agreement.
+const APPBAR_TITLE_MAX_W: usize =
+    W - GUTTER - ICON_BTN * 2 - ICON_BTN_GAP - APPBAR_TITLE_X - ICON_BTN_GAP;
+/// The scratch a surface name is trimmed into before the bar paints it.
+///
+/// WHY a named size and not a page of zeros: this runs for every pixel of the
+/// bar, and a buffer wider than the longest name would be paid for once per
+/// pixel for letters that never occur. The names are one word each.
+const APPBAR_TITLE_BUF: usize = 32;
 /// The row the app bar's controls are centred on.
 const APPBAR_ROW: usize = HEADER_TOP + std::design::back_button::SIZE / 2;
 /// The top of an app bar icon button.
@@ -176,7 +191,15 @@ const CARD_GAP: usize = 14;
 /// WHY the heading is given a row of its own: the heading is the name of
 /// the thing the rows under it belong to, and a name that shares a line
 /// with a measurement is a measurement.
-const TITLE_ROW_H: usize = 40;
+///
+/// WHY it is the section rung's own line box and not a number written down: a
+/// heading painted at `CAP_SECTION` reserves `line_height(SECTION_SCALE)` rows
+/// from the row it is stamped on, and forty was the cell's, not the rung's. The
+/// gap under the heading happened to be wide enough to swallow the difference,
+/// so nothing on screen disagreed with the number -- and a row that is shorter
+/// than the ink it owns is only ever saved by luck, because this platform
+/// paints no clip and a rung that moves lands the surplus on the first line.
+const TITLE_ROW_H: usize = LINE_SECTION;
 const TITLE_GAP: usize = 10;
 /// The height of a row.
 ///
@@ -250,6 +273,7 @@ const CAP_TITLE: u32 = std::design::typography::TITLE_CAP_PX;
 /// The line heights that go with the cap heights.
 const LINE_CAPTION: usize = std::design::typography::CAPTION_LINE_PX;
 const LINE_BODY: usize = std::design::typography::BODY_LINE_PX;
+const LINE_SECTION: usize = std::design::typography::SECTION_LINE_PX;
 /// The row the title rung's baseline sits on, below its line box's top.
 ///
 /// WHY it comes from the ladder: the app's own `text` puts the baseline at
@@ -2802,14 +2826,22 @@ fn appbar_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
 
     // The surface's name. It is the largest thing on the bar, because the
     // name of the screen is the first thing a person looks for.
+    //
+    // WHY it is measured before it is painted: every rung on the ladder can
+    // move a name's width and the bar's own span is fixed by the two controls
+    // at its right, and `draw_label` on this platform clips nothing. An
+    // unmeasured run that outgrew the span would not wrap -- its last letters
+    // would land on the search button's circle and read as part of it.
     let title = app.surface.title();
+    let mut shown = [0u8; APPBAR_TITLE_BUF];
+    let len = fit_marked(title.as_bytes(), APPBAR_TITLE_MAX_W, CAP_TITLE, &mut shown);
     if let Some(c) = text(
         x,
         y,
         APPBAR_TITLE_X,
         APPBAR_TITLE_Y,
         CAP_TITLE,
-        title.as_bytes(),
+        &shown[..len],
         THEME.on_surface,
         THEME.surface,
         true,
@@ -3169,7 +3201,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             x,
                             y,
                             GUTTER + CONTENT_W - CARD_PAD_X,
-                            screen_y + (ROW_H - 26) / 2,
+                            screen_y + (ROW_H - CHIP_H) / 2,
                             value,
                             line.tone,
                         ) {
@@ -3274,6 +3306,36 @@ fn bubble_pixel(
     Some(colour)
 }
 
+/// The gap a chip's fill keeps above and below the caption it holds.
+const CHIP_PAD_Y: usize = 2;
+/// The height of a status chip.
+///
+/// WHY it is the caption's own line box plus its padding and not a number
+/// written down: a chip holds one caption run, and the run reserves
+/// `LINE_CAPTION` rows whatever the chip was cut for, so a height written as
+/// a literal is a promise the chip can break the moment the ladder moves --
+/// and the screen paints no clip, so the ink lands on the card.
+///
+/// WHY one name for both places that need it: the chip's fill and the row
+/// that centres the chip are the same height, and two numbers for it are two
+/// numbers that can disagree without anything saying so.
+const CHIP_H: usize = LINE_CAPTION + 2 * CHIP_PAD_Y;
+/// What a chip spends around the word it holds: the leading inset, the dot,
+/// the gap after the dot and the trailing inset.
+///
+/// WHY it is one number: the chip's width is this chrome plus whatever the
+/// measured word needs, and the word's bound is the same chrome subtracted
+/// from the column. Written twice as two halves they can disagree, and the
+/// disagreement is a word cut shorter than the fill that was drawn for it.
+const CHIP_CHROME: usize = 10 + 8 + 6 + 10;
+
+// WHY at compile time: the chip is centred inside a row and painted with no
+// clip, so a chip taller than the row that carries it is a chip whose fill
+// lands on the row above and the row below. `CHIP_H` is built from the caption
+// rung and `ROW_H` from the body rung, so the two can part company without
+// anything on screen saying so until the ladder moves.
+const _: () = assert!(CHIP_H <= ROW_H);
+
 /// The colour of `(x, y)` if it is a status chip whose right edge is at
 /// `right_x`.
 fn chip_px(
@@ -3284,13 +3346,20 @@ fn chip_px(
     label: &[u8],
     tone: Tone,
 ) -> Option<u32> {
+    // WHY the word is trimmed before the fill is cut: the chip is right-anchored
+    // and grows to the left, so a state word wider than the value column pushed
+    // its own fill into the label column and painted the label through the dot.
+    // Trimming it is the only case this control can have too much to say.
+    let mut shown = [0u8; MAX_RUN_BYTES];
+    let len = fit_marked(label, VALUE_W.saturating_sub(CHIP_CHROME), CAP_CAPTION, &mut shown);
+    let label = &shown[..len];
     let text_w = measure_cap(label, CAP_CAPTION);
-    let width = 10 + 8 + 6 + text_w + 10;
+    let width = CHIP_CHROME + text_w;
     let left = right_x.saturating_sub(width);
-    let rect = Rect::new(left, top, width, 26);
+    let rect = Rect::new(left, top, width, CHIP_H);
     let mut colour = monochrome::chip_px(x, y, rect, THEME.surface_container_low, None)?;
     let dot_cx = left + 10 + 4;
-    let dot_cy = top + 13;
+    let dot_cy = top + CHIP_H / 2;
     if let Some(c) = monochrome::circle_px(x, y, dot_cx, dot_cy, 4, tone.colour(), None) {
         colour = c;
     }
@@ -3298,7 +3367,10 @@ fn chip_px(
         x,
         y,
         dot_cx + 10,
-        top + (LINE_CAPTION + 12).saturating_sub(LINE_CAPTION) / 2,
+        // WHY the caption is centred against the chip: the caption reserves
+        // `LINE_CAPTION` rows from the row it is stamped on, and a stamp that
+        // leaves the box taller than the chip spills the word over the fill.
+        top + (CHIP_H - LINE_CAPTION) / 2,
         CAP_CAPTION,
         label,
         tone.colour(),
