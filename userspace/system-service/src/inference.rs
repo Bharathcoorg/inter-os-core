@@ -2,7 +2,7 @@
 //!
 //! Strictly `#![no_std]` and zero heap allocation in all execution paths.
 //! Implements real tensor operations:
-//! - Dequantization (Q4_0, Q8_0, Q4_K, F16 to F32)
+//! - Dequantization (F32, F16, Q4_0, Q8_0 to F32); any other type id is refused by number
 //! - Matrix-vector multiplication (GEMV) with on-the-fly row dequantization
 //! - RMSNorm (Root Mean Square Layer Normalization)
 //! - RoPE (Rotary Positional Embeddings)
@@ -23,6 +23,9 @@ pub const MAX_HEAD_DIM: usize = 32;
 /// Error types for inference execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceError {
+    /// The GGML type id the tensor declares. Only the four ids `gemv` dequantizes
+    /// reach the arithmetic, so a K-quant file is refused here rather than read
+    /// with a layout the engine has not been given authoritatively.
     UnsupportedQuantization(u32),
     CorruptedWeights,
     BufferTooSmall,
