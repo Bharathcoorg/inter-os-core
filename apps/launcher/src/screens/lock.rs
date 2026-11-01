@@ -8,11 +8,14 @@
 //! `launcher::text`, never from literals local to this file.
 //!
 //! WHY the type scales below are derived rather than read from `theme::type_scale`:
-//! they are this surface's own measured cap heights, and the reference panel fixes
-//! them independently of the shell's ladder. Each is
-//! `round(measured_cap_px / font::CAP_HEIGHT)`, so the derivation survives the next
-//! typeface: only `CAP_HEIGHT` changes, and the arithmetic below is re-run against
-//! it. `theme::type_scale` still sizes every other surface in the shell.
+//! they are this surface's own measured ems, and the reference panel fixes them
+//! independently of the shell's ladder. Each `*_SCALE` is the ladder rung whose em
+//! is that measured em -- `font::em_for_scale(LOCK_CLOCK_SCALE) == LOCK_CLOCK_EM`
+//! exactly, and the date's 28 sits between rung 2's 25 and rung 3's 34 and is taken
+//! at the rung below, which the gates at the foot of this block both assert. The rung
+//! is what the refusal path rasterises at, so a rung that is not the run's em draws
+//! the reference's text at a different size in that one branch. `theme::type_scale`
+//! still sizes every other surface in the shell.
 //!
 //! WHY there is a [`Frame`] and a one-slot memo for it: this renderer is called
 //! once per pixel -- 1,036,800 times a frame -- through a function pointer the
@@ -53,6 +56,10 @@ const LOCK_REF_H: usize = walls::SCENE_REF_H;
 /// Longest string the lock surface can render (`Www, DD Mmm`).
 pub const LOCK_DATE_TEXT_LEN: usize = 11;
 /// Bottom edge of the status-bar band.
+///
+/// WHY this is the pad's own 56 and not the platform's 48: the band only has to
+/// contain what this surface draws in it, which is the clock box below, and the
+/// gate is asserted against that box rather than trusted.
 const LOCK_STATUS_BAND: usize = 56;
 
 /// Left edge shared by the status clock, the date line and the big clock.
@@ -68,8 +75,18 @@ const LOCK_STATUS_BAND: usize = 56;
 pub const LOCK_CONTENT_X: usize = 40;
 
 const LOCK_STATUS_TIME_X: usize = LOCK_CONTENT_X;
-const LOCK_STATUS_TIME_Y: usize = 27;
-const LOCK_STATUS_TIME_SCALE: usize = 1;
+/// The status clock's row and rung, shared by the lock surface and the pad.
+///
+/// WHY shared: the pad covers the whole surface, status band included, and used
+/// to draw the same five bytes at x 40 y 27 at scale 1 while the lock painter
+/// drew them at x 40 y 12 at scale 2 -- one clock, two cap heights, fifteen rows
+/// apart, in the one slot the module header says cannot be set twice. The lock's
+/// own placement is the one that reads: at y 27 the scale-1 run inks its 13 px cap
+/// across rows 32..=44, centred on 38, while the instrument marks it shares the
+/// band with occupy 14..=34, centred on 24, so the pad's clock sat fourteen rows
+/// below its own neighbours.
+const LOCK_STATUS_TIME_Y: usize = 12;
+const LOCK_STATUS_TIME_SCALE: usize = 2;
 
 /// The day and the date, at the document's own position and size.
 ///
@@ -77,20 +94,91 @@ const LOCK_STATUS_TIME_SCALE: usize = 1;
 /// weekday and the date on one line in the secondary ink, and the hero
 /// clock below it is the only thing on the screen that is allowed to be
 /// large.
-pub const LOCK_DATE_Y: usize = 78;
+///
+/// WHY the origin is solved from the baseline: `LOCK_DATE_Y` is the top of the
+/// line box the refusal path's painter reserves for a rung-2 run, and that
+/// painter puts its baseline `ascent_for_scale(2)` rows below whatever origin it
+/// is handed. Deriving it keeps that path's box on the same rows the reference-
+/// placed run occupies (the reference em 28 ascends 29 rows, so its own box starts
+/// three rows higher at 75 -- the two branches are three rows apart by the
+/// reference's own rounding, and each contains its own ink).
+pub const LOCK_DATE_Y: usize = LOCK_DATE_BASELINE - launcher::font::ascent_for_scale(LOCK_DATE_SCALE);
 pub const LOCK_DATE_SCALE: usize = 2;
 pub const LOCK_DATE_EM: u32 = 28;
 pub const LOCK_DATE_BASELINE: usize = 104;
 
-/// The hero clock: cap height 76px, bold, prominent.
-pub const LOCK_CLOCK_Y: usize = 140;
-pub const LOCK_CLOCK_SCALE: usize = 5;
+/// The hero clock: the reference panel's own 107 px em, which is a 76 px cap and
+/// is rung 7 of the ladder exactly.
+///
+/// WHY the rung is 7 and not the 5 this carried: `LOCK_CLOCK_SCALE` is not read by
+/// the reference-placed run at all -- that one is placed at `LOCK_CLOCK_EM` -- it
+/// is the rung the *refusal* path rasterises at. At 5 that path drew a 44 px clock
+/// inside a gate 120 rows deep, so a lock surface whose run the outline rasteriser
+/// declined showed a third-sized clock sitting fifteen rows below the row the same
+/// gate was measured to close at.
+pub const LOCK_CLOCK_Y: usize = LOCK_CLOCK_BASELINE - launcher::font::ascent_for_scale(LOCK_CLOCK_SCALE);
+pub const LOCK_CLOCK_SCALE: usize = 7;
 pub const LOCK_CLOCK_EM: u32 = 107;
 pub const LOCK_CLOCK_BASELINE: usize = 240;
 
 pub const LOCK_HINT_Y: usize = 1270;
 pub const LOCK_HINT_SCALE: usize = 2;
 pub const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
+
+/// The line box a run painted through `crate::test_text_aa` at `scale` reserves.
+///
+/// WHY `font::` and not `text::`: `test_text_aa` hands the painter the run's origin
+/// and lets the face solve its own baseline, and every rung on this surface reaches
+/// `interos_std::design::monochrome::text_px` -- the outline face -- whose box is
+/// the typeface's ascent plus descent at the rung's em. `text::line_height` answers
+/// the 16x24 bitmap cell instead: 48 rows at rung 2 against the 32 the face inks,
+/// 24 at rung 1 against 22, 120 at the clock's old rung against the 80 that rung
+/// actually painted. Gating on it handed the rasteriser rows outside its own run,
+/// let a band claim a height the ink never had, and is the reason the hint's box
+/// reached four rows into the control discs below it.
+const fn lh(scale: usize) -> usize {
+    launcher::font::line_height(scale)
+}
+
+/// Every reserved box on this surface, named once so a gate and a stride read the
+/// same number.
+const STATUS_TIME_BOX_H: usize = lh(LOCK_STATUS_TIME_SCALE);
+const DATE_BOX_H: usize = lh(LOCK_DATE_SCALE);
+const CLOCK_BOX_H: usize = lh(LOCK_CLOCK_SCALE);
+const HINT_BOX_H: usize = lh(LOCK_HINT_SCALE);
+const PIN_HEADING_BOX_H: usize = lh(PIN_HEADING_SCALE);
+const PIN_SUBHEADING_BOX_H: usize = lh(PIN_SUBHEADING_SCALE);
+
+/// The one box on this surface that is deliberately the *cell* height: the control
+/// captions are gated for `test_text`, and at the caption rung that funnel tries
+/// the outline face first (22 rows) and falls through to the bitmap pen walk
+/// (`text::line_height(1)` = 24 rows) for a run the outline face declines. The
+/// gate has to contain both branches, so it takes the wider of the two.
+const LOCK_NA_BOX_H: usize = text::line_height(type_scale::CAPTION);
+
+/// Truth gates: the ladder every box above trusts, and the fact that each run
+/// closes inside the band that claims to contain it.
+const _: () = assert!(launcher::font::em_for_scale(LOCK_CLOCK_SCALE) == LOCK_CLOCK_EM);
+const _: () = assert!(launcher::font::em_for_scale(LOCK_DATE_SCALE) <= LOCK_DATE_EM);
+const _: () = assert!(
+    launcher::font::em_for_scale(LOCK_DATE_SCALE + 1) > LOCK_DATE_EM,
+    "the date's rung must be the largest one that does not exceed the reference em"
+);
+const _: () = assert!(STATUS_TIME_BOX_H == 32 && DATE_BOX_H == 32 && CLOCK_BOX_H == 140);
+const _: () = assert!(HINT_BOX_H == 32 && PIN_HEADING_BOX_H == 32 && PIN_SUBHEADING_BOX_H == 22);
+const _: () = assert!(
+    LOCK_NA_BOX_H == 24 && launcher::font::line_height(type_scale::CAPTION) == 22,
+    "the caption box is the bitmap cell, which is two rows taller than the outline box it gates"
+);
+const _: () = assert!(LOCK_STATUS_TIME_Y + STATUS_TIME_BOX_H <= LOCK_STATUS_BAND);
+const _: () = assert!(LOCK_DATE_Y + DATE_BOX_H <= LOCK_CLOCK_Y);
+const _: () = assert!(LOCK_CLOCK_Y + CLOCK_BOX_H <= LOCK_HINT_Y);
+/// WHY the hint's own bottom rather than the pill: the hint is painted before the
+/// two control discs and falls through to them, so an over-tall hint box was only
+/// ever harmless by the accident of branch order. `text::line_height(2)` put its
+/// band at 1318, four rows down into the discs' own 1314.
+const _: () =
+    assert!(LOCK_HINT_Y + HINT_BOX_H <= (LOCK_BTN_CY - LOCK_BTN_R) as usize);
 
 #[allow(dead_code)]
 const LOCK_PADLOCK_CX: i32 = 362;
@@ -581,9 +669,10 @@ fn lock_button_disc(x: usize, y: usize, cx: i32, bg: u32) -> Option<u32> {
 /// WHY an origin and not a box: `test_text` is handed the glyph run's top-left and
 /// rasterises downward from it, so handing it a box whose height came from
 /// `text::line_height` puts the run a whole line-height above where it belongs.
-/// `line_height(CAPTION)` is 48 px on this face and the rasteriser draws 16, so
-/// the earlier version of this function drew "N/A" *inside* the torch disc, where
-/// the disc's own veil hid all but its last row.
+/// That funnel answers `text::line_height(CAPTION)` = 24 rows at this rung and the
+/// cell's own ink is 16 of them, so the earlier version of this function drew
+/// "N/A" *inside* the torch disc, where the disc's own veil hid all but its last
+/// row.
 ///
 /// WHY the position is still derived rather than typed: the label has to clear the
 /// control it belongs to and the home indicator, and both of those move when the
@@ -615,7 +704,7 @@ fn lock_na_origin() -> (usize, usize) {
 /// label's origin and let it reject the other 1,036,000-odd pixels one row-band
 /// test at a time, which is the cheapest possible reject but still a call and a pen
 /// walk per pixel. Testing the box first is the same test `test_text` performs on
-/// the row (`y` in `[y0, y0 + line_height)`) extended with the one it performs on
+/// the row (`y` in `[y0, y0 + LOCK_NA_BOX_H)`) extended with the one it performs on
 /// the column, so it accepts exactly the pixels `test_text` could have accepted and
 /// rejects the rest without calling anything.
 fn lock_na_box() -> Rect {
@@ -624,7 +713,7 @@ fn lock_na_box() -> Rect {
         x,
         y,
         text::measure(LOCK_NA_TEXT, type_scale::CAPTION),
-        text::line_height(type_scale::CAPTION),
+        LOCK_NA_BOX_H,
     )
 }
 
@@ -647,7 +736,7 @@ fn lock_na_r_box() -> Rect {
             .clamp(space::SM, W.saturating_sub(w + space::SM)),
         y,
         w,
-        text::line_height(type_scale::CAPTION),
+        LOCK_NA_BOX_H,
     )
 }
 
@@ -666,12 +755,17 @@ fn lock_na_r_box() -> Rect {
 /// times, and both are exactly the kind of thing a future runtime theme would move
 /// out of the compiler's reach.
 struct Frame {
-    /// Cell height of the status-bar clock: `text::line_height(LOCK_STATUS_TIME_SCALE)`.
+    /// Line-box height of the status-bar clock: `lh(LOCK_STATUS_TIME_SCALE)`.
     ///
     /// WHY it is here and not typed: the status clock is the one run on this
     /// surface with no measured width -- it is drawn from a fixed origin and the
     /// rasteriser stops at the end of the string -- so its only metric is its
     /// height, and that is still a `text::` call if it is made per pixel.
+    ///
+    /// WHY it is the outline box and not the cell: the rung is 2, which
+    /// `crate::test_text_aa` sends to the outline face, so the old
+    /// `text::line_height(2)` gated on 48 rows for the 32 the face inks -- and
+    /// the extra 16 rows were the band's own floor, not the run's.
     status_h: usize,
     /// The date line, left-aligned on `LOCK_CONTENT_X`.
     date: Rect,
@@ -782,7 +876,7 @@ impl Frame {
         );
 
         Frame {
-            status_h: text::line_height(2),
+            status_h: STATUS_TIME_BOX_H,
             date: match &date_outline {
                 Some(run) => {
                     let (x, y, w, h) = run.bounds();
@@ -792,7 +886,7 @@ impl Frame {
                     LOCK_CONTENT_X,
                     LOCK_DATE_Y,
                     text::measure(&state.date_line, LOCK_DATE_SCALE),
-                    text::line_height(LOCK_DATE_SCALE),
+                    DATE_BOX_H,
                 ),
             },
             date_outline,
@@ -805,7 +899,7 @@ impl Frame {
                     LOCK_CONTENT_X,
                     LOCK_CLOCK_Y,
                     text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
-                    text::line_height(LOCK_CLOCK_SCALE),
+                    CLOCK_BOX_H,
                 ),
             },
             clock_outline,
@@ -813,19 +907,19 @@ impl Frame {
                 text::center_x(LOCK_HINT_TEXT, LOCK_HINT_SCALE, W),
                 LOCK_HINT_Y,
                 text::measure(LOCK_HINT_TEXT, LOCK_HINT_SCALE),
-                text::line_height(LOCK_HINT_SCALE),
+                HINT_BOX_H,
             ),
             pin_heading: Rect::new(
                 text::center_x(heading, PIN_HEADING_SCALE, W),
                 PIN_HEADING_Y,
                 text::measure(heading, PIN_HEADING_SCALE),
-                text::line_height(PIN_HEADING_SCALE),
+                PIN_HEADING_BOX_H,
             ),
             pin_subheading: Rect::new(
                 text::center_x(subheading, PIN_SUBHEADING_SCALE, W),
                 PIN_SUBHEADING_Y,
                 text::measure(subheading, PIN_SUBHEADING_SCALE),
-                text::line_height(PIN_SUBHEADING_SCALE),
+                PIN_SUBHEADING_BOX_H,
             ),
             na: lock_na_box(),
             na_r: lock_na_r_box(),
@@ -986,9 +1080,10 @@ const PIN_KEYS: [[char; 3]; 4] = [
 ];
 /// Radius of a key in pixels -- the drawn disc *and* the tappable region, which
 /// are deliberately the same circle: every pixel of a key can be tapped and
-/// nothing outside it can be. 96 px across is twice the 48 px minimum touch
-/// target in `theme`. (The keypad used to draw at radius 44 and hit at 48, a
-/// four-pixel annulus of key that was never on screen; one radius removes the
+/// nothing outside it can be. 96 px across is a little over twice the 44 px
+/// minimum in `theme::MIN_TOUCH_TARGET` (`design::touch::MIN_TARGET`), which is
+/// what a dialer key wants. (The keypad used to draw at radius 44 and hit at 48,
+/// a four-pixel annulus of key that was never on screen; one radius removes the
 /// question of which is the real key.)
 const PIN_KEY_R: i32 = 48;
 /// Half the square that rejects a pixel nowhere near a key before the circular
@@ -1020,11 +1115,13 @@ const PIN_KEY_RIM_PERCENT: u32 = LOCK_BTN_RIM_PERCENT;
 /// 24 px-wide hairline floating in the middle of its key is exactly what "the
 /// numbers are not crystal clear" was describing.
 ///
-/// WHY 4 still fits the key: the figure's widest rows sit 18 px either side of
-/// the disc's centre line, where the disc's half-chord is 44.9 px, and its
-/// extreme cap rows are 18 px wide where the half-chord is 33.9 px. The ink
-/// clears the rim on every side, so `PIN_KEY_R` stays the drawn disc *and* the
-/// tappable disc and neither has to grow.
+/// WHY 4 still fits the key: the ink box is 36 px of half-extent down and 20 px
+/// of half-extent sideways from the disc's centre, both measured off `FONT_BOLD`
+/// by `bold_figure_ink` below, and the disc's half-chord at 36 rows is 31.7 px.
+/// The gate beside that scan asserts the corner of the box against
+/// `PIN_KEY_R`, so `PIN_KEY_R` stays the drawn disc *and* the tappable disc and
+/// neither has to grow -- and neither has to shave a figure, which is what the
+/// outline metric this run used to be centred with did to its bottom four rows.
 ///
 /// WHY a whole number on both axes: this face is a bitmap and the magnifier is
 /// nearest-neighbour, so only an exact integer multiple keeps every stem an
@@ -1043,12 +1140,19 @@ const PIN_DIGIT_SCALE: usize = 4;
 const PIN_DIGIT_BOLD: bool = true;
 /// The `CLR` label's scale.
 ///
-/// WHY 1: it has to stay subordinate to the figures, and 1 is the only rung left
-/// below them. Measured on the committed tables, "CLR" is 38 px at scale 1, 76 px
-/// at scale 2 and 114 px at scale 3; the disc's chord across its middle is 96 px,
-/// so scale 3 runs straight off both sides of the key and scale 2 leaves 10 px of
-/// margin and reads as jammed against the rim. Scale 1 is 0.24 of the figure's
-/// cap height and 0.40 of its width, which is the hierarchy a dialer wants.
+/// WHY 1: hierarchy, not fit. Measured on the committed tables the label inks
+/// 27 px wide at that rung, 13 px of cap against the figures' 68, and the disc's
+/// chord across its middle is 96 px, so it clears the rim by 34 px either side --
+/// and rung 2 would fit too, at 38 px of ink. But rung 2 is an 18 px cap, exactly
+/// the cap the prompt above the keypad carries, and a pad whose key label matches
+/// its prompt has lost the three levels it is built on: figures, prompt, caption.
+///
+/// WHY the box is centred on `text::measure` and sits a few pixels left of the
+/// disc: at the caption rung `measure` walks the bitmap cell and answers 38 px,
+/// while `test_text_aa` rasterises the outline face, which advances 27. That
+/// disagreement is `text::advance`'s scale-1 branch, not this surface's, and the
+/// same mismatch is documented at the pad's sub-prompt; centring on a hand-picked
+/// 27 here would be exactly wrong the moment the funnel is unified.
 ///
 /// The numbers this constant's note used to quote (102 / 90 / 45 px against a
 /// 90 px chord) were measured against the pre-condensing fixed 8x8 face, which
@@ -1060,19 +1164,139 @@ const PIN_DIGIT_BOLD: bool = true;
 /// stays in the lighter face so it cannot compete with the thing it labels.
 const PIN_LABEL_SCALE: usize = 1;
 
-/// The cell origin that centres a run's cap ink on `cy`: the ink is a cap
-/// height tall and its centre sits half a cap below the baseline.
+/// The line-box origin that centres an *outline-face* run's cap on `cy`: the cap
+/// is `cap_for_scale` tall and sits `ascent_for_scale - cap_for_scale` rows under
+/// the run's top.
 ///
 /// WHY derived rather than typed: the old keypad hand-typed `cy - 17`, which
 /// put its scale-2 figures six pixels below the disc's centre. This lands
 /// the cap box on the centre for whatever scale is in use, and it takes the
 /// metrics from the same ladder the renderer draws with, so the next
 /// typeface or scale change cannot re-offset the keys.
+///
+/// WHY it is *only* the outline face's answer: the `CLR` label this serves goes
+/// through `test_text_aa`, but the figures go through
+/// `text::rasterize_pixel_bold`, which walks the 16x24 cell and magnifies it and
+/// never consults this ladder. Handing that run an outline metric is what
+/// [`PIN_DIGIT_FACE_OFF`] exists to stop.
 fn pin_face_y(cy: usize, scale: usize) -> usize {
     cy.saturating_sub(
         launcher::font::ascent_for_scale(scale) - launcher::font::cap_for_scale(scale) as usize / 2,
     )
 }
+
+/// The ten figures' ink extents in the bold cell -- `(top row, bottom row, left
+/// column, right column)` -- read out of the committed table at compile time.
+///
+/// WHY scanned and not quoted: the centring below is only honest if the extent it
+/// centres is the extent the face actually inks. `font::CAP_TOP` and
+/// `font::BASELINE` say where the cap box is, but the round figures overshoot the
+/// baseline by a row (and the flat-footed ones do not), so a cell-row assumption
+/// written by hand would be one of the remembered numbers this audit is about.
+const fn bold_figure_ink() -> (usize, usize, usize, usize) {
+    let first = b'0' as usize - launcher::font::FIRST_CHAR as usize;
+    let mut top = launcher::font::GLYPH_H;
+    let mut bottom = 0usize;
+    let mut left = launcher::font::GLYPH_W;
+    let mut right = 0usize;
+    let mut d = 0usize;
+    while d < 10 {
+        let g = (first + d) * launcher::font::GLYPH_H;
+        let mut row = 0usize;
+        while row < launcher::font::GLYPH_H {
+            let bits = launcher::font::FONT_BOLD[g + row];
+            if bits != 0 {
+                if row < top {
+                    top = row;
+                }
+                if row > bottom {
+                    bottom = row;
+                }
+                let mut col = 0usize;
+                while col < launcher::font::GLYPH_W {
+                    if (bits >> (launcher::font::GLYPH_W - 1 - col)) & 1 == 1 {
+                        if col < left {
+                            left = col;
+                        }
+                        if col > right {
+                            right = col;
+                        }
+                    }
+                    col += 1;
+                }
+            }
+            row += 1;
+        }
+        d += 1;
+    }
+    (top, bottom, left, right)
+}
+
+const BOLD_FIG_TOP: usize = bold_figure_ink().0;
+const BOLD_FIG_BOTTOM: usize = bold_figure_ink().1;
+const BOLD_FIG_LEFT: usize = bold_figure_ink().2;
+const BOLD_FIG_RIGHT: usize = bold_figure_ink().3;
+
+/// The figures' advance in pixels at their scale, taken from the bold table the
+/// pen walk strides with -- all ten figures are tabular, so one number serves.
+const fn bold_figure_advance() -> usize {
+    let first = b'0' as usize - launcher::font::FIRST_CHAR as usize;
+    let mut widest = 0usize;
+    let mut d = 0usize;
+    while d < 10 {
+        let a = launcher::font::ADVANCE_BOLD[first + d] as usize;
+        if a > widest {
+            widest = a;
+        }
+        d += 1;
+    }
+    widest * PIN_DIGIT_SCALE
+}
+
+const BOLD_FIG_ADV: usize = bold_figure_advance();
+
+/// Rows between the pen walk's origin and the figure's ink-box centre, at the
+/// figures' scale: the origin that puts the ink -- not the cell, not the outline
+/// box -- on the disc's centre line.
+const PIN_DIGIT_FACE_OFF: usize = (BOLD_FIG_TOP + BOLD_FIG_BOTTOM + 1) * PIN_DIGIT_SCALE / 2;
+
+const fn amax(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The figure's ink box as half-extents about the disc's centre, vertically then
+/// horizontally, from the same scan that gives the origin.
+const PIN_DIGIT_HALF_H: usize = amax(
+    PIN_DIGIT_FACE_OFF - BOLD_FIG_TOP * PIN_DIGIT_SCALE,
+    (BOLD_FIG_BOTTOM + 1) * PIN_DIGIT_SCALE - 1 - PIN_DIGIT_FACE_OFF,
+);
+const PIN_DIGIT_HALF_W: usize = amax(
+    BOLD_FIG_ADV / 2 - BOLD_FIG_LEFT * PIN_DIGIT_SCALE,
+    (BOLD_FIG_RIGHT + 1) * PIN_DIGIT_SCALE - 1 - BOLD_FIG_ADV / 2,
+);
+
+/// Truth gates for the figures: the extent the scan answers, the origin it puts
+/// the ink on, and the fact that the whole ink box clears the drawn -- and
+/// tappable -- disc at its worst corner.
+///
+/// WHY the second one is the finding: at `pin_face_y`'s answer for scale 4, which
+/// is `ascent_for_scale(4) - cap_for_scale(4)/2` = 47 - 16 = 31 rows above the
+/// centre, the cell's 72-row ink ran from `cy - 19` to `cy + 52` -- 4 rows past
+/// the key's own `cy + PIN_KEY_BOX` gate and 4 rows past the disc's radius, so
+/// every figure on the pad was drawn with its feet sawed off: the overshoot rows
+/// of 0/2/3/5/6/8/9 and the whole flat foot of 1/4/7. The 48 this derives puts the
+/// ink at `cy - 36 ..= cy + 35`, inside the rim on every row.
+const _: () = assert!(BOLD_FIG_TOP == 3 && BOLD_FIG_BOTTOM == 20 && PIN_DIGIT_FACE_OFF == 48);
+const _: () = assert!(BOLD_FIG_LEFT == 1 && BOLD_FIG_RIGHT == 9 && BOLD_FIG_ADV == 48);
+const _: () = assert!(
+    PIN_DIGIT_HALF_H * PIN_DIGIT_HALF_H + PIN_DIGIT_HALF_W * PIN_DIGIT_HALF_W
+        <= (PIN_KEY_R * PIN_KEY_R) as usize,
+    "a keypad figure's ink box has to close inside the disc that is both drawn and tapped"
+);
 
 /// Backspace pictogram: the conventional left-pointing pentagon, outlined,
 /// with an X through its body. `dx`/`dy` are offsets from the key centre; the
@@ -1203,11 +1427,12 @@ fn pin_key_face(
         // of pure ink with a hard edge and nothing between the ink and the disc.
         //
         // WHY this is the right place to want hard edges and the header above it
-        // is not: the header is 34 px of cap and its run is anti-aliased at
-        // scale 2, where coverage buys real curve smoothing for 48 rows of type
-        // read once. The figure is 68 px of cap magnified 4x, where the same
-        // coverage buys nothing but a grey outline and costs the only weight the
-        // glyph has.
+        // is not: the header is rung 2 -- an 18 px cap in a 32-row line box --
+        // and it is anti-aliased, where coverage buys real curve smoothing for a
+        // line of type read once. The figure is 17 cell rows of cap magnified 4x
+        // (68 px, 72 with the round figures' overshoot), where the same coverage
+        // buys nothing but a grey outline and costs the only weight the glyph
+        // has.
         '0'..='9' => {
             let digit = ch as u8;
             // WHY the figure's own bold advance rather than a hand-tuned optical
@@ -1223,7 +1448,7 @@ fn pin_key_face(
                 x,
                 y,
                 x0,
-                pin_face_y(cy, PIN_DIGIT_SCALE),
+                cy.saturating_sub(PIN_DIGIT_FACE_OFF),
                 PIN_DIGIT_SCALE,
                 &[digit],
                 ink,
@@ -1375,36 +1600,58 @@ fn pin_messages(state: &LauncherState) -> (&'static [u8], &'static [u8]) {
     }
 }
 
-/// The prompt's scale: 2, i.e. a 34 px cap.
+/// The prompt's scale: rung 2, i.e. an 18 px cap in a 32-row line box.
 ///
-/// WHY 2: it is the line the user reads before every keystroke, and the widest of
-/// the four strings [`pin_messages`] can return -- "Confirm Device PIN" -- measures
-/// 364 px of the surface's 720, so it still clears both edges by 178 px. Scale 3
-/// would be 546 px and leave 87 px, which is inside the sidebearing of the
-/// widest glyph; scale 1 would put a 17 px cap above a keypad whose figures are
-/// 68 px and invert the hierarchy the pad is built on.
+/// WHY 2: it is the line the user reads before every keystroke, and it is the
+/// shell's own body rung. Fit is not what fixes it: the widest of the strings
+/// [`pin_messages`] can return -- "Confirm Device PIN", 181 px of the surface's
+/// 720 at this rung -- clears both edges by 269 px, and even at rung 3 (250 px) it
+/// would clear them by 235. What would break is the hierarchy: the figures are a
+/// 68 px cap and the sub-prompt a 13 px one, and this line has to sit between them
+/// rather than beside either.
 const PIN_HEADING_SCALE: usize = 2;
-/// The sub-prompt's scale: 1, i.e. a 17 px cap -- one rung below the prompt and
-/// two below the figures, which is the ladder the pad reads down: figures, then
-/// prompt, then sub-prompt, then the entry dots.
+/// The sub-prompt's scale: rung 1, i.e. a 13 px cap in a 22-row line box -- one
+/// rung below the prompt and three below the figures, which is the ladder the pad
+/// reads down: figures, then prompt, then sub-prompt, then the entry dots.
 const PIN_SUBHEADING_SCALE: usize = 1;
-/// The prompt's cell origin, and the sub-prompt's.
+/// The prompt's line-box origin, and the sub-prompt's.
 ///
 /// WHY these two numbers and not the `250..295` and `300..330` row windows the
 /// pixel function used to gate on: those windows were typed for the old fixed 8x8
-/// cell, in which a run's ink began on the cell's very first row, so 250 sat five
-/// rows *above* the run's origin and the window stopped at 295 -- eight rows
-/// short of the 48-row line box a scale-2 run occupies from 255.
+/// cell, in which a run's ink began on the cell's very first row, and neither edge
+/// answers to a run any more -- `250` sits five rows above the 32-row box a
+/// rung-2 run occupies from 255, and `295` sits eight rows below where that box
+/// closes.
 ///
-/// WHY that survived: every string [`pin_messages`] can return is caps and
-/// spaces, so the 17-row cap box (261..=294 for the prompt) happened to sit
-/// entirely inside the clipped window, and a descender is the only thing that
-/// would have revealed it. A run is now gated on `Rect::contains` over
-/// `text::line_height`, which is the face's own box rather than a remembered
-/// number, so the window follows the next typeface and the next scale by
-/// construction. Nothing moves on screen today; the clip is gone.
+/// WHY that survived: both windows were *wider* than the runs they gated -- 45
+/// rows for a 32-row box and 30 for a 22-row one -- so nothing was ever clipped,
+/// and the 13 and 8 spare rows only cost the rasteriser calls that answered None.
+/// The real exposure was the overlap: `250..295` starts five rows above the run it
+/// gates and `300..330` ends three rows below its own, so a longer caption or one
+/// rung up would have walked into its neighbour's window with neither gate able to
+/// say so. A run is now gated on `Rect::contains` over the box `lh` answers for
+/// its rung, which is the face's own box rather than a remembered number, so the
+/// window follows the next typeface and the next scale by construction. Nothing
+/// moves on screen today; the slack is gone.
 const PIN_HEADING_Y: usize = 255;
 const PIN_SUBHEADING_Y: usize = 305;
+
+/// Truth gates for the pad's text column: each rung closes before the next group
+/// begins, on the boxes the painter actually reserves.
+///
+/// WHY gated and not trusted: the prompt, the sub-prompt, the dots and the keys
+/// are painted in that order and each falls through to the next, so an over-tall
+/// box is invisible today and becomes a clipped glyph the moment a caption is
+/// lengthened or a rung moves -- which is exactly how the hint's box came to reach
+/// four rows into the discs on the lock face above.
+const _: () = assert!(PIN_HEADING_Y + PIN_HEADING_BOX_H <= PIN_SUBHEADING_Y);
+const _: () = assert!(
+    PIN_SUBHEADING_Y + PIN_SUBHEADING_BOX_H <= PIN_DOT_CY - (PIN_DOT_R + PIN_DOT_SLACK) as usize
+);
+const _: () = assert!(
+    PIN_DOT_CY + PIN_DOT_R as usize + PIN_DOT_SLACK as usize
+        <= PIN_ROWS[0] - (PIN_KEY_R as usize + 2)
+);
 
 fn lock_pin_pad_pixel(
     color: u32,
@@ -1424,9 +1671,10 @@ fn lock_pin_pad_pixel(
     if y < LOCK_STATUS_BAND {
         if state.clock_source_ok {
             // WHY the same gated box as the lock surface's own status clock and not
-            // an open band test: the run is 24 rows tall from `LOCK_STATUS_TIME_Y`
-            // and nothing else, so the 56-row band hands 32 rows to the rasteriser
-            // for a 24-row run.
+            // an open band test: the run is `STATUS_TIME_BOX_H` rows -- the outline
+            // box of the rung this path paints at, asserted to close inside the
+            // band -- and nothing else, so the 56-row band hands the rasteriser 24
+            // rows it can never ink.
             if y >= LOCK_STATUS_TIME_Y && y < LOCK_STATUS_TIME_Y + f.status_h {
                 if let Some(c) = test_text_aa(
                     x,
@@ -1640,14 +1888,23 @@ fn lock_screen_over_backdrop(
     }
 
     // 2. Status bar: time top-left, cellular signal and battery top-right.
-    if y < 48 {
-        if state.clock_source_ok {
+    //
+    //    WHY the band is the platform's and the clock is gated on its own box:
+    //    this whole row used to go to the rasteriser for a run that occupies
+    //    `STATUS_TIME_BOX_H` rows of it, and the origin, row and rung were typed
+    //    here as `40, 12, 2` independently of the `LOCK_STATUS_TIME_*` constants
+    //    the pad paints with -- the same clock, set twice, free to drift.
+    if y < STATUS_BAR_HEIGHT {
+        if state.clock_source_ok
+            && y >= LOCK_STATUS_TIME_Y
+            && y < LOCK_STATUS_TIME_Y + f.status_h
+        {
             if let Some(c) = test_text_aa(
                 x,
                 y,
-                40,
-                12,
-                2,
+                LOCK_STATUS_TIME_X,
+                LOCK_STATUS_TIME_Y,
+                LOCK_STATUS_TIME_SCALE,
                 &state.clock_time,
                 0xFFFFFFFF,
                 color,

@@ -86,7 +86,7 @@ pub fn measure(text: &[u8], scale: usize) -> usize {
 /// rasteriser can touch, so it is what a caller must reserve. Screens that want
 /// to centre a line optically should use [`CAP_TOP`] and [`BASELINE`] to bias it
 /// within that box.
-pub fn line_height(scale: usize) -> usize {
+pub const fn line_height(scale: usize) -> usize {
     GLYPH_H * scale
 }
 
