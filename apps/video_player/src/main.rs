@@ -120,6 +120,23 @@ const ORIENT_BTN: Rect = Rect::new(568, HEADER_TOP, 52, 52);
 const KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52);
 const _: () = assert!(CLOSE_BTN.y + CLOSE_BTN.h < HEADER_RULE_Y);
 
+/// The landscape HUD's top bar, and the controls that stand inside it.
+///
+/// WHY they are placed from `HEADER_TOP` and not from a literal 24: landscape
+/// draws on the same 720x1440 surface the portrait player uses, so the system
+/// status band still owns the top 48 rows. The bar began at y=24 and its back
+/// control at y=36, which left the first twelve rows of that control under the
+/// status bar -- ink the user could not see, on a band the press still answered.
+/// Both orientations now stand on the one header row.
+const LAND_BAR: Rect = Rect::new(24, HEADER_TOP, 672, 80);
+const LAND_BACK_BTN: Rect = Rect::new(36, LAND_BAR.y + (LAND_BAR.h - 52) / 2, 52, 52);
+/// The title run, and the badge run one line box below it.
+const LAND_TITLE_Y: usize = LAND_BAR.y + 12;
+const LAND_BADGE_Y: usize = LAND_TITLE_Y + font::line_height(2);
+const _: () = assert!(LAND_BAR.y >= std::design::viewport::STATUS_BAR_HEIGHT);
+const _: () = assert!(LAND_BACK_BTN.y + LAND_BACK_BTN.h <= LAND_BAR.y + LAND_BAR.h);
+const _: () = assert!(LAND_BADGE_Y + font::line_height(1) <= LAND_BAR.y + LAND_BAR.h);
+
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
 const CANVAS_RECT: Rect = Rect::new(CANVAS_X0, CANVAS_Y0, CANVAS_W, CANVAS_H);
@@ -130,7 +147,17 @@ const SEEK_Y: usize = 614;
 const SEEK_W: usize = 472;
 const SEEK_H: usize = 8;
 const SEEK_RECT: Rect = Rect::new(SEEK_X, SEEK_Y, SEEK_W, SEEK_H);
-const SEEK_HIT: Rect = Rect::new(110, 584, 500, 68);
+/// Where the remaining-time run starts, one gap to the right of the track.
+const REMAIN_X: usize = SEEK_X + SEEK_W + 12;
+/// The scrubber's touch band.
+///
+/// WHY it stops two columns short of `REMAIN_X`: the band is padded past the
+/// 8-row track so a thumb lands on the seek, but it used to run to x=610 while
+/// the remaining-time number starts at 608 -- so the first strokes of that
+/// number answered a seek and jumped the playback.
+const SEEK_HIT: Rect = Rect::new(SEEK_X - 14, 584, (REMAIN_X - 2) - (SEEK_X - 14), 68);
+const _: () = assert!(SEEK_HIT.x + SEEK_HIT.w <= REMAIN_X);
+const _: () = assert!(SEEK_RECT.x >= SEEK_HIT.x && SEEK_RECT.x + SEEK_RECT.w <= SEEK_HIT.x + SEEK_HIT.w);
 
 // Transport
 const TRANSPORT_CY: usize = 740;
@@ -1335,13 +1362,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
         // Translucent HUD Overlays
         if app.hud_visible {
-            // Top Translucent Bar (y: 24..100, x: 24..696)
-            let top_bar = Rect::new(24, 24, 672, 80);
+            // Top Translucent Bar
+            let top_bar = LAND_BAR;
             if top_bar.contains(x, y) {
                 let bg_hud = blend_argb(video_pixel, COLOR_SURFACE_SUNKEN, 210);
 
                 // Back / Orientation Toggle Button (✕ / ⛶)
-                let back_hit = Rect::new(36, 36, 52, 52);
+                let back_hit = LAND_BACK_BTN;
                 if back_hit.contains(x, y) {
                     let cx = back_hit.x + back_hit.w / 2;
                     let cy = back_hit.y + back_hit.h / 2;
@@ -1357,7 +1384,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 let title = app.current_title().as_bytes();
                 let mut tbuf = [0u8; 48];
                 let tn = font::ellipsize(title, 2, 420, &mut tbuf);
-                if let Some(col) = draw_text_bold(x, y, 104, 38, 2, &tbuf[..tn], COLOR_TEXT_PRIMARY, bg_hud) {
+                if let Some(col) = draw_text_bold(x, y, 104, LAND_TITLE_Y, 2, &tbuf[..tn], COLOR_TEXT_PRIMARY, bg_hud) {
                     return col;
                 }
 
@@ -1372,7 +1399,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 bl += 3;
                 badge_buf[bl..bl + s_label.len()].copy_from_slice(s_label);
                 bl += s_label.len();
-                if let Some(col) = draw_text(x, y, 104, 70, 1, &badge_buf[..bl], COLOR_TEXT_MUTED, bg_hud) {
+                if let Some(col) = draw_text(x, y, 104, LAND_BADGE_Y, 1, &badge_buf[..bl], COLOR_TEXT_MUTED, bg_hud) {
                     return col;
                 }
 
@@ -1574,7 +1601,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             return COLOR_BG;
         }
 
-        // Playlist Rows (y: 108..1390)
+        // Playlist Rows (y: LIB_LIST_Y0..LIB_VIEW_Y1)
         //
         // WHY the offset is in pixels: a drag delivers a few pixels per event,
         // and a row-quantised offset discarded every drag shorter than a row,
@@ -1582,7 +1609,10 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         let content_y = (y - LIB_LIST_Y0) + app.library_scroll;
         let row_idx = content_y / LIB_ROW_H;
 
-        if row_idx < app.playlist.count {
+        // WHY the band is closed at `LIB_VIEW_Y1`: the press path only selects a
+        // row above that line, so a row painted below it was a visible track the
+        // user could tap and nothing answered.
+        if row_idx < app.playlist.count && y < LIB_VIEW_Y1 {
             let row_y0 = LIB_LIST_Y0 + row_idx * LIB_ROW_H - app.library_scroll;
             let is_current = row_idx == app.playlist.current;
             let row_bg = if is_current { COLOR_SURFACE } else { COLOR_BG };
@@ -1965,7 +1995,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Remaining Time Text in Scale 2 Body
         let mut rbuf = [0u8; 12];
         let rlen = duration_label(app.duration_sec > 0, app.remaining_sec(), true, &mut rbuf);
-        if let Some(col) = draw_text(x, y, 608, 606, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, COLOR_BG) {
+        if let Some(col) = draw_text(x, y, REMAIN_X, 606, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, COLOR_BG) {
             return col;
         }
 
@@ -2461,7 +2491,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     if app.orientation == Orientation::Landscape {
         if app.hud_visible {
             // Orientation button in top bar -> Return to Portrait
-            if Rect::new(36, 36, 52, 52).contains(x, y) {
+            if LAND_BACK_BTN.contains(x, y) {
                 app.orientation = Orientation::Portrait;
                 app.aspect = AspectRatio::Fit;
                 let _ = std::audio_haptic_click();
@@ -2590,6 +2620,14 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 return EventAction::Redraw(Dirty::All);
             }
         }
+
+        // WHY the drawer keeps the rest of its own canvas: whenever the drawer is
+        // showing, the painter covers every pixel outside the rows with it, so a
+        // press on that background used to fall through to the portrait controls
+        // hidden underneath -- a seek or a volume change the user could not see
+        // happening. In picture-in-picture it was worse still: the card answers
+        // its own press above, so everything outside it is drawer.
+        return EventAction::None;
     }
 
     // =========================================================================
