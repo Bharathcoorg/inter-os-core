@@ -22,6 +22,35 @@ pub const MAX_TEXT_LINES: usize = 32;
 pub const LINE_STR_MAX: usize = 64;
 pub const DEFAULT_STEP_BUDGET: usize = 2000;
 
+/// The column a document run is set on, inside the container's own band.
+const TEXT_INSET_X: usize = 16;
+/// The row the first line box of a document sits below.
+const TEXT_INSET_Y: usize = 16;
+
+/// The rung an `<h1>` is set at and the rung a paragraph is set at.
+///
+/// WHY the outline face at the design's rungs: the layout in `get_pixel` reserved
+/// 32 rows for a heading and 20 for a line of body -- the boxes the outline face
+/// draws at the title and body rungs -- but the call itself went to
+/// `font::test_glyph_aa`, the 16x24 cell face the type notes keep only for runs
+/// the outline face refuses. The cell inks `GLYPH_H * scale` rows, so a heading
+/// measured at 34 inked rows was handed a 32-row box and its bottom two rows were
+/// never drawn, and the magnified cell is what made the document read as blocks
+/// beside the sharp chrome of the very screen it was painted on. The rungs below
+/// name the design's roles, and the box each line takes is the typeface's own at
+/// that rung, so the stride can no longer be smaller than what is drawn in it.
+const HEADING_SCALE: usize = 4;
+const BODY_SCALE: usize = 2;
+
+/// The line box a rendered document line reserves at its own rung.
+const fn line_box(is_heading: bool) -> usize {
+    font::line_height(if is_heading { HEADING_SCALE } else { BODY_SCALE })
+}
+
+const _: () = assert!(font::cap_for_scale(BODY_SCALE) >= 15 && font::cap_for_scale(BODY_SCALE) <= 18);
+const _: () = assert!(font::cap_for_scale(HEADING_SCALE) >= 28 && font::cap_for_scale(HEADING_SCALE) <= 32);
+const _: () = assert!(line_box(true) > line_box(false));
+
 /// Truthful lifecycle state of an InterWebView instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebViewState {
@@ -326,6 +355,7 @@ impl InterWebView {
             let title_text = b"about:blank";
             self.title[..title_text.len()].copy_from_slice(title_text);
             self.title_len = title_text.len();
+            self.relayout();
             self.push_event(WebViewEvent::PageStarted(url_buf, len));
             self.state = WebViewState::Loaded;
             self.push_event(WebViewEvent::PageFinished(url_buf, len, 200));
@@ -377,6 +407,7 @@ impl InterWebView {
                     }
                     self.add_render_line(line.as_bytes(), false, 0xFFCCCCCC);
                 }
+                self.relayout();
             }
             self.state = WebViewState::Loaded;
             self.push_event(WebViewEvent::PageFinished(url_buf, len, status));
@@ -438,6 +469,8 @@ impl InterWebView {
                 }
             }
         }
+
+        self.relayout();
     }
 
     /// Loads raw HTML directly from memory with an optional base URL.
@@ -544,7 +577,14 @@ impl InterWebView {
     pub fn handle_touch(&mut self, event: &InputEvent) -> bool {
         if event.kind == 2 {
             // Drag
-            self.scroll.apply_drag(-(event.dy as i32));
+            //
+            // WHY the delta goes in as the kernel measured it: `dy` is
+            // `current_y - start_y`, so a finger travelling up the screen sends a
+            // negative delta, and a negative delta is what `ScrollState` answers
+            // with a deeper offset -- the page moves with the finger. Negating it
+            // pinned the document at its first line, because at offset zero the
+            // only direction the drag could move was off the top of the page.
+            self.scroll.apply_drag(event.dy);
             true
         } else {
             false
@@ -610,9 +650,32 @@ impl InterWebView {
         Ok(())
     }
 
+    /// The rows the laid-out document occupies, top inset included.
+    ///
+    /// WHY this walks the same boxes `get_pixel` paints: the drag in `handle_touch`
+    /// can only travel as far as `ScrollState` permits, and a state whose content
+    /// height equals its viewport answers a maximum offset of zero. The container
+    /// was built that way, so every page taller than the band was unreachable and
+    /// no amount of dragging moved a line.
+    fn doc_height(&self) -> usize {
+        let mut h = TEXT_INSET_Y;
+        for line in &self.lines[..self.line_count] {
+            h += line_box(line.is_heading);
+        }
+        h
+    }
+
+    /// Tells the scroll state the document's real height after a layout pass.
+    fn relayout(&mut self) {
+        self.scroll.content_h = self.doc_height();
+        self.scroll.viewport_h = self.h.max(1) as usize;
+        self.scroll.clamp();
+    }
+
     /// Computes pixel color at (x, y) relative to the webview viewport.
     ///
-    /// Renders real font glyphs for headings and paragraphs with 4-bit grayscale coverage AA.
+    /// Draws heading and body runs with the face the design's type rungs name, each
+    /// line inside the box that face reserves at its rung.
     pub fn get_pixel(&self, x: usize, y: usize) -> u32 {
         if x < self.x as usize || x >= (self.x + self.w) as usize || y < self.y as usize || y >= (self.y + self.h) as usize {
             return 0x00000000;
@@ -626,15 +689,15 @@ impl InterWebView {
         }
         let rel_y_u = rel_y as usize;
 
-        let mut current_y = 16usize;
+        let mut current_y = TEXT_INSET_Y;
         for line in &self.lines[..self.line_count] {
-            let scale = if line.is_heading { 2 } else { 1 };
-            let line_h = if line.is_heading { 32 } else { 20 };
+            let scale = if line.is_heading { HEADING_SCALE } else { BODY_SCALE };
+            let line_h = line_box(line.is_heading);
             if rel_y_u >= current_y && rel_y_u < current_y + line_h {
-                if let Some(px) = font::test_glyph_aa(
+                if let Some(px) = font::test_text_aa(
                     rel_x,
                     rel_y_u,
-                    16,
+                    TEXT_INSET_X,
                     current_y,
                     scale,
                     &line.text[..line.len],
@@ -904,6 +967,75 @@ mod tests {
             }
         }
         assert!(has_ink, "InterWebView must render real font glyph ink, not blank or placeholder!");
+    }
+
+    /// Every row a line of body text reserves has to be a row it can be drawn on.
+    ///
+    /// WHY it asks for the box's lower half: the stride that first laid this
+    /// document out reserved 20 rows for a body line and handed the run to the 16x24
+    /// cell face, which inks 24, so the tail of a descender fell in the gap between
+    /// one box and the next and neither box drew it. A descender belongs to the
+    /// lower half of its own line box, so that is where ink has to appear.
+    #[test]
+    fn webview_body_lines_ink_the_whole_box_they_reserve() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+        webview
+            .load_html("<html><body><p>gjpqy</p></body></html>", None)
+            .expect("load html");
+
+        let box_h = line_box(false);
+        assert_eq!(box_h, font::line_height(BODY_SCALE));
+        let top = webview.y as usize + TEXT_INSET_Y;
+        let lower_half = box_h / 2;
+
+        let mut ink_in_the_lower_box = 0usize;
+        for dy in lower_half..box_h {
+            for dx in TEXT_INSET_X..TEXT_INSET_X + 200 {
+                if webview.get_pixel(dx, top + dy) != 0xFF121212 {
+                    ink_in_the_lower_box += 1;
+                }
+            }
+        }
+        assert!(
+            ink_in_the_lower_box > 0,
+            "a body line drew nothing in rows {}..{} of the box it reserved",
+            lower_half,
+            box_h
+        );
+    }
+
+    /// A page taller than its container has to be reachable by dragging it.
+    ///
+    /// WHY the scroll state is part of the layout: `handle_touch` moves the
+    /// document through `ScrollState`, which caps the travel at
+    /// `content_h - viewport_h`, and the container published its own height as
+    /// its content height. A cap of zero is a page the reader can never finish.
+    #[test]
+    fn webview_drag_reaches_a_page_taller_than_its_container() {
+        let mut config = WebViewConfig::default_portrait();
+        config.h = 400;
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        let body = b"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet\nkilo\nlima\nmike\nnovember\noscar\npapa";
+        webview
+            .load_url_content("file://words.txt", 200, "text/plain", body)
+            .expect("feed content");
+
+        assert_eq!(webview.scroll().content_h, TEXT_INSET_Y + 16 * line_box(false));
+        assert_eq!(webview.scroll().viewport_h, 400);
+        assert!(webview.scroll().max_offset() > 0, "a 16-line page must outgrow a 400-row band");
+
+        let drag = InputEvent {
+            kind: 2,
+            x: 360,
+            y: 300,
+            dx: 0,
+            dy: -100,
+            scale_milli: 1000,
+        };
+        assert!(webview.handle_touch(&drag));
+        assert_eq!(webview.scroll().offset, 100);
     }
 
     #[test]
