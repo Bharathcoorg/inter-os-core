@@ -663,6 +663,22 @@ const AGENDA_CARDS_Y0: usize = 232;
 /// The height of an Agenda view card.
 const AGENDA_CARD_H: usize = 104;
 
+/// The line box every run in an Agenda card reserves.
+const AGENDA_LINE_H: usize = std::design::font::line_height(2);
+
+/// The inset that puts an Agenda card's three lines inside its own border.
+///
+/// WHY it is derived: the three lines used to sit at remembered offsets of 8,
+/// 40 and 72, so the last one's box ran to row 103 of a 104-row card -- exactly
+/// the two rows its bottom border is drawn in. The descenders of the storage
+/// label's two `g`s inked that hairline on every card in the list.
+const AGENDA_LINE_STACK_Y: usize = 2 + (AGENDA_CARD_H - 4 - AGENDA_LINE_H * 3) / 2;
+
+/// Where the card's second line -- its title -- begins.
+const AGENDA_TITLE_Y: usize = AGENDA_LINE_STACK_Y + AGENDA_LINE_H;
+
+const _: () = assert!(AGENDA_LINE_STACK_Y + AGENDA_LINE_H * 3 <= AGENDA_CARD_H - 2);
+
 /// The stride between two Agenda view cards.
 const AGENDA_CARD_PITCH: usize = 116;
 
@@ -705,6 +721,25 @@ const TAB3_X1: usize = TAB3_X0 + TAB_W; // 513
 const TAB4_X0: usize = 525;
 const TAB4_X1: usize = TAB4_X0 + TAB_W; // 672
 const TAB_LABELS: [&[u8]; 4] = [b"Month", b"Week", b"Day", b"Agenda"];
+
+/// The tab band's four pills: the columns each is drawn in, and the view it names.
+///
+/// WHY one table for the painter and the press: the band is drawn from a strip
+/// of columns and answered from another, and the two have to agree everywhere
+/// the band is reachable -- including while a modal covers the rest of it.
+const TABS: [(usize, usize, ViewMode); 4] = [
+    (TAB1_X0, TAB1_X1, ViewMode::Month),
+    (TAB2_X0, TAB2_X1, ViewMode::Week),
+    (TAB3_X0, TAB3_X1, ViewMode::Day),
+    (TAB4_X0, TAB4_X1, ViewMode::Agenda),
+];
+
+/// The view a press in the tab band asks for, named by the pill it lands on.
+fn tab_mode_at(x: usize) -> Option<ViewMode> {
+    TABS.iter()
+        .find(|(x0, x1, _)| x >= *x0 && x < *x1)
+        .map(|(_, _, mode)| *mode)
+}
 
 // Text rendering helpers
 #[inline(always)]
@@ -929,6 +964,23 @@ const CLEAR_BTN_X0: usize = 616;
 const CLEAR_BTN_X1: usize = 668;
 const CLEAR_BTN_Y0: usize = 648;
 const CLEAR_BTN_Y1: usize = 708;
+
+/// The column the title run is drawn from, and how far it may reach.
+///
+/// WHY the run and its caret share one budget: the clear control is painted
+/// over the right end of the field, so both the text and the mark that follows
+/// it have to stop at it.
+const TITLE_TEXT_X0: usize = TITLE_FIELD_X0 + 16;
+const TITLE_TEXT_MAX_W: usize = CLEAR_BTN_X0 - TITLE_TEXT_X0 - 4;
+
+/// The width of the caret block that trails the run.
+const TITLE_CARET_W: usize = 8;
+
+/// The widest the run may measure and still have its caret land inside the field.
+const TITLE_CARET_TEXT_MAX: usize = TITLE_TEXT_MAX_W - TITLE_CARET_W - 2;
+
+const _: () = assert!(TITLE_TEXT_X0 + TITLE_TEXT_MAX_W <= CLEAR_BTN_X0);
+const _: () = assert!(TITLE_TEXT_X0 + TITLE_CARET_TEXT_MAX + 2 + TITLE_CARET_W <= CLEAR_BTN_X0);
 
 // Keyboard metrics
 const KB_Y0: usize = 730;
@@ -1235,15 +1287,9 @@ fn get_calendar_pixel(
 
 /// Navigation tabs pixel renderer.
 fn tabs_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
-    let tabs = [
-        (TAB1_X0, TAB1_X1, ViewMode::Month),
-        (TAB2_X0, TAB2_X1, ViewMode::Week),
-        (TAB3_X0, TAB3_X1, ViewMode::Day),
-        (TAB4_X0, TAB4_X1, ViewMode::Agenda),
-    ];
     let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(std::design::font::line_height(TAB_SCALE))) / 2;
 
-    for (i, (x0, x1, mode)) in tabs.iter().enumerate() {
+    for (i, (x0, x1, mode)) in TABS.iter().enumerate() {
         if x >= *x0 && x < *x1 {
             let is_active = app.view_mode == *mode;
             let rx = (x - *x0).min(*x1 - 1 - x);
@@ -1393,7 +1439,15 @@ fn month_view_pixel(
 
     // Section Divider & Header (y: 516..544)
     if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + SECTION_BAND_H {
-        if y >= SECTION_BAND_Y0 + 2 && y < SECTION_BAND_Y0 + 4 && x >= 24 && x < W - 24 {
+        // The hairline that opens this band.
+        //
+        // WHY it keeps to the band's first two rows and stops at the badge: it
+        // used to run the panel's whole width at offsets 2..3, and the count
+        // pill's own border is drawn at offsets 0..1 -- so the rule thickened
+        // that pill to a four-row top, filled the two columns beside each
+        // rounded cap that the pill had already decided were surface, and
+        // stepped one row into the header's line box, which starts at offset 3.
+        if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + 2 && x >= 24 && x < BADGE_X0 {
             return THEME.border;
         }
 
@@ -1859,17 +1913,17 @@ fn agenda_view_pixel(
                 dt_buf[dn + 1] = b' ';
                 let tn = fmt_time(&mut dt_buf[dn + 2..], item.hour, item.minute);
                 let full_dt = &dt_buf[..dn + 2 + tn];
-                if let Some(c) = test_text_bold(x, y, 48, card_y + 8, 2, full_dt, 550, THEME.primary, THEME.surface_container_high) {
+                if let Some(c) = test_text_bold(x, y, 48, card_y + AGENDA_LINE_STACK_Y, 2, full_dt, 550, THEME.primary, THEME.surface_container_high) {
                     return c;
                 }
 
                 // Title line
-                if let Some(c) = test_text_bold(x, y, 48, card_y + 40, 2, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high) {
+                if let Some(c) = test_text_bold(x, y, 48, card_y + AGENDA_TITLE_Y, 2, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high) {
                     return c;
                 }
 
                 // Storage label
-                if let Some(c) = test_text(x, y, 48, card_y + 72, 2, b"Sovereign Settings Store", 550, THEME.on_surface_variant, THEME.surface_container_high) {
+                if let Some(c) = test_text(x, y, 48, card_y + AGENDA_TITLE_Y + AGENDA_LINE_H, 2, b"Sovereign Settings Store", 550, THEME.on_surface_variant, THEME.surface_container_high) {
                     return c;
                 }
 
@@ -1878,8 +1932,8 @@ fn agenda_view_pixel(
                 // WHY it goes through chevron_pixel: the arm test here measured
                 // dx to the right of a left-hand apex, which drew a '<' on a
                 // row that opens forward.
-                if x >= 644 && x < 664 && y >= card_y + 40 && y < card_y + 64 {
-                    if chevron_pixel(x, y, 658, (card_y + 52) as isize, ChevronDir::Right) {
+                if x >= 644 && x < 664 && y >= card_y + AGENDA_TITLE_Y && y < card_y + AGENDA_TITLE_Y + AGENDA_LINE_H {
+                    if chevron_pixel(x, y, 658, (card_y + AGENDA_TITLE_Y + AGENDA_LINE_H / 2) as isize, ChevronDir::Right) {
                         return THEME.on_surface_variant;
                     }
                 }
@@ -2442,11 +2496,11 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         if let Some(c) = test_text(
             x,
             y,
-            TITLE_FIELD_X0 + 16,
+            TITLE_TEXT_X0,
             TITLE_TEXT_Y,
             2,
             text,
-            CLEAR_BTN_X0 - (TITLE_FIELD_X0 + 20),
+            TITLE_TEXT_MAX_W,
             color,
             THEME.surface_container_high,
         ) {
@@ -2454,10 +2508,18 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         }
 
         // Caret block
+        //
+        // WHY it is clamped to the field: the mark used to sit at the full
+        // measure of the run, but the run above it is ellipsized to this
+        // field's budget -- so as soon as the title was long enough to shorten,
+        // the caret landed 58 columns right of the last glyph it was meant to
+        // follow, on top of the clear control and cut off by the field's edge.
         if app.title_len > 0 {
-            let text_w = std::design::font::measure(text, 2);
-            if x >= TITLE_FIELD_X0 + 16 + text_w + 2
-                && x < TITLE_FIELD_X0 + 16 + text_w + 10
+            let caret_x = TITLE_TEXT_X0
+                + std::design::font::measure(text, 2).min(TITLE_CARET_TEXT_MAX)
+                + 2;
+            if x >= caret_x
+                && x < caret_x + TITLE_CARET_W
                 && y >= TITLE_TEXT_Y
                 && y < TITLE_TEXT_Y + std::design::font::line_height(2)
             {
@@ -3109,6 +3171,35 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
 
     let is_back = std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48);
 
+    // Navigation tabs -- answered before either modal gets to the row.
+    //
+    // WHY the band comes first: both surfaces are drawn under it, never over it,
+    // so its pills stay at full strength while they are on screen. Each of them
+    // used to test its own geometry first and count a press on a bright tab as a
+    // press outside itself: the details panel closed and the view stayed put,
+    // and the create-event sheet swallowed the press outright. A press here now
+    // means what it looks like -- leave whatever the band is sitting over, show
+    // that view -- and a gutter between the pills answers nothing.
+    if y >= TAB_BAND_Y0 && y < TAB_BAND_Y0 + TAB_BAND_H {
+        if let Some(mode) = tab_mode_at(x) {
+            let mut dirty = Dirty::TABS;
+            if app.details_event.take().is_some() {
+                dirty = dirty.widen(Dirty::CONTENT);
+            }
+            if app.flow != Flow::None {
+                app.flow = Flow::None;
+                app.commit_status = "CANCELLED: NO EVENT WRITTEN";
+                dirty = dirty.widen(Dirty::CONTENT);
+            }
+            if app.view_mode != mode {
+                app.view_mode = mode;
+                dirty = dirty.widen(Dirty::CONTENT);
+            }
+            return Tap::Redraw(dirty);
+        }
+        return Tap::None;
+    }
+
     // 2. If Event Details modal is open
     if let Some(event) = app.details_event {
         if is_back || (x >= DETAILS_CLOSE_X0 && x < DETAILS_CLOSE_X1 && y >= DETAILS_CLOSE_Y0 && y < DETAILS_CLOSE_Y1) {
@@ -3157,28 +3248,7 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
         return Tap::Leave("[CALENDAR APP] Back button or home gesture pressed. Exiting to launcher.");
     }
 
-    // 4. Navigation Tabs (y: 100..152)
-    if y >= TAB_BAND_Y0 && y < TAB_BAND_Y0 + TAB_BAND_H {
-        if x >= TAB1_X0 && x < TAB1_X1 && app.view_mode != ViewMode::Month {
-            app.view_mode = ViewMode::Month;
-            return Tap::Redraw(Dirty::TABS.widen(Dirty::CONTENT));
-        }
-        if x >= TAB2_X0 && x < TAB2_X1 && app.view_mode != ViewMode::Week {
-            app.view_mode = ViewMode::Week;
-            return Tap::Redraw(Dirty::TABS.widen(Dirty::CONTENT));
-        }
-        if x >= TAB3_X0 && x < TAB3_X1 && app.view_mode != ViewMode::Day {
-            app.view_mode = ViewMode::Day;
-            return Tap::Redraw(Dirty::TABS.widen(Dirty::CONTENT));
-        }
-        if x >= TAB4_X0 && x < TAB4_X1 && app.view_mode != ViewMode::Agenda {
-            app.view_mode = ViewMode::Agenda;
-            return Tap::Redraw(Dirty::TABS.widen(Dirty::CONTENT));
-        }
-        return Tap::None;
-    }
-
-    // 5. Active View Mode Tap Handling
+    // 4. Active View Mode Tap Handling
     match app.view_mode {
         ViewMode::Month => {
             // Month grid day selection
@@ -3191,10 +3261,20 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
                 }
             }
 
+            // The list the surface is showing for this selection. One call
+            // decides both branches below, so a press can never answer a
+            // control the painter did not draw.
+            let agenda = app.agenda_view();
+
             // Empty state action button "+ New Event"
-            debug_assert_eq!(ACTION_BTN_Y0, 800);
-            debug_assert_eq!(ACTION_BTN_Y1, 856);
-            if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+            //
+            // WHY it is gated on an empty list: the month view reaches this
+            // button only through `empty_state_pixel`, so once one event is
+            // stored the control has no pixels on the surface -- and its band,
+            // y 800..856, lands squarely on the third card (546 + 2*130 = 806),
+            // across the row that card draws its title on. A press on a visible
+            // event opened the create flow instead of showing that event.
+            if agenda.len == 0 && x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 std::log("[CALENDAR APP] Create-event flow opened: title entry.").ok();
                 return Tap::Redraw(Dirty::CONTENT);
@@ -3202,7 +3282,6 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
 
             // Tapping an event card to open details
             if y >= MONTH_LIST_Y0 && y < MONTH_LIST_Y1 {
-                let agenda = app.agenda_view();
                 let card_idx = (y - MONTH_LIST_Y0) / MONTH_CARD_PITCH;
                 let card_offset_y = (y - MONTH_LIST_Y0) % MONTH_CARD_PITCH;
                 if card_idx < agenda.len.min(MONTH_CARD_MAX)
