@@ -812,6 +812,27 @@ const SEARCH_TEXT_MAX_W: usize = 696 - 20 - SEARCH_TEXT_X;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
 const SEARCH_TEXT_SCALE: usize = type_scale::BODY;
 
+/// The rows a caption rung's box has to be pushed down to put its caps on the
+/// same baseline as a body rung's box laid out at the same box top.
+///
+/// WHY a baseline and not a shared box top: a run laid out at box top `y0` sits
+/// its `ascent_for_scale(rung)` rows lower, so two runs that start at the same
+/// box top end on lines eight rows apart. The composer's character count and
+/// the "To:" label are both rung 1 and both drawn at the box top of the rung-2
+/// text beside them, so each hung above the words it belongs to.
+///
+/// WHY checked against both fields: the shifted caption's own line box has to
+/// stay inside the control it labels.
+const SHARED_BASELINE_SHIFT: usize = std::design::font::ascent_for_scale(type_scale::BODY)
+    - std::design::font::ascent_for_scale(type_scale::CAPTION);
+const _: () = assert!(
+    SHARED_BASELINE_SHIFT + std::design::font::line_height(type_scale::CAPTION)
+        <= RECIPIENT_FIELD_H
+);
+const _: () = assert!(
+    SHARED_BASELINE_SHIFT + std::design::font::line_height(type_scale::CAPTION) <= COMPOSE_FIELD_H
+);
+
 // Recipient ("To:") editor
 //
 // WHY the band moves: the band heights and the positions they sit at are
@@ -841,8 +862,29 @@ const COMPOSE_COUNT_RIGHT: usize = 572;
 const COMPOSE_TEXT_MAX_W: usize = COMPOSE_COUNT_RIGHT - 56 - COMPOSE_TEXT_X;
 const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
 const COMPOSE_TEXT_SCALE: usize = type_scale::BODY;
+/// The composer field's inset from its band's top edge.
+const COMPOSE_FIELD_DY: usize = 14;
+/// The send disc, and the lane of the compose band it is drawn in.
+///
+/// WHY the lane is named at all: the painter clipped the disc to
+/// `x 630..694, y band+14..band+74` while the tap path clipped it to nothing,
+/// so the disc answered presses in every screen -- including the two that draw
+/// a notice card over those very pixels.
 const SEND_CX: usize = 662;
-const SEND_R: i32 = 29;
+const SEND_R: usize = 29;
+const SEND_LANE_X0: usize = 630;
+const SEND_LANE_X1: usize = 694;
+
+/// WHY checked at compile time: the disc has to sit inside the lane it is hit
+/// as, and the lane inside the card column. The diameter against the field's
+/// height is the fact that fails first if either control grows.
+const _: () = assert!(SEND_R * 2 <= COMPOSE_FIELD_H);
+const _: () = assert!(SEND_LANE_X0 + SEND_R <= SEND_CX);
+const _: () = assert!(SEND_CX + SEND_R <= SEND_LANE_X1);
+const _: () = assert!(SEND_LANE_X1 <= CARD_X1);
+/// The count's right edge stops before the lane, so the composer's number and
+/// its send control cannot share a column.
+const _: () = assert!(COMPOSE_COUNT_RIGHT < SEND_LANE_X0);
 
 /// The top of the two bands in the layout the app is drawing right now.
 #[inline(always)]
@@ -890,10 +932,40 @@ fn recipient_field(app: &MessagesApp) -> (usize, usize, usize, usize) {
 fn compose_field(app: &MessagesApp) -> (usize, usize, usize, usize) {
     (
         24,
-        compose_band_y0(app) + 14,
+        compose_band_y0(app) + COMPOSE_FIELD_DY,
         COMPOSE_FIELD_W,
         COMPOSE_FIELD_H,
     )
+}
+
+/// The lane the send control is drawn in: the strip of the compose band right
+/// of the composer field, over the field's own rows.
+///
+/// WHY derived from the field: the disc is the field's action, so it is centred
+/// on the field, and the two used to be expressed as separate literals
+/// (`band + 14 .. band + 74`) that only happened to agree while the field was
+/// 60 tall in a band of 84.
+#[inline(always)]
+fn send_lane(app: &MessagesApp) -> (usize, usize, usize, usize) {
+    let field = compose_field(app);
+    (
+        SEND_LANE_X0,
+        field.1,
+        SEND_LANE_X1 - SEND_LANE_X0,
+        field.3,
+    )
+}
+
+/// Whether the screen being drawn paints the recipient and compose bands.
+///
+/// WHY the tap path asks the same question the painter does: the thread details
+/// and the recipient picker paint a notice card across the rows the bands
+/// would occupy, and a control that is not drawn there must not answer a press
+/// there either -- above all the send control, whose press seals a message into
+/// the vault and posts it to the thread.
+#[inline(always)]
+fn compose_controls_shown(app: &MessagesApp) -> bool {
+    app.view_mode == ViewMode::ThreadList || app.view_mode == ViewMode::Conversation
 }
 
 /// The recipient picker's control, at the right of the recipient band.
@@ -903,9 +975,13 @@ fn pick_control(app: &MessagesApp) -> (usize, usize, usize, usize) {
 }
 
 /// The centre of the send button.
+///
+/// WHY it is the lane's own centre: the disc is hit-tested as the circle it is
+/// drawn as, and the lane is what the painter clips it to.
 #[inline(always)]
 fn send_cy(app: &MessagesApp) -> usize {
-    compose_band_y0(app) + 44
+    let lane = send_lane(app);
+    lane.1 + lane.3 / 2
 }
 
 /// The height of the thread list's visible band.
@@ -920,10 +996,38 @@ fn convo_viewport_h(app: &MessagesApp) -> usize {
     bands_top(app) - CONVO_TOP
 }
 
-// Home gesture band (y 1418..1424)
+/// The home indicator this app draws for itself.
+///
+/// WHY the mark is named rather than left as the literal `1418..1424` the
+/// painter used: the paint and the gesture are the same control, and the
+/// gesture had its own number -- see `HOME_GESTURE_Y0`.
+const HOME_PILL_H: usize = 6;
+const HOME_PILL_Y0: usize = H - 22;
+const HOME_PILL_Y1: usize = HOME_PILL_Y0 + HOME_PILL_H;
 const HOME_X0: usize = 240;
 const HOME_X1: usize = 480;
-const HOME_Y0: usize = 1400;
+
+/// The first row the leave-the-app gesture owns.
+///
+/// WHY it starts at the painted mark and not above it: the gesture used to
+/// start at the literal 1400, eighteen rows above the row it actually draws,
+/// and the compose band paints down to 1414. So the last five rows of the
+/// visible composer field -- and the eight rows of band below it -- were not
+/// composer pixels but a quit: a tap in the middle of the drawn field's bottom
+/// edge threw the user out of the app instead of placing the caret.
+///
+/// WHY the rows under the mark are left to it: from the mark down to the bottom
+/// of the canvas this app paints nothing of its own, so the gesture can keep a
+/// thumb-height of target without claiming a control.
+const HOME_GESTURE_Y0: usize = HOME_PILL_Y0;
+
+/// WHY checked at compile time: the gesture may only own rows no band of this
+/// app paints. Both positions of the compose bands and the keyboard dock are
+/// above the mark, and the first of those three facts is what a taller band or
+/// a taller dock would break.
+const _: () = assert!(HOME_PILL_Y0 >= BANDS_TOP_IDLE + BANDS_H);
+const _: () = assert!(HOME_PILL_Y0 >= KB_Y1);
+const _: () = assert!(HOME_PILL_Y1 <= H);
 
 /// The row every scrollable section of the app starts at, below the search band.
 ///
@@ -986,6 +1090,14 @@ const BUBBLE_GAP: usize = spacing::GRID_16;
 /// The distance from one bubble's top to the next one's top.
 const BUBBLE_STEP: usize = BUBBLE_H + BUBBLE_GAP;
 
+/// WHY checked at compile time: the conversation clamps a scrolled-out bubble
+/// to row zero (see the layout in `messages_pixel`), and that clamp is exact
+/// only while a bubble that has lost its top to the clamp also loses its whole
+/// body to it -- one bubble height above the canvas is still above the band's
+/// first row. Bring `CONTENT_TOP` under `BUBBLE_H` and the oldest bubble of a
+/// scrolled thread starts painting inside the search band.
+const _: () = assert!(CONVO_TOP >= BUBBLE_H);
+
 /// The longest line of notice text the app shows.
 const NOTICE_CAP: usize = 96;
 
@@ -996,13 +1108,50 @@ const NOTICE_CAP: usize = 96;
 // screen that started eight rows above the list printed its first row over the
 // band's hairline while its siblings did not.
 const DETAILS_TOP: usize = CONTENT_TOP;
-/// The row pitch, and the card it draws: `DETAIL_ROW_H - 8` leaves the
-/// platform's `GRID_8` between two report rows.
-const DETAIL_ROW_H: usize = 96;
+
+// The report row both the details screen and the recipient picker lay out: a
+// caption box over a body box, on a card, with the platform's grid between two
+// cards.
+//
+// WHY every number here is derived: the pitch was the literal 96 and the card
+// under it 88, and twelve of them from `DETAILS_TOP` run to row 1340 --
+// fifty-six rows past the band the screen paints inside, because the band ends
+// where the recipient band begins. The last row of the details report was
+// therefore cut on every visit: its label showed and the sentence under it
+// ("Unavailable: no transport is bound") never did, so the screen printed a
+// question with no answer.
+const ROW_TOP_PAD: usize = 12;
+const ROW_CAPTION_BOX: usize = std::design::font::line_height(type_scale::CAPTION);
+const ROW_INK_GAP: usize = 4;
+const ROW_BODY_BOX: usize = std::design::font::line_height(type_scale::BODY);
+const ROW_BOTTOM_PAD: usize = 12;
+/// The card a report row owns.
+const ROW_CARD_H: usize =
+    ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX + ROW_BOTTOM_PAD;
+/// The gap between two report cards.
+const ROW_GAP: usize = spacing::GRID_8;
+/// The distance from one report row's top to the next one's top.
+const ROW_PITCH: usize = ROW_CARD_H + ROW_GAP;
+
+/// The row's side padding, and the two boxes' tops inside the card.
+const ROW_PAD_X: usize = spacing::GRID_24;
+const ROW_CAPTION_Y: usize = ROW_TOP_PAD;
+const ROW_BODY_Y: usize = ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP;
+
+const DETAIL_ROW_H: usize = ROW_PITCH;
 const DETAIL_ROWS: usize = 12;
 const RECIP_ROW_TOP: usize = CONTENT_TOP;
-const RECIP_ROW_H: usize = 88;
+const RECIP_ROW_H: usize = ROW_PITCH;
 const RECIP_ROWS: usize = 12;
+
+/// WHY checked at compile time: a card has to outlast the ink it carries, and
+/// the twelve rows a screen can produce have to fit the band they are painted
+/// in -- which is the thread list's viewport, since all three screens share the
+/// same top edge and the same bottom edge. Each of these is the cut-off row
+/// coming back.
+const _: () = assert!(ROW_CAPTION_Y + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX < ROW_CARD_H);
+const _: () = assert!(DETAIL_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
+const _: () = assert!(RECIP_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
 const PICK_LABEL: &[u8] = b"PICK";
 const INFO_LABEL: &[u8] = b"INFO";
 
@@ -1459,17 +1608,17 @@ fn card_row_pixel(
         CARD.fill,
         CARD.border,
     ) {
-        let max_w = rect.2.saturating_sub(48);
+        let max_w = rect.2.saturating_sub(2 * ROW_PAD_X);
         let mut lbl_buf = [0u8; 64];
         let lbl_len = std::design::font::ellipsize(label, 1, max_w, &mut lbl_buf);
         let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };
-        if let Some(t) = test_text(x, y, fx + 24, fy + 16, 1, lbl_disp, THEME.on_surface_variant, CARD.fill) {
+        if let Some(t) = test_text(x, y, fx + ROW_PAD_X, fy + ROW_CAPTION_Y, 1, lbl_disp, THEME.on_surface_variant, CARD.fill) {
             return Some(t);
         }
         let mut val_buf = [0u8; 96];
         let val_len = std::design::font::ellipsize(value, 2, max_w, &mut val_buf);
         let val_disp = if val_len > 0 { &val_buf[..val_len] } else { value };
-        if let Some(t) = test_text(x, y, fx + 24, fy + 44, 2, val_disp, THEME.on_surface, CARD.fill) {
+        if let Some(t) = test_text(x, y, fx + ROW_PAD_X, fy + ROW_BODY_Y, 2, val_disp, THEME.on_surface, CARD.fill) {
             return Some(t);
         }
         return Some(c);
@@ -2175,7 +2324,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             let rfield = recipient_field(messages);
             if in_rect(rfield, x, y) {
                 let rect = primitives::Rect::new(rfield.0, rfield.1, rfield.2, rfield.3);
-                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    40,
+                    f.recipient.y + SHARED_BASELINE_SHIFT,
+                    1,
+                    b"To:",
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
                     return c;
                 }
                 if let Some(c) = editor_pixel(x, y, &f.recipient, messages.keyboard.is_focused(Field::Recipient), THEME.surface_container) {
@@ -2232,7 +2390,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
-                        f.compose.y,
+                        f.compose.y + SHARED_BASELINE_SHIFT,
                         1,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
@@ -2247,7 +2405,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             }
 
             // Send control circle
-            if x >= 630 && x < 694 && y >= compose_band_y0(messages) + 14 && y < compose_band_y1(messages) - 10 {
+            if in_rect(send_lane(messages), x, y) {
                 let dx = (x as isize) - SEND_CX as isize;
                 let dy = (y as isize) - send_cy(messages) as isize;
                 if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
@@ -2395,7 +2553,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // thumb and the tap targets cannot disagree.
                 let scroll = messages.convo_scroll.offset;
                 for i in 0..count {
-                    let b_top = CONVO_TOP + i * BUBBLE_STEP - scroll;
+                    // WHY the subtraction saturates: a thread holds sixteen
+                    // bubbles and the band shows twelve, so the scroll extent
+                    // runs to 16 * 92 - 1096 = 376 rows -- further than
+                    // `CONVO_TOP` itself. The top of the oldest bubble is then
+                    // above row zero, and `usize` has no such number: in the
+                    // checked build it aborted the task as soon as the user
+                    // scrolled a long thread, and unchecked it wrapped to a
+                    // top no pixel could reach, so the bubble silently stopped
+                    // existing. Clamping is exact here because of the gate on
+                    // `CONVO_TOP >= BUBBLE_H` above.
+                    let b_top = (CONVO_TOP + i * BUBBLE_STEP).saturating_sub(scroll);
                     let b_bot = b_top + BUBBLE_H;
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
@@ -2500,7 +2668,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             let rfield = recipient_field(messages);
             if in_rect(rfield, x, y) {
                 let rect = primitives::Rect::new(rfield.0, rfield.1, rfield.2, rfield.3);
-                if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", THEME.on_surface_variant, THEME.surface_container) {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    40,
+                    f.recipient.y + SHARED_BASELINE_SHIFT,
+                    1,
+                    b"To:",
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                ) {
                     return c;
                 }
                 if let Some(c) = editor_pixel(x, y, &f.recipient, messages.keyboard.is_focused(Field::Recipient), THEME.surface_container) {
@@ -2554,7 +2731,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
-                        f.compose.y,
+                        f.compose.y + SHARED_BASELINE_SHIFT,
                         1,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
@@ -2569,7 +2746,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             }
 
             // Send control circle
-            if x >= 630 && x < 694 && y >= compose_band_y0(messages) + 14 && y < compose_band_y1(messages) - 10 {
+            if in_rect(send_lane(messages), x, y) {
                 let dx = (x as isize) - SEND_CX as isize;
                 let dy = (y as isize) - send_cy(messages) as isize;
                 if dx * dx + dy * dy <= (SEND_R * SEND_R) as isize {
@@ -2598,7 +2775,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let top = DETAILS_TOP + row * DETAIL_ROW_H;
                 if y >= top && y < top + DETAIL_ROW_H {
                     let line = &f.detail[row];
-                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, DETAIL_ROW_H - 8);
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, ROW_CARD_H);
                     if let Some(c) = card_row_pixel(
                         x,
                         y,
@@ -2670,7 +2847,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let top = RECIP_ROW_TOP + row * RECIP_ROW_H;
                 if y >= top && y < top + RECIP_ROW_H {
                     let line = &f.picker[row];
-                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, RECIP_ROW_H - 8);
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, ROW_CARD_H);
                     if let Some(c) = card_row_pixel(
                         x,
                         y,
@@ -2726,8 +2903,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
     }
 
-    // 5. Home Gesture Pill (x: 240..480, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= HOME_X0 && x < HOME_X1 {
+    // 5. Home Gesture Pill (x: HOME_X0..HOME_X1, y: HOME_PILL_Y0..HOME_PILL_Y1)
+    if y >= HOME_PILL_Y0 && y < HOME_PILL_Y1 && x >= HOME_X0 && x < HOME_X1 {
         return THEME.on_surface_variant;
     }
 
@@ -3234,7 +3411,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     let (x, y) = (px as usize, py as usize);
 
     // System home gesture: leave to launcher
-    if x >= HOME_X0 && x < HOME_X1 && y >= HOME_Y0 {
+    if x >= HOME_X0 && x < HOME_X1 && y >= HOME_GESTURE_Y0 {
         return Tap::Leave("[MESSAGES APP] Home gesture pressed. Exiting to launcher.");
     }
 
@@ -3290,8 +3467,14 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(dirty);
     }
 
-    // The thread details screen's own rows.
-    if app.view_mode == ViewMode::Details && y >= DETAILS_TOP && y < recipient_band_y0(app) {
+    // The thread details screen's own rows. The card column bounds them, as
+    // the painter bounds them: a press outside the card is not on a row.
+    if app.view_mode == ViewMode::Details
+        && x >= CARD_X0
+        && x < CARD_X1
+        && y >= DETAILS_TOP
+        && y < recipient_band_y0(app)
+    {
         let mut detail = [DetailLine {
             label: b"",
             value: [0; 72],
@@ -3352,8 +3535,13 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // The recipient picker's rows.
-    if app.view_mode == ViewMode::Recipients && y >= RECIP_ROW_TOP && y < recipient_band_y0(app) {
+    // The recipient picker's rows, inside the same card column.
+    if app.view_mode == ViewMode::Recipients
+        && x >= CARD_X0
+        && x < CARD_X1
+        && y >= RECIP_ROW_TOP
+        && y < recipient_band_y0(app)
+    {
         let mut picker = [PickerLine::EMPTY; RECIP_ROWS];
         let count = build_picker_lines(app, &mut picker);
         let row = (y - RECIP_ROW_TOP) / RECIP_ROW_H;
@@ -3372,9 +3560,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     // The control at the right of the recipient band: it opens the recipient
     // picker from the thread list and the thread's details from a
     // conversation.
-    if in_rect(pick_control(app), x, y)
-        && (app.view_mode == ViewMode::ThreadList || app.view_mode == ViewMode::Conversation)
-    {
+    if in_rect(pick_control(app), x, y) && compose_controls_shown(app) {
         if app.view_mode == ViewMode::ThreadList {
             app.picker_return = ViewMode::ThreadList;
             app.view_mode = ViewMode::Recipients;
@@ -3389,27 +3575,42 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Send button circle
-    let sdx = x as isize - SEND_CX as isize;
-    let sdy = y as isize - send_cy(app) as isize;
-    if sdx * sdx + sdy * sdy <= (SEND_R * SEND_R) as isize {
-        if app.compose_len == 0 {
-            std::log("[MESSAGES APP] Send pressed with an empty composer; nothing was sealed.",
-            )
-            .ok();
-            return Tap::Redraw(Dirty::None);
+    // Send control: the disc the compose band draws, in the lane it draws it
+    // in, on the screens that draw it at all.
+    //
+    // WHY the band is checked here and not only in the painter: the press used
+    // to be tested against the circle alone, with no view and no rectangle, so
+    // on the thread details and the recipient picker -- which paint a notice
+    // card over exactly those rows -- an invisible send control sealed the
+    // draft into the vault and posted it to the thread.
+    if compose_controls_shown(app) && in_rect(send_lane(app), x, y) {
+        let sdx = x as isize - SEND_CX as isize;
+        let sdy = y as isize - send_cy(app) as isize;
+        if sdx * sdx + sdy * sdy <= (SEND_R * SEND_R) as isize {
+            if app.compose_len == 0 {
+                std::log("[MESSAGES APP] Send pressed with an empty composer; nothing was sealed.",
+                )
+                .ok();
+                return Tap::Redraw(Dirty::None);
+            }
+            let dirty = send_composed(app);
+            // WHY there is no summary line here: the send used to print "Message
+            // composed and processed." whatever had happened, so a press with no
+            // recipient - which the app had just announced it was storing nothing
+            // for - still read as a completed send. The transport, the vault and
+            // the thread store each report their own answer on every path.
+            return Tap::Redraw(dirty);
         }
-        let dirty = send_composed(app);
-        // WHY there is no summary line here: the send used to print "Message
-        // composed and processed." whatever had happened, so a press with no
-        // recipient - which the app had just announced it was storing nothing
-        // for - still read as a completed send. The transport, the vault and
-        // the thread store each report their own answer on every path.
-        return Tap::Redraw(dirty);
     }
 
-    // Composer text field
-    if in_rect(compose_field(app), x, y) {
+    // Composer text field -- drawn only on the two screens that carry the
+    // bands, so only they may focus it.
+    //
+    // WHY it matters here: focusing it raises the keyboard, and the keyboard
+    // moves the bands up to 850, which is where the details screen's rows are
+    // still being laid out: a press on a notice card used to clip half of that
+    // screen's report.
+    if compose_controls_shown(app) && in_rect(compose_field(app), x, y) {
         if app.compose_len > 0 && x >= 570 && x < 610 {
             app.compose = [0; COMPOSE_CAP];
             app.compose_len = 0;
@@ -3426,8 +3627,8 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Recipient text field
-    if in_rect(recipient_field(app), x, y) {
+    // Recipient text field, same band as the composer.
+    if compose_controls_shown(app) && in_rect(recipient_field(app), x, y) {
         if app.recip_len > 0 && x >= 570 && x < 610 {
             app.recip = [0; RECIP_CAP];
             app.recip_len = 0;
@@ -3465,7 +3666,13 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         // WHY the offset is added back: the rows are drawn at their
         // scrolled position, so the row under the finger is the one whose
         // scrolled band contains it.
-        if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 {
+        //
+        // WHY the band's bottom edge is the painter's own edge: the row math
+        // ran to the bottom of the screen, so a press in the recipient and
+        // compose bands -- rows the list does not fill -- was fed to it as if
+        // it were a row. The drag handler above already bounded the list to
+        // `recipient_band_y0`; the tap was the one place that did not.
+        if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 && y < recipient_band_y0(app) {
             let scroll = app.list_scroll.offset;
             let rel = (y - CARD_Y0) + scroll;
             let idx = rel / CARD_H;
