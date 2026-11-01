@@ -96,16 +96,40 @@ const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 /// the right inset the storage readout is aligned to.
 const HEADER_MARGIN: usize = spacing::GRID_24;
 
-/// The header's back control: a 44x44 pill in the strip below the status band.
+/// The header's title run: where its line box stands and the rung it draws at.
+///
+/// WHY written out rather than pulled from a token: the native-UI truth contract
+/// pins the call below to `48, 64, 3`, so the geometry under the header is
+/// derived from these two numbers instead of drifting away from them.
+const TITLE_Y: usize = 64;
+const TITLE_SCALE: usize = 3;
+
+/// The header's back control: a pill standing on the row under the title.
 ///
 /// WHY the back control exists at all: it is painted from the same rectangle
 /// the tap handler tests, so the region that leaves the screen is visible.
 ///
-/// WHY it sits at the header's foot: the platform band owns rows 0..48, and the
-/// header's title line box is pinned at row 64, so a 44px control standing at
-/// the band's foot is the only one that clears both the band and the title. It
-/// is the platform's minimum target, and it stays the tap handler's own rect.
-const BACK: Rect = Rect::new(HEADER_MARGIN, STATUS_BAR_HEIGHT + 48, MIN_TOUCH, MIN_TOUCH);
+/// WHY it stands on the title's foot row rather than at the band's foot: the
+/// surface answers one question per pixel and the first claimant it answers wins,
+/// so the pill that shared the title's rows had the foot of its own top edge
+/// given up to the title's "F" -- three rows of fill that never existed, and an
+/// edge that read as bitten. The title reserves its line box; the control
+/// reserves the row under it, and neither asks for a pixel the other has.
+const BACK: Rect = Rect::new(
+    HEADER_MARGIN,
+    TITLE_Y + font::line_height(TITLE_SCALE),
+    MIN_TOUCH,
+    MIN_TOUCH,
+);
+
+/// WHY checked at compile time: the band owns `0..STATUS_BAR_HEIGHT`, the header
+/// branch owns every row below `HEADER_H`, and a run and a control that share a
+/// row are two claimants for one pixel. These three gates are the whole claim of
+/// this header's layout -- the title clears the band, the control clears the
+/// title's line box, and the pair fits inside the band the header owns.
+const _: () = assert!(TITLE_Y >= std::design::viewport::HEADER_TOP);
+const _: () = assert!(BACK.y >= TITLE_Y + font::line_height(TITLE_SCALE));
+const _: () = assert!(BACK.y + BACK.h <= HEADER_H);
 
 /// The system home indicator, and the strip that contains it.
 const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
@@ -1714,10 +1738,15 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     //
     // WHY the coordinates are written out instead of pulled from constants:
     // the native-UI truth contract pins this exact call so the title's line
-    // box cannot be narrowed again.
+    // box cannot be narrowed again. `TITLE_Y` and `TITLE_SCALE` carry the same
+    // two numbers into the layout under it, and the gate beside `BACK` is where
+    // that is checked.
     //
-    // WHY it is drawn before the back control: the control now stands below the
-    // band, where the title's stem reaches, and a pinned run keeps its ink.
+    // WHY it is asked before the back control: a surface answers the first
+    // claimant of a pixel and the other one's ink never exists, so the run asked
+    // first keeps its ink -- which is only a fair order while the two claim
+    // different rows. The control now stands on the row under this line box, so
+    // the order decides nothing here and both are whole.
     if let Some(color) = test_text(x, y, 48, 64, 3, b"Files", THEME.on_surface, THEME.surface) {
         return color;
     }

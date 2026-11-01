@@ -637,7 +637,13 @@ pub fn action_for_mime(mime: &str) -> &'static [u8] {
 // -----------------------------------------------------------------------------
 
 /// The header band.
-pub const HEADER_H: usize = 140;
+///
+/// WHY this tall: the title's line box reserves rows 64..108 at the rung it
+/// draws on, and the back control is the platform's minimum target standing on
+/// the row under it. A header that stopped short of the control's own foot would
+/// hand the control's last rows to the screen below, which is the same loss the
+/// status band inflicts from above.
+pub const HEADER_H: usize = 152;
 
 // -----------------------------------------------------------------------------
 // The home screen
@@ -702,26 +708,35 @@ pub fn category_row_at(y: usize) -> Option<(usize, usize, usize)> {
 // The browse screen
 // -----------------------------------------------------------------------------
 
+/// The row the browse screen's stack starts on: the first row the header no
+/// longer answers.
+///
+/// WHY derived from the header and not written out: the header grew to carry the
+/// back control on the row under the title's line box, and every row of the
+/// stack below it kept the gap it already had from the search field. A stack
+/// starting inside the rows the header answers loses its top rows to a surface
+/// that never asks the stack what it is drawing.
+pub const BROWSE_STACK_Y: usize = HEADER_H;
 /// The search field: the app's one text input.
-pub const SEARCH_FIELD: Rect = Rect::new(36, 146, 648, 56);
+pub const SEARCH_FIELD: Rect = Rect::new(36, BROWSE_STACK_Y, 648, 56);
 /// The clear action inside the search field.
-pub const SEARCH_CLEAR: Rect = Rect::new(612, 150, 48, 48);
+pub const SEARCH_CLEAR: Rect = Rect::new(612, BROWSE_STACK_Y + 4, 48, 48);
 /// The scope caption beside the two scope pills.
-pub const SCOPE_Y: usize = 208;
+pub const SCOPE_Y: usize = BROWSE_STACK_Y + 62;
 /// The two search scopes, as pills the user can press.
-pub const SCOPE_THIS_PILL: Rect = Rect::new(432, 204, 120, 48);
-pub const SCOPE_ALL_PILL: Rect = Rect::new(560, 204, 124, 48);
+pub const SCOPE_THIS_PILL: Rect = Rect::new(432, BROWSE_STACK_Y + 58, 120, 48);
+pub const SCOPE_ALL_PILL: Rect = Rect::new(560, BROWSE_STACK_Y + 58, 124, 48);
 /// The widest the scope caption may run before it meets the first pill.
 pub const SCOPE_CAPTION_MAX_W: usize = 380;
 
 /// The breadcrumb band. The crumbs are text at scale 1, so the band is one
 /// 24-row line box with a touch strip around it.
-pub const BREADCRUMB_Y: usize = 262;
-pub const BREADCRUMB_HIT_Y0: usize = 256;
-pub const BREADCRUMB_HIT_Y1: usize = 304;
+pub const BREADCRUMB_Y: usize = BROWSE_STACK_Y + 116;
+pub const BREADCRUMB_HIT_Y0: usize = BROWSE_STACK_Y + 110;
+pub const BREADCRUMB_HIT_Y1: usize = BROWSE_STACK_Y + 158;
 
 /// The sort and layout toolbar.
-pub const TOOLBAR_Y: usize = 300;
+pub const TOOLBAR_Y: usize = BROWSE_STACK_Y + 154;
 pub const TOOLBAR_H: usize = 48;
 pub const SORT_PILL: Rect = Rect::new(36, TOOLBAR_Y, 160, TOOLBAR_H);
 pub const LIST_PILL: Rect = Rect::new(512, TOOLBAR_Y, 84, TOOLBAR_H);

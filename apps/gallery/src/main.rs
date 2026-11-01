@@ -257,6 +257,34 @@ const SUBTITLE_Y: usize = TITLE_Y + font::line_height(2) + 4;
 /// here under the band, only one row lower.
 const _: () = assert!(SUBTITLE_Y + font::line_height(2) <= HEADER_H);
 
+/// The fullscreen overlay's header strip: the codec badge over a fullscreen
+/// video, and the photo viewer's close control and zoom readout.
+///
+/// WHY it starts at the platform's content boundary and not at the top of the
+/// panel: the band answers every pixel above `STATUS_BAR_HEIGHT` before the
+/// detail painter is reached, so the badge authored at row 28 lost the crown of
+/// every glyph it carries -- twelve of its ink rows, from the top -- and the
+/// 48-tall control authored at row 24 lost its whole crown and round end to a
+/// surface the viewer never asked permission of.
+///
+/// WHY the strip is exactly one body line box tall: the badge is the only run
+/// inside it, and a strip taller than its run is picture the overlay claims
+/// for nothing.
+const VIEWER_BAR_TOP: usize = HEADER_TOP;
+const VIEWER_BAR_BOTTOM: usize = VIEWER_BAR_TOP + font::line_height(2);
+/// The viewer's close control and the zoom readout beside it. The painter and
+/// the press both test these rectangles, so a move here moves the tap with it.
+const VIEWER_CLOSE: Rect =
+    Rect::new(MARGIN, VIEWER_BAR_TOP, spacing::GRID_48, spacing::GRID_48);
+const VIEWER_ZOOM: Rect = Rect::new(W - 88, VIEWER_BAR_TOP, 64, spacing::GRID_48);
+/// WHY checked at compile time: every run and pill in this strip is authored
+/// from its top, and a control whose top crept back above `STATUS_BAR_HEIGHT`
+/// would be a control whose ink does not exist -- the exact defect these
+/// constants replace. The readout's own gate keeps it on the panel.
+const _: () = assert!(VIEWER_BAR_TOP >= interos_std::design::viewport::STATUS_BAR_HEIGHT);
+const _: () = assert!(VIEWER_CLOSE.y >= interos_std::design::viewport::STATUS_BAR_HEIGHT);
+const _: () = assert!(VIEWER_ZOOM.x + VIEWER_ZOOM.w <= W);
+
 /// The filter chip row.
 ///
 /// WHY the row is on top and not under the tab bar: the tab bar and the chip
@@ -3593,10 +3621,23 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     // If video is fullscreen, render fullscreen video surface and controls
     if let Some(ref player) = app.video_player {
         if player.is_fullscreen {
-            if y < 80 {
-                // Header strip in fullscreen
+            if y >= VIEWER_BAR_TOP && y < VIEWER_BAR_BOTTOM {
+                // Header strip in fullscreen. WHY the strip is the badge's own
+                // line box and not the rows above it too: the eight rows between
+                // the band and the overlay are picture the overlay has no claim
+                // on, and a strip that fills them says the badge is taller than
+                // the run it carries.
                 let codec_str = player.codec.as_str().as_bytes();
-                if let Some(c) = text(x, y, MARGIN, 28, 2, codec_str, THEME.on_primary, THEME.surface_container_low) {
+                if let Some(c) = text(
+                    x,
+                    y,
+                    MARGIN,
+                    VIEWER_BAR_TOP,
+                    2,
+                    codec_str,
+                    THEME.on_primary,
+                    THEME.surface_container_low,
+                ) {
                     return c;
                 }
                 return THEME.surface_container_low;
@@ -3636,13 +3677,19 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
 
         // Floating close control in the top-left. It is tested before the
         // picture's placeholder text so the control is always legible.
-        let exit_rect = Rect::new(24, 24, 48, 48);
+        let exit_rect = VIEWER_CLOSE;
         if exit_rect.contains(x, y) {
             if let Some(c) = draw_pill(x, y, exit_rect, 0xCC111214, Some(THEME.border)) {
                 if c != 0xCC111214 {
                     return c;
                 }
-                if let Some(tc) = text(x, y, exit_rect.x + 18, exit_rect.y + 12, 2, b"<", 0xFFFFFFFF, 0xCC111214) {
+                let lbl = b"<";
+                let lw = outline_text::drawn_advance(lbl, 2, None)
+                    .unwrap_or_else(|| font::measure(lbl, 2));
+                let lx = exit_rect.x + (exit_rect.w.saturating_sub(lw)) / 2;
+                let ly =
+                    exit_rect.y + (exit_rect.h.saturating_sub(font::line_height(2))) / 2;
+                if let Some(tc) = text(x, y, lx, ly, 2, lbl, 0xFFFFFFFF, 0xCC111214) {
                     return tc;
                 }
                 return c;
@@ -3651,7 +3698,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
 
         // Zoom readout, from the actual thousandths the viewer is using.
         if app.photo_zoom > 1000 {
-            let z_rect = Rect::new(W - 88, 24, 64, 48);
+            let z_rect = VIEWER_ZOOM;
             if z_rect.contains(x, y) {
                 let mut z_buf = [0u8; 8];
                 let zn = write_zoom_label(app.photo_zoom, &mut z_buf);
@@ -4956,7 +5003,7 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
     // inside the home-strip branch it used to be nested in -- it is at the top
     // of the screen, and a tap on it has to be reachable.
     if app.photo_fullscreen && app.open.is_some() && app.video_player.is_none() {
-        let exit_rect = Rect::new(24, 24, 48, 48);
+        let exit_rect = VIEWER_CLOSE;
         if exit_rect.contains(x, y) {
             app.photo_fullscreen = false;
             app.reset_viewer_transform();

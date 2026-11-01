@@ -152,10 +152,13 @@ def test_typography_and_touch_affordances():
     assert "draw_text(x, y, 24, 606, 2" in main
     assert "draw_text(x, y, 608, 606, 2" in main
 
-    # Touch targets >= 48px
-    assert "CLOSE_BTN: Rect = Rect::new(24, 32, 52, 52)" in main
-    assert "ORIENT_BTN: Rect = Rect::new(568, 32, 52, 52)" in main
-    assert "KEBAB_BTN: Rect = Rect::new(644, 32, 52, 52)" in main
+    # Touch targets >= 48px. The three header controls stand on the platform's
+    # content boundary, so the contract names the constant the row comes from
+    # rather than the row it happened to have.
+    assert "CLOSE_BTN: Rect = Rect::new(24, HEADER_TOP, 52, 52)" in main
+    assert "ORIENT_BTN: Rect = Rect::new(568, HEADER_TOP, 52, 52)" in main
+    assert "KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52)" in main
+    assert "const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;" in main
     assert "PLAY_R: usize = 44" in main  # 88px circle
     assert "PREV_R: usize = 28" in main  # 56px circle, 64px hit
     assert "NEXT_R: usize = 28" in main

@@ -50,6 +50,40 @@ const CHUNK: usize = 4096;
 const BAND0_Y0: usize = 0;
 const BAND0_Y1: usize = 120;
 
+/// The first row this app's own chrome may author from.
+///
+/// WHY not the top of the panel: this app paints no status band today, so chrome
+/// authored at row 32 has its ink while nobody is above it. The platform's
+/// content boundary is where every sibling screen starts, and the day this app
+/// adopts the shared band the band answers the pixel function before this painter
+/// is reached -- a badge authored above the boundary is then a badge whose crown
+/// simply does not exist.
+const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;
+/// The header's title row, the line under it, and the rule that closes the band.
+///
+/// WHY derived from the ladder rather than written out: the title draws on the
+/// body rung and the line under it on the caption rung, so the second run's top
+/// is exactly the first run's own line box, and the rule sits under whichever box
+/// is the taller of the two. Two literal rows for one run is how a value came to
+/// read four rows high on the sheet below.
+const HEADER_TITLE_Y: usize = HEADER_TOP;
+const HEADER_LINE_Y: usize = HEADER_TITLE_Y + font::line_height(2);
+const HEADER_RULE_Y: usize = HEADER_LINE_Y + font::line_height(1) + 2;
+/// The widest the centred portrait title may be.
+///
+/// WHY it is derived from the control that stands to its right: the run is
+/// centred on the panel, so half its width reaches either side of the middle, and
+/// the first control that owns those rows is the one it must not reach. A bound
+/// wider than that is a bound on a run whose tail is claimed by a control tested
+/// before it, and the tail then never exists.
+const HEADER_TITLE_MAX_W: usize = 2 * (ORIENT_BTN.x - W / 2);
+/// WHY checked at compile time: the header branch answers every pixel below
+/// `BAND0_Y1`, so a rule that reached past it loses the band it belongs to, and a
+/// run whose box reached the rule is a run sharing pixels with a hairline.
+const _: () = assert!(HEADER_TITLE_Y >= std::design::viewport::STATUS_BAR_HEIGHT);
+const _: () = assert!(HEADER_LINE_Y + font::line_height(1) < HEADER_RULE_Y);
+const _: () = assert!(HEADER_RULE_Y + 4 <= BAND0_Y1);
+
 // Band 1: Centered 16:9 Video Canvas (680x382)
 const BAND1_Y0: usize = 120;
 const BAND1_Y1: usize = 560;
@@ -78,9 +112,13 @@ const _BAND6_Y1: usize = 1440;
 // Control Rectangles (All Touch Targets >= 48px)
 // -----------------------------------------------------------------------------
 
-const CLOSE_BTN: Rect = Rect::new(24, 32, 52, 52);
-const ORIENT_BTN: Rect = Rect::new(568, 32, 52, 52);
-const KEBAB_BTN: Rect = Rect::new(644, 32, 52, 52);
+/// WHY every control here stands on `HEADER_TOP`: the painter and the press test
+/// the same rectangle, so the row these three carry is the row the tap lands on,
+/// and the rule under the header is the foot they must stop above.
+const CLOSE_BTN: Rect = Rect::new(24, HEADER_TOP, 52, 52);
+const ORIENT_BTN: Rect = Rect::new(568, HEADER_TOP, 52, 52);
+const KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52);
+const _: () = assert!(CLOSE_BTN.y + CLOSE_BTN.h < HEADER_RULE_Y);
 
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
@@ -137,10 +175,57 @@ const PIP_RECT: Rect = Rect::new(PIP_X, PIP_Y, PIP_W, PIP_H);
 
 // Media Properties Sheet Card
 const SHEET_RECT: Rect = Rect::new(24, 1036, 672, 340);
+
+/// The sheet's label column: where its runs start and how wide they may be.
+///
+/// WHY the column has a bound at all: `Location:` is the longest label this
+/// sheet authors and measures 86px on the body rung, and a label that is not
+/// trimmed to its column walks into the value it names. The trim matters more
+/// than the measurement suggests, because a run the outline face refuses is
+/// re-rendered at the bitmap cell -- 32px a character, so the same nine bytes
+/// would run to 288 and straight through the value beside them.
+const SHEET_LABEL_X: usize = SHEET_RECT.x + 24;
+const SHEET_LABEL_COL_W: usize = 96;
+/// The value column's left edge, derived from the label column rather than
+/// written beside it: the air between the two is what keeps a trimmed label and
+/// its value from sharing a pixel.
+const SHEET_VALUE_X: usize = SHEET_LABEL_X + SHEET_LABEL_COL_W + 20;
+/// The widest a value may be: from its column to the sheet's own inset.
+const SHEET_VALUE_MAX_W: usize = SHEET_RECT.x + SHEET_RECT.w - 24 - SHEET_VALUE_X;
+
+/// The sheet's rows. WHY one pitch derived from the ladder: every label draws on
+/// the body rung, so the row step is that line box and the air under it, and the
+/// five rows the sheet carries are that step from the first.
+const SHEET_HEADER_Y: usize = SHEET_RECT.y + 20;
+const SHEET_ROW_FORMAT_Y: usize = SHEET_RECT.y + 60;
+const SHEET_ROW_STEP: usize = font::line_height(2) + 4;
+const SHEET_ROW_CANVAS_Y: usize = SHEET_ROW_FORMAT_Y + SHEET_ROW_STEP;
+const SHEET_ROW_DECODER_Y: usize = SHEET_ROW_FORMAT_Y + 2 * SHEET_ROW_STEP;
+const SHEET_ROW_LOCATION_Y: usize = SHEET_ROW_FORMAT_Y + 3 * SHEET_ROW_STEP;
+const SHEET_ROW_AUDIO_Y: usize = SHEET_ROW_FORMAT_Y + 4 * SHEET_ROW_STEP;
+/// The offset a caption-rung value needs to stand on its body-rung label's
+/// baseline.
+///
+/// WHY not a literal two or four: the two rungs' ascents differ by exactly this,
+/// and a value authored at the label's box top rather than at the shared baseline
+/// reads several rows high next to the word it answers.
+const SHEET_SMALL_DY: usize = font::ascent_for_scale(2) - font::ascent_for_scale(1);
+
+/// WHY checked at compile time: the columns are the sheet's whole claim about
+/// itself, and a label column that reached its value column, or a last row whose
+/// box reached past the card, is the defect these rows replace.
+const _: () = assert!(SHEET_LABEL_X + SHEET_LABEL_COL_W < SHEET_VALUE_X);
+const _: () = assert!(SHEET_VALUE_X + SHEET_VALUE_MAX_W == SHEET_RECT.x + SHEET_RECT.w - 24);
+const _: () = assert!(SHEET_ROW_AUDIO_Y + font::line_height(2) < SHEET_RECT.y + SHEET_RECT.h);
 const HOME_RECT: Rect = Rect::new(260, 1418, 200, 6);
 
 // Video Library Drawer / Sheet Layout
-const LIB_LIST_Y0: usize = 108;
+/// The drawer's list viewport, and the row it starts on.
+///
+/// WHY under the header's rule: the drawer's title and its line are painted by
+/// the same band the list is tested against, so the list has to start below the
+/// hairline that closes the band rather than under the title's line box.
+const LIB_LIST_Y0: usize = HEADER_RULE_Y + 4;
 const LIB_ROW_H: usize = 68;
 /// The bottom of the library list's viewport.
 const LIB_VIEW_Y1: usize = 1390;
@@ -1127,6 +1212,63 @@ fn draw_text_bold(
     font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
 }
 
+/// The properties sheet's label column: a body-rung run, trimmed to its column
+/// before it is asked.
+///
+/// WHY the trim happens here rather than at each call: the bound belongs to the
+/// column, not to the string, and a literal label is only short for as long as
+/// nobody renames it.
+#[inline(always)]
+fn sheet_label(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
+    let mut buf = [0u8; 24];
+    let n = font::ellipsize(s, 2, SHEET_LABEL_COL_W, &mut buf);
+    draw_text(
+        x,
+        y,
+        SHEET_LABEL_X,
+        row_y,
+        2,
+        &buf[..n],
+        COLOR_TEXT_MUTED,
+        COLOR_SHEET_CARD,
+    )
+}
+
+/// A value on the body rung, sharing its row's box top with the label it answers.
+#[inline(always)]
+fn sheet_value_bold(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
+    let mut buf = [0u8; 32];
+    let n = font::ellipsize(s, 2, SHEET_VALUE_MAX_W, &mut buf);
+    draw_text_bold(
+        x,
+        y,
+        SHEET_VALUE_X,
+        row_y,
+        2,
+        &buf[..n],
+        COLOR_TEXT_PRIMARY,
+        COLOR_SHEET_CARD,
+    )
+}
+
+/// A value on the caption rung, stood on its label's baseline rather than on the
+/// label's box top.
+#[inline(always)]
+fn sheet_value_caption(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
+    let mut buf = [0u8; 48];
+    let n = font::ellipsize(s, 1, SHEET_VALUE_MAX_W, &mut buf);
+    draw_text(
+        x,
+        y,
+        SHEET_VALUE_X,
+        row_y + SHEET_SMALL_DY,
+        1,
+        &buf[..n],
+        COLOR_TEXT_PRIMARY,
+        COLOR_SHEET_CARD,
+    )
+}
+
 // -----------------------------------------------------------------------------
 // Pixel Generator across Entire Surface
 // -----------------------------------------------------------------------------
@@ -1351,7 +1493,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // 2. VIDEO LIBRARY & PLAYLIST DRAWER / SHEET
     // =========================================================================
     if app.library_open || (app.pip_mode && !PIP_RECT.contains(x, y)) {
-        // Drawer Top Bar (y: 0..108)
+        // Drawer Top Bar (y: 0..LIB_LIST_Y0)
         if y < LIB_LIST_Y0 {
             // Close / Back button (✕)
             if CLOSE_BTN.contains(x, y) {
@@ -1371,7 +1513,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             } else {
                 b"VIDEO LIBRARY"
             };
-            if let Some(col) = draw_text_bold(x, y, 96, 36, 2, lib_title, COLOR_TEXT_PRIMARY, COLOR_BG) {
+            if let Some(col) = draw_text_bold(
+                x,
+                y,
+                96,
+                HEADER_TITLE_Y,
+                2,
+                lib_title,
+                COLOR_TEXT_PRIMARY,
+                COLOR_BG,
+            ) {
                 return col;
             }
 
@@ -1403,12 +1554,21 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     sn += 1;
                 }
             }
-            if let Some(col) = draw_text(x, y, 96, 70, 1, &sub_buf[..sn], COLOR_TEXT_MUTED, COLOR_BG) {
+            if let Some(col) = draw_text(
+                x,
+                y,
+                96,
+                HEADER_LINE_Y,
+                1,
+                &sub_buf[..sn],
+                COLOR_TEXT_MUTED,
+                COLOR_BG,
+            ) {
                 return col;
             }
 
             // Hairline separator
-            if y == 104 {
+            if y == HEADER_RULE_Y {
                 return COLOR_BORDER;
             }
             return COLOR_BG;
@@ -1468,7 +1628,12 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 return col;
             }
 
-            // Line 2: Subtitle Metadata: [File Size] • [Codec] • [Resolution] • [Duration]
+            // Line 2: Subtitle Metadata: [File Size] - [Codec] - [Resolution] - [Duration]
+            //
+            // WHY the separator is a spaced hyphen and not the typographic bullet
+            // this line used to claim: the run is painted on the bitmap rung when
+            // the outline face refuses it, and a bullet is not in that cell, so
+            // the mark between two measurements would render as mojibake.
             let mut meta_buf = [0u8; 64];
             let mut ml = 0;
 
@@ -1594,10 +1759,19 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Title in Scale 2 Body Bold
         let title_bytes = app.current_title().as_bytes();
         let mut tbuf = [0u8; 48];
-        let tn = font::ellipsize(title_bytes, 2, 440, &mut tbuf);
+        let tn = font::ellipsize(title_bytes, 2, HEADER_TITLE_MAX_W, &mut tbuf);
         let tw = font::measure_bold(&tbuf[..tn], 2);
         let tx = (W.saturating_sub(tw)) / 2;
-        if let Some(col) = draw_text_bold(x, y, tx, 40, 2, &tbuf[..tn], COLOR_TEXT_PRIMARY, COLOR_BG) {
+        if let Some(col) = draw_text_bold(
+            x,
+            y,
+            tx,
+            HEADER_TITLE_Y,
+            2,
+            &tbuf[..tn],
+            COLOR_TEXT_PRIMARY,
+            COLOR_BG,
+        ) {
             return col;
         }
 
@@ -1615,12 +1789,21 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
         let sw = font::measure(&sub_buf[..sl], 1);
         let sx = (W.saturating_sub(sw)) / 2;
-        if let Some(col) = draw_text(x, y, sx, 78, 1, &sub_buf[..sl], COLOR_TEXT_MUTED, COLOR_BG) {
+        if let Some(col) = draw_text(
+            x,
+            y,
+            sx,
+            HEADER_LINE_Y,
+            1,
+            &sub_buf[..sl],
+            COLOR_TEXT_MUTED,
+            COLOR_BG,
+        ) {
             return col;
         }
 
         // Hairline divider
-        if y == 112 {
+        if y == HEADER_RULE_Y {
             return COLOR_BORDER;
         }
 
@@ -1711,7 +1894,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 let notice = b"Audio stream: unavailable";
                 let nx = CANVAS_X0 + 12;
                 let ny = CANVAS_Y0 + CANVAS_H - 28;
-                if x >= nx && x < nx + 250 && y >= ny && y < ny + 18 {
+                // WHY the gate is the run's real box: `draw_text` answers inside
+                // the caption rung's line box, and a gate shorter than that box
+                // hands the run's last rows back to the surface behind it -- the
+                // string reads whole only for as long as nobody writes a
+                // descender into it.
+                if x >= nx
+                    && x < nx + font::measure(notice, 1)
+                    && y >= ny
+                    && y < ny + font::line_height(1)
+                {
                     if let Some(col) = draw_text(
                         x,
                         y,
@@ -2035,21 +2227,30 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if let Some(col) = draw_rounded_rect(x, y, SHEET_RECT, 16, COLOR_SHEET_CARD, Some(COLOR_BORDER), 1) {
                 // Header (Scale 2 Body Bold)
                 let h_text = b"MEDIA PROPERTIES";
-                if let Some(t_col) = draw_text_bold(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 20, 2, h_text, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) = draw_text_bold(
+                    x,
+                    y,
+                    SHEET_LABEL_X,
+                    SHEET_HEADER_Y,
+                    2,
+                    h_text,
+                    COLOR_TEXT_PRIMARY,
+                    COLOR_SHEET_CARD,
+                ) {
                     return t_col;
                 }
 
                 // Format
                 let c_text = app.current_codec().label().as_bytes();
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 60, 2, b"Format:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_FORMAT_Y, b"Format:") {
                     return t_col;
                 }
-                if let Some(t_col) = draw_text_bold(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 60, 2, c_text, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_value_bold(x, y, SHEET_ROW_FORMAT_Y, c_text) {
                     return t_col;
                 }
 
                 // Resolution
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 96, 2, b"Canvas:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_CANVAS_Y, b"Canvas:") {
                     return t_col;
                 }
                 // The frame size comes from the selected file's own header;
@@ -2061,12 +2262,14 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     .unwrap_or((0, 0));
                 let mut res_buf = [0u8; 24];
                 let res_len = format_resolution(src_w, src_h, &mut res_buf);
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 96, 2, &res_buf[..res_len], COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) =
+                    sheet_value_bold(x, y, SHEET_ROW_CANVAS_Y, &res_buf[..res_len])
+                {
                     return t_col;
                 }
 
                 // Decoder Pipeline
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 132, 2, b"Decoder:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_DECODER_Y, b"Decoder:") {
                     return t_col;
                 }
                 // Only the formats this app genuinely decodes claim a
@@ -2086,13 +2289,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                         _ => b"No decoder bound",
                     }
                 };
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 132, 2, dec_label, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_value_bold(x, y, SHEET_ROW_DECODER_Y, dec_label) {
                     return t_col;
                 }
 
                 // Audio: an AVI's audio stream is named but not claimed as
                 // playable; the player has no audio decoder for it.
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 204, 2, b"Audio:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_AUDIO_Y, b"Audio:") {
                     return t_col;
                 }
                 let audio_label: &[u8] = if app.current_codec() == VideoCodec::Avi {
@@ -2106,18 +2309,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 } else {
                     b"Unavailable (no decoder)"
                 };
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 208, 1, audio_label, COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_value_caption(x, y, SHEET_ROW_AUDIO_Y, audio_label) {
                     return t_col;
                 }
 
                 // Location / Path
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 24, SHEET_RECT.y + 168, 2, b"Location:", COLOR_TEXT_MUTED, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_LOCATION_Y, b"Location:") {
                     return t_col;
                 }
                 let path_bytes = app.current_path().as_bytes();
-                let mut pbuf = [0u8; 40];
-                let pn = font::ellipsize(path_bytes, 1, 480, &mut pbuf);
-                if let Some(t_col) = draw_text(x, y, SHEET_RECT.x + 140, SHEET_RECT.y + 172, 1, &pbuf[..pn], COLOR_TEXT_PRIMARY, COLOR_SHEET_CARD) {
+                if let Some(t_col) = sheet_value_caption(x, y, SHEET_ROW_LOCATION_Y, path_bytes) {
                     return t_col;
                 }
 
