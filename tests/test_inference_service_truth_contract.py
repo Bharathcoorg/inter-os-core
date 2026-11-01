@@ -375,7 +375,45 @@ def test_the_head_geometry_is_checked_against_the_row_it_is_cached_in():
     inference = read("inference.rs")
     assert "pub const MAX_HEAD_DIM: usize = 32;" in inference
     assert "heads_span" in inference
-    assert "attention.head_count x head_length" in inference
+    assert "attention.head_count x key_length" in inference
+
+
+def test_the_head_width_a_published_file_names_is_read_not_missed():
+    """GGUF writers spell one head's width two ways, and both are the same number.
+
+    The published embedding model states `gemma-embedding.attention.key_length`
+    256. Asking only for `head_length` made a complete file look like one missing
+    a key, and the service told the person so -- the failure mode this suite
+    exists to catch is a notice that misdescribes the file in front of it.
+    """
+    gguf = read("gguf.rs")
+    walk = function_body(gguf, "pub fn read_model_info_stream")
+    assert 'b"key_length" | b"head_length"' in walk, "the reader stopped taking one spelling"
+    assert 'Some("<arch>.attention.key_length")' in gguf
+    fixture = function_body(
+        gguf, "fn test_read_model_info_configures_a_published_embedding_model"
+    )
+    assert fixture, "the published file's key shape is no longer a test"
+    for stated in ('b"gemma-embedding.attention.key_length", 256', "262_144"):
+        assert stated in fixture, f"the fixture lost the real file's {stated!r}"
+
+
+def test_the_published_head_width_rule_can_fail():
+    """Either half of the rule above has to be trippable."""
+    gguf = read("gguf.rs")
+
+    narrowed = gguf.replace('b"key_length" | b"head_length" =>', 'b"head_length" =>')
+    assert narrowed != gguf, "the spelling fixture no longer matches the reader"
+    assert 'b"key_length" | b"head_length"' not in function_body(
+        narrowed, "pub fn read_model_info_stream"
+    ), "a reader that takes only one spelling passed"
+
+    silent = gguf.replace(
+        '            return Some("<arch>.attention.key_length");',
+        '            return Some("<arch>.attention.head_length");',
+    )
+    assert silent != gguf, "the missing-key fixture no longer matches"
+    assert 'Some("<arch>.attention.key_length")' not in silent
 
 
 def test_the_reader_refuses_to_walk_a_vocabulary_to_reach_a_later_key():

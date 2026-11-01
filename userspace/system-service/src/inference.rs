@@ -17,7 +17,8 @@ pub const MAX_VOCAB_SIZE: usize = 320;
 pub const MAX_SEQ_LEN: usize = 64;
 pub const MAX_LAYERS: usize = 2;
 /// Width of one KV cache row. The cache is `[[f32; 32]; MAX_SEQ_LEN]`, so a
-/// head the file declares wider than this has nowhere to be stored.
+/// head the file declares wider than this has nowhere to be stored. Published
+/// Gemma files state this width as `<arch>.attention.key_length`.
 pub const MAX_HEAD_DIM: usize = 32;
 
 /// Error types for inference execution.
@@ -630,7 +631,7 @@ impl ModelConfig {
             MAX_INTERMEDIATE_DIM,
         )?;
         let num_layers = fits("<arch>.block_count", info.num_layers, MAX_LAYERS)?;
-        let head_dim = fits("<arch>.attention.head_length", info.head_dim, MAX_HEAD_DIM)?;
+        let head_dim = fits("<arch>.attention.key_length", info.head_dim, MAX_HEAD_DIM)?;
         let num_heads = fits("<arch>.attention.head_count", info.num_heads, MAX_HIDDEN_DIM)?;
         let vocab_size = fits("tokenizer.ggml.tokens", info.vocab_size, MAX_VOCAB_SIZE)?;
 
@@ -646,7 +647,7 @@ impl ModelConfig {
             ))?;
         if heads_span > hidden_dim {
             return Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count x head_length",
+                "<arch>.attention.head_count x key_length",
                 u32::try_from(heads_span).ok(),
                 hidden_dim,
             ));
@@ -1365,7 +1366,7 @@ pub mod tests {
         assert_eq!(
             ModelConfig::from_gguf(&info),
             Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count x head_length",
+                "<arch>.attention.head_count x key_length",
                 Some(128),
                 64
             ))
@@ -1378,9 +1379,31 @@ pub mod tests {
         assert_eq!(
             ModelConfig::from_gguf(&info),
             Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_length",
+                "<arch>.attention.key_length",
                 Some(64),
                 MAX_HEAD_DIM
+            ))
+        );
+    }
+
+    /// The numbers recorded from the published `embeddinggemma-300M-Q8_0.gguf`
+    /// (hidden 768, feed-forward 1152, 24 blocks, 3 heads 256 wide, 262,144
+    /// tokens), held here so the refusal this engine owes a real model is a test
+    /// and not a claim.
+    ///
+    /// WHY the first bound is the one named: `from_gguf` checks in the order the
+    /// graph is built, and the residual stream is the widest array the engine
+    /// sizes -- so the person is told the declaration that actually binds them
+    /// first, with the file's own number next to the engine's own limit.
+    #[test]
+    fn test_model_config_refuses_the_published_embedding_model_by_its_bound() {
+        let info = declared(768, 1152, 24, 3, 256, 262_144);
+        assert_eq!(
+            ModelConfig::from_gguf(&info),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.embedding_length",
+                Some(768),
+                MAX_HIDDEN_DIM
             ))
         );
     }

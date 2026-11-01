@@ -855,8 +855,15 @@ pub struct GgufModelInfo {
     pub num_heads: Option<u32>,
     /// `<arch>.attention.head_count_kv`
     pub num_kv_heads: Option<u32>,
-    /// `<arch>.attention.head_length`, or `key_head_length` where the file names
-    /// the query head width separately.
+    /// One head's width: `<arch>.attention.key_length`, which is the name the
+    /// published Gemma and Mistral files use, or `<arch>.attention.head_length`
+    /// where a writer spells the same number that way.
+    ///
+    /// WHY two spellings: `metadata_field` answers the bytes after the last dot,
+    /// so a file that declares `gemma-embedding.attention.key_length` 256 and a
+    /// file that declares `gemma2.attention.head_length` 256 are stating the same
+    /// width. Reading only one of them made the other look like a file missing a
+    /// key, and the notice said so.
     pub head_dim: Option<u32>,
     /// Length of `tokenizer.ggml.tokens`, read from the array's own header.
     pub vocab_size: Option<u32>,
@@ -910,7 +917,7 @@ impl GgufModelInfo {
             return Some("<arch>.attention.head_count");
         }
         if self.head_dim.is_none() {
-            return Some("<arch>.attention.head_length");
+            return Some("<arch>.attention.key_length");
         }
         if self.vocab_size.is_none() {
             return Some("tokenizer.ggml.tokens");
@@ -1058,7 +1065,7 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
                 b"block_count" => info.num_layers = Some(read_count(stream, val_type)?),
                 b"head_count" => info.num_heads = Some(read_count(stream, val_type)?),
                 b"head_count_kv" => info.num_kv_heads = Some(read_count(stream, val_type)?),
-                b"head_length" | b"key_head_length" => {
+                b"key_length" | b"head_length" => {
                     info.head_dim = Some(read_count(stream, val_type)?)
                 }
                 b"layer_norm_rms_epsilon" => {
@@ -2399,7 +2406,7 @@ mod tests {
         put_count(&mut buf, &mut off, b"gemma.feed_forward_length", 128);
         put_count(&mut buf, &mut off, b"gemma.block_count", 1);
         put_count(&mut buf, &mut off, b"gemma.attention.head_count", 2);
-        put_count(&mut buf, &mut off, b"gemma.attention.key_head_length", 32);
+        put_count(&mut buf, &mut off, b"gemma.attention.key_length", 32);
         put_float(&mut buf, &mut off, b"gemma.rope.freq_base", 1_000_000.0);
         put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
 
@@ -2408,6 +2415,48 @@ mod tests {
         assert_eq!(info.head_dim, Some(32));
         assert_eq!(info.rope_theta, Some(1_000_000.0));
         assert_eq!(info.missing_key(), None);
+    }
+
+    /// The key shape of the file anyone actually downloads, recorded from
+    /// `embeddinggemma-300M-Q8_0.gguf`: 316 tensors, 41 metadata pairs, the
+    /// head width declared as `attention.key_length` and the vocabulary 262,144
+    /// strings long -- and the vocabulary sits before every tokenizer flag the
+    /// file goes on to declare.
+    ///
+    /// WHY this is a test and not only a probe: until a published file was read
+    /// here, the reader asked for `head_length`, a name no Gemma writer uses, and
+    /// answered that a complete model was missing a key. The assertion that
+    /// matters is the position: the walk takes the vocabulary's count from its
+    /// header and stops, so a real file is configured without stepping 262,144
+    /// elements.
+    #[test]
+    fn test_read_model_info_configures_a_published_embedding_model() {
+        let mut buf = [0u8; 1024];
+        let mut off = begin_file(&mut buf, 7);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_count(&mut buf, &mut off, b"gemma-embedding.embedding_length", 768);
+        put_count(&mut buf, &mut off, b"gemma-embedding.feed_forward_length", 1152);
+        put_count(&mut buf, &mut off, b"gemma-embedding.block_count", 24);
+        put_count(&mut buf, &mut off, b"gemma-embedding.attention.head_count", 3);
+        put_count(&mut buf, &mut off, b"gemma-embedding.attention.key_length", 256);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
+        let after_vocab_header = off;
+
+        let mut stream = GgufStream::from_slice(&buf[..off]);
+        let info = read_model_info_stream(&mut stream)
+            .expect("a published embedding model declares everything the engine is built from");
+        assert_eq!(info.architecture(), Some("gemma-embedding"));
+        assert_eq!(info.hidden_dim, Some(768));
+        assert_eq!(info.intermediate_dim, Some(1152));
+        assert_eq!(info.num_layers, Some(24));
+        assert_eq!(info.num_heads, Some(3));
+        assert_eq!(info.head_dim, Some(256), "key_length is the head width");
+        assert_eq!(info.vocab_size, Some(262_144));
+        assert_eq!(
+            stream.position(),
+            after_vocab_header,
+            "the walk stopped at the vocabulary's own header, not inside it"
+        );
     }
 
     #[test]
