@@ -3413,8 +3413,13 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             colour = c;
         }
         let prompt = app.chat.prompt_text();
+        // WHY the prompt's ink is the secondary ink and not the dimmed one:
+        // on this light page `muted` measures 2.4:1 against the field's white,
+        // which is the contrast of a thing you cannot read, and this is the only
+        // sentence saying what the field is for. `muted` stays what it is for --
+        // chrome the person cannot press.
         let (body, ink) = if app.chat.prompt_is_empty() {
-            (&b"Type a message..."[..], THEME.muted)
+            (&b"Type a message..."[..], THEME.on_surface_variant)
         } else {
             (prompt, THEME.on_surface)
         };
