@@ -170,6 +170,30 @@ pub const HERO_H: usize = 904;
 const HERO_HEADER_H: usize = 84;
 const HERO_PAD: usize = 16;
 
+/// The rung the focused card shows its app name at, and its state line at.
+const HEADER_NAME_SCALE: usize = type_scale::SECTION;
+const HEADER_STATUS_SCALE: usize = type_scale::CAPTION;
+/// The name run's box top, and the status run's box top a whole name line box
+/// below it.
+///
+/// WHY the derived stride: the name is a scale-3 run that reserves
+/// `line_height(3)` = 44 rows, and a name whose glyphs descend (a "g", a "p")
+/// puts ink at the bottom of that box. The status run used to start only 34 rows
+/// below the name's top, so its own caps landed inside the name's reserved box
+/// and the two read through one another. One line box lower makes the boxes
+/// adjacent, so neither can paint into the other's rows.
+const HEADER_NAME_Y0: usize = HERO_Y + 18;
+const HEADER_STATUS_Y0: usize = HEADER_NAME_Y0 + launcher::font::line_height(HEADER_NAME_SCALE);
+
+/// Truth gates: the header's real ladder boxes (44 for a section name, 22 for a
+/// caption state), and the grown two-line stack must still close on the header
+/// band so the status box does not spill into the preview well beneath it.
+const _: () = assert!(launcher::font::line_height(HEADER_NAME_SCALE) == 44);
+const _: () = assert!(launcher::font::line_height(HEADER_STATUS_SCALE) == 22);
+const _: () = assert!(
+    HEADER_STATUS_Y0 + launcher::font::line_height(HEADER_STATUS_SCALE) <= HERO_Y + HERO_HEADER_H
+);
+
 pub const CARD_X: usize = 32;
 pub const CARD_W: usize = 656;
 
@@ -437,15 +461,20 @@ fn state_color(card: &Card) -> u32 {
 }
 
 /// What a card's header says about the app, and nothing it cannot back.
+///
+/// WHY an ASCII hyphen and not a UTF-8 middle dot: this run is painted at scale
+/// 1 by the bitmap face, which maps one byte to one glyph, so the two-byte
+/// middle dot `0xC2 0xB7` renders as "Â·" and its measured advance no longer
+/// matches the ink. A hyphen is one byte and reads as drawn.
 fn status_text(card: &Card) -> &'static [u8] {
     if card.task_id != 0 {
         if card.preview.is_live() {
             b"Running"
         } else {
-            b"Running \xc2\xb7 no frame yet"
+            b"Running - no frame yet"
         }
     } else if card.preview.has_picture() {
-        b"Not running \xc2\xb7 last frame"
+        b"Not running - last frame"
     } else {
         b"Not running"
     }
@@ -602,22 +631,29 @@ fn build(state: &LauncherState, fingerprint: u64) -> Plan {
 
     let name_x = CARD_X + HERO_PAD + 64;
     let name_room = hero_close_rect().x.saturating_sub(name_x + 16);
-    let (name, name_len) = launcher::text::ellipsize(card.label(), type_scale::SECTION, name_room);
+    let (name, name_len) = launcher::text::ellipsize(card.label(), HEADER_NAME_SCALE, name_room);
     plan.name = Label::at(
         name_x,
-        HERO_Y + 18,
-        type_scale::SECTION,
+        HEADER_NAME_Y0,
+        HEADER_NAME_SCALE,
         &name[..name_len],
         theme.on_surface,
     );
     plan.status = Label::at(
         name_x + 12,
-        HERO_Y + 52,
-        type_scale::CAPTION,
+        HEADER_STATUS_Y0,
+        HEADER_STATUS_SCALE,
         status_text(card),
         theme.on_surface_variant,
     );
-    plan.status_dot = (name_x + 1, HERO_Y + 61, state_color(card));
+    // WHY the dot is centred on the status run's box: it marks that line, so a
+    // dot left at the old y floats above the state it belongs to once the line
+    // moves a full name box lower.
+    plan.status_dot = (
+        name_x + 1,
+        HEADER_STATUS_Y0 + launcher::text::line_height(HEADER_STATUS_SCALE) / 2,
+        state_color(card),
+    );
     plan.card = Some(CardPlan {
         icon_box: Rect::new(CARD_X + HERO_PAD, HERO_Y + 16, 48, 48),
         icon,

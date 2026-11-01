@@ -31,7 +31,50 @@ const BTN_R2: i32 = BTN_RADIUS * BTN_RADIUS;
 const COL0_CX: usize = 220;
 const COL1_CX: usize = 500;
 const ROW0_CY: usize = 240;
-const ROW1_CY: usize = 380;
+/// WHY row 1 stands 156 rows under row 0 rather than the 140 it used to: a
+/// button's two-line block is a name box and a subject box, and at the ladder
+/// that is `line_height(3) + line_height(2)` = 76 rows. A 140-row pitch left
+/// only 68 rows between the two circles' rims, so no stride that cleared the
+/// name could keep the subject off the circle below it.
+const ROW1_CY: usize = 396;
+
+/// The rung a button's name is drawn at, and the rung its subject line is
+/// drawn at.
+const NAME_SCALE: usize = 3;
+const SUBJECT_SCALE: usize = 2;
+
+/// WHY the name sits a full button-radius below the centre: the circle's own
+/// ink ends at its radius, so a name any higher is painted on the button it
+/// names rather than under it.
+const ROW0_NAME_Y0: usize = ROW0_CY + BTN_RADIUS as usize;
+const ROW1_NAME_Y0: usize = ROW1_CY + BTN_RADIUS as usize;
+
+/// WHY the subject's top is the name's whole line box below the name and not a
+/// fixed 36 rows: at ladder scale 3 a run reserves `line_height(3)` = 44 rows,
+/// and the old 36-row stride was the 8x16 bitmap cell's, shorter than the name
+/// it followed, so the subject's first rows painted straight through the name's
+/// descender. Starting exactly one line box lower makes the two boxes adjacent,
+/// so no descender can be read through.
+const ROW0_SUBJECT_Y0: usize = ROW0_NAME_Y0 + launcher::font::line_height(NAME_SCALE);
+const ROW1_SUBJECT_Y0: usize = ROW1_NAME_Y0 + launcher::font::line_height(NAME_SCALE);
+
+/// The row band boundary between the two button rows: the top of row 1's button
+/// circle. WHY the circle's own edge and not the midpoint of the two centres:
+/// the circle is the primary target, so a tap on it must never be read as the
+/// row above, and a label block that grew toward it is the row's own.
+const ROW_BOUNDARY_Y: usize = ROW1_CY - BTN_RADIUS as usize;
+/// The first row the Cancel pill answers. WHY it is named: the row-1 band ends
+/// where the pill begins, and the two ranges cannot then be edited apart.
+const CANCEL_HIT_TOP_Y: usize = 510;
+
+/// Truth gates: the subject begins where its name's box ends, a whole two-line
+/// block clears the circle beneath it, and row 1's block closes above the Cancel
+/// pill rather than leaning on it.
+const _: () = assert!(launcher::font::line_height(NAME_SCALE) == 44);
+const _: () = assert!(launcher::font::line_height(SUBJECT_SCALE) == 32);
+const _: () = assert!(ROW0_SUBJECT_Y0 + launcher::font::line_height(SUBJECT_SCALE) <= ROW_BOUNDARY_Y);
+const _: () = assert!(ROW1_SUBJECT_Y0 + launcher::font::line_height(SUBJECT_SCALE) <= CANCEL_HIT_TOP_Y);
+const _: () = assert!(ROW_BOUNDARY_Y > ROW0_SUBJECT_Y0);
 
 // Button 1: Power Off (Col 0, Row 0)
 const BTN_POWER_CX: usize = COL0_CX;
@@ -75,24 +118,24 @@ pub enum PowerMenuAction {
 }
 
 pub fn power_menu_hit(x: usize, y: usize) -> PowerMenuAction {
-    // 1. Power off: Col 0, Row 0
-    if (80..340).contains(&x) && (190..340).contains(&y) {
+    // 1. Power off: Col 0, Row 0 (name and grown subject ride in this band).
+    if (80..340).contains(&x) && (190..ROW_BOUNDARY_Y).contains(&y) {
         return PowerMenuAction::PowerOff;
     }
     // 2. Lock screen: Col 1, Row 0 (contains (500, 225)!)
-    if (360..640).contains(&x) && (190..340).contains(&y) {
+    if (360..640).contains(&x) && (190..ROW_BOUNDARY_Y).contains(&y) {
         return PowerMenuAction::LockScreen;
     }
-    // 3. Restart: Col 0, Row 1
-    if (80..340).contains(&x) && (340..490).contains(&y) {
+    // 3. Restart: Col 0, Row 1 (band starts at this row's circle top).
+    if (80..340).contains(&x) && (ROW_BOUNDARY_Y..CANCEL_HIT_TOP_Y).contains(&y) {
         return PowerMenuAction::Restart;
     }
     // 4. Emergency: Col 1, Row 1
-    if (360..640).contains(&x) && (340..490).contains(&y) {
+    if (360..640).contains(&x) && (ROW_BOUNDARY_Y..CANCEL_HIT_TOP_Y).contains(&y) {
         return PowerMenuAction::Emergency;
     }
     // 5. Cancel pill button
-    if (180..540).contains(&x) && (510..590).contains(&y) {
+    if (180..540).contains(&x) && (CANCEL_HIT_TOP_Y..590).contains(&y) {
         return PowerMenuAction::Cancel;
     }
     // Outside sheet / backdrop
@@ -302,17 +345,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return COLOR_POWER_FILL;
         }
 
-        // Button 1 Labels: "Power off" (scale 2) & "Shut down" (scale 1)
+        // Button 1 Labels: "Power off" (scale 3) & "Shut down" (scale 2)
         let p_label_bytes = b"Power off";
-        let p_label_w = text::measure(p_label_bytes, 3);
+        let p_label_w = text::measure(p_label_bytes, NAME_SCALE);
         let p_label_x = BTN_POWER_CX.saturating_sub(p_label_w / 2);
-        if let Some(c) = text_pixel(x, y, p_label_x, 276, 3, p_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, p_label_x, ROW0_NAME_Y0, NAME_SCALE, p_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let p_sub_bytes = b"Shut down";
-        let p_sub_w = text::measure(p_sub_bytes, 2);
+        let p_sub_w = text::measure(p_sub_bytes, SUBJECT_SCALE);
         let p_sub_x = BTN_POWER_CX.saturating_sub(p_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, p_sub_x, 312, 2, p_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, p_sub_x, ROW0_SUBJECT_Y0, SUBJECT_SCALE, p_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -330,17 +373,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return COLOR_LOCK_FILL;
         }
 
-        // Button 2 Labels: "Lock screen" (scale 2) & "Secure device" (scale 1)
+        // Button 2 Labels: "Lock screen" (scale 3) & "Secure device" (scale 2)
         let l_label_bytes = b"Lock screen";
-        let l_label_w = text::measure(l_label_bytes, 3);
+        let l_label_w = text::measure(l_label_bytes, NAME_SCALE);
         let l_label_x = BTN_LOCK_CX.saturating_sub(l_label_w / 2);
-        if let Some(c) = text_pixel(x, y, l_label_x, 276, 3, l_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, l_label_x, ROW0_NAME_Y0, NAME_SCALE, l_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let l_sub_bytes = b"Secure device";
-        let l_sub_w = text::measure(l_sub_bytes, 2);
+        let l_sub_w = text::measure(l_sub_bytes, SUBJECT_SCALE);
         let l_sub_x = BTN_LOCK_CX.saturating_sub(l_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, l_sub_x, 312, 2, l_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, l_sub_x, ROW0_SUBJECT_Y0, SUBJECT_SCALE, l_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -358,17 +401,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return COLOR_RESTART_FILL;
         }
 
-        // Button 3 Labels: "Restart" (scale 2) & "Reboot OS" (scale 1)
+        // Button 3 Labels: "Restart" (scale 3) & "Reboot OS" (scale 2)
         let r_label_bytes = b"Restart";
-        let r_label_w = text::measure(r_label_bytes, 3);
+        let r_label_w = text::measure(r_label_bytes, NAME_SCALE);
         let r_label_x = BTN_RESTART_CX.saturating_sub(r_label_w / 2);
-        if let Some(c) = text_pixel(x, y, r_label_x, 416, 3, r_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, r_label_x, ROW1_NAME_Y0, NAME_SCALE, r_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let r_sub_bytes = b"Reboot OS";
-        let r_sub_w = text::measure(r_sub_bytes, 2);
+        let r_sub_w = text::measure(r_sub_bytes, SUBJECT_SCALE);
         let r_sub_x = BTN_RESTART_CX.saturating_sub(r_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, r_sub_x, 452, 2, r_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, r_sub_x, ROW1_SUBJECT_Y0, SUBJECT_SCALE, r_sub_bytes, 0xFFCBD5E1, SHEET_FILL) {
             return c;
         }
 
@@ -386,17 +429,17 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return COLOR_EMERGENCY_FILL;
         }
 
-        // Button 4 Labels: "Emergency" (scale 2) & "SOS / Dialer" (scale 1)
+        // Button 4 Labels: "Emergency" (scale 3) & "SOS / Dialer" (scale 2)
         let e_label_bytes = b"Emergency";
-        let e_label_w = text::measure(e_label_bytes, 3);
+        let e_label_w = text::measure(e_label_bytes, NAME_SCALE);
         let e_label_x = BTN_EMERGENCY_CX.saturating_sub(e_label_w / 2);
-        if let Some(c) = text_pixel(x, y, e_label_x, 416, 3, e_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, e_label_x, ROW1_NAME_Y0, NAME_SCALE, e_label_bytes, 0xFFFFFFFF, SHEET_FILL) {
             return c;
         }
         let e_sub_bytes = b"SOS / Dialer";
-        let e_sub_w = text::measure(e_sub_bytes, 2);
+        let e_sub_w = text::measure(e_sub_bytes, SUBJECT_SCALE);
         let e_sub_x = BTN_EMERGENCY_CX.saturating_sub(e_sub_w / 2);
-        if let Some(c) = text_pixel(x, y, e_sub_x, 452, 2, e_sub_bytes, 0xFFFCA5A5, SHEET_FILL) {
+        if let Some(c) = text_pixel(x, y, e_sub_x, ROW1_SUBJECT_Y0, SUBJECT_SCALE, e_sub_bytes, 0xFFFCA5A5, SHEET_FILL) {
             return c;
         }
 

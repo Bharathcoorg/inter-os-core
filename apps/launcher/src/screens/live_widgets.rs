@@ -31,6 +31,85 @@ const STORAGE_ROW: Rect = Rect::new(40, 138, 305, 160);
 const RAM_ROW: Rect = Rect::new(375, 138, 305, 160);
 const AUDIO_ROW: Rect = Rect::new(40, 312, 640, 120);
 const CAL_ROW: Rect = Rect::new(40, 446, 305, 160);
+const VAULT_ROW: Rect = Rect::new(375, 446, 305, 160);
+
+/// The line box a run at `scale` reserves, named once so a card's rows can be
+/// stacked from the ladder rather than from a fitted literal.
+const fn lh(scale: usize) -> usize {
+    launcher::font::line_height(scale)
+}
+
+/// WHY every second line below is derived from the line above: the old offsets
+/// (36, 42, 52 rows) were the 8x16 bitmap cell's, shorter than the run they
+/// followed, so a card's body line began before the line above had finished its
+/// box and read straight through it. Each row now starts where the row above
+/// ends, one `lh` lower.
+///
+/// Row 1 (Storage & Physical Memory): label, the figure, a body line, a caption
+/// detail. Both cards share the same vertical ladder.
+const ROW1_LABEL_Y: usize = STORAGE_ROW.y + 16;
+const ROW1_FIGURE_Y: usize = ROW1_LABEL_Y + lh(type_scale::CAPTION);
+const ROW1_SECONDARY_Y: usize = ROW1_FIGURE_Y + lh(type_scale::TITLE);
+const ROW1_DETAIL_Y: usize = ROW1_SECONDARY_Y + lh(type_scale::BODY);
+
+/// Audio card: the title, then the device line a whole body box below it, then
+/// the footer row - the volume reading on the left, the mixer tag on the right -
+/// under the gauge band.
+const AUDIO_TITLE_Y: usize = AUDIO_ROW.y + 16;
+const AUDIO_SUB_Y: usize = AUDIO_TITLE_Y + lh(type_scale::BODY);
+const AUDIO_FOOT_Y: usize = AUDIO_ROW.y + 92;
+
+/// Calendar card: label, the RTC date line, then the detail row (the chip is a
+/// filled rect and its label is centred, so it reserves its own band).
+const CAL_LABEL_Y: usize = CAL_ROW.y + 16;
+const CAL_DATE_Y: usize = CAL_LABEL_Y + lh(type_scale::CAPTION);
+const CAL_DETAIL_Y: usize = CAL_ROW.y + 124;
+
+/// Security card: label, the status figure, the architecture line, then the
+/// capability chip a whole body box under the architecture line.
+const VAULT_LABEL_Y: usize = VAULT_ROW.y + 16;
+const VAULT_STATUS_Y: usize = VAULT_LABEL_Y + lh(type_scale::CAPTION);
+const VAULT_ARCH_Y: usize = VAULT_STATUS_Y + lh(type_scale::TITLE);
+const VAULT_CHIP_Y: usize = VAULT_ARCH_Y + lh(type_scale::BODY);
+
+/// Readings cards: the label, and the sublabel one body box below it. The value
+/// is right-anchored on the same first row, so it keeps its own offset.
+const READING_LABEL_DY: usize = 10;
+const READING_SUB_DY: usize = 10 + lh(type_scale::BODY);
+const READING_VALUE_DY: usize = 20;
+/// The first readings card's row, and the section header above it. WHY the
+/// header is solved from the card and not from the card row above: a scale-3 run
+/// reserves `lh(SECTION)` = 44 rows and its descender reaches the bottom of that
+/// box, so a header placed 6 rows above the card let the card's own fill answer
+/// those rows first and ate the tail of the 'g'.
+const READINGS_CARD0_Y: usize = 664;
+const READINGS_HEAD_Y: usize = READINGS_CARD0_Y - lh(type_scale::SECTION);
+
+/// The width of a readings card, and the room one of its side-anchored runs
+/// gets: each half of the span between the left label's anchor and the right
+/// value's anchor, so the widest the label may grow is the card centre and the
+/// widest the value may grow back is the same centre.
+const READING_CARD_W: usize = 640;
+const READING_TEXT_MAX: usize = side_text_w(READING_CARD_W, 24, 24);
+
+/// The room the header title and subtitle get before the status chip: from the
+/// left margin to the chip's own left edge (the screen minus the chip's span),
+/// less the margin and a gutter.
+const HEADER_TEXT_MAX: usize = SCREEN_WIDTH - 214 - 40 - 8;
+/// The clock is canonical shell telemetry drawn in the shared band; its bound is
+/// simply the width left of it on the screen, so it can never run off-edge.
+const CLOCK_TEXT_MAX: usize = SCREEN_WIDTH - crate::screens::status::CLOCK_X;
+
+/// Truth gates: the ladder each derived stride trusts, and the fact that the
+/// grown stacks still close inside their own cards.
+const _: () = assert!(lh(type_scale::CAPTION) == 22);
+const _: () = assert!(lh(type_scale::BODY) == 32);
+const _: () = assert!(lh(type_scale::TITLE) == 59);
+const _: () = assert!(ROW1_DETAIL_Y + lh(type_scale::CAPTION) <= STORAGE_ROW.y + STORAGE_ROW.h);
+const _: () = assert!(AUDIO_SUB_Y + lh(type_scale::CAPTION) <= AUDIO_ROW.y + 74);
+const _: () = assert!(VAULT_CHIP_Y + 24 <= VAULT_ROW.y + VAULT_ROW.h);
+const _: () = assert!(READING_SUB_DY + lh(type_scale::CAPTION) <= 64);
+const _: () = assert!(READINGS_HEAD_Y + lh(type_scale::SECTION) <= READINGS_CARD0_Y);
 
 /// First row the dashboard draws a queried figure into, and the row after the
 /// last one. Covers the calendar card because its date line is read from the
@@ -78,6 +157,53 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 
 const RUN_CAP: usize = 64;
 
+/// The bytes a run paints, cut to fit `max_w` and marked with an ellipsis when
+/// it had to be.
+///
+/// WHY this is the first step of every unbounded path: a card figure is a
+/// runtime reading with no length cap of its own, and a run measured wider than
+/// its box paints into whatever is anchored on the other side, so a left label
+/// and a right value read through each other regardless of their rows. This
+/// names the canonical truncation once so `new` and `right` cannot forget it.
+/// It fills the caller's own buffer rather than returning one, so the painted
+/// bytes outlive the call that trimmed them.
+fn truncate_into(bytes: &[u8], scale: usize, max_w: usize, buf: &mut [u8]) -> usize {
+    let len = bytes.len().min(buf.len());
+    buf[..len].copy_from_slice(&bytes[..len]);
+    if max_w == 0 || text::measure(&buf[..len], scale) <= max_w {
+        return len;
+    }
+    // WHY the run handed to `ellipsize` is three bytes shorter than the buffer:
+    // the mark is written over the run's tail, and a destination that could hold
+    // one or the other would end the run mid-glyph with no mark on it.
+    let room = buf.len() - 3;
+    let (trimmed, trimmed_len) = text::ellipsize(&bytes[..bytes.len().min(room)], scale, max_w);
+    let n = trimmed_len.min(buf.len());
+    buf[..n].copy_from_slice(&trimmed[..n]);
+    n
+}
+
+/// The horizontal room a left-anchored reading gets inside a card of width
+/// `w`: from its inset on the left to the same inset on the right.
+const fn card_text_w(w: usize) -> usize {
+    w.saturating_sub(2 * 20)
+}
+
+/// The horizontal room the title line of the wide audio card gets between the
+/// art emblem it follows and the card's inset right edge.
+const AUDIO_TITLE_TEXT_W: usize = AUDIO_ROW.w.saturating_sub(76 + 20);
+
+/// The horizontal room a left reading and a right reading share on a card that
+/// carries both on one row: half the gap between their anchors, so the widest
+/// the left run may grow is the card centre and the widest the right run may
+/// grow is the same centre, and they can never meet.
+const fn side_text_w(w: usize, left_inset: usize, right_inset: usize) -> usize {
+    w.saturating_sub(left_inset + right_inset) / 2
+}
+
+/// The room the volume reading and the mixer tag share on the audio footer row.
+const AUDIO_FOOT_TEXT_W: usize = side_text_w(AUDIO_ROW.w, 20, 20);
+
 fn run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
     let em = launcher::outline_text::em_for_scale(scale);
     let (asc, desc) = interos_std::design::typeface::line_metrics(em);
@@ -118,13 +244,13 @@ impl LabelRun {
         outline: None,
     };
 
-    fn new(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+    fn new(x: usize, y: usize, max_w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
         let mut buf = [0u8; RUN_CAP];
-        let len = bytes.len().min(RUN_CAP);
-        buf[..len].copy_from_slice(&bytes[..len]);
+        let len = truncate_into(bytes, scale, max_w, &mut buf);
         let (em, top, box_h) = run_metrics(y, scale);
         let w = text::measure(&buf[..len], scale)
-            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize)
+            .min(max_w.max(1));
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
@@ -189,13 +315,13 @@ impl LabelRun {
         }
     }
 
-    fn right(x_right: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+    fn right(x_right: usize, y: usize, max_w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
         let mut buf = [0u8; RUN_CAP];
-        let len = bytes.len().min(RUN_CAP);
-        buf[..len].copy_from_slice(&bytes[..len]);
+        let len = truncate_into(bytes, scale, max_w, &mut buf);
         let (em, top, box_h) = run_metrics(y, scale);
         let w = text::measure(&buf[..len], scale)
-            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize)
+            .min(max_w.max(1));
         let rx = x_right.saturating_sub(w);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
@@ -394,6 +520,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         LabelRun::new(
             crate::screens::status::CLOCK_X,
             crate::screens::status::CLOCK_Y,
+            CLOCK_TEXT_MAX,
             type_scale::BODY,
             &state.clock_time,
             theme.on_surface,
@@ -403,14 +530,15 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     };
 
     // 2. Header
-    // WHY the subtitle sits a whole title descender below the rung: the page
-    // title is a cap-height label whose 'g' drops under its own box, and at the
-    // old y the subtitle's ink began one pixel below that tail, so the two lines
-    // read as one smeared row on the device.
-    let page_title = LabelRun::new(40, 60, type_scale::TITLE, b"Live Widgets", theme.on_surface);
+    // WHY the subtitle sits a whole title box below the title: the page title is
+    // a scale-4 run that reserves `lh(4)` = 59 rows, and at the old y the
+    // subtitle's ink began above the bottom of that box, so the two read as one
+    // smeared row on the device.
+    let page_title = LabelRun::new(40, 60, HEADER_TEXT_MAX, type_scale::TITLE, b"Live Widgets", theme.on_surface);
     let page_subtitle = LabelRun::new(
         40,
-        112,
+        60 + lh(type_scale::TITLE),
+        HEADER_TEXT_MAX,
         type_scale::CAPTION,
         b"Real-time hardware telemetry & system status",
         theme.on_surface_variant,
@@ -437,7 +565,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     // card printed "6.00 GB" and "13.2 GB" as source literals, so it reported
     // hardware the device never confirmed.
     let storage_rect = STORAGE_ROW;
-    let storage_label = LabelRun::new(storage_rect.x + 20, storage_rect.y + 16, type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant);
+    let storage_label = LabelRun::new(storage_rect.x + 20, ROW1_LABEL_Y, card_text_w(STORAGE_ROW.w), type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant);
     let mut cap_buf = [0u8; 24];
     let cap_len = if state.storage_state_valid {
         push_capacity(&mut cap_buf, state.storage_total_bytes)
@@ -445,16 +573,16 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         push_text(&mut cap_buf, 0, b"Unavailable")
     };
     let storage_ink = if state.storage_state_valid { theme.on_surface } else { theme.on_surface_variant };
-    let storage_capacity = LabelRun::new(storage_rect.x + 20, storage_rect.y + 38, type_scale::TITLE, &cap_buf[..cap_len], storage_ink);
+    let storage_capacity = LabelRun::new(storage_rect.x + 20, ROW1_FIGURE_Y, card_text_w(STORAGE_ROW.w), type_scale::TITLE, &cap_buf[..cap_len], storage_ink);
     let storage_mount = if state.storage_state_valid {
-        LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"Persistent Block Disk", theme.on_surface)
+        LabelRun::new(storage_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(STORAGE_ROW.w), type_scale::BODY, b"Persistent Block Disk", theme.on_surface)
     } else {
-        LabelRun::new(storage_rect.x + 20, storage_rect.y + 90, type_scale::BODY, b"No block device bound", theme.on_surface_variant)
+        LabelRun::new(storage_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(STORAGE_ROW.w), type_scale::BODY, b"No block device bound", theme.on_surface_variant)
     };
-    let storage_detail = LabelRun::new(storage_rect.x + 20, storage_rect.y + 124, type_scale::CAPTION, b"/data, /user, /storage persist", theme.on_surface_variant);
+    let storage_detail = LabelRun::new(storage_rect.x + 20, ROW1_DETAIL_Y, card_text_w(STORAGE_ROW.w), type_scale::CAPTION, b"/data, /user, /storage persist", theme.on_surface_variant);
 
     let ram_rect = RAM_ROW;
-    let ram_label = LabelRun::new(ram_rect.x + 20, ram_rect.y + 16, type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant);
+    let ram_label = LabelRun::new(ram_rect.x + 20, ROW1_LABEL_Y, card_text_w(RAM_ROW.w), type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant);
     let mut ram_buf = [0u8; 24];
     let ram_len = if state.memory_state_valid {
         push_capacity(&mut ram_buf, state.memory_total_bytes)
@@ -463,7 +591,8 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     };
     let ram_total = LabelRun::new(
         ram_rect.x + 20,
-        ram_rect.y + 38,
+        ROW1_FIGURE_Y,
+        card_text_w(RAM_ROW.w),
         type_scale::TITLE,
         &ram_buf[..ram_len],
         if state.memory_state_valid { 0xFF10B981 } else { theme.on_surface_variant },
@@ -479,8 +608,12 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         push_text(&mut used_buf, 0, b"No counters reported")
     };
-    let ram_mmu = LabelRun::new(ram_rect.x + 20, ram_rect.y + 90, type_scale::BODY, &used_buf[..used_len], theme.on_surface);
-    let ram_detail = LabelRun::new(ram_rect.x + 20, ram_rect.y + 124, type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
+    // WHY the rows are the shared ladder and not the old `y + 90` / `y + 124`:
+    // those offsets were the 8x16 cell's, shorter than the boxes they follow, so
+    // this card's body line began while the scale-4 figure above was still
+    // painting and read through it. The storage card already stacks this way.
+    let ram_mmu = LabelRun::new(ram_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(RAM_ROW.w), type_scale::BODY, &used_buf[..used_len], theme.on_surface);
+    let ram_detail = LabelRun::new(ram_rect.x + 20, ROW1_DETAIL_Y, card_text_w(RAM_ROW.w), type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
 
     // 4. Row 2: Real System Audio & Master Volume (y = 312..432, height 120)
     //
@@ -490,11 +623,11 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     // instead of naming a sound device the platform never answered for.
     let audio_rect = AUDIO_ROW;
     let audio_art_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 16, 44, 44);
-    let audio_title = LabelRun::new(audio_rect.x + 76, audio_rect.y + 16, type_scale::BODY, b"Master Audio Output", theme.on_surface);
+    let audio_title = LabelRun::new(audio_rect.x + 76, AUDIO_TITLE_Y, AUDIO_TITLE_TEXT_W, type_scale::BODY, b"Master Audio Output", theme.on_surface);
     let audio_sublabel = if state.volume_state_valid {
-        LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"AC'97 codec, 48 kHz PCM", theme.on_surface_variant)
+        LabelRun::new(audio_rect.x + 76, AUDIO_SUB_Y, AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"AC'97 codec, 48 kHz PCM", theme.on_surface_variant)
     } else {
-        LabelRun::new(audio_rect.x + 76, audio_rect.y + 42, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant)
+        LabelRun::new(audio_rect.x + 76, AUDIO_SUB_Y, AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant)
     };
     let audio_gauge_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 74, audio_rect.w - 40, 8);
     let pct = if state.volume_state_valid { state.last_volume_percent as usize } else { 0 };
@@ -513,16 +646,16 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         push_text(&mut vol_buf, 0, b"Volume: not reported")
     };
-    let audio_volume_label = LabelRun::new(audio_rect.x + 20, audio_rect.y + 92, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant);
+    let audio_volume_label = LabelRun::new(audio_rect.x + 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant);
     let audio_service_tag = if state.volume_state_valid {
-        LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Mixer register live", 0xFF10B981)
+        LabelRun::right(audio_rect.x + audio_rect.w - 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Mixer register live", 0xFF10B981)
     } else {
-        LabelRun::right(audio_rect.x + audio_rect.w - 20, audio_rect.y + 92, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant)
+        LabelRun::right(audio_rect.x + audio_rect.w - 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant)
     };
 
     // 5. Row 3: Calendar / RTC & Security (y = 446..606, height 160)
     let cal_rect = CAL_ROW;
-    let cal_label = LabelRun::new(cal_rect.x + 20, cal_rect.y + 16, type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
+    let cal_label = LabelRun::new(cal_rect.x + 20, CAL_LABEL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
     // WHY "No clock reading" and not "Clock Synced": the two say opposite things
     // and the old literal was printed whenever the RTC refused, so the card
     // claimed a synchronisation this shell had just been told did not happen.
@@ -535,7 +668,12 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         b"No clock reading"
     };
-    let cal_date = LabelRun::new(cal_rect.x + 20, cal_rect.y + 38, type_scale::SECTION, date_slice, theme.on_surface);
+    // WHY the date line is derived from the label box, not from `y + 38`: the
+    // old offset assumed the 8x16 cell, but the label is a caption run that
+    // reserves `lh(CAPTION)` = 22 rows, so a date line begun at 38 rows below
+    // the card top was already clear - the number is the same, only named from
+    // the ladder so a change in the caption stride moves it with the label.
+    let cal_date = LabelRun::new(cal_rect.x + 20, CAL_DATE_Y, card_text_w(CAL_ROW.w), type_scale::SECTION, date_slice, theme.on_surface);
     let cal_time_chip = Rect::new(cal_rect.x + 20, cal_rect.y + 88, 110, 24);
     let cal_time_label = if state.clock_source_ok {
         LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface)
@@ -554,17 +692,28 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         push_text(&mut cal_buf, 0, b"No calendar source queried")
     };
-    let cal_detail = LabelRun::new(cal_rect.x + 20, cal_rect.y + 124, type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant);
+    let cal_detail = LabelRun::new(cal_rect.x + 20, CAL_DETAIL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant);
 
-    let vault_rect = Rect::new(375, 446, 305, 160);
-    let vault_label = LabelRun::new(vault_rect.x + 20, vault_rect.y + 16, type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
-    let vault_status = LabelRun::new(vault_rect.x + 20, vault_rect.y + 38, type_scale::TITLE, b"Enforced", 0xFF10B981);
-    let vault_arch = LabelRun::new(vault_rect.x + 20, vault_rect.y + 90, type_scale::BODY, b"Zero Ambient Authority", theme.on_surface);
-    let vault_chip_rect = Rect::new(vault_rect.x + 20, vault_rect.y + 120, 130, 24);
+    // WHY the security card is stacked from the ladder: the status figure is a
+    // scale-4 run that reserves `lh(TITLE)` = 59 rows, and the architecture line
+    // and the chip below it were spaced by the 8x16 cell's 52 and 34 rows, so
+    // each began its ink while the run above was still inside its box.
+    let vault_rect = VAULT_ROW;
+    let vault_label = LabelRun::new(vault_rect.x + 20, VAULT_LABEL_Y, card_text_w(VAULT_ROW.w), type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
+    let vault_status = LabelRun::new(vault_rect.x + 20, VAULT_STATUS_Y, card_text_w(VAULT_ROW.w), type_scale::TITLE, b"Enforced", 0xFF10B981);
+    let vault_arch = LabelRun::new(vault_rect.x + 20, VAULT_ARCH_Y, card_text_w(VAULT_ROW.w), type_scale::BODY, b"Zero Ambient Authority", theme.on_surface);
+    let vault_chip_rect = Rect::new(vault_rect.x + 20, VAULT_CHIP_Y, 130, 24);
     let vault_chip_label = LabelRun::centred(vault_chip_rect.x, vault_chip_rect.y + 4, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF);
 
-    // 6. Section 2 Header (y = 626..656)
-    let readings_head = LabelRun::new(40, 626, type_scale::SECTION, b"System Readings", theme.on_surface);
+    // 6. Section 2 Header.
+    let readings_head = LabelRun::new(
+        40,
+        READINGS_HEAD_Y,
+        card_text_w(READING_CARD_W),
+        type_scale::SECTION,
+        b"System Readings",
+        theme.on_surface,
+    );
 
     // 7. System Readings Cards (y = 664..1044, 5 cards of height 64)
     let mut pkg_buf = [0u8; 32];
@@ -588,32 +737,38 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
 
     let card_w = 640;
     let card_h = 64;
+    // WHY the run rows are derived per card: the label is a body run reserving
+    // `lh(BODY)` = 32 rows, and the sublabels were placed 36 rows under the card
+    // top - inside the label's box - so they read straight through it. The value
+    // is right-anchored and shares the row with the label, so all three runs are
+    // bounded at the card centre by `READING_TEXT_MAX`.
     let readings = [
         DashboardReadingCard {
-            rect: Rect::new(40, 664, card_w, card_h),
-            label: LabelRun::new(64, 674, type_scale::BODY, b"Package Registry", theme.on_surface),
-            sublabel: LabelRun::new(64, 700, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 684, type_scale::BODY, &pkg_buf[..n], theme.on_surface),
+            rect: Rect::new(40, READINGS_CARD0_Y, card_w, card_h),
+            label: LabelRun::new(64, READINGS_CARD0_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Package Registry", theme.on_surface),
+            sublabel: LabelRun::new(64, READINGS_CARD0_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, READINGS_CARD0_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &pkg_buf[..n], theme.on_surface),
             accent_color: 0xFF6366F1,
         },
         DashboardReadingCard {
             rect: Rect::new(40, 740, card_w, card_h),
-            label: LabelRun::new(64, 750, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
-            sublabel: LabelRun::new(64, 776, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 760, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
+            label: LabelRun::new(64, 740 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
+            sublabel: LabelRun::new(64, 740 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 740 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
             accent_color: 0xFF10B981,
         },
         DashboardReadingCard {
             rect: Rect::new(40, 816, card_w, card_h),
-            label: LabelRun::new(64, 826, type_scale::BODY, b"Display Compositor", theme.on_surface),
-            sublabel: LabelRun::new(64, 852, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
+            label: LabelRun::new(64, 816 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Display Compositor", theme.on_surface),
+            sublabel: LabelRun::new(64, 816 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
             // WHY the panel state and not a frame rate: nothing in this kernel measures
             // a flip interval - the scanout deadline is computed from a configured
             // refresh figure - so "60 FPS" reported a number no clock had observed.
             // Whether the panel has power is something the platform does answer.
             value: LabelRun::right(
                 40 + card_w - 24,
-                836,
+                816 + READING_VALUE_DY,
+                READING_TEXT_MAX,
                 type_scale::BODY,
                 if !state.display_power_state_valid {
                     b"Power state unread"
@@ -632,19 +787,19 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         },
         DashboardReadingCard {
             rect: Rect::new(40, 892, card_w, card_h),
-            label: LabelRun::new(64, 902, type_scale::BODY, b"Network Connectivity", theme.on_surface),
+            label: LabelRun::new(64, 892 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Network Connectivity", theme.on_surface),
             // WHY this names the address as a configuration: the stack sends from a
             // fixed address and nothing probes a link, so the old line's "Online"
             // claimed a measured connection that no code here could observe.
-            sublabel: LabelRun::new(64, 928, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 912, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
+            sublabel: LabelRun::new(64, 892 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 892 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
             accent_color: 0xFF3B82F6,
         },
         DashboardReadingCard {
             rect: Rect::new(40, 968, card_w, card_h),
-            label: LabelRun::new(64, 978, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
-            sublabel: LabelRun::new(64, 1004, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 988, type_scale::BODY, b"Protected", 0xFF059669),
+            label: LabelRun::new(64, 968 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
+            sublabel: LabelRun::new(64, 968 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, 968 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Protected", 0xFF059669),
             accent_color: 0xFF059669,
         },
     ];
