@@ -1194,6 +1194,33 @@ const BTN_R: usize = 12;
 const MENU_ROW_Y0: usize = 130;
 const MENU_ROW_H: usize = 44;
 
+/// The kebab menu's card.
+///
+/// WHY one named box for the card and its rows: the card is painted as a
+/// rectangle whose far edge is exclusive, and the hit test used to compare the
+/// same edges with `<=`, so the column at x 696 and the row at y 532 answered
+/// an item although no pixel of the card is drawn there. Both now read this
+/// one box, and the gate beside it fails the build if the rows ever outgrow
+/// the card that holds them.
+const MENU_CARD: Rect = Rect::new(440, 116, 256, 416);
+
+/// The menu's items, and so the number of rows the card must hold.
+const MENU_ITEMS: [&[u8]; 9] = [
+    b"New Tab",
+    b"Bookmarks",
+    b"History",
+    b"Downloads",
+    b"Settings",
+    b"Tools",
+    b"Reload Page",
+    b"Save Page",
+    b"Close Menu",
+];
+
+const _: () = assert!(MENU_ROW_Y0 + MENU_ITEMS.len() * MENU_ROW_H <= MENU_CARD.y + MENU_CARD.h);
+const _: () = assert!(MENU_CARD.x + MENU_CARD.w <= W);
+const _: () = assert!(MENU_CARD.y + MENU_CARD.h <= NAV_BAR_Y0);
+
 /// Start Page Favorites / Quick Access Geometry (4 columns)
 #[allow(dead_code)]
 const QA_ROW_Y: usize = 282;
@@ -1285,6 +1312,71 @@ const FILTER_H: usize = 44;
 
 /// The first row below the filter row.
 const LIST_Y: usize = 236;
+
+// -----------------------------------------------------------------------------
+// The history sheet's rows
+//
+// WHY the card is derived from the rows of text it owns: the card used to be
+// `row_h - 8` -- fifty-two rows -- while its second run started at row thirty-
+// two of it and reserved a whole line box, fifty-four rows in all. A per-pixel
+// painter has no clip: the run's last two rows fell outside the card the
+// label was drawn in, and the card's own fill answered them, so the descenders
+// of `g`, `j`, `p`, `q` and `y` were erased at the card's bottom border. Every
+// number below now comes from the type ladder, and the gates beside them fail
+// the build if the ladder and the card ever disagree.
+// -----------------------------------------------------------------------------
+
+/// The stride between two history rows.
+const HISTORY_ROW_PITCH: usize = 60;
+
+/// The gap left between one history card and the next.
+const HISTORY_ROW_GAP: usize = 8;
+
+/// The height of a history card.
+const HISTORY_CARD_H: usize = HISTORY_ROW_PITCH - HISTORY_ROW_GAP;
+
+/// How many history rows the sheet walks.
+const HISTORY_ROWS: usize = 8;
+
+/// The rung both of a history row's runs are set at.
+const HISTORY_RUN_SCALE: usize = type_scale::CAPTION;
+
+/// One run's line box at [`HISTORY_RUN_SCALE`].
+const HISTORY_LINE_BOX: usize = font::line_height(HISTORY_RUN_SCALE);
+
+/// The left edge of a history card.
+const HISTORY_CARD_X: usize = 24;
+
+/// The width of a history card.
+const HISTORY_CARD_W: usize = W - 2 * HISTORY_CARD_X;
+
+/// Where a history row's text starts.
+const HISTORY_TEXT_X: usize = 40;
+
+/// The inset between the card's edge and its text, on each side.
+const HISTORY_TEXT_INSET: usize = HISTORY_TEXT_X - HISTORY_CARD_X;
+
+/// The width a history row's run is cut to.
+const HISTORY_TEXT_MAX: usize = HISTORY_CARD_W - 2 * HISTORY_TEXT_INSET;
+
+/// The two runs a named visit reserves, as one block.
+const HISTORY_BLOCK_H: usize = 2 * HISTORY_LINE_BOX;
+
+/// WHY the block is inset as a block: a row's title and address read as one
+/// paragraph, so the space above the first line equals the space below the
+/// second, and neither line's descenders can fall past the card.
+const HISTORY_BLOCK_Y: usize = (HISTORY_CARD_H - HISTORY_BLOCK_H) / 2;
+
+/// The top of a named visit's address line.
+const HISTORY_SECOND_Y: usize = HISTORY_BLOCK_Y + HISTORY_LINE_BOX;
+
+/// The top of an unnamed visit's single line.
+const HISTORY_SINGLE_Y: usize = (HISTORY_CARD_H - HISTORY_LINE_BOX) / 2;
+
+const _: () = assert!(HISTORY_BLOCK_Y + HISTORY_BLOCK_H + HISTORY_BLOCK_Y <= HISTORY_CARD_H);
+const _: () = assert!(HISTORY_SINGLE_Y + HISTORY_LINE_BOX <= HISTORY_CARD_H);
+const _: () = assert!(HISTORY_TEXT_X + HISTORY_TEXT_MAX <= HISTORY_CARD_X + HISTORY_CARD_W);
+const _: () = assert!(HISTORY_ROWS * HISTORY_ROW_PITCH <= NAV_BAR_Y0 - LIST_Y);
 
 const PLACEHOLDER: &[u8] = b"Search or type URL";
 
@@ -6552,6 +6644,53 @@ const KB_Y1: usize = 1408;
 const KB_ACC_Y0: usize = 918;
 const KB_ACC_Y1: usize = 974;
 
+/// The keyboard's column rhythm: rows 0, 1 and 2 are runs of caps `KB_COL_PITCH`
+/// apart, starting at each row's own left edge and `KB_KEY_W` wide.
+///
+/// WHY one rhythm for the painter and the tap handler: the two symbol rows used
+/// to count their columns from a different edge and a different stride than the
+/// caps they answer. Row 1 painted nine caps from x 46 and hit-tested ten
+/// columns from x 15, and row 2 painted seven caps on a stride of 70 and
+/// hit-tested eight columns on a stride of 64. The left edge of a drawn cap and
+/// the left edge of the column that answers it are forty-odd rows apart, so the
+/// outer half of every symbol key inserted its neighbour's glyph -- tapping the
+/// drawn "@" typed `"`, and tapping the drawn "+" typed "=" -- and the extra
+/// column past the last cap was tappable where no key is drawn.
+const KB_COL_PITCH: usize = 70;
+const KB_KEY_W: usize = 60;
+
+/// The space left inside a column before its cap begins.
+const KB_KEY_INSET: usize = 3;
+
+/// The left edge of the keyboard's three run-of-caps rows.
+const KB_ROW_X0: [usize; 3] = [15, 46, 105];
+
+/// How many caps each of those rows draws, and so how many columns answer it.
+const KB_ROW_KEYS: [usize; 3] = [10, 9, 7];
+
+/// The left edge of the backspace cap that ends row 2.
+const KB_BACKSPACE_X0: usize = 620;
+
+/// Row 0's letters and digits, and row 1's and row 2's symbols: one table per
+/// row per layout, each exactly as long as the row draws caps, so no glyph is
+/// reachable without a key drawn for it and no drawn key is inert.
+const KB_ROW0_LETTERS: &[u8] = b"QWERTYUIOP";
+const KB_ROW0_SYMBOLS: &[u8] = b"1234567890";
+const KB_ROW1_LETTERS: &[u8] = b"ASDFGHJKL";
+const KB_ROW1_SYMBOLS: &[u8] = b"-/:;()$&@";
+const KB_ROW2_LETTERS: &[u8] = b"ZXCVBNM";
+const KB_ROW2_SYMBOLS: &[u8] = b"?!'#%*+";
+
+const _: () = assert!(KB_ROW0_LETTERS.len() == KB_ROW_KEYS[0]);
+const _: () = assert!(KB_ROW0_SYMBOLS.len() == KB_ROW_KEYS[0]);
+const _: () = assert!(KB_ROW1_LETTERS.len() == KB_ROW_KEYS[1]);
+const _: () = assert!(KB_ROW1_SYMBOLS.len() == KB_ROW_KEYS[1]);
+const _: () = assert!(KB_ROW2_LETTERS.len() == KB_ROW_KEYS[2]);
+const _: () = assert!(KB_ROW2_SYMBOLS.len() == KB_ROW_KEYS[2]);
+const _: () = assert!(KB_ROW_X0[0] + KB_COL_PITCH * KB_ROW_KEYS[0] <= W);
+const _: () = assert!(KB_ROW_X0[1] + KB_COL_PITCH * KB_ROW_KEYS[1] <= W);
+const _: () = assert!(KB_ROW_X0[2] + KB_COL_PITCH * KB_ROW_KEYS[2] <= KB_BACKSPACE_X0);
+
 fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Option<u8> {
     if y < KB_Y0 || y >= KB_Y1 {
         return None;
@@ -6560,29 +6699,29 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
     if symbols {
         // Row 0: 1 2 3 4 5 6 7 8 9 0 (y: 994..1066)
         if y >= 994 && y <= 1066 {
-            let col = (x.saturating_sub(15)) / 70;
-            if col < 10 {
-                return Some(b"1234567890"[col]);
+            let col = (x.saturating_sub(KB_ROW_X0[0])) / KB_COL_PITCH;
+            if col < KB_ROW_KEYS[0] {
+                return Some(KB_ROW0_SYMBOLS[col]);
             }
         }
-        // Row 1: - / : ; ( ) $ & @ " (y: 1076..1148)
+        // Row 1: - / : ; ( ) $ & @ (y: 1076..1148)
         if y >= 1076 && y <= 1148 {
-            let col = (x.saturating_sub(15)) / 70;
-            if col < 10 {
-                return Some(b"-/:;()$&@\""[col]);
+            let col = (x.saturating_sub(KB_ROW_X0[1])) / KB_COL_PITCH;
+            if col < KB_ROW_KEYS[1] {
+                return Some(KB_ROW1_SYMBOLS[col]);
             }
         }
-        // Row 2: ABC, ? ! ' # % * + = Backspace (y: 1158..1230)
+        // Row 2: ABC, ? ! ' # % * +, Backspace (y: 1158..1230)
         if y >= 1158 && y <= 1230 {
             if x >= 15 && x <= 95 {
                 return Some(0xFE); // toggle ABC
             }
-            if x >= 620 && x <= 705 {
+            if x >= KB_BACKSPACE_X0 && x <= 705 {
                 return Some(8); // Backspace
             }
-            let col = (x.saturating_sub(105)) / 64;
-            if col < 8 {
-                return Some(b"?!'#%*+="[col]);
+            let col = (x.saturating_sub(KB_ROW_X0[2])) / KB_COL_PITCH;
+            if col < KB_ROW_KEYS[2] {
+                return Some(KB_ROW2_SYMBOLS[col]);
             }
         }
         // Row 3: 123, comma, space, period, Go (y: 1240..1312)
@@ -6609,17 +6748,17 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
     // Standard QWERTY
     // Row 0: Q W E R T Y U I O P (y: 994..1066)
     if y >= 994 && y <= 1066 {
-        let col = (x.saturating_sub(15)) / 70;
-        if col < 10 {
-            let ch = b"QWERTYUIOP"[col];
+        let col = (x.saturating_sub(KB_ROW_X0[0])) / KB_COL_PITCH;
+        if col < KB_ROW_KEYS[0] {
+            let ch = KB_ROW0_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
     }
     // Row 1: A S D F G H J K L (y: 1076..1148)
     if y >= 1076 && y <= 1148 {
-        let col = (x.saturating_sub(46)) / 70;
-        if col < 9 {
-            let ch = b"ASDFGHJKL"[col];
+        let col = (x.saturating_sub(KB_ROW_X0[1])) / KB_COL_PITCH;
+        if col < KB_ROW_KEYS[1] {
+            let ch = KB_ROW1_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
     }
@@ -6628,12 +6767,12 @@ fn get_soft_keyboard_char(x: usize, y: usize, shift: bool, symbols: bool) -> Opt
         if x >= 15 && x <= 95 {
             return Some(0xFF); // Shift toggle
         }
-        if x >= 620 && x <= 705 {
+        if x >= KB_BACKSPACE_X0 && x <= 705 {
             return Some(8); // Backspace
         }
-        let col = (x.saturating_sub(105)) / 70;
-        if col < 7 {
-            let ch = b"ZXCVBNM"[col];
+        let col = (x.saturating_sub(KB_ROW_X0[2])) / KB_COL_PITCH;
+        if col < KB_ROW_KEYS[2] {
+            let ch = KB_ROW2_LETTERS[col];
             return Some(if shift { ch } else { ch.to_ascii_lowercase() });
         }
     }
@@ -6664,15 +6803,15 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
     if let Some(_) = draw_rounded_rect(x, y, krect, R_CARD, THEME.surface_container_low, Some(THEME.border), 1) {
         // Row 0: Q W E R T Y U I O P (y: 994..1066)
         if y >= 994 && y <= 1066 {
-            let col = (x.saturating_sub(15)) / 70;
-            let kx = 15 + col * 70;
-            if col < 10 && x >= kx + 3 && x <= kx + 63 {
-                let rect = Rect::new(kx + 3, 994, 60, 72);
+            let col = (x.saturating_sub(KB_ROW_X0[0])) / KB_COL_PITCH;
+            let kx = KB_ROW_X0[0] + col * KB_COL_PITCH;
+            if col < KB_ROW_KEYS[0] && x >= kx + KB_KEY_INSET && x < kx + KB_KEY_INSET + KB_KEY_W {
+                let rect = Rect::new(kx + KB_KEY_INSET, 994, KB_KEY_W, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
-                        b"1234567890"[col]
+                        KB_ROW0_SYMBOLS[col]
                     } else {
-                        let ch = b"QWERTYUIOP"[col];
+                        let ch = KB_ROW0_LETTERS[col];
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
@@ -6686,15 +6825,15 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Row 1: A S D F G H J K L (y: 1076..1148)
         if y >= 1076 && y <= 1148 {
-            let col = (x.saturating_sub(46)) / 70;
-            let kx = 46 + col * 70;
-            if col < 9 && x >= kx + 3 && x <= kx + 63 {
-                let rect = Rect::new(kx + 3, 1076, 60, 72);
+            let col = (x.saturating_sub(KB_ROW_X0[1])) / KB_COL_PITCH;
+            let kx = KB_ROW_X0[1] + col * KB_COL_PITCH;
+            if col < KB_ROW_KEYS[1] && x >= kx + KB_KEY_INSET && x < kx + KB_KEY_INSET + KB_KEY_W {
+                let rect = Rect::new(kx + KB_KEY_INSET, 1076, KB_KEY_W, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
-                        b"-/:;()$&@\""[col]
+                        KB_ROW1_SYMBOLS[col]
                     } else {
-                        let ch = b"ASDFGHJKL"[col];
+                        let ch = KB_ROW1_LETTERS[col];
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
@@ -6721,16 +6860,16 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
                 }
             }
 
-            // Center 7 keys: Z X C V B N M
-            let col = (x.saturating_sub(105)) / 70;
-            let kx = 105 + col * 70;
-            if col < 7 && x >= kx + 3 && x <= kx + 63 {
-                let rect = Rect::new(kx + 3, 1158, 60, 72);
+            // Center 7 keys: Z X C V B N M, or the seven symbols
+            let col = (x.saturating_sub(KB_ROW_X0[2])) / KB_COL_PITCH;
+            let kx = KB_ROW_X0[2] + col * KB_COL_PITCH;
+            if col < KB_ROW_KEYS[2] && x >= kx + KB_KEY_INSET && x < kx + KB_KEY_INSET + KB_KEY_W {
+                let rect = Rect::new(kx + KB_KEY_INSET, 1158, KB_KEY_W, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, None, 0) {
                     let ch = if app.kb_symbols {
-                        b"?!'#%*+="[col]
+                        KB_ROW2_SYMBOLS[col]
                     } else {
-                        let ch = b"ZXCVBNM"[col];
+                        let ch = KB_ROW2_LETTERS[col];
                         if app.kb_shift { ch } else { ch.to_ascii_lowercase() }
                     };
                     let ch_buf = [ch];
@@ -6742,8 +6881,8 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             }
 
             // Backspace key (620..705)
-            if x >= 620 && x <= 705 {
-                let rect = Rect::new(620, 1158, 85, 72);
+            if x >= KB_BACKSPACE_X0 && x <= 705 {
+                let rect = Rect::new(KB_BACKSPACE_X0, 1158, 85, 72);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container, None, 0) {
                     if let Some(px) = text_px(x, y, 646, 1182, 1, b"<X]", THEME.on_surface, c, true) {
                         return px;
@@ -7295,7 +7434,7 @@ fn history_row(app: &BrowserApp, row: usize) -> Option<Visit<'_>> {
     let count = app.history.len();
     let filter = app.filter_bytes();
     let mut skipped = row;
-    for i in 0..count.min(8) {
+    for i in 0..count.min(HISTORY_ROWS) {
         let Some(visit) = app.history.visit(count - 1 - i) else {
             continue;
         };
@@ -8762,21 +8901,20 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     return Some(px);
                 }
             } else {
-                let row_h = 60;
                 let mut drawn = false;
-                for row in 0..8 {
+                for row in 0..HISTORY_ROWS {
                     let Some(visit) = history_row(app, row) else {
                         break;
                     };
                     drawn = true;
-                    let r_y = LIST_Y + row * row_h;
-                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 8);
+                    let r_y = LIST_Y + row * HISTORY_ROW_PITCH;
+                    let r_rect = Rect::new(HISTORY_CARD_X, r_y, HISTORY_CARD_W, HISTORY_CARD_H);
                     if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
                         // WHY the address is ellipsized: a recorded address
                         // fills its buffer, and drawing it unmeasured ran it
                         // through the card edge and off the screen. The width
-                        // is the card's inner width: sixteen pixels of inset
-                        // on each side of the text at x 40.
+                        // is the card's inner width: the inset named beside the
+                        // text on each side of it.
                         let mut line = [0u8; 128];
                         // WHY a page that named itself gets two lines: the
                         // name is what the person remembers and the address is
@@ -8784,17 +8922,47 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         // nothing has only the address to show, so it keeps the
                         // one line it always had.
                         if visit.title.is_empty() {
-                            let n = font::ellipsize(visit.url, 1, r_rect.w - 32, &mut line);
-                            if let Some(px) = text_px(x, y, 40, r_y + 18, 1, &line[..n], THEME.on_surface, c, false) {
+                            let n = font::ellipsize(visit.url, HISTORY_RUN_SCALE, HISTORY_TEXT_MAX, &mut line);
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                HISTORY_TEXT_X,
+                                r_y + HISTORY_SINGLE_Y,
+                                HISTORY_RUN_SCALE,
+                                &line[..n],
+                                THEME.on_surface,
+                                c,
+                                false,
+                            ) {
                                 return Some(px);
                             }
                         } else {
-                            let n = font::ellipsize(visit.title, 1, r_rect.w - 32, &mut line);
-                            if let Some(px) = text_px(x, y, 40, r_y + 8, 1, &line[..n], THEME.on_surface, c, true) {
+                            let n = font::ellipsize(visit.title, HISTORY_RUN_SCALE, HISTORY_TEXT_MAX, &mut line);
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                HISTORY_TEXT_X,
+                                r_y + HISTORY_BLOCK_Y,
+                                HISTORY_RUN_SCALE,
+                                &line[..n],
+                                THEME.on_surface,
+                                c,
+                                true,
+                            ) {
                                 return Some(px);
                             }
-                            let n = font::ellipsize(visit.url, 1, r_rect.w - 32, &mut line);
-                            if let Some(px) = text_px(x, y, 40, r_y + 32, 1, &line[..n], THEME.on_surface_variant, c, false) {
+                            let n = font::ellipsize(visit.url, HISTORY_RUN_SCALE, HISTORY_TEXT_MAX, &mut line);
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                HISTORY_TEXT_X,
+                                r_y + HISTORY_SECOND_Y,
+                                HISTORY_RUN_SCALE,
+                                &line[..n],
+                                THEME.on_surface_variant,
+                                c,
+                                false,
+                            ) {
                                 return Some(px);
                             }
                         }
@@ -9352,25 +9520,21 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
         }
         SheetOverlay::Menu => {
             // Kebab Overflow Menu dropdown card at top right (x 440..696, y 116..532)
-            let menu_rect = Rect::new(440, 116, 256, 416);
-            if let Some(c) = draw_rounded_rect(x, y, menu_rect, R_CONTROL, THEME.surface_container_high, Some(THEME.border), 2) {
-                let items: [&[u8]; 9] = [
-                    b"New Tab",
-                    b"Bookmarks",
-                    b"History",
-                    b"Downloads",
-                    b"Settings",
-                    b"Tools",
-                    b"Reload Page",
-                    b"Save Page",
-                    b"Close Menu",
-                ];
-                for (idx, item) in items.iter().enumerate() {
+            if let Some(c) = draw_rounded_rect(
+                x,
+                y,
+                MENU_CARD,
+                R_CONTROL,
+                THEME.surface_container_high,
+                Some(THEME.border),
+                2,
+            ) {
+                for (idx, item) in MENU_ITEMS.iter().enumerate() {
                     let item_y = MENU_ROW_Y0 + idx * MENU_ROW_H;
                     if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
                         return Some(px);
                     }
-                    if idx < 8 && y == item_y + 30 {
+                    if idx + 1 < MENU_ITEMS.len() && y == item_y + 30 {
                         return Some(THEME.outline_variant);
                     }
                 }
@@ -10104,7 +10268,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Handle Active Overlays Interactions
     match app.overlay {
         SheetOverlay::Menu => {
-            if x >= 440 && x <= 696 && y >= 116 && y <= 532 {
+            if MENU_CARD.contains(x, y) {
                 // WHY the row is counted from the painted row origin: the menu's
                 // items are MENU_ROW_H apart and the first is drawn at MENU_ROW_Y0,
                 // and this used to divide by the same height from the card's top
@@ -10251,13 +10415,19 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.filter_clear();
                 return Tap::Redraw;
             }
-            let row_h = 60;
-            for row in 0..8 {
+            // WHY the row's box is the painter's own: the card is drawn inside
+            // the pitch, so a tap just past its edge would open a row whose
+            // ink is not under the finger.
+            for row in 0..HISTORY_ROWS {
                 let Some(visit) = history_row(app, row) else {
                     break;
                 };
-                let r_y = LIST_Y + row * row_h;
-                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                let r_y = LIST_Y + row * HISTORY_ROW_PITCH;
+                if y >= r_y
+                    && y < r_y + HISTORY_ROW_PITCH
+                    && x >= HISTORY_CARD_X
+                    && x < HISTORY_CARD_X + HISTORY_CARD_W
+                {
                     let _ = std::audio_haptic_click();
                     // WHY the address is copied before the navigation: the row
                     // borrows the log that this navigation is about to append
