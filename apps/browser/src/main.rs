@@ -37,6 +37,7 @@ use browser::{
     MAX_LINE_BYTES, MAX_TABS,
 };
 pub use browser::tls;
+use browser::chrome;
 use browser::css;
 use browser::images;
 use browser::layout;
@@ -1075,6 +1076,12 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+/// WHY this gate: the chrome control boxes live in `browser::chrome`, where both
+/// the renderer and the press path read them and their tests can run. A panel
+/// width edited in one of the two files would put those boxes off the edge of
+/// the screen the renderer actually fills.
+const _: () = assert!(W == chrome::PANEL_W);
+
 /// y 0..48: System Status Bar
 const STATUS_H: usize = 48;
 
@@ -1190,6 +1197,27 @@ const _: () = assert!(back_button::Y + back_button::SIZE <= TOOLBAR_Y1);
 /// below, which start at 180, are untouched.
 const NEW_TAB_BTN: Rect = Rect::new(530, 126, 150, MIN_TOUCH_TARGET);
 
+/// The tab switcher's card block: where the first card stands, how tall it is
+/// and the air between two of them.
+///
+/// WHY three named constants instead of the literals each walker carried: the
+/// renderer stacked the cards with `180`, `110` and `16` written inline, and the
+/// press path wrote the same three numbers again. Every one of them was a way
+/// for the two to part while still looking right on screen, and the person's
+/// finger is what finds the parting.
+///
+/// WHY the gates: the close control is set from the card's top edge, so the
+/// card's height is what keeps a 44-pixel target inside the card it belongs to;
+/// and the first card may not climb into the header band its own sheet paints.
+const TAB_CARD_Y0: usize = 180;
+const TAB_CARD_H: usize = 110;
+const TAB_CARD_GAP: usize = 16;
+
+const _: () = assert!(TAB_CARD_H >= MIN_TOUCH_TARGET);
+const _: () = assert!(TAB_CARD_Y0 >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
+const _: () = assert!(TAB_CLOSE_CENTER_Y + MIN_TOUCH_TARGET / 2 <= TAB_CARD_H);
+const _: () = assert!(TAB_CLOSE_CENTER_Y >= MIN_TOUCH_TARGET / 2);
+
 /// Omnibox Right Controls
 const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
 
@@ -1242,6 +1270,27 @@ fn chrome_control_px(x: usize, y: usize, rect: Rect, radius: usize) -> Option<u3
         Some(THEME.on_surface_variant),
         1,
     )
+}
+
+/// The ink of a sheet's close control: its plate, and the `X` centred in it.
+///
+/// WHY the plate comes from `chrome_control_px` and the box from
+/// `browser::chrome`: the nine sheets each drew a bare 17-row `X` at a
+/// memorised (660, 145) and answered a press anywhere in `640..=695 x 120..=165`
+/// -- a strip whose top 17 rows and left 12 columns are header with nothing in
+/// them, and whose ink sits 12 rows off the strip's own middle. A person aiming
+/// at the mark they could see pressed a box they could not see, and a person
+/// pressing the middle of the box got nothing they could point to. The plate is
+/// the same tile the toolbar's controls wear, the glyph is centred in it, and the
+/// press answers exactly it.
+#[inline]
+fn sheet_close_pixel(x: usize, y: usize) -> Option<u32> {
+    let rect = chrome::SHEET_CLOSE;
+    let c = chrome_control_px(x, y, rect, BTN_R)?;
+    if close_glyph(x, y, rect.x + rect.w / 2, rect.y + rect.h / 2) {
+        return Some(THEME.on_surface_variant);
+    }
+    Some(c)
 }
 
 /// The ink a disabled navigation glyph is painted with.
@@ -1303,10 +1352,55 @@ const _: () = assert!(MENU_CARD.x + MENU_CARD.w <= W);
 const _: () = assert!(MENU_CARD.y + MENU_CARD.h <= NAV_BAR_Y0);
 
 /// Start Page Favorites / Quick Access Geometry (4 columns)
-#[allow(dead_code)]
-const QA_ROW_Y: usize = 282;
-#[allow(dead_code)]
-const QA_TILE_SIZE: usize = 64;
+///
+/// WHY these are gone: `QA_ROW_Y` said the tiles stood at 282 and `QA_TILE_SIZE`
+/// said 64, while the renderer drew them at 278 and the press path answered
+/// 278..=342. Two dead constants that disagreed with the ink is the drift this
+/// sweep exists to close, and `chrome` owns the row, the plate and the band now.
+const _: () = assert!(chrome::HOME_TILE_SIZE == 64);
+
+/// The plate of the `i`th quick-link tile, as the renderer draws it.
+///
+/// WHY a function and not four literals: the four tiles each carried their own
+/// `Rect::new(66, 278, 64, 64)`-style box, and the press path carried four more.
+/// Both now read `chrome::HOME_TILE_X`, so a tile cannot move its ink without
+/// moving the band that answers it.
+const fn quick_tile_plate(i: usize) -> Rect {
+    Rect::new(
+        chrome::HOME_TILE_X[i],
+        chrome::HOME_TILE_Y,
+        chrome::HOME_TILE_SIZE,
+        chrome::HOME_TILE_SIZE,
+    )
+}
+
+const _: () = assert!(quick_tile_plate(0).w == chrome::HOME_TILE_SIZE);
+const _: () = assert!(chrome::home_tile_hit(0).x <= quick_tile_plate(0).x);
+const _: () = assert!(chrome::home_tile_hit(3).x + chrome::home_tile_hit(3).w
+    >= quick_tile_plate(3).x + chrome::HOME_TILE_SIZE);
+
+/// The mark the `i`th quick-link tile wears inside its own plate.
+///
+/// WHY set from the plate and not from four absolute columns: every offset here
+/// is the one the renderer used before this sweep (`plate.x + 20`, `plate.y + 22`,
+/// the play triangle at `+26 / +32`), restated so that moving a tile's plate
+/// moves its ink with it. Ink left behind by a moved plate is the dead mark this
+/// sweep is hunting.
+fn quick_tile_ink(x: usize, y: usize, i: usize, plate: Rect, bg: u32) -> Option<u32> {
+    match i {
+        0 => text_px(x, y, plate.x + 20, plate.y + 22, 1, b"IO", THEME.on_surface, bg, true),
+        1 => {
+            let px = (x as isize) - (plate.x + 26) as isize;
+            let py = ((y as isize) - (plate.y + 32) as isize).abs();
+            if px >= 0 && px <= 14 && py * 14 <= (14 - px) * 10 {
+                return Some(THEME.on_surface_variant);
+            }
+            None
+        }
+        2 => text_px(x, y, plate.x + 20, plate.y + 22, 1, b"GH", THEME.on_surface, bg, true),
+        _ => text_px(x, y, plate.x + 24, plate.y + 22, 1, b"W", THEME.on_surface, bg, true),
+    }
+}
 
 /// Sovereign Bottom Navigation Bar (y 1350..1410)
 const NAV_BAR_Y0: usize = 1350;
@@ -1330,14 +1424,25 @@ const NAV_ROW_Y: usize = NAV_BAR_Y0 + (NAV_BAR_Y1 - NAV_BAR_Y0 - NAV_BTN_H) / 2;
 /// same `BACK_BTN`, so neither can claim a column the other has not; the width
 /// the bar gives this tile (110) is fill the person sees, not dead tap area.
 const BACK_BTN: Rect = Rect::new(back_button::X, NAV_ROW_Y, 110, NAV_BTN_H);
+/// The other four tiles of the same row.
+///
+/// WHY derived from `NAV_ROW_Y`/`NAV_BTN_H` and not authored at 1356 and 48:
+/// `BACK_BTN` was rewritten to answer the row it is drawn on and the four beside
+/// it were left at the numbers that row happened to hold. They are the same
+/// today; a plate that ever left the bar's band would answer presses on rows the
+/// bar never inks, which is the mismatch this row was rewritten for.
+const FWD_BTN: Rect = Rect::new(160, NAV_ROW_Y, 110, NAV_BTN_H);
+const HOME_TAB_BTN: Rect = Rect::new(296, NAV_ROW_Y, 128, NAV_BTN_H);
+const ADD_BOOK_BTN: Rect = Rect::new(448, NAV_ROW_Y, 110, NAV_BTN_H);
+const TABS_BTN: Rect = Rect::new(582, NAV_ROW_Y, 114, NAV_BTN_H);
 // WHY this gate: the tile has to stay inside the band the bar paints. A plate
 // that left the band would answer presses on rows the bar never inks -- the
 // mismatch this task is about, in the other direction.
 const _: () = assert!(BACK_BTN.y >= NAV_BAR_Y0 && BACK_BTN.y + BACK_BTN.h <= NAV_BAR_Y1);
-const FWD_BTN: Rect = Rect::new(160, 1356, 110, 48);
-const HOME_TAB_BTN: Rect = Rect::new(296, 1356, 128, 48);
-const ADD_BOOK_BTN: Rect = Rect::new(448, 1356, 110, 48);
-const TABS_BTN: Rect = Rect::new(582, 1356, 114, 48);
+const _: () = assert!(FWD_BTN.y == NAV_ROW_Y && HOME_TAB_BTN.y == NAV_ROW_Y
+    && ADD_BOOK_BTN.y == NAV_ROW_Y && TABS_BTN.y == NAV_ROW_Y);
+const _: () = assert!(NAV_ROW_Y >= NAV_BAR_Y0 && NAV_ROW_Y + NAV_BTN_H <= NAV_BAR_Y1);
+const _: () = assert!(TABS_BTN.x + TABS_BTN.w <= W);
 
 /// System Gesture Home Indicator (y 1410..1440)
 const GESTURE_PILL: Rect = Rect::new(260, 1422, 200, 6);
@@ -1408,13 +1513,22 @@ const MAX_DOWNLOADS: usize = 12;
 const FILTER_MAX: usize = 32;
 
 /// The top of the filter row in the bookmark and history sheets.
-const FILTER_Y: usize = 176;
+const FILTER_Y: usize = chrome::FILTER_Y;
 
 /// The height of the filter row in the bookmark and history sheets.
-const FILTER_H: usize = 44;
+const FILTER_H: usize = chrome::FILTER_H;
 
 /// The first row below the filter row.
 const LIST_Y: usize = 236;
+
+/// WHY this is a gate and not a comment: the clear plate was given height by
+/// the filter row, and the filter row is the last thing above the list. If the
+/// row grew past `LIST_Y` it would paint over the first row's card while the
+/// first row still answered at `LIST_Y`, which is exactly the painted-versus-
+/// tappable drift this sweep is hunting.
+const _: () = assert!(chrome::FILTER_CLEAR.y >= FILTER_Y);
+const _: () = assert!(chrome::FILTER_CLEAR.y + chrome::FILTER_CLEAR.h <= FILTER_Y + FILTER_H);
+const _: () = assert!(FILTER_Y + FILTER_H <= LIST_Y);
 
 /// The stride between two bookmark rows.
 const BOOKMARK_ROW_PITCH: usize = 80;
@@ -1429,6 +1543,32 @@ const BOOKMARK_ROW_GAP: usize = 10;
 /// rows of nothing between two history cards answered the visit they were not
 /// drawn for. Both sheets now test the box they paint.
 const BOOKMARK_CARD_H: usize = BOOKMARK_ROW_PITCH - BOOKMARK_ROW_GAP;
+
+// -----------------------------------------------------------------------------
+// The downloads sheet's rows
+//
+// WHY the pitch and the card are two numbers: the list stacks a card every 72
+// rows and paints it 62 rows tall, and the press path tested the whole pitch.
+// The ten rows of gap at the foot of a card answered the file above them --
+// a tap on empty sheet opened a download whose name was not under the finger.
+// -----------------------------------------------------------------------------
+
+/// The first downloads row's top edge.
+const DOWNLOAD_ROW_Y0: usize = 180;
+
+/// The stride between two downloads rows.
+const DOWNLOAD_ROW_PITCH: usize = 72;
+
+/// The gap left between one downloads card and the next.
+const DOWNLOAD_ROW_GAP: usize = 10;
+
+/// The height of a downloads card -- the box it is painted in, and the box the
+/// press answers.
+const DOWNLOAD_CARD_H: usize = DOWNLOAD_ROW_PITCH - DOWNLOAD_ROW_GAP;
+
+const _: () = assert!(DOWNLOAD_CARD_H >= MIN_TOUCH_TARGET);
+const _: () = assert!(DOWNLOAD_ROW_GAP < DOWNLOAD_ROW_PITCH);
+const _: () = assert!(DOWNLOAD_ROW_Y0 >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
 
 // -----------------------------------------------------------------------------
 // The history sheet's rows
@@ -1463,10 +1603,15 @@ const HISTORY_RUN_SCALE: usize = type_scale::CAPTION;
 const HISTORY_LINE_BOX: usize = font::line_height(HISTORY_RUN_SCALE);
 
 /// The left edge of a history card.
-const HISTORY_CARD_X: usize = 24;
+///
+/// WHY taken from `chrome`: the sheet lists all share one gutter and one card
+/// width, and the press path of every list reads `chrome::list_row_card`. A
+/// second literal here is a second source of truth -- the drift this sweep
+/// hunts.
+const HISTORY_CARD_X: usize = chrome::LIST_ROW_CARD_X;
 
 /// The width of a history card.
-const HISTORY_CARD_W: usize = W - 2 * HISTORY_CARD_X;
+const HISTORY_CARD_W: usize = chrome::LIST_ROW_CARD_W;
 
 /// Where a history row's text starts.
 const HISTORY_TEXT_X: usize = 40;
@@ -6771,8 +6916,8 @@ const KB_Y0: usize = 980;
 /// so with a field focused Back / Forward / Home / Bookmarks / Tabs were visible
 /// and completely dead. The keyboard now stops where the bar starts.
 const KB_Y1: usize = NAV_BAR_Y0;
-const KB_ACC_Y0: usize = 918;
-const KB_ACC_Y1: usize = 974;
+const KB_ACC_Y0: usize = chrome::ACC_BAR_Y0;
+const KB_ACC_Y1: usize = chrome::ACC_BAR_Y1;
 
 /// The top inset that centres a line at rung `rung` inside a box `h` rows tall.
 const fn centred_text_top(h: usize, rung: usize) -> usize {
@@ -7127,22 +7272,27 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
 }
 
 fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
-    let bar_rect = Rect::new(16, KB_ACC_Y0, 688, 56);
+    // WHY every chip below is a `chrome` box: the strip's press path and this
+    // painter each carried the same six rectangles, written twice, and the two
+    // copies are how a chip came to be pressed in a band wider than its own
+    // plate -- and how the strip's own plate, which is not a control, answered
+    // a press as if it were one.
+    let bar_rect = Rect::new(16, chrome::ACC_BAR_Y0, 688, chrome::ACC_BAR_H);
     if let Some(_) = draw_rounded_rect(x, y, bar_rect, R_SOFT, THEME.surface_container, Some(THEME.border), 1) {
         if app.field_focus != NO_FIELD {
-            // Clear button (x: 24..104)
-            let c_clear = Rect::new(24, KB_ACC_Y0 + 6, 80, 44);
+            // Clear button.
+            let c_clear = chrome::FIELD_CLEAR;
             if let Some(c) = chrome_control_px(x, y, c_clear, R_CHIP) {
-                if let Some(px) = text_px(x, y, centred_text_left(c_clear, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(x, y, centred_text_left(c_clear, b"Clear", 1), chrome::ACC_CHIP_Y + 10, 1, b"Clear", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 return c;
             }
 
-            // Done button (x: 600..694)
-            let c_done = Rect::new(600, KB_ACC_Y0 + 6, 94, 44);
+            // Done button.
+            let c_done = chrome::FIELD_DONE;
             if let Some(c) = draw_rounded_rect(x, y, c_done, R_CHIP, THEME.primary, None, 0) {
-                if let Some(px) = text_px(x, y, centred_text_left(c_done, b"Done", 1), KB_ACC_Y0 + 16, 1, b"Done", THEME.on_primary, c, true) {
+                if let Some(px) = text_px(x, y, centred_text_left(c_done, b"Done", 1), chrome::ACC_CHIP_Y + 10, 1, b"Done", THEME.on_primary, c, true) {
                     return px;
                 }
                 return c;
@@ -7151,46 +7301,51 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
             return THEME.surface_container;
         }
 
-        // Chip 1: "https://" (x 24..134)
-        let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
+        // Chip 1: "https://"
+        let c1 = chrome::ACC_HTTPS;
         if let Some(c) = chrome_control_px(x, y, c1, R_CHIP) {
-            if let Some(px) = text_px(x, y, centred_text_left(c1, b"https://", 1), KB_ACC_Y0 + 16, 1, b"https://", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c1, b"https://", 1), chrome::ACC_CHIP_Y + 10, 1, b"https://", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
         }
 
-        // Chip 2: ".com" (x 144..224)
-        let c2 = Rect::new(144, KB_ACC_Y0 + 6, 80, 44);
+        // Chip 2: ".com"
+        let c2 = chrome::ACC_TLD_COM;
         if let Some(c) = chrome_control_px(x, y, c2, R_CHIP) {
-            if let Some(px) = text_px(x, y, centred_text_left(c2, b".com", 1), KB_ACC_Y0 + 16, 1, b".com", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c2, b".com", 1), chrome::ACC_CHIP_Y + 10, 1, b".com", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
         }
 
-        // Chip 3: ".org" (x 234..314)
-        let c3 = Rect::new(234, KB_ACC_Y0 + 6, 80, 44);
+        // Chip 3: ".org"
+        let c3 = chrome::ACC_TLD_ORG;
         if let Some(c) = chrome_control_px(x, y, c3, R_CHIP) {
-            if let Some(px) = text_px(x, y, centred_text_left(c3, b".org", 1), KB_ACC_Y0 + 16, 1, b".org", THEME.on_surface, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c3, b".org", 1), chrome::ACC_CHIP_Y + 10, 1, b".org", THEME.on_surface, c, false) {
                 return px;
             }
             return c;
         }
 
-        // Chip 4: "Clear" (x 324..404)
-        let c4 = Rect::new(324, KB_ACC_Y0 + 6, 80, 44);
+        // Chip 4: "Clear"
+        let c4 = chrome::ACC_CLEAR;
         if let Some(c) = chrome_control_px(x, y, c4, R_CHIP) {
-            if let Some(px) = text_px(x, y, centred_text_left(c4, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
+            if let Some(px) = text_px(x, y, centred_text_left(c4, b"Clear", 1), chrome::ACC_CHIP_Y + 10, 1, b"Clear", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
         }
 
-        // Dismiss Down Chevron (x 630..694)
-        let c_down = Rect::new(630, KB_ACC_Y0 + 6, 64, 44);
+        // Dismiss Down Chevron.
+        //
+        // WHY the chevron is set from the chip's own centre: the mark was drawn
+        // at column 662 and row 946, which is this chip's centre -- and a glyph
+        // that drifts out of the plate it is answered by is a mark with no
+        // control under it.
+        let c_down = chrome::ACC_DISMISS;
         if let Some(c) = chrome_control_px(x, y, c_down, R_CHIP) {
-            if let Some(col) = draw_chevron_down(x, y, 662, KB_ACC_Y0 + 28, THEME.primary) {
+            if let Some(col) = draw_chevron_down(x, y, c_down.x + c_down.w / 2, c_down.y + c_down.h / 2, THEME.primary) {
                 return col;
             }
             return c;
@@ -7394,67 +7549,45 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     }
 
     // 2. Favorites / Quick Access Grid (y 252..376)
-    if y >= 252 && y < 376 {
+    if y >= chrome::HOME_GRID_Y0 && y < chrome::HOME_GRID_Y1 {
         // Section label
-        if y >= 252 && y < 252 + font::line_height(1) {
+        if y >= chrome::HOME_GRID_Y0 && y < chrome::HOME_GRID_Y0 + font::line_height(1) {
             // WHY the heading is "Quick links" and not "Favorites": the tiles
-        // are a list the app shipped with, not the user's favourites. The
-        // user's own bookmarks are the list below this one, and it says so
-        // when it is empty.
-        if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", THEME.on_surface_variant, THEME.surface, true) {
+            // are a list the app shipped with, not the user's favourites. The
+            // user's own bookmarks are the list below this one, and it says so
+            // when it is empty.
+            if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", THEME.on_surface_variant, THEME.surface, true) {
                 return px;
             }
             return THEME.surface;
         }
 
-        // Col 0: cx = 98 (InterOS Platform)
-        let c0_rect = Rect::new(66, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c0_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
-            if let Some(px) = text_px(x, y, 86, 300, 1, b"IO", THEME.on_surface, c, true) {
+        // WHY the walk reads `chrome`'s table: the plate, the caption that names
+        // it and the address the press opens are one row of data there, and the
+        // press path answers `chrome::home_tile_hit(i)`. Four hand-written rects
+        // here against four hand-written bands there is exactly how a tile came
+        // to draw a word its own band did not answer.
+        for i in 0..chrome::HOME_TILE_X.len() {
+            let plate = quick_tile_plate(i);
+            if let Some(c) = draw_rounded_rect(x, y, plate, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
+                if let Some(px) = quick_tile_ink(x, y, i, plate, c) {
+                    return px;
+                }
+                return c;
+            }
+            if let Some(px) = text_px(
+                x,
+                y,
+                chrome::HOME_TILE_CAPTION_X[i],
+                chrome::HOME_TILE_CAPTION_Y,
+                1,
+                chrome::HOME_TILE_CAPTION[i],
+                THEME.on_surface,
+                THEME.surface,
+                false,
+            ) {
                 return px;
             }
-            return c;
-        }
-        if let Some(px) = text_px(x, y, 70, 350, 1, b"InterOS", THEME.on_surface, THEME.surface, false) {
-            return px;
-        }
-
-        // Col 1: cx = 266 (YouTube Mobile)
-        let c1_rect = Rect::new(234, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c1_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
-            let px = (x as isize) - 260;
-            let py = ((y as isize) - 310).abs();
-            if px >= 0 && px <= 14 && py * 14 <= (14 - px) * 10 {
-                return THEME.on_surface_variant;
-            }
-            return c;
-        }
-        if let Some(px) = text_px(x, y, 238, 350, 1, b"YouTube", THEME.on_surface, THEME.surface, false) {
-            return px;
-        }
-
-        // Col 2: cx = 434 (GitHub Source)
-        let c2_rect = Rect::new(402, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c2_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
-            if let Some(px) = text_px(x, y, 422, 300, 1, b"GH", THEME.on_surface, c, true) {
-                return px;
-            }
-            return c;
-        }
-        if let Some(px) = text_px(x, y, 410, 350, 1, b"GitHub", THEME.on_surface, THEME.surface, false) {
-            return px;
-        }
-
-        // Col 3: cx = 602 (Wikipedia)
-        let c3_rect = Rect::new(570, 278, 64, 64);
-        if let Some(c) = draw_rounded_rect(x, y, c3_rect, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
-            if let Some(px) = text_px(x, y, 594, 300, 1, b"W", THEME.on_surface, c, true) {
-                return px;
-            }
-            return c;
-        }
-        if let Some(px) = text_px(x, y, 566, 350, 1, b"Wikipedia", THEME.on_surface, THEME.surface, false) {
-            return px;
         }
 
         return THEME.surface;
@@ -8929,11 +9062,9 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             }
 
             // Tab cards stacked vertically (4 slots)
-            let card_h = 110;
-            let card_gap = 16;
             for i in 0..MAX_TABS {
-                let card_y = 180 + i * (card_h + card_gap);
-                let card_rect = Rect::new(24, card_y, W - 48, card_h);
+                let card_y = TAB_CARD_Y0 + i * (TAB_CARD_H + TAB_CARD_GAP);
+                let card_rect = chrome::list_row_card(card_y, TAB_CARD_H);
                 let tab = app.tabs.tab(i);
                 let is_active = app.tabs.active_tab_index() == i;
 
@@ -9022,8 +9153,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     return Some(px);
                 }
                 // Close button 'X' at x=650, y=140
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9059,7 +9190,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                             continue;
                         }
                         let r_y = LIST_Y + shown * row_h;
-                        let r_rect = Rect::new(24, r_y, W - 48, BOOKMARK_CARD_H);
+                        let r_rect = chrome::list_row_card(r_y, BOOKMARK_CARD_H);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                             if star_glyph(x, y, 48, r_y + 35, true) {
                                 return Some(THEME.primary);
@@ -9094,8 +9225,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9122,7 +9253,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     };
                     drawn = true;
                     let r_y = LIST_Y + row * HISTORY_ROW_PITCH;
-                    let r_rect = Rect::new(HISTORY_CARD_X, r_y, HISTORY_CARD_W, HISTORY_CARD_H);
+                    let r_rect = chrome::list_row_card(r_y, HISTORY_CARD_H);
                     if let Some(c) = draw_rounded_rect(x, y, r_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
                         // WHY the address is ellipsized: a recorded address
                         // fills its buffer, and drawing it unmeasured ran it
@@ -9202,8 +9333,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9219,10 +9350,9 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     return Some(px);
                 }
             } else {
-                let row_h = 72;
                 for i in 0..app.download_count {
-                    let r_y = 180 + i * row_h;
-                    let r_rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                    let r_y = DOWNLOAD_ROW_Y0 + i * DOWNLOAD_ROW_PITCH;
+                    let r_rect = chrome::list_row_card(r_y, DOWNLOAD_CARD_H);
                     let entry = &app.downloads[i];
                     if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                         // WHY the path is ellipsized: the saved path fills its
@@ -9260,7 +9390,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 }
                 if app.downloads_error {
                     let msg = b"No installed app handles this file's type.";
-                    if let Some(px) = text_px(x, y, 32, 180 + app.download_count * 72 + 12, 1, msg, THEME.error, THEME.surface, false) {
+                    let below = DOWNLOAD_ROW_Y0 + app.download_count * DOWNLOAD_ROW_PITCH + 12;
+                    if let Some(px) = text_px(x, y, 32, below, 1, msg, THEME.error, THEME.surface, false) {
                         return Some(px);
                     }
                 }
@@ -9275,8 +9406,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Tools", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9325,8 +9456,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Settings", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9375,8 +9506,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Upload a File", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9488,8 +9619,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Speed Test", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9620,8 +9751,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Compatibility Lab", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9707,8 +9838,8 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 if let Some(px) = text_px(x, y, 32, 134, 1, b"Test Files", THEME.on_surface, THEME.surface, true) {
                     return Some(px);
                 }
-                if close_glyph(x, y, 660, 145) {
-                    return Some(THEME.on_surface_variant);
+                if let Some(px) = sheet_close_pixel(x, y) {
+                    return Some(px);
                 }
                 return Some(THEME.surface);
             }
@@ -9816,9 +9947,26 @@ fn filter_row_pixel(x: usize, y: usize, app: &BrowserApp, hint: &[u8]) -> Option
         }
     }
     // The clear control, only when there is something to clear.
+    //
+    // WHY the plate is drawn at all: the row used to ink a bare `X` and answer a
+    // press anywhere in 73 columns of empty card around it. The tile is the same
+    // one the tab card's close wears -- the container step, ringed in the
+    // platform's secondary ink -- and the press now tests this very box.
     if !filter.is_empty() {
-        if close_glyph(x, y, W - 48, FILTER_Y + FILTER_H / 2) {
-            return Some(THEME.on_surface_variant);
+        let clear = chrome::FILTER_CLEAR;
+        if let Some(cc) = draw_rounded_rect(
+            x,
+            y,
+            clear,
+            R_CHIP,
+            THEME.surface_container,
+            Some(THEME.on_surface_variant),
+            1,
+        ) {
+            if close_glyph(x, y, clear.x + clear.w / 2, clear.y + clear.h / 2) {
+                return Some(THEME.on_surface_variant);
+            }
+            return Some(cc);
         }
     }
     Some(c)
@@ -9962,8 +10110,13 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
     // but clearly behind.
 
     // Soft Keyboard and Accessory Strip overlay when keyboard is open
+    //
+    // WHY the strip's band is `chrome`'s and half-open: the dock painted the
+    // strip's plate from 918 for 56 rows and this walk handed row 974 to the
+    // strip as well, so the keyboard's own first row was painted by the strip's
+    // renderer while the press path read it as keyboard.
     if app.keyboard_open() && y >= KB_ACC_Y0 && y < KB_Y1 {
-        if y <= KB_ACC_Y1 {
+        if y < KB_ACC_Y1 {
             return render_accessory_bar(x, y, app);
         } else {
             return render_browser_soft_keyboard(x, y, app);
@@ -9973,13 +10126,19 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
     // Search and Direct Navigation suggestion cards when address is focused
     if app.address_focused && y >= 116 && y < KB_ACC_Y0 {
         if app.address_len > 0 {
-            // Search suggestion card: y: 130..198
-            let s_rect = Rect::new(24, 130, W - 48, 68);
+            // Search suggestion card.
+            //
+            // WHY the box is `chrome`'s: the press path used to test `130..=198`
+            // against a card 68 rows tall from 130, so it claimed the first row
+            // of the gap under the card and the card's own trailing column. Both
+            // walkers read `chrome::SUGGEST_SEARCH` now, and everything drawn
+            // inside it is set from its own top edge.
+            let s_rect = chrome::SUGGEST_SEARCH;
             if let Some(c) = draw_rounded_rect(x, y, s_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-                let icon_box = Rect::new(38, 144, 40, 40);
+                let icon_box = Rect::new(s_rect.x + 14, s_rect.y + 14, 40, 40);
                 if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container, None, 0) {
-                    let dx = (x as isize) - 58;
-                    let dy = (y as isize) - 164;
+                    let dx = (x as isize) - (s_rect.x + 34) as isize;
+                    let dy = (y as isize) - (s_rect.y + 34) as isize;
                     if (dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25) || (dx >= 3 && dx <= 6 && dy >= 3 && dy <= 6) {
                         return THEME.primary;
                     }
@@ -9990,7 +10149,7 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 // WHY: the card used to read "Search Web" over a request that
                 // was sent to one host, so the screen promised a web search
                 // the browser does not perform.
-                if let Some(px) = text_px(x, y, 92, 144, 1, browser::SEARCH_LABEL, THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(x, y, s_rect.x + 68, s_rect.y + 14, 1, browser::SEARCH_LABEL, THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 // The candidate is the string the card offers, and it is
@@ -10000,29 +10159,29 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 // the candidate stopped at the edge of the row with nothing
                 // to say that it continued, so it read as a whole address.
                 let q = &f.suggest[..f.suggest_len];
-                if let Some(px) = text_px(x, y, 92, 168, 1, q, THEME.primary, c, true) {
+                if let Some(px) = text_px(x, y, s_rect.x + 68, s_rect.y + 38, 1, q, THEME.primary, c, true) {
                     return px;
                 }
                 return c;
             }
 
-            // Direct Navigate card: y: 208..276
-            let d_rect = Rect::new(24, 208, W - 48, 68);
+            // Direct Navigate card.
+            let d_rect = chrome::SUGGEST_NAVIGATE;
             if let Some(c) = draw_rounded_rect(x, y, d_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-                let icon_box = Rect::new(38, 222, 40, 40);
+                let icon_box = Rect::new(d_rect.x + 14, d_rect.y + 14, 40, 40);
                 if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container_high, None, 0) {
-                    let dx = (x as isize) - 58;
-                    let dy = (y as isize) - 242;
+                    let dx = (x as isize) - (d_rect.x + 34) as isize;
+                    let dy = (y as isize) - (d_rect.y + 34) as isize;
                     if dx * dx + dy * dy <= 16 {
                         return THEME.on_surface;
                     }
                     return ic;
                 }
-                if let Some(px) = text_px(x, y, 92, 222, 1, b"Open Address", THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(x, y, d_rect.x + 68, d_rect.y + 14, 1, b"Open Address", THEME.on_surface_variant, c, false) {
                     return px;
                 }
                 let q = &f.suggest[..f.suggest_len];
-                if let Some(px) = text_px(x, y, 92, 246, 1, q, THEME.on_surface, c, true) {
+                if let Some(px) = text_px(x, y, d_rect.x + 68, d_rect.y + 38, 1, q, THEME.on_surface, c, true) {
                     return px;
                 }
                 return c;
@@ -10243,6 +10402,14 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         app.address_focused = true;
         app.select_all = app.address_len > 0;
         app.overlay = SheetOverlay::None;
+        // WHY the page's field loses the keyboard here: `focus_field` clears
+        // this focus when a page takes the keyboard, and the reverse never
+        // happened. Both flags set means the accessory strip painted a page
+        // field's Clear and Done while the press path answered the address
+        // strip's chips -- ink that does not behave as the control under it.
+        if app.field_focus != NO_FIELD {
+            app.field_focus = NO_FIELD;
+        }
         let _ = std::audio_haptic_click();
         std::log("[BROWSER APP] Address field focused for keyboard input.").ok();
         return Tap::Redraw;
@@ -10250,10 +10417,16 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
 
     // If address bar is focused, handle keyboard, accessory bar, and suggestion taps
     if app.address_focused {
-        // 1. Accessory bar chips (y: KB_ACC_Y0..KB_ACC_Y1)
-        if y >= KB_ACC_Y0 && y <= KB_ACC_Y1 {
-            // Chip 1: "https://" (x 24..134)
-            if x >= 24 && x <= 134 {
+        // 1. Accessory bar chips
+        //
+        // WHY every chip is a `chrome` box now: the plates are drawn 110 and 80
+        // and 64 columns wide, and the press path tested `x <= 134`, `x <= 224`,
+        // `x <= 314`, `x <= 404` and `x <= 694` -- one column past each plate,
+        // into the gap that carries no ink and belongs to no control. The band
+        // itself was `918..=974`, one row past the strip's own 56-row plate.
+        if y >= chrome::ACC_BAR_Y0 && y < chrome::ACC_BAR_Y1 {
+            // Chip 1: "https://"
+            if chrome::ACC_HTTPS.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 let prefix = b"https://";
                 if !app.address[..app.address_len].starts_with(prefix) {
@@ -10269,8 +10442,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 }
                 return Tap::Redraw;
             }
-            // Chip 2: ".com" (x 144..224)
-            if x >= 144 && x <= 224 {
+            // Chip 2: ".com"
+            if chrome::ACC_TLD_COM.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 let suffix = b".com";
                 if app.address_len + suffix.len() <= app.address.len() {
@@ -10280,8 +10453,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 }
                 return Tap::Redraw;
             }
-            // Chip 3: ".org" (x 234..314)
-            if x >= 234 && x <= 314 {
+            // Chip 3: ".org"
+            if chrome::ACC_TLD_ORG.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 let suffix = b".org";
                 if app.address_len + suffix.len() <= app.address.len() {
@@ -10291,20 +10464,23 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 }
                 return Tap::Redraw;
             }
-            // Chip 4: "Clear" (x 324..404)
-            if x >= 324 && x <= 404 {
+            // Chip 4: "Clear"
+            if chrome::ACC_CLEAR.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.address_len = 0;
                 app.select_all = false;
                 return Tap::Redraw;
             }
-            // Dismiss down chevron (x 630..694)
-            if x >= 630 && x <= 694 {
+            // Dismiss down chevron
+            if chrome::ACC_DISMISS.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.address_focused = false;
                 app.select_all = false;
                 return Tap::Redraw;
             }
+            // WHY the strip keeps the rest of its own band: the plate is not a
+            // control, and a press on the empty 16 columns beside a chip must
+            // not fall through to the page under the keyboard.
             return Tap::Redraw;
         }
 
@@ -10358,8 +10534,14 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
 
         // 3. Typing suggestion cards
-        if app.address_len > 0 && x >= 24 && x <= W - 24 {
-            if y >= 130 && y <= 198 {
+        //
+        // WHY the two boxes are `chrome`'s: the press path used to test
+        // `130..=198` and `208..=276` -- inclusive -- against cards painted 68
+        // rows from 130 and from 208, so each band claimed the first row of the
+        // gap below its card, and both claimed the column one past the card's
+        // trailing edge. Now each card answers exactly the plate it draws.
+        if app.address_len > 0 {
+            if chrome::SUGGEST_SEARCH.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.address_focused = false;
                 app.select_all = false;
@@ -10368,7 +10550,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.navigate(&search_url[..n]);
                 return Tap::Redraw;
             }
-            if y >= 208 && y <= 276 {
+            if chrome::SUGGEST_NAVIGATE.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.address_focused = false;
                 app.select_all = false;
@@ -10378,7 +10560,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.navigate(&url[..n]);
                 return Tap::Redraw;
             }
-        } else if app.address_len == 0 && x >= 24 && x <= W - 24 {
+        } else if x >= 24 && x < W - 24 {
             // The quick-link row.
             //
             // WHY the gemini link is gone: the browser reads pages over
@@ -10417,16 +10599,21 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
 
     // If a form field is focused, handle keyboard and accessory bar taps
     if app.field_focus != NO_FIELD {
-        // 1. Accessory bar (y: KB_ACC_Y0..KB_ACC_Y1)
-        if y >= KB_ACC_Y0 && y <= KB_ACC_Y1 {
-            // Clear button (x: 24..104)
-            if x >= 24 && x <= 104 {
+        // 1. Accessory bar (the page field's own two chips)
+        //
+        // WHY the boxes are `chrome`'s: the plates are 80 and 94 columns wide
+        // and the press path tested `x <= 104` and `x <= 694` -- one column past
+        // each, in the gap between the chip and the strip's edge -- and the band
+        // was `918..=974`, one row past the strip's own 56-row plate.
+        if y >= chrome::ACC_BAR_Y0 && y < chrome::ACC_BAR_Y1 {
+            // Clear button
+            if chrome::FIELD_CLEAR.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.field_clear();
                 return Tap::Redraw;
             }
-            // Done button (x: 600..694)
-            if x >= 600 && x <= 694 {
+            // Done button
+            if chrome::FIELD_DONE.contains(x, y) {
                 app.blur_field();
                 return Tap::Redraw;
             }
@@ -10581,11 +10768,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
 
             // Tab cards interaction (4 slots)
-            let card_h = 110;
-            let card_gap = 16;
             for i in 0..MAX_TABS {
-                let card_y = 180 + i * (card_h + card_gap);
-                if y >= card_y && y < card_y + card_h && x >= 24 && x <= W - 24 {
+                let card_y = TAB_CARD_Y0 + i * (TAB_CARD_H + TAB_CARD_GAP);
+                if chrome::list_row_card(card_y, TAB_CARD_H).contains(x, y) {
                     let _ = std::audio_haptic_click();
                     // Close target tapped?
                     if tab_close_rect(card_y).contains(x, y) {
@@ -10615,13 +10800,15 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
         SheetOverlay::Bookmarks => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 app.filter_clear();
                 return Tap::Redraw;
             }
-            // The filter's clear control.
-            if y >= FILTER_Y && y < FILTER_Y + FILTER_H && x >= W - 96 && x <= W - 24 {
+            // The filter's clear control: it answers the plate it paints, and
+            // only when the plate is actually on screen (a filter that is
+            // empty has no clear control drawn, so it must not answer).
+            if app.filter_len > 0 && chrome::FILTER_CLEAR.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.filter_clear();
                 return Tap::Redraw;
@@ -10636,7 +10823,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                         continue;
                     }
                     let r_y = LIST_Y + shown * BOOKMARK_ROW_PITCH;
-                    if y >= r_y && y < r_y + BOOKMARK_CARD_H && x >= 24 && x < W - 24 {
+                    if chrome::list_row_card(r_y, BOOKMARK_CARD_H).contains(x, y) {
                         let _ = std::audio_haptic_click();
                         let mut url = [0u8; 64];
                         let u = rec.url_bytes();
@@ -10652,13 +10839,15 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
         SheetOverlay::History => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 app.filter_clear();
                 return Tap::Redraw;
             }
-            // The filter's clear control.
-            if y >= FILTER_Y && y < FILTER_Y + FILTER_H && x >= W - 96 && x <= W - 24 {
+            // The filter's clear control: it answers the plate it paints, and
+            // only when the plate is actually on screen (a filter that is
+            // empty has no clear control drawn, so it must not answer).
+            if app.filter_len > 0 && chrome::FILTER_CLEAR.contains(x, y) {
                 let _ = std::audio_haptic_click();
                 app.filter_clear();
                 return Tap::Redraw;
@@ -10671,11 +10860,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     break;
                 };
                 let r_y = LIST_Y + row * HISTORY_ROW_PITCH;
-                if y >= r_y
-                    && y < r_y + HISTORY_CARD_H
-                    && x >= HISTORY_CARD_X
-                    && x < HISTORY_CARD_X + HISTORY_CARD_W
-                {
+                if chrome::list_row_card(r_y, HISTORY_CARD_H).contains(x, y) {
                     let _ = std::audio_haptic_click();
                     // WHY the address is copied before the navigation: the row
                     // borrows the log that this navigation is about to append
@@ -10692,7 +10877,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
         SheetOverlay::Downloads => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
@@ -10702,10 +10887,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             // is a download they did not keep. A page is the browser's own
             // document and navigates; a file belongs to the device and is
             // handed to whichever app registered for its type.
-            let row_h = 72;
             for i in 0..app.download_count {
-                let r_y = 180 + i * row_h;
-                if y >= r_y && y < r_y + row_h && x >= 24 && x <= W - 24 {
+                let r_y = DOWNLOAD_ROW_Y0 + i * DOWNLOAD_ROW_PITCH;
+                if chrome::list_row_card(r_y, DOWNLOAD_CARD_H).contains(x, y) {
                     let _ = std::audio_haptic_click();
                     let entry = app.downloads[i];
                     if entry.is_page {
@@ -10741,7 +10925,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
         SheetOverlay::Tools => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
@@ -10786,7 +10970,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
         SheetOverlay::Settings => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
@@ -10802,7 +10986,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw;
         }
         SheetOverlay::TestFiles => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
@@ -10824,7 +11008,7 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw;
         }
         SheetOverlay::UploadPicker => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
@@ -10846,13 +11030,13 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw;
         }
         SheetOverlay::SpeedTest => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
             }
             return Tap::Redraw;
         }
         SheetOverlay::CompatibilityLab => {
-            if x >= 640 && y >= 120 && y <= 165 {
+            if chrome::SHEET_CLOSE.contains(x, y) {
                 app.overlay = SheetOverlay::None;
             }
             return Tap::Redraw;
@@ -10860,31 +11044,22 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         SheetOverlay::None => {}
     }
 
-    // Start Page Favorites / Quick Access Tiles Tap (y: 278..342)
-    if app.status == PageStatus::Blank && y >= 278 && y <= 342 {
-        // Col 0: InterOS (x: 66..130)
-        if x >= 66 && x <= 130 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://interos.tech");
-            return Tap::Redraw;
-        }
-        // Col 1: YouTube (x: 234..298)
-        if x >= 234 && x <= 298 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://m.youtube.com");
-            return Tap::Redraw;
-        }
-        // Col 2: GitHub (x: 402..466)
-        if x >= 402 && x <= 466 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://github.com");
-            return Tap::Redraw;
-        }
-        // Col 3: Wikipedia (x: 570..634)
-        if x >= 570 && x <= 634 {
-            let _ = std::audio_haptic_click();
-            app.navigate(b"https://wikipedia.org");
-            return Tap::Redraw;
+    // Start Page Favorites / Quick Access Tiles Tap
+    //
+    // WHY the band is `chrome`'s, and why it runs to the bottom of the grid
+    // block rather than stopping one row past the plate's ink: a press on the
+    // word under a tile -- the only thing that says what the tile opens -- used
+    // to do nothing at all, while a press on the row just past the plate did.
+    // The plate and its caption are one control now, and the address a press
+    // opens is the row of the table the caption is painted from, so a tile
+    // cannot name one page and open another.
+    if app.status == PageStatus::Blank {
+        for i in 0..chrome::HOME_TILE_X.len() {
+            if chrome::home_tile_hit(i).contains(x, y) {
+                let _ = std::audio_haptic_click();
+                app.navigate(chrome::HOME_TILE_URL[i]);
+                return Tap::Redraw;
+            }
         }
     }
 

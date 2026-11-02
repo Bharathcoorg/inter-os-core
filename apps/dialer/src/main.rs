@@ -89,6 +89,7 @@ use interos_std::design::scroll::ScrollState;
 use core::panic::PanicInfo;
 use interos_std as std;
 use dialer::theme::{type_scale, THEME};
+use dialer::chrome;
 use interos_std::design::color;
 use dialer::ModemCallState;
 use dialer::{
@@ -2431,20 +2432,25 @@ const _: () = assert!(W == dialer::tab_row::SURFACE_W);
 const _: () = assert!(TAB4_X1 == dialer::tab_row::row_right_edge());
 const _: () = assert!(dialer::tab_row::rung_band_h() <= TAB_BAND_H);
 
-// Dialed-number display card.
-const DISPLAY_X0: usize = 24;
-const DISPLAY_X1: usize = 696;
-const DISPLAY_Y0: usize = 170;
-const DISPLAY_Y1: usize = 380;
+// Dialed-number display card. The card's own edges are declared once, in
+// `chrome`, because the controls drawn on it are declared against them.
+const DISPLAY_X0: usize = chrome::DISPLAY_X0;
+const DISPLAY_X1: usize = chrome::DISPLAY_X1;
+const DISPLAY_Y0: usize = chrome::DISPLAY_Y0;
+const DISPLAY_Y1: usize = chrome::DISPLAY_Y1;
 const DISPLAY_W: usize = DISPLAY_X1 - DISPLAY_X0;
 /// The leading-plus control on the dialed-number card.
 ///
 /// WHY a disc and not a keypad sublabel: the keypad has no long-press, so a
 /// "+" printed under the 0 key was a label for a key that typed 0. The disc
 /// is a real control, offered only where a leading "+" is valid.
-const PLUS_CX: usize = DISPLAY_X0 + 44;
-const PLUS_CY: usize = 236;
-const PLUS_R: i32 = 20;
+///
+/// WHY the radius is the chrome's: the card inked this disc at twenty rows and
+/// the press answered twenty-four, so the person aimed at a ring that did not
+/// answer and at four rows of card that had never been drawn as a button.
+const PLUS_CX: usize = chrome::PLUS_CX;
+const PLUS_CY: usize = chrome::PLUS_CY;
+const PLUS_R: i32 = chrome::DISC_R;
 const PLACEHOLDER_SCALE: usize = type_scale::BODY;
 const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
@@ -2576,8 +2582,13 @@ const NOTICE_Y1: usize = NOTICE_Y0 + NOTICE_TOP_PAD + 2 * NOTICE_LINE_ROWS;
 const _: () = assert!(NOTICE_Y1 >= NOTICE_LINE2_Y + NOTICE_LINE_ROWS);
 const _: () = assert!(NOTICE_Y1 <= C_ACTION_Y - CALL_R as usize);
 /// Star hit circle on the right edge of every contact row.
-const STAR_CX: usize = 660;
-const STAR_R: i32 = 20;
+///
+/// WHY the radius is the chrome's disc radius: the row inked a forty-row plate
+/// and answered the same forty rows, four under the platform's floor, so the
+/// control that stars a contact was the one thing on the list a thumb could
+/// miss on purpose. The glyph is unchanged; the plate it sits in is the floor.
+const STAR_CX: usize = chrome::STAR_CX;
+const STAR_R: i32 = chrome::STAR_R;
 /// Action discs in the contacts action row.
 const C_ACTION_Y: usize = 1065;
 
@@ -2632,8 +2643,16 @@ const RINGTONE_TEXT_MAX_W: usize = DISPLAY_W - 2 * SETTINGS_ROW_PAD;
 /// edge has to stop at that left extent. Writing the number down is how the two
 /// came to overlap.
 const FIELD_TEXT_X0: usize = DISPLAY_X0 + 24;
-const FIELD_CLEAR_DX: usize = 88;
-const FIELD_DISC_R: usize = 22;
+/// The two in-field discs' centres and radius, all from `chrome`.
+///
+/// WHY the insets moved apart: both discs inked an eighteen-row ring and
+/// answered a twenty-two-row one, so the press landed on four rows of card that
+/// had never been drawn as a button -- and once each ring grew to the platform's
+/// floor the two were tangent, which reads as one control. Their centres are now
+/// further apart than two radii.
+const FIELD_CLEAR_DX: usize = chrome::FIELD_CLEAR_DX;
+const FIELD_BACKSPACE_DX: usize = chrome::FIELD_BACKSPACE_DX;
+const FIELD_DISC_R: usize = chrome::FIELD_DISC_R as usize;
 const FIELD_VALUE_GAP: usize = 12;
 const FIELD_VALUE_MAX_W: usize =
     (DISPLAY_X1 - FIELD_CLEAR_DX) - FIELD_DISC_R - FIELD_TEXT_X0 - FIELD_VALUE_GAP;
@@ -3027,9 +3046,9 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
 
         // Clear (X) disc on the right of the dialed number
-        let clear_cx = DISPLAY_X1 - 44;
-        let clear_cy = 236;
-        let clear_r = 20i32;
+        let clear_cx = chrome::CLEAR_CX;
+        let clear_cy = chrome::CLEAR_CY;
+        let clear_r = chrome::DISC_R;
         let c_dx = (x as i32) - clear_cx as i32;
         let c_dy = (y as i32) - clear_cy as i32;
         if c_dx * c_dx + c_dy * c_dy <= clear_r * clear_r {
@@ -3070,46 +3089,27 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
         } else {
-        let p1_x0 = 80usize;
-        let p1_w = 250usize;
-        let p1_y0 = 295usize;
-        let p1_h = 44usize;
-        if x >= p1_x0 && x < p1_x0 + p1_w && y >= p1_y0 && y < p1_y0 + p1_h {
-            if let Some(fill) = std::design::primitives::draw_pill(
-                x,
-                y,
-                std::design::primitives::Rect::new(p1_x0, p1_y0, p1_w, p1_h),
-                THEME.surface_container,
-                Some(THEME.border),
-            ) {
-                let label = b"+ Add Contact";
-                let lw = std::design::font::measure(label, 2);
-                let lx = p1_x0 + (p1_w.saturating_sub(lw)) / 2;
-                let ly = p1_y0 + (p1_h.saturating_sub(run_rows(2))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 2, label, 250, THEME.primary, fill) {
-                    return c;
-                }
-                return fill;
+        // The two action pills are drawn from `chrome::ACTION_PILLS`, the same
+        // rects the press answers, so a pill can no longer be a plate one size
+        // and a band another.
+        const PILL_LABELS: [&[u8]; 2] = [b"+ Add Contact", b"Send Message"];
+        const PILL_INKS: [u32; 2] = [THEME.primary, THEME.success];
+        for (i, pill) in chrome::ACTION_PILLS.iter().enumerate() {
+            if !pill.contains(x, y) {
+                continue;
             }
-        }
-
-        let p2_x0 = 390usize;
-        let p2_w = 250usize;
-        let p2_y0 = 295usize;
-        let p2_h = 44usize;
-        if x >= p2_x0 && x < p2_x0 + p2_w && y >= p2_y0 && y < p2_y0 + p2_h {
             if let Some(fill) = std::design::primitives::draw_pill(
                 x,
                 y,
-                std::design::primitives::Rect::new(p2_x0, p2_y0, p2_w, p2_h),
+                *pill,
                 THEME.surface_container,
                 Some(THEME.border),
             ) {
-                let label = b"Send Message";
+                let label = PILL_LABELS[i];
                 let lw = std::design::font::measure(label, 2);
-                let lx = p2_x0 + (p2_w.saturating_sub(lw)) / 2;
-                let ly = p2_y0 + (p2_h.saturating_sub(run_rows(2))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 2, label, 250, THEME.success, fill) {
+                let lx = pill.x + (pill.w.saturating_sub(lw)) / 2;
+                let ly = pill.y + (pill.h.saturating_sub(run_rows(2))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 2, label, pill.w, PILL_INKS[i], fill) {
                     return c;
                 }
                 return fill;
@@ -3787,13 +3787,15 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     return THEME.primary;
                 }
 
-                // Touch Clear (X) button at DISPLAY_X1 - 88
+                // Touch Clear (X) button at DISPLAY_X1 - FIELD_CLEAR_DX
                 let clr_cx = DISPLAY_X1 - FIELD_CLEAR_DX;
                 let clr_cy = fy + 48;
                 let clr_dx = (x as i32) - clr_cx as i32;
                 let clr_dy = (y as i32) - clr_cy as i32;
-                if clr_dx * clr_dx + clr_dy * clr_dy <= 18 * 18 {
-                    if clr_dx * clr_dx + clr_dy * clr_dy >= 16 * 16 {
+                if clr_dx * clr_dx + clr_dy * clr_dy <= (FIELD_DISC_R * FIELD_DISC_R) as i32 {
+                    if clr_dx * clr_dx + clr_dy * clr_dy
+                        >= ((FIELD_DISC_R - 2) * (FIELD_DISC_R - 2)) as i32
+                    {
                         return THEME.border;
                     }
                     let ix = clr_dx.abs();
@@ -3804,13 +3806,15 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     return THEME.surface_container_high;
                 }
 
-                // Touch Backspace (⌫) button at DISPLAY_X1 - 44
-                let bs_cx = DISPLAY_X1 - 44;
+                // Touch Backspace (⌫) button at DISPLAY_X1 - FIELD_BACKSPACE_DX
+                let bs_cx = DISPLAY_X1 - FIELD_BACKSPACE_DX;
                 let bs_cy = fy + 48;
                 let bs_dx = (x as i32) - bs_cx as i32;
                 let bs_dy = (y as i32) - bs_cy as i32;
-                if bs_dx * bs_dx + bs_dy * bs_dy <= 18 * 18 {
-                    if bs_dx * bs_dx + bs_dy * bs_dy >= 16 * 16 {
+                if bs_dx * bs_dx + bs_dy * bs_dy <= (FIELD_DISC_R * FIELD_DISC_R) as i32 {
+                    if bs_dx * bs_dx + bs_dy * bs_dy
+                        >= ((FIELD_DISC_R - 2) * (FIELD_DISC_R - 2)) as i32
+                    {
                         return THEME.border;
                     }
                     // WHY a left chevron and a bar and not the clear button's
@@ -3863,26 +3867,33 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return THEME.surface;
     };
 
-    // Star toggle pill, so the card agrees with the row and allows direct toggling.
-    let star_rect = (DISPLAY_X1 - 130, 186, 110, 36);
+    // Star toggle pill, so the card agrees with the row and allows direct
+    // toggling.
+    //
+    // WHY the plate is the chrome's: the pill was painted thirty-six rows tall
+    // and answered those same thirty-six, so press and ink agreed and both were
+    // eight rows under the floor the platform names. Growing the plate is the
+    // fix; growing only the band would leave the person aiming at the smaller
+    // thing they can see.
+    let star_rect = chrome::FAV_PILL;
     let is_fav = sel < ContactEditor::UNSAVED_BASE && rec.is_favourite();
     let (star_label, star_color) = if is_fav {
         (b"Starred" as &[u8], THEME.warning)
     } else {
         (b"Favorite" as &[u8], THEME.on_surface_variant)
     };
-    if (star_rect.0..star_rect.0 + star_rect.2).contains(&x) && (star_rect.1..star_rect.1 + star_rect.3).contains(&y) {
+    if star_rect.contains(x, y) {
         if let Some(fill) = std::design::primitives::draw_pill(
             x,
             y,
-            std::design::primitives::Rect::new(star_rect.0, star_rect.1, star_rect.2, star_rect.3),
+            star_rect,
             THEME.surface_container,
             Some(THEME.border),
         ) {
             let lw = std::design::font::measure(star_label, 1);
-            let lx = star_rect.0 + (star_rect.2.saturating_sub(lw)) / 2;
-            let ly = star_rect.1 + (star_rect.3.saturating_sub(run_rows(1))) / 2;
-            if let Some(c) = test_text(x, y, lx, ly, 1, star_label, star_rect.2, star_color, fill) {
+            let lx = star_rect.x + (star_rect.w.saturating_sub(lw)) / 2;
+            let ly = star_rect.y + (star_rect.h.saturating_sub(run_rows(1))) / 2;
+            if let Some(c) = test_text(x, y, lx, ly, 1, star_label, star_rect.w, star_color, fill) {
                 return c;
             }
             return fill;
@@ -4660,8 +4671,10 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return dock_pixel(x, y, dialer);
     }
 
-    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    // 6. Home Gesture Pill. The ink is `chrome::HOME_PILL` and the strip that
+    // answers it is `chrome::HOME_HIT`, one declaration in the library, so the
+    // page that answers is the page that was drawn.
+    if chrome::HOME_PILL.contains(x, y) {
         return THEME.on_surface_variant;
     }
 
@@ -4793,12 +4806,14 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     // the screen, and leaving the app from an open contact editor or ringtone
     // picker threw away what the user had typed or chosen. The home gesture
     // still leaves from anywhere.
-    if x >= 240 && x <= 480 && y >= 1400 {
+    if chrome::home_claims(x, y) {
         return Tap::Leave("[DIALER APP] Home gesture pressed. Exiting to launcher.");
     }
-    if std::design::back_button::contains(x, y)
-        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
-    {
+    // WHY the chip's own plate and nothing beside it: this used to union the
+    // header band out to x=100, and the app's title run starts at x=92 -- so a
+    // press on the app's own name quit the app from ink that was never drawn
+    // as a button.
+    if chrome::back_claims(x, y) {
         if dialer.section == DialerSection::Contacts && dialer.contact_edit.is_some() {
             dialer.cancel_edit_contact();
             return Tap::Redraw(Dirty::All);
@@ -4883,7 +4898,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         // The ledger scrolls, so the row under the tap is the one at the
         // scrolled position, not the one at the unshifted position.
         let offset = dialer.recents_scroll.offset;
-        if y >= RECENTS_Y0 && y < RECENTS_VIEWPORT_Y1 {
+        if y >= RECENTS_Y0 && y < RECENTS_VIEWPORT_Y1 && chrome::card_columns(x) {
             let content_y = y + offset;
             if content_y >= RECENTS_Y0 {
                 let row_idx = (content_y - RECENTS_Y0) / RECENTS_ROW_H;
@@ -4913,33 +4928,30 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
 
     if dialer.section == DialerSection::Keypad {
         // Leading-plus control on the dialed-number card.
-        if dialer.state == CallState::Idle
-            && dialer.active_len == 0
-            && in_circle(x, y, PLUS_CX, PLUS_CY, 24)
+        if dialer.state == CallState::Idle && dialer.active_len == 0 && chrome::plus_claims(x, y)
         {
             dialer.input_digit('+');
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::Display);
         }
         // Clear (X) disc on dialed number card
-        if dialer.active_len > 0 && in_circle(x, y, DISPLAY_X1 - 44, 236, 24) {
+        if dialer.active_len > 0 && chrome::clear_claims(x, y) {
             dialer.clear_entry();
             return Tap::Redraw(Dirty::Display);
         }
-        // Action pills in display card when active_len > 0
-        if dialer.active_len > 0 && y >= 295 && y < 345 {
-            if x >= 80 && x < 330 {
+        // Action pills in display card when active_len > 0. The pills answer the
+        // rects they are painted in, so the six rows below each plate no longer
+        // answer a press the card had never inked as a control.
+        if dialer.active_len > 0 {
+            if let Some(pill) = chrome::action_pill_at(x, y) {
                 let mut num_buf = [0u8; 32];
                 let len = dialer.active_len.min(32);
                 num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
-                dialer.start_add_contact_with_number(&num_buf[..len]);
-                let _ = std::audio_haptic_click();
-                return Tap::Redraw(Dirty::All);
-            }
-            if x >= 390 && x < 640 {
-                let mut num_buf = [0u8; 32];
-                let len = dialer.active_len.min(32);
-                num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
+                if pill == 0 {
+                    dialer.start_add_contact_with_number(&num_buf[..len]);
+                    let _ = std::audio_haptic_click();
+                    return Tap::Redraw(Dirty::All);
+                }
                 if hand_off_to_messaging(&num_buf[..len]) {
                     let _ = std::audio_haptic_click();
                 }
@@ -5002,7 +5014,7 @@ fn handle_settings_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
     if dialer.settings_view == SettingsView::RingtonePicker {
         return handle_ringtone_picker_tap(dialer, x, y);
     }
-    if y < SETTINGS_ROW_Y0 {
+    if y < SETTINGS_ROW_Y0 || !chrome::card_columns(x) {
         return Tap::None;
     }
     let index = (y - SETTINGS_ROW_Y0) / SETTINGS_ROW_H;
@@ -5049,7 +5061,13 @@ fn handle_settings_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
 }
 
 /// The ringtone picker's hit-testing.
-fn handle_ringtone_picker_tap(dialer: &mut DialerApp, _x: usize, y: usize) -> Tap<'static> {
+///
+/// WHY the columns are gated: the picker's rows are painted inside the app's
+/// card, so the page margins either side answered a row no ink had ever drawn.
+fn handle_ringtone_picker_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'static> {
+    if !chrome::card_columns(x) {
+        return Tap::None;
+    }
     // The row that leaves the picker.
     if y >= RINGTONE_BACK_Y0 && y < RINGTONE_BACK_Y0 + RINGTONE_BACK_H {
         dialer.settings_view = SettingsView::Main;
@@ -5114,8 +5132,8 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
             ContactField::Name => CARD_Y0 + 6,
             ContactField::Number => CARD_Y0 + 108,
         };
-        // Touch Clear (X) button at DISPLAY_X1 - 88
-        if in_circle(x, y, DISPLAY_X1 - 88, fy + 48, 22) {
+        // Touch Clear (X) button at DISPLAY_X1 - FIELD_CLEAR_DX
+        if in_circle(x, y, DISPLAY_X1 - FIELD_CLEAR_DX, fy + 48, FIELD_DISC_R as i32) {
             let mut next = ed;
             match next.field {
                 ContactField::Name => {
@@ -5132,8 +5150,8 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
             let _ = std::audio_haptic_click();
             return Tap::Redraw(Dirty::Fields);
         }
-        // Touch Backspace (⌫) button at DISPLAY_X1 - 44
-        if in_circle(x, y, DISPLAY_X1 - 44, fy + 48, 22) {
+        // Touch Backspace (⌫) button at DISPLAY_X1 - FIELD_BACKSPACE_DX
+        if in_circle(x, y, DISPLAY_X1 - FIELD_BACKSPACE_DX, fy + 48, FIELD_DISC_R as i32) {
             let mut next = ed;
             next.backspace();
             dialer.contact_edit = Some(next);
@@ -5214,8 +5232,8 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
     }
 
     // --- Browse mode -------------------------------------------------------
-    // Star toggle pill
-    if dialer.contact_sel.is_some() && (186..222).contains(&y) && x >= DISPLAY_X1 - 130 && x < DISPLAY_X1 - 20 {
+    // Star toggle pill: the plate the card draws is the plate that answers.
+    if dialer.contact_sel.is_some() && chrome::fav_pill_claims(x, y) {
         dialer.toggle_selected_favourite();
         let _ = std::audio_haptic_click();
         return Tap::Redraw(Dirty::All);

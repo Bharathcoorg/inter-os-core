@@ -9,6 +9,13 @@ use interos_std::design::scroll::ScrollState;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The rectangles the app's controls are drawn in and pressed in.
+///
+/// WHY the library owns them: the renderer lives in the binary, and a binary
+/// is built without a test harness, so a control whose geometry lives there
+/// cannot be pinned by a test. Both sides read the declaration below.
+pub mod chrome;
+
 /// The width the expression tape wraps at, in pixels.
 ///
 /// WHY it is a column and not the whole card: the tape has to leave room
@@ -2403,5 +2410,138 @@ mod tests {
         calc.press_key('4');
         calc.press_key('=');
         assert_eq!(calc.display_str(), "-4");
+    }
+
+    // ---------------------------------------------------------------------
+    // Painted-is-tappable gates
+    //
+    // WHY these sit here rather than only as const gates: a const assert
+    // proves the arithmetic today, and a test proves that the control named
+    // in the painter is the control the press answers -- the two functions
+    // the platform's own runtime taps reach. Every number below is read off
+    // the same `chrome` rect the renderer draws, so a rect that moves drags
+    // its own gate with it.
+    // ---------------------------------------------------------------------
+
+    /// The back chip answers its plate and nothing beside it.
+    ///
+    /// WHY this is pinned by a scan and not by two points: the header used to
+    /// union the chip with x=24..100, so a press at x=90 -- where the title
+    /// run starts at x=92 -- quit the app from page that had never been inked
+    /// as a button. A scan says no column outside the plate answers.
+    #[test]
+    fn test_back_chip_answers_only_the_plate_it_paints() {
+        use interos_std::design::back_button;
+        for y in 0..160usize {
+            for x in 0..180usize {
+                let inside = x >= back_button::X
+                    && x < back_button::X + back_button::SIZE
+                    && y >= back_button::Y
+                    && y < back_button::Y + back_button::SIZE;
+                assert_eq!(
+                    chrome::back_claims(x, y),
+                    inside,
+                    "back chip answered ({x}, {y}) outside its {}x{} plate",
+                    back_button::SIZE,
+                    back_button::SIZE
+                );
+            }
+        }
+        assert!(chrome::back_claims(48, 80));
+        assert!(!chrome::back_claims(90, 80));
+    }
+
+    /// Every control the app answers is at least the platform's floor on both
+    /// edges.
+    #[test]
+    fn test_every_named_control_clears_the_platform_touch_floor() {
+        use interos_std::design::touch::MIN_TARGET;
+        for (name, rect) in [
+            ("history toggle", chrome::HISTORY_PILL),
+            ("drawer clear", chrome::CLEAR_PILL),
+            ("drawer close", chrome::CLOSE_PILL),
+            ("tape scroll plate", chrome::SCROLL_PLATE),
+        ] {
+            assert!(
+                rect.w >= MIN_TARGET && rect.h >= MIN_TARGET,
+                "{name} is {}x{}, under the platform's {MIN_TARGET}-pixel floor",
+                rect.w,
+                rect.h
+            );
+        }
+    }
+
+    /// The drawer's two pills are painted on the rows it draws its header on.
+    ///
+    /// WHY: the pill grew from forty rows to the floor's forty-eight, and a
+    /// plate that overflowed the band it is drawn in is a plate whose bottom
+    /// edge the header's `if` never reaches -- ink that is never blitted, on
+    /// a control the press still answers.
+    #[test]
+    fn test_drawer_pills_are_painted_inside_the_band_the_drawer_draws() {
+        assert!(chrome::CLEAR_PILL.y >= chrome::DRAWER_HEADER_Y0);
+        assert!(chrome::CLOSE_PILL.y >= chrome::DRAWER_HEADER_Y0);
+        assert!(chrome::CLEAR_PILL.y + chrome::CLEAR_PILL.h <= chrome::DRAWER_HEADER_Y1);
+        assert!(chrome::CLOSE_PILL.y + chrome::CLOSE_PILL.h <= chrome::DRAWER_HEADER_Y1);
+        for y in (chrome::DRAWER_HEADER_Y0 - 1)..chrome::DRAWER_HEADER_Y1 {
+            assert_eq!(
+                chrome::clear_claims(470, y),
+                chrome::CLEAR_PILL.contains(470, y),
+                "the Clear press disagreed with the Clear plate at row {y}"
+            );
+            assert_eq!(
+                chrome::close_claims(600, y),
+                chrome::CLOSE_PILL.contains(600, y),
+                "the Close press disagreed with the Close plate at row {y}"
+            );
+        }
+    }
+
+    /// The home strip answers the rows the pill actually inks, and stops
+    /// short of the keypad.
+    #[test]
+    fn test_home_strip_covers_the_pill_it_draws_and_no_key() {
+        for y in [1410usize, 1420, 1439] {
+            assert!(chrome::home_claims(360, y), "home strip missed (360, {y})");
+        }
+        for y in chrome::HOME_PILL.y..chrome::HOME_PILL.y + chrome::HOME_PILL.h {
+            for x in chrome::HOME_PILL.x..chrome::HOME_PILL.x + chrome::HOME_PILL.w {
+                assert!(
+                    chrome::home_claims(x, y),
+                    "the home strip answered nothing at the inked pixel ({x}, {y})"
+                );
+            }
+        }
+        // The keypad's last row ends at 1360; a strip that reached into it
+        // would quit the app from under a finger that was pressing a key.
+        assert!(chrome::HOME_HIT.y >= 1360);
+        assert!(!chrome::home_claims(360, 1355));
+    }
+
+    /// The tape's scroll control is one plate at the platform's floor, and
+    /// its two halves answer the direction they are drawn for.
+    #[test]
+    fn test_tape_scroll_plate_is_one_painted_control() {
+        use interos_std::design::touch::MIN_TARGET;
+        assert!(chrome::SCROLL_PLATE.w >= MIN_TARGET);
+        assert!(chrome::SCROLL_PLATE.h >= MIN_TARGET);
+        let mid_x = chrome::SCROLL_PLATE.x + chrome::SCROLL_PLATE.w / 2;
+        assert_eq!(chrome::scroll_claims(mid_x, chrome::TAPE_Y0), Some(true));
+        assert_eq!(
+            chrome::scroll_claims(mid_x, chrome::TAPE_Y1 - 1),
+            Some(false)
+        );
+        assert_eq!(chrome::scroll_claims(mid_x - chrome::SCROLL_PLATE_W - 1, chrome::TAPE_Y0), None);
+        assert_eq!(chrome::scroll_claims(mid_x, chrome::TAPE_Y1), None);
+        // The plate sits inside the display card it belongs to.
+        assert!(chrome::SCROLL_PLATE.x + chrome::SCROLL_PLATE.w <= chrome::DISPLAY_X1);
+        assert!(chrome::SCROLL_PLATE.y >= chrome::DISPLAY_Y0);
+        assert!(chrome::SCROLL_PLATE.y + chrome::SCROLL_PLATE.h <= chrome::DISPLAY_Y1);
+    }
+
+    /// The display card, however tall its result, stops above the keypad.
+    #[test]
+    fn test_display_band_clears_the_keypad_top() {
+        assert!(chrome::DISPLAY_Y1 <= 420);
     }
 }

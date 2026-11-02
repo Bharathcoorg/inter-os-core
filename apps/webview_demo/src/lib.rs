@@ -3,8 +3,29 @@
 #![no_std]
 
 pub use interos_std as std;
-use interos_std::design::{back_button, viewport};
+use interos_std::design::{back_button, monochrome, viewport};
 use interos_std::webview::{InterWebView, WebViewConfig, WebViewSecurityPolicy};
+
+/// The theme the back control is cut from: the dark half of the platform's
+/// monochrome ladder, because this app's band is dark.
+///
+/// WHY not the light one the rest of the fleet hands `pixel_for_theme`: the chip
+/// takes its ring, fill and ink from the theme it is given, and the light roles
+/// put a `#EFEFE9` plate with a `#0A0A0A` outline on this app's `#121212` band --
+/// a ring one hundredth of a step off the band it stands on, so the control
+/// reads as a lit panel rather than a button. The dark variant trades paper for
+/// ink: the plate lifts to `#232323` (1.19:1 over the band) and the ring and the
+/// chevron carry `#FAFAFA`, 17.95:1 against the band and 15.06:1 against the
+/// plate. All three are roles of one shipped theme; none is a colour here.
+pub const THEME: std::design::Theme = monochrome::THEME_DARK;
+
+/// The colour the page is set on, and the colour its chrome continues into.
+///
+/// WHY repeated here: `InterWebView` paints its own container colour for every
+/// row inside its band and answers nothing at all outside it, so the rows above
+/// and below can only be set by the app that owns the surface. Anything other
+/// than the page's own colour would read as a second panel behind the document.
+pub const PAGE_BG: u32 = 0xFF121212;
 
 /// The address of the demo's first screen, and the only one the document can
 /// be at without having been navigated away from.

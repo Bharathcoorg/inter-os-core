@@ -10,6 +10,9 @@ pub use http::{
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The boxes the chrome controls are painted in and answer taps in.
+pub mod chrome;
+
 /// The bounded CSS subset the reader applies to block elements.
 pub mod css;
 

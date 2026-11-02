@@ -7,6 +7,9 @@ use interos_std::design::scroll::ScrollState;
 /// The app's view of the platform's design system.
 pub mod theme;
 
+/// The rectangles the dialer paints its controls in and answers taps in.
+pub mod chrome;
+
 pub const CONTACT_NAME_MAX: usize = 18;
 pub const CONTACT_NUM_MAX: usize = 16;
 pub const CONTACT_RECORD_BYTES: usize = 1 + 1 + CONTACT_NAME_MAX + CONTACT_NUM_MAX; // 36 bytes
@@ -989,5 +992,190 @@ mod tests {
         // The rung's own ascent+descent fits the band the painter centres it in.
         let band_h = outline_text::row_band(0, tab_row::SCALE).1;
         assert!(band_h <= tab_row::BAND_H);
+    }
+
+    // ---------------------------------------------------------------------
+    // Touch geometry: every control answers the plate it paints, at the size
+    // the platform calls a floor.
+    //
+    // WHY these gates read `chrome` rather than the renderer: the renderer
+    // lives in the binary, which is built without a test harness, so the only
+    // way a test can hold it to a number is for the number to be declared here
+    // and for the renderer to read it back. A gate against a copy of the
+    // geometry would pass while the screen moved.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn the_back_chip_answers_only_the_plate_it_paints() {
+        use interos_std::design::back_button;
+        // Every pixel of the chip's plate answers.
+        for y in back_button::Y..back_button::Y + back_button::SIZE {
+            for x in back_button::X..back_button::X + back_button::SIZE {
+                assert!(chrome::back_claims(x, y), "chip plate ({x},{y}) went dead");
+            }
+        }
+        // The columns the header used to union past the plate -- 72..100 held
+        // the app's own title ink -- answer nothing now.
+        for x in back_button::X + back_button::SIZE..100 {
+            assert!(
+                !chrome::back_claims(x, back_button::Y + back_button::SIZE / 2),
+                "x={x} past the chip still quit the app"
+            );
+        }
+        assert!(!chrome::back_claims(
+            back_button::X - 1,
+            back_button::Y + back_button::SIZE / 2
+        ));
+    }
+
+    #[test]
+    fn the_back_chip_is_painted_and_its_plate_clears_the_floor() {
+        use interos_std::design::back_button;
+        // WHY ink is asked for here: a chip that answers a rect nobody drew is
+        // the worst of the three defects, so the gate checks the SDK paints
+        // inside the very rect `chrome::back_claims` answers.
+        assert!(back_button::SIZE >= interos_std::design::touch::MIN_TARGET);
+        let mut inked = 0usize;
+        for y in back_button::Y..back_button::Y + back_button::SIZE {
+            for x in back_button::X..back_button::X + back_button::SIZE {
+                if back_button::pixel_for_theme(x, y, &theme::THEME).is_some() {
+                    inked += 1;
+                }
+            }
+        }
+        assert!(
+            inked > 0,
+            "the back chip's plate is answered but holds no ink"
+        );
+    }
+
+    #[test]
+    fn the_card_discs_answer_the_ring_the_card_inks() {
+        use interos_std::design::touch::MIN_TARGET;
+        // The plate is the floor across, so a control that was forty rows of
+        // ink is now forty-four of plate.
+        assert!(chrome::DISC_R as usize * 2 >= MIN_TARGET);
+        // The press answers exactly the ring the card fills: the floor's edge
+        // claims, the row outside it does not.
+        assert!(chrome::disc_claims(
+            chrome::PLUS_CX + MIN_TARGET / 2,
+            chrome::PLUS_CY,
+            chrome::PLUS_CX + MIN_TARGET / 2,
+            chrome::PLUS_CY
+        ));
+        assert!(!chrome::plus_claims(
+            chrome::PLUS_CX + MIN_TARGET / 2 + 1,
+            chrome::PLUS_CY
+        ));
+        assert!(!chrome::clear_claims(chrome::CLEAR_CX - MIN_TARGET / 2 - 1, chrome::CLEAR_CY));
+        // Both discs stay inside the card they are painted on.
+        assert!(chrome::PLUS_CX - chrome::DISC_R as usize >= chrome::DISPLAY_X0);
+        assert!(chrome::CLEAR_CX + chrome::DISC_R as usize <= chrome::DISPLAY_X1);
+    }
+
+    #[test]
+    fn the_action_pills_answer_their_own_plates() {
+        use interos_std::design::touch::MIN_TARGET;
+        for pill in chrome::ACTION_PILLS.iter() {
+            assert!(pill.w >= MIN_TARGET && pill.h >= MIN_TARGET);
+        }
+        // Each plate answers corner to corner -- and the row just past each edge
+        // does not answer at all. Those two rows are the fix: the press used to
+        // test `y < 345`, six rows below the plate's own bottom edge.
+        for pill in chrome::ACTION_PILLS.iter() {
+            for y in pill.y..pill.y + pill.h {
+                for x in pill.x..pill.x + pill.w {
+                    assert!(chrome::action_pill_at(x, y).is_some());
+                }
+            }
+            assert_eq!(chrome::action_pill_at(pill.x + 1, pill.y + pill.h), None);
+            assert_eq!(chrome::action_pill_at(pill.x + pill.w, pill.y + 1), None);
+        }
+        assert_eq!(chrome::action_pill_at(90, 344), None);
+        assert_eq!(chrome::action_pill_at(340, 310), None);
+        // The gap between the two pills is page, not a control.
+        assert_eq!(chrome::action_pill_at(360, 310), None);
+    }
+
+    #[test]
+    fn the_favourite_pill_clears_the_floor_and_answers_its_plate() {
+        use interos_std::design::touch::MIN_TARGET;
+        // The pill used to be both painted and answered at thirty-six rows: two
+        // agreeing numbers, both under the floor.
+        assert!(chrome::FAV_PILL.h >= MIN_TARGET);
+        assert!(chrome::FAV_PILL.w >= MIN_TARGET);
+        assert!(chrome::fav_pill_claims(chrome::FAV_PILL.x, chrome::FAV_PILL.y));
+        assert!(chrome::fav_pill_claims(
+            chrome::FAV_PILL.x + chrome::FAV_PILL.w - 1,
+            chrome::FAV_PILL.y + MIN_TARGET - 1
+        ));
+        assert!(!chrome::fav_pill_claims(
+            chrome::FAV_PILL.x + chrome::FAV_PILL.w,
+            chrome::FAV_PILL.y
+        ));
+        assert!(!chrome::fav_pill_claims(
+            chrome::FAV_PILL.x,
+            chrome::FAV_PILL.y + chrome::FAV_PILL.h
+        ));
+        assert!(chrome::FAV_PILL.y >= chrome::DISPLAY_Y0);
+        assert!(chrome::FAV_PILL.y + chrome::FAV_PILL.h <= chrome::DISPLAY_Y1);
+    }
+
+    #[test]
+    fn the_editor_field_discs_are_one_size_and_never_touch() {
+        use interos_std::design::touch::MIN_TARGET;
+        // Painted at eighteen rows, answered at twenty-two: the press landed on
+        // four rows of card never drawn as a button. One radius now, and it
+        // clears the floor.
+        assert!(chrome::FIELD_DISC_R as usize * 2 >= MIN_TARGET);
+        // Two tangent circles read as one control, so the centres sit further
+        // apart than the two plates.
+        assert!(
+            chrome::FIELD_CLEAR_DX - chrome::FIELD_BACKSPACE_DX
+                >= 2 * chrome::FIELD_DISC_R as usize + 8
+        );
+        let clear = chrome::DISPLAY_X1 - chrome::FIELD_CLEAR_DX;
+        let back = chrome::DISPLAY_X1 - chrome::FIELD_BACKSPACE_DX;
+        assert!(clear + chrome::FIELD_DISC_R as usize <= back - chrome::FIELD_DISC_R as usize);
+        assert!(back + chrome::FIELD_DISC_R as usize <= chrome::DISPLAY_X1);
+    }
+
+    #[test]
+    fn the_row_star_clears_the_floor() {
+        use interos_std::design::touch::MIN_TARGET;
+        assert!(chrome::STAR_R as usize * 2 >= MIN_TARGET);
+        assert_eq!(chrome::STAR_R, chrome::DISC_R);
+        assert!(chrome::STAR_CX + chrome::STAR_R as usize <= chrome::DISPLAY_X1);
+    }
+
+    #[test]
+    fn the_home_pill_sits_inside_the_strip_that_answers_it() {
+        use interos_std::design::touch::MIN_TARGET;
+        // The strip is a gesture, so it may be generous -- but it must clear the
+        // floor on both edges, and the pill drawn inside it must not be the
+        // reason the strip is smaller than the page it lives on.
+        assert!(chrome::HOME_HIT.w >= MIN_TARGET && chrome::HOME_HIT.h >= MIN_TARGET);
+        assert!(chrome::HOME_PILL.x >= chrome::HOME_HIT.x);
+        assert!(chrome::HOME_PILL.x + chrome::HOME_PILL.w
+            <= chrome::HOME_HIT.x + chrome::HOME_HIT.w);
+        assert!(chrome::HOME_PILL.y >= chrome::HOME_HIT.y);
+        assert!(chrome::HOME_PILL.y + chrome::HOME_PILL.h
+            <= chrome::HOME_HIT.y + chrome::HOME_HIT.h);
+        // The points the interaction contracts tap stay live on the strip.
+        assert!(chrome::home_claims(360, 1410));
+        assert!(chrome::home_claims(360, 1420));
+        assert!(chrome::home_claims(chrome::HOME_PILL.x + 1, chrome::HOME_PILL.y + 1));
+        assert!(!chrome::home_claims(360, chrome::HOME_HIT.y - 1));
+    }
+
+    #[test]
+    fn list_rows_answer_only_where_the_card_is_inked() {
+        // The settings rows, the ringtone rows and the recents ledger all chose
+        // their row from `y` alone, so the page margins answered controls no
+        // ink had ever drawn there.
+        assert!(!chrome::card_columns(chrome::DISPLAY_X0 - 1));
+        assert!(chrome::card_columns(chrome::DISPLAY_X0));
+        assert!(chrome::card_columns(chrome::DISPLAY_X1 - 1));
+        assert!(!chrome::card_columns(chrome::DISPLAY_X1));
     }
 }

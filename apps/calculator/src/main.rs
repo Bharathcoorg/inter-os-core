@@ -17,10 +17,9 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use calculator::theme::{THEME, radius, spacing, typography};
+use calculator::theme::{THEME, radius, typography};
 
 use interos_std::design::components;
-use interos_std::design::outline_text;
 use interos_std::design::primitives::Rect;
 
 
@@ -42,7 +41,6 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
-const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 
 pub fn status_band() -> (usize, usize) {
     (0, STATUS_BAR_HEIGHT)
@@ -109,22 +107,27 @@ fn test_text(
     interos_std::design::monochrome::text_px(x, y, x0, y0, cap_px, text, color, bg, bold)
 }
 
-/// The line box of a run drawn at a cap height.
+/// The line box of a run drawn at a cap height, and the rectangles every
+/// control of this app is painted in and pressed in.
 ///
-/// WHY the typeface's own box and not a number: a line box is the space a
-/// run reserves, and a run reserves its ascent and its descent.
-const fn run_rows(cap_px: u32) -> usize {
-    let em = outline_text::em_for_cap_height(cap_px);
-    let (ascent, descent) = interos_std::design::typeface::line_metrics(em);
-    (ascent + descent) as usize
-}
+/// WHY they come from the library and not from this file: the painter and the
+/// tap handler are two functions, and while each held its own numbers the
+/// drawer's Clear pill stood forty rows against the platform's forty-four,
+/// the home strip answered a two-hundred-and-forty-wide box around a pill one
+/// hundred and forty across, and the columns beside the back chip quit the
+/// app from page that had never been inked as a button. One declaration is
+/// also the only version of it the app's own tests can reach: this file is a
+/// binary, and a binary is built without a test harness.
+use calculator::chrome::{
+    CLEAR_PILL, CLOSE_PILL, DISPLAY_PAD, DISPLAY_X0, DISPLAY_X1, DISPLAY_Y0, DISPLAY_Y1,
+    DRAWER_HEADER_Y0, DRAWER_HEADER_Y1, HISTORY_PILL, HIST_EXPR_DY, HIST_LIST_Y0, HIST_RES_DY,
+    HIST_ROW_H, HIST_ROW_PITCH, HOME_PILL, PILL_INK_DY, PILL_TOP, SCROLL_CHEVRON_X, SCROLL_PLATE,
+    SCROLL_PLATE_H, SCROLL_PLATE_X, TAPE_LINE_H, TAPE_LINES, TAPE_TEXT_X1, TAPE_Y0,
+    TAPE_Y1, VALUE_Y0, run_rows,
+};
+use calculator::chrome;
 
 const HEADER_H: usize = 110;
-
-// Display Card Geometry
-const DISPLAY_X0: usize = 24;
-const DISPLAY_X1: usize = 696;
-const DISPLAY_PAD: usize = spacing::GRID_24;
 
 /// The cap heights the display draws at.
 ///
@@ -146,47 +149,11 @@ const CAP_SECTION: u32 = typography::TITLE_CAP_PX;
 /// The keypad honours the engine's declaration.
 const CAP_KEY_LABEL: u32 = calculator::KEY_LABEL_CAP_PX;
 
-/// The band the history drawer's Clear and Close controls are drawn in, and the
-/// offset their label starts at inside it.
-///
-/// WHY the band is one name and not the six numbers it was: the painter, the
-/// corner rounding and the press all test the same rows, and the label was
-/// centred from the cap rather than the box -- a scale-two run reserves
-/// `run_rows(BODY_CAP_PX)` = 32 rows, so centring from an 18-row cap stood the
-/// box seven rows below the fill's middle and ran its last three rows past the
-/// pill's own bottom edge. On a per-pixel blit those rows are not clipped: they
-/// are painted on whatever the drawer puts under the pill.
-const PILL_TOP: usize = 130;
-const PILL_H: usize = 40;
-const PILL_BOTTOM: usize = PILL_TOP + PILL_H;
-const PILL_INK_DY: usize = (PILL_H - run_rows(typography::BODY_CAP_PX)) / 2;
-
-/// The history drawer's ledger geometry, all derived from the two runs a row
-/// stacks so the result cannot be drawn through the expression.
-///
-/// WHY a stride and not two offsets: the expression box and the result box
-/// are neighbours in one column, and the row's height has to close around
-/// the pair. A literal offset fitted to the old bitmap cell let the result's
-/// cap start inside the expression's box.
-/// The history row's height: where its result's box ends, plus the air below
-/// it. WHY derived rather than remembered: the row used to be a literal 125
-/// while the two boxes it stacks come from the type ladder, and the ladder's
-/// title rung grew the pair past the frame -- the result's last two rows
-/// painted outside the row that owns them.
-const HIST_ROW_BOTTOM_PAD: usize = 2;
-const HIST_ROW_H: usize = HIST_RES_DY + run_rows(CAP_SECTION) + HIST_ROW_BOTTOM_PAD;
-const HIST_LIST_Y0: usize = 195;
-const HIST_ROW_PITCH: usize = 140;
-const HIST_EXPR_DY: usize = 16;
-const HIST_LINE_STRIDE: usize = run_rows(CAP_LABEL);
-const HIST_RES_DY: usize = HIST_EXPR_DY + HIST_LINE_STRIDE;
-
 // WHY these gates exist: the two runs above share the row's column and the
 // row's own height, so the relations that keep them off each other and off
-// the row's bottom edge are checked where the numbers are set, not hoped for.
-const _: () = assert!(HIST_RES_DY >= HIST_EXPR_DY + run_rows(CAP_LABEL));
-const _: () = assert!(HIST_RES_DY + run_rows(CAP_SECTION) <= HIST_ROW_H);
-const _: () = assert!(run_rows(typography::BODY_CAP_PX) <= PILL_H);
+// the row's bottom edge are checked in `chrome`, where the numbers are set.
+// What is checked here is the one relation that belongs to this file: the key
+// label inside the keycap it is drawn on.
 const _: () = assert!(run_rows(CAP_KEY_LABEL) <= 140);
 
 /// The rungs the result comes down when it does not fit the card.
@@ -204,51 +171,12 @@ const ERROR_LADDER: [u32; 3] = [
     typography::BODY_CAP_PX,
 ];
 
-/// The gap between the expression and the result.
-const VALUE_GAP: usize = 12;
-
-/// The top of the result's cap.
-const VALUE_Y0: usize = TAPE_Y1 + VALUE_GAP;
-
-/// The bottom of the display band.
+/// The right edge of the tape's text when the scroll plate is shown.
 ///
-/// WHY the band ends below the result's line box and not below its cap: a
-/// result with a thousands separator has a comma that hangs below the cap,
-/// and a band that ended at the cap would cut it off.
-const DISPLAY_Y1: usize = VALUE_Y0 + typography::DISPLAY_LINE_PX + DISPLAY_PAD;
-
-/// The top of the display band: the card that holds the expression and the
-/// result.
-const DISPLAY_Y0: usize = 110;
-
-/// The expression tape's geometry.
-///
-/// WHY the tape is two lines and not one: the tape used to show the last
-/// thirty-two characters of the expression and say nothing about it, so a
-/// long expression was cut off at the front with no way to reach it. Two
-/// lines of the column, scrolled with the platform's scroll model, hold a
-/// whole expression.
-///
-/// WHY the tape starts at the card's padding and not at the card's edge:
-/// the tape is a caption above the answer, and a caption that starts at the
-/// card's edge is a caption that is drawn on the border.
-const TAPE_Y0: usize = DISPLAY_Y0 + DISPLAY_PAD;
-const TAPE_LINES: usize = calculator::TAPE_VISIBLE_LINES;
-const TAPE_LINE_H: usize = calculator::TAPE_LINE_H;
-const TAPE_Y1: usize = TAPE_Y0 + TAPE_LINES * TAPE_LINE_H;
-
-/// The right edge of the tape's text.
-const TAPE_TEXT_X1: usize = DISPLAY_X1 - DISPLAY_PAD;
-
-/// The right edge of the tape's text when the scroll chevrons are shown.
-///
-/// WHY the text moves in: the chevrons are the only way to reach the part
-/// of the expression that is off the screen, and text drawn under them
-/// would hide them.
-const TAPE_TEXT_X1_SCOLL: usize = TAPE_TEXT_X1 - 40;
-
-/// The centre of the tape's scroll chevrons.
-const TAPE_CHEVRON_X: usize = TAPE_TEXT_X1 - 12;
+/// WHY the text moves in: the plate is the only way to reach the part of the
+/// expression that is off the screen, and text drawn under it would hide the
+/// control the person is looking for.
+const TAPE_TEXT_X1_SCOLL: usize = SCROLL_PLATE_X.saturating_sub(6);
 
 // Button layout constants (Minimum 64pt targets: 144x140px)
 //
@@ -359,17 +287,21 @@ fn draw_calc_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, 
 }
 
 
-/// The scroll chevron on the expression tape.
+/// The scroll plate's chevron.
 ///
 /// WHY it is drawn and not typed: the platform's typeface carries no
 /// chevron character, and a control labelled with a character the face
 /// does not carry would draw as a blank.
+///
+/// WHY its centre comes from the plate: the plate is what the person sees
+/// and what the press answers, and a glyph that stood eighteen rows into a
+/// band of its own was a glyph the plate's halves did not agree with.
 fn tape_chevron_pixel(x: usize, y: usize, up: bool, color: u32) -> Option<u32> {
-    let cx = TAPE_CHEVRON_X as isize;
+    let cx = SCROLL_CHEVRON_X as isize;
     let cy = if up {
-        (TAPE_Y0 + 18) as isize
+        (TAPE_Y0 + SCROLL_PLATE_H / 4) as isize
     } else {
-        (TAPE_Y1 - 18) as isize
+        (TAPE_Y0 + SCROLL_PLATE_H * 3 / 4) as isize
     };
     let dx = (x as isize) - cx;
     let dy = (y as isize) - cy;
@@ -443,16 +375,9 @@ fn key_hit(row: usize, col: usize, x: usize, y: usize) -> bool {
     x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
 }
 
-/// The home indicator, in the platform's own geometry.
-///
-/// WHY these numbers and not the app's own: the shell draws the home
-/// indicator on every screen, and the app drew a second one -- a grey
-/// line, two hundred pixels wide, in a different row. One home indicator
-/// is the shell's.
-const HOME_PILL_W: usize = 140;
-const HOME_PILL_H: usize = 5;
-const HOME_PILL_Y: usize = 1418;
-const HOME_PILL_X: usize = (W - HOME_PILL_W) / 2;
+// The home indicator's ink (`HOME_PILL`) and the strip that answers it
+// (`HOME_HIT`) are both declared in `calculator::chrome`, beside the numbers
+// the press asks.
 
 #[derive(Clone, Copy)]
 struct CalcDisplayPlan {
@@ -582,10 +507,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             return c;
         }
 
-        // History toggle pill button at top right: x: 576..688, y: 56..104
-        if x >= 576 && x < 688 && y >= HEADER_TOP && y < HEADER_TOP + 48 {
-            let rx = (x - 576).min(687 - x);
-            let ry = (y - HEADER_TOP).min(HEADER_TOP + 47 - y);
+        // History toggle pill: the rect the press answers, drawn.
+        if HISTORY_PILL.contains(x, y) {
+            let rx = (x - HISTORY_PILL.x).min(HISTORY_PILL.x + HISTORY_PILL.w - 1 - x);
+            let ry = (y - HISTORY_PILL.y).min(HISTORY_PILL.y + HISTORY_PILL.h - 1 - y);
             if rx < R_SOFT && ry < R_SOFT {
                 let cdx = (R_SOFT - rx) as isize;
                 let cdy = (R_SOFT - ry) as isize;
@@ -602,8 +527,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 return border;
             }
             let hw = calculator::text_width(b"History", typography::BODY_CAP_PX);
-            let hx = 576 + (112 - hw) / 2;
-            let hy = HEADER_TOP + (48 - typography::BODY_CAP_PX as usize) / 2;
+            let hx = HISTORY_PILL.x + (HISTORY_PILL.w - hw) / 2;
+            // WHY the line box and not the cap: a run reserves its ascent and
+            // its descent, and centring the cap inside a forty-eight-row pill
+            // left the box's last two rows painted on the page under it.
+            let hy = HISTORY_PILL.y + (HISTORY_PILL.h - run_rows(typography::BODY_CAP_PX)) / 2;
             if let Some(c) = test_text(x, y, hx, hy, typography::BODY_CAP_PX, b"History", text_c, bg, true) {
                 return c;
             }
@@ -626,17 +554,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 }
             }
 
-            // Header of History Drawer: y: 125..175
-            if y >= 125 && y < 175 {
+            // Header of History Drawer: y: DRAWER_HEADER_Y0..DRAWER_HEADER_Y1
+            if y >= DRAWER_HEADER_Y0 && y < DRAWER_HEADER_Y1 {
                 // "Calculation History" title
                 if let Some(c) = test_text(x, y, 48, 136, typography::SECTION_CAP_PX, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
 
-                // Clear button pill: x: 440..530, y: `PILL_TOP..PILL_BOTTOM`
-                if x >= 440 && x < 530 && y >= PILL_TOP && y < PILL_BOTTOM {
-                    let prx = (x - 440).min(529 - x);
-                    let pry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
+                // Clear button pill: the rect the press answers, drawn.
+                if CLEAR_PILL.contains(x, y) {
+                    let prx = (x - CLEAR_PILL.x).min(CLEAR_PILL.x + CLEAR_PILL.w - 1 - x);
+                    let pry = (y - CLEAR_PILL.y).min(CLEAR_PILL.y + CLEAR_PILL.h - 1 - y);
                     if prx < R_CHIP && pry < R_CHIP {
                         let cdx = (R_CHIP - prx) as isize;
                         let cdy = (R_CHIP - pry) as isize;
@@ -648,7 +576,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         return THEME.border;
                     }
                     let cw = calculator::text_width(b"CLEAR", typography::BODY_CAP_PX);
-                    let cx0 = 440 + (90 - cw) / 2;
+                    let cx0 = CLEAR_PILL.x + (CLEAR_PILL.w - cw) / 2;
                     let cy0 = PILL_TOP + PILL_INK_DY;
                     if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
                         return c;
@@ -656,10 +584,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     return THEME.surface_container_high;
                 }
 
-                // Close button pill: x: 550..660, y: `PILL_TOP..PILL_BOTTOM`
-                if x >= 550 && x < 660 && y >= PILL_TOP && y < PILL_BOTTOM {
-                    let prx = (x - 550).min(659 - x);
-                    let pry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
+                // Close button pill: the rect the press answers, drawn.
+                if CLOSE_PILL.contains(x, y) {
+                    let prx = (x - CLOSE_PILL.x).min(CLOSE_PILL.x + CLOSE_PILL.w - 1 - x);
+                    let pry = (y - CLOSE_PILL.y).min(CLOSE_PILL.y + CLOSE_PILL.h - 1 - y);
                     if prx < R_CHIP && pry < R_CHIP {
                         let cdx = (R_CHIP - prx) as isize;
                         let cdy = (R_CHIP - pry) as isize;
@@ -671,7 +599,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         return THEME.border;
                     }
                     let cw = calculator::text_width(b"CLOSE", typography::BODY_CAP_PX);
-                    let cx0 = 550 + (110 - cw) / 2;
+                    let cx0 = CLOSE_PILL.x + (CLOSE_PILL.w - cw) / 2;
                     let cy0 = PILL_TOP + PILL_INK_DY;
                     if let Some(c) = test_text(x, y, cx0, cy0, typography::BODY_CAP_PX, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
                         return c;
@@ -825,14 +753,35 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         return c;
                     }
                 }
-                // The scroll chevrons, only when there is more than one
+                // The scroll plate, only when there is more than one
                 // screenful of expression to reach.
+                //
+                // WHY the plate is inked and not just the two chevrons: the
+                // press answers the whole chip, and a chip whose visible
+                // mark is nineteen pixels across inside a box forty across
+                // is a person tapping page they cannot see and calling it a
+                // broken screen. What is drawn is what is answered.
                 if p.tape_overflow {
-                    if let Some(c) = tape_chevron_pixel(x, y, true, THEME.on_surface_variant) {
-                        return c;
-                    }
-                    if let Some(c) = tape_chevron_pixel(x, y, false, THEME.on_surface_variant) {
-                        return c;
+                    if SCROLL_PLATE.contains(x, y) {
+                        let prx = (x - SCROLL_PLATE.x).min(SCROLL_PLATE.x + SCROLL_PLATE.w - 1 - x);
+                        let pry = (y - SCROLL_PLATE.y).min(SCROLL_PLATE.y + SCROLL_PLATE.h - 1 - y);
+                        if prx < R_CHIP && pry < R_CHIP {
+                            let cdx = (R_CHIP - prx) as isize;
+                            let cdy = (R_CHIP - pry) as isize;
+                            if cdx * cdx + cdy * cdy > (R_CHIP * R_CHIP) as isize {
+                                return THEME.surface_container;
+                            }
+                        }
+                        if prx < 2 || pry < 2 {
+                            return THEME.border;
+                        }
+                        if let Some(c) = tape_chevron_pixel(x, y, true, THEME.on_surface_variant) {
+                            return c;
+                        }
+                        if let Some(c) = tape_chevron_pixel(x, y, false, THEME.on_surface_variant) {
+                            return c;
+                        }
+                        return THEME.surface_container_high;
                     }
                 }
             }
@@ -978,13 +927,9 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // grey line of a different size in a different place, so the screen
     // carried two home indicators and the one that was drawn was the one
     // nobody could see. The pill is the shell's: the same width, the same
-    // height and the same row, in the ink that stands out against the
-    // page behind it.
-    if y >= HOME_PILL_Y
-        && y < HOME_PILL_Y + HOME_PILL_H
-        && x >= HOME_PILL_X
-        && x < HOME_PILL_X + HOME_PILL_W
-    {
+    // height and the same row as the strip the press answers, in the ink
+    // that stands out against the page behind it.
+    if HOME_PILL.contains(x, y) {
         return THEME.on_surface;
     }
 
@@ -1151,33 +1096,41 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
 }
 
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
-    // Back button
-    let is_back = std::design::back_button::contains(x as usize, y as usize)
-        || (x >= 24 && x < 100 && y >= HEADER_TOP as u32 && y < (HEADER_TOP + 48) as u32);
-    if is_back {
+    let x = x as usize;
+    let y = y as usize;
+
+    // The back chip.
+    //
+    // WHY there is no second clause: this used to be the chip's rect unioned
+    // with a band from x=24 to x=100, and the columns past the chip's
+    // forty-eight-row plate are bare header -- the title run starts at x=92.
+    // A press there quit the app from page that had never been inked as a
+    // button, which is the defect the platform's own chip exists to prevent.
+    if chrome::back_claims(x, y) {
         return Tap::Leave("[CALCULATOR] Back button tapped. Returning to launcher.");
     }
 
-    // Home gesture bar
-    if x >= 240 && x <= 480 && y >= 1400 {
+    // The home strip: the rows below the pill's ink, at the pill's own
+    // width, and no wider than the plate the shell draws.
+    if chrome::home_claims(x, y) {
         return Tap::Leave("[CALCULATOR] Home gesture tapped. Returning to launcher.");
     }
 
-    // History button in Header (576..688, HEADER_TOP..HEADER_TOP+48)
-    if x >= 576 && x < 688 && y >= HEADER_TOP as u32 && y < (HEADER_TOP + 48) as u32 {
+    // History toggle: the pill the header row paints.
+    if chrome::history_claims(x, y) {
         calc.toggle_history();
         return Tap::Redraw(Dirty::All);
     }
 
     // History Drawer active interactions
     if calc.show_history {
-        // Close button: x: 550..660, y: `PILL_TOP..PILL_BOTTOM`
-        if x >= 550 && x < 660 && y >= PILL_TOP as u32 && y < PILL_BOTTOM as u32 {
+        // Close pill: the rect the drawer draws.
+        if chrome::close_claims(x, y) {
             calc.show_history = false;
             return Tap::Redraw(Dirty::All);
         }
-        // Clear history button: x: 440..530, y: `PILL_TOP..PILL_BOTTOM`
-        if x >= 440 && x < 530 && y >= PILL_TOP as u32 && y < PILL_BOTTOM as u32 {
+        // Clear pill: the rect the drawer draws.
+        if chrome::clear_claims(x, y) {
             calc.history.clear();
             return Tap::Redraw(Dirty::All);
         }
@@ -1186,35 +1139,33 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
         for i in 0..count.min(8) {
             let row_y0 = HIST_LIST_Y0 + i * HIST_ROW_PITCH;
             let row_y1 = row_y0 + HIST_ROW_H;
-            if (y as usize) >= row_y0 && (y as usize) < row_y1 && x >= 40 && x < 680 {
+            if y >= row_y0 && y < row_y1 && x >= 40 && x < 680 {
                 calc.load_history_entry(i);
                 calc.show_history = false;
                 return Tap::Redraw(Dirty::All);
             }
         }
         // Tapping outside closes drawer
-        if (y as usize) >= 110 && (y as usize) < 1380 {
+        if y >= 110 && y < 1380 {
             calc.show_history = false;
             return Tap::Redraw(Dirty::All);
         }
         return Tap::None;
     }
 
-    // The expression tape's scroll chevrons.
+    // The expression tape's scroll plate.
     //
-    // WHY they are there: the tape holds the whole expression, and the
-    // part of it that is off the screen has to be reachable.
-    if (y as usize) >= TAPE_Y0 && (y as usize) < TAPE_Y1 && calc.tape_count > TAPE_LINES {
-        let chevron_x = x as isize;
-        if (chevron_x - TAPE_CHEVRON_X as isize).abs() <= 20 {
-            if (y as usize) < TAPE_Y0 + 36 {
+    // WHY it is there: the tape holds the whole expression, and the part of
+    // it that is off the screen has to be reachable -- through the chip the
+    // person can see, at the size the platform names.
+    if calc.tape_count > TAPE_LINES {
+        if let Some(toward_the_start) = chrome::scroll_claims(x, y) {
+            if toward_the_start {
                 calc.scroll_tape(-1);
-                return Tap::Redraw(Dirty::Display);
-            }
-            if (y as usize) + 36 > TAPE_Y1 {
+            } else {
                 calc.scroll_tape(1);
-                return Tap::Redraw(Dirty::Display);
             }
+            return Tap::Redraw(Dirty::Display);
         }
     }
 
