@@ -31,6 +31,153 @@ pub const MAX_NOTES: usize = 16;
 pub const MAX_TITLE_LEN: usize = 48;
 pub const MAX_BODY_LEN: usize = 1024;
 
+// =============================================================================
+// The containers the renderer paints into
+//
+// WHY these live in the library and not beside the per-pixel branch that draws
+// them: this app's binary is built with `test = false`, so a fit gate can only
+// be a `#[test]` in this library -- and a `#[test]` can only ask a container it
+// can reach. The renderer used to hold each of these widths as a literal inside
+// its own branch, which meant the gate was measuring a number the painter had
+// invented somewhere the test could not see. That is the defect class where a
+// real clip passes the suite: raise a rung, the run grows, the remembered lane
+// stays, and nothing answers.
+//
+// Every lane below is derived forward from the box the painter actually draws
+// into, and every gap of air is its own named constant, so moving the box moves
+// the lane and the gate with it. The rungs are not restated here: the painter
+// asks `theme::type_scale`, and the gates measure at the same rung the painter
+// uses.
+// =============================================================================
+
+/// The note card's left edge in the list.
+pub const LIST_CARD_X0: usize = 28;
+
+/// The note card's width.
+pub const LIST_CARD_W: usize = 664;
+
+/// The note card's right edge.
+pub const LIST_CARD_X1: usize = LIST_CARD_X0 + LIST_CARD_W;
+
+/// The card's hairline: the painter draws the frame, then cuts one step inside
+/// it to get the fill. Same treatment for the list cards and the empty state.
+pub const CARD_HAIRLINE: usize = 2;
+
+/// The list card's fill: the surface a run is actually painted on.
+pub const LIST_CARD_INNER_X0: usize = LIST_CARD_X0 + CARD_HAIRLINE;
+pub const LIST_CARD_INNER_X1: usize = LIST_CARD_X1 - CARD_HAIRLINE;
+
+/// The tone rail: the first mark inside the card.
+pub const LIST_CARD_RAIL_X: usize = LIST_CARD_X0 + CARD_HAIRLINE + 2;
+pub const LIST_CARD_RAIL_W: usize = 4;
+
+/// A card's runs start one grid step clear of the rail.
+pub const LIST_CARD_TEXT_X: usize =
+    LIST_CARD_RAIL_X + LIST_CARD_RAIL_W + crate::theme::spacing::GRID_20;
+
+/// The pin glyph's centre column, and the half-width of its widest arm (the
+/// rim, which `draw_pin_glyph` paints at `dx.abs() <= 7`).
+pub const PIN_GLYPH_CX: usize = 656;
+pub const PIN_GLYPH_HALF_W: usize = 7;
+
+/// The columns the pin glyph can answer for.
+pub const PIN_GLYPH_X0: usize = PIN_GLYPH_CX - PIN_GLYPH_HALF_W;
+pub const PIN_GLYPH_X1: usize = PIN_GLYPH_CX + PIN_GLYPH_HALF_W + 1;
+
+/// Air between an unpinned title's run and the card's fill edge.
+pub const TITLE_RIGHT_AIR: usize = crate::theme::spacing::GRID_24;
+
+/// The lane the painter ellipsizes an unpinned title to.
+pub const LIST_CARD_TITLE_LANE: usize =
+    LIST_CARD_INNER_X1 - TITLE_RIGHT_AIR - LIST_CARD_TEXT_X;
+
+/// Air between a pinned title's run and the pin glyph's left arm.
+///
+/// WHY it is not `TITLE_RIGHT_AIR`: the pin is ink, not a card edge. A title
+/// that reaches it reads as one smear, so this row reserves its gap against the
+/// glyph that shares the row.
+pub const TITLE_PIN_CLEARANCE: usize = 13;
+
+/// The lane the painter ellipsizes a pinned title to.
+pub const LIST_CARD_TITLE_LANE_PINNED: usize =
+    PIN_GLYPH_X0 - TITLE_PIN_CLEARANCE - LIST_CARD_TEXT_X;
+
+/// The checklist box `draw_checkbox_glyph` paints, and the gap before the text
+/// that belongs to it.
+pub const CHECKBOX_SIZE: usize = 22;
+pub const CHECKBOX_X: usize = LIST_CARD_TEXT_X;
+pub const CHECKBOX_TEXT_GAP: usize = 10;
+pub const CHECKBOX_TEXT_X: usize = CHECKBOX_X + CHECKBOX_SIZE + CHECKBOX_TEXT_GAP;
+
+/// Air between the end of a snippet run and the card's fill edge. Both snippet
+/// variants -- the one that starts on the checkbox and the one that starts on
+/// the card's text column -- end on this same wall, which is why the checked
+/// lane is not the plain lane minus the box.
+pub const SNIPPET_RIGHT_AIR: usize = 14;
+pub const SNIPPET_RUN_X1: usize = LIST_CARD_INNER_X1 - SNIPPET_RIGHT_AIR;
+
+/// The lane the painter ellipsizes a plain snippet line to.
+pub const LIST_CARD_SNIPPET_LANE: usize = SNIPPET_RUN_X1 - LIST_CARD_TEXT_X;
+
+/// The lane the painter ellipsizes a checklist snippet line to.
+pub const LIST_CARD_CHECK_SNIPPET_LANE: usize = SNIPPET_RUN_X1 - CHECKBOX_TEXT_X;
+
+/// The empty-state card: the box the renderer draws when the list has nothing
+/// to show, and the lane its subtitle is ellipsized to.
+pub const EMPTY_CARD_X: usize = 60;
+pub const EMPTY_CARD_Y: usize = 440;
+pub const EMPTY_CARD_W: usize = 600;
+pub const EMPTY_CARD_H: usize = 240;
+pub const EMPTY_CARD_X1: usize = EMPTY_CARD_X + EMPTY_CARD_W;
+pub const EMPTY_CARD_INNER_X0: usize = EMPTY_CARD_X + CARD_HAIRLINE;
+pub const EMPTY_CARD_INNER_X1: usize = EMPTY_CARD_X1 - CARD_HAIRLINE;
+
+/// Air the empty-state subtitle keeps on either side of the card.
+pub const EMPTY_SUBTITLE_INSET: usize = 20;
+pub const EMPTY_SUBTITLE_LANE: usize = EMPTY_CARD_W - 2 * EMPTY_SUBTITLE_INSET;
+
+/// The ruled page in the editor: the column a body line wraps to and the column
+/// it is drawn in are the distance between the rule's two edges.
+pub const EDITOR_RULE_INSET: usize = 44;
+pub const EDITOR_RULE_X0: usize = EDITOR_RULE_INSET;
+pub const EDITOR_RULE_X1: usize =
+    interos_std::design::viewport::LOGICAL_WIDTH - EDITOR_RULE_INSET;
+pub const EDITOR_TEXT_COL_W: usize = EDITOR_RULE_X1 - EDITOR_RULE_X0;
+
+/// The editor's circular tools: the radius the painter fills, and the centre
+/// columns it draws them at. `EDITOR_FIRST_TOOL_CX` is the one a title can run
+/// into, so the plate's left edge is the container the title answers to.
+pub const EDITOR_TOOL_R: usize = 20;
+pub const EDITOR_TOOL_CX: [usize; 3] = [520, 580, 640];
+pub const EDITOR_FIRST_TOOL_CX: usize = 520;
+pub const EDITOR_FIRST_TOOL_X0: usize = EDITOR_FIRST_TOOL_CX - EDITOR_TOOL_R;
+
+/// Air between the editor title's run and the first tool's plate.
+pub const EDITOR_TITLE_TOOL_CLEARANCE: usize = crate::theme::spacing::GRID_8;
+
+/// The lane the painter ellipsizes the editor title to.
+pub const EDITOR_TITLE_LANE: usize =
+    EDITOR_FIRST_TOOL_X0 - EDITOR_TITLE_TOOL_CLEARANCE - EDITOR_RULE_X0;
+
+// The containers have to describe a card that can actually hold its runs. A
+// lane that reaches past the fill it is drawn on is the bug these refuse: the
+// painter would ellipsize to a width the card does not own, and the tail of the
+// run would answer nothing.
+const _: () = assert!(LIST_CARD_TEXT_X > LIST_CARD_INNER_X0);
+const _: () = assert!(LIST_CARD_TEXT_X + LIST_CARD_TITLE_LANE <= LIST_CARD_INNER_X1);
+const _: () = assert!(LIST_CARD_TEXT_X + LIST_CARD_SNIPPET_LANE <= LIST_CARD_INNER_X1);
+const _: () = assert!(CHECKBOX_TEXT_X <= SNIPPET_RUN_X1);
+const _: () = assert!(CHECKBOX_TEXT_X + LIST_CARD_CHECK_SNIPPET_LANE == SNIPPET_RUN_X1);
+const _: () = assert!(PIN_GLYPH_X1 <= LIST_CARD_INNER_X1);
+const _: () = assert!(LIST_CARD_TEXT_X + LIST_CARD_TITLE_LANE_PINNED <= PIN_GLYPH_X0);
+const _: () = assert!(LIST_CARD_TITLE_LANE_PINNED < LIST_CARD_TITLE_LANE);
+const _: () = assert!(LIST_CARD_CHECK_SNIPPET_LANE < LIST_CARD_SNIPPET_LANE);
+const _: () = assert!(EMPTY_CARD_X1 < interos_std::design::viewport::LOGICAL_WIDTH);
+const _: () = assert!(EMPTY_SUBTITLE_LANE <= EMPTY_CARD_INNER_X1 - EMPTY_CARD_INNER_X0);
+const _: () = assert!(EDITOR_RULE_X0 + EDITOR_TEXT_COL_W == EDITOR_RULE_X1);
+const _: () = assert!(EDITOR_RULE_X1 <= interos_std::design::viewport::LOGICAL_WIDTH);
+const _: () = assert!(EDITOR_RULE_X0 + EDITOR_TITLE_LANE <= EDITOR_FIRST_TOOL_X0);
+
 /// On-disk header. The version byte is `3`.
 ///
 /// WHY version 3: versions 1 and 2 stored the two timestamp slots as Unix
@@ -1796,17 +1943,27 @@ mod tests {
         use interos_std::design::font;
         let mut buf = [0u8; 96];
         let long_title = b"Very Long Sovereign Research Note Title That Exceeds Normal Card Width Limit";
-        
-        // Pinned title max width: 580px
-        let len_pinned = font::ellipsize(long_title, 2, 580, &mut buf);
+
+        // WHY the lane is read from the library and not remembered here: the
+        // painter ellipsizes to `LIST_CARD_TITLE_LANE[_PINNED]`, so a width
+        // typed at this call site stops describing the card the moment the pin
+        // glyph, the rail or a rung moves -- and the gate keeps passing while the
+        // title on screen loses its tail.
+        let pinned_w = LIST_CARD_TITLE_LANE_PINNED;
+        let unpinned_w = LIST_CARD_TITLE_LANE;
+
+        let len_pinned = font::ellipsize(long_title, 2, pinned_w, &mut buf);
         let disp_pinned = if len_pinned > 0 { &buf[..len_pinned] } else { long_title.as_slice() };
-        assert!(font::measure(disp_pinned, 2) <= 580);
+        assert!(font::measure(disp_pinned, 2) <= pinned_w);
         assert!(disp_pinned.ends_with(b"...") || disp_pinned == long_title.as_slice());
 
-        // Unpinned title max width: 610px
-        let len_unpinned = font::ellipsize(long_title, 2, 610, &mut buf);
+        let len_unpinned = font::ellipsize(long_title, 2, unpinned_w, &mut buf);
         let disp_unpinned = if len_unpinned > 0 { &buf[..len_unpinned] } else { long_title.as_slice() };
-        assert!(font::measure(disp_unpinned, 2) <= 610);
+        assert!(font::measure(disp_unpinned, 2) <= unpinned_w);
+        assert!(
+            unpinned_w > pinned_w,
+            "an unpinned title may not have less room than one that shares its row with the pin"
+        );
 
         // WHY the bound is the key and not a remembered width: the action labels
         // sit on keys of four different widths -- shift, symbols, backspace and

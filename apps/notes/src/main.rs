@@ -34,6 +34,23 @@ pub use notes::{
     NOTE_TONE_COUNT, NOTE_TONES, StorageState, TIMESTAMP_UNKNOWN,
 };
 
+// The boxes the painter draws into, and the lanes it ellipsizes its runs to.
+//
+// WHY they are the library's and not literals in the branch that paints them:
+// the binary is built without a test harness, so a fit gate can only reach a
+// container this library exports. A lane authored here is a number no test can
+// check; a lane derived there is the same number plus a refusal.
+use notes::{
+    CARD_HAIRLINE, CHECKBOX_TEXT_X, CHECKBOX_X, EDITOR_TITLE_LANE,
+    LIST_CARD_CHECK_SNIPPET_LANE, LIST_CARD_INNER_X0, LIST_CARD_INNER_X1, LIST_CARD_RAIL_X,
+    LIST_CARD_SNIPPET_LANE, LIST_CARD_TEXT_X, LIST_CARD_TITLE_LANE,
+    LIST_CARD_TITLE_LANE_PINNED, LIST_CARD_W, LIST_CARD_X0, LIST_CARD_X1, PIN_GLYPH_CX,
+    EMPTY_CARD_H, EMPTY_CARD_W, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_SUBTITLE_LANE,
+};
+
+const RULE_X0: usize = notes::EDITOR_RULE_X0;
+const RULE_X1: usize = notes::EDITOR_RULE_X1;
+
 /// The platform's card treatment, at the elevation the app's cards sit at.
 ///
 /// WHY the app's cards are the platform's cards: a card that invents its own
@@ -136,12 +153,6 @@ const CHIP_WS: [usize; 5] = [88, 88, 110, 88, 100];
 /// everybody's thumb does.
 const PIN_FILTER: (usize, usize, usize, usize) = (556, CHIP_Y0, 136, CHIP_H);
 
-/// The ruled page's left edge.
-const RULE_X0: usize = 44;
-
-/// The ruled page's right edge: the note's text column.
-const RULE_X1: usize = W - 44;
-
 /// The width the editor wraps a body line to: the distance between the rule's
 /// two edges, the column every line is drawn in.
 ///
@@ -149,10 +160,7 @@ const RULE_X1: usize = W - 44;
 /// face at `EDITOR_BODY_SCALE`, whose glyphs vary in width, so a line has to
 /// break where its measured advance reaches this edge rather than after a fixed
 /// number of characters that never measures anything.
-const EDITOR_TEXT_COL_W: usize = RULE_X1 - RULE_X0;
-
-/// The distance from a line's top to the rule drawn under it.
-
+const EDITOR_TEXT_COL_W: usize = notes::EDITOR_TEXT_COL_W;
 
 /// The distance from one line to the next in the editor.
 #[allow(dead_code)]
@@ -1152,8 +1160,16 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
         if visible_count == 0 {
             // Empty state card
-            if in_rounded_rect(x, y, 60, 440, 600, 240, 24) {
-                if !in_rounded_rect(x, y, 62, 442, 596, 236, 22) {
+            if in_rounded_rect(x, y, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_CARD_W, EMPTY_CARD_H, 24) {
+                if !in_rounded_rect(
+                    x,
+                    y,
+                    EMPTY_CARD_X + CARD_HAIRLINE,
+                    EMPTY_CARD_Y + CARD_HAIRLINE,
+                    EMPTY_CARD_W - 2 * CARD_HAIRLINE,
+                    EMPTY_CARD_H - 2 * CARD_HAIRLINE,
+                    22,
+                ) {
                     return CARD_BORDER;
                 }
                 // WHY the state is read here and not assumed: an empty list
@@ -1190,14 +1206,14 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // ellipsized to the card's inner width for the same
                 // reason: a sentence that runs past the card is a
                 // sentence the user cannot finish reading.
-                const CARD_X: usize = 60;
-                const CARD_W: usize = 600;
+                const CARD_X: usize = EMPTY_CARD_X;
+                const CARD_W: usize = EMPTY_CARD_W;
                 let title_x = CARD_X + std::design::font::center_x(title, 2, CARD_W);
                 if let Some(c) = test_text(x, y, title_x, 500, 2, title, THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
                 let mut sub_buf = [0u8; 96];
-                let sub_len = std::design::font::ellipsize(subtitle, 1, CARD_W - 40, &mut sub_buf);
+                let sub_len = std::design::font::ellipsize(subtitle, 1, EMPTY_SUBTITLE_LANE, &mut sub_buf);
                 let sub_x = CARD_X + std::design::font::center_x(&sub_buf[..sub_len], 1, CARD_W);
                 if let Some(c) = test_text(x, y, sub_x, 560, 1, &sub_buf[..sub_len], THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
@@ -1226,22 +1242,30 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             let cy1 = cy0 + card_h as isize;
 
             let iy = y as isize;
-            if iy >= cy0 && iy < cy1 && x >= 28 && x <= 692 {
+            if iy >= cy0 && iy < cy1 && x >= LIST_CARD_X0 && x <= LIST_CARD_X1 {
                 let theme = NOTE_TONES[note.color_idx as usize % NOTE_TONE_COUNT];
 
                 // Rounded Card Frame (r=20)
-                if !in_rounded_rect(x, y, 28, cy0 as usize, 664, card_h, CARD.radius) {
+                if !in_rounded_rect(
+                    x,
+                    y,
+                    LIST_CARD_X0,
+                    cy0 as usize,
+                    LIST_CARD_W,
+                    card_h,
+                    CARD.radius,
+                ) {
                     return THEME.surface;
                 }
                 // Card Border: the card's own hairline, one step inside it.
                 if !in_rounded_rect(
                     x,
                     y,
-                    30,
-                    (cy0 + 2) as usize,
-                    660,
-                    card_h - 4,
-                    CARD.radius.saturating_sub(2),
+                    LIST_CARD_INNER_X0,
+                    (cy0 + CARD_HAIRLINE as isize) as usize,
+                    LIST_CARD_INNER_X1 - LIST_CARD_INNER_X0,
+                    card_h - 2 * CARD_HAIRLINE,
+                    CARD.radius.saturating_sub(CARD_HAIRLINE),
                 ) {
                     return theme.border;
                 }
@@ -1253,23 +1277,35 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // WHY it is inset and muted: a full-height pure-black bar on
                 // a white card reads as a rendering stripe, not as the note's
                 // mark, so only a pinned note may carry the tone's accent.
-                if in_rounded_rect(x, y, 32, uy0 + 26, 4, card_h - 52, 2) {
+                if in_rounded_rect(
+                    x,
+                    y,
+                    LIST_CARD_RAIL_X,
+                    uy0 + 26,
+                    notes::LIST_CARD_RAIL_W,
+                    card_h - 52,
+                    2,
+                ) {
                     return if note.is_pinned { theme.accent } else { theme.muted_ink };
                 }
 
                 // 1. Top row: Note Title (Scale 2 Bold, y: uy0 + 20 .. uy0 + 44)
                 let title = note.title_bytes();
-                let max_title_w = if note.is_pinned { 580 } else { 610 };
+                let max_title_w = if note.is_pinned {
+                    LIST_CARD_TITLE_LANE_PINNED
+                } else {
+                    LIST_CARD_TITLE_LANE
+                };
                 let mut title_buf = [0u8; 96];
                 let title_len = std::design::font::ellipsize(title, 2, max_title_w, &mut title_buf);
                 let title_disp = if title_len > 0 { &title_buf[..title_len] } else { title };
-                if let Some(c) = test_text(x, y, 56, uy0 + 20, 2, title_disp, theme.title_ink, theme.fill, true) {
+                if let Some(c) = test_text(x, y, LIST_CARD_TEXT_X, uy0 + 20, 2, title_disp, theme.title_ink, theme.fill, true) {
                     return c;
                 }
 
-                // Pinned Vector Icon if pinned (x: 656, y: uy0 + 26)
+                // Pinned Vector Icon if pinned (x: PIN_GLYPH_CX, y: uy0 + 26)
                 if note.is_pinned {
-                    if let Some(c) = draw_pin_glyph(x, y, 656, uy0 + 26, true, theme.accent) {
+                    if let Some(c) = draw_pin_glyph(x, y, PIN_GLYPH_CX, uy0 + 26, true, theme.accent) {
                         return c;
                     }
                 }
@@ -1286,14 +1322,18 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                         // scale 2 runs past the card's inner edge, so the
                         // measured run is the one that gets painted.
                         let mut p1_buf = [0u8; 48];
-                        let p1_max = if sn.p1_is_chk { 588 } else { 620 };
+                        let p1_max = if sn.p1_is_chk {
+                            LIST_CARD_CHECK_SNIPPET_LANE
+                        } else {
+                            LIST_CARD_SNIPPET_LANE
+                        };
                         let p1_len = std::design::font::ellipsize(sn.p1, 2, p1_max, &mut p1_buf);
                         let p1 = &p1_buf[..p1_len];
                         if sn.p1_is_chk {
                             if let Some(c) = draw_checkbox_glyph(
                                 x,
                                 y,
-                                56,
+                                CHECKBOX_X,
                                 uy0 + 58,
                                 sn.p1_is_done,
                                 theme.accent,
@@ -1303,15 +1343,19 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                                 return c;
                             }
                             let tcol = if sn.p1_is_done { theme.muted_ink } else { theme.body_ink };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 56, 2, p1, tcol, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, CHECKBOX_TEXT_X, uy0 + 56, 2, p1, tcol, theme.fill, false) {
                                 return c;
                             }
                             let p1_w = std::design::font::measure(p1, 2);
-                            if sn.p1_is_done && (y == uy0 + 69 || y == uy0 + 70) && x >= 88 && x <= 88 + p1_w {
+                            if sn.p1_is_done
+                                && (y == uy0 + 69 || y == uy0 + 70)
+                                && x >= CHECKBOX_TEXT_X
+                                && x <= CHECKBOX_TEXT_X + p1_w
+                            {
                                 return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 56, 2, p1, theme.body_ink, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, LIST_CARD_TEXT_X, uy0 + 56, 2, p1, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1320,14 +1364,18 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     // Preview line 2 at uy0 + 90 (ends at uy0 + 116, clean 8px gap)
                     if !sn.p2.is_empty() {
                         let mut p2_buf = [0u8; 48];
-                        let p2_max = if sn.p2_is_chk { 588 } else { 620 };
+                        let p2_max = if sn.p2_is_chk {
+                            LIST_CARD_CHECK_SNIPPET_LANE
+                        } else {
+                            LIST_CARD_SNIPPET_LANE
+                        };
                         let p2_len = std::design::font::ellipsize(sn.p2, 2, p2_max, &mut p2_buf);
                         let p2 = &p2_buf[..p2_len];
                         if sn.p2_is_chk {
                             if let Some(c) = draw_checkbox_glyph(
                                 x,
                                 y,
-                                56,
+                                CHECKBOX_X,
                                 uy0 + 92,
                                 sn.p2_is_done,
                                 theme.accent,
@@ -1337,15 +1385,19 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                                 return c;
                             }
                             let tcol = if sn.p2_is_done { theme.muted_ink } else { theme.body_ink };
-                            if let Some(c) = test_text(x, y, 88, uy0 + 90, 2, p2, tcol, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, CHECKBOX_TEXT_X, uy0 + 90, 2, p2, tcol, theme.fill, false) {
                                 return c;
                             }
                             let p2_w = std::design::font::measure(p2, 2);
-                            if sn.p2_is_done && (y == uy0 + 103 || y == uy0 + 104) && x >= 88 && x <= 88 + p2_w {
+                            if sn.p2_is_done
+                                && (y == uy0 + 103 || y == uy0 + 104)
+                                && x >= CHECKBOX_TEXT_X
+                                && x <= CHECKBOX_TEXT_X + p2_w
+                            {
                                 return theme.muted_ink;
                             }
                         } else {
-                            if let Some(c) = test_text(x, y, 56, uy0 + 90, 2, p2, theme.body_ink, theme.fill, false) {
+                            if let Some(c) = test_text(x, y, LIST_CARD_TEXT_X, uy0 + 90, 2, p2, theme.body_ink, theme.fill, false) {
                                 return c;
                             }
                         }
@@ -1466,11 +1518,12 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     // Clean, unruled modern typography with ample negative whitespace
     if y >= EDITOR_TITLE_Y0 && y < EDITOR_TITLE_Y1 {
         let title = note.title_bytes();
-        // WHY the title is ellipsized to 460 px: the pin, palette and trash
-        // tools start at x=520, so an unbounded title runs under them and
-        // off-screen -- and the caret, placed from the same run, with it.
+        // WHY the title is ellipsized to the lane the library derives: the pin,
+        // palette and trash tools are circles whose plates begin at
+        // `notes::EDITOR_FIRST_TOOL_X0`, so an unbounded title runs under them
+        // and off-screen -- and the caret, placed from the same run, with it.
         let mut title_buf = [0u8; 64];
-        let title_len = std::design::font::ellipsize(title, 2, 460, &mut title_buf);
+        let title_len = std::design::font::ellipsize(title, 2, EDITOR_TITLE_LANE, &mut title_buf);
         let title_disp = &title_buf[..title_len];
         if title.is_empty() {
             if let Some(c) = test_text(x, y, 44, EDITOR_TITLE_TEXT_Y, 2, b"Title", theme.muted_ink, theme.fill, true) {
