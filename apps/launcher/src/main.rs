@@ -3224,14 +3224,26 @@ pub extern "C" fn _start() -> ! {
                                 match state.current_view {
                                     ViewMode::BootScreen | ViewMode::PowerTransition => {}
                                     ViewMode::LockScreen => {
-                                        state.lock_state = std::UserLockState::Unlocked;
-                                        state.pin_pad_visible = false;
-                                        state.pin_len = 0;
-                                        state.auth_error = false;
-                                        state.current_view = ViewMode::HomeScreen;
-                                        render_view(surface, &state);
-                                        surface_flip_display();
-                                        std::log("[LAUNCHER] Power key pressed on lock screen; unlocked to home screen.").ok();
+                                        // WHY the unlock is asked for and not assumed: the kernel
+                                        // holds the lock state and the shell re-reads it on every
+                                        // wake, so a branch that only moved its own copy back to
+                                        // home was overruled a moment later and the person saw the
+                                        // lock screen reappear under the very key that had just
+                                        // dismissed it. The swipe path already goes through
+                                        // user_unlock; the power key has to answer to the same
+                                        // authority, and a device that needs a PIN stays locked.
+                                        if state.lock_state == std::UserLockState::Unlocked
+                                            || std::user_unlock(shell_uid(), b"").is_ok()
+                                        {
+                                            state.lock_state = std::UserLockState::Unlocked;
+                                            state.pin_pad_visible = false;
+                                            state.pin_len = 0;
+                                            state.auth_error = false;
+                                            state.current_view = ViewMode::HomeScreen;
+                                            render_view(surface, &state);
+                                            surface_flip_display();
+                                            std::log("[LAUNCHER] Power key pressed on lock screen; unlocked to home screen.").ok();
+                                        }
                                     }
                                     _ => {
                                         let _ = std::user_lock(1000);
