@@ -35,7 +35,7 @@ mod font;
 use core::panic::PanicInfo;
 use interos_std as std;
 use interos_std::design::{components, outline_text};
-use vault::theme::{spacing, THEME};
+use vault::theme::{spacing, type_scale, THEME};
 use vault::{
     fletcher32, hex_decode, hex_encode, hit_test_pin_disc, key_material_row, BackupState,
     EntropyProbe, IdentityState, KeyProbe, VaultSectorType, PIN_COLS, PIN_DISC_RADIUS,
@@ -549,9 +549,29 @@ const _: () = assert!(centred_text_top(ACTION_H, 1) + std::design::font::line_he
 const _: () = assert!(centred_text_top(BTN_H, 2) + std::design::font::line_height(2) <= BTN_H);
 const _: () = assert!(centred_text_top(2 * PIN_DISC_RADIUS, 3) + std::design::font::line_height(3) <= 2 * PIN_DISC_RADIUS);
 
-/// The rung both header lines are drawn at, on every one of the three screens
+/// The rung the header's title is drawn at, on every one of the three screens
 /// that carries this header.
-const HEAD_RUNG: usize = 2;
+///
+/// WHY the section rung: the header line names the screen, and a name set at the
+/// size of the prose under it is not a name. This is the rung File Manager's
+/// `HEADER_TITLE_SCALE` already stands at.
+const HEAD_TITLE_RUNG: usize = type_scale::SECTION;
+
+/// The rung the header's subtitle is drawn at.
+///
+/// WHY a rung of its own, and a lower one: both lines used to read from a single
+/// `HEAD_RUNG` set at the body rung, so the line that qualifies the title was
+/// the title's own size and the pair read as two names stacked. Sharing the rung
+/// also could not be made to fit: the header bounds its runs by the pill that
+/// reaches furthest left, and the longest subtitle lost its tail to that bound
+/// and drew as "Sovereign sto...". A caption is the role this line plays, and
+/// the caption rung is what the platform gives that role.
+const HEAD_SUBTITLE_RUNG: usize = type_scale::CAPTION;
+
+/// WHY the two lines may not silently meet again: the defect they shared was one
+/// rung standing in for two roles, and a rename back to a single constant would
+/// restore it without any layout number changing.
+const _: () = assert!(HEAD_TITLE_RUNG > HEAD_SUBTITLE_RUNG);
 
 /// The air between the header's runs and the first pill standing to their
 /// right.
@@ -575,9 +595,9 @@ const fn head_text_max(right_of: usize) -> usize {
 }
 
 /// Rows the title's line box reserves: ascent plus descent at its rung.
-const TITLE_BOX_H: usize = std::design::font::line_height(HEAD_RUNG);
+const TITLE_BOX_H: usize = std::design::font::line_height(HEAD_TITLE_RUNG);
 /// Rows the subtitle's line box reserves.
-const SUBTITLE_BOX_H: usize = std::design::font::line_height(HEAD_RUNG);
+const SUBTITLE_BOX_H: usize = std::design::font::line_height(HEAD_SUBTITLE_RUNG);
 
 /// The air between the two header lines' boxes.
 const HEAD_LINE_GAP: usize = spacing::GRID_8;
@@ -590,14 +610,14 @@ const HEAD_RULE_H: usize = 1;
 ///
 /// WHY the caps are centred on the back control's row rather than the box being
 /// dropped on the row's top edge: the box at this rung is
-/// `line_height(HEAD_RUNG)` rows, and the control beside it is 48, so a box
+/// `line_height(HEAD_TITLE_RUNG)` rows, and the control beside it is 48, so a box
 /// authored at `BACK_Y` ran past the control and straight into the subtitle
 /// under it. Centring the cap height is the placement the dialer and messages
 /// already document.
 const TITLE_Y0: usize = BACK_Y
     + BACK_S / 2
-    - std::design::font::ascent_for_scale(HEAD_RUNG)
-    + std::design::font::cap_for_scale(HEAD_RUNG) as usize / 2;
+    - std::design::font::ascent_for_scale(HEAD_TITLE_RUNG)
+    + std::design::font::cap_for_scale(HEAD_TITLE_RUNG) as usize / 2;
 
 /// The subtitle's line-box top: the whole of the title's box, then the gap.
 ///
@@ -828,10 +848,10 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         // No pill stands in this screen's header row, so the runs may use the
         // whole panel up to its inset -- and no further.
         let text_max = head_text_max(W - MARGIN);
-        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_TITLE_RUNG, b"PIN Authentication", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_SUBTITLE_RUNG, b"Enter sovereign access PIN", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
@@ -932,10 +952,10 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         // The SIGN OUT pill is painted before these runs and stands in the same
         // row, so they stop a gutter short of it (see `header_pixel`).
         let text_max = head_text_max(action_rect(SIGN_OUT).0);
-        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_TITLE_RUNG, b"Credential Vault", text_max, THEME.on_surface, THEME.surface, true) {
             return c;
         }
-        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
+        if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_SUBTITLE_RUNG, b"Sovereign secrets store", text_max, THEME.on_surface_variant, THEME.surface, true) {
             return c;
         }
         return THEME.surface;
@@ -1713,10 +1733,10 @@ fn header_pixel(x: usize, y: usize) -> u32 {
         .0
         .min(cred_action_rect(CRED_PILL_WIDEST).0);
     let text_max = head_text_max(leftmost_pill);
-    if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_RUNG, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, TITLE_Y0, HEAD_TITLE_RUNG, TITLE, text_max, THEME.on_surface, THEME.surface, true) {
         return c;
     }
-    if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_RUNG, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
+    if let Some(c) = font::ink(x, y, TITLE_X, SUBTITLE_Y0, HEAD_SUBTITLE_RUNG, SUBTITLE, text_max, THEME.on_surface_variant, THEME.surface, true) {
         return c;
     }
     THEME.surface
