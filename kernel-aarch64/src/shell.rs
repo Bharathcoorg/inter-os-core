@@ -12,7 +12,6 @@ use crate::touch::{TouchPhase, TouchPoint};
 pub enum MobileAction {
     LaunchDialer,
     LaunchVault,
-    LaunchTerminal,
     LaunchSettings,
 }
 
@@ -25,7 +24,7 @@ pub struct DockButton {
     pub action: MobileAction,
 }
 
-pub const DOCK_BUTTONS: [DockButton; 4] = [
+pub const DOCK_BUTTONS: [DockButton; 3] = [
     DockButton {
         label: "DIALER",
         x_min: 60,
@@ -41,14 +40,6 @@ pub const DOCK_BUTTONS: [DockButton; 4] = [
         y_min: 1320,
         y_max: 1400,
         action: MobileAction::LaunchVault,
-    },
-    DockButton {
-        label: "TERMINAL",
-        x_min: 320,
-        x_max: 500,
-        y_min: 1320,
-        y_max: 1400,
-        action: MobileAction::LaunchTerminal,
     },
     DockButton {
         label: "SETTINGS",
@@ -165,13 +156,6 @@ impl MobileShell {
                 fb.draw_string(40, 160, "Hardware Keystore: 16 Enclave Slots", (255, 255, 255), (14, 18, 32));
                 fb.draw_string(40, 190, "Master Seed: Sealed in EL1 Memory", (100, 255, 150), (14, 18, 32));
                 fb.draw_string(40, 220, "Storage Isolation: AES-256 Block Encrypted", (160, 175, 195), (14, 18, 32));
-            }
-            MobileAction::LaunchTerminal => {
-                fb.draw_string(40, 130, "DEVELOPER TERMINAL", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "UART Serial Console: COM1 / PL011", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Privilege: Ring 3 / EL0 Process Ready", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 220, "IPC Router: Zero-Copy Endpoint Channel", (100, 255, 150), (14, 18, 32));
-                fb.draw_string(40, 250, "Status: Ready for Commands", (100, 255, 150), (14, 18, 32));
             }
         }
     }

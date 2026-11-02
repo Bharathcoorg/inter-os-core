@@ -1,7 +1,7 @@
 //! Shared scrolling model, boundary clamping, and thumb geometry.
 //!
 //! Provides an allocation-free scroll state manager used across browser reader,
-//! notes editor, messages conversation view, file manager, and terminal.
+//! notes editor, messages conversation view, and file manager.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScrollState {

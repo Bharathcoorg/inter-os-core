@@ -10,7 +10,7 @@ use crate::input::{InputEvent, TouchGesture, TouchPhase};
 
 /// Interactive smartphone home screen and compositor shell.
 pub struct MobileShell {
-    pub cards: [UiCard; 13],
+    pub cards: [UiCard; 12],
     pub shade: NotificationShade,
     pub active_modal: Option<PermissionModal>,
     pub active_share_drawer: Option<ShareSheetDrawer>,
@@ -72,18 +72,6 @@ impl MobileShell {
                 h: 80,
                 accent: COLOR_CYAN,
                 action_intent: "APP_LAUNCH_SETTINGS",
-            },
-            UiCard {
-                id: 5,
-                title: "Terminal & Shell",
-                subtitle: "Command Line & Diagnostics",
-                badge: "NATIVE",
-                x: card_x,
-                y: PHONE_Y + 512,
-                w: card_w,
-                h: 80,
-                accent: COLOR_PURPLE,
-                action_intent: "APP_LAUNCH_TERMINAL",
             },
             UiCard {
                 id: 6,
@@ -265,10 +253,6 @@ impl MobileShell {
                         self.active_share_drawer = None;
                         self.last_dispatched_intent = "SHARE_INTENT_MESSAGES";
                         return Some("SHARE_INTENT_MESSAGES");
-                    } else if drawer.hit_test_target2(x, y) {
-                        self.active_share_drawer = None;
-                        self.last_dispatched_intent = "SHARE_INTENT_TERMINAL";
-                        return Some("SHARE_INTENT_TERMINAL");
                     } else if drawer.hit_test_target3(x, y) {
                         self.active_share_drawer = None;
                         self.last_dispatched_intent = "SHARE_INTENT_VAULT";
@@ -289,10 +273,6 @@ impl MobileShell {
                         self.active_share_drawer = None;
                         self.last_dispatched_intent = "SHARE_INTENT_MESSAGES";
                         return Some("SHARE_INTENT_MESSAGES");
-                    } else if drawer.hit_test_target2(touch.x, touch.y) {
-                        self.active_share_drawer = None;
-                        self.last_dispatched_intent = "SHARE_INTENT_TERMINAL";
-                        return Some("SHARE_INTENT_TERMINAL");
                     } else if drawer.hit_test_target3(touch.x, touch.y) {
                         self.active_share_drawer = None;
                         self.last_dispatched_intent = "SHARE_INTENT_VAULT";

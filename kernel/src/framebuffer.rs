@@ -28,7 +28,7 @@ pub const COLOR_PURPLE: (u8, u8, u8) = (168, 85, 247);    // #A855F7 (Electric V
 pub const COLOR_AMBER: (u8, u8, u8) = (245, 158, 11);     // #F59E0B (Amber Gold)
 pub const COLOR_WHITE: (u8, u8, u8) = (248, 250, 252);    // #F8FAFC (Pure White)
 pub const COLOR_MUTED: (u8, u8, u8) = (148, 163, 184);    // #94A3B8 (Slate Gray)
-pub const COLOR_DARK_SLATE: (u8, u8, u8) = (5, 8, 15);    // #05080F (Terminal Drawer)
+pub const COLOR_DARK_SLATE: (u8, u8, u8) = (5, 8, 15);    // #05080F (dark panel field)
 pub const COLOR_RED: (u8, u8, u8) = (239, 68, 68);        // #EF4444 (Alert Red)
 pub const COLOR_BLUE: (u8, u8, u8) = (59, 130, 246);      // #3B82F6 (Electric Blue)
 
@@ -46,7 +46,6 @@ pub enum ActiveScreen {
     Dialer,
     Camera,
     Settings,
-    Terminal,
     Messages,
     Vault,
     Calculator,
@@ -168,9 +167,6 @@ pub struct FramebufferWriter {
     pub shutter_count: u32,
     pub settings_tab: u8,
     pub dvfs_governor: u8,
-    pub term_lines: [[char; 42]; 10],
-    pub term_line_lens: [usize; 10],
-    pub term_line_count: usize,
     pub vault_pin: [char; 4],
     pub vault_pin_len: usize,
     pub vault_unlocked: bool,
@@ -198,9 +194,6 @@ impl FramebufferWriter {
             shutter_count: 0,
             settings_tab: 0,
             dvfs_governor: 0,
-            term_lines: [['\0'; 42]; 10],
-            term_line_lens: [0; 10],
-            term_line_count: 0,
             vault_pin: ['\0'; 4],
             vault_pin_len: 0,
             vault_unlocked: false,
@@ -363,7 +356,6 @@ impl FramebufferWriter {
             ActiveScreen::Dialer => self.draw_dialer_contents(),
             ActiveScreen::Camera => self.draw_camera_contents(),
             ActiveScreen::Settings => self.draw_settings_contents(),
-            ActiveScreen::Terminal => self.draw_terminal_contents(),
             ActiveScreen::Messages => self.draw_messages_contents(),
             ActiveScreen::Vault => self.draw_vault_contents(),
             ActiveScreen::Calculator => self.draw_calculator_contents(),
@@ -444,15 +436,15 @@ impl FramebufferWriter {
 
         self.draw_string(x, y, "[ NATIVE APP SHORTCUTS ]", 1, COLOR_CYAN, None);
         y += 22;
-        self.draw_string(x, y, "1: Settings     2: Terminal", 1, COLOR_WHITE, None);
+        self.draw_string(x, y, "1: Settings     3: Phone Dialer", 1, COLOR_WHITE, None);
         y += 18;
-        self.draw_string(x, y, "3: Phone Dialer 4: Storage Vault", 1, COLOR_WHITE, None);
+        self.draw_string(x, y, "4: Storage Vault 5: Sony Camera", 1, COLOR_WHITE, None);
         y += 18;
-        self.draw_string(x, y, "5: Sony Camera  6: Astro AI", 1, COLOR_WHITE, None);
+        self.draw_string(x, y, "6: Astro AI      7: Browser", 1, COLOR_WHITE, None);
         y += 18;
-        self.draw_string(x, y, "7: Browser      8: Messages", 1, COLOR_WHITE, None);
+        self.draw_string(x, y, "8: Messages      9: Calendar", 1, COLOR_WHITE, None);
         y += 18;
-        self.draw_string(x, y, "9: Calendar     0: Music Studio", 1, COLOR_WHITE, None);
+        self.draw_string(x, y, "0: Music Studio", 1, COLOR_WHITE, None);
         y += 18;
         self.draw_string(x, y, "ESC / 'home':   Return Home", 1, COLOR_AMBER, None);
         y += 28;
@@ -582,11 +574,10 @@ impl FramebufferWriter {
         self.draw_app_icon(start_x + 2 * col_w, r1_y, "Calendar", "CAL", COLOR_RED);
         self.draw_app_icon(start_x + 3 * col_w, r1_y, "Clock", "CLK", (70, 80, 100));
 
-        // Row 3: Tools & Security (Files, Calculator, Terminal, Vault)
+        // Row 3: Tools & Security (Files, Calculator, Vault)
         let r2_y = start_y + 152;
         self.draw_app_icon(start_x, r2_y, "Files", "DIR", COLOR_AMBER);
         self.draw_app_icon(start_x + col_w, r2_y, "Calc", "NUM", COLOR_CYAN);
-        self.draw_app_icon(start_x + 2 * col_w, r2_y, "Terminal", "CLI", COLOR_GREEN);
         self.draw_app_icon(start_x + 3 * col_w, r2_y, "Vault", "SEC", COLOR_PURPLE);
 
         // Row 4: System Tools & Compatibility (Updates, Android ACR, Packages, Verified TCB)
@@ -919,65 +910,6 @@ impl FramebufferWriter {
         self.draw_string(x + 14, fy, "Press 1-5 to switch tabs | 'g' cycles the governor selection", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
     }
 
-    fn draw_terminal_contents(&mut self) {
-        let x = PHONE_X + 20;
-        let w = PHONE_W - 40;
-        let mut y = PHONE_Y + 54;
-
-        self.draw_string(x, y, "SOVEREIGN INTENT TERMINAL", 1, COLOR_PURPLE, Some(COLOR_FRAME_BG));
-        self.draw_string(x + w - 104, y, "Ring 3 Shell", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
-        y += 24;
-
-        let box_h = 440;
-        self.draw_rect(x, y, w, box_h, COLOR_DARK_SLATE);
-        self.draw_rect_outline(x, y, w, box_h, 1, COLOR_CARD_BORDER);
-
-        let mut ty = y + 12;
-        self.draw_string(x + 14, ty, "Inter OS Sovereign Shell 0.1.0 (x86_64)", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));
-        ty += 18;
-        self.draw_string(x + 14, ty, "Type 'help' for commands, 'exit' for home.", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
-        ty += 24;
-
-        let start_idx = if self.term_line_count > 6 { self.term_line_count - 6 } else { 0 };
-        for i in start_idx..self.term_line_count {
-            let line_len = self.term_line_lens[i % 10];
-            let mut char_buf = [0u8; 4];
-            let mut cur_x = x + 14;
-            for j in 0..line_len {
-                let c = self.term_lines[i % 10][j];
-                let s = c.encode_utf8(&mut char_buf);
-                self.draw_string(cur_x, ty, s, 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
-                cur_x += 8;
-            }
-            ty += 18;
-        }
-
-        let mut prompt_str = ['\0'; 44];
-        let pfx = b"interos@sovereign:~$ ";
-        let mut pos = 0;
-        for &b in pfx {
-            prompt_str[pos] = b as char;
-            pos += 1;
-        }
-        for i in 0..self.intent_len {
-            prompt_str[pos] = self.intent_buffer[i];
-            pos += 1;
-        }
-        prompt_str[pos] = '_';
-        pos += 1;
-
-        let mut char_buf = [0u8; 4];
-        let mut cur_x = x + 14;
-        for &c in &prompt_str[..pos] {
-            let s = c.encode_utf8(&mut char_buf);
-            self.draw_string(cur_x, ty, s, 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
-            cur_x += 8;
-        }
-
-        let ref_y = y + box_h + 16;
-        self.draw_string(x, ref_y, "Commands: help, status, intent, plan, ai, dma, reboot", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
-    }
-
     fn draw_messages_contents(&mut self) {
         let x = PHONE_X + 20;
         let w = PHONE_W - 40;
@@ -1304,7 +1236,6 @@ impl FramebufferWriter {
             ActiveScreen::HomeScreen => {
                 match c {
                     '1' => { self.active_screen = ActiveScreen::Settings; self.redraw_phone(); return; }
-                    '2' => { self.active_screen = ActiveScreen::Terminal; self.redraw_phone(); return; }
                     '3' => { self.active_screen = ActiveScreen::Dialer; self.redraw_phone(); return; }
                     '4' => { self.active_screen = ActiveScreen::Vault; self.redraw_phone(); return; }
                     '5' => { self.active_screen = ActiveScreen::Camera; self.redraw_phone(); return; }
@@ -1343,8 +1274,6 @@ impl FramebufferWriter {
                                 self.active_screen = ActiveScreen::Camera;
                             } else if cmd_str.contains("set") || cmd_str.contains("pref") {
                                 self.active_screen = ActiveScreen::Settings;
-                            } else if cmd_str.contains("term") || cmd_str.contains("shell") {
-                                self.active_screen = ActiveScreen::Terminal;
                             } else if cmd_str.contains("vault") || cmd_str.contains("key") {
                                 self.active_screen = ActiveScreen::Vault;
                             } else if cmd_str.contains("calc") || cmd_str.contains("math") {
@@ -1434,43 +1363,6 @@ impl FramebufferWriter {
                     _ => {}
                 }
             }
-            ActiveScreen::Terminal => {
-                match c {
-                    '\x08' => {
-                        if self.intent_len > 0 {
-                            self.intent_len -= 1;
-                            self.intent_buffer[self.intent_len] = '\0';
-                            self.redraw_phone();
-                        }
-                    }
-                    '\n' | '\r' => {
-                        if self.intent_len > 0 {
-                            let slot = self.term_line_count % 10;
-                            let mut len = 0;
-                            for i in 0..self.intent_len {
-                                self.term_lines[slot][i] = self.intent_buffer[i];
-                                len += 1;
-                            }
-                            self.term_line_lens[slot] = len;
-                            self.term_line_count += 1;
-
-                            if self.intent_len >= 4 && &self.intent_buffer[..4] == &['e','x','i','t'] {
-                                self.active_screen = ActiveScreen::HomeScreen;
-                            }
-                            self.intent_len = 0;
-                            self.redraw_phone();
-                        }
-                    }
-                    printable if printable.is_ascii_graphic() || printable == ' ' => {
-                        if self.intent_len < 38 {
-                            self.intent_buffer[self.intent_len] = printable;
-                            self.intent_len += 1;
-                            self.redraw_phone();
-                        }
-                    }
-                    _ => {}
-                }
-            }
             ActiveScreen::Vault => {
                 if c.is_ascii_digit() {
                     if self.vault_pin_len < 4 {
@@ -1535,12 +1427,11 @@ impl FramebufferWriter {
                         _ => {}
                     }
                 }
-                // Row 3: Files, Calc, Terminal, Vault
+                // Row 3: Files, Calc, Vault
                 if y >= start_y + 152 && y < start_y + 222 {
                     match col {
                         0 => { self.active_screen = ActiveScreen::Settings; self.redraw_phone(); return; }
                         1 => { self.active_screen = ActiveScreen::Calculator; self.redraw_phone(); return; }
-                        2 => { self.active_screen = ActiveScreen::Terminal; self.redraw_phone(); return; }
                         3 => { self.active_screen = ActiveScreen::Vault; self.redraw_phone(); return; }
                         _ => {}
                     }
@@ -1550,7 +1441,7 @@ impl FramebufferWriter {
                     match col {
                         0 => { self.active_screen = ActiveScreen::Settings; self.redraw_phone(); return; }
                         1 => { self.active_screen = ActiveScreen::Settings; self.redraw_phone(); return; }
-                        2 => { self.active_screen = ActiveScreen::Terminal; self.redraw_phone(); return; }
+                        2 => { self.active_screen = ActiveScreen::Settings; self.redraw_phone(); return; }
                         3 => { self.active_screen = ActiveScreen::Vault; self.redraw_phone(); return; }
                         _ => {}
                     }

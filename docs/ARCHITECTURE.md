@@ -15,9 +15,9 @@ InterOS Core is engineered from first principles as an open-source, memory-safe 
 ```text
 +-------------------------------------------------------------------------+
 |                  InterOS Native Smartphone Applications                 |
-|   16 Ring-3 Apps: Launcher, Settings, Messages, Dialer, Camera, Gallery,|
+|   17 Ring-3 Apps: Launcher, Settings, Messages, Dialer, Camera, Gallery,|
 |   Files, Calculator, Vault, Calendar, Browser, Music, Notes,            |
-|   Video Player, Agent Manager, Compositor                               |
+|   Video Player, Agent Manager, Compositor, Webview Demo                 |
 +-------------------------------------------------------------------------+
 |                Userspace System Services & SDK (Ring 3 / EL0 / U-Mode)  |
 |   - Window Compositor (DRM/KMS Scanout)         - Audio Service (audiod) |

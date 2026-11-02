@@ -2,11 +2,11 @@
 """
 tools/verify_surfaces.py - InterOS Ring-3 Surface & UI Samples Alignment Auditor
 
-Scans all 16 Ring-3 guest applications in `apps/`, verifying:
+Scans the first-party Ring-3 guest applications listed in `APP_SAMPLE_MAP`, verifying:
   1. `#![no_std]` and `#![no_main]` compliance (Userspace Guarantees: Zero heap allocations in rendering loops)
   2. Viewport compliance (Logical and scanout 720x1440; composition is a 1:1 copy)
   3. Design token adherence (colors, typography scales, insets, touch target min 44x44)
-  4. Mapping and alignment against the 16 reference designs in `Ui Samples/`
+  4. Mapping and alignment against the numbered reference designs in `Ui Samples/`
 
 Outputs an empirical compliance scorecard to terminal and writes `target/surface_audit_report.json`.
 """
@@ -28,7 +28,6 @@ APP_SAMPLE_MAP = {
     "dialer": "09_phone.png",
     "messages": "10_messages.png",
     "browser": "13_browser.png",
-    "terminal": "03_app_view.png",
     "vault": "07_quick_controls.png",
     "calendar": "05_events.png",
     "music": "14_media_player.png",

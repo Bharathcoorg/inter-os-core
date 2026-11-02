@@ -649,7 +649,7 @@ pub mod radius {
     pub const CONTROL: usize = 12;
     /// A large control: a 40-48px pill that is rounded but not a capsule.
     ///
-    /// WHY this step exists: the terminal's badge, the camera's top-row pills
+    /// WHY this step exists: the camera's top-row pills
     /// and the browser's chrome all rounded their corners at 16 and kept the
     /// number to themselves, so a third-party app had no step for the shape it
     /// could see on screen and had to invent one. It is between

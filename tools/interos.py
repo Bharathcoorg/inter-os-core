@@ -9,7 +9,7 @@ Usage:
   python tools/interos.py doctor
   python tools/interos.py build [--target x86_64|aarch64|riscv64|all|<app_name>]
   python tools/interos.py test [--target unit|kernel|x86_64|aarch64|riscv64|security|adversarial|qemu|lifecycle|contracts|stress|recovery|persistence|storage_recovery|crash|watchdog|panic|all]
-  python tools/interos.py new <app_name> [--template basic|authenticator|sensor|meshchat]
+  python tools/interos.py new <app_name> [--template basic|sensor]
   python tools/interos.py package <app_name> [--output dist/<app_name>.rapp]
   python tools/interos.py sign <package_or_file> [--key <key_path>]
   python tools/interos.py verify <package.rapp>
@@ -104,8 +104,6 @@ RAPP_CAPABILITY_IDS = {
     "CAP_SENSOR_ACCEL": 23,          # SystemControl scoped to the sensor domain.
     "CAP_SENSOR_GYRO": 23,
     "CAP_SENSOR_HR": 23,
-    "CAP_MESH_RADIO": 12,            # NetworkSocket: create UDP/TCP transports.
-    "CAP_P2P_SOCKET": 13,            # NetworkSend: transmit packets.
 }
 
 # Identifiers a template-facing alias must never resolve to, because handing one
@@ -120,20 +118,6 @@ TEMPLATES = {
         "description": "Standard #![no_std] Rust mobile app with UI frontend",
         "permissions": ["CAP_LOGGING", "CAP_WINDOW_FOCUS"],
     },
-    "authenticator": {
-        "title": "TOTP Authenticator",
-        # WHY this description does not mention a hardware enclave: RAPP v2
-        # defines no keystore or enclave capability, so there is nothing to
-        # request. Secrets are persisted in the app's sandboxed VFS mount, which
-        # is encrypted-at-rest by the kernel's storage vault but is ordinary
-        # file storage as far as the app is concerned.
-        "description": (
-            "Cryptographic TOTP authenticator. Seeds are persisted in the app's "
-            "sandboxed VFS mount (encrypted at rest by the kernel vault). RAPP v2 "
-            "defines no hardware keystore or enclave capability, so none is claimed."
-        ),
-        "permissions": ["CAP_SECURE_STORAGE"],
-    },
     "sensor": {
         "title": "Sensor Telemetry Hub",
         # WHY the sensor permissions are the sensor domain of SystemControl:
@@ -145,11 +129,6 @@ TEMPLATES = {
             "sensor domain of SystemControl (capability 23)"
         ),
         "permissions": ["CAP_SENSOR_ACCEL", "CAP_SENSOR_GYRO", "CAP_SENSOR_HR"],
-    },
-    "meshchat": {
-        "title": "Mesh Messenger",
-        "description": "Decentralized peer-to-peer mesh networking and encrypted messaging",
-        "permissions": ["CAP_MESH_RADIO", "CAP_P2P_SOCKET"],
     },
 }
 
@@ -1239,7 +1218,7 @@ path = "src/main.rs"
         "id": f"org.interos.{app_name}",
         "name": app_name.replace("_", " ").title(),
         "version": "1.0.0",
-        "category": "utility" if template_key != "meshchat" else "communication",
+        "category": "utility",
         "description": tmpl["description"],
         "icon": "ui/icon.svg",
         "entrypoint": {

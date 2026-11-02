@@ -30,7 +30,7 @@ pub const THREAD_DOC_SUFFIX: &str = ".txt";
 ///
 /// WHY `text/plain`: the document is a transcript, it is a text document, and
 /// the platform's index classifies a `.txt` file as plain text. The
-/// terminal declares a handler for it, so the thread can be handed to
+/// share sheet still has `text/` targets, so the thread can be handed to
 /// another app.
 pub const THREAD_DOC_MIME: &str = "text/plain";
 

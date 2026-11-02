@@ -40,7 +40,7 @@ pub static APP_WEBVIEW_DEMO_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANI
 pub static AID_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/aid"));
 
 // WHY the app statics above are embedded rather than loaded from the VFS: every
-// first-party app already on the launch path (settings, terminal, gallery, ...)
+// first-party app already on the launch path (settings, browser, gallery, ...)
 // is a kernel-resident image, and `sys_app_launch` spawns from that image rather
 // than from a `/system/bin` file. Without these the launch arms would have no ELF
 // to hand the Ring 3 loader, so the drawer entries could never start.

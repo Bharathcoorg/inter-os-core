@@ -428,8 +428,6 @@ pub enum Icon {
     Camera,
     /// A musical note.
     Music,
-    /// A prompt.
-    Terminal,
     /// A keypad.
     Calculator,
     /// A calendar.
@@ -606,12 +604,6 @@ pub fn icon_hit(icon: Icon, px: i32, py: i32) -> bool {
                 || seg(px, py, 10, 18, 10, 5, 2)
                 || seg(px, py, 10, 5, 20, 3, 2)
                 || seg(px, py, 20, 3, 20, 16, 2)
-        }
-        Icon::Terminal => {
-            square(px, py, 2, 4, 20, 16, 2)
-                || seg(px, py, 6, 9, 11, 12, 2)
-                || seg(px, py, 11, 12, 6, 15, 2)
-                || seg(px, py, 13, 16, 19, 16, 2)
         }
         Icon::Calculator => {
             square(px, py, 4, 2, 16, 20, 2)
@@ -1096,7 +1088,7 @@ mod tests {
     use crate::design::primitives::Rect;
 
     /// Every icon in the set, so the test below reaches all of them.
-    const ALL: [Icon; 59] = [
+    const ALL: [Icon; 58] = [
         Icon::Search,
         Icon::More,
         Icon::MoreHorizontal,
@@ -1114,7 +1106,6 @@ mod tests {
         Icon::Image,
         Icon::Camera,
         Icon::Music,
-        Icon::Terminal,
         Icon::Calculator,
         Icon::Calendar,
         Icon::Clock,

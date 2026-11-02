@@ -148,16 +148,7 @@ pub fn init() {
         accent_color: (16, 185, 129), // Emerald Green
     });
 
-    // 2. Terminal (Task 18) - Accepts app intent, plain text, URIs
-    ssm.register_target(ShareTarget {
-        app_id: "interos.terminal",
-        display_name: "Terminal",
-        target_task: TaskId(18),
-        accepted_mime_prefix: "text/",
-        accent_color: (168, 85, 247), // Electric Violet
-    });
-
-    // 3. Vault (Task 20) - Accepts encrypted records, photos, audio tracks
+    // 2. Vault (Task 20) - Accepts encrypted records, photos, audio tracks
     ssm.register_target(ShareTarget {
         app_id: "interos.vault",
         display_name: "Vault",
@@ -166,7 +157,7 @@ pub fn init() {
         accent_color: (245, 158, 11), // Amber Gold
     });
 
-    // 4. Browser (Task 23) - Accepts web URLs and text
+    // 3. Browser (Task 23) - Accepts web URLs and text
     ssm.register_target(ShareTarget {
         app_id: "interos.browser",
         display_name: "Browser",
@@ -175,7 +166,7 @@ pub fn init() {
         accent_color: (0, 229, 255), // Neon Cyan
     });
 
-    // 5. Calendar (Task 25) - Accepts calendar events and text
+    // 4. Calendar (Task 25) - Accepts calendar events and text
     ssm.register_target(ShareTarget {
         app_id: "interos.calendar",
         display_name: "Calendar",

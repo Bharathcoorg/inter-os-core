@@ -97,7 +97,6 @@ pub const FIRST_PARTY_INTENTS: &[(&str, &str, &str)] = &[
     ("org.interos.music", "mime", "audio/mpeg"),
     ("org.interos.music", "mime", "audio/wav"),
     ("org.interos.music", "mime", "audio/flac"),
-    // The terminal opens the text the device holds.
     // The notes app opens the notes the device holds.
     ("org.interos.notes", "mime", "text/x-interos-note"),
     // The browser opens the web.

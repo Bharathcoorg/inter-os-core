@@ -19,8 +19,6 @@ pub enum IconKind {
     Music,
     Calculator,
     Vault,
-    Health,
-    MeshChat,
     Apps,
     Calendar,
     Notes,
@@ -50,7 +48,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Messages)
     } else if id == b"org.interos.camera" || id == b"camera" || id == b"app_camera"
         || id == b"CAM"
-        || id == b"Camera" || id == b"Camera Preview"
+        || id == b"Camera"
     {
         Some(IconKind::Camera)
     } else if id == b"org.interos.browser" || id == b"browser" || id == b"app_browser" || id == b"WEB" || id == b"BROW"
@@ -82,14 +80,6 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         || id == b"Vault"
     {
         Some(IconKind::Vault)
-    } else if id == b"org.interos.health" || id == b"health" || id == b"HLTH" || id == b"FIT"
-        || id == b"Health"
-    {
-        Some(IconKind::Health)
-    } else if id == b"org.interos.meshchat" || id == b"meshchat" || id == b"MESH" || id == b"CHAT"
-        || id == b"MeshChat"
-    {
-        Some(IconKind::MeshChat)
     } else if id == b"org.interos.apps" || id == b"apps" || id == b"APPS" || id == b"drawer"
         || id == b"Apps"
     {
@@ -360,22 +350,6 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
             let keyhole = (fx * fx + (fy - 65) * (fy - 65) <= 400) || (fx.abs() <= 15 && fy >= 65 && fy <= 120);
             (arch || legs || in_body) && !keyhole
         }
-        IconKind::Health => {
-            let seg1 = fx >= -165 && fx <= -85 && fy.abs() <= 10;
-            let up = fx >= -85 && fx <= -30 && (fy - (-3 * (fx + 85))).abs() <= 15;
-            let down = fx >= -30 && fx <= 30 && (fy - (4 * fx)).abs() <= 15;
-            let ret = fx >= 30 && fx <= 85 && (fy - (-3 * (fx - 85))).abs() <= 15;
-            let seg2 = fx >= 85 && fx <= 165 && fy.abs() <= 10;
-            seg1 || up || down || ret || seg2
-        }
-        IconKind::MeshChat => {
-            let n1 = fx * fx + (fy + 95) * (fy + 95) <= 1500;
-            let n2 = (fx + 95) * (fx + 95) + (fy - 75) * (fy - 75) <= 1500;
-            let n3 = (fx - 95) * (fx - 95) + (fy - 75) * (fy - 75) <= 1500;
-            let b1 = fx.abs() <= 12 && fy >= -95 && fy <= 75;
-            let b2 = fy >= 63 && fy <= 87 && fx.abs() <= 95;
-            n1 || n2 || n3 || b1 || b2
-        }
         IconKind::Apps => {
             // 4 rounded squircle tiles in 2x2 grid
             let qx = fx.abs() - 72;
@@ -508,8 +482,6 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.music"), Some(IconKind::Music));
         assert_eq!(match_icon_kind(b"org.interos.calculator"), Some(IconKind::Calculator));
         assert_eq!(match_icon_kind(b"org.interos.vault"), Some(IconKind::Vault));
-        assert_eq!(match_icon_kind(b"org.interos.health"), Some(IconKind::Health));
-        assert_eq!(match_icon_kind(b"org.interos.meshchat"), Some(IconKind::MeshChat));
         assert_eq!(match_icon_kind(b"org.interos.calendar"), Some(IconKind::Calendar));
         assert_eq!(match_icon_kind(b"org.interos.notes"), Some(IconKind::Notes));
         assert_eq!(match_icon_kind(b"org.interos.video_player"), Some(IconKind::VideoPlayer));
@@ -533,8 +505,6 @@ mod tests {
             IconKind::Music,
             IconKind::Calculator,
                     IconKind::Vault,
-            IconKind::Health,
-            IconKind::MeshChat,
             IconKind::Apps,
             IconKind::Calendar,
             IconKind::Notes,

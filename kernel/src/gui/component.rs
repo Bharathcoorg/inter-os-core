@@ -176,7 +176,7 @@ impl ShareSheetDrawer {
             target1_y: row1_y,
             target1_w: col_w,
             target1_h: row_h,
-            // Target 2: Terminal
+            // Target 2: unbound grid slot (kept so slots 3 and 4 stay in place)
             target2_x: col2_x,
             target2_y: row1_y,
             target2_w: col_w,
