@@ -321,6 +321,78 @@ def test_the_app_does_not_report_a_model_as_ready():
         _forbids(lib + main, r"\bready\b", "a ready badge")
 
 
+def _cancel_body_faults(main: str) -> list:
+    """Every way the cancel button still states what the platform did.
+
+    WHY the detector reads the function's body and not the file: the fault is
+    the cancel button's own sentence, and the app has other honest reasons to
+    use the word "stream". Why the four arms are separate: the first two are
+    the claim, and the last two are what makes the claim unfalsifiable -- a
+    request whose result is discarded cannot tell a refusal from an accepted
+    cancellation, so the sentence it paints is the app's guess either way.
+    """
+    body = _body(main, "fn cancel_streaming")
+    faults = []
+    if re.search(r"let\s+_\s*=\s*std::ipc_send", body):
+        faults.append("the cancel request's own result is thrown away with `let _ =`")
+    if re.search(
+        r"cancelled by user|streaming cancelled|generation cancelled|"
+        r"cancellation acknowledged",
+        body,
+        re.IGNORECASE,
+    ):
+        faults.append("the transcript states a cancellation the app never read back")
+    if ".is_err()" not in body and ".is_ok()" not in body:
+        faults.append("no branch reports a request the service refused")
+    if not re.search(r"cancel\w*\s+request", body, re.IGNORECASE):
+        faults.append("the notice does not say what the app did -- requesting a cancellation")
+    return faults
+
+
+def test_the_cancel_button_reports_the_request_and_not_a_result():
+    """The cancel button used to paint "[Generation cancelled by user]".
+
+    The app sent the request and read nothing back: `ipc_send`'s result was
+    discarded with `let _ =`, and the service's answer -- which is
+    "[Cancellation acknowledged]", "there was nothing to cancel", or "the
+    sender does not own the session", depending on state only the service
+    holds -- arrives on the generation message type the app reserves for the
+    model's words, so the app could not have read it as a verdict even if it
+    had looked. The notice now names the app's own act, and a refused send is
+    reported as a refused send in the same words the file already uses.
+
+    WHY this is a contract and not a comment: a supervisor that reports an
+    outcome it did not observe is the exact fault this file exists to catch,
+    and the reader of that line has no way to tell it was a guess.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        faults = _cancel_body_faults(main)
+        assert not faults, f"{path}: {faults}"
+        _forbids(lib + main, r"cancelled by user", "a cancellation the app observed")
+        _forbids(lib + main, r"streaming cancelled", "a stream the app saw cancelled")
+
+
+def test_the_app_does_not_claim_a_token_stream_the_service_does_not_keep():
+    """The action band used to say "Streaming generation active..." on send.
+
+    The service fills the whole answer onto the channel and only then posts
+    the notice that names it, so there is one arrival and no per-token stream
+    to describe. What the app does hold is a request it has made and an answer
+    it has not yet been given, so the band now says that.
+
+    WHY only this sentence: the transcript's own streaming state is the app's
+    bookkeeping for waiting, and forbidding the word "stream" everywhere would
+    forbid the app's names for its own fields rather than its claim about the
+    platform.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        _forbids(lib + main, r"streaming generation active", "a per-token stream")
+        body = _body(main, "fn send_prompt")
+        assert re.search(r"generation (?:requested|in flight)", body, re.IGNORECASE), (
+            f"{path} does not say what it actually holds when it sends a prompt"
+        )
+
+
 # -----------------------------------------------------------------------------
 # The shape the app has to keep
 # -----------------------------------------------------------------------------
@@ -881,6 +953,12 @@ def test_the_contract_can_fail():
         (r"\[pass\]", 'let label = "cosine [PASS]";'),
         (r"index empty", 'let label = "0 documents (Index Empty)";'),
         (r"\bready\b", 'let label = "EmbeddingGemma 2 (740M) -- Ready";'),
+        (r"cancelled by user", 'self.chat.push(Notice, b"[Generation cancelled by user]");'),
+        (r"streaming cancelled", 'self.set_action(b"Streaming cancelled.", Tone::Plain);'),
+        (
+            r"streaming generation active",
+            'self.set_action(b"Streaming generation active...", Tone::Accent);',
+        ),
     ]
     for pattern, synthetic in cases:
         assert _hits(synthetic, pattern), (
@@ -996,6 +1074,57 @@ def test_the_contract_can_fail():
     ]
     for label, lib, main in counter_faults:
         assert _width_defects(lib, main, 320), f"the counter detector does not catch {label}"
+
+    # The cancel detector, over an app that carries each fault it exists to
+    # catch and over one that reports only the request it made.
+    honest_cancel = (
+        "pub fn cancel_streaming(&mut self) {\n"
+        "    if std::ipc_send(id, MSG_TYPE_CANCEL, b\"CANC\").is_err() {\n"
+        "        self.chat.push(ChatRole::Notice, b\"[Cancellation request not sent]\");\n"
+        "        self.set_action(b\"CANCEL: the service would not take the request.\");\n"
+        "        return;\n"
+        "    }\n"
+        "    self.chat.push(ChatRole::Notice, b\"[Cancellation requested]\");\n"
+        "}\n"
+    )
+    assert not _cancel_body_faults(honest_cancel), (
+        f"the cancel detector fires on an app that states only its own request: "
+        f"{_cancel_body_faults(honest_cancel)}"
+    )
+    cancel_cases = [
+        (
+            "an app that throws the request's result away and states the outcome",
+            "pub fn cancel_streaming(&mut self) {\n"
+            "    let _ = std::ipc_send(id, MSG_TYPE_CANCEL, b\"CANC\");\n"
+            "    self.chat.push(ChatRole::Notice, b\"[Generation cancelled by user]\");\n"
+            "}\n",
+        ),
+        (
+            "an app that throws the request's result away but keeps the request wording",
+            "pub fn cancel_streaming(&mut self) {\n"
+            "    let _ = std::ipc_send(id, MSG_TYPE_CANCEL, b\"CANC\");\n"
+            "    self.chat.push(ChatRole::Notice, b\"[Cancellation requested]\");\n"
+            "}\n",
+        ),
+        (
+            "an app that checks the send and still paints a cancelled stream",
+            "pub fn cancel_streaming(&mut self) {\n"
+            "    if std::ipc_send(id, MSG_TYPE_CANCEL, b\"CANC\").is_err() {\n"
+            "        return;\n"
+            "    }\n"
+            "    self.set_action(b\"Streaming cancelled.\");\n"
+            "    self.chat.push(ChatRole::Notice, b\"[Cancellation requested]\");\n"
+            "}\n",
+        ),
+    ]
+    for label, synthetic in cancel_cases:
+        assert _cancel_body_faults(synthetic), f"the cancel detector does not catch {label}"
+
+    # The streaming claim, over an app that makes it and over one that does not.
+    assert _hits(
+        _code('self.set_action(b"Streaming generation active...", Tone::Accent);'),
+        r"streaming generation active",
+    ), "the streaming detector does not catch a per-token stream the service keeps"
 
 
 def main() -> int:

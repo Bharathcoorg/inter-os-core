@@ -2033,7 +2033,7 @@ impl AgentManagerApp {
         }
     }
 
-    /// Sends the prompt to whatever model the device has, starting live streaming.
+    /// Sends the prompt to whatever model the device has, and waits for an answer.
     ///
     /// WHY the prompt is recorded before the answer is sought: the
     /// exchange is the user's, and it belongs in the transcript whether
@@ -2063,7 +2063,17 @@ impl AgentManagerApp {
             self.rebuild();
             return;
         } else {
-            self.set_action(b"Streaming generation active...", Tone::Accent);
+            // WHY the band says a request is waiting and not that it is
+            // streaming: the service fills the whole answer onto the channel
+            // and only then posts the notice that names it, so nothing arrives
+            // a token at a time and there is no stream here to describe. What
+            // the app genuinely holds at this point is a request it has made
+            // and an answer it has not yet been given, which is what the band
+            // now says.
+            self.set_action(
+                b"Generation requested: waiting for the platform's answer.",
+                Tone::Accent,
+            );
         }
 
         // WHY the queue is emptied before the prompt is sent: a generation that
@@ -2102,17 +2112,46 @@ impl AgentManagerApp {
         }
     }
 
-    /// Cancels active streaming token generation via IPC to SERVICE_INFERENCE.
+    /// Asks the inference service to cancel the generation in flight.
     pub fn cancel_streaming(&mut self) {
-        let _ = std::ipc_send(
+        let sent = std::ipc_send(
             std::ai::SERVICE_INFERENCE_TASK_ID,
             std::ai::MSG_TYPE_CANCEL,
             b"CANC",
-        );
+        )
+        .is_ok();
+
+        // WHY the app stops its own wait whatever the service answers: whether
+        // the generation is still running is the service's, but sitting and
+        // waiting for an answer this person has asked to stop is the app's own
+        // state, and closing it needs no permission from anything.
         self.chat.finish_stream();
         self.answer_deadline = 0;
-        self.chat.push(ChatRole::Notice, b"[Generation cancelled by user]");
-        self.set_action(b"Streaming cancelled.", Tone::Plain);
+
+        // WHY the notice names the request and not its outcome: whether
+        // anything was cancelled is decided by state only the service holds --
+        // it answers an acknowledgement, or says there was no session to
+        // cancel, or refuses a sender that does not own the session -- and this
+        // app reads none of that back. The naive line here stated the platform
+        // had cancelled the generation, which is a verdict the app never
+        // observed and would paint even on a turn where there was nothing to
+        // cancel or the send itself had been refused.
+        if sent {
+            self.chat.push(ChatRole::Notice, b"[Cancellation requested]");
+            self.set_action(b"Cancellation requested.", Tone::Plain);
+        } else {
+            // WHY the file's own words for a refused send: the SDK says only
+            // that the send failed, so the app reuses the sentence
+            // `request_model_install` already uses when the inference service
+            // would not take a request rather than inventing an error the
+            // platform has no notion of.
+            self.chat
+                .push(ChatRole::Notice, b"[Cancellation request not sent]");
+            self.set_action(
+                b"CANCEL: the inference service would not take the request.",
+                Tone::Unavailable,
+            );
+        }
         self.rebuild();
     }
 
