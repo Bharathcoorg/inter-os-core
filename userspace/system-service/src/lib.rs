@@ -1,5 +1,28 @@
 #![no_std]
 
+// WHY `alloc` is linked here and nowhere else in this crate's dependants: the
+// inference engine's scratch and KV cache are cut from the service's own
+// `CapType::MemoryHeap` mapping, so `inference` needs `Vec`.
+extern crate alloc;
+
+// WHY the allocator is declared in the library and not in `src/bin/aid.rs`:
+// a `#[global_allocator]` has to be in scope for the binary that links an
+// allocating library, so putting it in `aid.rs` leaves the other ten daemons of
+// this crate without one and they fail to compile -- which is the guarantee that
+// keeps them honest, and it is kept by the kernel rather than by the link step:
+// the grant lives in `kernel/src/services.rs::service_capability_policy`, where
+// only `ServiceId::Inference` receives `MemoryHeap`. A daemon that reached an
+// allocating path would get `PermissionDenied` from `sys_mem_map`, a null block
+// from `InterOsHeap`, and an aborted task; none of them has such a path.
+//
+// `#[cfg(not(test))]` because the host unit suite links std and takes std's
+// allocator, so the same engine code runs there; on the device the same code
+// runs against the mapping-backed heap. Nothing about the budget is asserted by
+// the host that the device allocator does not also have to satisfy.
+#[cfg(not(test))]
+#[global_allocator]
+static HEAP: interos_std::heap::InterOsHeap = interos_std::heap::InterOsHeap::new();
+
 use interos_std as std;
 
 pub mod embedding;
@@ -24,9 +47,9 @@ pub use gguf::{
     PATH_LOCAL_MODEL_DATA, PROMPT_MARKER,
 };
 pub use inference::{
-    apply_rope, dequantize_q4_0, dequantize_q8_0, extract_embedding, forward_step, gemv,
-    generate, rms_norm, sample_token, softmax, swiglu, InferenceError, KvCache, LayerWeights,
-    ModelConfig, ModelWeights,
+    apply_rope, dequantize_q4_0, dequantize_q8_0, extract_embedding, forward_step, gemv, generate,
+    rms_norm, sample_token, softmax, swiglu, DEFAULT_SEQ_LEN, InferenceError, KvCache,
+    LayerWeights, ModelConfig, ModelWeights, Scratch, FLOAT_BYTES, SCRATCH_BYTE_BUDGET,
 };
 pub use rag::{
     compute_chunk_id, format_rag_prompt, RagChunk, RagIndex, RagMatch, MAX_CHUNK_TEXT_LEN,
@@ -690,6 +713,15 @@ enum ModelGap {
     /// The file states a dimension -- or omits one -- the engine cannot be built
     /// from. Carries the key, what the file stated, and the engine's bound.
     Declaration(&'static str, Option<u32>, usize),
+    /// The shape the file declares costs more scratch than the device's byte
+    /// budget. Carries both numbers -- what the run would have taken and the
+    /// budget it was refused against -- because after the budget there is no
+    /// per-dimension bound left to name, and "too big" without a byte count is
+    /// not an answer the next stage can act on.
+    Scratch(usize, usize),
+    /// The budget said the shape fits and the memory capability still would not
+    /// hand the mapping out.
+    ScratchUnavailable,
 }
 
 /// Writes what the tokenizer walk reached in the same model file.
@@ -815,6 +847,18 @@ fn model_gap_notice<'a>(
         ModelGap::Declaration(key, None, _) => {
             notice.word(b", and states no ");
             notice.word(key.as_bytes());
+        }
+        ModelGap::Scratch(needed, budget) => {
+            notice.word(b", whose run needs ");
+            notice.byte_count(needed as u64);
+            notice.word(b" scratch bytes against the ");
+            notice.byte_count(budget as u64);
+            notice.word(b" byte budget, over by ");
+            notice.byte_count(needed.saturating_sub(budget) as u64);
+            notice.word(b" bytes");
+        }
+        ModelGap::ScratchUnavailable => {
+            notice.word(b", whose scratch the byte budget prices as fitting but the device would not map");
         }
     }
     if let Some(tok) = tokenizer {
@@ -1082,6 +1126,16 @@ pub fn handle_ipc_inference_query(
                                             stated,
                                             limit,
                                         )) => ModelGap::Declaration(key, stated, limit),
+                                        // The one size limit the engine carries now:
+                                        // the byte budget, answered with both numbers
+                                        // and the overage rather than "too big".
+                                        Err(inference::InferenceError::ScratchTooLarge(
+                                            needed,
+                                            budget,
+                                        )) => ModelGap::Scratch(needed, budget),
+                                        Err(inference::InferenceError::ScratchUnavailable) => {
+                                            ModelGap::ScratchUnavailable
+                                        }
                                         Err(_) => {
                                             reply_with_answer(
                                                 sender_task_id,
@@ -1100,8 +1154,11 @@ pub fn handle_ipc_inference_query(
                                     // branch below uses: this notice carries the
                                     // vocabulary's count and where the template came
                                     // from as well, and the shorter one would cut the
-                                    // sentence off mid-word.
-                                    let mut scratch = [0u8; 320];
+                                    // sentence off mid-word. The scratch refusal adds
+                                    // three full byte counts to that sentence, so the
+                                    // window is sized for them too -- see
+                                    // `test_the_longest_notice_still_fits_the_window_it_is_written_in`.
+                                    let mut scratch = [0u8; 448];
                                     let notice = model_gap_notice(
                                         &info,
                                         gap,
@@ -1640,10 +1697,15 @@ mod tests {
             post_ffn_norm: &ones,
             weight_type: 0,
         };
+        // A slice and not a fixed array: the block count belongs to the config,
+        // and an array literal could only ever describe the model it was written
+        // for. The fixture's config declares one block, so the second slot that
+        // `generate` never reaches is dropped rather than carried.
+        let layers = [Some(layer)];
         let model = inference::ModelWeights {
             token_embd: &embd,
             token_embd_type: 0,
-            layers: [Some(layer), None],
+            layers: &layers,
             final_norm: &ones,
             output_weight: &head_w,
             output_weight_type: 0,
@@ -1947,6 +2009,47 @@ mod tests {
         );
     }
 
+    /// The one size limit the engine carries now is a byte budget, so the refusal
+    /// has to carry three byte counts: what the run would have taken, the budget it
+    /// was refused against, and how far over it is. "Unsupported architecture"
+    /// names none of them, and a person cannot choose a smaller model from that.
+    #[test]
+    fn test_the_scratch_refusal_names_the_budget_and_the_overage() {
+        let info = declared(b"gemma2", 3072, 48, 256_000);
+        let mut out = [0u8; 320];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Scratch(437_421_056, 125_829_120),
+            b"hi",
+            None,
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file declares gemma2, whose run needs 437421056 scratch bytes against the 125829120 byte budget, over by 311591936 bytes; the prompt's 2 bytes were not answered."
+        );
+    }
+
+    /// The budget and the mapping are two different answers: one says the device
+    /// has no room for this model, the other says it could not be handed out right
+    /// now. Reporting the second as the first would send someone looking for a
+    /// smaller file when the machine is what is full.
+    #[test]
+    fn test_the_budget_refusal_names_the_memory_the_device_would_not_map() {
+        let mut out = [0u8; 240];
+        let notice = model_gap_notice(
+            &gguf::GgufModelInfo::empty(),
+            ModelGap::ScratchUnavailable,
+            b"",
+            None,
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file states no architecture, whose scratch the byte budget prices as fitting but the device would not map; the prompt's 0 bytes were not answered."
+        );
+    }
+
     /// A tokenizer walk whose vocabulary sits past the reader's load cap and whose
     /// template the walk held -- the shape a real Gemma file leaves.
     fn walked_vocab_and_template() -> gguf::GgufTokenizerInfo {
@@ -2059,6 +2162,28 @@ mod tests {
         assert!(
             text.ends_with("bytes were not answered."),
             "the whole sentence did not survive the walk's clauses: {text}"
+        );
+
+        // The scratch refusal is the longest sentence this window carries: three
+        // byte counts at their widest on top of everything the walk adds, so it is
+        // the case the dispatch site's window is sized for.
+        let mut scratch_out = [0u8; 448];
+        let scratch_window = scratch_out.len();
+        let scratch_text = model_gap_notice(
+            &info,
+            ModelGap::Scratch(usize::MAX, inference::SCRATCH_BYTE_BUDGET),
+            b"a prompt of thirty bytes or thereabouts",
+            Some(&tok),
+            &mut scratch_out,
+        );
+        let scratch_text = core::str::from_utf8(scratch_text).unwrap_or("<unprintable>");
+        assert!(
+            scratch_text.len() < scratch_window,
+            "the {scratch_window}-byte window is exactly full, so Notice was cutting words off: {scratch_text}"
+        );
+        assert!(
+            scratch_text.ends_with("bytes were not answered."),
+            "the scratch refusal did not survive the walk's clauses: {scratch_text}"
         );
     }
 

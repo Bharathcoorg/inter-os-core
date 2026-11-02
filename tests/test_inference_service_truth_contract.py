@@ -67,6 +67,16 @@ def without_comments(arm: str) -> str:
     return "\n".join(kept)
 
 
+def flat(source: str) -> str:
+    """`source` with every run of whitespace collapsed to a single space.
+
+    WHY: a fixture's bytes are the contract, but rustfmt owns how they are laid
+    out, and a pin written against one line of a wrapped call fails for a reason
+    that has nothing to do with what the fixture declares.
+    """
+    return " ".join(source.split())
+
+
 def function_body(source: str, signature: str) -> str:
     """The body of the function whose line starts with `signature`."""
     start = source.index(signature)
@@ -295,8 +305,11 @@ def test_the_notice_carries_what_the_walk_read_counted_and_refused():
     arm = generative_arm(lib)
     assert "gguf::read_tokenizer_info(path)" in arm
     assert "tokenizer.as_ref()" in arm
-    # The refusals the walk cannot speak about keep their old 240-byte window.
-    assert arm.count("let mut scratch = [0u8; 320];") == 2
+    # The refusals the walk cannot speak about keep their old 240-byte window, and
+    # the scratch refusal -- three byte counts longer than the declaration it
+    # replaced -- has a window of its own.
+    assert arm.count("let mut scratch = [0u8; 448];") == 1
+    assert arm.count("let mut scratch = [0u8; 320];") == 1
     assert arm.count("let mut scratch = [0u8; 240];") == 2
 
 
@@ -366,16 +379,128 @@ def test_a_declaration_beyond_the_engine_is_refused_not_clamped():
     body = function_body(inference, "pub fn from_gguf")
     for clamp in (".min(", ".max(", "unwrap_or(MAX_"):
         assert clamp not in body, f"from_gguf clamps a dimension with {clamp!r}"
-    assert "MAX_HIDDEN_DIM" in body
+    # The size answer is one computed byte budget, not a per-dimension ceiling:
+    # the six compile-time maxima refused every published model, because every one
+    # of them exceeds at least one of those ceilings while the device has room for
+    # the shape. What bounds a run now is what it costs.
+    assert "check_scratch_budget" in body, "from_gguf no longer prices the declared shape"
+    assert "ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)" in inference
+    # The ceilings are gone from the engine's code. Prose is allowed to name one
+    # to explain what the budget replaced; a declaration, or a check reading a
+    # dimension against it, is not.
+    code = without_comments(inference)
+    for ceiling in (
+        "MAX_HIDDEN_DIM",
+        "MAX_INTERMEDIATE_DIM",
+        "MAX_LAYERS",
+        "MAX_SEQ_LEN",
+        "MAX_VOCAB_SIZE",
+        "MAX_HEAD_DIM",
+    ):
+        assert ceiling not in code, f"{ceiling} is back as a compile-time ceiling"
+    assert "const MAX_" not in inference, "a compile-time ceiling has come back"
+    assert "MAX_HEAD_DIM" not in read("lib.rs"), "the ceilings are back in the dispatch arm"
+
+
+def test_the_run_is_priced_before_any_memory_is_asked_for():
+    """The budget is checked, then the heap is asked: never the other way round.
+
+    A shape the device cannot hold has to be refused on the arithmetic, and the
+    refusal has to carry both numbers, or the next stage is guessing whether it
+    needs a smaller model or a bigger machine.
+    """
+    inference = read("inference.rs")
+    assert "pub const SCRATCH_BYTE_BUDGET: usize = 120 * 1024 * 1024;" in inference
+    for priced in ("pub fn kv_cache_bytes", "pub fn scratch_bytes", "fn check_scratch_budget"):
+        body = function_body(inference, priced)
+        assert body, f"the engine no longer computes {priced!r}"
+    for entry in ("pub fn generate", "pub fn extract_embedding"):
+        body = function_body(inference, entry)
+        assert "config.check_scratch_budget()?" in body, f"{entry} allocates before pricing"
+        assert body.index("check_scratch_budget") < body.index("Scratch::new"), (
+            f"{entry} asks the heap for the run before it checks the run fits"
+        )
+    # The scratch and the cache live on the service's memory capability, not on
+    # the 256 KiB user stack a service thread is given.
+    assert "use alloc::vec::Vec;" in inference
+    assert ".try_reserve_exact(" in inference, "the scratch falls back to the aborting allocator"
+    assert "Vec<f32>" in inference, "the scratch buffers are fixed arrays again"
+    assert "pub struct Scratch" in inference and "pub struct KvCache" in inference
+
+
+def test_the_scratch_is_taken_from_the_memory_the_service_is_already_granted():
+    """96 MiB of cache needs a mapping, and one exists only behind a capability.
+
+    The change is not "use malloc": it is using the memory the kernel already
+    handed this service and nobody else, which is why the allocator declaration,
+    the crate that needs a heap and the kernel's grant list are pinned together.
+    A `#[global_allocator]` applies to every binary that links an allocating
+    library, so it lives once in the library -- putting it in `aid.rs` alone would
+    either fail to link the other ten daemons or quietly give them a heap too.
+    """
+    lib = read("lib.rs")
+    assert "extern crate alloc;" in lib, "the library asks for a heap it never declared"
+    assert "#[global_allocator]" in lib
+    assert "interos_std::heap::InterOsHeap" in lib, "the scratch is not on the service's heap"
+    assert "#[cfg(not(test))]" in lib, (
+        "the host suite would run against the syscall-backed heap it cannot call"
+    )
+    aid = (SERVICE / "bin" / "aid.rs").read_text(encoding="utf-8")
+    assert "#[global_allocator]" not in without_comments(aid), (
+        "two allocator declarations, one per binary"
+    )
+    assert "#![no_std]" in aid, "the service binary stopped being freestanding"
+    services = KERNEL_SERVICES.read_text(encoding="utf-8")
+    assert "CapabilityType::MemoryHeap" in policy_arm(services, "Inference"), (
+        "inference was given a heap it has no capability for"
+    )
+
+
+def test_the_real_model_file_is_read_or_its_absence_is_said_aloud():
+    """The one case that opens the 333 MB file has to announce when it did not.
+
+    Every other case prices a description of the file typed in by hand, so a
+    reader wrong about the real bytes passes the whole suite as long as the
+    fixture repeats the mistake. This test exists to keep the file-reading case
+    honest: gated on a path it prints, running the shipping reader and the
+    shipping pricing, and refusing the same file at a longer context so the
+    budget cannot be read as "tuned until EmbeddingGemma fit".
+    """
+    inference = read("inference.rs")
+    body = function_body(
+        inference, "fn test_the_real_published_file_is_priced_and_allocated"
+    )
+    assert "INTEROS_REAL_GGUF_PATH" in body, "the real file is no longer opt-in, or is silent"
+    assert "NOT VERIFIED" in body, (
+        "a run with no file in front of it would pass without saying it read nothing"
+    )
+    for shipping in (
+        "crate::gguf::read_model_info_stream",
+        "ModelConfig::from_gguf",
+        "Scratch::new(&config)",
+        "KvCache::new(&config)",
+        "check_scratch_budget",
+    ):
+        assert shipping in body, f"the real-file case no longer runs {shipping!r}"
+    assert "ScratchTooLarge(" in body, "the real file is only ever shown being accepted"
 
 
 def test_the_head_geometry_is_checked_against_the_row_it_is_cached_in():
-    """Each head is cached in a row 32 floats wide, and the heads are laid end
-    to end across the hidden dimension."""
+    """Each head is cached in a row `head_dim` wide, and the heads are laid end
+    to end across the hidden dimension.
+
+    The row width is the file's number now, so what is checked is the geometry --
+    heads that do not tile their own residual stream, and more key/value heads
+    than the attention kernel walks -- not a compiled-in ceiling.
+    """
     inference = read("inference.rs")
-    assert "pub const MAX_HEAD_DIM: usize = 32;" in inference
-    assert "heads_span" in inference
-    assert "attention.head_count x key_length" in inference
+    body = function_body(inference, "pub fn check_attention_shape")
+    assert body, "the head geometry is no longer checked at all"
+    assert "heads_span" in body
+    assert "attention.head_count x key_length" in body
+    assert "attention.head_count_kv" in body, (
+        "a grouped-query file is no longer refused by the kernel's own reason"
+    )
 
 
 def test_the_head_width_a_published_file_names_is_read_not_missed():
@@ -390,11 +515,19 @@ def test_the_head_width_a_published_file_names_is_read_not_missed():
     walk = function_body(gguf, "pub fn read_model_info_stream")
     assert 'b"key_length" | b"head_length"' in walk, "the reader stopped taking one spelling"
     assert 'Some("<arch>.attention.key_length")' in gguf
-    fixture = function_body(
+    fixture = flat(function_body(
         gguf, "fn test_read_model_info_configures_a_published_embedding_model"
-    )
+    ))
     assert fixture, "the published file's key shape is no longer a test"
-    for stated in ('b"gemma-embedding.attention.key_length", 256', "262_144"):
+    # Every number the run is priced from, exactly as the real file states them:
+    # the cache is deep as `context_length` and narrow as `head_count_kv`, so a
+    # fixture that drops either is no longer the published file.
+    for stated in (
+        'b"gemma-embedding.attention.key_length", 256',
+        'b"gemma-embedding.attention.head_count_kv", 1',
+        'b"gemma-embedding.context_length", 2048',
+        "262_144",
+    ):
         assert stated in fixture, f"the fixture lost the real file's {stated!r}"
 
 

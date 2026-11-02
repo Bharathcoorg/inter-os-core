@@ -878,6 +878,23 @@ pub struct GgufModelInfo {
     /// width. Reading only one of them made the other look like a file missing a
     /// key, and the notice said so.
     pub head_dim: Option<u32>,
+    /// `<arch>.context_length` -- how many positions the model was trained to
+    /// address, which is what the engine sizes one sequence's KV cache for.
+    ///
+    /// WHY it is not in `missing_key`: the walk stops as soon as every required
+    /// parameter is in hand, and a file that states no context length is still a
+    /// file the engine can be built from -- it just gets the engine's own
+    /// documented run length, which `ModelConfig::from_gguf` names in the shape
+    /// it hands back rather than passing off as the file's declaration.
+    pub context_length: Option<u32>,
+    /// `<arch>.attention.sliding_window`, when the file declares one.
+    ///
+    /// WHY it is read and not used yet: the attention kernel walks every position
+    /// it has cached, so the cache has to be `context_length` deep to answer for
+    /// it. A window narrower than that is the number the graph task will shrink
+    /// the cache to once the kernel honours it; holding it here keeps that step
+    /// a change to one line instead of a change to the reader.
+    pub sliding_window: Option<u32>,
     /// Length of `tokenizer.ggml.tokens`, read from the array's own header.
     pub vocab_size: Option<u32>,
     /// `<arch>.attention.layer_norm_rms_epsilon`
@@ -897,6 +914,8 @@ impl GgufModelInfo {
             num_heads: None,
             num_kv_heads: None,
             head_dim: None,
+            context_length: None,
+            sliding_window: None,
             vocab_size: None,
             rms_norm_eps: None,
             rope_theta: None,
@@ -1081,6 +1100,8 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
                 b"key_length" | b"head_length" => {
                     info.head_dim = Some(read_count(stream, val_type)?)
                 }
+                b"context_length" => info.context_length = Some(read_count(stream, val_type)?),
+                b"sliding_window" => info.sliding_window = Some(read_count(stream, val_type)?),
                 b"layer_norm_rms_epsilon" => {
                     info.rms_norm_eps = Some(read_epsilon(stream, val_type)?)
                 }
@@ -2581,9 +2602,9 @@ mod tests {
 
     /// The key shape of the file anyone actually downloads, recorded from
     /// `embeddinggemma-300M-Q8_0.gguf`: 316 tensors, 41 metadata pairs, the
-    /// head width declared as `attention.key_length` and the vocabulary 262,144
-    /// strings long -- and the vocabulary sits before every tokenizer flag the
-    /// file goes on to declare.
+    /// head width declared as `attention.key_length`, one key/value head, and the
+    /// vocabulary 262,144 strings long -- and the vocabulary sits before every
+    /// tokenizer flag the file goes on to declare.
     ///
     /// WHY this is a test and not only a probe: until a published file was read
     /// here, the reader asked for `head_length`, a name no Gemma writer uses, and
@@ -2594,13 +2615,41 @@ mod tests {
     #[test]
     fn test_read_model_info_configures_a_published_embedding_model() {
         let mut buf = [0u8; 1024];
-        let mut off = begin_file(&mut buf, 7);
+        let mut off = begin_file(&mut buf, 10);
         put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
         put_count(&mut buf, &mut off, b"gemma-embedding.embedding_length", 768);
-        put_count(&mut buf, &mut off, b"gemma-embedding.feed_forward_length", 1152);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding.feed_forward_length",
+            1152,
+        );
         put_count(&mut buf, &mut off, b"gemma-embedding.block_count", 24);
-        put_count(&mut buf, &mut off, b"gemma-embedding.attention.head_count", 3);
-        put_count(&mut buf, &mut off, b"gemma-embedding.attention.key_length", 256);
+        put_count(&mut buf, &mut off, b"gemma-embedding.context_length", 2048);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding.attention.sliding_window",
+            512,
+        );
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding.attention.head_count",
+            3,
+        );
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding.attention.head_count_kv",
+            1,
+        );
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding.attention.key_length",
+            256,
+        );
         put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
         let after_vocab_header = off;
 
@@ -2612,8 +2661,21 @@ mod tests {
         assert_eq!(info.intermediate_dim, Some(1152));
         assert_eq!(info.num_layers, Some(24));
         assert_eq!(info.num_heads, Some(3));
+        // The file says one key/value head against three query heads. Without it
+        // the engine assumes the query count, and `check_attention_shape` refuses
+        // the shape -- so this is the difference between pricing the published
+        // model and refusing it for a number the reader failed to pick up.
+        assert_eq!(
+            info.num_kv_heads, Some(1),
+            "head_count_kv is the file's own"
+        );
         assert_eq!(info.head_dim, Some(256), "key_length is the head width");
         assert_eq!(info.vocab_size, Some(262_144));
+        // The two numbers the cache is shaped from, both read before the walk
+        // stops at the vocabulary's header -- which is where the published file
+        // puts them.
+        assert_eq!(info.context_length, Some(2048));
+        assert_eq!(info.sliding_window, Some(512));
         assert_eq!(
             stream.position(),
             after_vocab_header,

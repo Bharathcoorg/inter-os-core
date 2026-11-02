@@ -1,7 +1,14 @@
 //! Real neural inference engine and model lifecycle for InterOS AI service (`aid`).
 //!
-//! Strictly `#![no_std]` and zero heap allocation in all execution paths: every
-//! activation below is a fixed-size array on the caller's stack.
+//! Strictly `#![no_std]`. The graph's per-run footprint -- the KV cache and every
+//! activation buffer -- is carved from the service's own memory capability
+//! (`CapType::MemoryHeap`, granted at `kernel/src/services.rs`), not from the
+//! calling thread's stack, so the engine is sized by what the model file declares
+//! instead of by what a 256 KiB user stack happens to hold. The allocator behind
+//! those buffers is `interos_std::heap::InterOsHeap`, declared once for this
+//! crate at `src/lib.rs`; the capability that makes its mappings succeed is the
+//! one `aid` holds, and no other daemon in the crate reaches a path that
+//! allocates.
 //! Implements real tensor operations:
 //! - Dequantization (F32, F16, Q4_0, Q8_0, Q4_K to F32); any other type id is refused by number
 //! - Matrix-vector multiplication (GEMV) with on-the-fly row dequantization
@@ -12,20 +19,72 @@
 //! - Autoregressive token generation loop with timeout / cancellation checks
 //! - Neural vector embedding extraction (EmbeddingGemma 2): mean pool, then L2
 //!
-//! Nothing in the forward path falls back. A declaration wider than a buffer, a
-//! quantisation the engine has no layout for, or an embedding row the file does
-//! not hold is reported as the refusal it is. An invented stand-in would let an
-//! answer computed from nothing be reported as the installed model's answer.
+//! Nothing in the forward path falls back. A declaration the file has not stated,
+//! a quantisation the engine has no layout for, an embedding row the file does not
+//! hold, or a shape whose scratch is over budget is reported as the refusal it is.
+//! An invented stand-in would let an answer computed from nothing be reported as
+//! the installed model's answer.
 
-pub const MAX_HIDDEN_DIM: usize = 256;
-pub const MAX_INTERMEDIATE_DIM: usize = 512;
-pub const MAX_VOCAB_SIZE: usize = 320;
-pub const MAX_SEQ_LEN: usize = 64;
-pub const MAX_LAYERS: usize = 2;
-/// Width of one KV cache row. The cache is `[[f32; 32]; MAX_SEQ_LEN]`, so a
-/// head the file declares wider than this has nowhere to be stored. Published
-/// Gemma files state this width as `<arch>.attention.key_length`.
-pub const MAX_HEAD_DIM: usize = 32;
+use alloc::vec::Vec;
+
+/// Bytes of heap one inference run may be given, and the only size limit the
+/// engine now carries.
+///
+/// WHY one computed budget instead of six compile-time maxima: the maxima
+/// (`hidden 256, ffn 512, vocab 320, layers 2, head 32, sequence 64`) sat below
+/// every model that has ever been published, so the engine could only ever refuse
+/// them. What actually bounds a run is the memory the service can be handed, and
+/// that is a byte count, not a per-dimension ceiling -- `ModelConfig::scratch_bytes`
+/// computes what a declared shape needs and this constant says what the device
+/// offers.
+///
+/// THE ARITHMETIC, from the device demo's 2 GiB of RAM and 6 GiB of storage:
+///
+/// ```text
+///   device RAM                                    2,048 MiB
+///   - kernel heap (kernel/src/allocator.rs)          64 MiB
+///   - kernel image, page tables, frame metadata      32 MiB
+///   - display: two 720x1440 BGRA buffers          ~  8 MiB
+///   - the other 31 userspace tasks and the page cache
+///     are left the rest, and one service taking a
+///     twentieth of the machine is where it stops -> 128 MiB
+/// ```
+///
+/// 128 MiB is also the ceiling the platform itself puts on one mapping, and the
+/// budget has to live under it rather than at it:
+/// - `sys_mem_map` refuses any single mapping above 128 MiB
+///   (`kernel/src/syscall/mod.rs`), and the heap serves one big buffer from one
+///   mapping plus a 16-byte block header and page rounding;
+/// - the address space a process may hold in total is its own resource limit, and
+///   `ServiceId::Inference` is budgeted 2 GiB of it
+///   (`kernel/src/services.rs::resource_limits`) -- the 256 MiB
+///   `USER_ADDRESS_SPACE_LIMIT` (`kernel/src/task/user.rs`) is the default for a
+///   process that states no limit, and it bounds what the loaded `.rapp`, its
+///   256 KiB stack and this service's other mappings would have to share.
+///
+/// So the budget is the mapping ceiling less an 8 MiB reservation for the header,
+/// the guard pages and the rest of the footprint that shares the address space:
+/// 128 MiB - 8 MiB = 120 MiB = 125,829,120 bytes. One run's largest single
+/// buffer, the 48 MiB K tensor, is well under the mapping ceiling, and the whole
+/// run is well under the service's address-space budget.
+///
+/// The published `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks, 2048 positions,
+/// one key/value head 256 wide, 768-wide stream, 1152-wide feed-forward and
+/// 262,144 tokens -- computes 101,767,680 bytes under this formula: the KV cache
+/// is 2 x 24 x 2048 x 1 x 256 x 4 = 100,663,296 (96 MiB) and the rest is
+/// 11 x 768 + 3 x 1152 + 2048 + 262,144 = 276,096 floats = 1,104,384 bytes. It
+/// fits with 24 MiB to spare, and the tests
+/// `test_model_config_accepts_the_published_embedding_model_by_its_budget` and
+/// `test_the_real_published_file_is_priced_and_allocated` hold the arithmetic to
+/// that number -- the second one against the 333 MB file's own bytes, so the
+/// fixture's numbers are the file's and not whoever typed them in.
+///
+/// It fits in memory; it does not yet run, because the graph and the weight
+/// loader for it are separate work.
+pub const SCRATCH_BYTE_BUDGET: usize = 120 * 1024 * 1024;
+
+/// Bytes one f32 occupies: every buffer the engine sizes is f32.
+pub const FLOAT_BYTES: usize = core::mem::size_of::<f32>();
 
 /// Error types for inference execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +101,20 @@ pub enum InferenceError {
     ModelUnavailable,
     /// A declaration in the model file the engine cannot be built from: the key
     /// it was declared under, what the file stated (`None` when the file states
-    /// no such key), and the bound the engine is compiled to.
+    /// no such key), and the bound the engine is compiled to. After the scratch
+    /// budget there is no per-dimension bound left, so the third field carries
+    /// the bound only where one exists -- the single key/value head the attention
+    /// kernel walks -- and 0 where the file simply did not state the number.
     ModelDeclaration(&'static str, Option<u32>, usize),
+    /// The shape the file declares needs more scratch than the device offers.
+    /// Carries both byte counts: what this model would have taken, and the budget
+    /// it was refused against. A refusal that named neither would leave the next
+    /// stage guessing whether it needs a smaller model or a bigger machine.
+    ScratchTooLarge(usize, usize),
+    /// The heap refused the scratch the shape was accepted for. The budget said
+    /// the device can hold it; this says it could not be handed out right now,
+    /// which is the kernel's `MemoryHeap` mapping failing, not the model's shape.
+    ScratchUnavailable,
 }
 
 // -----------------------------------------------------------------------------
@@ -570,6 +641,11 @@ pub fn sample_token(logits: &[f32], temperature: f32) -> u32 {
 // -----------------------------------------------------------------------------
 
 /// Architecture hyper-parameters for Gemma / EmbeddingGemma models.
+///
+/// Every field is a number the model file stated (or, for the two floats and the
+/// run length, the documented default the format leaves open). They are the shape
+/// the scratch is cut from, so `seq_len` is a field and not a constant: it is what
+/// the cache is deep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelConfig {
     pub hidden_dim: usize,
@@ -579,9 +655,22 @@ pub struct ModelConfig {
     pub num_kv_heads: usize,
     pub head_dim: usize,
     pub vocab_size: usize,
+    /// Positions one sequence addresses, and so the depth of the KV cache.
+    pub seq_len: usize,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
 }
+
+/// Run length for a file that states no `<arch>.context_length`.
+///
+/// WHY a default exists at all: every published Gemma, Mistral and BERT-family
+/// file states one, and the walk reads it before it stops; a file that declares
+/// none still has to be given a cache depth or the engine cannot answer. 512 is
+/// the shortest window any of them ships with, so the engine asks for the least
+/// memory anything else would have needed. The config records the number, and
+/// `ModelConfig::scratch_bytes` prices it, so nothing here is presented as the
+/// file's own declaration.
+pub const DEFAULT_SEQ_LEN: usize = 512;
 
 impl ModelConfig {
     /// The dimensions the engine's own tests are written against.
@@ -600,13 +689,91 @@ impl ModelConfig {
             num_kv_heads: 1,
             head_dim: 32,
             vocab_size: 290,
+            seq_len: 64,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
         }
     }
 
+    /// Bytes the KV cache needs: K and V, one row of `head_dim` floats per
+    /// (layer, position, key/value head).
+    ///
+    /// WHY it saturates instead of failing: a shape whose product overflows a
+    /// `usize` needs more memory than the device can count, and the refusal that
+    /// follows is the right one. The number then names `usize::MAX` rather than
+    /// the exact need, which says "at least this much" -- still a refusal the
+    /// person can act on, and the arithmetic is exact for anything a real file
+    /// declares (every dimension arrives as a `u32`).
+    pub fn kv_cache_bytes(&self) -> usize {
+        [
+            2,
+            self.num_layers,
+            self.seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+            FLOAT_BYTES,
+        ]
+        .iter()
+        .fold(1usize, |acc, &n| acc.saturating_mul(n))
+    }
+
+    /// Bytes the whole run needs: the cache plus every activation, score and
+    /// logit buffer `Scratch` holds.
+    ///
+    /// This is the one number the engine's size limit is measured against.
+    pub fn scratch_bytes(&self) -> usize {
+        self.kv_cache_bytes().saturating_add(Scratch::bytes_for(self))
+    }
+
+    /// Refuses a declared shape whose scratch is over `SCRATCH_BYTE_BUDGET`.
+    ///
+    /// WHY this replaces the six maxima: each of them refused a dimension on its
+    /// own, so a model could only be described as too wide, too deep or too rich
+    /// in tokens. What the device actually has is one pile of bytes, and one
+    /// comparison against it says both whether this model fits and how far over it
+    /// is. The refusal names the two numbers because the answer to "too big" is a
+    /// byte count, not a guess.
+    pub fn check_scratch_budget(&self) -> Result<(), InferenceError> {
+        let needed = self.scratch_bytes();
+        if needed > SCRATCH_BYTE_BUDGET {
+            return Err(InferenceError::ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET));
+        }
+        Ok(())
+    }
+
+    /// The head geometry this build's attention kernel can actually walk.
+    ///
+    /// WHY it is not part of the budget: two key/value heads fit in memory -- the
+    /// cache prices them -- but the kernel below caches and attends to head 0
+    /// alone, so a grouped-query file would get an answer read from one head and
+    /// reported as the model's. That is a graph gap, not a byte gap, and grouped
+    /// query attention is the separate task that closes it.
+    pub fn check_attention_shape(&self) -> Result<(), InferenceError> {
+        if self.num_kv_heads > 1 {
+            let stated = u32::try_from(self.num_kv_heads).ok();
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                stated,
+                1,
+            ));
+        }
+        let heads_span = self
+            .num_heads
+            .checked_mul(self.head_dim)
+            .unwrap_or(usize::MAX);
+        if heads_span > self.hidden_dim {
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count x key_length",
+                u32::try_from(heads_span).ok(),
+                self.hidden_dim,
+            ));
+        }
+        Ok(())
+    }
+
     /// Builds the engine's parameters from what the model file declares about
-    /// itself, refusing a declaration the engine's static buffers cannot hold.
+    /// itself, refusing a declaration the engine has no number for and a shape
+    /// whose scratch is over the device's budget.
     ///
     /// WHY the file is the only source of these numbers: the alternative is the
     /// engine running at whatever it was compiled with and describing the result
@@ -617,48 +784,46 @@ impl ModelConfig {
     /// the file states neither, which is what the format specifies for an absent
     /// key; every dimension comes from the file or the engine does not run.
     pub fn from_gguf(info: &crate::gguf::GgufModelInfo) -> Result<Self, InferenceError> {
-        fn fits(key: &'static str, declared: Option<u32>, limit: usize) -> Result<usize, InferenceError> {
+        // One bound left for a declared dimension: the file has to state it, and
+        // state it as something this machine can hold. Every published width fits
+        // that, so this refuses nothing a real model would trip -- the size answer
+        // is `check_scratch_budget` below, which prices the shape instead of
+        // comparing each dimension against a number the engine was compiled with.
+        fn fits(key: &'static str, declared: Option<u32>) -> Result<usize, InferenceError> {
             let Some(declared) = declared else {
-                return Err(InferenceError::ModelDeclaration(key, None, limit));
+                return Err(InferenceError::ModelDeclaration(key, None, 0));
             };
             let Ok(size) = usize::try_from(declared) else {
-                return Err(InferenceError::ModelDeclaration(key, Some(declared), limit));
+                return Err(InferenceError::ModelDeclaration(key, Some(declared), 0));
             };
-            if size == 0 || size > limit {
-                return Err(InferenceError::ModelDeclaration(key, Some(declared), limit));
+            if size == 0 {
+                return Err(InferenceError::ModelDeclaration(key, Some(declared), 0));
             }
             Ok(size)
         }
 
-        let hidden_dim = fits("<arch>.embedding_length", info.hidden_dim, MAX_HIDDEN_DIM)?;
-        let intermediate_dim = fits(
-            "<arch>.feed_forward_length",
-            info.intermediate_dim,
-            MAX_INTERMEDIATE_DIM,
-        )?;
-        let num_layers = fits("<arch>.block_count", info.num_layers, MAX_LAYERS)?;
-        let head_dim = fits("<arch>.attention.key_length", info.head_dim, MAX_HEAD_DIM)?;
-        let num_heads = fits("<arch>.attention.head_count", info.num_heads, MAX_HIDDEN_DIM)?;
-        let vocab_size = fits("tokenizer.ggml.tokens", info.vocab_size, MAX_VOCAB_SIZE)?;
+        let hidden_dim = fits("<arch>.embedding_length", info.hidden_dim)?;
+        let intermediate_dim = fits("<arch>.feed_forward_length", info.intermediate_dim)?;
+        let num_layers = fits("<arch>.block_count", info.num_layers)?;
+        let head_dim = fits("<arch>.attention.key_length", info.head_dim)?;
+        let num_heads = fits("<arch>.attention.head_count", info.num_heads)?;
+        let vocab_size = fits("tokenizer.ggml.tokens", info.vocab_size)?;
 
-        // The head loop walks `num_heads` slices of `head_dim` out of a buffer
-        // that is `hidden_dim` long, so a file whose heads do not tile its
-        // residual stream would index past it.
-        let heads_span = num_heads
-            .checked_mul(head_dim)
-            .ok_or(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count",
-                info.num_heads,
-                hidden_dim,
-            ))?;
-        if heads_span > hidden_dim {
-            return Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count x key_length",
-                u32::try_from(heads_span).ok(),
-                hidden_dim,
-            ));
-        }
+        // The depth the cache is cut to. `context_length` is what the file calls
+        // the sequence it addresses, and it is read before the metadata walk
+        // stops; a file that states none gets the engine's own run length, which
+        // the config then carries in the open rather than hiding behind a
+        // constant.
+        let seq_len = match info.context_length {
+            Some(stated) if usize::try_from(stated).unwrap_or(usize::MAX) > 0 => {
+                stated as usize
+            }
+            _ => DEFAULT_SEQ_LEN,
+        };
 
+        // A file that states no count is the format's own multi-head case: one KV
+        // head per query head. The cache prices either answer; the kernel only
+        // walks one, which `check_attention_shape` is left to say.
         let num_kv_heads = match info.num_kv_heads {
             Some(kv) if kv > 0 && usize::try_from(kv).unwrap_or(usize::MAX) <= num_heads => {
                 kv as usize
@@ -666,24 +831,7 @@ impl ModelConfig {
             _ => num_heads,
         };
 
-        // The cache holds one K row and one V row per (layer, position), which is
-        // exactly what a model with a single key/value head needs. A file that
-        // declares more asks for rows this shape cannot address, so the refusal
-        // names the count rather than letting every head read head zero's cached
-        // keys. A file that states no count is the format's own multi-head case:
-        // one KV head per query head.
-        if num_kv_heads > 1 {
-            let declared = info
-                .num_kv_heads
-                .or_else(|| u32::try_from(num_kv_heads).ok());
-            return Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count_kv",
-                declared,
-                1,
-            ));
-        }
-
-        Ok(Self {
+        let config = Self {
             hidden_dim,
             intermediate_dim,
             num_layers,
@@ -691,13 +839,197 @@ impl ModelConfig {
             num_kv_heads,
             head_dim,
             vocab_size,
+            seq_len,
             rms_norm_eps: info.rms_norm_eps.unwrap_or(1e-6),
             rope_theta: info.rope_theta.unwrap_or(10000.0),
+        };
+
+        // Checked in the order the graph is built: the head geometry first, since
+        // a file whose heads do not tile their own residual stream is a malformed
+        // declaration rather than a big one, then the byte budget the whole run
+        // is measured against.
+        config.check_attention_shape()?;
+        config.check_scratch_budget()?;
+        Ok(config)
+    }
+}
+
+/// How many `hidden_dim`-wide streams one run holds, and how many
+/// `intermediate_dim`-wide ones: the feed-forward's gate, up and product.
+///
+/// The hidden streams are `x`, `residual`, `x_norm`, `q`, `k`, `v_vec`,
+/// `attn_out`, `attn_proj`, `ffn_out`, `hidden` and `pooled`; the eleven is the
+/// pooling head's accumulator, which is why it is a stream and not a slice of
+/// `hidden` (mean pooling sums every position's vector before normalising).
+///
+/// WHY these are counted here and not written twice: `Scratch::bytes_for` prices
+/// the run from them and `Scratch::new` allocates them, and the two agreeing is
+/// what makes `ModelConfig::scratch_bytes` a promise instead of a comment. The
+/// test `scratch_pricing_matches_the_allocation` holds them to each other.
+const HIDDEN_STREAM_BUFFERS: usize = 11;
+const INTERMEDIATE_BUFFERS: usize = 3;
+
+/// Everything one forward run needs that a 256 KiB user stack cannot hold.
+///
+/// Moved off the stack because a 24-block model with a 2048-position sequence and
+/// 256-wide heads is 96 MiB of cache on its own: no fixed array on any thread of
+/// this service fits it, and the alternative to heap memory was the six compile
+/// time maxima that refused every published model. Every buffer is sized from the
+/// model's own declaration, so a 64-wide test fixture takes 64-wide buffers and
+/// the published file takes 768-wide ones; none of them is a ceiling.
+///
+/// WHY one allocation per run rather than a static: `aid` answers one inference
+/// request at a time and the scratch is dropped when it returns, so the budget is
+/// the peak, not the sum of concurrent runs.
+pub struct Scratch {
+    /// The residual stream at the step's entry, and the copy the residual add
+    /// reads back.
+    pub x: Vec<f32>,
+    pub residual: Vec<f32>,
+    pub x_norm: Vec<f32>,
+    /// The attention projections, each `num_heads` slices of `head_dim` wide.
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v_vec: Vec<f32>,
+    pub attn_out: Vec<f32>,
+    pub attn_proj: Vec<f32>,
+    /// The feed-forward's gate half, up half, product, and the down projection.
+    pub gate: Vec<f32>,
+    pub up: Vec<f32>,
+    pub ffn_hidden: Vec<f32>,
+    pub ffn_out: Vec<f32>,
+    /// One attention head's softmax over the positions it has cached.
+    pub scores: Vec<f32>,
+    /// The logits the output head writes, and the normalised residual stream the
+    /// pooling head reads.
+    pub logits: Vec<f32>,
+    pub hidden: Vec<f32>,
+    /// The pooling head's accumulator: one position's normalised stream at a time
+    /// is summed here before the mean and its length are taken.
+    pub pooled: Vec<f32>,
+}
+
+impl Scratch {
+    /// Bytes the non-cache part of a run costs: the streams, the scores and the
+    /// logits, plus every allocation's own overhead of one block header.
+    pub fn bytes_for(config: &ModelConfig) -> usize {
+        let streams = HIDDEN_STREAM_BUFFERS.saturating_mul(config.hidden_dim);
+        let feed_forward = INTERMEDIATE_BUFFERS.saturating_mul(config.intermediate_dim);
+        let scores = config.seq_len;
+        let logits = config.vocab_size;
+        streams
+            .saturating_add(feed_forward)
+            .saturating_add(scores)
+            .saturating_add(logits)
+            .saturating_mul(FLOAT_BYTES)
+    }
+
+    /// Carves the run's buffers from the service heap, refusing rather than
+    /// falling back when a piece of it cannot be had.
+    ///
+    /// WHY `try_reserve` and not `vec![0.0; n]`: the plain form calls the alloc
+    /// error handler and aborts the task when the kernel refuses the mapping. A
+    /// service that answers queries has to answer this one with the number it
+    /// could not get instead of dying, so the allocation is attempted and its
+    /// failure is reported.
+    pub fn new(config: &ModelConfig) -> Result<Self, InferenceError> {
+        let h = config.hidden_dim;
+        let i = config.intermediate_dim;
+        Ok(Self {
+            x: zeros(h)?,
+            residual: zeros(h)?,
+            x_norm: zeros(h)?,
+            q: zeros(h)?,
+            k: zeros(h)?,
+            v_vec: zeros(h)?,
+            attn_out: zeros(h)?,
+            attn_proj: zeros(h)?,
+            gate: zeros(i)?,
+            up: zeros(i)?,
+            ffn_hidden: zeros(i)?,
+            ffn_out: zeros(h)?,
+            scores: zeros(config.seq_len)?,
+            logits: zeros(config.vocab_size)?,
+            hidden: zeros(h)?,
+            pooled: zeros(h)?,
         })
+    }
+
+    /// Bytes actually held.
+    ///
+    /// WHY it exists: the price the budget was checked against has to be the
+    /// price of what was allocated, or the one remaining size limit is arithmetic
+    /// nothing verified. `scratch_pricing_matches_the_allocation` holds the two to
+    /// each other.
+    pub fn allocated_bytes(&self) -> usize {
+        [
+            self.x.len(),
+            self.residual.len(),
+            self.x_norm.len(),
+            self.q.len(),
+            self.k.len(),
+            self.v_vec.len(),
+            self.attn_out.len(),
+            self.attn_proj.len(),
+            self.gate.len(),
+            self.up.len(),
+            self.ffn_hidden.len(),
+            self.ffn_out.len(),
+            self.scores.len(),
+            self.logits.len(),
+            self.hidden.len(),
+            self.pooled.len(),
+        ]
+        .iter()
+        .fold(0usize, |acc, &n| acc.saturating_add(n))
+        .saturating_mul(FLOAT_BYTES)
+    }
+
+    /// Refuses a scratch that was not cut for this shape, rather than letting a
+    /// step write past the buffers it was handed.
+    fn fits(&self, config: &ModelConfig) -> Result<(), InferenceError> {
+        let h = config.hidden_dim;
+        let i = config.intermediate_dim;
+        let streams = [
+            &self.x,
+            &self.residual,
+            &self.x_norm,
+            &self.q,
+            &self.k,
+            &self.v_vec,
+            &self.attn_out,
+            &self.attn_proj,
+            &self.ffn_out,
+            &self.hidden,
+            &self.pooled,
+        ];
+        if streams.iter().any(|b| b.len() < h) {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        if [
+            &self.gate,
+            &self.up,
+            &self.ffn_hidden,
+            &self.logits,
+            &self.scores,
+        ]
+        .iter()
+        .any(|b| b.is_empty())
+        {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        if self.gate.len() < i || self.up.len() < i || self.ffn_hidden.len() < i {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        if self.logits.len() < config.vocab_size || self.scores.len() < config.seq_len {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        Ok(())
     }
 }
 
 /// References to layer weights (supports zero-copy referencing from memory or test fixture).
+#[derive(Clone, Copy)]
 pub struct LayerWeights<'a> {
     pub attn_norm: &'a [f32],
     pub attn_q: &'a [u8],
@@ -713,30 +1045,150 @@ pub struct LayerWeights<'a> {
     pub weight_type: u32,
 }
 
+impl<'a> LayerWeights<'a> {
+    /// Whether the four norms this layer applies are as wide as the stream.
+    ///
+    /// WHY the tensors are not checked here: `gemv` already refuses a row buffer
+    /// shorter than the product it is asked for, and it is the one that knows each
+    /// quantisation's block width. The norms are different because `rms_norm`
+    /// walks the shorter of the two slices it is handed -- a norm that stopped
+    /// early would leave the tail of the stream unscaled and the answer would
+    /// still arrive looking like it came from this model.
+    fn norms_hold(&self, hidden_dim: usize) -> bool {
+        [
+            self.attn_norm,
+            self.post_attn_norm,
+            self.ffn_norm,
+            self.post_ffn_norm,
+        ]
+        .iter()
+        .all(|w| w.len() >= hidden_dim)
+    }
+}
+
 /// References to model weights.
+///
+/// `layers` is a slice and not a fixed array because the block count is the
+/// file's: a two-entry array could only ever describe a two-block model, which is
+/// one of the ceilings this module no longer has.
 pub struct ModelWeights<'a> {
     pub token_embd: &'a [u8],
     pub token_embd_type: u32,
-    pub layers: [Option<LayerWeights<'a>>; MAX_LAYERS],
+    pub layers: &'a [Option<LayerWeights<'a>>],
     pub final_norm: &'a [f32],
     pub output_weight: &'a [u8],
     pub output_weight_type: u32,
 }
 
-/// KV cache for attention mechanisms with zero heap allocation.
+/// KV cache for attention mechanisms, cut from the service's memory capability.
+///
+/// The rows are `[layer][position][kv head][dimension]` in two flat buffers, and
+/// both are allocated to the depth, width and block count the file declared. This
+/// is the shape that could not live on the stack: the published
+/// `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks, 2048 positions, one key/value
+/// head 256 wide -- is 100,663,296 bytes here, against a 262,144-byte user stack.
+///
+/// WHY the shape is recorded instead of inferred from `k.len()`: a step has to be
+/// able to tell "position 2049 of this sequence" from "a cache built for a
+/// different model", and those are different answers to give a person.
 pub struct KvCache {
-    pub k: [[[f32; 32]; MAX_SEQ_LEN]; MAX_LAYERS],
-    pub v: [[[f32; 32]; MAX_SEQ_LEN]; MAX_LAYERS],
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    /// Positions the cache was cut for: a step at `seq_len` is past the sequence,
+    /// not wrapped around into row 0.
+    pub seq_len: usize,
+    pub num_layers: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    /// Positions written so far.
     pub len: usize,
 }
 
 impl KvCache {
-    pub const fn empty() -> Self {
-        Self {
-            k: [[[0.0f32; 32]; MAX_SEQ_LEN]; MAX_LAYERS],
-            v: [[[0.0f32; 32]; MAX_SEQ_LEN]; MAX_LAYERS],
+    /// Allocates the cache the model's own declaration describes.
+    pub fn new(config: &ModelConfig) -> Result<Self, InferenceError> {
+        let rows = config
+            .num_layers
+            .saturating_mul(config.seq_len)
+            .saturating_mul(config.num_kv_heads);
+        let floats = rows.saturating_mul(config.head_dim);
+        Ok(Self {
+            k: zeros(floats)?,
+            v: zeros(floats)?,
+            seq_len: config.seq_len,
+            num_layers: config.num_layers,
+            num_kv_heads: config.num_kv_heads,
+            head_dim: config.head_dim,
             len: 0,
+        })
+    }
+
+    /// Bytes held: both tensors.
+    pub fn allocated_bytes(&self) -> usize {
+        (self.k.len().saturating_add(self.v.len())).saturating_mul(FLOAT_BYTES)
+    }
+
+    /// First float of one (layer, position, head) row, or `None` when the row is
+    /// not in this cache.
+    pub fn row_start(&self, layer: usize, position: usize, head: usize) -> Option<usize> {
+        if layer >= self.num_layers || position >= self.seq_len || head >= self.num_kv_heads {
+            return None;
         }
+        let per_layer = self.seq_len.saturating_mul(self.num_kv_heads).saturating_mul(self.head_dim);
+        layer
+            .checked_mul(per_layer)?
+            .checked_add(position.checked_mul(self.num_kv_heads.saturating_mul(self.head_dim))?)?
+            .checked_add(head.checked_mul(self.head_dim)?)
+    }
+
+    /// The cached key row at (layer, position, head), or `None` when the cache
+    /// was not cut with that address in it.
+    ///
+    /// WHY the caller names the head: this build's kernel walks one key/value
+    /// head, so it passes 0 and `ModelConfig::check_attention_shape` is what keeps
+    /// that honest. The addressing already carries a head index, which is the
+    /// memory side of grouped-query attention being representable -- the kernel
+    /// that reads more than one row is the separate task.
+    pub fn k_row(&self, layer: usize, position: usize, head: usize) -> Option<&[f32]> {
+        let start = self.row_start(layer, position, head)?;
+        self.k.get(start..start.checked_add(self.head_dim)?)
+    }
+
+    pub fn v_row(&self, layer: usize, position: usize, head: usize) -> Option<&[f32]> {
+        let start = self.row_start(layer, position, head)?;
+        self.v.get(start..start.checked_add(self.head_dim)?)
+    }
+
+    /// Writes one position's K and V rows for one key/value head.
+    pub fn write(
+        &mut self,
+        layer: usize,
+        position: usize,
+        head: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<(), InferenceError> {
+        // The row the cache holds is exactly the head the file declared; a head
+        // wider than the row would be truncated, and a truncated key is a
+        // different model's key.
+        if key.len() != self.head_dim || value.len() != self.head_dim {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        let start = self
+            .row_start(layer, position, head)
+            .ok_or(InferenceError::ContextLengthExceeded)?;
+        let end = start
+            .checked_add(self.head_dim)
+            .ok_or(InferenceError::ContextLengthExceeded)?;
+        self.k
+            .get_mut(start..end)
+            .ok_or(InferenceError::BufferTooSmall)?
+            .copy_from_slice(key);
+        self.v
+            .get_mut(start..end)
+            .ok_or(InferenceError::BufferTooSmall)?
+            .copy_from_slice(value);
+        Ok(())
     }
 
     pub fn reset(&mut self) {
@@ -744,53 +1196,101 @@ impl KvCache {
     }
 }
 
+/// One zeroed buffer from the service heap, or the refusal that says it was not
+/// given the memory.
+fn zeros(count: usize) -> Result<Vec<f32>, InferenceError> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(count)
+        .map_err(|_| InferenceError::ScratchUnavailable)?;
+    buffer.resize(count, 0.0f32);
+    Ok(buffer)
+}
+
 // -----------------------------------------------------------------------------
 // Neural Forward Pass & Generation
 // -----------------------------------------------------------------------------
 
 /// Executes a single forward step of the neural network for one token at `pos`.
+///
+/// The step's streams, scores and logits arrive through `scratch` and the cached
+/// keys through `kv_cache`, both cut from the model's own declaration; the
+/// normalised residual stream leaves as `scratch.hidden` and the next-token
+/// distribution as `scratch.logits`.
 pub fn forward_step(
     token_id: u32,
     pos: usize,
     model: &ModelWeights,
     config: &ModelConfig,
     kv_cache: &mut KvCache,
-    out_logits: &mut [f32],
-    out_hidden: &mut [f32],
+    scratch: &mut Scratch,
 ) -> Result<(), InferenceError> {
-    if pos >= MAX_SEQ_LEN {
-        return Err(InferenceError::ContextLengthExceeded);
-    }
     let h_dim = config.hidden_dim;
-    if h_dim > MAX_HIDDEN_DIM {
-        return Err(InferenceError::BufferTooSmall);
-    }
-    // A declaration wider than a buffer is refused, never truncated to fit. The
-    // cache row is `MAX_HEAD_DIM` and the FFN buffers are
-    // `MAX_INTERMEDIATE_DIM`, so clipping either would let an answer computed at
-    // 32 wide be reported as the answer of a model that declared 256.
-    if config.head_dim > MAX_HEAD_DIM || config.num_kv_heads > 1 {
-        return Err(InferenceError::BufferTooSmall);
-    }
-    if config.intermediate_dim > MAX_INTERMEDIATE_DIM {
-        return Err(InferenceError::BufferTooSmall);
+    let inter_dim = config.intermediate_dim;
+
+    // Everything the step indexes with is checked before any work runs, so a call
+    // this engine will not complete leaves the cache holding what it held when it
+    // arrived.
+    //
+    // A declaration wider than the memory it was handed is refused, never
+    // truncated to fit: an answer computed at 32 wide and reported as the answer
+    // of a model that declared 256 would be the engine describing a model it
+    // never ran.
+    if pos >= kv_cache.seq_len {
+        return Err(InferenceError::ContextLengthExceeded);
     }
     // The head loop indexes `num_heads x head_dim` of a stream that is `h_dim`
     // long, so heads that do not tile it would read past the projection that
-    // produced them. `from_gguf` refuses this pairing already; a hand-built
-    // config is checked here for the same reason.
-    let heads_span = config
-        .num_heads
-        .checked_mul(config.head_dim)
-        .unwrap_or(usize::MAX);
-    if heads_span > h_dim {
+    // produced them, and this build's kernel walks one key/value head.
+    // `from_gguf` refuses both already; a hand-built config is checked here for
+    // the same reason.
+    config.check_attention_shape()?;
+    scratch.fits(config)?;
+    if kv_cache.head_dim != config.head_dim
+        || kv_cache.num_kv_heads != config.num_kv_heads
+        || kv_cache.num_layers < config.num_layers
+        || kv_cache.seq_len < config.seq_len
+    {
         return Err(InferenceError::BufferTooSmall);
     }
-    // Checked before any work, so a call this engine will not complete leaves
-    // the cache holding what it held when it arrived.
-    if !out_hidden.is_empty() && out_hidden.len() < h_dim {
-        return Err(InferenceError::BufferTooSmall);
+    // The file declares `num_layers` blocks; fewer than that handed over means the
+    // run would skip transformer blocks and still be reported as this model's
+    // answer. There is no weight loader yet, so this is the check that keeps an
+    // unloaded model from answering at all.
+    if model.layers.len() < config.num_layers {
+        return Err(InferenceError::CorruptedWeights);
     }
+    // The same argument as `LayerWeights::norms_hold` for the block norms: a final
+    // norm narrower than the stream leaves its tail unscaled, and the logits and
+    // the pooled vector would both be computed from a half-normalised stream.
+    if model.final_norm.len() < h_dim {
+        return Err(InferenceError::CorruptedWeights);
+    }
+
+    // Destructured so the step holds disjoint borrows of the buffers it writes in
+    // one block -- the attention pass reads `q` while it writes `attn_out`, and
+    // the residual add reads `residual` while it writes `x`.
+    //
+    // `pooled` is left out because a step does not pool: the accumulator belongs
+    // to `extract_embedding`, which sums one position's `hidden` at a time.
+    let Scratch {
+        x,
+        residual,
+        x_norm,
+        q,
+        k,
+        v_vec,
+        attn_out,
+        attn_proj,
+        gate,
+        up,
+        ffn_hidden,
+        ffn_out,
+        scores,
+        logits,
+        hidden,
+        ..
+    } = scratch;
 
     // 1. Embedding lookup. The row is read as floats because that is the only
     // layout this path can address; a quantised embedding belongs to a loader
@@ -798,10 +1298,13 @@ pub fn forward_step(
     if model.token_embd_type != 0 {
         return Err(InferenceError::UnsupportedQuantization(model.token_embd_type));
     }
-    let mut x = [0.0f32; MAX_HIDDEN_DIM];
     let embd_idx = (token_id as usize) % config.vocab_size;
-    let embd_stride = h_dim * 4;
-    let embd_offset = embd_idx * embd_stride;
+    let embd_stride = h_dim
+        .checked_mul(FLOAT_BYTES)
+        .ok_or(InferenceError::CorruptedWeights)?;
+    let embd_offset = embd_idx
+        .checked_mul(embd_stride)
+        .ok_or(InferenceError::CorruptedWeights)?;
     if model.token_embd.len() < embd_offset + embd_stride {
         // The row the file does not hold is not invented here. A stand-in built
         // from the token id would let an answer be reported as the installed
@@ -809,7 +1312,7 @@ pub fn forward_step(
         return Err(InferenceError::CorruptedWeights);
     }
     for j in 0..h_dim {
-        let b_idx = embd_offset + j * 4;
+        let b_idx = embd_offset + j * FLOAT_BYTES;
         x[j] = f32::from_le_bytes([
             model.token_embd[b_idx],
             model.token_embd[b_idx + 1],
@@ -825,26 +1328,20 @@ pub fn forward_step(
     }
 
     // 2. Transformer layers
-    let mut residual = [0.0f32; MAX_HIDDEN_DIM];
-    let mut x_norm = [0.0f32; MAX_HIDDEN_DIM];
-    let mut q = [0.0f32; MAX_HIDDEN_DIM];
-    let mut k = [0.0f32; MAX_HIDDEN_DIM];
-    let mut v_vec = [0.0f32; MAX_HIDDEN_DIM];
-    let mut attn_out = [0.0f32; MAX_HIDDEN_DIM];
-    let mut attn_proj = [0.0f32; MAX_HIDDEN_DIM];
-    let mut gate = [0.0f32; MAX_INTERMEDIATE_DIM];
-    let mut up = [0.0f32; MAX_INTERMEDIATE_DIM];
-    let mut ffn_hidden = [0.0f32; MAX_INTERMEDIATE_DIM];
-    let mut ffn_out = [0.0f32; MAX_HIDDEN_DIM];
-
     for l in 0..config.num_layers {
-        if l >= MAX_LAYERS {
-            break;
-        }
         let lw = match &model.layers[l] {
-            Some(w) => w,
-            None => continue,
+            Some(w) => *w,
+            // A block the file declares and nobody loaded is a missing weight,
+            // not a block to walk around: skipping it silently would report a
+            // shallower network as this model's answer.
+            None => return Err(InferenceError::CorruptedWeights),
         };
+        // `rms_norm` walks the shorter of the two slices it is handed, so a norm
+        // vector narrower than the stream would leave its tail unscaled and the
+        // answer would still arrive described as this model's.
+        if !lw.norms_hold(h_dim) {
+            return Err(InferenceError::CorruptedWeights);
+        }
 
         // Pre-Attention RMSNorm
         residual[..h_dim].copy_from_slice(&x[..h_dim]);
@@ -864,43 +1361,52 @@ pub fn forward_step(
             apply_rope(&mut k[head_start..head_end], pos, config.head_dim, config.rope_theta);
         }
 
-        // Cache K and V. The row is the whole declared head: `config.head_dim`
-        // was checked against `MAX_HEAD_DIM` above, so nothing is dropped here.
+        // Cache K and V. `KvCache::write` refuses a slice that is not exactly
+        // `head_dim` long, so the row is the whole declared head: nothing is
+        // dropped and nothing is zero-padded to reach it.
         let hd = config.head_dim;
-        kv_cache.k[l][pos][..hd].copy_from_slice(&k[..hd]);
-        kv_cache.v[l][pos][..hd].copy_from_slice(&v_vec[..hd]);
+        kv_cache.write(l, pos, 0, &k[..hd], &v_vec[..hd])?;
 
         // Attention dot product & Softmax
         let scale_att = 1.0f32 / f32_sqrt(config.head_dim as f32);
-        let mut scores = [0.0f32; MAX_SEQ_LEN];
         let seq_len_cur = pos + 1;
 
         // One key/value head, so every query head attends to the same cached
-        // row; a file that declares more is refused above rather than read as
-        // this one. The destination is cleared first: heads span at most
-        // `num_heads x head_dim` of the residual stream, and whatever lies past
-        // that belongs to this layer, not the last one.
+        // row; a file that declares more is refused by `check_attention_shape`
+        // rather than read as this one. The destination is cleared first: heads
+        // span at most `num_heads x head_dim` of the residual stream, and whatever
+        // lies past that belongs to this layer, not the last one.
         for v in attn_out[..h_dim].iter_mut() {
             *v = 0.0f32;
         }
         for h in 0..config.num_heads {
             let h_base = h * config.head_dim;
             for t in 0..seq_len_cur {
+                // A row the cache does not address is a position past the
+                // sequence the file declared, and it is reported as that. Reading
+                // zero instead would score a token that never existed as if it had
+                // no key rather than no presence at all.
+                let key_row = kv_cache
+                    .k_row(l, t, 0)
+                    .ok_or(InferenceError::ContextLengthExceeded)?;
                 let mut dot = 0.0f32;
                 for d in 0..hd {
-                    dot += q[h_base + d] * kv_cache.k[l][t][d];
+                    dot += q[h_base + d] * key_row[d];
                 }
                 scores[t] = dot * scale_att;
             }
             softmax(&mut scores[..seq_len_cur]);
 
-            // Weighted sum of V
-            for d in 0..hd {
-                let mut v_sum = 0.0f32;
-                for t in 0..seq_len_cur {
-                    v_sum += scores[t] * kv_cache.v[l][t][d];
+            // Weighted sum of V, accumulated position by position into the head's
+            // own slice of the stream.
+            for t in 0..seq_len_cur {
+                let value_row = kv_cache
+                    .v_row(l, t, 0)
+                    .ok_or(InferenceError::ContextLengthExceeded)?;
+                let weight = scores[t];
+                for d in 0..hd {
+                    attn_out[h_base + d] += weight * value_row[d];
                 }
-                attn_out[h_base + d] = v_sum;
             }
         }
 
@@ -919,7 +1425,6 @@ pub fn forward_step(
         rms_norm(&mut x_norm[..h_dim], lw.ffn_norm, config.rms_norm_eps);
 
         // FFN: Gate and Up projections
-        let inter_dim = config.intermediate_dim;
         gemv(lw.ffn_gate, lw.weight_type, &x_norm[..h_dim], &mut gate[..inter_dim], inter_dim, h_dim)?;
         gemv(lw.ffn_up, lw.weight_type, &x_norm[..h_dim], &mut up[..inter_dim], inter_dim, h_dim)?;
 
@@ -939,21 +1444,23 @@ pub fn forward_step(
     // 3. Final RMSNorm
     rms_norm(&mut x[..h_dim], model.final_norm, config.rms_norm_eps);
 
-    // The normalised residual stream is what a pooling head consumes, so it
-    // leaves through `out_hidden` rather than being re-derived from the logits
-    // below. An empty slice means the caller only wanted the next token.
-    if !out_hidden.is_empty() {
-        out_hidden[..h_dim].copy_from_slice(&x[..h_dim]);
-    }
+    // The normalised residual stream is what a pooling head consumes, so it leaves
+    // in `scratch.hidden` rather than being re-derived from the logits below.
+    hidden[..h_dim].copy_from_slice(&x[..h_dim]);
 
-    // 4. Output projection to compute logits
-    let v_size = config.vocab_size.min(out_logits.len());
+    // 4. Output projection to compute logits.
+    //
+    // WHY the whole declared vocabulary and not a length taken from the caller's
+    // buffer: `Scratch::fits` has already guaranteed the buffer holds
+    // `config.vocab_size`, and a distribution truncated to whatever the caller
+    // happened to hand over would still be sampled as though it were complete --
+    // reporting a token chosen from half the model's vocabulary.
     gemv(
         model.output_weight,
         model.output_weight_type,
         &x[..h_dim],
-        &mut out_logits[..v_size],
-        v_size,
+        &mut logits[..config.vocab_size],
+        config.vocab_size,
         h_dim,
     )?;
 
@@ -977,11 +1484,20 @@ pub fn generate(
     if prompt_tokens.is_empty() {
         return Ok(0);
     }
-    let mut kv_cache = KvCache::empty();
-    let mut logits = [0.0f32; MAX_VOCAB_SIZE];
+    // The budget is the first thing the run pays for: a model that does not fit
+    // is refused before a single byte is asked for, and the refusal names both
+    // numbers so the caller knows which one to change.
+    config.check_scratch_budget()?;
+    let mut scratch = Scratch::new(config)?;
+    let mut kv_cache = KvCache::new(config)?;
 
-    // 1. Pre-fill prompt tokens
-    let prefill_len = prompt_tokens.len().min(MAX_SEQ_LEN);
+    // 1. Pre-fill prompt tokens.
+    //
+    // A prompt longer than the sequence the file declared is cut to it rather than
+    // run past the cache: `config.seq_len` comes from `context_length`, so the tail
+    // the model could not have attended to is dropped by the model's own limit and
+    // not by one invented here.
+    let prefill_len = prompt_tokens.len().min(config.seq_len);
     for pos in 0..prefill_len {
         if is_cancelled() {
             return Err(InferenceError::Cancelled);
@@ -992,18 +1508,17 @@ pub fn generate(
             model,
             config,
             &mut kv_cache,
-            &mut logits[..config.vocab_size],
-            &mut [],
+            &mut scratch,
         )?;
     }
 
     // 2. Sample first generated token from prompt's final logits
-    let mut next_token = sample_token(&logits[..config.vocab_size], temperature);
+    let mut next_token = sample_token(&scratch.logits[..config.vocab_size], temperature);
     let mut generated_count = 0usize;
     let mut cur_pos = prefill_len;
 
     // 3. Autoregressive loop
-    while generated_count < max_new_tokens && cur_pos < MAX_SEQ_LEN {
+    while generated_count < max_new_tokens && cur_pos < config.seq_len {
         if is_cancelled() {
             return Err(InferenceError::Cancelled);
         }
@@ -1023,12 +1538,11 @@ pub fn generate(
             model,
             config,
             &mut kv_cache,
-            &mut logits[..config.vocab_size],
-            &mut [],
+            &mut scratch,
         )?;
 
         cur_pos += 1;
-        next_token = sample_token(&logits[..config.vocab_size], temperature);
+        next_token = sample_token(&scratch.logits[..config.vocab_size], temperature);
     }
 
     Ok(generated_count)
@@ -1047,18 +1561,26 @@ pub fn extract_embedding(
     if tokens.is_empty() {
         return Ok(0);
     }
-    let mut kv_cache = KvCache::empty();
-    let mut logits = [0.0f32; MAX_VOCAB_SIZE];
-    let count = tokens.len().min(MAX_SEQ_LEN);
+    // WHY the caller's buffer is checked against the declared width instead of the
+    // two being min'ed together: a 768-wide model that wrote 256 numbers and
+    // reported 256 would hand back a prefix of a vector and let the caller compare
+    // it to another prefix as though both were the whole embedding. Checked before
+    // anything is allocated, because a destination this service cannot write into
+    // is not a reason to take memory from the device first.
+    if out_embedding.len() < config.hidden_dim {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    // Same order as `generate`: priced, refused if it does not fit, then allocated.
+    config.check_scratch_budget()?;
+    let mut scratch = Scratch::new(config)?;
+    let mut kv_cache = KvCache::new(config)?;
+    let count = tokens.len().min(config.seq_len);
+    let dim = config.hidden_dim;
 
     // Mean pooling over the positions, which is what an embedding file declares
     // when it states `pooling_type` 1. Each step's normalised residual stream is
     // summed as it is produced, so the vector is the model's own hidden
     // representation rather than a slice of the cache or a re-use of the logits.
-    let dim = config.hidden_dim.min(out_embedding.len());
-    let mut pooled = [0.0f32; MAX_HIDDEN_DIM];
-    let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
-
     for pos in 0..count {
         forward_step(
             tokens[pos],
@@ -1066,17 +1588,16 @@ pub fn extract_embedding(
             model,
             config,
             &mut kv_cache,
-            &mut logits[..config.vocab_size],
-            &mut hidden,
+            &mut scratch,
         )?;
         for i in 0..dim {
-            pooled[i] += hidden[i];
+            scratch.pooled[i] += scratch.hidden[i];
         }
     }
 
     let inv_count = 1.0f32 / (count as f32);
     for i in 0..dim {
-        out_embedding[i] = pooled[i] * inv_count;
+        out_embedding[i] = scratch.pooled[i] * inv_count;
     }
 
     // L2-normalize vector
@@ -1271,8 +1792,27 @@ pub mod tests {
     /// read a row out of. An empty table would only ever exercise the refusal, and
     /// a stand-in row built from the token id would have these tests certify an
     /// answer computed from nothing.
+    /// The width this fixture is built at.
+    ///
+    /// WHY it is a fixture's own number and not a constant of the engine: the
+    /// engine used to carry a compile-time ceiling for every dimension and the
+    /// tests sized themselves with those, which made the little graph look like
+    /// the shape the engine could speak of. The published model is 768 wide, this
+    /// one is 64, and both are described by the same `ModelConfig`; the only limit
+    /// that applies to either is `SCRATCH_BYTE_BUDGET`.
+    const LITTLE_HIDDEN: usize = 64;
+
+    /// Scratch and cache cut for a config, the way every caller of `forward_step`
+    /// must supply them.
+    fn fit(config: &ModelConfig) -> (Scratch, KvCache) {
+        (
+            Scratch::new(config).expect("the fixture's shape is under budget"),
+            KvCache::new(config).expect("the fixture's cache is under budget"),
+        )
+    }
+
     struct LittleModel {
-        ones: [f32; MAX_HIDDEN_DIM],
+        ones: [f32; LITTLE_HIDDEN],
         id_w: [u8; 64 * 64 * 4],
         ffn_gate_w: [u8; 128 * 64 * 4],
         ffn_down_w: [u8; 64 * 128 * 4],
@@ -1283,7 +1823,7 @@ pub mod tests {
     impl LittleModel {
         fn new() -> Self {
             let mut model = Self {
-                ones: [1.0f32; MAX_HIDDEN_DIM],
+                ones: [1.0f32; LITTLE_HIDDEN],
                 id_w: [0u8; 64 * 64 * 4],
                 ffn_gate_w: [0u8; 128 * 64 * 4],
                 ffn_down_w: [0u8; 64 * 128 * 4],
@@ -1313,8 +1853,9 @@ pub mod tests {
             ModelConfig::default_test_config()
         }
 
-        fn weights(&self) -> ModelWeights<'_> {
-            let layer = LayerWeights {
+        /// The one block the fixture declares, loaded.
+        fn layer(&self) -> LayerWeights<'_> {
+            LayerWeights {
                 attn_norm: &self.ones[..64],
                 attn_q: &self.id_w,
                 attn_k: &self.id_w,
@@ -1327,11 +1868,20 @@ pub mod tests {
                 ffn_down: &self.ffn_down_w,
                 post_ffn_norm: &self.ones[..64],
                 weight_type: 0, // F32
-            };
+            }
+        }
+
+        /// The fixture as the engine sees it, over the caller's block list.
+        ///
+        /// WHY the list arrives from the caller: its length is the model's declared
+        /// block count, which is a property of the config under test and not of this
+        /// fixture. A `ModelWeights` that could only carry two blocks was the same
+        /// kind of limit as the ceilings this module no longer has.
+        fn weights<'b>(&'b self, blocks: &'b [Option<LayerWeights<'b>>]) -> ModelWeights<'b> {
             ModelWeights {
                 token_embd: &self.embd,
                 token_embd_type: 0,
-                layers: [Some(layer), None],
+                layers: blocks,
                 final_norm: &self.ones[..64],
                 output_weight: &self.head_w,
                 output_weight_type: 0,
@@ -1343,7 +1893,8 @@ pub mod tests {
     fn test_forward_step_and_generate_on_real_fixture() {
         let fixture = LittleModel::new();
         let config = LittleModel::config();
-        let model = fixture.weights();
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
 
         let prompt = [crate::tokenizer::TOKEN_BOS, 261]; // BOS, " the"
         let mut generated_tokens = [0u32; 4];
@@ -1375,17 +1926,17 @@ pub mod tests {
     }
 
     /// The embedding service consumes the forward pass's normalised residual
-    /// stream, so it leaves through `out_hidden` instead of being re-derived from
+    /// stream, so it leaves in `scratch.hidden` instead of being re-derived from
     /// somewhere else. A destination too small for the stream the file declares is
-    /// refused: a vector truncated to 8 dims is not that model's embedding.
+    /// refused by the pooling head that writes it: a vector truncated to 8 dims is
+    /// not that model's embedding.
     #[test]
     fn test_forward_step_hands_back_the_normalised_residual_stream() {
         let fixture = LittleModel::new();
         let config = LittleModel::config();
-        let model = fixture.weights();
-        let mut kv_cache = KvCache::empty();
-        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
-        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
+        let (mut scratch, mut kv_cache) = fit(&config);
 
         forward_step(
             crate::tokenizer::TOKEN_BOS,
@@ -1393,13 +1944,12 @@ pub mod tests {
             &model,
             &config,
             &mut kv_cache,
-            &mut logits[..config.vocab_size],
-            &mut hidden,
+            &mut scratch,
         )
         .expect("the fixture holds the row this token asks for");
 
         assert!(
-            hidden[..config.hidden_dim].iter().any(|&v| v != 0.0),
+            scratch.hidden[..config.hidden_dim].iter().any(|&v| v != 0.0),
             "the residual stream left the step empty"
         );
         // This fixture's output head is the identity, so the logits are the stream
@@ -1408,111 +1958,168 @@ pub mod tests {
         // property a pooling head depends on.
         for i in 0..config.hidden_dim {
             assert!(
-                (hidden[i] - logits[i]).abs() < 1e-6,
+                (scratch.hidden[i] - scratch.logits[i]).abs() < 1e-6,
                 "dim {} handed back {} while the output head was fed {}",
                 i,
-                hidden[i],
-                logits[i]
+                scratch.hidden[i],
+                scratch.logits[i]
             );
         }
         assert_eq!(kv_cache.len, 1);
+        // The row the step just wrote is in the cache where the addressing says it
+        // is, and not only in the buffers the caller can see.
+        assert!(kv_cache
+            .k_row(0, 0, 0)
+            .expect("position 0 of block 0 is addressed")
+            .iter()
+            .any(|&v| v != 0.0));
 
         let mut too_narrow = [0.0f32; 8];
         assert_eq!(
-            forward_step(
-                crate::tokenizer::TOKEN_BOS,
-                1,
+            extract_embedding(
+                &[crate::tokenizer::TOKEN_BOS],
                 &model,
                 &config,
-                &mut kv_cache,
-                &mut logits[..config.vocab_size],
                 &mut too_narrow,
             ),
             Err(InferenceError::BufferTooSmall)
         );
-        // Refused before the graph ran, so the cache is still what it was.
-        assert_eq!(kv_cache.len, 1);
     }
 
-    /// A declaration wider than a buffer is refused, never clipped to fit. An
-    /// answer computed at 32 dims wide and reported as the answer of a model that
-    /// declared 256 would be the engine describing a model it never ran.
+    /// A declaration wider than the memory it was handed is refused, never
+    /// clipped to fit. An answer computed at 64 dims wide and reported as the
+    /// answer of a model that declared 72 would be the engine describing a model
+    /// it never ran.
+    ///
+    /// WHY the scratch and the cache are cut once, for the fixture, and then asked
+    /// to run the variants: that is the only way to show the check is on the shape
+    /// of the memory rather than on a number compiled into the engine. Each variant
+    /// outgrows one part of the fixture's allocation -- the stream, the
+    /// feed-forward, the cached head's width, the sequence depth, the block count.
     #[test]
     fn test_forward_step_refuses_a_shape_wider_than_its_buffers() {
-        let empty = ModelWeights {
-            token_embd: &[],
-            token_embd_type: 0,
-            layers: [None, None],
-            final_norm: &[],
-            output_weight: &[],
-            output_weight_type: 0,
-        };
+        let fixture = LittleModel::new();
         let base = LittleModel::config();
-        let mut kv_cache = KvCache::empty();
-        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
-        let no_out: &mut [f32] = &mut [];
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
+        let (mut scratch, mut kv_cache) = fit(&base);
 
-        let wider_head = ModelConfig {
-            head_dim: MAX_HEAD_DIM + 8,
-            ..base
-        };
+        for wider in [
+            ModelConfig {
+                hidden_dim: 72,
+                ..base
+            },
+            ModelConfig {
+                intermediate_dim: 512,
+                ..base
+            },
+            ModelConfig {
+                num_heads: 1,
+                head_dim: 40,
+                ..base
+            },
+            ModelConfig {
+                seq_len: 128,
+                ..base
+            },
+            ModelConfig {
+                num_layers: 2,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                forward_step(
+                    crate::tokenizer::TOKEN_BOS,
+                    0,
+                    &model,
+                    &wider,
+                    &mut kv_cache,
+                    &mut scratch,
+                ),
+                Err(InferenceError::BufferTooSmall),
+                "{wider:?} ran on memory cut for {base:?}"
+            );
+        }
+
+        // Two key/value heads where the kernel walks one is the graph's gap, and it
+        // is reported as the declaration that says so rather than as a size.
         assert_eq!(
             forward_step(
-                1,
+                crate::tokenizer::TOKEN_BOS,
                 0,
-                &empty,
-                &wider_head,
+                &model,
+                &ModelConfig {
+                    num_kv_heads: 2,
+                    ..base
+                },
                 &mut kv_cache,
-                &mut logits,
-                no_out
+                &mut scratch,
             ),
-            Err(InferenceError::BufferTooSmall)
-        );
-
-        let wider_ffn = ModelConfig {
-            intermediate_dim: MAX_INTERMEDIATE_DIM + 1,
-            ..base
-        };
-        assert_eq!(
-            forward_step(1, 0, &empty, &wider_ffn, &mut kv_cache, &mut logits, no_out),
-            Err(InferenceError::BufferTooSmall)
-        );
-
-        let shared_kv = ModelConfig {
-            num_kv_heads: 2,
-            ..base
-        };
-        assert_eq!(
-            forward_step(1, 0, &empty, &shared_kv, &mut kv_cache, &mut logits, no_out),
-            Err(InferenceError::BufferTooSmall)
-        );
-
-        let wider_stream = ModelConfig {
-            hidden_dim: MAX_HIDDEN_DIM + 1,
-            ..base
-        };
-        assert_eq!(
-            forward_step(
-                1,
-                0,
-                &empty,
-                &wider_stream,
-                &mut kv_cache,
-                &mut logits,
-                no_out
-            ),
-            Err(InferenceError::BufferTooSmall)
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(2),
+                1
+            ))
         );
 
         // Four heads of 32 do not tile a 64-wide stream, so the fourth would read
         // past the projection that filled it.
-        let overhanging = ModelConfig {
-            num_heads: 4,
+        assert_eq!(
+            forward_step(
+                crate::tokenizer::TOKEN_BOS,
+                0,
+                &model,
+                &ModelConfig {
+                    num_heads: 4,
+                    ..base
+                },
+                &mut kv_cache,
+                &mut scratch,
+            ),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count x key_length",
+                Some(128),
+                64
+            ))
+        );
+
+        // Every refusal above ran before the graph did, so the cache still holds
+        // what it arrived holding: nothing.
+        assert_eq!(kv_cache.len, 0);
+
+        // A block the file declares and nobody loaded is a missing weight, not a
+        // block to walk around -- and the memory here is deliberately big enough.
+        let deeper = ModelConfig {
+            num_layers: 2,
             ..base
         };
+        let mut deep_cache = KvCache::new(&deeper).expect("two blocks of this shape fit");
         assert_eq!(
-            forward_step(1, 0, &empty, &overhanging, &mut kv_cache, &mut logits, no_out),
-            Err(InferenceError::BufferTooSmall)
+            forward_step(
+                crate::tokenizer::TOKEN_BOS,
+                0,
+                &model,
+                &deeper,
+                &mut deep_cache,
+                &mut scratch,
+            ),
+            Err(InferenceError::CorruptedWeights)
+        );
+
+        // A final norm narrower than the stream would leave its tail unscaled, and
+        // `rms_norm` walks the shorter of the two, so the gap is refused outright.
+        let mut bare = fixture.weights(&blocks);
+        bare.final_norm = &fixture.ones[..8];
+        assert_eq!(
+            forward_step(
+                crate::tokenizer::TOKEN_BOS,
+                0,
+                &bare,
+                &base,
+                &mut kv_cache,
+                &mut scratch,
+            ),
+            Err(InferenceError::CorruptedWeights)
         );
     }
 
@@ -1524,11 +2131,10 @@ pub mod tests {
     fn test_forward_step_refuses_an_embedding_the_file_does_not_hold() {
         let fixture = LittleModel::new();
         let config = LittleModel::config();
-        let mut no_rows = fixture.weights();
+        let blocks = [Some(fixture.layer())];
+        let mut no_rows = fixture.weights(&blocks);
         no_rows.token_embd = &[];
-        let mut kv_cache = KvCache::empty();
-        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
-        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+        let (mut scratch, mut kv_cache) = fit(&config);
 
         assert_eq!(
             forward_step(
@@ -1537,15 +2143,14 @@ pub mod tests {
                 &no_rows,
                 &config,
                 &mut kv_cache,
-                &mut logits[..config.vocab_size],
-                &mut hidden,
+                &mut scratch,
             ),
             Err(InferenceError::CorruptedWeights)
         );
 
         // A table that stops inside the last row is the same lie as no table at
         // all: the row is read as far as it exists and the rest would be invented.
-        let mut truncated = fixture.weights();
+        let mut truncated = fixture.weights(&blocks);
         let one_row_short = fixture.embd.len() - 4;
         truncated.token_embd = &fixture.embd[..one_row_short];
         assert_eq!(
@@ -1555,13 +2160,12 @@ pub mod tests {
                 &truncated,
                 &config,
                 &mut kv_cache,
-                &mut logits[..config.vocab_size],
-                &mut hidden,
+                &mut scratch,
             ),
             Err(InferenceError::CorruptedWeights)
         );
 
-        let mut quantised = fixture.weights();
+        let mut quantised = fixture.weights(&blocks);
         quantised.token_embd_type = 8; // Q8_0: 34 bytes per 32 values, not floats
         assert_eq!(
             forward_step(
@@ -1570,11 +2174,12 @@ pub mod tests {
                 &quantised,
                 &config,
                 &mut kv_cache,
-                &mut logits[..config.vocab_size],
-                &mut hidden,
+                &mut scratch,
             ),
             Err(InferenceError::UnsupportedQuantization(8))
         );
+        // None of the three wrote a position into the cache.
+        assert_eq!(kv_cache.len, 0);
     }
 
     /// What the search index stores is the mean of the positions the model ran,
@@ -1585,18 +2190,19 @@ pub mod tests {
     fn test_extract_embedding_mean_pools_the_positions_and_normalises_them() {
         let fixture = LittleModel::new();
         let config = LittleModel::config();
-        let model = fixture.weights();
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
         let tokens = [crate::tokenizer::TOKEN_BOS, 261, 4];
-        let mut embedding = [0.0f32; MAX_HIDDEN_DIM];
+        let mut embedding = [0.0f32; LITTLE_HIDDEN];
 
         let dim = extract_embedding(&tokens, &model, &config, &mut embedding)
             .expect("the fixture is a runnable model");
         assert_eq!(dim, config.hidden_dim);
 
-        let mut kv_cache = KvCache::empty();
-        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
-        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
-        let mut summed = [0.0f32; MAX_HIDDEN_DIM];
+        // The same three positions run one at a time, by hand, against memory cut
+        // for this config: the pooled vector has to be their mean and nothing else.
+        let (mut scratch, mut kv_cache) = fit(&config);
+        let mut summed = [0.0f32; LITTLE_HIDDEN];
         for (pos, &token) in tokens.iter().enumerate() {
             forward_step(
                 token,
@@ -1604,12 +2210,11 @@ pub mod tests {
                 &model,
                 &config,
                 &mut kv_cache,
-                &mut logits[..config.vocab_size],
-                &mut hidden,
+                &mut scratch,
             )
             .expect("the same tokens run the same graph");
             for i in 0..dim {
-                summed[i] += hidden[i];
+                summed[i] += scratch.hidden[i];
             }
         }
         let mut sum_sq = 0.0f32;
@@ -1722,20 +2327,343 @@ pub mod tests {
         let defaulted = ModelConfig::from_gguf(&info).expect("the two floats are optional");
         assert_eq!(defaulted.rms_norm_eps, 1e-6);
         assert_eq!(defaulted.rope_theta, 10000.0);
+
+        // The cache depth is declared too. A file that states no `context_length`
+        // gets `DEFAULT_SEQ_LEN`, and it is recorded on the config where the budget
+        // can price it rather than hidden in a constant the caller cannot see.
+        assert_eq!(defaulted.seq_len, DEFAULT_SEQ_LEN);
+        info.context_length = Some(2048);
+        let deep = ModelConfig::from_gguf(&info).expect("the file states its own run length");
+        assert_eq!(deep.seq_len, 2048);
+        assert_eq!(
+            deep.kv_cache_bytes(),
+            2 * 2 * 2048 * 1 * 32 * FLOAT_BYTES,
+            "two blocks of 2048 positions, one key/value head 32 wide"
+        );
     }
 
+    /// The published `embeddinggemma-300M-Q8_0.gguf` exactly as its own metadata
+    /// states it: 768-wide stream, 1152-wide feed-forward, 24 blocks, 3 heads 256
+    /// wide over one key/value head, 262,144 tokens, a 2048-position context and a
+    /// 512 sliding window. The numbers are read out of the file with
+    /// `tools/../target/verify` metadata dump and recorded here so the shape is a
+    /// test and not a recollection.
+    fn published_file() -> crate::gguf::GgufModelInfo {
+        let mut info = declared(768, 1152, 24, 3, 256, 262_144);
+        info.num_kv_heads = Some(1);
+        info.context_length = Some(2048);
+        info.sliding_window = Some(512);
+        info.rms_norm_eps = Some(1e-6);
+        info.rope_theta = Some(1_000_000.0);
+        info
+    }
+
+    /// The one size limit the engine has: the scratch a declared shape needs,
+    /// against the bytes the device offers. Tested from both ends, because a
+    /// budget that only ever refuses is indistinguishable from a ceiling.
     #[test]
-    fn test_model_config_refuses_a_dimension_the_engine_cannot_hold() {
-        // The real Gemma 2B: 2304 wide over 26 blocks with a 256,000 vocabulary.
-        let info = declared(2304, 4608, 26, 8, 256, 256_000);
+    fn test_a_shape_is_refused_by_the_bytes_it_needs_and_accepted_by_the_bytes_it_needs() {
+        // Gemma 2B published at its own 8192-position context: the cache alone is
+        // 2 x 26 x 8192 x 1 x 256 x 4 = 436,207,616 bytes, so the shape is over
+        // budget by a factor of three and no dimension of it is individually odd.
+        let mut huge = declared(2304, 4608, 26, 8, 256, 256_000);
+        huge.num_kv_heads = Some(1);
+        huge.context_length = Some(8192);
         assert_eq!(
-            ModelConfig::from_gguf(&info),
-            Err(InferenceError::ModelDeclaration(
-                "<arch>.embedding_length",
-                Some(2304),
-                MAX_HIDDEN_DIM
-            ))
+            ModelConfig::from_gguf(&huge),
+            Err(InferenceError::ScratchTooLarge(437_421_056, SCRATCH_BYTE_BUDGET))
         );
+
+        // The same file at the shortest context anything of this family ships with
+        // is 28,445,696 bytes: the engine accepts it, because the memory really is
+        // there. What it still cannot do is load the weights or run this model's
+        // graph, which the two refusals below say plainly.
+        let mut small = declared(2304, 4608, 26, 8, 256, 256_000);
+        small.num_kv_heads = Some(1);
+        small.context_length = Some(512);
+        let accepted = ModelConfig::from_gguf(&small).expect("28 MiB of cache is under budget");
+        assert_eq!(accepted.scratch_bytes(), 28_445_696);
+        assert_eq!(accepted.check_scratch_budget(), Ok(()));
+
+        // Refusing on bytes is not the same as refusing on a dimension, and the
+        // difference is what the person acting on the message needs: the number
+        // that was wanted and the number that was given, both of them.
+        let Err(InferenceError::ScratchTooLarge(wanted, budget)) =
+            ModelConfig::from_gguf(&huge).map(|_| ())
+        else {
+            panic!("a 416 MiB cache was not refused for its bytes");
+        };
+        assert!(wanted > budget);
+        assert_eq!(budget, SCRATCH_BYTE_BUDGET);
+        assert_eq!(wanted, huge_priced().scratch_bytes());
+    }
+
+    /// The refused shape, priced directly from its declared dimensions.
+    fn huge_priced() -> ModelConfig {
+        ModelConfig {
+            hidden_dim: 2304,
+            intermediate_dim: 4608,
+            num_layers: 26,
+            num_heads: 8,
+            num_kv_heads: 1,
+            head_dim: 256,
+            vocab_size: 256_000,
+            seq_len: 8192,
+            rms_norm_eps: 1e-6,
+            rope_theta: 1_000_000.0,
+        }
+    }
+
+    /// The published model, by the shape its own file states. This is the result
+    /// this change exists to produce: the file is no longer refused for being a
+    /// real model, and the numbers below are the arithmetic the budget comment
+    /// claims.
+    #[test]
+    fn test_model_config_accepts_the_published_embedding_model_by_its_budget() {
+        let config = ModelConfig::from_gguf(&published_file())
+            .expect("the published file's shape is representable on this device");
+        assert_eq!(config.hidden_dim, 768);
+        assert_eq!(config.intermediate_dim, 1152);
+        assert_eq!(config.num_layers, 24);
+        assert_eq!(config.num_heads, 3);
+        assert_eq!(config.num_kv_heads, 1);
+        assert_eq!(config.head_dim, 256);
+        assert_eq!(config.vocab_size, 262_144);
+        assert_eq!(config.seq_len, 2048);
+        assert_eq!(config.rope_theta, 1_000_000.0);
+        // 2 x 24 x 2048 x 1 x 256 x 4: 96 MiB, which is 100 times the stack it
+        // used to have to live on.
+        assert_eq!(config.kv_cache_bytes(), 100_663_296);
+        assert_eq!(config.scratch_bytes(), 101_767_680);
+        assert_eq!(config.check_scratch_budget(), Ok(()));
+        assert!(config.scratch_bytes() < SCRATCH_BYTE_BUDGET);
+    }
+
+    /// The claim the change is named for, tested against the allocation rather than
+    /// against a type: a 24-block, 2048-position, 256-wide cache is memory the
+    /// service can be handed, and every row of the file's own declaration is
+    /// addressable in it.
+    #[test]
+    fn test_the_published_models_cache_is_representable_and_addressed() {
+        let config = ModelConfig::from_gguf(&published_file()).expect("the shape is under budget");
+        let mut cache = KvCache::new(&config).expect("the device has the 96 MiB");
+        assert_eq!(cache.allocated_bytes(), 100_663_296);
+        assert_eq!(cache.k.len(), 12_582_912);
+        assert_eq!(cache.v.len(), 12_582_912);
+        assert_eq!(cache.seq_len, 2048);
+        assert_eq!(cache.num_layers, 24);
+
+        // The last position of the last block: the row no fixed array in this
+        // engine ever had, and the one a 2048-token sequence writes.
+        let last = 12_582_912 - 256;
+        assert_eq!(cache.row_start(23, 2047, 0), Some(last));
+        cache
+            .write(23, 2047, 0, &[7.5f32; 256], &[-2.0f32; 256])
+            .expect("the last row is in the cache");
+        assert_eq!(cache.k_row(23, 2047, 0).map(|row| row[255]), Some(7.5f32));
+        assert_eq!(cache.v_row(23, 2047, 0).map(|row| row[0]), Some(-2.0f32));
+        assert_eq!(cache.k[12_582_911], 7.5f32);
+
+        // Past the declared sequence there is no row, and the cache says so instead
+        // of wrapping into row 0. A head the file did not declare is the same.
+        assert_eq!(cache.row_start(23, 2048, 0), None);
+        assert_eq!(
+            cache.write(23, 2048, 0, &[0.0f32; 256], &[0.0f32; 256]),
+            Err(InferenceError::ContextLengthExceeded)
+        );
+        assert_eq!(cache.k_row(0, 0, 1), None);
+        assert_eq!(cache.row_start(24, 0, 0), None);
+        // A key wider than the row would be truncated, and a truncated key is a
+        // different model's key.
+        assert_eq!(
+            cache.write(0, 0, 0, &[0.0f32; 128], &[0.0f32; 128]),
+            Err(InferenceError::BufferTooSmall)
+        );
+    }
+
+    /// The 333 MB file's own bytes, read, priced and allocated by the code that
+    /// ships.
+    ///
+    /// WHY this exists beside the fixture test above: every other case here hands
+    /// `from_gguf` a hand-written description of the published file, so all of them
+    /// pass when the reader is wrong about a real file -- the fixture only has to
+    /// repeat the mistake. This one runs `read_model_info_stream` over the first
+    /// kilobytes of `embeddinggemma-300M-Q8_0.gguf` itself, holds what the reader
+    /// took from those bytes against what the independent Python probe recorded
+    /// (`target/verify/gguf_real_file_probe.py` writes
+    /// `target/verify/models/gguf_metadata_dump.json`, and imports nothing of the
+    /// kernel's parser), then prices the shape and takes the memory off the heap.
+    ///
+    /// WHY it is gated on an environment variable: the file is 333 MB and is not
+    /// in the repository, so its host path arrives in `INTEROS_REAL_GGUF_PATH`.
+    /// Without that variable the test prints what it did not check and returns --
+    /// the record then says the real file went unverified, which is the honest
+    /// alternative to a green test that silently read nothing.
+    ///
+    /// To run it:
+    /// `INTEROS_REAL_GGUF_PATH=/c/path/to/embeddinggemma-300M-Q8_0.gguf cargo test -p interos-system-service real_published_file`
+    #[test]
+    fn test_the_real_published_file_is_priced_and_allocated() {
+        extern crate std as file_bytes;
+        use file_bytes::io::Read;
+
+        let Some(path) = file_bytes::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            file_bytes::println!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
+                 the 333 MB GGUF was never opened and only hand-written fixtures were priced."
+            );
+            return;
+        };
+
+        // The metadata the walk needs is under a kilobyte into a 6.5 MB block, but
+        // the window is 64 KiB so the walk gets to be as greedy as it likes with
+        // the keys before the vocabulary, and the position assertion below is what
+        // proves it did not step the 262,144 strings.
+        const WINDOW: usize = 64 * 1024;
+        let mut bytes: file_bytes::vec::Vec<u8> = file_bytes::vec![0u8; WINDOW];
+        let mut file = file_bytes::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+        let mut filled = 0usize;
+        while filled < WINDOW {
+            match file.read(&mut bytes[filled..]) {
+                Ok(0) => break,
+                Ok(got) => filled += got,
+                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+            }
+        }
+        assert!(filled >= WINDOW / 2, "only {filled} bytes of the real file arrived");
+        let head = &bytes[..filled];
+
+        // 1. What the file declares, read by the reader that ships.
+        let mut stream = crate::gguf::GgufStream::from_slice(head);
+        let info = crate::gguf::read_model_info_stream(&mut stream).unwrap_or_else(|error| {
+            panic!("the real file at {path} did not configure the engine: {error:?}")
+        });
+        assert_eq!(info.architecture(), Some("gemma-embedding"));
+        assert_eq!(info.hidden_dim, Some(768), "embedding_length");
+        assert_eq!(info.intermediate_dim, Some(1152), "feed_forward_length");
+        assert_eq!(info.num_layers, Some(24), "block_count");
+        assert_eq!(info.num_heads, Some(3), "attention.head_count");
+        assert_eq!(info.num_kv_heads, Some(1), "attention.head_count_kv");
+        assert_eq!(info.head_dim, Some(256), "attention.key_length");
+        assert_eq!(info.context_length, Some(2048), "context_length");
+        assert_eq!(info.sliding_window, Some(512), "attention.sliding_window");
+        assert_eq!(info.rope_theta, Some(1_000_000.0), "rope.freq_base");
+        assert_eq!(info.vocab_size, Some(262_144), "tokenizer.ggml.tokens, counted");
+        assert!(
+            stream.position() < WINDOW / 8,
+            "the walk ran to byte {} of the metadata, so the vocabulary was loaded and \
+             not merely counted",
+            stream.position()
+        );
+
+        // 2. The price the file's own shape carries -- the same two numbers the
+        // fixture test asserts, which is what ties that hand-written fixture to
+        // the file rather than to whoever typed it in.
+        let config = ModelConfig::from_gguf(&info)
+            .unwrap_or_else(|error| panic!("the real file at {path} was refused: {error:?}"));
+        assert_eq!(config.kv_cache_bytes(), 100_663_296);
+        assert_eq!(config.scratch_bytes(), 101_767_680);
+        assert_eq!(config.check_scratch_budget(), Ok(()));
+        file_bytes::println!(
+            "REAL FILE {path}: 24 x 2048 x 1 x 256 cache = {} bytes + {} scratch = {} of \
+             the {SCRATCH_BYTE_BUDGET} byte budget, {spare} spare",
+            config.kv_cache_bytes(),
+            Scratch::bytes_for(&config),
+            config.scratch_bytes(),
+            spare = SCRATCH_BYTE_BUDGET - config.scratch_bytes(),
+        );
+
+        // 3. The memory is taken, off the stack, and priced the same way.
+        let scratch = Scratch::new(&config).expect("the device holds the real file's scratch");
+        assert_eq!(scratch.allocated_bytes(), Scratch::bytes_for(&config));
+        let cache = KvCache::new(&config).expect("the device holds the real file's 96 MiB");
+        assert_eq!(cache.allocated_bytes(), config.kv_cache_bytes());
+        assert_eq!(
+            cache.allocated_bytes() + scratch.allocated_bytes(),
+            config.scratch_bytes()
+        );
+        // 96 MiB against the 256 KiB thread stack this engine used to run on: the
+        // number is the whole reason for the change, and the last row of the last
+        // block is the address no fixed array in the old engine could name.
+        assert!(
+            cache.allocated_bytes() > 256 * 1024,
+            "the real file's cache is {} bytes, which is not stack-sized memory",
+            cache.allocated_bytes()
+        );
+        assert_eq!(cache.row_start(23, 2047, 0), Some(12_582_912 - 256));
+        assert_eq!(cache.row_start(23, 2048, 0), None);
+
+        // 4. The same file at the longest context its family ships with is refused,
+        // for its bytes and with both numbers: the budget was not loosened until
+        // this model happened to clear it.
+        let longer = ModelConfig {
+            seq_len: 8192,
+            ..config
+        };
+        assert_eq!(
+            longer.check_scratch_budget(),
+            Err(InferenceError::ScratchTooLarge(403_782_144, SCRATCH_BYTE_BUDGET)),
+            "the real file at 8192 positions has to be refused by the bytes it names"
+        );
+    }
+
+    /// WHY the budget can be trusted: `Scratch::bytes_for` is the number the check
+    /// compares, and `Scratch::new` is the memory the run actually holds. If the two
+    /// disagreed, the one size limit left in the engine would be arithmetic nothing
+    /// verified, so they are held to each other at both the little shape and the
+    /// published one.
+    #[test]
+    fn scratch_pricing_matches_the_allocation() {
+        let published = ModelConfig::from_gguf(&published_file()).expect("under budget");
+        for config in [LittleModel::config(), published] {
+            let scratch = Scratch::new(&config).expect("both shapes are under budget");
+            assert_eq!(
+                scratch.allocated_bytes(),
+                Scratch::bytes_for(&config),
+                "the price and the allocation disagree at {config:?}"
+            );
+            let cache = KvCache::new(&config).expect("both caches are under budget");
+            assert_eq!(cache.allocated_bytes(), config.kv_cache_bytes());
+            assert_eq!(
+                config.scratch_bytes(),
+                scratch.allocated_bytes() + cache.allocated_bytes()
+            );
+            assert!(config.scratch_bytes() <= SCRATCH_BYTE_BUDGET);
+        }
+    }
+
+    /// A scratch that was not cut for this shape is refused before the graph runs,
+    /// so the run cannot quietly read a narrower buffer as a wider model's.
+    #[test]
+    fn scratch_refuses_a_config_it_was_not_cut_for() {
+        let base = LittleModel::config();
+        let scratch = Scratch::new(&base).expect("the fixture is a tiny shape");
+        scratch.fits(&base).expect("its own config");
+        for wider in [
+            ModelConfig {
+                hidden_dim: 65,
+                ..base
+            },
+            ModelConfig {
+                intermediate_dim: 129,
+                ..base
+            },
+            ModelConfig {
+                seq_len: 65,
+                ..base
+            },
+            ModelConfig {
+                vocab_size: 291,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                scratch.fits(&wider),
+                Err(InferenceError::BufferTooSmall),
+                "{wider:?} was accepted by a scratch cut for {base:?}"
+            );
+        }
     }
 
     #[test]
@@ -1747,7 +2675,7 @@ pub mod tests {
             Err(InferenceError::ModelDeclaration(
                 "<arch>.block_count",
                 None,
-                MAX_LAYERS
+                0
             ))
         );
 
@@ -1758,7 +2686,7 @@ pub mod tests {
             Err(InferenceError::ModelDeclaration(
                 "<arch>.embedding_length",
                 Some(0),
-                MAX_HIDDEN_DIM
+                0
             ))
         );
     }
@@ -1766,50 +2694,38 @@ pub mod tests {
     #[test]
     fn test_model_config_refuses_heads_that_overrun_the_residual_stream() {
         // The head loop walks num_heads slices of head_dim out of a buffer that is
-        // hidden_dim long, so four heads of 32 do not fit inside 64.
-        let info = declared(64, 128, 1, 4, 32, 290);
+        // hidden_dim long, so four heads of 32 do not fit inside 64. One key/value
+        // head, because a file with four of those is refused for the kernel's own
+        // reason first -- `test_model_config_refuses_more_than_one_key_value_head`
+        // covers that, and this one is about the span.
+        let mut overhanging_heads = declared(64, 128, 1, 4, 32, 290);
+        overhanging_heads.num_kv_heads = Some(1);
         assert_eq!(
-            ModelConfig::from_gguf(&info),
+            ModelConfig::from_gguf(&overhanging_heads),
             Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count x key_length",
                 Some(128),
                 64
             ))
         );
-    }
 
-    #[test]
-    fn test_model_config_bounds_a_head_wider_than_the_kv_cache_row() {
-        let info = declared(64, 128, 1, 1, 64, 290);
+        // A single head wider than the stream it lives in is the same arithmetic:
+        // 256 declared as one head inside a 64-wide residual. What is no longer
+        // refused is a head of 64 in a stream of 64, which is a model whose heads
+        // do tile their own stream and whose cache the budget can price.
+        let overhanging = declared(64, 128, 1, 1, 128, 290);
         assert_eq!(
-            ModelConfig::from_gguf(&info),
+            ModelConfig::from_gguf(&overhanging),
             Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.key_length",
-                Some(64),
-                MAX_HEAD_DIM
+                "<arch>.attention.head_count x key_length",
+                Some(128),
+                64
             ))
         );
-    }
-
-    /// The numbers recorded from the published `embeddinggemma-300M-Q8_0.gguf`
-    /// (hidden 768, feed-forward 1152, 24 blocks, 3 heads 256 wide, 262,144
-    /// tokens), held here so the refusal this engine owes a real model is a test
-    /// and not a claim.
-    ///
-    /// WHY the first bound is the one named: `from_gguf` checks in the order the
-    /// graph is built, and the residual stream is the widest array the engine
-    /// sizes -- so the person is told the declaration that actually binds them
-    /// first, with the file's own number next to the engine's own limit.
-    #[test]
-    fn test_model_config_refuses_the_published_embedding_model_by_its_bound() {
-        let info = declared(768, 1152, 24, 3, 256, 262_144);
+        let matching = declared(64, 128, 1, 1, 64, 290);
         assert_eq!(
-            ModelConfig::from_gguf(&info),
-            Err(InferenceError::ModelDeclaration(
-                "<arch>.embedding_length",
-                Some(768),
-                MAX_HIDDEN_DIM
-            ))
+            ModelConfig::from_gguf(&matching).map(|c| c.head_dim),
+            Ok(64)
         );
     }
 }
