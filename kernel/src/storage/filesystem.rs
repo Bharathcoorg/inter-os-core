@@ -5,7 +5,7 @@
 use crate::storage::block::BlockDevice;
 use crate::drivers::ATA_PRIMARY;
 use super::boot_guard::{self, SectorRange, WriteVerdict};
-use super::interfs::{FsBackendError, InterFs};
+use super::interfs::{FsBackendError, FsLayout, InterFs, SpaceReport};
 
 /// Leave the first 4096 sectors to the bootloader/partition/device-specific area.
 pub const BLOCK_FS_BASE_LBA: u32 = 4096;
@@ -54,6 +54,83 @@ fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBack
 
 fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
     region_for_layout(total, FilesystemLayout::canonical())
+}
+
+/// The largest file the filesystem on a `total_sectors` device can ever hold.
+///
+/// WHY this is the data region and not the free space: InterFS gives a file one
+/// contiguous extent, so no inode can describe more bytes than the region holds
+/// whatever the disk looks like. That is the format's ceiling. The ceiling
+/// *today* is the largest contiguous free run, which `space_report` measures and
+/// which is always at most this. Reporting only the format's ceiling would let
+/// a used disk claim room it no longer has.
+///
+/// WHY it takes a sector count rather than a device: the bound is pure geometry,
+/// so a caller that has not opened the disk yet -- a build tool deciding whether
+/// a model is worth copying, a boot report naming the limit -- can state it.
+///
+/// # Concrete sizes on the demo data disk
+///
+/// The emulator builds a 6 GiB data disk (`emulator/server.py`, "the guest's 6GB
+/// data disk"), 12,582,912 sectors. This function returns 6,437,453,824 bytes
+/// for it. `embeddinggemma-300M-Q8_0.gguf` is 333,590,944 bytes, which is 5.18%
+/// of that, so the published model is inside the bound with 19x to spare and no
+/// on-disk format change is needed to hold it.
+pub fn max_data_file_bytes(total_sectors: u32) -> Option<u64> {
+    let region = region_for_layout(total_sectors, FilesystemLayout::canonical()).ok()?;
+    FsLayout::for_region(region).map(|layout| layout.capacity_bytes())
+}
+
+/// The largest file the filesystem on `device` can ever hold, in bytes.
+pub fn max_data_file_bytes_with_device(device: &dyn BlockDevice) -> u64 {
+    max_data_file_bytes(device.sector_count()).unwrap_or(0)
+}
+
+/// The largest file the data device this kernel is running on can hold.
+///
+/// WHY this is the one a surface should ask: a screen that recites a model-size
+/// limit is making a claim about hardware it did not read, and the number is
+/// wrong the moment the disk is a different size. This asks the mounted device.
+///
+/// WHY it returns `None` rather than `0` when there is no device: "this device
+/// holds no room" and "this device was never attached" are different statements,
+/// and a report that says the first when the second is true is a fabricated
+/// capacity claim. A caller with `None` says the device is absent.
+///
+/// WHY no bitmap walk is involved: this is the format's ceiling, which the
+/// geometry gives from the sector count. The ceiling *right now* -- the largest
+/// contiguous free run -- is `reserve_data_file_checked_with_device`, and the two
+/// differ on any disk that has been written to.
+pub fn max_data_file_bytes_on_device() -> Option<u64> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut()?;
+    Some(max_data_file_bytes_with_device(device))
+}
+
+/// Says, on the console the operator reads, what the disk was measured to hold.
+///
+/// WHY the numbers are printed and not only returned: a refusal to store a model
+/// is reached from a streaming writer that has already spent its time copying,
+/// and the one thing that decides its next move is whether it asked for more than
+/// the format can express or merely more than this disk currently has in one run.
+/// Both are bytes; a bare `NoSpace` makes the reader guess. `boot_guard` already
+/// announces its refusals this way, and a device-verified capacity claim belongs
+/// on the same channel as the device-verified refusal.
+fn announce_space_refusal(scope: &str, path: &str, report: &SpaceReport) {
+    crate::serial_println!(
+        "[INTERFS] {} refuses {}: asked {} bytes, largest contiguous extent available is {} bytes, {} bytes free in total, data region {} bytes.",
+        scope, path, report.asked_bytes, report.largest_free_run_bytes,
+        report.free_bytes, report.data_region_bytes
+    );
+    if report.asked_bytes > report.data_region_bytes {
+        crate::serial_println!(
+            "[INTERFS] the ask exceeds what one InterFS extent can describe on this device; no amount of free space would take it."
+        );
+    } else {
+        crate::serial_println!(
+            "[INTERFS] the disk holds the bytes but not in one run; the model is refused rather than promised a multi-extent file this format does not have."
+        );
+    }
 }
 
 /// Decides whether the InterFS region of `device` may be written at all.
@@ -105,6 +182,30 @@ pub fn init_block_filesystem_with_device(device: &mut dyn BlockDevice) -> Result
     init_block_filesystem_with_layout(device, FilesystemLayout::canonical())
 }
 
+/// States, on the console the boot log is taken from, how large a file the
+/// filesystem the platform just read can hold.
+///
+/// WHY this is reported at boot: the question a model payload raises is not
+/// "is there a loader" but "how large a file can this device be given", and an
+/// answer that is only available by reading the allocator source is an answer
+/// nobody acting on the device can check. The number comes from the superblock
+/// the mount already read, so it states what was observed on this disk rather
+/// than what the geometry would predict for a disk of this size -- which on a
+/// device that has been resized are different things, and the difference is the
+/// part worth printing.
+///
+/// WHY no free-space figure appears here: the longest contiguous free run needs
+/// a full pass over the allocation bitmap, 3,071 sector reads on the demo disk.
+/// Boot is not the place to spend that on every start, and the number changes
+/// the moment anything is written. It is measured by
+/// `reserve_data_file_checked_with_device`, on the ask that acts on it.
+fn announce_observed_capacity<D: BlockDevice + ?Sized>(scope: &str, fs: &InterFs<'_, D>) {
+    crate::serial_println!(
+        "[INTERFS] {} region: {} data sectors, {} bytes -- the largest file one InterFS extent can hold on this device.",
+        scope, fs.capacity_sectors(), fs.capacity_bytes()
+    );
+}
+
 pub fn init_block_filesystem_with_layout(device: &mut dyn BlockDevice, layout: FilesystemLayout) -> Result<(), FsBackendError> {
     let region = region_for_layout(device.sector_count(), layout)?;
     guard_region(device, layout.base_lba, region, "InterFS format")?;
@@ -117,9 +218,14 @@ pub fn init_block_filesystem_with_layout(device: &mut dyn BlockDevice, layout: F
             if fs.region_sectors() > region {
                 return Err(FsBackendError::CorruptMetadata);
             }
+            announce_observed_capacity("mounted", &fs);
             Ok(())
         }
-        Err(FsBackendError::InvalidFormat) => { let _ = InterFs::format_region(device, layout.base_lba, region)?; Ok(()) }
+        Err(FsBackendError::InvalidFormat) => {
+            let fs = InterFs::format_region(device, layout.base_lba, region)?;
+            announce_observed_capacity("formatted", &fs);
+            Ok(())
+        }
         Err(FsBackendError::UnsupportedVersion) => {
             // The region holds a filesystem this build cannot read. It is not
             // mounted and not interpreted -- reading another version's fields
@@ -128,7 +234,8 @@ pub fn init_block_filesystem_with_layout(device: &mut dyn BlockDevice, layout: F
             crate::serial_println!(
                 "[INTERFS] the filesystem on this device was written in another format version; the region is being reformatted."
             );
-            let _ = InterFs::format_region(device, layout.base_lba, region)?;
+            let fs = InterFs::format_region(device, layout.base_lba, region)?;
+            announce_observed_capacity("reformatted", &fs);
             Ok(())
         }
         Err(e) => Err(e),
@@ -196,6 +303,58 @@ pub fn reserve_data_file_with_device(
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     fs.reserve_stream(path, capacity)
+}
+
+/// Reserves `capacity` bytes for `path` only if the disk is measured to hold
+/// that much in the one contiguous extent InterFS would give it.
+///
+/// WHY this exists beside `reserve_data_file_with_device` rather than replacing
+/// it: the streaming writer's first call is the reservation, and a payload
+/// larger than the kernel heap is copied in after that call succeeds. Refusing
+/// halfway through -- when the extent turns out not to be there -- would leave a
+/// partial payload on the device and a caller holding nothing to act on. This
+/// measures the disk first, and on refusal names the bytes asked and the bytes
+/// observed, then leaves the disk exactly as it found it.
+///
+/// WHAT THE BOUND IS: the reported `SpaceReport` is measured from the on-disk
+/// allocation bitmap, so the bound this enforces is the real one -- one extent,
+/// at most the data region, and no more than the longest free run the disk holds
+/// at the moment of the ask. It is not a constant and it is not the free total.
+///
+/// WHY the returned report is the pre-reservation one: it is the number the
+/// caller needs to print or refuse on. After the reservation the run it measured
+/// is consumed, so a post-call measurement would report a different, smaller,
+/// disk and read as though the write had failed.
+pub fn reserve_data_file_checked(
+    path: &str,
+    capacity: u64,
+) -> Result<SpaceReport, FsBackendError> {
+    let mut guard = ATA_PRIMARY.lock();
+    let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    reserve_data_file_checked_with_device(device, path, capacity)
+}
+
+/// Reserves `capacity` bytes for `path` on `device`, refusing with measured
+/// numbers when the disk cannot hold the one extent.
+pub fn reserve_data_file_checked_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+    capacity: u64,
+) -> Result<SpaceReport, FsBackendError> {
+    let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
+    let report = fs.space_report(capacity)?;
+    if !report.fits() {
+        announce_space_refusal("reserve", path, &report);
+        return Err(if capacity > report.data_region_bytes {
+            FsBackendError::FileTooLarge
+        } else {
+            FsBackendError::NoSpace
+        });
+    }
+    fs.reserve_stream(path, capacity)?;
+    Ok(report)
 }
 
 /// Writes `data` at `offset` inside a data file, growing the file if needed.
@@ -290,6 +449,19 @@ pub fn data_file_len_with_device(
 pub fn remove_data_file(path: &str) -> Result<(), FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
+    remove_data_file_with_device(device, path)
+}
+
+/// Removes a data file on `device` and the blocks it held.
+///
+/// WHY the `_with_device` twin exists: the rest of this module's helpers all have
+/// one, and the bound this layer enforces is only testable if the fragmentation
+/// that exercises it can be built without the real disk. Removing a file is the
+/// half that hands the sectors back.
+pub fn remove_data_file_with_device(
+    device: &mut dyn BlockDevice,
+    path: &str,
+) -> Result<(), FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
@@ -619,5 +791,298 @@ mod tests {
         );
         assert_eq!(dev.writes, 0);
         assert_eq!(dev.sectors, before);
+    }
+
+    /// A device that stores only the sectors that were written.
+    ///
+    /// WHY this is not the `MockDevice` above: proving that the published model
+    /// file fits one extent means exercising the 6 GiB geometry, and a device
+    /// holding every sector of it in memory would need six gigabytes of host
+    /// RAM to prove one number. Sparse, the same proof costs the 333 MB actually
+    /// written.
+    struct SparseDevice {
+        total: u32,
+        sectors: std::collections::BTreeMap<u32, [u8; SECTOR_SIZE]>,
+        writes: u64,
+    }
+
+    impl SparseDevice {
+        fn new(total: u32) -> Self {
+            Self { total, sectors: std::collections::BTreeMap::new(), writes: 0 }
+        }
+    }
+
+    impl BlockDevice for SparseDevice {
+        fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total { return Err(BlockDeviceError::LbaOutOfRange); }
+            match self.sectors.get(&lba) {
+                Some(sector) => buf.copy_from_slice(sector),
+                None => buf.fill(0),
+            }
+            Ok(())
+        }
+        fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total { return Err(BlockDeviceError::LbaOutOfRange); }
+            self.sectors.insert(lba, *buf);
+            self.writes += 1;
+            Ok(())
+        }
+        fn sector_count(&self) -> u32 { self.total }
+        fn model(&self) -> &str { "sparse" }
+    }
+
+    /// 6 GiB in sectors, as the emulator builds the data disk.
+    const SIX_GB_SECTORS: u32 = 6 * 1024 * 1024 * 2;
+
+    /// The published model: `target/verify/models/embeddinggemma-300M-Q8_0.gguf`,
+    /// measured from the file on this host rather than quoted from a ticket.
+    const MODEL_BYTES: u64 = 333_590_944;
+
+    /// The byte at an offset of the streamed payload.
+    ///
+    /// WHY a function of position and not a table: the payload must never be
+    /// resident. A 333 MB `Vec` would make the test prove the filesystem holds
+    /// the file by spending the same memory the test is meant to fit in, which
+    /// is the property the kernel cannot have either.
+    fn payload_byte(offset: u64) -> u8 {
+        let x = offset.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 29;
+        (x as u8) ^ ((offset >> 7) as u8) ^ ((offset >> 13) as u8)
+    }
+
+    /// The defect this pins: the claim that a 333 MB model cannot be created
+    /// because InterFS allocates contiguous extents only.
+    ///
+    /// WHAT THE CODE ACTUALLY DOES: `DiskInode::sector_count` is a `u32` of
+    /// sectors, so the field reaches 2 TiB, and the only bound `create_stream`
+    /// applies is `sectors > data_sectors`. On the 6 GiB demo disk that region is
+    /// 12,573,152 sectors, and `format_region` zeroes the bitmap, so the whole
+    /// region is one free run and the model needs 651,545 of it -- 5.18%.
+    ///
+    /// So multi-extent allocation is not what this file needs, and adding it would
+    /// have moved a persisted on-disk format for no reason. The bound is the disk.
+    ///
+    /// WHY a whole round trip and not a reservation: a reservation only proves the
+    /// bitmap was marked. This writes every one of the 333,590,944 bytes, in
+    /// 2,545 chunks that never hold more than 128 KiB at once, then reads all of
+    /// them back and compares byte for byte. The assertion names the counts so a
+    /// regression that silently truncates cannot pass by accident.
+    #[test]
+    fn a_333_megabyte_model_round_trips_through_one_extent() {
+        let mut dev = SparseDevice::new(SIX_GB_SECTORS);
+        init_block_filesystem_with_device(&mut dev).expect("format the demo data disk");
+
+        // The bound the design rests on, measured off the disk that was just
+        // formatted -- not recited from a constant.
+        let max = max_data_file_bytes_with_device(&mut dev);
+        assert_eq!(
+            max, 6_437_453_824,
+            "the 6 GiB demo disk's one-extent ceiling is the data region, in bytes"
+        );
+        assert!(
+            MODEL_BYTES < max,
+            "a {MODEL_BYTES} byte model needs {MODEL_BYTES} bytes of run and the region holds {max}"
+        );
+
+        let path = "/data/models/embeddinggemma-300M-Q8_0.gguf";
+        assert!(
+            path.len() <= super::super::interfs::MAX_PATH,
+            "the real model name has to fit one inode record, or it is unaskable: {} vs {}",
+            path.len(), super::super::interfs::MAX_PATH,
+        );
+
+        let report = reserve_data_file_checked_with_device(&mut dev, path, MODEL_BYTES)
+            .expect("the published model must be reservable in the extent the format gives");
+        assert_eq!(report.asked_bytes, MODEL_BYTES);
+        assert_eq!(
+            report.largest_free_run_bytes, 12_573_152 * 512,
+            "a fresh region is one free run, so the largest extent available is all of it"
+        );
+        assert!(report.fits());
+
+        // Stream the payload in. 128 KiB is the most this holds at one time.
+        const CHUNK: usize = 128 * 1024;
+        let mut chunk = vec![0u8; CHUNK];
+        let mut written: u64 = 0;
+        let mut chunks = 0u64;
+        while written < MODEL_BYTES {
+            let want = core::cmp::min(CHUNK as u64, MODEL_BYTES - written) as usize;
+            for i in 0..want {
+                chunk[i] = payload_byte(written + i as u64);
+            }
+            let n = store_data_file_range_with_device(&mut dev, path, written, &chunk[..want])
+                .unwrap_or_else(|e| panic!("chunk at {written} landed: {e:?}"));
+            assert_eq!(n, want, "the store takes every byte it was handed");
+            written += want as u64;
+            chunks += 1;
+        }
+        assert_eq!(written, MODEL_BYTES, "every byte of the model was handed to the store");
+        assert_eq!(
+            data_file_len_with_device(&mut dev, path).expect("the published length"),
+            MODEL_BYTES,
+            "the file publishes its full {} bytes", MODEL_BYTES,
+        );
+
+        // Read all of it back and compare, without ever holding the file.
+        let mut read: u64 = 0;
+        let mut reads = 0u64;
+        while read < MODEL_BYTES {
+            let want = core::cmp::min(CHUNK as u64, MODEL_BYTES - read) as usize;
+            let n = load_data_file_range_with_device(&mut dev, path, read, &mut chunk[..want])
+                .expect("the range reads back");
+            assert_eq!(n, want, "the read returns the bytes it asked for at {read}");
+            for i in 0..want {
+                let at = read + i as u64;
+                assert_eq!(chunk[i], payload_byte(at), "byte {} of the model differs", at);
+            }
+            read += want as u64;
+            reads += 1;
+        }
+        assert_eq!(
+            read, MODEL_BYTES,
+            "{} bytes streamed in {} chunks of at most {} bytes, and all {} bytes read back byte for byte over {} reads",
+            MODEL_BYTES, chunks, CHUNK, read, reads,
+        );
+
+        // The extent the model holds is the whole ask in one run, and nothing
+        // else on the disk moved.
+        let after = reserve_data_file_checked_with_device(&mut dev, path, 512)
+            .expect("an existing file keeps its extent");
+        assert!(
+            after.largest_free_run_bytes < report.largest_free_run_bytes,
+            "the model's extent came out of the free run: {} -> {}",
+            report.largest_free_run_bytes, after.largest_free_run_bytes,
+        );
+    }
+
+    /// The bound is the largest contiguous run, not the free total -- and the
+    /// refusal says so in bytes.
+    ///
+    /// WHY this test exists beside the round trip: the round trip proves a fresh
+    /// disk takes the model. It does not prove the enforcement is real. A device
+    /// that has written and deleted files holds the same total free space in more
+    /// than one piece, and a file needing more than any single piece must be
+    /// refused, because InterFS gives a file one extent and this build has no
+    /// multi-extent allocation to promise. Reporting the free total as if it were
+    /// available would be exactly the capacity claim the platform truth rule
+    /// forbids.
+    #[test]
+    fn a_reservation_is_refused_by_the_largest_run_not_the_free_total() {
+        // 32 MiB: region 58,880 sectors, bitmap 15, data start 48, data 58,832.
+        let mut dev = SparseDevice::new(65_536);
+        init_block_filesystem_with_device(&mut dev).expect("format");
+
+        let kept = 10_000 * 512;
+        reserve_data_file_checked_with_device(&mut dev, "/data/models/a.gguf", kept).expect("first");
+        reserve_data_file_checked_with_device(&mut dev, "/data/models/b.gguf", kept).expect("second");
+        // Removing the first leaves a 10,000-sector hole before a 38,832-sector
+        // tail: two runs, one free total.
+        remove_data_file_with_device(&mut dev, "/data/models/a.gguf").expect("remove the first");
+
+        // 45,000 sectors: more than either run, less than the free total, and
+        // less than the data region, so this is a fragmentation refusal and not
+        // a "too large for the format" one.
+        let asked = 45_000u64 * 512;
+        let err = reserve_data_file_checked_with_device(&mut dev, "/data/models/big.gguf", asked)
+            .expect_err("no single run is this wide, so the ask is refused");
+        assert_eq!(err, FsBackendError::NoSpace, "the disk has the bytes, just not in one extent");
+
+        // The numbers a caller is refused with are measured, not asserted.
+        let mounted = {
+            let region = filesystem_region_sectors(dev.sector_count()).expect("region");
+            InterFs::mount_region(&mut dev, BLOCK_FS_BASE_LBA, region).expect("mount")
+        };
+        let mut mounted = mounted;
+        let report = mounted.space_report(asked).expect("measure the ask");
+        assert_eq!(report.asked_bytes, asked, "45,000 sectors asked");
+        assert_eq!(report.largest_free_run_bytes, 38_832 * 512, "the tail run is the widest");
+        assert_eq!(report.free_bytes, 48_832 * 512, "both runs together");
+        assert_eq!(report.data_region_bytes, 58_832 * 512, "the region the format reaches");
+        assert!(!report.fits(), "the widest run is {} bytes and the ask is {}",
+            report.largest_free_run_bytes, asked);
+        assert!(report.free_bytes > asked, "the refusal is about contiguity, not volume");
+        assert!(asked <= report.data_region_bytes, "and the format could describe it, so this is not FileTooLarge");
+
+        // Nothing was written by the refusal: the file does not exist.
+        assert_eq!(
+            data_file_len_with_device(&mut dev, "/data/models/big.gguf")
+                .err(),
+            Some(FsBackendError::FileNotFound),
+            "a refused reservation leaves no half-file behind"
+        );
+    }
+
+    /// An ask the format itself cannot describe is refused as too large, and the
+    /// refusal says which bound it hit.
+    #[test]
+    fn an_extent_larger_than_the_data_region_is_refused_as_too_large() {
+        let mut dev = SparseDevice::new(65_536);
+        init_block_filesystem_with_device(&mut dev).expect("format");
+        let region_bytes = max_data_file_bytes_with_device(&mut dev);
+        assert_eq!(region_bytes, 58_832 * 512, "the 32 MiB device's data region");
+        let asked = region_bytes + 512;
+        assert_eq!(
+            reserve_data_file_checked_with_device(&mut dev, "/data/models/too.gguf", asked).err(),
+            Some(FsBackendError::FileTooLarge),
+            "{asked} bytes past a {region_bytes} byte region is beyond one extent, not beyond free space",
+        );
+    }
+
+    /// The documented bound, stated as the number it is.
+    ///
+    /// WHY the exact figure and not just "large enough": the question this
+    /// answers is "can the device hold the published model", and an answer that
+    /// cannot be checked against a byte count is not an answer. 6,437,453,824 is
+    /// 12,573,152 sectors, which is the 6 GiB disk less the 4,096-sector boot area,
+    /// the 2,560-sector journal tail, the superblock, the 3,071-sector bitmap and
+    /// the 32-sector inode table.
+    #[test]
+    fn the_demo_disk_extent_bound_is_the_number_the_geometry_gives() {
+        assert_eq!(
+            max_data_file_bytes(SIX_GB_SECTORS),
+            Some(6_437_453_824),
+            "a 6 GiB data disk bounds one file at the data region, in bytes",
+        );
+        assert!(
+            MODEL_BYTES <= 6_437_453_824,
+            "the {} byte model is inside the {} byte bound; {} sectors of {}",
+            MODEL_BYTES, 6_437_453_824u64,
+            (MODEL_BYTES + 511) / 512, 12_573_152,
+        );
+        // A disk with no room for a region has no bound to claim, and says so
+        // rather than reporting a capacity it does not have.
+        assert_eq!(max_data_file_bytes(1024), None, "a 1024 sector device holds no region");
+    }
+
+    /// The on-disk format did not move for this, and an existing disk still
+    /// mounts.
+    ///
+    /// WHY this is asserted rather than assumed: Option A was chosen because the
+    /// measured geometry already reaches the model, so no inode field changed and
+    /// `FS_VERSION` stayed at 2. A disk the device already booted from therefore
+    /// reads back unchanged. If a later change does move the record, the version
+    /// has to move with it and the test has to say so out loud.
+    #[test]
+    fn the_inode_record_is_unchanged_so_existing_disks_still_mount() {
+        assert_eq!(super::super::interfs::FS_VERSION, 2, "the version this build writes");
+        assert_eq!(super::super::interfs::MAX_PATH, 46, "the path field of the v2 record");
+        assert_eq!(super::super::interfs::INODE_SECTORS, 32, "the v2 inode table");
+        // Every byte of the model's own size, written and read on a fresh disk,
+        // then re-read by a second mount of the same disk.
+        let mut dev = SparseDevice::new(2_097_152); // 1 GiB
+        init_block_filesystem_with_device(&mut dev).expect("format");
+        let path = "/data/models/remount.gguf";
+        reserve_data_file_checked_with_device(&mut dev, path, 1024 * 1024).expect("reserve 1 MiB");
+        let chunk: Vec<u8> = (0..1024 * 1024u64).map(payload_byte).collect();
+        store_data_file_range_with_device(&mut dev, path, 0, &chunk).expect("write 1 MiB");
+        // A second mount of the same disk -- what the next boot does.
+        let region = filesystem_region_sectors(dev.sector_count()).expect("region");
+        let mut fs = InterFs::mount_region(&mut dev, BLOCK_FS_BASE_LBA, region)
+            .expect("a disk written by this build remounts");
+        assert_eq!(fs.file_len(path).expect("the file is there"), 1024 * 1024);
+        let mut head = [0u8; 512];
+        fs.read_at(path, 0, &mut head).expect("the head reads");
+        for (i, b) in head.iter().enumerate() {
+            assert_eq!(*b, payload_byte(i as u64), "byte {} survived the remount", i);
+        }
     }
 }

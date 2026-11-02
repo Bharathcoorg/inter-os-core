@@ -41,6 +41,30 @@
 //! sectors in place; the file only relocates when the reserved extent is too
 //! small, and it relocates geometrically so the total copy cost stays linear
 //! in the file size.
+//!
+//! # The single-extent bound, measured
+//!
+//! One inode describes one contiguous extent: `start_sector` plus
+//! `sector_count`. Nothing in the format caps that run at a size -- the count
+//! is a `u32` of sectors, so the field reaches 2 TiB -- so the bound on a file
+//! is the geometry, and the bound *today* is the longest consecutive free run
+//! the bitmap holds. Both are reported by `space_report`, and neither is a
+//! constant.
+//!
+//! For the demo data disk as the emulator builds it -- 6 GiB, so 12,582,912
+//! sectors -- the placement layer in `storage::filesystem` leaves the first
+//! 4,096 sectors to the boot area and the last 2,560 to the journal, giving a
+//! region of 12,576,256 sectors. That region's bitmap is 3,071 sectors, the
+//! inode table 32, and the superblock 1, so data starts at sector 3,104 and the
+//! data region is 12,573,152 sectors = 6,437,453,824 bytes.
+//!
+//! A 333,590,944-byte model file is 651,545 sectors -- 5.18% of that region. On
+//! a freshly formatted disk `format_region` zeroes the bitmap, so the whole
+//! data region is one free run and the model needs no multi-extent support: the
+//! single extent the format already gives is nineteen times larger than the
+//! file. `SpaceReport` exists so that claim stays measured rather than
+//! asserted: once other files have been written, the free *total* keeps
+//! matching while the free *run* may not, and the refusal then says which.
 
 use crate::crypto::Sha256;
 use crate::storage::block::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
@@ -155,6 +179,39 @@ impl FsTransaction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FsCheckReport { pub used_inodes: u32, pub allocated_sectors: u32, pub referenced_sectors: u32 }
+
+/// What the disk was observed to hold when a reservation was asked for.
+///
+/// WHY the largest *contiguous* run and not the free total: InterFS gives a
+/// file one extent (`DiskInode::start_sector` plus `sector_count`), so the
+/// number that decides whether a payload can be stored at all is the longest
+/// consecutive free run the allocation bitmap holds. A disk with 3 GiB free in
+/// a thousand fragments cannot hold a 333 MB model, and reporting the free
+/// total as though it could would be a capacity claim the device cannot keep.
+///
+/// WHY every field is measured rather than derived from the superblock: the
+/// geometry says how large the data region *is*; only the bitmap says how much
+/// of it is free right now. Both are reported, because the refusal is only
+/// actionable if the reader can tell "the format cannot express this" apart from
+/// "this disk does not currently have the run".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceReport {
+    /// Bytes the caller asked to reserve.
+    pub asked_bytes: u64,
+    /// Bytes in the longest consecutive free run the bitmap holds.
+    pub largest_free_run_bytes: u64,
+    /// Free bytes in total, consecutive or not.
+    pub free_bytes: u64,
+    /// Bytes of the data region -- the ceiling one extent can ever reach.
+    pub data_region_bytes: u64,
+}
+
+impl SpaceReport {
+    /// Whether the ask fits in the one extent InterFS would give it.
+    pub fn fits(&self) -> bool {
+        self.asked_bytes <= self.largest_free_run_bytes
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackendError {
@@ -628,6 +685,69 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
             }
         }
         Err(FsBackendError::NoSpace)
+    }
+
+    /// The longest consecutive free run and the total free sectors, read from
+    /// the on-disk allocation bitmap.
+    ///
+    /// WHY this walks the whole bitmap when `find_free_extent` can stop early:
+    /// `find_free_extent` answers "is there a run of N", and a refusal has to
+    /// answer "how large is the largest run there is". The first question is
+    /// settled by the first hit; the second is not settled until every bit has
+    /// been read. This is the difference between a bare `NoSpace` and a number
+    /// the operator can act on.
+    ///
+    /// WHY it reads one bitmap sector at a time and caches it: the bitmap is
+    /// sized from the region, so a 6 GiB disk carries 3,071 bitmap sectors.
+    /// Re-reading the sector for each of the 12,573,152 bits it addresses would
+    /// turn one pass into four thousand times as many reads.
+    fn measure_free_sectors(&mut self) -> Result<(u32, u32), FsBackendError> {
+        let max = self.superblock.layout.data_sectors;
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
+        let mut run = 0u32;
+        let mut largest = 0u32;
+        let mut free = 0u32;
+        for block in 0..max {
+            let byte_index = block as usize / 8;
+            let bit = 1u8 << (block % 8);
+            let lba = self.superblock.layout.bitmap_lba + (byte_index / SECTOR_SIZE) as u32;
+            if lba != cur_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            if (cur_sector[byte_index % SECTOR_SIZE] & bit) != 0 {
+                if run > largest { largest = run; }
+                run = 0;
+            } else {
+                run += 1;
+                free += 1;
+            }
+        }
+        if run > largest { largest = run; }
+        Ok((largest, free))
+    }
+
+    /// The largest single-extent file this disk can hold right now, in bytes.
+    ///
+    /// WHY this is published: the bound is a property of the disk at the moment
+    /// of the ask, so a caller that wants to state the maximum model size has to
+    /// read it off the device rather than recite a constant that will be wrong
+    /// on the next one.
+    pub fn largest_free_extent_bytes(&mut self) -> Result<u64, FsBackendError> {
+        let (largest, _) = self.measure_free_sectors()?;
+        Ok((largest as u64).saturating_mul(SECTOR_SIZE as u64))
+    }
+
+    /// Measures what the disk can hold for `asked_bytes`, before writing.
+    pub fn space_report(&mut self, asked_bytes: u64) -> Result<SpaceReport, FsBackendError> {
+        let (largest, free) = self.measure_free_sectors()?;
+        Ok(SpaceReport {
+            asked_bytes,
+            largest_free_run_bytes: (largest as u64).saturating_mul(SECTOR_SIZE as u64),
+            free_bytes: (free as u64).saturating_mul(SECTOR_SIZE as u64),
+            data_region_bytes: self.superblock.layout.capacity_bytes(),
+        })
     }
 
     fn set_extent_bitmap(&mut self, start: u32, count: u32, used: bool) -> Result<(), FsBackendError> {

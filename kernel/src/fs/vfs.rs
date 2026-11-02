@@ -2627,6 +2627,26 @@ pub fn read_file_for_task(
         }
         let store = self.spill;
         self.apply_provisioned_manifest(&window[..len], store);
+        // WHY the ceiling is stated here: this is the point at which the device is
+        // known to hold a model, and the figure that follows is the device's own,
+        // read from the sector count of the attached disk rather than quoted from
+        // the geometry in the source. Anyone deciding whether the next model will
+        // land needs what the platform observed, and a bound the kernel recites
+        // without looking is exactly the kind of claim this repository forbids.
+        //
+        // WHY no free-space figure is printed alongside it: the largest run the
+        // bitmap holds right now costs a full pass over the bitmap, and the boot
+        // that reads this line has no ask to spend it on. The reservation that
+        // would take the model measures it and refuses with the numbers.
+        match crate::storage::filesystem::max_data_file_bytes_on_device() {
+            Some(bytes) => crate::serial_println!(
+                "[VFS PROVISION] this device can hold one file of at most {} bytes; a larger model needs a larger disk.",
+                bytes
+            ),
+            None => crate::serial_println!(
+                "[VFS PROVISION] no data device is attached, so no model capacity is claimed for it."
+            ),
+        }
     }
 
     /// Imports the entries of `manifest`, reading the payloads they name from
