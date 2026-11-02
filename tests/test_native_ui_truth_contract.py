@@ -1081,3 +1081,69 @@ def test_unavailable_settings_services_use_neutral_not_success_styling():
     assert 'b"Derivation refused by the kernel", THEME.success' not in compact
     assert 'b"No vault encryption status query is exposed", THEME.success' not in compact
     assert 'b"No privacy filter status query is exposed", THEME.success' not in compact
+
+
+def test_the_back_affordance_paints_the_box_a_person_can_tap():
+    """One Back control per screen, and its tap area is its painted plate.
+
+    WHY a source gate: the chips are answered by absolute coordinates from the
+    QEMU suites (`test_interactive_lifecycle.py` taps the chip's centre at
+    (48, 80)), so a coordinate change is a runtime regression, not a refactor.
+    What is pinned here is the derivation -- the app must not own a second copy
+    of a rect the SDK already owns, and must not answer a column it never inks.
+
+    The platform chip is `back_button`: X 24, Y viewport::HEADER_TOP (56),
+    SIZE 48, painted by `pixel_for_theme` and answered by `contains`, both over
+    the identical 24..72 by 56..104 square.
+    """
+    flat = {
+        app: " ".join(read(f"apps/{app}/src/main.rs").split())
+        for app in ("browser", "vault", "camera", "video_player", "calendar", "agent_manager")
+    }
+
+    # The four apps that adopt the chip: paint and target from the same SDK call.
+    for app in ("vault", "camera", "calendar", "agent_manager"):
+        assert "back_button::pixel_for_theme(x, y, &THEME)" in flat[app] or \
+               "back_button::pixel_for_theme(x, y, &CHASSIS_THEME)" in flat[app], (
+                f"{app} no longer paints the platform chip")
+        assert "back_button::contains(" in flat[app], (
+            f"{app} no longer tests the tap through the SDK's own box")
+    # The boxes these four re-derived by hand are gone: each name now reads off
+    # `back_button`, so the header layout and the painted chip cannot drift.
+    assert "const BACK_X: usize = std::design::back_button::X;" in flat["vault"]
+    assert "const BACK_Y: usize = std::design::back_button::Y;" in flat["vault"]
+    assert "const BACK_S: usize = std::design::back_button::SIZE;" in flat["vault"]
+    assert "const BACK_RECT: Rect = Rect::new( std::design::back_button::X, " \
+           "std::design::back_button::Y, std::design::back_button::SIZE, " \
+           "std::design::back_button::SIZE, );" in flat["camera"]
+    # No second copy of the same square in a press path, and no band wider than
+    # the plate: 24..100 (calendar) and 24..88 (agent manager) both answered
+    # columns of bare surface between the chip and the run beside it.
+    assert "in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14)" not in flat["vault"]
+    assert "BACK_RECT.contains(x, y)" not in flat["camera"]
+    assert "x >= 24 && x < 100 && y >= HEADER_TOP" not in flat["calendar"]
+    assert "ux >= 24 && ux < 88 && uy >= HEADER_TOP" not in flat["agent_manager"]
+
+    # The two overrides with a real layout reason keep their own rect, but the
+    # rect is built from the SDK's control size, and one rect feeds both the
+    # painter and the press.
+    browser = read("apps/browser/src/main.rs")
+    assert "const NAV_BTN_H: usize = back_button::SIZE;" in browser
+    assert "const BACK_BTN: Rect = Rect::new(back_button::X, NAV_ROW_Y, 110, NAV_BTN_H);" in browser
+    assert "const _: () = assert!(BACK_BTN.y >= NAV_BAR_Y0 && BACK_BTN.y + BACK_BTN.h <= NAV_BAR_Y1);" in browser
+    assert "Rect::new(24, 1356, 110, 48)" not in browser
+    # Painted == hit is structural: both branches name the same rect.
+    assert "chrome_control_px(x, y, BACK_BTN, BTN_R)" in browser
+    assert "if BACK_BTN.contains(x, y)" in browser
+    assert "back_button::pixel_for_theme(x, y, &THEME)" in browser
+    assert "if back_button::contains(x, y)" in browser
+
+    video = read("apps/video_player/src/main.rs")
+    assert "const LAND_BACK_X: usize = LAND_BAR.x + LAND_BAR_AIR;" in video
+    assert "Rect::new( 36, LAND_BAR.y" not in " ".join(video.split())
+    assert "let back_hit = LAND_BACK_BTN;" in video
+    assert "if LAND_BACK_BTN.contains(x, y)" in video
+    assert (
+        "const _: () = assert!(LAND_BACK_X >= back_button::X && "
+        "LAND_BACK_BTN.y >= back_button::Y);"
+    ) in " ".join(video.split())

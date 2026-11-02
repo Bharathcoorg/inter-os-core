@@ -3697,9 +3697,14 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     // band and stop short of the control's bottom, so a tap on the lower half
     // of the button the reader was looking at did nothing and a tap on the band
     // did.
-    if std::design::back_button::contains(ux, uy)
-        || (ux >= 24 && ux < 88 && uy >= HEADER_TOP && uy < HEADER_TOP + std::design::back_button::SIZE)
-    {
+    //
+    // WHY the columns are the control's own, too: the bar paints the chip
+    // through `back_button::pixel_for_theme`, whose plate is 24..72, while this
+    // press ran to 88. The 16 columns past the plate are the gap the bar keeps
+    // before the surface's name at `APPBAR_TITLE_X`, so the old band made an
+    // invisible strip answer as a button. One rect now serves the painter and
+    // this test.
+    if std::design::back_button::contains(ux, uy) {
         return Tap::Leave("[AGENT_MGR] Back button tapped. Returning to the launcher.");
     }
 

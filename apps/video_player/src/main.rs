@@ -196,7 +196,30 @@ const _: () = assert!(LAND_BAR.h >= back_button::SIZE);
 /// WHY the square went from 52 to 48: the plate is 48 across, so the old rect's
 /// outer two columns and rows on every side were tappable area the user could
 /// not see -- the same mismatch the portrait control had, in miniature.
-const LAND_BACK_BTN: Rect = Rect::new(36, LAND_BAR.y + (LAND_BAR.h - back_button::SIZE) / 2, back_button::SIZE, back_button::SIZE);
+///
+/// WHY the inset is a named constant and not a literal: 36 is the one number the
+/// bar owns about this control -- 12 columns of scrim air, which is
+/// `LAND_BAR_AIR` stood on the scrim's own left edge -- and the painter and the
+/// press both reach the plate through `LAND_BACK_BTN`. Naming it makes the inset
+/// a layout decision with a name, and the gate under it proves the plate the
+/// painter shifts into `back_button`'s space and the rect the press tests are
+/// the same 48x48 box.
+const LAND_BACK_X: usize = LAND_BAR.x + LAND_BAR_AIR;
+const LAND_BACK_BTN: Rect = Rect::new(
+    LAND_BACK_X,
+    LAND_BAR.y + (LAND_BAR.h - back_button::SIZE) / 2,
+    back_button::SIZE,
+    back_button::SIZE,
+);
+// Painted == hit, by construction: the painter hands `back_button::pixel` the
+// point shifted by `LAND_BACK_BTN.x - back_button::X` and `.y - back_button::Y`,
+// so the ink it can produce is exactly the plate the rect covers -- never a
+// wider rect, which is what the 52x52 square used to be.
+//
+// WHY the shift is gated rather than assumed: both differences are `usize`, so
+// a rect ever stood left of or above the chip's own origin the painter would
+// subtract past zero instead of drawing a button.
+const _: () = assert!(LAND_BACK_X >= back_button::X && LAND_BACK_BTN.y >= back_button::Y);
 /// The title run, and the badge run one line box below it.
 ///
 /// WHY the badge stands on the title's own box: the two runs are one column of

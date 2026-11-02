@@ -178,8 +178,21 @@ const DOCK_BAND_Y1: usize = DOCK_Y1 - 30;
 const TOP_ROW_Y: usize = interos_std::design::viewport::HEADER_TOP;
 const TOP_ROW_H: usize = 48;
 
-/// Back control, 48x48: matches the SDK back button's painted box exactly.
-const BACK_RECT: Rect = Rect::new(GUTTER, TOP_ROW_Y, 48, TOP_ROW_H);
+/// Back control: the SDK chip's painted box, read off the SDK and not re-mixed
+/// from this row's own gutter and height.
+///
+/// WHY it is still named here at all: the row below is a chain of neighbours
+/// gated edge-to-edge, and the chain has to start from the control it cannot
+/// move. Deriving it from `back_button` keeps that chain honest while making the
+/// chip impossible to re-size here by accident -- the painter asks
+/// `back_button::pixel_for_theme` (24..72 by 56..104), so a `BACK_RECT` that
+/// drifted from it would be a box the press answers and the screen never inks.
+const BACK_RECT: Rect = Rect::new(
+    std::design::back_button::X,
+    std::design::back_button::Y,
+    std::design::back_button::SIZE,
+    std::design::back_button::SIZE,
+);
 /// Flash / torch pill: 116x48 (>=48px).
 const FLASH_RECT: Rect = Rect::new(80, TOP_ROW_Y, 116, TOP_ROW_H);
 /// Capture-geometry readout: 150x48. Reports platform geometry.
@@ -1699,7 +1712,13 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32, page: &mut usize)
     let y = y as usize;
 
     // 1. Back control or the home gesture strip: exit to the Launcher
-    if std::design::back_button::contains(x, y) || BACK_RECT.contains(x, y) || HOME_HIT.contains(x, y) {
+    //
+    // WHY the chip is asked on its own: `BACK_RECT.contains` used to sit here as
+    // a second clause. Now that `BACK_RECT` is the SDK's rect the two answer the
+    // identical box, so spelling it twice only invited the second copy to drift
+    // from the painted chip. The layout chain below still gates `BACK_RECT`
+    // against the flash pill, which is what the name is for.
+    if std::design::back_button::contains(x, y) || HOME_HIT.contains(x, y) {
         if camera.screen == CameraScreen::Settings {
             camera.screen = CameraScreen::Viewfinder;
             return Tap::Redraw(Dirty::Viewfinder);

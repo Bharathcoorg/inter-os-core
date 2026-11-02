@@ -1311,7 +1311,29 @@ const QA_TILE_SIZE: usize = 64;
 /// Sovereign Bottom Navigation Bar (y 1350..1410)
 const NAV_BAR_Y0: usize = 1350;
 const NAV_BAR_Y1: usize = 1410;
-const BACK_BTN: Rect = Rect::new(24, 1356, 110, 48);
+/// The height of every tile in the bar: the platform chip's own plate.
+const NAV_BTN_H: usize = back_button::SIZE;
+/// The row the tiles stand on, centred inside the bar's band.
+///
+/// WHY derived and not a remembered 1356: the band is 60 rows and the plate is
+/// `NAV_BTN_H`, so the air above and below is what is left over -- an authored
+/// 1356 is a number that goes stale the moment the platform's control changes,
+/// and the control is what this row is sized against.
+const NAV_ROW_Y: usize = NAV_BAR_Y0 + (NAV_BAR_Y1 - NAV_BAR_Y0 - NAV_BTN_H) / 2;
+/// The Back tile. It stays the app's own rect, and for a real layout reason: the
+/// browser puts its navigation on the bar under the page, not in the header the
+/// SDK chip owns -- and the header chip is adopted here too, painted by
+/// `back_button::pixel_for_theme` and answered by `back_button::contains`.
+///
+/// WHY painted == hit is structural: `bottom_bar_pixel` inks the whole plate
+/// through `chrome_control_px(x, y, BACK_BTN, BTN_R)` and the press tests the
+/// same `BACK_BTN`, so neither can claim a column the other has not; the width
+/// the bar gives this tile (110) is fill the person sees, not dead tap area.
+const BACK_BTN: Rect = Rect::new(back_button::X, NAV_ROW_Y, 110, NAV_BTN_H);
+// WHY this gate: the tile has to stay inside the band the bar paints. A plate
+// that left the band would answer presses on rows the bar never inks -- the
+// mismatch this task is about, in the other direction.
+const _: () = assert!(BACK_BTN.y >= NAV_BAR_Y0 && BACK_BTN.y + BACK_BTN.h <= NAV_BAR_Y1);
 const FWD_BTN: Rect = Rect::new(160, 1356, 110, 48);
 const HOME_TAB_BTN: Rect = Rect::new(296, 1356, 128, 48);
 const ADD_BOOK_BTN: Rect = Rect::new(448, 1356, 110, 48);

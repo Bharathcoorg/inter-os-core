@@ -3256,10 +3256,14 @@ fn stepper_button_at(x: usize, y: usize, boxes: &[(usize, usize)]) -> Option<(us
 
 fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
     // Back button or touch Close [X] at top-right of sheet
-    if std::design::back_button::contains(x, y)
-        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
-        || (x >= 624 && x < 676 && y >= 538 && y < 590)
-    {
+    //
+    // WHY the band's own test is gone: the header paints the platform chip
+    // through `back_button::pixel_for_theme`, which answers 24..72, while this
+    // press answered 24..100. The extra 28 columns were bare `THEME.surface` --
+    // the title run does not start until x=116 -- so they were a tap area that
+    // painted nothing. The band that closes the sheet is now the box the chip
+    // draws, one rect, read from the SDK by both the painter and this test.
+    if std::design::back_button::contains(x, y) || (x >= 624 && x < 676 && y >= 538 && y < 590) {
         app.flow = Flow::None;
         app.commit_status = "CANCELLED: NO EVENT WRITTEN";
         return Dirty::CONTENT;
@@ -3322,7 +3326,12 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
         return Tap::Leave("[CALENDAR APP] Back button or home gesture pressed. Exiting to launcher.");
     }
 
-    let is_back = std::design::back_button::contains(x, y) || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48);
+    // WHY only the chip's own box: see `handle_flow_tap` -- the wider
+    // 24..100 band answered rows the header never inks as a control, so the
+    // press and the picture disagreed. `back_button::contains` is the box the
+    // painter draws, and at 48x48 it is still this app's own 48px touch-target
+    // floor, so shrinking to the picture costs no reachability.
+    let is_back = std::design::back_button::contains(x, y);
 
     // Navigation tabs -- answered before either modal gets to the row.
     //

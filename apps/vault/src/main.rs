@@ -494,9 +494,15 @@ const CARD_R: usize = CARD.radius;
 const INNER_W: usize = CARD_W - PAD * 2; // 624
 
 const TITLE_X: usize = 88;
-const BACK_X: usize = 24;
-const BACK_Y: usize = interos_std::design::viewport::HEADER_TOP;
-const BACK_S: usize = 48;
+// The header's back control, read straight off the SDK rather than re-authored
+// here. WHY: the painter below asks `back_button::pixel_for_theme`, which owns
+// 24..72 by 56..104, so these three numbers are not a layout choice the vault
+// makes -- they are the platform's, and writing 24 and 48 a second time is how
+// the box the app lays out its header against and the box the chip draws drift
+// apart. `back_button::Y` is the same `viewport::HEADER_TOP` this used to name.
+const BACK_X: usize = std::design::back_button::X;
+const BACK_Y: usize = std::design::back_button::Y;
+const BACK_S: usize = std::design::back_button::SIZE;
 
 /// Header action pill ("RE-PROBE"): 44px tall, right-aligned to the margin.
 const ACTION_H: usize = 44;
@@ -2315,8 +2321,13 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     // the app draws, so a press on blank surface next to the indicator closed
     // the vault. The pan and fling the event loop recognises keeps the
     // platform's wider strip -- see `tests/test_vault_truth_contract.py`.
+    //
+    // WHY the chip is tested through `back_button::contains` alone: the painter
+    // asks `back_button::pixel_for_theme`, and this used to union that test
+    // with `in_round(.., BACK_X, BACK_Y, BACK_S, BACK_S, 14)` -- the same
+    // square, drawn from the app's own copy of its numbers. One call, one box,
+    // and the box is the SDK's.
     if std::design::back_button::contains(x, y)
-        || in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14)
         || (x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 && y >= GESTURE_MARK_Y)
     {
         if vault.pin_modal_open {
