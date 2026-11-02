@@ -2410,19 +2410,26 @@ const _: () =
 // of SIM the platform does not offer - and a section the user cannot reach is
 // not a surface. The four pills are 147px wide with 12px gaps, which still
 // leaves the longest label ("Contacts") its full width.
-const TAB_SCALE: usize = type_scale::BODY;
-const TAB_BAND_Y0: usize = 120;
-const TAB_BAND_H: usize = 44;
-const TAB_W: usize = 147;
-const TAB1_X0: usize = 48;
-const TAB1_X1: usize = TAB1_X0 + TAB_W; // 195
-const TAB2_X0: usize = 207;
-const TAB2_X1: usize = TAB2_X0 + TAB_W; // 354
-const TAB3_X0: usize = 366;
-const TAB3_X1: usize = TAB3_X0 + TAB_W; // 513
-const TAB4_X0: usize = 525;
-const TAB4_X1: usize = TAB4_X0 + TAB_W; // 672
-const TAB_LABELS: [&[u8]; 4] = [b"Dial", b"Recents", b"Contacts", b"Settings"];
+const TAB_SCALE: usize = dialer::tab_row::SCALE;
+const TAB_BAND_Y0: usize = dialer::tab_row::BAND_Y0;
+const TAB_BAND_H: usize = dialer::tab_row::BAND_H;
+const TAB_W: usize = dialer::tab_row::COL_W;
+const TAB1_X0: usize = dialer::tab_row::col_x0(0);
+const TAB1_X1: usize = dialer::tab_row::col_x1(0);
+const TAB2_X0: usize = dialer::tab_row::col_x0(1);
+const TAB2_X1: usize = dialer::tab_row::col_x1(1);
+const TAB3_X0: usize = dialer::tab_row::col_x0(2);
+const TAB3_X1: usize = dialer::tab_row::col_x1(2);
+const TAB4_X0: usize = dialer::tab_row::col_x0(3);
+const TAB4_X1: usize = dialer::tab_row::col_x1(3);
+const TAB_LABELS: [&[u8]; 4] = dialer::tab_row::LABELS;
+
+// The painter and the lib's tab gate read the same geometry; these ties fail the
+// build if the band, the surface or the row ever drifts from what `tab_row`
+// publishes, so the gate can no longer pass a row the screen does not paint.
+const _: () = assert!(W == dialer::tab_row::SURFACE_W);
+const _: () = assert!(TAB4_X1 == dialer::tab_row::row_right_edge());
+const _: () = assert!(dialer::tab_row::rung_band_h() <= TAB_BAND_H);
 
 // Dialed-number display card.
 const DISPLAY_X0: usize = 24;

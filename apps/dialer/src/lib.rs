@@ -374,6 +374,115 @@ pub const CONTACTS_LIST_Y0: usize = 410;
 /// The bottom of the contact list's window; the notice band starts here.
 pub const CONTACTS_VIEWPORT_Y1: usize = 938;
 
+// ---------------------------------------------------------------------------
+// The tab row the dialer draws across the top of every section.
+//
+// WHY the geometry lives here and not only in the renderer: the row's width is
+// the sum of the columns the painter seats, and the only honest way to know a
+// tab's label fits its column -- and the row fits the surface -- is to add the
+// real columns back. If those numbers live in the painter (`src/main.rs`, a
+// `test = false` bin no host test can reach), the gate re-states them as
+// literals and the gate and the row can disagree without either failing to
+// compile. The painter reads these back, so the row and the gate are one fact.
+// ---------------------------------------------------------------------------
+pub mod tab_row {
+    use crate::theme::type_scale;
+    use interos_std::design::font;
+    use interos_std::design::outline_text;
+    use interos_std::design::viewport;
+
+    /// The rung the tab labels are drawn at: the body rung. WHY not lowered: a
+    /// tab that fits only by shrinking its type is a tab the gate passed by
+    /// lying about the label, not by the label being short.
+    pub const SCALE: usize = type_scale::BODY;
+
+    /// How many tabs the row lays out -- all four sections are live.
+    pub const COUNT: usize = 4;
+
+    /// The tab labels, in section order, exactly as the painter draws them.
+    pub const LABELS: [&[u8]; COUNT] = [b"Dial", b"Recents", b"Contacts", b"Settings"];
+
+    /// The top of the band the tabs sit in.
+    pub const BAND_Y0: usize = 120;
+
+    /// The height of the band the tabs sit in.
+    pub const BAND_H: usize = 44;
+
+    /// The width of one tab column.
+    pub const COL_W: usize = 147;
+
+    /// The x the first column starts on: the display's margin.
+    pub const START_X: usize = 48;
+
+    /// The gap between two tab columns.
+    pub const GAP: usize = 12;
+
+    /// The width of the surface the row is laid out on. The painter draws into a
+    /// surface of this width, so a row whose last edge passes it is off-screen.
+    pub const SURFACE_W: usize = viewport::LOGICAL_WIDTH;
+
+    /// The left edge of the column at `index`, derived forward from the margin,
+    /// the column width and the gap -- never a literal that can drift.
+    pub const fn col_x0(index: usize) -> usize {
+        START_X + index * (COL_W + GAP)
+    }
+
+    /// The right edge (one-past) of the column at `index`.
+    pub const fn col_x1(index: usize) -> usize {
+        col_x0(index) + COL_W
+    }
+
+    /// The right edge (one-past the last column) the whole row reaches.
+    pub const fn row_right_edge() -> usize {
+        START_X + COUNT * COL_W + (COUNT - 1) * GAP
+    }
+
+    /// The ascent-plus-descent the rung occupies, i.e. the vertical band a tab's
+    /// line box claims. WHY not the line box the painter centres with: the gate
+    /// is asked whether the rung fits the band the app draws it into, and that
+    /// extent is the face's own ascent plus descent at the rung's em.
+    pub const fn rung_band_h() -> usize {
+        // `row_band(0, scale).1` is the band's lower row for a run based at 0,
+        // which is exactly the ascent-plus-descent height the rung occupies.
+        outline_text::row_band(0, SCALE).1
+    }
+
+    /// Whether one tab label fits a column `col_w` wide at the rung it is drawn at.
+    pub fn label_fits_column(label: &[u8], col_w: usize) -> bool {
+        font::measure(label, SCALE) <= col_w
+    }
+
+    /// Whether every tab label fits the column the painter gives it.
+    pub fn each_label_fits_column() -> bool {
+        let mut i = 0;
+        while i < COUNT {
+            if !label_fits_column(LABELS[i], COL_W) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Whether every tab label fits a column `col_w` wide -- the gate asked with
+    /// the container narrowed, to prove it tracks the column and not a literal.
+    pub fn each_label_fits_column_at(col_w: usize) -> bool {
+        let mut i = 0;
+        while i < COUNT {
+            if !label_fits_column(LABELS[i], col_w) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Whether the row ends on or before a surface `surface_w` wide.
+    pub const fn row_fits(surface_w: usize) -> bool {
+        row_right_edge() <= surface_w
+    }
+}
+
 /// How tall a scrollable list is, and how much of it is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollExtents {
@@ -787,14 +896,38 @@ mod tests {
         use interos_std::design::font;
 
         const DISPLAY_W: usize = 672;
-        const TAB_W: usize = 208;
 
-        // 1. Tab labels must fit in TAB_W at scale 2
-        let tab_labels: [&[u8]; 3] = [b"Keypad", b"Recents", b"Contacts"];
-        for t in tab_labels.iter() {
-            let w = font::measure(t, 2);
-            assert!(w <= TAB_W, "Tab label {:?} width {} exceeds TAB_W", core::str::from_utf8(t).unwrap(), w);
+        // 1. The tab row is measured against what the app actually draws: the
+        //    real labels, at the real column, on the real rung, and the whole row
+        //    laid end to end against the real surface -- not a stale 3-label set
+        //    held to a 208px pin that the painter never uses.
+        for t in tab_row::LABELS.iter() {
+            let w = font::measure(t, tab_row::SCALE);
+            assert!(
+                w <= tab_row::COL_W,
+                "Tab label {:?} width {} exceeds its {}px column",
+                core::str::from_utf8(t).unwrap(),
+                w,
+                tab_row::COL_W
+            );
         }
+        assert!(
+            tab_row::each_label_fits_column(),
+            "a tab label overruns the column the painter gives it"
+        );
+        assert!(
+            tab_row::row_fits(tab_row::SURFACE_W),
+            "tab row right edge {} overruns the {}-wide surface",
+            tab_row::row_right_edge(),
+            tab_row::SURFACE_W
+        );
+        let (_top, band_h) = interos_std::design::outline_text::row_band(0, tab_row::SCALE);
+        assert!(
+            band_h <= tab_row::BAND_H,
+            "tab rung band {} exceeds the {}px tab band",
+            band_h,
+            tab_row::BAND_H
+        );
 
         // 2. Settings row titles and notes must fit within DISPLAY_W - 48 at scale 1
         for row in SettingsRow::ORDER {
@@ -820,5 +953,41 @@ mod tests {
         assert_eq!(&line[..n], b"Saved 3 of 12");
         assert!(!line[..n].contains(&0), "Formatted string must not contain null bytes");
         assert!(font::measure(&line[..n], 1) <= DISPLAY_W - 48);
+    }
+
+    /// The re-pointed tab gate must actually bite: it refuses a row whose columns
+    /// overrun the surface, and a label that no longer fits the column the painter
+    /// gives it -- proving the gate tracks the geometry the app draws, not the
+    /// stale 3-label / 208px pin it replaced.
+    #[test]
+    fn test_dialer_tab_gate_refuses_a_clipped_row() {
+        use interos_std::design::{font, outline_text};
+
+        // The real row fits the real surface, but the same arithmetic on a
+        // surface narrowed to just under the row's own right edge is refused.
+        let right = tab_row::row_right_edge();
+        assert!(tab_row::row_fits(tab_row::SURFACE_W));
+        assert!(!tab_row::row_fits(right - 1));
+
+        // The real labels fit the column the painter gives them, but a column
+        // narrowed under the widest label's own advance is refused -- the gate
+        // tracks the column, not the 208px pin it replaced.
+        let mut widest = 0usize;
+        let mut widest_label: &[u8] = b"";
+        for t in tab_row::LABELS.iter() {
+            let w = font::measure(t, tab_row::SCALE);
+            if w > widest {
+                widest = w;
+                widest_label = t;
+            }
+        }
+        assert!(tab_row::each_label_fits_column());
+        assert!(tab_row::label_fits_column(widest_label, widest));
+        assert!(!tab_row::label_fits_column(widest_label, widest - 1));
+        assert!(!tab_row::each_label_fits_column_at(widest - 1));
+
+        // The rung's own ascent+descent fits the band the painter centres it in.
+        let band_h = outline_text::row_band(0, tab_row::SCALE).1;
+        assert!(band_h <= tab_row::BAND_H);
     }
 }
