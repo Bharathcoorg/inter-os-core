@@ -5647,7 +5647,7 @@ pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     drop(sched);
 
     let mut rtc = crate::hal::RTC.lock();
-    let dt = rtc.read_hardware();
+    let dt = rtc.current_time();
     let local_dt = rtc.local_now();
     use core::fmt::Write;
     struct SliceWriter<'a> {

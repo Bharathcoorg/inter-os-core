@@ -194,9 +194,14 @@ fn is_update_in_progress() -> bool {
 pub struct RtcManager {
     last_time: DateTime,
     boot_epoch: u64,
+    last_hw_ticks: u64,
 }
 
 impl RtcManager {
+    /// One guest second, in system ticks. The tick is aged from the HPET main
+    /// counter, so 1000 of them is one second of host time.
+    const SELF_REFRESH_TICKS: u64 = 1_000;
+
     pub const fn new() -> Self {
         Self {
             last_time: DateTime {
@@ -209,6 +214,7 @@ impl RtcManager {
                 unix_epoch_secs: 0,
             },
             boot_epoch: 0,
+            last_hw_ticks: 0,
         }
     }
 
@@ -279,6 +285,26 @@ impl RtcManager {
     /// Returns the cached or current wall-clock date-time in UTC.
     pub fn now(&self) -> DateTime {
         self.last_time
+    }
+
+    /// Returns the wall clock, interrogating the CMOS only when the previous
+    /// reading is at least a guest second old.
+    ///
+    /// WHY the rate limit exists: the CMOS registers advance once a second, so a
+    /// second read inside that second can only return what the first one
+    /// returned -- but each read is eight register pairs of port I/O, and every
+    /// one of them traps to the hypervisor. The shell asked for the clock on each
+    /// 25 ms wake, so the device spent a tenth of its life re-reading a number
+    /// that cannot have changed, and a tap waited behind it.
+    pub fn current_time(&mut self) -> DateTime {
+        let ticks = crate::interrupts::get_system_ticks();
+        if self.last_hw_ticks != 0
+            && ticks.saturating_sub(self.last_hw_ticks) < Self::SELF_REFRESH_TICKS
+        {
+            return self.last_time;
+        }
+        self.last_hw_ticks = ticks;
+        self.read_hardware()
     }
 
     /// Returns the wall-clock date-time adjusted for system default timezone (India Standard Time UTC+05:30).
