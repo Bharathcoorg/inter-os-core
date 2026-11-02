@@ -30,7 +30,7 @@ use video_player::avi::{self, AviChunk, AviError, AviInfo, AviStream};
 use video_player::theme::{
     COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
     COLOR_PROGRESS_ACTIVE, COLOR_PROGRESS_BG, COLOR_SHEET_CARD, COLOR_SURFACE,
-    COLOR_SURFACE_SUNKEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY, THEME,
+    COLOR_SURFACE_SUNKEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY, MIN_TOUCH_TARGET, THEME,
 };
 use video_player::{
     blend_argb, format_file_size, format_resolution, format_time, map_canvas_to_source,
@@ -136,6 +136,15 @@ const KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52);
 // last thing the chip can genuinely collide with. Its foot lands at row 104,
 // where the square it replaced reached 108.
 const _: () = assert!(back_button::Y + back_button::SIZE < HEADER_RULE_Y);
+/// WHY checked at compile time: these two are the only presses on the header
+/// row the app itself authors, and both now wear a plate the eye can find -- the
+/// gates hold the plate inside the band that repaints it, clear of each other,
+/// clear of the gutter, and over the platform's minimum target on both axes.
+const _: () = assert!(ORIENT_BTN.w >= MIN_TOUCH_TARGET && ORIENT_BTN.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(KEBAB_BTN.w >= MIN_TOUCH_TARGET && KEBAB_BTN.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(ORIENT_BTN.x + ORIENT_BTN.w <= KEBAB_BTN.x);
+const _: () = assert!(KEBAB_BTN.x + KEBAB_BTN.w <= W - 24);
+const _: () = assert!(ORIENT_BTN.y + ORIENT_BTN.h <= HEADER_RULE_Y);
 
 /// The air the landscape HUD's top bar keeps around its two runs.
 ///
@@ -245,6 +254,134 @@ const _: () = assert!(
     LAND_BACK_BTN.w == back_button::SIZE && LAND_BACK_BTN.h == back_button::SIZE
 );
 
+/// The landscape HUD's lower panel, control by control.
+///
+/// WHY these are named here instead of written where they are used: the
+/// scrubber, the transport and the volume row were each authored twice -- once
+/// as the literals the painter fills, once as the literals the press answers --
+/// and the two copies had drifted apart. The play control was answered four
+/// columns and four rows outside its own disc, and both bar bands were measured
+/// in rows the platform's minimum target does not cover (41 for the scrubber,
+/// 31 for the volume), so a thumb landing on the middle of a band it could not
+/// reach did nothing at all.
+const LAND_SEEK_X: usize = 120;
+const LAND_SEEK_Y: usize = 1128;
+const LAND_SEEK_W: usize = 460;
+const LAND_SEEK_H: usize = 8;
+const LAND_SEEK: Rect = Rect::new(LAND_SEEK_X, LAND_SEEK_Y, LAND_SEEK_W, LAND_SEEK_H);
+/// Where the landscape remaining-time run starts, one gap right of the track.
+const LAND_REMAIN_X: usize = 600;
+/// The scrubber's touch band: the track's own columns plus the air between it
+/// and the top of the scrim it is painted on.
+///
+/// WHY it stops where the panel starts rather than centring on the track: the
+/// rows above `LAND_PANEL` are live video, and the press there belongs to the
+/// HUD toggle, not to a seek. The band therefore takes every row the scrim owns
+/// down to the transport -- which is what makes it a target the platform's
+/// minimum covers without inventing a strip the panel never painted.
+///
+/// WHY it stops short of `LAND_REMAIN_X`: the portrait scrubber already gives
+/// the remaining-time number its own columns; a band that ran under the first
+/// strokes of that number would jump the playback on a press meant to read it.
+const LAND_SEEK_HIT: Rect = Rect::new(LAND_SEEK_X - 10, LAND_PANEL.y, LAND_SEEK_W + 20, 52);
+
+const LAND_TRANSPORT_CY: usize = 1210;
+const LAND_PLAY_CX: usize = 360;
+const LAND_PLAY_R: usize = 36;
+const LAND_STEP_CX_LEFT: usize = 230;
+const LAND_STEP_CX_RIGHT: usize = 490;
+const LAND_STEP_R: usize = 24;
+/// Each transport press: the bounding box of the disc that paints it, from the
+/// same centre and radius the painter is handed.
+const LAND_PLAY_HIT: Rect =
+    Rect::new(LAND_PLAY_CX - LAND_PLAY_R, LAND_TRANSPORT_CY - LAND_PLAY_R, LAND_PLAY_R * 2, LAND_PLAY_R * 2);
+const LAND_PREV_HIT: Rect = Rect::new(
+    LAND_STEP_CX_LEFT - LAND_STEP_R,
+    LAND_TRANSPORT_CY - LAND_STEP_R,
+    LAND_STEP_R * 2,
+    LAND_STEP_R * 2,
+);
+const LAND_NEXT_HIT: Rect = Rect::new(
+    LAND_STEP_CX_RIGHT - LAND_STEP_R,
+    LAND_TRANSPORT_CY - LAND_STEP_R,
+    LAND_STEP_R * 2,
+    LAND_STEP_R * 2,
+);
+
+const LAND_VOL_X: usize = 120;
+const LAND_VOL_Y: usize = 1290;
+const LAND_VOL_W: usize = 460;
+const LAND_VOL_H: usize = 8;
+const LAND_VOL: Rect = Rect::new(LAND_VOL_X, LAND_VOL_Y, LAND_VOL_W, LAND_VOL_H);
+/// The volume band's foot: the panel's own bottom edge is 54 rows under the
+/// track, so the band takes 52 of them and leaves the scrim's last rows to the
+/// video the tap toggle still answers.
+const LAND_VOL_HIT: Rect = Rect::new(LAND_VOL_X - 10, LAND_VOL_Y - 16, LAND_VOL_W + 20, 52);
+
+/// The landscape mute control: the plate the painter fills and the press
+/// answers, with its glyph centred on the plate rather than on a remembered
+/// column.
+///
+/// WHY the plate exists at all: this control used to be answered as a 52x52
+/// square around a bare speaker cone, and the cone is the only ink the scrim
+/// ever put there -- on a translucent panel over live video that reads as a
+/// mark on the picture, not as a button. The portrait mute control is now drawn
+/// the same way, and both are the app's own plate style.
+const LAND_MUTE_BTN: Rect = Rect::new(40, 1274, 52, 52);
+const LAND_MUTE_CX: usize = LAND_MUTE_BTN.x + LAND_MUTE_BTN.w / 2;
+const LAND_MUTE_CY: usize = LAND_MUTE_BTN.y + LAND_MUTE_BTN.h / 2;
+
+/// WHY checked at compile time: the first four gates are the painting itself --
+/// every band answers rows the scrim fills, and the transport presses are the
+/// discs that draw them, so a control can no longer be answered where it is not
+/// inked. The rest are the platform minimum and the collisions a taller band or
+/// a wider plate would create: the scrubber meeting the transport, the volume
+/// meeting the mute plate, the remaining-time run meeting the seek band's right
+/// edge, and the mute plate leaving the panel it is painted on.
+const _: () = assert!(
+    LAND_SEEK.y >= LAND_SEEK_HIT.y
+        && LAND_SEEK.y + LAND_SEEK.h <= LAND_SEEK_HIT.y + LAND_SEEK_HIT.h
+);
+const _: () = assert!(
+    LAND_SEEK_HIT.x <= LAND_SEEK.x && LAND_SEEK_HIT.x + LAND_SEEK_HIT.w >= LAND_SEEK.x + LAND_SEEK.w
+);
+const _: () = assert!(LAND_SEEK_HIT.x + LAND_SEEK_HIT.w <= LAND_REMAIN_X);
+const _: () = assert!(
+    LAND_VOL.y >= LAND_VOL_HIT.y && LAND_VOL.y + LAND_VOL.h <= LAND_VOL_HIT.y + LAND_VOL_HIT.h
+);
+const _: () = assert!(
+    LAND_VOL_HIT.x <= LAND_VOL.x && LAND_VOL_HIT.x + LAND_VOL_HIT.w >= LAND_VOL.x + LAND_VOL.w
+);
+const _: () = assert!(LAND_PLAY_HIT.x == LAND_PLAY_CX - LAND_PLAY_R && LAND_PLAY_HIT.w == LAND_PLAY_R * 2);
+const _: () = assert!(
+    LAND_PREV_HIT.x == LAND_STEP_CX_LEFT - LAND_STEP_R && LAND_PREV_HIT.w == LAND_STEP_R * 2
+);
+const _: () = assert!(
+    LAND_NEXT_HIT.x == LAND_STEP_CX_RIGHT - LAND_STEP_R && LAND_NEXT_HIT.w == LAND_STEP_R * 2
+);
+const _: () = assert!(
+    LAND_PLAY_HIT.y == LAND_TRANSPORT_CY - LAND_PLAY_R && LAND_PLAY_HIT.h == LAND_PLAY_R * 2
+);
+const _: () = assert!(LAND_SEEK_HIT.h >= MIN_TOUCH_TARGET && LAND_VOL_HIT.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(
+    LAND_PLAY_HIT.w >= MIN_TOUCH_TARGET
+        && LAND_PREV_HIT.w >= MIN_TOUCH_TARGET
+        && LAND_NEXT_HIT.w >= MIN_TOUCH_TARGET
+);
+const _: () = assert!(LAND_MUTE_BTN.w >= MIN_TOUCH_TARGET && LAND_MUTE_BTN.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(LAND_SEEK_HIT.y + LAND_SEEK_HIT.h <= LAND_PREV_HIT.y);
+const _: () = assert!(LAND_PLAY_HIT.y + LAND_PLAY_HIT.h <= LAND_VOL_HIT.y);
+const _: () = assert!(LAND_MUTE_BTN.x + LAND_MUTE_BTN.w <= LAND_VOL_HIT.x);
+const _: () = assert!(
+    LAND_MUTE_BTN.x >= LAND_PANEL.x && LAND_MUTE_BTN.y + LAND_MUTE_BTN.h <= LAND_PANEL.y + LAND_PANEL.h
+);
+const _: () = assert!(LAND_VOL_HIT.y + LAND_VOL_HIT.h <= LAND_PANEL.y + LAND_PANEL.h);
+const _: () = assert!(LAND_VOL.x + LAND_VOL.w <= LAND_PANEL.x + LAND_PANEL.w);
+const _: () = assert!(
+    LAND_PREV_HIT.x + LAND_PREV_HIT.w <= LAND_PLAY_HIT.x
+        && LAND_PLAY_HIT.x + LAND_PLAY_HIT.w <= LAND_NEXT_HIT.x
+);
+
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
 const CANVAS_RECT: Rect = Rect::new(CANVAS_X0, CANVAS_Y0, CANVAS_W, CANVAS_H);
@@ -275,11 +412,28 @@ const PLAY_HIT: Rect = Rect::new(PLAY_CX - PLAY_R, TRANSPORT_CY - PLAY_R, PLAY_R
 
 const PREV_CX: usize = 180;
 const PREV_R: usize = 28;
-const PREV_HIT: Rect = Rect::new(PREV_CX - PREV_R - 4, TRANSPORT_CY - PREV_R - 4, 64, 64);
-
 const NEXT_CX: usize = 540;
 const NEXT_R: usize = 28;
-const NEXT_HIT: Rect = Rect::new(NEXT_CX - NEXT_R - 4, TRANSPORT_CY - NEXT_R - 4, 64, 64);
+/// WHY the two side presses are the discs' own bounding boxes: each used to be
+/// a 64x64 square stood four columns and four rows outside the 56x56 circle it
+/// paints, so the ring of a press the user could not see restarted the track or
+/// skipped it. `PLAY_HIT` below already answers its disc exactly; the pair now
+/// follows the same derivation from the same centre and radius the painter is
+/// handed, and neither disc needed enlarging -- both are already over the
+/// platform's minimum target on both axes.
+const PREV_HIT: Rect = Rect::new(PREV_CX - PREV_R, TRANSPORT_CY - PREV_R, PREV_R * 2, PREV_R * 2);
+const NEXT_HIT: Rect = Rect::new(NEXT_CX - NEXT_R, TRANSPORT_CY - NEXT_R, NEXT_R * 2, NEXT_R * 2);
+const _: () = assert!(PREV_HIT.w == PREV_R * 2 && PREV_HIT.h == PREV_R * 2);
+const _: () = assert!(NEXT_HIT.w == NEXT_R * 2 && NEXT_HIT.h == NEXT_R * 2);
+const _: () = assert!(
+    PREV_HIT.w >= MIN_TOUCH_TARGET
+        && NEXT_HIT.w >= MIN_TOUCH_TARGET
+        && PLAY_HIT.w >= MIN_TOUCH_TARGET
+        && PREV_HIT.h >= MIN_TOUCH_TARGET
+);
+const _: () = assert!(PREV_HIT.x + PREV_HIT.w <= PLAY_HIT.x && PLAY_HIT.x + PLAY_HIT.w <= NEXT_HIT.x);
+const _: () = assert!(SEEK_HIT.y + SEEK_HIT.h <= PREV_HIT.y);
+const _: () = assert!(PREV_HIT.y + PREV_HIT.h <= VOL_HIT.y);
 
 // Volume HUD
 const _VOL_CY: usize = 850;
@@ -290,6 +444,19 @@ const VOL_BAR_W: usize = 490;
 const VOL_BAR_H: usize = 8;
 const VOL_BAR_RECT: Rect = Rect::new(VOL_BAR_X, VOL_BAR_Y, VOL_BAR_W, VOL_BAR_H);
 const VOL_HIT: Rect = Rect::new(88, 824, 510, 52);
+/// WHY checked at compile time: the mute plate and the bar's touch band share one
+/// row and answer in that order, so the two must not overlap and the band must
+/// hold the track it seeks. Both bands here are padded past the 8-row tracks
+/// they answer on purpose -- the gates say the padding reaches the platform's
+/// minimum, which is the only reason it is allowed at all.
+const _: () = assert!(VOL_MUTE_BTN.w >= MIN_TOUCH_TARGET && VOL_MUTE_BTN.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(VOL_MUTE_BTN.x + VOL_MUTE_BTN.w <= VOL_HIT.x);
+const _: () = assert!(VOL_MUTE_BTN.y == VOL_HIT.y && VOL_MUTE_BTN.h == VOL_HIT.h);
+const _: () = assert!(
+    VOL_BAR_RECT.y >= VOL_HIT.y && VOL_BAR_RECT.y + VOL_BAR_RECT.h <= VOL_HIT.y + VOL_HIT.h
+);
+const _: () = assert!(VOL_HIT.w >= MIN_TOUCH_TARGET && VOL_HIT.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(SEEK_HIT.w >= MIN_TOUCH_TARGET && SEEK_HIT.h >= MIN_TOUCH_TARGET);
 
 // Secondary Row 1 (y: 900, h: 52)
 const SPEED_BTN: Rect = Rect::new(24, 900, 154, 52);
@@ -300,6 +467,19 @@ const PIP_BTN: Rect = Rect::new(534, 900, 162, 52);
 // Secondary Row 2 (y: 968, h: 52)
 const LIB_BTN: Rect = Rect::new(24, 968, 326, 52);
 const INFO_BTN: Rect = Rect::new(366, 968, 330, 52);
+
+/// WHY checked at compile time: these six are painted as plates from the same
+/// literals the press answers, so the only way one of them can stop working is a
+/// layout edit -- the chain says the rows stay edge-to-edge inside the gutters
+/// and every one of them over the platform's minimum on both axes.
+const _: () = assert!(SPEED_BTN.h >= MIN_TOUCH_TARGET && PIP_BTN.w >= MIN_TOUCH_TARGET);
+const _: () = assert!(LIB_BTN.h >= MIN_TOUCH_TARGET && INFO_BTN.h >= MIN_TOUCH_TARGET);
+const _: () = assert!(SPEED_BTN.x + SPEED_BTN.w <= ASPECT_BTN.x);
+const _: () = assert!(ASPECT_BTN.x + ASPECT_BTN.w <= LOOP_BTN.x);
+const _: () = assert!(LOOP_BTN.x + LOOP_BTN.w <= PIP_BTN.x);
+const _: () = assert!(PIP_BTN.x + PIP_BTN.w <= W - 24);
+const _: () = assert!(LIB_BTN.x + LIB_BTN.w <= INFO_BTN.x);
+const _: () = assert!(INFO_BTN.x + INFO_BTN.w <= W - 24);
 
 // PIP Floating Preview Card (Bottom Right, 280x158)
 const PIP_W: usize = 280;
@@ -1547,14 +1727,15 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     true,
                     &mut rbuf,
                 );
-                if let Some(col) = draw_text(x, y, 600, 1120, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, bg_hud) {
+                if let Some(col) = draw_text(x, y, LAND_REMAIN_X, 1120, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, bg_hud) {
                     return col;
                 }
 
-                let l_seek_rect = Rect::new(120, 1128, 460, 8);
-                let l_thumb_x = scrubber_thumb_x(120, 460, app.elapsed_sec, app.duration_sec);
+                let l_seek_rect = LAND_SEEK;
+                let l_thumb_x =
+                    scrubber_thumb_x(LAND_SEEK_X, LAND_SEEK_W, app.elapsed_sec, app.duration_sec);
                 let dx = (x as i32) - (l_thumb_x as i32);
-                let dy = (y as i32) - ((1128 + 4) as i32);
+                let dy = (y as i32) - ((LAND_SEEK_Y + LAND_SEEK_H / 2) as i32);
                 if dx * dx + dy * dy <= 64 {
                     return COLOR_TEXT_PRIMARY;
                 }
@@ -1562,10 +1743,20 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return if x <= l_thumb_x { COLOR_PROGRESS_ACTIVE } else { COLOR_PROGRESS_BG };
                 }
 
-                // Transport: Play/Pause (cx: 360, cy: 1210)
-                let t_cy = 1210;
-                if let Some(col) = draw_circle(x, y, 360, t_cy, 36, COLOR_PLAY_FILL, None) {
-                    let pdx = (x as i32) - 360;
+                // Transport: Play/Pause, and the two track controls beside it.
+                // Each disc is drawn from the same centre and radius the press
+                // tests, so a tap answers the ink and nothing beyond it.
+                let t_cy = LAND_TRANSPORT_CY;
+                if let Some(col) = draw_circle(
+                    x,
+                    y,
+                    LAND_PLAY_CX,
+                    t_cy,
+                    LAND_PLAY_R,
+                    COLOR_PLAY_FILL,
+                    None,
+                ) {
+                    let pdx = (x as i32) - (LAND_PLAY_CX as i32);
                     let pdy = (y as i32) - (t_cy as i32);
                     if app.state == PlaybackState::Playing {
                         if (pdx >= -8 && pdx <= -3 && pdy.abs() <= 12) || (pdx >= 3 && pdx <= 8 && pdy.abs() <= 12) {
@@ -1580,9 +1771,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return col;
                 }
 
-                // Prev (cx: 230) & Next (cx: 490)
-                if let Some(col) = draw_circle(x, y, 230, t_cy, 24, COLOR_SURFACE, Some(COLOR_BORDER)) {
-                    let pdx = (x as i32) - 230;
+                if let Some(col) = draw_circle(
+                    x,
+                    y,
+                    LAND_STEP_CX_LEFT,
+                    t_cy,
+                    LAND_STEP_R,
+                    COLOR_SURFACE,
+                    Some(COLOR_BORDER),
+                ) {
+                    let pdx = (x as i32) - (LAND_STEP_CX_LEFT as i32);
                     let pdy = (y as i32) - (t_cy as i32);
                     if pdx >= -8 && pdx <= -6 && pdy.abs() <= 8 {
                         return COLOR_TEXT_PRIMARY;
@@ -1592,8 +1790,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     }
                     return col;
                 }
-                if let Some(col) = draw_circle(x, y, 490, t_cy, 24, COLOR_SURFACE, Some(COLOR_BORDER)) {
-                    let pdx = (x as i32) - 490;
+                if let Some(col) = draw_circle(
+                    x,
+                    y,
+                    LAND_STEP_CX_RIGHT,
+                    t_cy,
+                    LAND_STEP_R,
+                    COLOR_SURFACE,
+                    Some(COLOR_BORDER),
+                ) {
+                    let pdx = (x as i32) - (LAND_STEP_CX_RIGHT as i32);
                     let pdy = (y as i32) - (t_cy as i32);
                     if pdx >= -6 && pdx < 6 && pdy.abs() <= (6 - pdx) * 8 / 12 {
                         return COLOR_TEXT_PRIMARY;
@@ -1604,31 +1810,48 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return col;
                 }
 
-                // Volume Bar in Landscape (y: 1290)
-                let l_vol_x = 120;
-                let l_vol_w = 460;
+                // Volume Bar in Landscape
                 let l_vol_thumb = volume_thumb_x(
-                    l_vol_x,
-                    l_vol_w,
+                    LAND_VOL_X,
+                    LAND_VOL_W,
                     if app.is_muted || !app.volume_known { 0 } else { app.volume_percent },
                 );
                 let vdx = (x as i32) - (l_vol_thumb as i32);
-                let vdy = (y as i32) - ((1290 + 4) as i32);
+                let vdy = (y as i32) - ((LAND_VOL_Y + LAND_VOL_H / 2) as i32);
                 if vdx * vdx + vdy * vdy <= 36 {
                     return COLOR_TEXT_PRIMARY;
                 }
-                if Rect::new(l_vol_x, 1290, l_vol_w, 8).contains(x, y) {
+                if LAND_VOL.contains(x, y) {
                     return if x <= l_vol_thumb { COLOR_PROGRESS_ACTIVE } else { COLOR_PROGRESS_BG };
                 }
 
-                // Volume Speaker Icon at (60, 1294)
-                let spk_dx = (x as i32) - 60;
-                let spk_dy = (y as i32) - 1294;
-                if spk_dx >= -8 && spk_dx <= -3 && spk_dy.abs() <= 5 {
-                    return COLOR_TEXT_PRIMARY;
-                }
-                if spk_dx > -3 && spk_dx <= 5 && spk_dy.abs() <= (spk_dx + 3) * 8 / 8 {
-                    return COLOR_TEXT_PRIMARY;
+                // Mute plate, with the speaker centred on it -- the same control
+                // the press answers, and the same state ink the portrait HUD uses
+                // so a press that muted the output visibly says so.
+                if let Some(col) =
+                    draw_rounded_rect(x, y, LAND_MUTE_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
+                {
+                    let spk_dx = (x as i32) - (LAND_MUTE_CX as i32);
+                    let spk_dy = (y as i32) - (LAND_MUTE_CY as i32);
+                    if spk_dx >= -8 && spk_dx <= -3 && spk_dy.abs() <= 5 {
+                        return COLOR_TEXT_PRIMARY;
+                    }
+                    if spk_dx > -3 && spk_dx <= 5 && spk_dy.abs() <= (spk_dx + 3) * 8 / 8 {
+                        return COLOR_TEXT_PRIMARY;
+                    }
+                    if app.is_muted || !app.volume_known {
+                        if spk_dx >= 6 && spk_dx <= 14 && spk_dy.abs() <= 6
+                            && (((spk_dx - 10) - spk_dy).abs() <= 1 || ((spk_dx - 10) + spk_dy).abs() <= 1)
+                        {
+                            return 0xFFE05A68;
+                        }
+                    } else if spk_dx > 4 {
+                        let d_arc = spk_dx * spk_dx + spk_dy * spk_dy;
+                        if d_arc >= 64 && d_arc <= 100 {
+                            return COLOR_TEXT_PRIMARY;
+                        }
+                    }
+                    return col;
                 }
 
                 return bg_hud;
@@ -1878,7 +2101,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         }
 
         // Orientation Mode Button (⛶ Fullscreen / Landscape Toggle)
-        if ORIENT_BTN.contains(x, y) {
+        //
+        // WHY the plate: both header controls were answered as a 52x52 square
+        // whose only ink was the mark in the middle, on a page colour identical
+        // to the square's own "background" -- so the row read as two glyphs
+        // floating over the title rather than as the two buttons beside it that
+        // the press genuinely answers. They now stand on the same plate the
+        // secondary row below uses.
+        if let Some(col) =
+            draw_rounded_rect(x, y, ORIENT_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
+        {
             let cx = ORIENT_BTN.x + ORIENT_BTN.w / 2;
             let cy = ORIENT_BTN.y + ORIENT_BTN.h / 2;
             let dx = (x as i32) - (cx as i32);
@@ -1890,11 +2122,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             {
                 return COLOR_TEXT_PRIMARY;
             }
-            return COLOR_BG;
+            return col;
         }
 
         // Kebab Overflow (⋮)
-        if KEBAB_BTN.contains(x, y) {
+        if let Some(col) =
+            draw_rounded_rect(x, y, KEBAB_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
+        {
             let cx = KEBAB_BTN.x + KEBAB_BTN.w / 2;
             let cy = KEBAB_BTN.y + KEBAB_BTN.h / 2;
             let dx = (x as i32) - (cx as i32);
@@ -1902,7 +2136,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if dx * dx <= 4 && (dy.abs() <= 2 || (dy - 9).abs() <= 2 || (dy + 9).abs() <= 2) {
                 return COLOR_TEXT_PRIMARY;
             }
-            return COLOR_BG;
+            return col;
         }
 
         // Title in Scale 2 Body Bold
@@ -2202,7 +2436,14 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // -------------------------------------------------------------------------
     if y >= BAND4_Y0 && y < BAND4_Y1 {
         // Speaker / Mute Button
-        if VOL_MUTE_BTN.contains(x, y) {
+        //
+        // WHY the plate: the press answers a 52x52 square and the only ink in it
+        // was the cone, so on the page's own colour the control read as a mark
+        // beside the bar rather than as the button that mutes it. Same plate as
+        // the header controls and the secondary row.
+        if let Some(col) =
+            draw_rounded_rect(x, y, VOL_MUTE_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
+        {
             let cx = VOL_MUTE_BTN.x + VOL_MUTE_BTN.w / 2;
             let cy = VOL_MUTE_BTN.y + VOL_MUTE_BTN.h / 2;
             let dx = (x as i32) - (cx as i32);
@@ -2231,7 +2472,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return COLOR_TEXT_PRIMARY;
                 }
             }
-            return COLOR_BG;
+            return col;
         }
 
         // Volume Bar
@@ -2617,15 +2858,18 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 return EventAction::Redraw(Dirty::All);
             }
 
-            // Scrubber seek in landscape (y: 1120..1150)
-            if y >= 1110 && y <= 1150 && x >= 110 && x <= 590 {
-                let seek_sec = scrubber_seek_seconds(x, 120, 460, app.duration_sec);
+            // Scrubber seek in landscape: the band `LAND_SEEK_HIT` names, which
+            // is the box the panel paints the track inside and is gated to the
+            // platform's minimum height.
+            if LAND_SEEK_HIT.contains(x, y) {
+                let seek_sec =
+                    scrubber_seek_seconds(x, LAND_SEEK_X, LAND_SEEK_W, app.duration_sec);
                 app.seek_to_sec(seek_sec);
                 return EventAction::Redraw(Dirty::All);
             }
 
             // Play/Pause button in landscape
-            if Rect::new(320, 1170, 80, 80).contains(x, y) {
+            if LAND_PLAY_HIT.contains(x, y) {
                 toggle_playback(app);
                 let _ = std::audio_haptic_click();
                 return EventAction::Redraw(Dirty::All);
@@ -2633,7 +2877,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
             // Previous and Next controls in landscape. They are drawn beside
             // the play control, so a tap on one has to do what it looks like.
-            if Rect::new(206, 1186, 48, 48).contains(x, y) {
+            if LAND_PREV_HIT.contains(x, y) {
                 if app.avi.is_some() {
                     app.load_current_track();
                     app.state = if app.has_frame {
@@ -2652,7 +2896,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 let _ = std::audio_haptic_click();
                 return EventAction::Redraw(Dirty::All);
             }
-            if Rect::new(466, 1186, 48, 48).contains(x, y) {
+            if LAND_NEXT_HIT.contains(x, y) {
                 if app.playlist.next(app.loop_mode).is_some() {
                     app.load_current_track();
                     app.state = if app.has_frame {
@@ -2665,9 +2909,10 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 return EventAction::Redraw(Dirty::All);
             }
 
-            // Volume bar in landscape (y: 1280..1310)
-            if y >= 1280 && y <= 1310 && x >= 110 && x <= 590 {
-                let pct = volume_seek_percent(x, 120, 460);
+            // Volume bar in landscape: the band the panel paints the track
+            // inside, gated to the platform's minimum height.
+            if LAND_VOL_HIT.contains(x, y) {
+                let pct = volume_seek_percent(x, LAND_VOL_X, LAND_VOL_W);
                 app.volume_percent = pct;
                 app.is_muted = false;
                 app.volume_known = true;
@@ -2675,8 +2920,8 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
                 return EventAction::Redraw(Dirty::All);
             }
 
-            // Speaker mute in landscape
-            if Rect::new(40, 1274, 52, 52).contains(x, y) {
+            // Speaker mute in landscape: the plate the HUD now paints.
+            if LAND_MUTE_BTN.contains(x, y) {
                 app.is_muted = !app.is_muted;
                 app.volume_known = true;
                 let eff_vol = if app.is_muted { 0 } else { app.volume_percent };
