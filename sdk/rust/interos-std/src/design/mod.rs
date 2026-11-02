@@ -1217,8 +1217,8 @@ pub mod back_button {
     /// on the monochrome theme's `#FAFAFA` page, a 1.21:1 step. Its former
     /// fill, `surface_container_high`, is `#EFEEE9` on the same page: 1.11:1.
     /// Neither step survives the device's own pixel density, so what a person
-    /// saw was a bare chevron with no button around it, and a control whose
-    /// hit box is 48x48 but whose visible mark is 9 pixels wide reads as a
+    /// saw was a bare chevron with no button around it -- a control whose hit
+    /// box was 48x48 and whose visible mark was nine pixels wide read as a
     /// screen with no way back. The ring is what says "this is a thing you can
     /// press", so the ring now takes the role that means exactly that.
     ///
@@ -1268,18 +1268,109 @@ pub mod back_button {
         pixel(x, y, ink, ring, fill)
     }
 
+    /// Half the height the chevron inks, taken from the platform's own icon box.
+    ///
+    /// WHY the icon box and not a number: [`super::monochrome::ICON_BOX`] is the
+    /// square every other glyph on the device is drawn to fill, and a control 48
+    /// across whose mark was 17 tall is a control whose mark belonged to a smaller
+    /// chip. The arms climb this many rows each way, so the mark inks the box and
+    /// the row its vertex joins them on.
+    const MARK_DROP: usize = super::monochrome::ICON_BOX / 2;
+    /// How far each arm runs sideways from the vertex, as half its climb.
+    ///
+    /// WHY half: the arms are drawn at 45 degrees, so an arm that climbs
+    /// [`MARK_DROP`] rows and runs the same number of columns would be a mark 27
+    /// columns across on a plate 48 wide -- the shell's own nav chevron is the
+    /// same shape with the same half-width-over-half-height ratio, and these two
+    /// marks now read as one set rather than as a bold one and a hairline.
+    const MARK_REACH: usize = MARK_DROP / 2;
+    /// Half the width of an arm, measured across a row.
+    ///
+    /// WHY a quarter of the climb: the shell's nav mark uses the same ratio at
+    /// its own size, and an arm whose rows are fewer than three apart is the
+    /// hairline a person scrolling at arm's length cannot find.
+    const MARK_STROKE: usize = MARK_DROP / 4;
+
+    /// The chevron's ink footprint: width, height and the widest row, measured
+    /// off [`pixel`] rather than off the constants, so a resize that quietly
+    /// overlaps the ring is a failing test and not a chip with no edge.
+    #[cfg(test)]
+    pub fn mark_metrics() -> (usize, usize, usize) {
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        let mut min_y = usize::MAX;
+        let mut max_y = 0usize;
+        let mut widest = 0usize;
+        for y in Y..Y + SIZE {
+            let mut row = 0usize;
+            for x in X..X + SIZE {
+                if pixel(x, y, INK_PROBE, RING_PROBE, FILL_PROBE) == Some(INK_PROBE) {
+                    row += 1;
+                    if x < min_x {
+                        min_x = x;
+                    }
+                    if x > max_x {
+                        max_x = x;
+                    }
+                    if y < min_y {
+                        min_y = y;
+                    }
+                    if y > max_y {
+                        max_y = y;
+                    }
+                }
+            }
+            if row > widest {
+                widest = row;
+            }
+        }
+        (max_x - min_x + 1, max_y - min_y + 1, widest)
+    }
+
+    /// The three probe colours [`mark_metrics`] tells apart. They are distinct on
+    /// purpose: the mark is only found by asking which of the three a pixel came
+    /// back as.
+    #[cfg(test)]
+    pub const INK_PROBE: u32 = 0xFF00_0001;
+    #[cfg(test)]
+    pub const RING_PROBE: u32 = 0xFF00_0002;
+    #[cfg(test)]
+    pub const FILL_PROBE: u32 = 0xFF00_0003;
+
+    /// The chip's mark: two 45-degree arms that meet at a vertex left of the
+    /// plate's centre and point the way back.
+    ///
+    /// WHY the arms are built from the same arithmetic as the shell's nav mark:
+    /// the mark used to be two one-pixel offsets of a 45-degree line over an
+    /// eight-row climb -- nine columns wide, seventeen rows tall, thirty-four
+    /// pixels of ink on a plate forty-eight across. Measured off the device it
+    /// was the quietest thing in the header, quieter than the 17-pixel title
+    /// beside it, and a person who could not find it tapped the page and thought
+    /// the app had frozen. The same construction at the size the icon ladder
+    /// already uses inks seventeen columns, twenty-five rows and a hundred and
+    /// twenty-five pixels.
     #[inline]
     pub fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
         let dx = (x as i32) - (cx as i32);
         let dy = (y as i32) - (cy as i32);
-        if dx >= -4 && dx <= 4 && dy >= -8 && dy <= 8 {
-            let arm_top = dx == -dy - 4 || dx == -dy - 3;
-            let arm_bot = dx == dy - 4 || dx == dy - 3;
-            if arm_top || arm_bot {
-                return Some(color);
-            }
+        let climb = MARK_DROP as i32;
+        if dy < -climb || dy > climb {
+            return None;
         }
-        None
+        let reach = MARK_REACH as i32;
+        let arm = MARK_STROKE as i32;
+        // Both arms answer the vertex row with the same set, so the point is one
+        // place rather than a notch the ring would show through.
+        let on_arm = if dy <= 0 {
+            (dx + dy + reach).abs() < arm
+        } else {
+            (dx - dy + reach).abs() < arm
+        };
+        if on_arm {
+            Some(color)
+        } else {
+            None
+        }
     }
 
     /// Whether a pixel lies inside the chip's outline, shrunk `inset` pixels on
@@ -1738,6 +1829,89 @@ mod tests {
             contrast_ratio_x100(ring, monochrome::THEME.surface) >= 1500,
             "the monochrome back ring is no longer the dark edge it was chosen to be"
         );
+    }
+
+    /// The chip's mark is the size the platform draws its glyphs at, and it
+    /// keeps its distance from the ring.
+    ///
+    /// WHY measured off [`back_button::pixel`] and not off the constants: the
+    /// defect this pins was a mark nobody sized -- nine columns across a plate
+    /// forty-eight wide, which on the device is a scratch, not an arrow. A
+    /// resized mark can also fail the other way, by running into the ring it is
+    /// supposed to sit inside, and neither failure is visible in a constant.
+    #[test]
+    fn the_back_chip_marks_a_glyph_the_platform_sizes_and_a_ring_it_clears() {
+        use super::back_button;
+        use super::monochrome::ICON_BOX;
+
+        let (width, height, widest_row) = back_button::mark_metrics();
+
+        // The glyph fills the platform's icon box, and its arms are at least
+        // three rows across so the mark survives the scanout.
+        assert!(
+            height >= ICON_BOX,
+            "the back chip's mark is {} rows tall on a {} chip; the platform draws \
+             its glyphs to fill {}",
+            height,
+            back_button::SIZE,
+            ICON_BOX
+        );
+        assert!(
+            width >= ICON_BOX / 2,
+            "the back chip's mark is only {} columns wide, which is the scratch this \
+             mark existed to replace",
+            width
+        );
+        assert!(
+            widest_row >= 3,
+            "an arm {} rows across is a hairline, not a stroke",
+            widest_row
+        );
+
+        // The mark stays inside the ring's own square rather than crossing it.
+        let half = back_button::SIZE / 2;
+        assert!(
+            width / 2 < half - back_button::RADIUS / 2 && height / 2 < half - 1,
+            "the back chip's {}x{} mark crowds the ring on a {} chip",
+            width,
+            height,
+            back_button::SIZE
+        );
+
+        // The mark never crowds the ring it is supposed to sit inside: walk the
+        // plate and every ink pixel answers its four neighbours with ink or with
+        // the chip's own fill. A mark grown past its plate shows up here as a
+        // neighbour that came back as the ring, or as nothing at all.
+        let (x_lo, x_hi) = (back_button::X + 1, back_button::X + back_button::SIZE - 1);
+        let (y_lo, y_hi) = (back_button::Y + 1, back_button::Y + back_button::SIZE - 1);
+        for y in y_lo..y_hi {
+            for x in x_lo..x_hi {
+                let painted = back_button::pixel(
+                    x,
+                    y,
+                    back_button::INK_PROBE,
+                    back_button::RING_PROBE,
+                    back_button::FILL_PROBE,
+                );
+                if painted == Some(back_button::INK_PROBE) {
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        let neighbour = back_button::pixel(
+                            nx,
+                            ny,
+                            back_button::INK_PROBE,
+                            back_button::RING_PROBE,
+                            back_button::FILL_PROBE,
+                        );
+                        assert!(
+                            neighbour == Some(back_button::INK_PROBE)
+                                || neighbour == Some(back_button::FILL_PROBE),
+                            "the mark at ({x}, {y}) touches the ring or the plate's edge \
+                             at ({nx}, {ny}), so the chip no longer has an edge of its own"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
