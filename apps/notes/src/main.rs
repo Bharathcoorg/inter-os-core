@@ -89,9 +89,15 @@ const CARD_STRIDE: usize = CARD_H + CARD_GAP;
 const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 
 /// The list's search pill.
-const SEARCH_Y0: usize = HEADER_TOP;
-const SEARCH_H: usize = 54;
-const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_H;
+///
+/// WHY it reads the chrome module: the pill, the clear control inside it and
+/// the press that answers it are three sites over two functions, and they had
+/// three sets of numbers.
+const SEARCH_PILL: notes::chrome::Rect = notes::chrome::SEARCH_PILL;
+const SEARCH_CLEAR: notes::chrome::Rect = notes::chrome::SEARCH_CLEAR;
+const SEARCH_Y0: usize = SEARCH_PILL.y;
+const SEARCH_H: usize = SEARCH_PILL.h;
+const SEARCH_Y1: usize = SEARCH_PILL.y + SEARCH_PILL.h;
 
 /// The pill's own search icon, and the run beside it.
 ///
@@ -112,7 +118,7 @@ const CHIP_Y1: usize = CHIP_Y0 + CHIP_H;
 /// WHY the centre is 24 rows into the box rather than at its middle: the tools are
 /// circles of radius 20-22 and the box has to carry the divider below them.
 const EDITOR_BAR_H: usize = HEADER_TOP + 62;
-const EDITOR_TOOL_CY: usize = HEADER_TOP + 24;
+const EDITOR_TOOL_CY: usize = notes::chrome::EDITOR_TOOL_CY;
 
 /// The editor's title row, the body band under it, and the first line's top.
 const EDITOR_TITLE_Y0: usize = EDITOR_BAR_H + 12;
@@ -814,8 +820,8 @@ fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
     // WHY the indicator is ink and not a translucent white: the bar is drawn
     // on the theme's page, and a white pill on a near-white page is a pill
     // nobody can see. The ink role is the strong mark a home indicator is.
-    if y >= 1416 && y <= 1440 {
-        if in_rounded_rect(x, y, 260, 1422, 200, 4, 2) {
+    if y >= chrome::HOME_PILL.y && y <= 1440 {
+        if chrome::HOME_PILL.contains(x, y) {
             return THEME.on_surface;
         }
         return THEME.surface;
@@ -961,9 +967,9 @@ fn extract_card_snippet<'a>(body: &'a [u8]) -> CardSnippet<'a> {
 
 fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
     // --- A. Elevated Search Pill Bar (y: SEARCH_Y0..SEARCH_Y1, x: 28..692) ---
-    if y >= SEARCH_Y0 && y <= SEARCH_Y1 && x >= 28 && x <= 692 {
-        if in_rounded_rect(x, y, 28, SEARCH_Y0, 664, SEARCH_H, 24) {
-            if !in_rounded_rect(x, y, 30, SEARCH_Y0 + 2, 660, SEARCH_H - 4, 22) {
+    if SEARCH_PILL.contains(x, y) {
+        if in_rounded_rect(x, y, SEARCH_PILL.x, SEARCH_PILL.y, SEARCH_PILL.w, SEARCH_PILL.h, 24) {
+            if !in_rounded_rect(x, y, SEARCH_PILL.x + 2, SEARCH_PILL.y + 2, SEARCH_PILL.w - 4, SEARCH_PILL.h - 4, 22) {
                 return if state.search_active { THEME.primary } else { THEME.border };
             }
 
@@ -1001,8 +1007,8 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
             // Right Clear 'X' or Note Count Pill
             if state.search_len > 0 {
-                let dx = (x as i32 - 650).abs();
-                let dy = (y as i32 - (SEARCH_Y0 + SEARCH_H / 2) as i32).abs();
+                let dx = (x as i32 - (SEARCH_CLEAR.x + SEARCH_CLEAR.w / 2) as i32).abs();
+                let dy = (y as i32 - (SEARCH_CLEAR.y + SEARCH_CLEAR.h / 2) as i32).abs();
                 if (dx - dy).abs() <= 1 && dx <= 7 {
                     return THEME.on_surface_variant;
                 }
@@ -1099,21 +1105,21 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
     }
 
     // --- D. Floating Action Bar Dock at Bottom (y: 1318..1386) ---
-    if !state.keyboard_visible && y >= 1318 && y <= 1386 {
+    if !state.keyboard_visible && y >= chrome::DOCK_PILL.y && y < chrome::DOCK_PILL.y + chrome::DOCK_PILL.h {
         // Right circular primary FAB (+) at (654, 1352, r=28)
-        if in_circle(x, y, 654, 1352, 28) {
+        if in_circle(x, y, chrome::DOCK_FAB_CX, chrome::DOCK_FAB_CY, chrome::FAB_R) {
             // The glyph is drawn on the filled primary control, so its ink is
             // the control's on-colour; on_surface would be the same black as
             // the fill in the monochrome theme.
-            if let Some(c) = draw_plus_glyph(x, y, 654, 1352, THEME.on_primary) {
+            if let Some(c) = draw_plus_glyph(x, y, chrome::DOCK_FAB_CX, chrome::DOCK_FAB_CY, THEME.on_primary) {
                 return c;
             }
             return THEME.primary;
         }
 
         // Left Pill: "Take a note..." + Quick tools (x: 28..608)
-        if in_rounded_rect(x, y, 28, 1320, 580, 64, 26) {
-            if !in_rounded_rect(x, y, 30, 1322, 576, 60, 24) {
+        if in_rounded_rect(x, y, chrome::DOCK_PILL.x, chrome::DOCK_PILL.y, chrome::DOCK_PILL.w, chrome::DOCK_PILL.h, 26) {
+            if !in_rounded_rect(x, y, chrome::DOCK_PILL.x + 2, chrome::DOCK_PILL.y + 2, chrome::DOCK_PILL.w - 4, chrome::DOCK_PILL.h - 4, 24) {
                 return THEME.border;
             }
 
@@ -1121,8 +1127,8 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             if let Some(c) = draw_checkbox_glyph(
                 x,
                 y,
-                440,
-                1341,
+                chrome::DOCK_TOOL_CXS[0],
+                chrome::DOCK_FAB_CY - 11,
                 false,
                 THEME.primary,
                 THEME.on_surface_variant,
@@ -1132,12 +1138,12 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             }
 
             // Palette tool icon at x: 500
-            if let Some(c) = draw_palette_glyph(x, y, 500, 1352, THEME.on_surface_variant) {
+            if let Some(c) = draw_palette_glyph(x, y, chrome::DOCK_TOOL_CXS[1], chrome::DOCK_FAB_CY, THEME.on_surface_variant) {
                 return c;
             }
 
             // Search / edit tool icon at x: 560
-            if let Some(c) = draw_keyboard_glyph(x, y, 560, 1352, THEME.on_surface_variant) {
+            if let Some(c) = draw_keyboard_glyph(x, y, chrome::DOCK_TOOL_CXS[2], chrome::DOCK_FAB_CY, THEME.on_surface_variant) {
                 return c;
             }
 
@@ -1480,27 +1486,27 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
         // Right Tools:
         // 1. Pin Toggle Glyph (x: 520, on the toolbar's centre row)
-        if in_circle(x, y, 520, EDITOR_TOOL_CY, 20) {
+        if in_circle(x, y, chrome::EDITOR_TOOL_CXS[0], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
             // A pin is the note's own state, so it takes the tone's accent;
             // `warning` would report a caution the user never set.
             let pcol = if note.is_pinned { theme.accent } else { theme.muted_ink };
-            if let Some(c) = draw_pin_glyph(x, y, 520, EDITOR_TOOL_CY, note.is_pinned, pcol) {
+            if let Some(c) = draw_pin_glyph(x, y, chrome::EDITOR_TOOL_CXS[0], chrome::EDITOR_TOOL_CY, note.is_pinned, pcol) {
                 return c;
             }
             return theme.chip;
         }
 
         // 2. Palette Toggle Glyph (x: 580, on the toolbar's centre row)
-        if in_circle(x, y, 580, EDITOR_TOOL_CY, 20) {
-            if let Some(c) = draw_palette_glyph(x, y, 580, EDITOR_TOOL_CY, theme.title_ink) {
+        if in_circle(x, y, chrome::EDITOR_TOOL_CXS[1], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
+            if let Some(c) = draw_palette_glyph(x, y, chrome::EDITOR_TOOL_CXS[1], chrome::EDITOR_TOOL_CY, theme.title_ink) {
                 return c;
             }
             return theme.chip;
         }
 
         // 3. Trash Can Glyph (x: 640, on the toolbar's centre row)
-        if in_circle(x, y, 640, EDITOR_TOOL_CY, 20) {
-            if let Some(c) = draw_trash_glyph(x, y, 640, EDITOR_TOOL_CY, THEME.error) {
+        if in_circle(x, y, chrome::EDITOR_TOOL_CXS[2], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
+            if let Some(c) = draw_trash_glyph(x, y, chrome::EDITOR_TOOL_CXS[2], chrome::EDITOR_TOOL_CY, THEME.error) {
                 return c;
             }
             return theme.chip;
@@ -1673,23 +1679,23 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
         }
     } else {
         // Full-page reading mode: Minimal floating bottom dock (y: 1324..1392)
-        if y >= 1324 && y <= 1392 {
-            if in_rounded_rect(x, y, 36, 1324, 648, 68, 28) {
-                if !in_rounded_rect(x, y, 38, 1326, 644, 64, 26) {
+        if y >= chrome::READING_DOCK.y && y < chrome::READING_DOCK.y + chrome::READING_DOCK.h {
+            if in_rounded_rect(x, y, chrome::READING_DOCK.x, chrome::READING_DOCK.y, chrome::READING_DOCK.w, chrome::READING_DOCK.h, 28) {
+                if !in_rounded_rect(x, y, chrome::READING_DOCK.x + 2, chrome::READING_DOCK.y + 2, chrome::READING_DOCK.w - 4, chrome::READING_DOCK.h - 4, 26) {
                     return THEME.border;
                 }
 
                 // Category Tag
                 let cat_name = CATEGORY_NAMES[note.category as usize % 5];
-                if in_rounded_rect(x, y, 54, 1338, 100, 40, 12) {
-                    if let Some(c) = test_text(x, y, 74, 1346, 1, cat_name, theme.accent, theme.chip, true) {
+                if in_rounded_rect(x, y, chrome::READING_TAG.x, chrome::READING_TAG.y, chrome::READING_TAG.w, chrome::READING_TAG.h, 12) {
+                    if let Some(c) = test_text(x, y, chrome::READING_TAG.x + 20, chrome::READING_TAG.y + 8, 1, cat_name, theme.accent, theme.chip, true) {
                         return c;
                     }
                     return theme.chip;
                 }
 
                 // Checklist tool
-                if in_circle(x, y, 240, 1358, 20) {
+                if in_circle(x, y, chrome::READING_TOOL_CXS[0], chrome::READING_TOOL_CY, chrome::TOOL_R) {
                     if let Some(c) = draw_checkbox_glyph(
                         x,
                         y,
@@ -1706,24 +1712,24 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
                 }
 
                 // Palette tool
-                if in_circle(x, y, 340, 1358, 20) {
-                    if let Some(c) = draw_palette_glyph(x, y, 340, 1358, THEME.on_surface) {
+                if in_circle(x, y, chrome::READING_TOOL_CXS[1], chrome::READING_TOOL_CY, chrome::TOOL_R) {
+                    if let Some(c) = draw_palette_glyph(x, y, chrome::READING_TOOL_CXS[1], chrome::READING_TOOL_CY, THEME.on_surface) {
                         return c;
                     }
                     return THEME.surface_container;
                 }
 
                 // Type / Edit note button (Keyboard icon)
-                if in_circle(x, y, 440, 1358, 20) {
-                    if let Some(c) = draw_keyboard_glyph(x, y, 440, 1358, THEME.primary) {
+                if in_circle(x, y, chrome::READING_TOOL_CXS[2], chrome::READING_TOOL_CY, chrome::TOOL_R) {
+                    if let Some(c) = draw_keyboard_glyph(x, y, chrome::READING_TOOL_CXS[2], chrome::READING_TOOL_CY, THEME.primary) {
                         return c;
                     }
                     return THEME.surface_container;
                 }
 
                 // Delete Note icon
-                if in_circle(x, y, 630, 1358, 20) {
-                    if let Some(c) = draw_trash_glyph(x, y, 630, 1358, THEME.error) {
+                if in_circle(x, y, chrome::READING_TOOL_CXS[3], chrome::READING_TOOL_CY, chrome::TOOL_R) {
+                    if let Some(c) = draw_trash_glyph(x, y, chrome::READING_TOOL_CXS[3], chrome::READING_TOOL_CY, THEME.error) {
                         return c;
                     }
                     return THEME.surface_container;
@@ -2069,8 +2075,14 @@ fn apply_key_action(state: &mut AppState, action: KeyAction) {
 }
 
 fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
-    // 1. Android Home Gesture Bar Exit (x: 240..480, y >= 1400)
-    if uy >= 1400 && ux >= 240 && ux <= 480 {
+    // 1. The home strip, at the rows below the keyboard's last row.
+    //
+    // WHY the keyboard's bottom edge is the strip's top: the band used to
+    // begin at row 1400, inside the soft keyboard's own `980..1410`, so a
+    // finger that pressed a key in the keyboard's bottom row between x=240
+    // and x=480 quit the app instead of typing -- and the strip it quit from
+    // was two hundred rows wider than the pill the app inks there.
+    if chrome::home_claims(ux, uy) {
         return TapAction::Exit;
     }
 
@@ -2114,9 +2126,8 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             }
 
             // Search Bar Tap (y: SEARCH_Y0..SEARCH_Y1, x: 28..692)
-            if uy >= SEARCH_Y0 && uy <= SEARCH_Y1 && ux >= 28 && ux <= 692 {
-                // Clear field touch target: 68px wide x 54px tall >= 48px
-                if state.search_len > 0 && ux >= 618 && ux <= 686 {
+            if SEARCH_PILL.contains(ux, uy) {
+                if state.search_len > 0 && chrome::search_clear_claims(ux, uy) {
                     state.search_len = 0;
                     state.search_query = [0; 32];
                     return TapAction::Redraw;
@@ -2144,10 +2155,19 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
             }
 
-            // Bottom Action Bar Dock (y: 1318..1386)
-            if uy >= 1318 && uy <= 1386 {
+            // Bottom Action Bar Dock: the pill and the button beside it.
+            //
+            // WHY the press is asked through `chrome::dock_tool_at`: the dock
+            // drew its three glyphs at 440, 500 and 560 and answered them at
+            // 415..465, 475..525 and 535..608, so every band stood a few rows
+            // right of the mark it was named for and the ten rows between the
+            // palette and the keyboard answered nothing at all.
+            if chrome::DOCK_PILL.contains(ux, uy)
+                || in_circle(ux, uy, chrome::DOCK_FAB_CX, chrome::DOCK_FAB_CY, chrome::FAB_R)
+            {
+                let dock_tool = chrome::dock_tool_at(ux, uy);
                 // FAB (+) or "Take a note..." tap
-                if in_circle(ux, uy, 654, 1352, 34) || (ux >= 28 && ux <= 410) {
+                if dock_tool.is_none() {
                     let Some(new_id) = state.create_stamped_note("") else {
                         // The store is full. The card stays as it is; the
                         // limit is reported by the store, not by opening
@@ -2165,7 +2185,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
 
                 // Checklist tool tap
-                if ux >= 415 && ux <= 465 {
+                if dock_tool == Some(0) {
                     // WHY the body starts with a checklist marker: this is the
                     // scaffold the checklist tool exists to create, and the
                     // editor's first line must be a toggleable item.
@@ -2184,7 +2204,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
 
                 // Palette tool tap
-                if ux >= 475 && ux <= 525 {
+                if dock_tool == Some(1) {
                     let Some(new_id) = state.create_stamped_note("") else {
                         return TapAction::Redraw;
                     };
@@ -2207,7 +2227,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 // list's search field and raises the keyboard over it, the same
                 // pair the search bar itself sets. It runs to the pill's own
                 // right edge at 608 so no part of the pill is left inert.
-                if ux >= 535 && ux <= 608 {
+                if dock_tool == Some(2) {
                     state.search_active = true;
                     state.keyboard_visible = true;
                     return TapAction::Redraw;
@@ -2245,7 +2265,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
 
         ViewMode::Editor => {
             // Top Bar: Pin Toggle on the toolbar's centre row
-            if in_circle(ux, uy, 520, EDITOR_TOOL_CY, 22) {
+            if in_circle(ux, uy, chrome::EDITOR_TOOL_CXS[0], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
                 if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
                     note.toggle_pinned();
                 }
@@ -2253,13 +2273,13 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             }
 
             // Top Bar: Palette Toggle on the toolbar's centre row
-            if in_circle(ux, uy, 580, EDITOR_TOOL_CY, 22) {
+            if in_circle(ux, uy, chrome::EDITOR_TOOL_CXS[1], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
                 state.swatch_picker_open = !state.swatch_picker_open;
                 return TapAction::Redraw;
             }
 
             // Top Bar: Trash / Delete on the toolbar's centre row
-            if in_circle(ux, uy, 640, EDITOR_TOOL_CY, 22) {
+            if in_circle(ux, uy, chrome::EDITOR_TOOL_CXS[2], chrome::EDITOR_TOOL_CY, chrome::TOOL_R) {
                 state.store.delete_note(state.selected_note_id);
                 state.sync_list_extent();
                 state.save_to_storage();
@@ -2283,7 +2303,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 let cy = swatch_y0 + 31;
                 for i in 0..NOTE_TONE_COUNT {
                     let cx = 58 + i * 82;
-                    if in_circle(ux, uy, cx, cy, 26) {
+                    if in_circle(ux, uy, cx, cy, chrome::TOOL_R) {
                         if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
                             note.set_color(i as u8);
                         }
@@ -2355,9 +2375,9 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 }
             } else {
                 // Reading mode bottom dock taps (y: 1324..1392)
-                if uy >= 1324 && uy <= 1392 {
-                    // Category cycle pill (x: 54..154)
-                    if ux >= 54 && ux <= 154 {
+                if uy >= chrome::READING_DOCK.y && uy < chrome::READING_DOCK.y + chrome::READING_DOCK.h {
+                    // Category cycle pill: the plate the dock draws.
+                    if chrome::READING_TAG.contains(ux, uy) {
                         if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
                             note.category = (note.category + 1) % 5;
                             note.is_dirty = true;
@@ -2365,25 +2385,25 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                         return TapAction::Redraw;
                     }
                     // Checkbox tool
-                    if in_circle(ux, uy, 240, 1358, 24) {
+                    if in_circle(ux, uy, chrome::READING_TOOL_CXS[0], chrome::READING_TOOL_CY, chrome::TOOL_R) {
                         state.editor_buf.insert_checklist_item();
                         state.update_editor_layout();
                         state.keyboard_visible = true;
                         return TapAction::Redraw;
                     }
                     // Palette tool
-                    if in_circle(ux, uy, 340, 1358, 24) {
+                    if in_circle(ux, uy, chrome::READING_TOOL_CXS[1], chrome::READING_TOOL_CY, chrome::TOOL_R) {
                         state.swatch_picker_open = !state.swatch_picker_open;
                         return TapAction::Redraw;
                     }
                     // Edit / Keyboard button
-                    if in_circle(ux, uy, 440, 1358, 24) {
+                    if in_circle(ux, uy, chrome::READING_TOOL_CXS[2], chrome::READING_TOOL_CY, chrome::TOOL_R) {
                         state.focus = EditorFocus::Body;
                         state.keyboard_visible = true;
                         return TapAction::Redraw;
                     }
                     // Delete button
-                    if in_circle(ux, uy, 630, 1358, 24) {
+                    if in_circle(ux, uy, chrome::READING_TOOL_CXS[3], chrome::READING_TOOL_CY, chrome::TOOL_R) {
                         state.store.delete_note(state.selected_note_id);
                         state.sync_list_extent();
                         state.save_to_storage();

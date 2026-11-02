@@ -27,6 +27,7 @@ use messages::keyboard::{
     Editor, Editors, Field, KeyAction, Keyboard, BANDS_H, BANDS_TOP_IDLE, BANDS_TOP_KEYBOARD,
     KB_Y0, KB_Y1, RECIPIENT_BAND_H,
 };
+use messages::layout;
 use messages::privacy;
 use messages::publish;
 use messages::store;
@@ -148,9 +149,14 @@ impl HeaderStatus {
 }
 
 /// Bounded input buffer capacities.
-const COMPOSE_CAP: usize = 160;
-const SEARCH_CAP: usize = 48;
-const RECIP_CAP: usize = 32;
+///
+/// WHY they are the library's: the character counter's widest line is the
+/// compose capacity written out as `used/limit`, so the number a fit gate has
+/// to measure is the same number the buffer is sized with, and a copy of it
+/// beside the painter is a number no test can tie to the counter.
+const COMPOSE_CAP: usize = layout::COMPOSE_CAP;
+const SEARCH_CAP: usize = layout::SEARCH_CAP;
+const RECIP_CAP: usize = layout::RECIP_CAP;
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
@@ -698,7 +704,7 @@ const fn later(a: usize, b: usize) -> usize {
 
 const HEADER_Y0: usize = 0;
 const TITLE_TEXT: &[u8] = b"Messages";
-const TITLE_X: usize = 116;
+const TITLE_X: usize = layout::HEADER_TITLE_X;
 const TITLE_SCALE: usize = type_scale::TITLE;
 
 /// The rows the title's line box reserves: ascent + descent + leading.
@@ -794,8 +800,12 @@ const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_BAND_H;
 /// The field's margin inside its band: the platform's smallest grid step split
 /// between the two sides, so the field's hairline is not the band's edge.
 const SEARCH_FIELD_DY: usize = spacing::GRID_4 / 2;
-const SEARCH_FIELD: (usize, usize, usize, usize) =
-    (24, SEARCH_Y0 + SEARCH_FIELD_DY, 672, 48);
+const SEARCH_FIELD: (usize, usize, usize, usize) = (
+    layout::SEARCH_FIELD_X,
+    SEARCH_Y0 + SEARCH_FIELD_DY,
+    layout::SEARCH_FIELD_W,
+    48,
+);
 /// The centre of the band's leading glyph lane -- the search view's magnifier
 /// and the conversation view's threat mark share it.
 ///
@@ -807,20 +817,24 @@ const SEARCH_ICON_CY: usize = SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2;
 /// The clear control's hit half-height; the mark itself is nine rows tall.
 const SEARCH_CLEAR_HALF_H: usize = 14;
 /// The centre of the clear mark that ends the search field.
-const SEARCH_CLEAR_CX: usize = 672;
+const SEARCH_CLEAR_CX: usize = layout::SEARCH_CLEAR_CX;
 /// The half-width of the band the clear mark answers taps in.
-const SEARCH_CLEAR_HALF_W: usize = 16;
-const SEARCH_TEXT_X: usize = 82;
+const SEARCH_CLEAR_HALF_W: usize = layout::SEARCH_CLEAR_HALF_W;
+const SEARCH_TEXT_X: usize = layout::SEARCH_TEXT_X;
 /// The columns the typed query may use.
 ///
 /// WHY it stops short of the mark: the budget used to run to the field's own edge
 /// minus 20, which is 676 -- inside the nine columns the clear mark paints. A
 /// query long enough to reach it lost its last letters under the cross, and the
 /// cross lost its right arm to them.
-const SEARCH_TEXT_MAX_W: usize =
-    SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W - spacing::GRID_8 - SEARCH_TEXT_X;
+///
+/// WHY it is the library's lane and not arithmetic written here: the lane is what
+/// a fit gate has to be able to reach, and this app's binary is built with
+/// `test = false`. The arithmetic now lives in `messages::layout`, derived from
+/// the clear mark's own left arm, so moving the mark moves the lane with it.
+const SEARCH_TEXT_MAX_W: usize = layout::SEARCH_TEXT_LANE;
 const SEARCH_PLACEHOLDER: &[u8] = b"Search chats...";
-const SEARCH_TEXT_SCALE: usize = type_scale::BODY;
+const SEARCH_TEXT_SCALE: usize = layout::FIELD_TEXT_RUNG;
 
 /// The rows a caption rung's box has to be pushed down to put its caps on the
 /// same baseline as a body rung's box laid out at the same box top.
@@ -855,23 +869,33 @@ const _: () = assert!(
 // gives up those four rows rather than the field overlapping the compose
 // band below.
 const RECIPIENT_FIELD_H: usize = MIN_TOUCH_TARGET;
-const RECIPIENT_FIELD_W: usize = 586;
-const RECIPIENT_TEXT_X: usize = 76;
-const RECIPIENT_TEXT_MAX_W: usize = 490 - RECIPIENT_TEXT_X;
+const RECIPIENT_FIELD_W: usize = layout::RECIPIENT_FIELD_W;
+const RECIPIENT_TEXT_X: usize = layout::RECIPIENT_TEXT_X;
+/// The lane the typed recipient address owns.
+///
+/// WHY it was not left as `490 - RECIPIENT_TEXT_X`: the `490` named no box. It is
+/// not the field's right edge (the field ends at `RECIPIENT_FIELD_X +
+/// RECIPIENT_FIELD_W`, 610), not the clear mark's arm (574) and not the picker
+/// control's column (616) -- it was a width remembered from the day the band was
+/// laid out, and it cut the address 76 columns before the space the field
+/// actually reserves. The lane now answers the mark the address is typed beside.
+const RECIPIENT_TEXT_MAX_W: usize = layout::RECIPIENT_TEXT_LANE;
 const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
-const RECIPIENT_TEXT_SCALE: usize = type_scale::BODY;
+const RECIPIENT_TEXT_SCALE: usize = layout::FIELD_TEXT_RUNG;
 
 // Compose field geometry
 const COMPOSE_FIELD_H: usize = 60;
-const COMPOSE_FIELD_W: usize = 586;
-const COMPOSE_TEXT_X: usize = 52;
+const COMPOSE_FIELD_W: usize = layout::COMPOSE_FIELD_W;
+const COMPOSE_TEXT_X: usize = layout::COMPOSE_TEXT_X;
 // WHY the text stops before the field's right edge: the last ~60 px of the
 // field are the character counter and the clear control, and text that ran
-// underneath them made both unreadable.
-const COMPOSE_COUNT_RIGHT: usize = 572;
-const COMPOSE_TEXT_MAX_W: usize = COMPOSE_COUNT_RIGHT - 56 - COMPOSE_TEXT_X;
+// underneath them made both unreadable. The room the counter is given is its
+// own named constant now, and the fit gate below measures the counter's widest
+// line against it -- an unnamed `56` is exactly how a counter outgrows its room.
+const COMPOSE_COUNT_RIGHT: usize = layout::COMPOSE_COUNT_RIGHT;
+const COMPOSE_TEXT_MAX_W: usize = layout::COMPOSE_TEXT_LANE;
 const COMPOSE_PLACEHOLDER: &[u8] = b"Type a message...";
-const COMPOSE_TEXT_SCALE: usize = type_scale::BODY;
+const COMPOSE_TEXT_SCALE: usize = layout::FIELD_TEXT_RUNG;
 /// The composer field's inset from its band's top edge.
 const COMPOSE_FIELD_DY: usize = 14;
 /// The clear control both editors carry at the right end of their field.
@@ -880,10 +904,9 @@ const COMPOSE_FIELD_DY: usize = 14;
 /// `574..606` while the tap path clipped it to `570..610`, and `570` is inside
 /// the character counter's own right edge at 572 -- so the two columns at the
 /// end of the count cleared the draft instead of focusing the field.
-const FIELD_CLEAR_CX: usize = 590;
-const FIELD_CLEAR_HALF_W: usize = 16;
-const FIELD_CLEAR_X0: usize = FIELD_CLEAR_CX - FIELD_CLEAR_HALF_W;
-const FIELD_CLEAR_X1: usize = FIELD_CLEAR_CX + FIELD_CLEAR_HALF_W;
+const FIELD_CLEAR_CX: usize = layout::FIELD_CLEAR_CX;
+const FIELD_CLEAR_X0: usize = layout::FIELD_CLEAR_X0;
+const FIELD_CLEAR_X1: usize = layout::FIELD_CLEAR_X1;
 /// WHY gated: the mark lives inside the field, and the field's edge is also the
 /// lane the send control and the recipient picker are drawn in. A wider mark
 /// would answer presses that belong to those controls.
@@ -995,9 +1018,18 @@ fn compose_controls_shown(app: &MessagesApp) -> bool {
 }
 
 /// The recipient picker's control, at the right of the recipient band.
+///
+/// WHY the box is the library's: the label inside it is centred with no trim, so
+/// whether the word still reads inside its control is a question about this rect,
+/// and the gate that answers it is in `messages::layout`.
 #[inline(always)]
 fn pick_control(app: &MessagesApp) -> (usize, usize, usize, usize) {
-    (616, recipient_band_y0(app), 80, MIN_TOUCH_TARGET)
+    (
+        layout::PICK_CONTROL_X,
+        recipient_band_y0(app),
+        layout::PICK_CONTROL_W,
+        MIN_TOUCH_TARGET,
+    )
 }
 
 /// The centre of the send button.
@@ -1066,8 +1098,12 @@ const _: () = assert!(HOME_PILL_Y1 <= H);
 const CONTENT_TOP: usize = SEARCH_Y1 + spacing::GRID_16;
 
 // Thread card geometry
-const CARD_X0: usize = 24;
-const CARD_X1: usize = 696;
+//
+// WHY the card's own column lives in the library: every lane in the thread list,
+// the details report, the recipient picker and the notice card is derived from
+// this box, and a fit gate can only reach a container the library exports.
+const CARD_X0: usize = layout::LIST_CARD_X;
+const CARD_X1: usize = layout::LIST_CARD_RIGHT;
 const CARD_Y0: usize = CONTENT_TOP;
 const CARD_H: usize = 120;
 /// The card's own body; the remainder of `CARD_H` is the gap to the next card.
@@ -1075,11 +1111,13 @@ const CARD_BODY_H: usize = 104;
 
 /// The width a thread row's bold peer name may use.
 ///
-/// The run starts at `CARD_X0 + 84` and has to clear the unread pill's left
-/// edge at `CARD_X1 - 92`; the 12 px slack absorbs bold advances being wider
-/// than the regular advances the trim is measured with.
+/// The run starts at the row's text column and has to clear the unread pill's
+/// left edge; the slack absorbs bold advances being wider than the regular
+/// advances the trim is measured with. Both numbers are the library's now, so a
+/// pill that moves moves the lane, and the gate in `messages::layout` refuses a
+/// lane that reaches past the pill.
 const PEER_NAME_CAP: usize = 96;
-const PEER_NAME_MAX_W: usize = (CARD_X1 - 92) - (CARD_X0 + 84) - 12;
+const PEER_NAME_MAX_W: usize = layout::PEER_NAME_LANE;
 
 /// The height of the thread list's visible band when the keyboard is down.
 ///
@@ -1099,11 +1137,15 @@ const BUBBLE_H: usize = 76;
 
 /// The narrowest a bubble may be drawn, so a one-word message still reads as
 /// a bubble and not as a floating chip.
-const BUBBLE_MIN_W: usize = 168;
+const BUBBLE_MIN_W: usize = layout::BUBBLE_MIN_W;
 
 /// The widest a bubble may be drawn. Long messages still wrap short of the
 /// screen edge instead of touching it.
-const BUBBLE_MAX_W: usize = 488;
+///
+/// WHY it is the library's: the bubble hugs its content, so this clamp is the
+/// widest lane a body line can ever be fitted to, and the notice that says a run
+/// did not fit has to answer the same number.
+const BUBBLE_MAX_W: usize = layout::BUBBLE_MAX_W;
 
 /// The gap between two chat bubbles.
 ///
@@ -1160,7 +1202,12 @@ const ROW_GAP: usize = spacing::GRID_8;
 const ROW_PITCH: usize = ROW_CARD_H + ROW_GAP;
 
 /// The row's side padding, and the two boxes' tops inside the card.
-const ROW_PAD_X: usize = spacing::GRID_24;
+///
+/// WHY the padding is the library's: it is the air every full-width card of this
+/// app keeps from its own edge, and the lane a report row trims to is the card's
+/// width less this padding twice. Named in one place, the painter and the fit gate
+/// cannot disagree about it.
+const ROW_PAD_X: usize = layout::CARD_PAD_X;
 const ROW_CAPTION_Y: usize = ROW_TOP_PAD;
 const ROW_BODY_Y: usize = ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP;
 
@@ -1182,8 +1229,8 @@ const RECIP_ROWS: usize = LIST_VIEWPORT_H / ROW_PITCH;
 const _: () = assert!(ROW_CAPTION_Y + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX < ROW_CARD_H);
 const _: () = assert!(DETAIL_ROWS >= 1 && DETAIL_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
 const _: () = assert!(RECIP_ROWS >= 1 && RECIP_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
-const PICK_LABEL: &[u8] = b"PICK";
-const INFO_LABEL: &[u8] = b"INFO";
+const PICK_LABEL: &[u8] = layout::PICK_LABEL;
+const INFO_LABEL: &[u8] = layout::INFO_LABEL;
 
 // Empty-state card
 //
@@ -1195,9 +1242,9 @@ const INFO_LABEL: &[u8] = b"INFO";
 // there is nothing else to look at.
 const EMPTY_CARD_TOP: usize = 560;
 const EMPTY_CARD: (usize, usize, usize, usize) = (
-    24,
+    layout::EMPTY_CARD_X,
     EMPTY_CARD_TOP,
-    672,
+    layout::EMPTY_CARD_W,
     BANDS_TOP_KEYBOARD - spacing::GRID_8 - EMPTY_CARD_TOP,
 );
 const _: () = assert!(
@@ -1605,15 +1652,16 @@ fn pick_control_pixel(
         return None;
     }
     let rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
-    let label_w = std::design::font::measure(label, 1);
+    let label_w = std::design::font::measure(label, layout::CONTROL_LABEL_RUNG);
     let label_x = rect.x + (rect.w.saturating_sub(label_w)) / 2;
-    let label_y = rect.y + (rect.h.saturating_sub(std::design::font::line_height(1))) / 2;
+    let label_y = rect.y
+        + (rect.h.saturating_sub(std::design::font::line_height(layout::CONTROL_LABEL_RUNG))) / 2;
     if let Some(c) = test_text(
         x,
         y,
         label_x,
         label_y,
-        1,
+        layout::CONTROL_LABEL_RUNG,
         label,
         THEME.on_surface,
         THEME.surface_container_high,
@@ -1655,17 +1703,36 @@ fn card_row_pixel(
         CARD.fill,
         CARD.border,
     ) {
-        let max_w = rect.2.saturating_sub(2 * ROW_PAD_X);
+        let max_w = layout::card_row_lane(rect.2);
         let mut lbl_buf = [0u8; 64];
-        let lbl_len = std::design::font::ellipsize(label, 1, max_w, &mut lbl_buf);
+        let lbl_len =
+            std::design::font::ellipsize(label, layout::ROW_CAPTION_RUNG, max_w, &mut lbl_buf);
         let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };
-        if let Some(t) = test_text(x, y, fx + ROW_PAD_X, fy + ROW_CAPTION_Y, 1, lbl_disp, THEME.on_surface_variant, CARD.fill) {
+        if let Some(t) = test_text(
+            x,
+            y,
+            fx + ROW_PAD_X,
+            fy + ROW_CAPTION_Y,
+            layout::ROW_CAPTION_RUNG,
+            lbl_disp,
+            THEME.on_surface_variant,
+            CARD.fill,
+        ) {
             return Some(t);
         }
         let mut val_buf = [0u8; 96];
-        let val_len = std::design::font::ellipsize(value, 2, max_w, &mut val_buf);
+        let val_len = std::design::font::ellipsize(value, layout::ROW_BODY_RUNG, max_w, &mut val_buf);
         let val_disp = if val_len > 0 { &val_buf[..val_len] } else { value };
-        if let Some(t) = test_text(x, y, fx + ROW_PAD_X, fy + ROW_BODY_Y, 2, val_disp, THEME.on_surface, CARD.fill) {
+        if let Some(t) = test_text(
+            x,
+            y,
+            fx + ROW_PAD_X,
+            fy + ROW_BODY_Y,
+            layout::ROW_BODY_RUNG,
+            val_disp,
+            THEME.on_surface,
+            CARD.fill,
+        ) {
             return Some(t);
         }
         return Some(c);
@@ -1796,7 +1863,7 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     let title_len = std::design::font::ellipsize(
         header_title(messages, &contacts, contacts_count),
         TITLE_SCALE,
-        pill.left.saturating_sub(TITLE_X + 12),
+        layout::header_title_lane(pill.left),
         &mut title,
     );
     Frame {
@@ -2038,19 +2105,36 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     // draws. The platform's card has one outline that follows the
                     // corner.
 
-                    let line = b"No chats match your search";
+                    let line = layout::EMPTY_FILTER_LINE;
                     let sub = &messages.search[..messages.search_len];
                     let mut buf = [0u8; COMPOSE_CAP];
-                    let n = std::design::font::ellipsize(sub, 1, 624, &mut buf);
-                    let sub_line: &[u8] = if n == 0 { b"(empty query)" } else { &buf[..n] };
-                    let line_w = std::design::font::measure_bold(line, 1);
-                    let sub_w = std::design::font::measure(sub_line, 1);
+                    // WHY the lane is the card's and not the remembered `624`:
+                    // both lines of this card are centred inside it, so the room a
+                    // run owns is the card's width less the air it keeps on either
+                    // side -- the same arithmetic every other full-width card of
+                    // this app answers. `624` was that number written out with no
+                    // constant naming the card it came from, so the day the card
+                    // moved, the trim would have stayed and the query would have run
+                    // past the card's own edge.
+                    let n = std::design::font::ellipsize(
+                        sub,
+                        layout::EMPTY_QUERY_RUNG,
+                        layout::EMPTY_CARD_LANE,
+                        &mut buf,
+                    );
+                    let sub_line: &[u8] = if n == 0 {
+                        layout::EMPTY_FILTER_FALLBACK
+                    } else {
+                        &buf[..n]
+                    };
+                    let line_w = std::design::font::measure_bold(line, layout::EMPTY_HEADLINE_RUNG);
+                    let sub_w = std::design::font::measure(sub_line, layout::EMPTY_QUERY_RUNG);
                     if let Some(c) = test_text_bold(
                         x,
                         y,
                         EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(line_w)) / 2,
                         676,
-                        1,
+                        layout::EMPTY_HEADLINE_RUNG,
                         line,
                         THEME.on_surface,
                         THEME.surface_container,
@@ -2062,7 +2146,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         y,
                         EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(sub_w)) / 2,
                         716,
-                        1,
+                        layout::EMPTY_QUERY_RUNG,
                         sub_line,
                         THEME.on_surface_variant,
                         THEME.surface_container,
@@ -2145,13 +2229,23 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     }
 
                     // Strict contract coordinates: 740 and 810
+                    //
+                    // WHY the rungs are named: both lines are centred inside the
+                    // empty card with no trim at all, so the card's own fit gate
+                    // (see `messages::layout`) has to measure them at the rung this
+                    // branch inks them at.
                     if let Some(c) = test_text(
                         x,
                         y,
-                        EMPTY_CARD.0 + std::design::font::center_x(b"No Conversations Yet", 2, EMPTY_CARD.2),
+                        EMPTY_CARD.0
+                            + std::design::font::center_x(
+                                layout::EMPTY_THREADS_TITLE,
+                                layout::EMPTY_TITLE_RUNG,
+                                EMPTY_CARD.2,
+                            ),
                         740,
-                        2,
-                        b"No Conversations Yet",
+                        layout::EMPTY_TITLE_RUNG,
+                        layout::EMPTY_THREADS_TITLE,
                         THEME.on_surface,
                         THEME.surface_container,
                     ) {
@@ -2163,25 +2257,30 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     // showed the same two lines for both.
                     let (subline, subline_color): (&[u8], u32) = match messages.store.state {
                         store::StoreState::ReadRefused => (
-                            b"Stored conversations could not be read",
+                            layout::EMPTY_STORE_REFUSED_SUBLINE,
                             THEME.warning,
                         ),
                         store::StoreState::Invalid => (
-                            b"Stored conversations failed validation",
+                            layout::EMPTY_STORE_INVALID_SUBLINE,
                             THEME.error,
                         ),
                         store::StoreState::Full => (
-                            b"Conversation store is full; older threads were not kept",
+                            layout::EMPTY_STORE_FULL_SUBLINE,
                             THEME.warning,
                         ),
-                        _ => (b"Messaging unavailable: no transport", THEME.on_surface_variant),
+                        _ => (layout::EMPTY_TRANSPORT_SUBLINE, THEME.on_surface_variant),
                     };
                     if let Some(c) = test_text(
                         x,
                         y,
-                        EMPTY_CARD.0 + std::design::font::center_x(subline, 1, EMPTY_CARD.2),
+                        EMPTY_CARD.0
+                            + std::design::font::center_x(
+                                subline,
+                                layout::EMPTY_SUBLINE_RUNG,
+                                EMPTY_CARD.2,
+                            ),
                         810,
-                        1,
+                        layout::EMPTY_SUBLINE_RUNG,
                         subline,
                         subline_color,
                         THEME.surface_container,
@@ -2219,11 +2318,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     if let Some(ledger_idx) = messages.filtered_index(idx) {
                         if let Some(tr) = messages.ledger.get_thread_by_idx(ledger_idx) {
                             // 1. Avatar glyph with colored backdrop
-                            let acx = CARD_X0 + 44;
+                            let acx = layout::AVATAR_CX;
                             let acy = card_top + 52;
                             let adx = x as isize - acx as isize;
                             let ady = y as isize - acy as isize;
-                            if adx * adx + ady * ady <= 576 {
+                            if adx * adx + ady * ady <= (layout::AVATAR_R * layout::AVATAR_R) as isize {
                                 let initial = if tr.handle_len > 0 { tr.peer_handle[0] } else { b'?' };
                                 let glyph = [initial];
                                 if let Some(c) = test_text_bold(
@@ -2231,7 +2330,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                     y,
                                     acx.saturating_sub(7),
                                     acy.saturating_sub(12),
-                                    1,
+                                    layout::SNIPPET_RUNG,
                                     &glyph,
                                     THEME.ink_on_dark,
                                     avatar_color(tr.peer()),
@@ -2241,21 +2340,22 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 return avatar_color(tr.peer());
                             }
 
-                            // 2. Peer handle / name (Scale 1 Bold with 10px spacing above snippet)
+                            // 2. Peer handle / name, on the row's text column, cut
+                            // to the lane the unread pill leaves it.
                             let display_peer = f.resolve_contact_name(tr.peer());
                             let mut peer_name = [0u8; PEER_NAME_CAP];
                             let peer_len = std::design::font::ellipsize(
                                 display_peer,
-                                2,
+                                layout::PEER_NAME_RUNG,
                                 PEER_NAME_MAX_W,
                                 &mut peer_name,
                             );
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
-                                CARD_X0 + 84,
+                                layout::ROW_TEXT_X,
                                 card_top + 22,
-                                2,
+                                layout::PEER_NAME_RUNG,
                                 &peer_name[..peer_len],
                                 THEME.on_surface,
                                 THEME.surface_container,
@@ -2269,14 +2369,22 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             // privacy setting exists so that the message is
                             // not on the screen, and a preview that was
                             // merely shortened would still be the message.
+                            //
+                            // WHY the lane is the pill-derived one: the painter
+                            // trimmed this run to `CARD_X1 - CARD_X0 - 180`, a
+                            // remembered number that stopped it four columns short
+                            // of the unread pill and eight columns past the peer
+                            // name's own bound -- and the run is inked bold, so the
+                            // width the trim measured was never the width painted.
+                            // It now answers the same edge the name does.
                             let mut snippet = [0u8; 48];
                             let slen = if messages.hidden_previews[ledger_idx] {
                                 copy_ascii(HIDDEN_PREVIEW_LABEL, &mut snippet)
                             } else if let Some(last_msg) = messages.ledger.latest_message(tr.id) {
                                 std::design::font::ellipsize(
                                     last_msg.text(),
-                                    1,
-                                    CARD_X1 - CARD_X0 - 180,
+                                    layout::SNIPPET_RUNG,
+                                    layout::SNIPPET_LANE,
                                     &mut snippet,
                                 )
                             } else {
@@ -2287,9 +2395,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
-                                CARD_X0 + 84,
+                                layout::ROW_TEXT_X,
                                 card_top + 56,
-                                1,
+                                layout::SNIPPET_RUNG,
                                 &snippet[..slen],
                                 THEME.on_surface_variant,
                                 THEME.surface_container,
@@ -2322,8 +2430,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                             // 5. Unread counter pill (if unread_count > 0)
                             if tr.unread_count > 0 {
-                                let px0 = CARD_X1 - 92;
-                                let px1 = CARD_X1 - 56;
+                                let px0 = layout::UNREAD_PILL_X;
+                                let px1 = layout::UNREAD_PILL_RIGHT;
                                 let py0 = card_top + 34;
                                 let py1 = card_top + 68;
                                 if x >= px0 && x < px1 && y >= py0 && y < py1 {
@@ -2332,9 +2440,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                     if let Some(c) = test_text_bold(
                                         x,
                                         y,
-                                        px0 + 12,
+                                        px0 + layout::UNREAD_COUNT_INSET,
                                         py0 + 5,
-                                        1,
+                                        layout::UNREAD_COUNT_RUNG,
                                         &digit[..dn],
                                         THEME.ink_on_dark,
                                         THEME.primary,
@@ -2374,10 +2482,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if let Some(c) = test_text(
                     x,
                     y,
-                    40,
+                    layout::RECIPIENT_PREFIX_X,
                     f.recipient.y + SHARED_BASELINE_SHIFT,
-                    1,
-                    b"To:",
+                    layout::FIELD_PREFIX_RUNG,
+                    layout::RECIPIENT_PREFIX_LABEL,
                     THEME.on_surface_variant,
                     THEME.surface_container,
                 ) {
@@ -2440,13 +2548,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if messages.compose_len > 0 {
                     let mut count_buf = [0u8; 8];
                     let cn = format_char_count(messages.compose_len, &mut count_buf);
-                    let cw = std::design::font::measure(&count_buf[..cn], 1);
+                    let cw =
+                        std::design::font::measure(&count_buf[..cn], layout::COUNTER_RUNG);
                     if let Some(c) = test_text(
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
                         f.compose.y + SHARED_BASELINE_SHIFT,
-                        1,
+                        layout::COUNTER_RUNG,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
                         THEME.surface_container,
@@ -2650,8 +2759,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         // bar, so the thread read as bars instead of a
                         // conversation. The bubble is the wider of the body
                         // and the status line, clamped to the band.
-                        let mut bubble_w = std::design::font::measure_bold(msgs[i].text(), 2) + 32;
-                        let status_w = std::design::font::measure_bold(status_label, 1) + 32;
+                        //
+                        // WHY the hug spends the same air the text lane removes:
+                        // the body run is trimmed to `bubble - 2 * BUBBLE_PAD_X`
+                        // and the bubble is grown by the same room, so a message
+                        // that fits the bubble is a message that fits its lane.
+                        let mut bubble_w = std::design::font::measure_bold(
+                            msgs[i].text(),
+                            layout::BUBBLE_BODY_RUNG,
+                        ) + layout::BUBBLE_HUG_PAD;
+                        let status_w = std::design::font::measure_bold(
+                            status_label,
+                            layout::BUBBLE_STATUS_RUNG,
+                        ) + layout::BUBBLE_HUG_PAD;
                         if status_w > bubble_w {
                             bubble_w = status_w;
                         }
@@ -2663,22 +2783,24 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         };
 
                         if x >= bx0 && x < bx1 {
-                            let bubble_rect = primitives::Rect::new(bx0, b_top, bx1 - bx0, BUBBLE_H);
+                            let bubble_rect =
+                                primitives::Rect::new(bx0, b_top, bx1 - bx0, BUBBLE_H);
 
-                            // Message body text (scale 2)
+                            // Message body text, cut to the lane the bubble itself
+                            // leaves it.
                             let mut buf = [0u8; 96];
                             let n = std::design::font::ellipsize(
                                 msgs[i].text(),
-                                2,
-                                bx1 - bx0 - 32,
+                                layout::BUBBLE_BODY_RUNG,
+                                layout::bubble_text_lane(bx1 - bx0),
                                 &mut buf,
                             );
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
-                                bx0 + 16,
+                                bx0 + layout::BUBBLE_PAD_X,
                                 b_top + 10,
-                                2,
+                                layout::BUBBLE_BODY_RUNG,
                                 &buf[..n],
                                 ink_color,
                                 fill_color,
@@ -2689,9 +2811,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
-                                bx0 + 16,
+                                bx0 + layout::BUBBLE_PAD_X,
                                 b_top + 44,
-                                1,
+                                layout::BUBBLE_STATUS_RUNG,
                                 status_label,
                                 status_color,
                                 fill_color,
@@ -2726,10 +2848,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if let Some(c) = test_text(
                     x,
                     y,
-                    40,
+                    layout::RECIPIENT_PREFIX_X,
                     f.recipient.y + SHARED_BASELINE_SHIFT,
-                    1,
-                    b"To:",
+                    layout::FIELD_PREFIX_RUNG,
+                    layout::RECIPIENT_PREFIX_LABEL,
                     THEME.on_surface_variant,
                     THEME.surface_container,
                 ) {
@@ -2789,13 +2911,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if messages.compose_len > 0 {
                     let mut count_buf = [0u8; 8];
                     let cn = format_char_count(messages.compose_len, &mut count_buf);
-                    let cw = std::design::font::measure(&count_buf[..cn], 1);
+                    let cw =
+                        std::design::font::measure(&count_buf[..cn], layout::COUNTER_RUNG);
                     if let Some(c) = test_text(
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
                         f.compose.y + SHARED_BASELINE_SHIFT,
-                        1,
+                        layout::COUNTER_RUNG,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
                         THEME.surface_container,
@@ -2861,24 +2984,24 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let n = if messages.notice_len > 0 {
                     std::design::font::ellipsize(
                         &messages.notice[..messages.notice_len],
-                        1,
-                        rect.2 - 48,
+                        layout::NOTICE_RUNG,
+                        layout::card_row_lane(rect.2),
                         &mut buf,
                     )
                 } else {
                     std::design::font::ellipsize(
                         b"Nothing has been published or shared yet.",
-                        1,
-                        rect.2 - 48,
+                        layout::NOTICE_RUNG,
+                        layout::card_row_lane(rect.2),
                         &mut buf,
                     )
                 };
                 if let Some(c) = test_text(
                     x,
                     y,
-                    rect.0 + 24,
+                    rect.0 + ROW_PAD_X,
                     rect.1 + 40,
-                    1,
+                    layout::NOTICE_RUNG,
                     &buf[..n],
                     THEME.on_surface_variant,
                     CARD.fill,
@@ -2934,8 +3057,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let n = if messages.recip_len > 0 {
                     std::design::font::ellipsize(
                         &messages.recip[..messages.recip_len],
-                        1,
-                        rect.2 - 48,
+                        layout::NOTICE_RUNG,
+                        layout::card_row_lane(rect.2),
                         &mut buf,
                     )
                 } else {
@@ -2944,9 +3067,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if let Some(c) = test_text(
                     x,
                     y,
-                    rect.0 + 24,
+                    rect.0 + ROW_PAD_X,
                     rect.1 + 40,
-                    1,
+                    layout::NOTICE_RUNG,
                     &buf[..n],
                     THEME.on_surface,
                     CARD.fill,

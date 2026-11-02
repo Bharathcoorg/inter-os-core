@@ -40,6 +40,453 @@ pub const INCOMING_LOCAL_LABEL: &[u8] = b"Written locally - never received";
 /// format.
 pub const HIDDEN_PREVIEW_LABEL: &[u8] = b"Message";
 
+// -----------------------------------------------------------------------------
+// The lanes the painter draws into
+//
+// WHY these live in the library and not beside the per-pixel branch that draws
+// them: this app's binary is built with `test = false` (see
+// `apps/messages/Cargo.toml`), so a fit gate can only be a `#[test]` inside this
+// library, and a `#[test]` can only ask about a container it can reach. Every
+// width below used to be a number written inside the branch that painted it --
+// `624` for the empty state's query line, `CARD_X1 - CARD_X0 - 180` for a thread
+// row's snippet, `rect.2 - 48` for a notice card, `490 - RECIPIENT_TEXT_X` for
+// the recipient field -- with no constant naming what the number was or which box
+// it came from. That is the defect class where a real clip passes the suite:
+// raise a rung, the run grows, the remembered lane stays, and nothing answers.
+//
+// Every lane is derived forward from the box the painter actually draws into, and
+// every gap of air is its own named constant, so moving the box moves the lane
+// and the gate with it. The rungs come from the platform's ladder rather than
+// being typed as multipliers, because a draw site that types its own multiplier
+// can measure a run at one rung and ink it at another.
+// -----------------------------------------------------------------------------
+
+/// The geometry this app paints into, and the lane every fitted run answers.
+pub mod layout {
+    use crate::theme::{spacing, type_scale};
+
+    // --- the boxes -----------------------------------------------------------
+
+    /// The card every full-width row of this app is drawn on: the thread list's
+    /// cards, the details and picker report rows, and the notice card.
+    pub const LIST_CARD_X: usize = 24;
+    pub const LIST_CARD_W: usize = 672;
+    pub const LIST_CARD_RIGHT: usize = LIST_CARD_X + LIST_CARD_W;
+
+    /// Air a run keeps from the card that carries it, on each side.
+    pub const CARD_PAD_X: usize = spacing::GRID_24;
+
+    /// The empty-state card: the same column and width as a row card, so a query
+    /// line that fits one fits the other.
+    pub const EMPTY_CARD_X: usize = LIST_CARD_X;
+    pub const EMPTY_CARD_W: usize = LIST_CARD_W;
+
+    // --- the thread row's columns -------------------------------------------
+
+    /// The avatar disc's centre and radius, as the painter inks them.
+    pub const AVATAR_CX: usize = LIST_CARD_X + 44;
+    pub const AVATAR_R: usize = 24;
+
+    /// The text column both of a thread row's runs start in.
+    pub const ROW_TEXT_X: usize = LIST_CARD_X + 84;
+
+    /// The unread pill's own box, and the delete mark's column and half-width.
+    /// The pill is the trailing mark that binds a row's lanes: it shares its
+    /// rows with both runs (`card_top + 34 .. card_top + 68` covers the peer
+    /// name's box and the snippet's), and a lane that only clears the card's
+    /// edge runs under it.
+    pub const UNREAD_PILL_X: usize = LIST_CARD_RIGHT - 92;
+    pub const UNREAD_PILL_RIGHT: usize = LIST_CARD_RIGHT - 56;
+    pub const DELETE_MARK_X: usize = LIST_CARD_RIGHT - 38;
+    pub const DELETE_MARK_HALF: usize = 6;
+
+    /// Slack a run measured at one face keeps before the mark it sits beside.
+    ///
+    /// WHY it is named: the peer name and the header title were trimmed with a
+    /// bare `12` written at the draw site. A slack that has no name cannot be
+    /// re-measured when the mark moves, and it is the only thing standing between
+    /// a fitted run and the pill's left edge.
+    pub const MARK_TRIM_SLACK: usize = 12;
+
+    // --- the search / recipient / compose fields ----------------------------
+
+    /// The search field's box, its text column, and the clear mark that ends it.
+    pub const SEARCH_FIELD_X: usize = 24;
+    pub const SEARCH_FIELD_W: usize = 672;
+    pub const SEARCH_TEXT_X: usize = 82;
+    pub const SEARCH_CLEAR_CX: usize = 672;
+    pub const SEARCH_CLEAR_HALF_W: usize = 16;
+    pub const SEARCH_CLEAR_X0: usize = SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W;
+
+    /// The recipient field's box and its text column.
+    pub const RECIPIENT_FIELD_X: usize = 24;
+    pub const RECIPIENT_FIELD_W: usize = 586;
+    pub const RECIPIENT_FIELD_RIGHT: usize = RECIPIENT_FIELD_X + RECIPIENT_FIELD_W;
+    pub const RECIPIENT_TEXT_X: usize = 76;
+
+    /// The clear mark both editors carry, as the painter clips it.
+    pub const FIELD_CLEAR_CX: usize = 590;
+    pub const FIELD_CLEAR_HALF_W: usize = 16;
+    pub const FIELD_CLEAR_X0: usize = FIELD_CLEAR_CX - FIELD_CLEAR_HALF_W;
+    pub const FIELD_CLEAR_X1: usize = FIELD_CLEAR_CX + FIELD_CLEAR_HALF_W;
+
+    /// The air a field's text keeps from the mark it is typed beside.
+    pub const FIELD_MARK_PAD: usize = spacing::GRID_8;
+
+    /// The compose field's text column, the counter's right edge, and the room
+    /// the counter is given for its widest line (`used/limit`).
+    pub const COMPOSE_FIELD_X: usize = 24;
+    pub const COMPOSE_FIELD_W: usize = 586;
+    pub const COMPOSE_TEXT_X: usize = 52;
+    pub const COMPOSE_COUNT_RIGHT: usize = 572;
+    pub const COMPOSE_COUNT_RESERVE: usize = 56;
+
+    /// The buffers the three editors are bounded by. They live here because the
+    /// counter's denominator and the widest run an editor can hold are the same
+    /// numbers, and a fit gate has to measure the worst case rather than a
+    /// typical one.
+    pub const COMPOSE_CAP: usize = 160;
+    pub const SEARCH_CAP: usize = 48;
+    pub const RECIP_CAP: usize = 32;
+
+    /// The recipient picker's control: the column it owns at the right end of
+    /// the recipient band, the width it is painted with, and the air its centred
+    /// label keeps from its own border.
+    ///
+    /// WHY the box is here: the label inside it is centred with no trim, so
+    /// "does `PICK` still read inside its control" is a lane question, and the
+    /// lane answers to the control's width.
+    pub const PICK_CONTROL_X: usize = LIST_CARD_RIGHT - 80;
+    pub const PICK_CONTROL_W: usize = 80;
+    pub const CONTROL_LABEL_PAD: usize = spacing::GRID_8;
+
+    /// The two labels that control can carry. Nothing trims either of them -- the
+    /// painter centres them in the control -- so the only honest check is that the
+    /// widest one still reads inside the box it is inked on, which is what the
+    /// library's fit gate measures.
+    pub const PICK_LABEL: &[u8] = b"PICK";
+    pub const INFO_LABEL: &[u8] = b"INFO";
+
+    /// The `To:` prefix's column, in front of the recipient editor's text column.
+    pub const RECIPIENT_PREFIX_X: usize = 40;
+
+    /// The prefix itself. It is drawn with no trim, so the lane beside it is the
+    /// only thing that can say whether it still stops short of the typed address.
+    pub const RECIPIENT_PREFIX_LABEL: &[u8] = b"To:";
+
+    /// The unread pill's count column: the inset from the pill's left edge the
+    /// painter inks the digits at.
+    pub const UNREAD_COUNT_INSET: usize = 12;
+
+    /// The conversation view's status banner columns: the run it starts with when
+    /// the threat glyph leads and the column it starts in when nothing does.
+    pub const BANNER_GLYPH_TEXT_X: usize = 76;
+    pub const BANNER_PLAIN_TEXT_X: usize = 40;
+
+    /// The header's title column.
+    pub const HEADER_TITLE_X: usize = 116;
+
+    /// The air a bubble keeps between its own edge and the run it carries.
+    pub const BUBBLE_PAD_X: usize = 16;
+
+    /// The narrowest a chat bubble may be drawn, so a one-word message still
+    /// reads as a bubble, and the widest, so a long message stops short of the
+    /// screen edge.
+    ///
+    /// WHY they live here: the bubble hugs its content, so the lane a bubble's
+    /// body is trimmed to is only as wide as the clamp lets the bubble grow -- and
+    /// a status line that cannot be drawn inside the widest bubble is a status
+    /// line the screen never shows whole.
+    pub const BUBBLE_MIN_W: usize = 168;
+    pub const BUBBLE_MAX_W: usize = 488;
+
+    // --- the rungs, named ---------------------------------------------------
+
+    pub const PEER_NAME_RUNG: usize = type_scale::BODY;
+    pub const SNIPPET_RUNG: usize = type_scale::CAPTION;
+    pub const ROW_CAPTION_RUNG: usize = type_scale::CAPTION;
+    pub const ROW_BODY_RUNG: usize = type_scale::BODY;
+    pub const NOTICE_RUNG: usize = type_scale::CAPTION;
+    pub const EMPTY_QUERY_RUNG: usize = type_scale::CAPTION;
+    /// The empty state's own headline rungs: the search-refusal line reads at the
+    /// caption rung, the zero-thread card's title at the body rung.
+    pub const EMPTY_HEADLINE_RUNG: usize = type_scale::CAPTION;
+    pub const EMPTY_TITLE_RUNG: usize = type_scale::BODY;
+    pub const EMPTY_SUBLINE_RUNG: usize = type_scale::CAPTION;
+    pub const BUBBLE_BODY_RUNG: usize = type_scale::BODY;
+    pub const BUBBLE_STATUS_RUNG: usize = type_scale::CAPTION;
+    pub const FIELD_TEXT_RUNG: usize = type_scale::BODY;
+
+    /// The remaining rungs this app inks at, named rather than typed at the draw
+    /// site.
+    ///
+    /// WHY they belong to the ladder and not to the branch: a site that writes its
+    /// own multiplier can measure a run at one rung and ink it at another, and
+    /// nothing in the suite answers -- which is exactly how a remembered `1` ended
+    /// up beside a `measure` call that meant the caption rung.
+    pub const CONTROL_LABEL_RUNG: usize = type_scale::CAPTION;
+    pub const FIELD_PREFIX_RUNG: usize = type_scale::CAPTION;
+    pub const BANNER_RUNG: usize = type_scale::CAPTION;
+    pub const CONVO_EMPTY_RUNG: usize = type_scale::CAPTION;
+    pub const COUNTER_RUNG: usize = type_scale::CAPTION;
+    pub const UNREAD_COUNT_RUNG: usize = type_scale::CAPTION;
+
+    // --- the lanes ----------------------------------------------------------
+
+    /// The lane a card's full-width row gives its run: the card's own width less
+    /// the air on either side. A `const fn` because the painter builds the rect it
+    /// draws into at the call site, and the fit has to answer that rect and not a
+    /// remembered copy of it.
+    pub const fn card_row_lane(w: usize) -> usize {
+        if w > 2 * CARD_PAD_X {
+            w - 2 * CARD_PAD_X
+        } else {
+            0
+        }
+    }
+
+    /// A report row's lane: the card the painter builds at
+    /// `(CARD_X0, top, CARD_X1 - CARD_X0, ROW_CARD_H)`.
+    pub const REPORT_ROW_LANE: usize = card_row_lane(LIST_CARD_W);
+
+    /// The empty state's query line, centred inside the empty card.
+    pub const EMPTY_CARD_LANE: usize = card_row_lane(EMPTY_CARD_W);
+
+    /// The notice card's lane: the card's width less the air the run is painted
+    /// in by, which is where the painter puts it (`rect.0 + CARD_PAD_X`).
+    pub const NOTICE_LANE: usize = card_row_lane(LIST_CARD_W);
+
+    /// The lane a thread row's peer name owns: from the text column to the
+    /// unread pill's left edge, less the slack that keeps it off the pill.
+    pub const PEER_NAME_LANE: usize = UNREAD_PILL_X - ROW_TEXT_X - MARK_TRIM_SLACK;
+
+    /// The lane a thread row's snippet owns.
+    ///
+    /// WHY it is spelled out instead of aliasing the name lane's arithmetic: the
+    /// two runs stand on the same two edges of the same card, so they answer the
+    /// same lane -- but the painter used to trim the snippet to
+    /// `CARD_X1 - CARD_X0 - 180`, a remembered number that stopped four columns
+    /// short of the pill and eight past the peer name's own bound. A snippet is
+    /// now cut where the name is cut.
+    pub const SNIPPET_LANE: usize = UNREAD_PILL_X - ROW_TEXT_X - MARK_TRIM_SLACK;
+
+    /// The lane the typed query owns inside the search field: it stops at the
+    /// clear mark's left arm, less the field's mark pad.
+    pub const SEARCH_TEXT_LANE: usize = SEARCH_CLEAR_X0 - FIELD_MARK_PAD - SEARCH_TEXT_X;
+
+    /// The lane the recipient editor owns: it stops at the clear mark's left arm.
+    ///
+    /// WHY the remembered `490` is not kept as a literal: it is this same
+    /// distance, measured by hand off the mark; the day the mark moves, the
+    /// remembered number is what lets the typed address run under it.
+    pub const RECIPIENT_TEXT_LANE: usize = FIELD_CLEAR_X0 - FIELD_MARK_PAD - RECIPIENT_TEXT_X;
+
+    /// The lane the compose editor owns: it stops where the character counter's
+    /// reserved room begins.
+    pub const COMPOSE_TEXT_LANE: usize =
+        COMPOSE_COUNT_RIGHT - COMPOSE_COUNT_RESERVE - COMPOSE_TEXT_X;
+
+    /// The header title's lane: the pill's measured left edge, less the title's
+    /// own column and the slack that keeps the run off the pill.
+    pub const fn header_title_lane(pill_left: usize) -> usize {
+        pill_left.saturating_sub(HEADER_TITLE_X + MARK_TRIM_SLACK)
+    }
+
+    /// A bubble's text lane: the bubble's own width less the air on either side.
+    /// The bubble hugs its content, so the lane is only known once the hug is.
+    pub const fn bubble_text_lane(bubble_w: usize) -> usize {
+        if bubble_w > 2 * BUBBLE_PAD_X {
+            bubble_w - 2 * BUBBLE_PAD_X
+        } else {
+            0
+        }
+    }
+
+    /// The room a bubble's text takes on top of its own width when the bubble
+    /// hugs its content: the same air the text lane removes.
+    pub const BUBBLE_HUG_PAD: usize = 2 * BUBBLE_PAD_X;
+
+    /// A control's centred label lane: the control's own width less the air it
+    /// keeps from its border on either side. Nothing trims this run, so the gate
+    /// is the label fitting at all.
+    pub const CONTROL_LABEL_LANE: usize = PICK_CONTROL_W - 2 * CONTROL_LABEL_PAD;
+
+    /// The lane the `To:` prefix owns: from its own column to the editor's text
+    /// column, which is where the typed address starts.
+    pub const RECIPIENT_PREFIX_LANE: usize = RECIPIENT_TEXT_X - RECIPIENT_PREFIX_X;
+
+    /// The lane the unread count owns inside its pill: from the digit column to
+    /// the pill's right edge.
+    pub const UNREAD_COUNT_LANE: usize = UNREAD_PILL_RIGHT - (UNREAD_PILL_X + UNREAD_COUNT_INSET);
+
+    /// The conversation view's status banner lanes: from the column the run starts
+    /// in -- after the threat glyph, or at the field's own padding when there is no
+    /// glyph -- to the air inside the band's right edge.
+    pub const BANNER_GLYPH_LANE: usize = LIST_CARD_RIGHT - CARD_PAD_X - BANNER_GLYPH_TEXT_X;
+    pub const BANNER_PLAIN_LANE: usize = LIST_CARD_RIGHT - CARD_PAD_X - BANNER_PLAIN_TEXT_X;
+
+    /// The lane a run centred on the bare panel owns: the screen less the side
+    /// margin every card of this app stands inside, so a centred line never reads
+    /// wider than the cards it sits between.
+    pub const PANEL_CENTER_LANE: usize =
+        interos_std::design::viewport::LOGICAL_WIDTH - 2 * LIST_CARD_X;
+
+    // --- the runs that are never trimmed -----------------------------------
+
+    /// The fixed strings this app paints with no `ellipsize` in front of them,
+    /// gathered next to the lanes that hold them.
+    ///
+    /// WHY they are here: an unellipsized run has no fit step to check, so the
+    /// only thing that can say it still fits is a gate that measures the literal
+    /// itself at the rung the painter inks it at. Measuring it inside the branch
+    /// that draws it would be the same number twice.
+    pub const EMPTY_FILTER_LINE: &[u8] = b"No chats match your search";
+    /// What the empty state falls back to when the lane cannot even hold the
+    /// ellipsis `ellipsize` appends -- the report of what happened, not a silence.
+    pub const EMPTY_FILTER_FALLBACK: &[u8] = b"(empty query)";
+    pub const EMPTY_THREADS_TITLE: &[u8] = b"No Conversations Yet";
+    pub const EMPTY_TRANSPORT_SUBLINE: &[u8] = b"Messaging unavailable: no transport";
+    pub const EMPTY_STORE_REFUSED_SUBLINE: &[u8] =
+        b"Stored conversations could not be read";
+    pub const EMPTY_STORE_INVALID_SUBLINE: &[u8] =
+        b"Stored conversations failed validation";
+    pub const EMPTY_STORE_FULL_SUBLINE: &[u8] =
+        b"Conversation store is full; older threads were not kept";
+
+    /// The empty conversation's two centred lines, drawn on the bare panel.
+    pub const CONVO_EMPTY_LINE1: &[u8] = b"No messages in this chat yet";
+    pub const CONVO_EMPTY_LINE2: &[u8] = b"Type a draft below to compose";
+
+    /// The notice card's own copy when there is nothing to notice, and the
+    /// picker card's when no address has been chosen.
+    pub const NOTICE_EMPTY_TEXT: &[u8] = b"Nothing has been published or shared yet.";
+    pub const PICKER_NO_RECIPIENT_TEXT: &[u8] = b"No recipient chosen";
+
+    /// The widest unread count the model can hand the pill: `unread_count` is a
+    /// `u8` the list only ever saturates, so three digits is the worst line the
+    /// pill can be asked to hold.
+    pub const UNREAD_COUNT_WIDEST: &[u8] = b"255";
+
+    /// The run a container hands its painter: `label` whole when the container
+    /// holds it, otherwise the same label cut to `lane` with an ellipsis on it.
+    ///
+    /// WHY it lives in the model: every call site is a per-pixel branch this
+    /// app's binary cannot test, and the claim a fit gate is worth making -- a run
+    /// this app draws is either whole or visibly cut, never silently missing --
+    /// has to be checked against the same function the painter calls. A lane
+    /// narrower than the ellipsis itself answers `font::ellipsize` with nothing,
+    /// which is the one case where a word would vanish rather than be trimmed; the
+    /// gates below refuse that for every lane in this module.
+    pub fn fitted_run<'a>(label: &'a [u8], rung: usize, lane: usize, buf: &'a mut [u8]) -> &'a [u8] {
+        let len = interos_std::design::font::ellipsize(label, rung, lane, buf);
+        if len == 0 {
+            return label;
+        }
+        &buf[..len]
+    }
+
+    /// Truth gates: every lane is a lane -- it owns room of its own, it is not
+    /// wider than the ellipsis that trims it, and it never reaches past the box it
+    /// is drawn in. These are the checks that fire if a container moves and its
+    /// lane is left where the remembered number had it.
+    const _: () = assert!(LIST_CARD_RIGHT <= interos_std::design::viewport::LOGICAL_WIDTH);
+    const _: () = assert!(CARD_PAD_X > 0);
+    const _: () = assert!(AVATAR_CX + AVATAR_R < ROW_TEXT_X);
+    const _: () = assert!(ROW_TEXT_X < UNREAD_PILL_X);
+    const _: () = assert!(UNREAD_PILL_X < UNREAD_PILL_RIGHT);
+    const _: () = assert!(UNREAD_PILL_RIGHT < DELETE_MARK_X);
+    const _: () = assert!(DELETE_MARK_X + DELETE_MARK_HALF <= LIST_CARD_RIGHT);
+    const _: () = assert!(MARK_TRIM_SLACK >= 1);
+    const _: () = assert!(PEER_NAME_LANE > 0);
+    const _: () = assert!(
+        ROW_TEXT_X + PEER_NAME_LANE <= UNREAD_PILL_X,
+        "a thread row's peer name must stop before the unread pill it is drawn beside"
+    );
+    const _: () = assert!(SNIPPET_LANE > 0);
+    const _: () = assert!(
+        ROW_TEXT_X + SNIPPET_LANE <= UNREAD_PILL_X,
+        "a thread row's snippet must stop before the unread pill it is drawn beside"
+    );
+    const _: () = assert!(SNIPPET_LANE == PEER_NAME_LANE);
+    const _: () = assert!(REPORT_ROW_LANE > 0);
+    const _: () = assert!(
+        LIST_CARD_X + CARD_PAD_X + REPORT_ROW_LANE <= LIST_CARD_RIGHT,
+        "a report row's lane must end inside the card the row is drawn on"
+    );
+    const _: () = assert!(EMPTY_CARD_LANE > 0);
+    const _: () = assert!(
+        EMPTY_CARD_X + CARD_PAD_X + EMPTY_CARD_LANE <= EMPTY_CARD_X + EMPTY_CARD_W,
+        "the empty state's query line must end inside the card that holds it"
+    );
+    const _: () = assert!(NOTICE_LANE > 0);
+    const _: () = assert!(
+        LIST_CARD_X + CARD_PAD_X + NOTICE_LANE <= LIST_CARD_RIGHT,
+        "a notice card's line must end inside the card it is painted on"
+    );
+    const _: () = assert!(SEARCH_TEXT_LANE > 0);
+    const _: () = assert!(
+        SEARCH_TEXT_X + SEARCH_TEXT_LANE <= SEARCH_CLEAR_X0,
+        "the typed query must stop before the clear mark it is typed beside"
+    );
+    const _: () = assert!(SEARCH_FIELD_X + SEARCH_FIELD_W <= LIST_CARD_RIGHT);
+    const _: () = assert!(RECIPIENT_TEXT_LANE > 0);
+    const _: () = assert!(
+        RECIPIENT_TEXT_X + RECIPIENT_TEXT_LANE <= FIELD_CLEAR_X0,
+        "the recipient editor must stop before the clear mark inside its field"
+    );
+    const _: () = assert!(FIELD_CLEAR_X1 <= RECIPIENT_FIELD_RIGHT);
+    const _: () = assert!(COMPOSE_TEXT_LANE > 0);
+    const _: () = assert!(
+        COMPOSE_TEXT_X + COMPOSE_TEXT_LANE + COMPOSE_COUNT_RESERVE <= COMPOSE_COUNT_RIGHT,
+        "the composer must stop where the character counter's reserved room begins"
+    );
+    const _: () = assert!(COMPOSE_COUNT_RIGHT < FIELD_CLEAR_X0);
+    const _: () = assert!(header_title_lane(LIST_CARD_RIGHT) > 0);
+    const _: () = assert!(bubble_text_lane(2 * BUBBLE_PAD_X) == 0);
+    const _: () = assert!(bubble_text_lane(BUBBLE_MIN_W) > 3);
+    const _: () = assert!(bubble_text_lane(BUBBLE_MAX_W) > 3);
+    const _: () = assert!(BUBBLE_HUG_PAD == 2 * BUBBLE_PAD_X);
+    /// Every lane has to be wider than the ellipsis `ellipsize` appends, or a
+    /// trimmed run comes back as nothing and the word disappears instead of
+    /// showing itself cut.
+    const _: () = assert!(card_row_lane(LIST_CARD_W) > 3);
+    const _: () = assert!(PEER_NAME_LANE > 3);
+
+    // The lanes that bind a run to a mark it is drawn beside, rather than to a
+    // card's edge.
+    const _: () = assert!(RECIPIENT_FIELD_RIGHT <= PICK_CONTROL_X);
+    const _: () = assert!(PICK_CONTROL_X + PICK_CONTROL_W <= LIST_CARD_RIGHT);
+    const _: () = assert!(CONTROL_LABEL_LANE > 0);
+    const _: () = assert!(
+        PICK_CONTROL_X + (PICK_CONTROL_W - CONTROL_LABEL_LANE) / 2 + CONTROL_LABEL_LANE
+            <= PICK_CONTROL_X + PICK_CONTROL_W,
+        "a control's centred label must end inside the control it is inked on"
+    );
+    const _: () = assert!(RECIPIENT_PREFIX_LANE > 0);
+    const _: () = assert!(
+        RECIPIENT_PREFIX_X + RECIPIENT_PREFIX_LANE <= RECIPIENT_TEXT_X,
+        "the `To:` prefix must stop where the typed address it sits beside begins"
+    );
+    const _: () = assert!(UNREAD_COUNT_LANE > 0);
+    const _: () = assert!(
+        UNREAD_PILL_X + UNREAD_COUNT_INSET + UNREAD_COUNT_LANE <= UNREAD_PILL_RIGHT,
+        "the unread count must end inside the pill it is inked on"
+    );
+    const _: () = assert!(BANNER_GLYPH_LANE > 0);
+    const _: () = assert!(BANNER_PLAIN_LANE > 0);
+    const _: () = assert!(
+        BANNER_GLYPH_TEXT_X + BANNER_GLYPH_LANE <= LIST_CARD_RIGHT - CARD_PAD_X,
+        "the status banner's line must end inside the band it is painted on"
+    );
+    const _: () = assert!(PANEL_CENTER_LANE > 0);
+    const _: () = assert!(
+        LIST_CARD_X + PANEL_CENTER_LANE
+            <= interos_std::design::viewport::LOGICAL_WIDTH - LIST_CARD_X,
+        "a line centred on the panel must keep the side margin every card stands inside"
+    );
+    const _: () = assert!(COMPOSE_COUNT_RESERVE > 0);
+}
+
 /// Case-insensitive substring match.
 pub fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {

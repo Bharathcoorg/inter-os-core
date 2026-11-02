@@ -80,12 +80,29 @@ def test_a_refused_store_read_reaches_the_screen():
 
     An unreadable store and a device with no conversations are different
     facts, and the thread list has to say which one it is.
+
+    WHY the words and the pairing are checked in two files: the sentence the
+    card paints is a layout constant in `lib.rs` and the choice of which one
+    the store's state selects is a match in `main.rs`, so pinning both in
+    whichever file happens to hold the literal is how a rename of either half
+    passes while the screen paints the wrong fact.
     """
     source = messages_main()
+    layout = messages_lib()
     assert "StoreState::ReadRefused" in source
     assert "StoreState::Invalid" in source
-    assert "Stored conversations could not be read" in source
-    assert "Stored conversations failed validation" in source
+    # The state names the subline the card draws, and that subline says what
+    # happened to the stored conversations.
+    assert "layout::EMPTY_STORE_REFUSED_SUBLINE" in source
+    assert "layout::EMPTY_STORE_INVALID_SUBLINE" in source
+    assert 'b"Stored conversations could not be read"' in layout
+    assert 'b"Stored conversations failed validation"' in layout
+    # The refused arm names the refused subline, not the transport's: the two
+    # were one card before, and a name that is merely present somewhere in the
+    # file would still pass if the arm reached for the wrong constant.
+    refused_arm = source.split("StoreState::ReadRefused => (")[1].split("StoreState::")[0]
+    assert "EMPTY_STORE_REFUSED_SUBLINE" in refused_arm
+    assert "EMPTY_TRANSPORT_SUBLINE" not in refused_arm
 
 
 def test_a_refused_store_write_reaches_the_screen():

@@ -2080,5 +2080,114 @@ mod tests {
         // label under the control and hit-test it first.
         assert!(chrome::LABEL_X >= back_button::X + back_button::SIZE);
     }
+
+    /// Every circular tool this app draws stands at the platform's floor, and
+    /// the press answers the same disc.
+    ///
+    /// WHY this is pinned: the renderer and the press each carried their own
+    /// radius -- the editor's toolbar was drawn at twenty and answered at
+    /// twenty-two, the reading dock's tools at twenty against twenty-four, the
+    /// floating action button at twenty-eight against thirty-four, and the
+    /// swatch picker at twenty-two against twenty-six. A thumb lands on the
+    /// ink, so the ink is what has to clear the floor.
+    #[test]
+    fn test_every_circular_tool_is_inked_at_the_disc_its_press_answers() {
+        use interos_std::design::touch::MIN_TARGET;
+        assert_eq!(chrome::TOOL_R * 2, MIN_TARGET);
+        assert!(chrome::FAB_R * 2 >= MIN_TARGET);
+        for cx in chrome::EDITOR_TOOL_CXS {
+            assert!(cx + chrome::TOOL_R <= 720);
+            assert!(chrome::EDITOR_TOOL_CY >= chrome::TOOL_R);
+        }
+        for cx in chrome::READING_TOOL_CXS {
+            let disc_top = chrome::READING_TOOL_CY - chrome::TOOL_R;
+            let disc_bottom = chrome::READING_TOOL_CY + chrome::TOOL_R;
+            assert!(
+                disc_top >= chrome::READING_DOCK.y && disc_bottom <= chrome::READING_DOCK.y + chrome::READING_DOCK.h,
+                "the reading dock's tool at x={cx} is inked outside the plate it stands on"
+            );
+        }
+    }
+
+    /// The home strip answers the rows the pill inks, and never reaches into
+    /// the soft keyboard.
+    #[test]
+    fn test_home_strip_covers_its_pill_and_stops_below_the_keyboard() {
+        assert!(
+            chrome::HOME_HIT.y >= crate::keyboard::KB_Y1,
+            "the home strip starts at row {}, inside the keyboard's {}..{}",
+            chrome::HOME_HIT.y,
+            crate::keyboard::KB_Y0,
+            crate::keyboard::KB_Y1
+        );
+        for y in chrome::HOME_PILL.y..chrome::HOME_PILL.y + chrome::HOME_PILL.h {
+            for x in chrome::HOME_PILL.x..chrome::HOME_PILL.x + chrome::HOME_PILL.w {
+                assert!(chrome::home_claims(x, y), "the pill inked ({x}, {y}) that no press answers");
+            }
+        }
+        assert!(chrome::home_claims(360, 1420));
+        assert!(!chrome::home_claims(360, crate::keyboard::KB_Y1 - 1));
+        assert!(!chrome::home_claims(200, 1439));
+    }
+
+    /// The dock's three tool bands are each centred on the glyph they name,
+    /// and run to one another with no dead column between.
+    #[test]
+    fn test_dock_tool_bands_are_centred_on_the_glyphs_they_answer() {
+        use interos_std::design::touch::MIN_TARGET;
+        let mid_y = chrome::DOCK_PILL.y + chrome::DOCK_PILL.h / 2;
+        assert!(chrome::DOCK_TOOL_W >= MIN_TARGET);
+        for (i, cx) in chrome::DOCK_TOOL_CXS.iter().enumerate() {
+            assert_eq!(
+                chrome::dock_tool_at(*cx, mid_y),
+                Some(i),
+                "the glyph at x={cx} answers as tool {:?}",
+                chrome::dock_tool_at(*cx, mid_y)
+            );
+            assert_eq!(chrome::dock_tool_at(cx - chrome::DOCK_TOOL_W / 2, mid_y), Some(i));
+            assert_eq!(chrome::dock_tool_at(cx + chrome::DOCK_TOOL_W / 2 - 1, mid_y), Some(i));
+            assert_ne!(chrome::dock_tool_at(cx + chrome::DOCK_TOOL_W / 2, mid_y), Some(i));
+        }
+        // The bands touch: no column of the pill's tool run answers nothing.
+        for pair in chrome::DOCK_TOOL_CXS.windows(2) {
+            let seam = pair[0] + chrome::DOCK_TOOL_W / 2;
+            assert_eq!(seam, pair[1] - chrome::DOCK_TOOL_W / 2);
+            assert!(chrome::dock_tool_at(seam, mid_y).is_some());
+        }
+        // The pill's own head still reads as the note it advertises.
+        assert_eq!(chrome::dock_tool_at(chrome::DOCK_PILL.x + 4, mid_y), None);
+    }
+
+    /// The search pill's clear control is a plate the press answers whole,
+    /// inside the pill that carries it.
+    #[test]
+    fn test_search_clear_answers_the_plate_the_painter_inks() {
+        use interos_std::design::touch::MIN_TARGET;
+        assert!(chrome::SEARCH_CLEAR.w >= MIN_TARGET && chrome::SEARCH_CLEAR.h >= MIN_TARGET);
+        assert!(chrome::SEARCH_CLEAR.x >= chrome::SEARCH_PILL.x);
+        assert!(chrome::SEARCH_CLEAR.y >= chrome::SEARCH_PILL.y);
+        assert!(chrome::SEARCH_CLEAR.x + chrome::SEARCH_CLEAR.w <= chrome::SEARCH_PILL.x + chrome::SEARCH_PILL.w);
+        assert!(chrome::SEARCH_CLEAR.y + chrome::SEARCH_CLEAR.h <= chrome::SEARCH_PILL.y + chrome::SEARCH_PILL.h);
+        let mid_y = chrome::SEARCH_CLEAR.y + chrome::SEARCH_CLEAR.h / 2;
+        for x in 0..720usize {
+            assert_eq!(
+                chrome::search_clear_claims(x, mid_y),
+                chrome::SEARCH_CLEAR.contains(x, mid_y),
+                "the clear press disagreed with the clear plate at x={x}"
+            );
+        }
+    }
+
+    /// The reading dock's category tag is drawn on the plate the dock owns,
+    /// at the platform's floor.
+    #[test]
+    fn test_reading_tag_is_a_plate_the_dock_draws() {
+        use interos_std::design::touch::MIN_TARGET;
+        assert!(chrome::READING_TAG.w >= MIN_TARGET && chrome::READING_TAG.h >= MIN_TARGET);
+        assert!(chrome::READING_TAG.x >= chrome::READING_DOCK.x);
+        assert!(chrome::READING_TAG.y >= chrome::READING_DOCK.y);
+        assert!(chrome::READING_TAG.x + chrome::READING_TAG.w <= chrome::READING_DOCK.x + chrome::READING_DOCK.w);
+        assert!(chrome::READING_TAG.y + chrome::READING_TAG.h <= chrome::READING_DOCK.y + chrome::READING_DOCK.h);
+    }
 }
 
