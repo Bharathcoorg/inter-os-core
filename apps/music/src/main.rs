@@ -1864,7 +1864,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             return THEME.border;
         }
         // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_low) {
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
             return c;
         }
         if let Some(c) = text_centered_bold(x, y, 56, 2, b"Media Player", THEME.on_surface, THEME.surface) {

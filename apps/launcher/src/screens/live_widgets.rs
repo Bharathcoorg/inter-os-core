@@ -22,17 +22,6 @@ const THEME: Theme = launcher::theme::SHELL;
 
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
-/// The cards whose figures are device readings.
-///
-/// WHY they are consts and not literals inside the painter: the shell repaints a
-/// band named by the screen that draws it, and a band written down separately
-/// from the rows it covers is a band that can drift away from them.
-const STORAGE_ROW: Rect = Rect::new(40, 138, 305, 160);
-const RAM_ROW: Rect = Rect::new(375, 138, 305, 160);
-const AUDIO_ROW: Rect = Rect::new(40, 312, 640, 120);
-const CAL_ROW: Rect = Rect::new(40, 446, 305, 160);
-const VAULT_ROW: Rect = Rect::new(375, 446, 305, 160);
-
 /// The line box a run at `scale` reserves, named once so a card's rows can be
 /// stacked from the ladder rather than from a fitted literal.
 const fn lh(scale: usize) -> usize {
@@ -45,9 +34,58 @@ const fn lh(scale: usize) -> usize {
 /// box and read straight through it. Each row now starts where the row above
 /// ends, one `lh` lower.
 ///
+/// WHY the cards and the row pitch are derived from the same ladder: a stack of
+/// whole line boxes is only as tall as the boxes are, and the raised ladder grew
+/// a caption from 22 rows to 27, a body from 32 to 36, a section from 44 to 48
+/// and a title from 59 to 63. A card whose height was its old stack plus its old
+/// padding therefore had its last line running past the bottom edge, so every
+/// card height here is solved from the boxes it carries and each row is placed
+/// off the bottom of the row above rather than from a remembered y. The whole
+/// dashboard still closes above the home gesture pill, which the last gate
+/// below checks.
+
+/// Vertical inset from a card's top edge to the first line box it draws.
+const CARD_INSET_Y: usize = 16;
+/// Breathing room between a card's last line box and its bottom edge.
+const CARD_BOTTOM_PAD: usize = 9;
+/// Gap between one dashboard row's bottom edge and the next row's top edge.
+const ROW_GAP: usize = 14;
+
+/// The page header: the title run, and its subtitle a whole title box below it.
+///
+/// WHY the dashboard starts below this box: a run's ink reaches the bottom of
+/// the box it reserves, and the first card row began inside the subtitle's.
+const HEADER_Y: usize = 60;
+const HEADER_STACK_H: usize = lh(type_scale::TITLE) + lh(type_scale::CAPTION);
+
+/// A chip: a caption label inside a filled pill, so the pill reserves the
+/// caption's own line box plus its vertical padding.
+///
+/// WHY the pill is no longer a 24-row band: 24 rows is the bitmap cell's line,
+/// and a caption run drawn with the outline face at the raised rung puts ink
+/// below the pill's bottom edge, which reads as a clipped control.
+const CHIP_PAD_Y: usize = 6;
+const CHIP_H: usize = CHIP_PAD_Y + lh(type_scale::CAPTION) + CHIP_PAD_Y;
+
+/// The cards whose figures are device readings.
+///
+/// WHY they are consts and not literals inside the painter: the shell repaints a
+/// band named by the screen that draws it, and a band written down separately
+/// from the rows it covers is a band that can drift away from them.
+///
 /// Row 1 (Storage & Physical Memory): label, the figure, a body line, a caption
 /// detail. Both cards share the same vertical ladder.
-const ROW1_LABEL_Y: usize = STORAGE_ROW.y + 16;
+const ROW1_STACK_H: usize = CARD_INSET_Y
+    + lh(type_scale::CAPTION)
+    + lh(type_scale::TITLE)
+    + lh(type_scale::BODY)
+    + lh(type_scale::CAPTION);
+const ROW1_CARD_H: usize = ROW1_STACK_H + CARD_BOTTOM_PAD;
+const ROW1_Y: usize = HEADER_Y + HEADER_STACK_H + ROW_GAP;
+const STORAGE_ROW: Rect = Rect::new(40, ROW1_Y, 305, ROW1_CARD_H);
+const RAM_ROW: Rect = Rect::new(375, ROW1_Y, 305, ROW1_CARD_H);
+
+const ROW1_LABEL_Y: usize = ROW1_Y + CARD_INSET_Y;
 const ROW1_FIGURE_Y: usize = ROW1_LABEL_Y + lh(type_scale::CAPTION);
 const ROW1_SECONDARY_Y: usize = ROW1_FIGURE_Y + lh(type_scale::TITLE);
 const ROW1_DETAIL_Y: usize = ROW1_SECONDARY_Y + lh(type_scale::BODY);
@@ -55,19 +93,51 @@ const ROW1_DETAIL_Y: usize = ROW1_SECONDARY_Y + lh(type_scale::BODY);
 /// Audio card: the title, then the device line a whole body box below it, then
 /// the footer row - the volume reading on the left, the mixer tag on the right -
 /// under the gauge band.
-const AUDIO_TITLE_Y: usize = AUDIO_ROW.y + 16;
+///
+/// WHY the gauge band moved: the old gate was the caption box closing on the
+/// literal `y + 74`, which was the proof the device line sat above the divider.
+/// With the raised boxes the line ends below 74, so the divider is now placed
+/// off the line box and the footer row off the divider.
+const AUDIO_GAUGE_GAP: usize = 4;
+const AUDIO_GAUGE_H: usize = 8;
+const AUDIO_FOOT_GAP: usize = 10;
+const AUDIO_FOOT_DY: usize = CARD_INSET_Y
+    + lh(type_scale::BODY)
+    + lh(type_scale::CAPTION)
+    + AUDIO_GAUGE_GAP
+    + AUDIO_GAUGE_H
+    + AUDIO_FOOT_GAP;
+const AUDIO_CARD_H: usize = AUDIO_FOOT_DY + lh(type_scale::CAPTION) + CARD_BOTTOM_PAD;
+const AUDIO_ROW_Y: usize = ROW1_Y + ROW1_CARD_H + ROW_GAP;
+const AUDIO_ROW: Rect = Rect::new(40, AUDIO_ROW_Y, 640, AUDIO_CARD_H);
+const AUDIO_TITLE_Y: usize = AUDIO_ROW_Y + CARD_INSET_Y;
 const AUDIO_SUB_Y: usize = AUDIO_TITLE_Y + lh(type_scale::BODY);
-const AUDIO_FOOT_Y: usize = AUDIO_ROW.y + 92;
+const AUDIO_GAUGE_Y: usize = AUDIO_SUB_Y + lh(type_scale::CAPTION) + AUDIO_GAUGE_GAP;
+const AUDIO_FOOT_Y: usize = AUDIO_GAUGE_Y + AUDIO_GAUGE_H + AUDIO_FOOT_GAP;
 
-/// Calendar card: label, the RTC date line, then the detail row (the chip is a
-/// filled rect and its label is centred, so it reserves its own band).
-const CAL_LABEL_Y: usize = CAL_ROW.y + 16;
+/// Row 3: the calendar card (label, the RTC date line, the source chip, the
+/// detail) and the security card (label, the status figure, the architecture
+/// line, the capability chip). The pair takes the height the taller stack needs
+/// so the two cards still read as one row.
+const CAL_CHIP_DY: usize = CARD_INSET_Y + lh(type_scale::CAPTION) + lh(type_scale::SECTION);
+const CAL_DETAIL_DY: usize = CAL_CHIP_DY + CHIP_H + 4;
+const VAULT_CHIP_DY: usize =
+    CARD_INSET_Y + lh(type_scale::CAPTION) + lh(type_scale::TITLE) + lh(type_scale::BODY);
+const ROW3_CARD_H: usize = VAULT_CHIP_DY + CHIP_H + CARD_BOTTOM_PAD;
+const ROW3_Y: usize = AUDIO_ROW_Y + AUDIO_CARD_H + ROW_GAP;
+
+/// Calendar card: label, the RTC date line, the source chip a whole section box
+/// under it, then the detail row.
+const CAL_ROW: Rect = Rect::new(40, ROW3_Y, 305, ROW3_CARD_H);
+const CAL_LABEL_Y: usize = CAL_ROW.y + CARD_INSET_Y;
 const CAL_DATE_Y: usize = CAL_LABEL_Y + lh(type_scale::CAPTION);
-const CAL_DETAIL_Y: usize = CAL_ROW.y + 124;
+const CAL_CHIP_Y: usize = CAL_ROW.y + CAL_CHIP_DY;
+const CAL_DETAIL_Y: usize = CAL_ROW.y + CAL_DETAIL_DY;
 
 /// Security card: label, the status figure, the architecture line, then the
 /// capability chip a whole body box under the architecture line.
-const VAULT_LABEL_Y: usize = VAULT_ROW.y + 16;
+const VAULT_ROW: Rect = Rect::new(375, ROW3_Y, 305, ROW3_CARD_H);
+const VAULT_LABEL_Y: usize = VAULT_ROW.y + CARD_INSET_Y;
 const VAULT_STATUS_Y: usize = VAULT_LABEL_Y + lh(type_scale::CAPTION);
 const VAULT_ARCH_Y: usize = VAULT_STATUS_Y + lh(type_scale::TITLE);
 const VAULT_CHIP_Y: usize = VAULT_ARCH_Y + lh(type_scale::BODY);
@@ -75,14 +145,27 @@ const VAULT_CHIP_Y: usize = VAULT_ARCH_Y + lh(type_scale::BODY);
 /// Readings cards: the label, and the sublabel one body box below it. The value
 /// is right-anchored on the same first row, so it keeps its own offset.
 const READING_LABEL_DY: usize = 10;
-const READING_SUB_DY: usize = 10 + lh(type_scale::BODY);
+const READING_SUB_DY: usize = READING_LABEL_DY + lh(type_scale::BODY);
 const READING_VALUE_DY: usize = 20;
+/// Height of one readings card, and the pitch between two of them: the card
+/// reserves the sublabel's whole box, the pitch keeps the 12-row gutter the
+/// 64x76 pair had.
+const READING_CARD_H: usize = READING_SUB_DY + lh(type_scale::CAPTION) + 3;
+const READING_GUTTER: usize = 12;
+const READING_PITCH: usize = READING_CARD_H + READING_GUTTER;
+const READINGS_CARD_COUNT: usize = 5;
+/// The five readings cards' top edges, one pitch apart.
+const READING_CARD1_Y: usize = READINGS_CARD0_Y + READING_PITCH;
+const READING_CARD2_Y: usize = READINGS_CARD0_Y + 2 * READING_PITCH;
+const READING_CARD3_Y: usize = READINGS_CARD0_Y + 3 * READING_PITCH;
+const READING_CARD4_Y: usize = READINGS_CARD0_Y + 4 * READING_PITCH;
 /// The first readings card's row, and the section header above it. WHY the
-/// header is solved from the card and not from the card row above: a scale-3 run
-/// reserves `lh(SECTION)` = 44 rows and its descender reaches the bottom of that
-/// box, so a header placed 6 rows above the card let the card's own fill answer
+/// header is solved from the card and not from the card row above: a section run
+/// reserves `lh(SECTION)` rows and its descender reaches the bottom of that box,
+/// so a header placed a few rows above the card let the card's own fill answer
 /// those rows first and ate the tail of the 'g'.
-const READINGS_CARD0_Y: usize = 664;
+const READINGS_HEAD_GAP: usize = 10;
+const READINGS_CARD0_Y: usize = ROW3_Y + ROW3_CARD_H + READINGS_HEAD_GAP + lh(type_scale::SECTION);
 const READINGS_HEAD_Y: usize = READINGS_CARD0_Y - lh(type_scale::SECTION);
 
 /// The width of a readings card, and the room one of its side-anchored runs
@@ -100,16 +183,42 @@ const HEADER_TEXT_MAX: usize = SCREEN_WIDTH - 214 - 40 - 8;
 /// simply the width left of it on the screen, so it can never run off-edge.
 const CLOCK_TEXT_MAX: usize = SCREEN_WIDTH - crate::screens::status::CLOCK_X;
 
-/// Truth gates: the ladder each derived stride trusts, and the fact that the
-/// grown stacks still close inside their own cards.
-const _: () = assert!(lh(type_scale::CAPTION) == 22);
-const _: () = assert!(lh(type_scale::BODY) == 32);
-const _: () = assert!(lh(type_scale::TITLE) == 59);
+/// Truth gates: the ladder each derived stride trusts still orders the rungs the
+/// way the stacks assume, every grown stack closes inside the card that carries
+/// it, a chip's label inside its pill, and the whole dashboard above the home
+/// gesture pill.
+///
+/// WHY these no longer read `lh(CAPTION) == 22`, `lh(BODY) == 32` and
+/// `lh(TITLE) == 59`: those literals were the previous ladder's boxes, so they
+/// pinned the ladder instead of this layout - the day the ladder grew they
+/// failed for reasons the geometry here had nothing to do with, while the fact
+/// the derivation actually depends on (that each rung's box is taller than the
+/// rung above it, which is what makes a derived stride monotonic) went
+/// unasserted.
+const _: () = assert!(lh(type_scale::CAPTION) >= launcher::font::cap_for_scale(type_scale::CAPTION) as usize);
+const _: () = assert!(
+    lh(type_scale::BODY) > lh(type_scale::CAPTION),
+    "a body line box must reserve more rows than the caption above it",
+);
+const _: () = assert!(
+    lh(type_scale::TITLE) > lh(type_scale::BODY),
+    "a title line box must reserve more rows than the body above it",
+);
 const _: () = assert!(ROW1_DETAIL_Y + lh(type_scale::CAPTION) <= STORAGE_ROW.y + STORAGE_ROW.h);
-const _: () = assert!(AUDIO_SUB_Y + lh(type_scale::CAPTION) <= AUDIO_ROW.y + 74);
-const _: () = assert!(VAULT_CHIP_Y + 24 <= VAULT_ROW.y + VAULT_ROW.h);
-const _: () = assert!(READING_SUB_DY + lh(type_scale::CAPTION) <= 64);
+const _: () = assert!(ROW1_DETAIL_Y + lh(type_scale::CAPTION) <= RAM_ROW.y + RAM_ROW.h);
+const _: () = assert!(AUDIO_SUB_Y + lh(type_scale::CAPTION) <= AUDIO_GAUGE_Y);
+const _: () = assert!(AUDIO_FOOT_Y + lh(type_scale::CAPTION) <= AUDIO_ROW_Y + AUDIO_CARD_H);
+const _: () = assert!(VAULT_CHIP_Y + CHIP_H <= VAULT_ROW.y + VAULT_ROW.h);
+const _: () = assert!(CAL_CHIP_Y + CHIP_H <= CAL_DETAIL_Y);
+const _: () = assert!(CAL_DETAIL_Y + lh(type_scale::CAPTION) <= CAL_ROW.y + CAL_ROW.h);
+const _: () = assert!(READING_SUB_DY + lh(type_scale::CAPTION) <= READING_CARD_H);
 const _: () = assert!(READINGS_HEAD_Y + lh(type_scale::SECTION) <= READINGS_CARD0_Y);
+const _: () = assert!(AUDIO_ROW_Y >= STORAGE_ROW.y + STORAGE_ROW.h);
+const _: () = assert!(ROW3_Y >= AUDIO_ROW.y + AUDIO_ROW.h);
+const _: () = assert!(
+    READINGS_CARD0_Y + (READINGS_CARD_COUNT - 1) * READING_PITCH + READING_CARD_H <= HOME_PILL.y,
+    "the dashboard's last readings card must stay above the home gesture pill",
+);
 
 /// First row the dashboard draws a queried figure into, and the row after the
 /// last one. Covers the calendar card because its date line is read from the
@@ -531,13 +640,13 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
 
     // 2. Header
     // WHY the subtitle sits a whole title box below the title: the page title is
-    // a scale-4 run that reserves `lh(4)` = 59 rows, and at the old y the
+    // a rung-4 run that reserves `lh(TITLE)` rows, and at the old y the
     // subtitle's ink began above the bottom of that box, so the two read as one
     // smeared row on the device.
-    let page_title = LabelRun::new(40, 60, HEADER_TEXT_MAX, type_scale::TITLE, b"Live Widgets", theme.on_surface);
+    let page_title = LabelRun::new(40, HEADER_Y, HEADER_TEXT_MAX, type_scale::TITLE, b"Live Widgets", theme.on_surface);
     let page_subtitle = LabelRun::new(
         40,
-        60 + lh(type_scale::TITLE),
+        HEADER_Y + lh(type_scale::TITLE),
         HEADER_TEXT_MAX,
         type_scale::CAPTION,
         b"Real-time hardware telemetry & system status",
@@ -546,18 +655,19 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
 
     // WHY the chip is as wide as it is: the caption run measures ~135 px and the
     // old 150 px pill left the label touching its own border, which reads as a
-    // clipped control rather than a status.
-    let status_chip_rect = Rect::new(SCREEN_WIDTH - 214, 60, 174, 30);
+    // clipped control rather than a status. WHY it is as tall as it is: the pill
+    // reserves the caption run's whole line box plus its own padding.
+    let status_chip_rect = Rect::new(SCREEN_WIDTH - 214, HEADER_Y, 174, CHIP_H);
     let status_chip_label = LabelRun::centred(
         status_chip_rect.x,
-        status_chip_rect.y + 6,
+        status_chip_rect.y + CHIP_PAD_Y,
         status_chip_rect.w,
         type_scale::CAPTION,
         b"Platform Active",
         0xFF10B981, // Emerald green
     );
 
-    // 3. Row 1: Storage & Physical Memory (y = 138..298, height 160)
+    // 3. Row 1: Storage & Physical Memory (STORAGE_ROW / RAM_ROW, one ladder high)
     //
     // WHY both figures are read from the kernel: a capacity is a property of the
     // machine the guest happens to be running on, and the same image boots with
@@ -615,7 +725,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     let ram_mmu = LabelRun::new(ram_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(RAM_ROW.w), type_scale::BODY, &used_buf[..used_len], theme.on_surface);
     let ram_detail = LabelRun::new(ram_rect.x + 20, ROW1_DETAIL_Y, card_text_w(RAM_ROW.w), type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
 
-    // 4. Row 2: Real System Audio & Master Volume (y = 312..432, height 120)
+    // 4. Row 2: Real System Audio & Master Volume (AUDIO_ROW)
     //
     // WHY the device line changes with the reading: the mixer level is the AC'97
     // master-volume register, so a reading is the only evidence this shell has
@@ -629,7 +739,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         LabelRun::new(audio_rect.x + 76, AUDIO_SUB_Y, AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant)
     };
-    let audio_gauge_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 74, audio_rect.w - 40, 8);
+    let audio_gauge_rect = Rect::new(audio_rect.x + 20, AUDIO_GAUGE_Y, audio_rect.w - 40, AUDIO_GAUGE_H);
     let pct = if state.volume_state_valid { state.last_volume_percent as usize } else { 0 };
     let audio_gauge_fill_w = (audio_gauge_rect.w * pct.min(100)) / 100;
 
@@ -653,7 +763,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         LabelRun::right(audio_rect.x + audio_rect.w - 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant)
     };
 
-    // 5. Row 3: Calendar / RTC & Security (y = 446..606, height 160)
+    // 5. Row 3: Calendar / RTC & Security (CAL_ROW / VAULT_ROW)
     let cal_rect = CAL_ROW;
     let cal_label = LabelRun::new(cal_rect.x + 20, CAL_LABEL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
     // WHY "No clock reading" and not "Clock Synced": the two say opposite things
@@ -668,17 +778,17 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         b"No clock reading"
     };
-    // WHY the date line is derived from the label box, not from `y + 38`: the
-    // old offset assumed the 8x16 cell, but the label is a caption run that
-    // reserves `lh(CAPTION)` = 22 rows, so a date line begun at 38 rows below
-    // the card top was already clear - the number is the same, only named from
-    // the ladder so a change in the caption stride moves it with the label.
+    // WHY the date line is derived from the label box and not from a `y + 38`:
+    // the old offset assumed the 8x16 cell, but the label is a caption run that
+    // reserves `lh(CAPTION)` rows, so the date line is one whole caption box
+    // under the card's inset - named from the ladder so a change in the caption
+    // stride moves it with the label.
     let cal_date = LabelRun::new(cal_rect.x + 20, CAL_DATE_Y, card_text_w(CAL_ROW.w), type_scale::SECTION, date_slice, theme.on_surface);
-    let cal_time_chip = Rect::new(cal_rect.x + 20, cal_rect.y + 88, 110, 24);
+    let cal_time_chip = Rect::new(cal_rect.x + 20, CAL_CHIP_Y, 110, CHIP_H);
     let cal_time_label = if state.clock_source_ok {
-        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface)
+        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface)
     } else {
-        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + 4, cal_time_chip.w, type_scale::CAPTION, b"RTC refused", theme.on_surface_variant)
+        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"RTC refused", theme.on_surface_variant)
     };
     // WHY the detail names the reading it shows: the chip above it already says
     // where the date came from, and a static "No calendar source queried" under
@@ -695,15 +805,15 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     let cal_detail = LabelRun::new(cal_rect.x + 20, CAL_DETAIL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant);
 
     // WHY the security card is stacked from the ladder: the status figure is a
-    // scale-4 run that reserves `lh(TITLE)` = 59 rows, and the architecture line
+    // rung-4 run that reserves `lh(TITLE)` rows, and the architecture line
     // and the chip below it were spaced by the 8x16 cell's 52 and 34 rows, so
     // each began its ink while the run above was still inside its box.
     let vault_rect = VAULT_ROW;
     let vault_label = LabelRun::new(vault_rect.x + 20, VAULT_LABEL_Y, card_text_w(VAULT_ROW.w), type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
     let vault_status = LabelRun::new(vault_rect.x + 20, VAULT_STATUS_Y, card_text_w(VAULT_ROW.w), type_scale::TITLE, b"Enforced", 0xFF10B981);
     let vault_arch = LabelRun::new(vault_rect.x + 20, VAULT_ARCH_Y, card_text_w(VAULT_ROW.w), type_scale::BODY, b"Zero Ambient Authority", theme.on_surface);
-    let vault_chip_rect = Rect::new(vault_rect.x + 20, VAULT_CHIP_Y, 130, 24);
-    let vault_chip_label = LabelRun::centred(vault_chip_rect.x, vault_chip_rect.y + 4, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF);
+    let vault_chip_rect = Rect::new(vault_rect.x + 20, VAULT_CHIP_Y, 130, CHIP_H);
+    let vault_chip_label = LabelRun::centred(vault_chip_rect.x, vault_chip_rect.y + CHIP_PAD_Y, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF);
 
     // 6. Section 2 Header.
     let readings_head = LabelRun::new(
@@ -715,7 +825,7 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         theme.on_surface,
     );
 
-    // 7. System Readings Cards (y = 664..1044, 5 cards of height 64)
+    // 7. System Readings Cards (READINGS_CARD0_Y, five cards a READING_PITCH apart)
     let mut pkg_buf = [0u8; 32];
     let mut n = push_dec(&mut pkg_buf, 0, state.app_count as u64);
     for &b in b" registered" {
@@ -735,13 +845,13 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         }
     }
 
-    let card_w = 640;
-    let card_h = 64;
+    let card_w = READING_CARD_W;
+    let card_h = READING_CARD_H;
     // WHY the run rows are derived per card: the label is a body run reserving
-    // `lh(BODY)` = 32 rows, and the sublabels were placed 36 rows under the card
-    // top - inside the label's box - so they read straight through it. The value
-    // is right-anchored and shares the row with the label, so all three runs are
-    // bounded at the card centre by `READING_TEXT_MAX`.
+    // `lh(BODY)` rows, and the sublabels were placed inside that box, so they
+    // read straight through it. The card is now as tall as the sublabel's whole
+    // box, and the value is right-anchored and shares the label's row, so all
+    // three runs are bounded at the card centre by `READING_TEXT_MAX`.
     let readings = [
         DashboardReadingCard {
             rect: Rect::new(40, READINGS_CARD0_Y, card_w, card_h),
@@ -751,23 +861,23 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
             accent_color: 0xFF6366F1,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 740, card_w, card_h),
-            label: LabelRun::new(64, 740 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
-            sublabel: LabelRun::new(64, 740 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 740 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
+            rect: Rect::new(40, READING_CARD1_Y, card_w, card_h),
+            label: LabelRun::new(64, READING_CARD1_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
+            sublabel: LabelRun::new(64, READING_CARD1_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, READING_CARD1_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
             accent_color: 0xFF10B981,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 816, card_w, card_h),
-            label: LabelRun::new(64, 816 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Display Compositor", theme.on_surface),
-            sublabel: LabelRun::new(64, 816 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
+            rect: Rect::new(40, READING_CARD2_Y, card_w, card_h),
+            label: LabelRun::new(64, READING_CARD2_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Display Compositor", theme.on_surface),
+            sublabel: LabelRun::new(64, READING_CARD2_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
             // WHY the panel state and not a frame rate: nothing in this kernel measures
             // a flip interval - the scanout deadline is computed from a configured
             // refresh figure - so "60 FPS" reported a number no clock had observed.
             // Whether the panel has power is something the platform does answer.
             value: LabelRun::right(
                 40 + card_w - 24,
-                816 + READING_VALUE_DY,
+                READING_CARD2_Y + READING_VALUE_DY,
                 READING_TEXT_MAX,
                 type_scale::BODY,
                 if !state.display_power_state_valid {
@@ -786,20 +896,20 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
             accent_color: 0xFF8B5CF6,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 892, card_w, card_h),
-            label: LabelRun::new(64, 892 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Network Connectivity", theme.on_surface),
+            rect: Rect::new(40, READING_CARD3_Y, card_w, card_h),
+            label: LabelRun::new(64, READING_CARD3_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Network Connectivity", theme.on_surface),
             // WHY this names the address as a configuration: the stack sends from a
             // fixed address and nothing probes a link, so the old line's "Online"
             // claimed a measured connection that no code here could observe.
-            sublabel: LabelRun::new(64, 892 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 892 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
+            sublabel: LabelRun::new(64, READING_CARD3_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, READING_CARD3_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
             accent_color: 0xFF3B82F6,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, 968, card_w, card_h),
-            label: LabelRun::new(64, 968 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
-            sublabel: LabelRun::new(64, 968 + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, 968 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Protected", 0xFF059669),
+            rect: Rect::new(40, READING_CARD4_Y, card_w, card_h),
+            label: LabelRun::new(64, READING_CARD4_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
+            sublabel: LabelRun::new(64, READING_CARD4_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
+            value: LabelRun::right(40 + card_w - 24, READING_CARD4_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Protected", 0xFF059669),
             accent_color: 0xFF059669,
         },
     ];

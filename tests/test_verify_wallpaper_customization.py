@@ -9,12 +9,14 @@ rectangle the Settings app computes from the SDK's spacing and type tokens, and 
 app's own hit-tests accept those rectangles and nothing else. A literal coordinate is
 a copy of that arithmetic, and the copy is what goes stale when the app's chain is
 re-laid -- which is exactly how this suite came to tap the gap between two gallery
-rows and a row that had moved 320px up the screen. The block below re-derives the
-arithmetic from the same tokens, names the source line for each of them, and then
-takes the centre of the rectangle the app drew.
+rows and a row that had moved 320px up the screen. The block below resolves each
+layout constant out of the source that declares it -- the SDK's tokens, the face's
+line box, and Settings' own bindings -- and then takes the centre of the rectangle
+the app drew.
 """
 
 import os
+import re
 import sys
 import time
 import socket
@@ -27,54 +29,249 @@ if hasattr(sys.stdout, 'reconfigure'):
 ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
+# The platform's type ladder, read off the Rust side
+# ---------------------------------------------------------------------------
+#
+# WHY parsed and not written down: `font::line_height` is the only authority for
+# the row box a rung reserves, and every row, card and gallery cell this suite
+# taps is sized from it by the Settings app. This file used to carry its own copy
+# of the ladder next to the arithmetic, and when the rungs rose the copy went on
+# answering 32 and 44 while the app reserved 36 and 48: every pitch derived from
+# it slid up the screen and the suite tapped the gutter between two gallery cells.
+# The chain the SDK solves -- cap height -> em -> ascent + descent -- is re-solved
+# here from the same four sources, so a rung that moves moves this suite with it:
+#   font::cap_for_scale                     sdk/rust/interos-std/src/font.rs
+#   outline_text::em_for_cap_height         .../src/design/outline_text.rs
+#   typeface::line_metrics                  .../src/design/typeface.rs
+#   face::{ASCENT, DESCENT, UNITS_PER_EM}    .../src/design/face.rs
+SDK_SRC = ROOT / "sdk" / "rust" / "interos-std" / "src"
+_FONT_SRC = (SDK_SRC / "font.rs").read_text(encoding="utf-8")
+_OUTLINE_SRC = (SDK_SRC / "design" / "outline_text.rs").read_text(encoding="utf-8")
+_TYPEFACE_SRC = (SDK_SRC / "design" / "typeface.rs").read_text(encoding="utf-8")
+_FACE_SRC = (SDK_SRC / "design" / "face.rs").read_text(encoding="utf-8")
+_DESIGN_SRC = (SDK_SRC / "design" / "mod.rs").read_text(encoding="utf-8")
+_WALLS_SRC = (SDK_SRC / "design" / "walls.rs").read_text(encoding="utf-8")
+_SETTINGS_SRC = (ROOT / "apps" / "settings" / "src" / "main.rs").read_text(encoding="utf-8")
+
+
+def _fn_body(src, signature):
+    """The body of a `const fn`, given its signature verbatim.
+
+    WHY the signature and not a looser pattern: the reader is a copy of the
+    arithmetic the SDK runs; if that signature changes, the ladder has been
+    re-plumbed and this suite has to be re-read with it. Failing loudly here is
+    the honest outcome -- a silent fallback would put the suite back to aiming at
+    rows the app no longer draws.
+    """
+    match = re.search(re.escape(signature) + r" \{(.*?)\n\}", src, re.S)
+    assert match, f"{signature} is no longer shaped the way this suite reads it"
+    return match.group(1)
+
+
+def _cap_ladder():
+    """`font::cap_for_scale`: the rung -> cap-height table and its fallback step."""
+    body = _fn_body(_FONT_SRC, "pub const fn cap_for_scale(scale: usize) -> u32")
+    ladder = {int(rung): int(cap)
+              for rung, cap in re.findall(r"^\s*(\d+)\s*=>\s*(\d+)", body, re.M)}
+    assert ladder, "font::cap_for_scale answers no rung"
+    fallback = re.search(r"\bs\s*=>\s*\(s as u32\)\.saturating_mul\((\d+)\)", body)
+    assert fallback, "font::cap_for_scale no longer answers an unknown rung by scaling it"
+    return ladder, int(fallback.group(1))
+
+
+_LADDER, _LADDER_FALLBACK = _cap_ladder()
+
+
+def _em_arithmetic():
+    """`outline_text::em_for_cap_height` as (cap * UNITS + ROUND) // CAP_HEIGHT."""
+    body = _fn_body(_OUTLINE_SRC, "pub const fn em_for_cap_height(cap_px: u32) -> u32")
+    expr = re.search(r"\(\(cap_px as u64 \* (\d+) \+ (\d+)\) / (\d+)\)", body)
+    assert expr, ("outline_text::em_for_cap_height is no longer the arithmetic this suite "
+                  "solves, so the ladder has to be re-read here")
+    return tuple(int(group) for group in expr.groups())
+
+
+_EM_UNITS_PER_EM, _EM_ROUNDING, _EM_CAP_UNITS = _em_arithmetic()
+
+
+def _face_metrics():
+    """`face`'s metrics, with `typeface::line_metrics`' rule pinned beside them."""
+    body = _fn_body(_TYPEFACE_SRC, "pub const fn line_metrics(px_per_em: u32) -> (u32, u32)")
+    assert "let upem = face::UNITS_PER_EM as i32;" in body
+    assert "(face::ASCENT as i32 * px_per_em as i32) / upem" in body
+    assert "(-(face::DESCENT as i32) * px_per_em as i32) / upem" in body
+    upem = int(re.search(r"pub const UNITS_PER_EM: u16 = (\d+);", _FACE_SRC).group(1))
+    ascent = int(re.search(r"pub const ASCENT: i16 = (-?\d+);", _FACE_SRC).group(1))
+    descent = int(re.search(r"pub const DESCENT: i16 = (-?\d+);", _FACE_SRC).group(1))
+    return upem, ascent, descent
+
+
+_FACE_UPM, _FACE_ASCENT, _FACE_DESCENT = _face_metrics()
+
+
+def _line_height(scale):
+    """`font::line_height(scale)`: the outline face's box at that rung, in rows."""
+    if scale == 0:
+        return 0
+    cap = _LADDER.get(scale, scale * _LADDER_FALLBACK)
+    em = (cap * _EM_UNITS_PER_EM + _EM_ROUNDING) // _EM_CAP_UNITS
+    return (_FACE_ASCENT * em) // _FACE_UPM + ((-_FACE_DESCENT) * em) // _FACE_UPM
+
+
+def _closes_at(expr, index):
+    depth = 0
+    for i in range(index, len(expr)):
+        if expr[i] == "(":
+            depth += 1
+        elif expr[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _split_chain(expr, operators):
+    """Splits a top-level operator chain into its operands and its operators."""
+    operands, ops, depth, start = [], [], 0, 0
+    for i, ch in enumerate(expr):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch in operators and depth == 0:
+            operands.append(expr[start:i])
+            ops.append(ch)
+            start = i + 1
+    operands.append(expr[start:])
+    return operands, ops
+
+
+def _usize(expr, source, depth=0):
+    """Evaluates a Rust `usize` expression out of the source that declares its names.
+
+    WHY evaluate rather than copy: the boxes this suite taps are the app's own
+    constants -- `CARD_H`, `ROW_H`, `WP_CELL_H` -- and a literal here is a second
+    copy of the app's arithmetic, which is exactly what went stale when the ladder
+    rose. Resolving the binding from the app's source means the suite taps the row
+    the app reserves even when the app's rhythm changes.
+    """
+    assert depth < 24, f"expression nests too deeply to resolve: {expr!r}"
+    expr = expr.strip()
+    while expr.startswith("(") and _closes_at(expr, 0) == len(expr) - 1:
+        expr = expr[1:-1].strip()
+    if expr.isdigit():
+        return int(expr)
+    # `font::line_height` at a rung, and the SDK tables the app reaches through
+    # a path, are the only calls these layout constants make.
+    call = re.fullmatch(r"[\w:]*font::line_height\((.+)\)", expr)
+    if call:
+        return _line_height(_usize(call.group(1), source, depth + 1))
+    if expr.endswith("SCENES.len()"):
+        table = re.search(r"pub const SCENES: \[[^\]]+;\s*(\d+)\]", _WALLS_SRC)
+        assert table, "design::walls::SCENES no longer declares its own length"
+        return int(table.group(1))
+    saturating = re.fullmatch(r"([A-Z_][A-Z0-9_]*)\.saturating_sub\((\d+)\)", expr)
+    if saturating:
+        return max(0, _usize(saturating.group(1), source, depth + 1)
+                   - int(saturating.group(2)))
+    for operators, fold in (("+-", lambda a, op, b: a + b if op == "+" else a - b),
+                            ("*/", lambda a, op, b: a * b if op == "*" else a // b)):
+        operands, ops = _split_chain(expr, operators)
+        if len(operands) > 1:
+            value = _usize(operands[0], source, depth + 1)
+            for op, operand in zip(ops, operands[1:]):
+                value = fold(value, op, _usize(operand, source, depth + 1))
+            return value
+    path = re.fullmatch(r"[\w:]*::([A-Z_][A-Z0-9_]*)", expr)
+    if path:
+        # A qualified name is one of the SDK's design tokens.
+        binding = re.search(r"^\s*pub const " + path.group(1) + r"\s*:\s*usize\s*=\s*([^;]+);",
+                            _DESIGN_SRC, re.M)
+        if binding:
+            return _usize(binding.group(1), _DESIGN_SRC, depth + 1)
+        raise AssertionError(f"no design token {expr!r} in sdk/.../design/mod.rs")
+    if re.fullmatch(r"[A-Z_][A-Z0-9_]*", expr):
+        # A bare name belongs to the source being read; that source may itself
+        # reach an SDK token by its short path (`spacing::GRID_12`).
+        for candidate in (source, _DESIGN_SRC):
+            binding = re.search(r"^\s*(?:pub )?const " + expr + r"\s*:\s*usize\s*=\s*([^;]+);",
+                                candidate, re.M)
+            if binding:
+                return _usize(binding.group(1), candidate, depth + 1)
+        raise AssertionError(f"no `const {expr}: usize` binding in the SDK or the app source")
+    raise AssertionError(f"cannot resolve {expr!r} as a usize expression")
+
+
+def _settings(name):
+    """One module-level `const NAME: usize = ...;` of the Settings app, resolved."""
+    return _usize(name, _SETTINGS_SRC)
+
+
+def _design(name):
+    """One `pub const NAME: usize = ...;` of the SDK's design tokens, resolved."""
+    return _usize(f"std::design::{name}", _DESIGN_SRC)
+
+
+# ---------------------------------------------------------------------------
 # Settings-app geometry, re-derived from the app's own layout constants
 # ---------------------------------------------------------------------------
 #
-# Every number here is a token or a constant of the app, with the file:line that
-# defines it. The app lays its screens out in the 720x1440 authoring viewport
-# (sdk/rust/interos-std/src/design/mod.rs::viewport::LOGICAL_WIDTH/HEIGHT), so the
-# derived points are scanout pixels one-for-one.
+# Every number here is a binding of the app or a token of the SDK, read out of the
+# source that declares it. The app lays its screens out in the 720x1440 authoring
+# viewport (sdk/rust/interos-std/src/design/mod.rs::viewport::LOGICAL_WIDTH/HEIGHT),
+# so the derived points are scanout pixels one-for-one.
 
-W, H = 720, 1440                       # apps/settings/src/main.rs:43-44
+W, H = _settings("W"), _settings("H")   # apps/settings/src/main.rs
 
 # SDK tokens (sdk/rust/interos-std/src/design/mod.rs)
-GRID_4, GRID_8, GRID_16 = 4, 8, 16     # spacing::GRID_4/8/16  (mod.rs:613-616)
-GRID_24, GRID_32 = 24, 32              # spacing::GRID_24/32   (mod.rs:618-619)
-PREFERRED_TARGET = 48                  # touch::PREFERRED_TARGET (mod.rs:673)
-PRIMARY_ACTION = 56                    # touch::PRIMARY_ACTION   (mod.rs:674)
-STATUS_BAR_HEIGHT = 48                 # viewport::STATUS_BAR_HEIGHT (mod.rs:882)
-HEADER_TOP = STATUS_BAR_HEIGHT + 8     # viewport::HEADER_TOP        (mod.rs:893)
+GRID_4 = _design("GRID_4")              # spacing::GRID_4
+GRID_8 = _design("GRID_8")              # spacing::GRID_8
+GRID_16 = _design("GRID_16")            # spacing::GRID_16
+GRID_24 = _design("GRID_24")            # spacing::GRID_24
+GRID_32 = _design("GRID_32")            # spacing::GRID_32
+PREFERRED_TARGET = _design("PREFERRED_TARGET")   # touch::PREFERRED_TARGET
+PRIMARY_ACTION = _design("PRIMARY_ACTION")       # touch::PRIMARY_ACTION
+STATUS_BAR_HEIGHT = _design("STATUS_BAR_HEIGHT")  # viewport::STATUS_BAR_HEIGHT
+HEADER_TOP = _design("HEADER_TOP")                # viewport::HEADER_TOP
 
-# The face's line boxes, from the same ladder the app's compile-time constants use:
-# font::line_height(scale) = ascent + descent of the outline face at that rung
-# (sdk/rust/interos-std/src/font.rs:1882, cap_for_scale :1744, em_for_cap_height
-# design/outline_text.rs:558, line_metrics design/typeface.rs:135).
-def _line_height(scale):
-    cap = {1: 13, 2: 18, 3: 24, 4: 32, 5: 44, 6: 56, 7: 76}.get(scale, scale * 13)
-    em = (cap * 2048 + 728) // 1456
-    return (2146 * em) // 2048 + (555 * em) // 2048
+# The face's line boxes, from the same ladder the app's compile-time constants
+# use: the rungs are the app's own (`TYPE_H3`, `TYPE_DISPLAY`), and the box each
+# one reserves is `_line_height` above.
+TYPE_H3 = _settings("TYPE_H3")          # the row / card rung, settings main.rs
+TYPE_DISPLAY = _settings("TYPE_DISPLAY")  # the screen-title rung
+LINE_H = _settings("LINE_H")            # font::line_height(TYPE_H3), settings main.rs
+LINE_H_DISPLAY = _line_height(TYPE_DISPLAY)
 
-LINE_H = _line_height(2)               # settings main.rs:1834 (TYPE_H3 rung)
-LINE_H_DISPLAY = _line_height(3)       # TYPE_DISPLAY, settings main.rs:1832
+assert LINE_H == _line_height(TYPE_H3), (
+    "Settings no longer binds LINE_H to the face's own box at TYPE_H3, so the "
+    "row and card heights below are not the boxes the app reserves"
+)
+assert "const LINE_H: usize = std::design::font::line_height(TYPE_H3);" in _SETTINGS_SRC, (
+    "Settings' LINE_H binding moved, and this suite's re-derivation of it has to move with it"
+)
+assert "const DIVIDER_Y: usize = HEADER_Y + std::design::font::line_height(TYPE_DISPLAY)" \
+       " + std::design::spacing::GRID_16;" in _SETTINGS_SRC, (
+    "the header rule is no longer one grid step under the title's line box"
+)
 
-MARGIN = GRID_24                       # settings main.rs:1842
-CONTENT_X = MARGIN                     # settings main.rs:1896
-CONTENT_W = W - 2 * MARGIN             # settings main.rs:1897
-CARD_GAP = GRID_16                     # settings main.rs:1845
-BUTTON_H = PREFERRED_TARGET            # settings main.rs:2044
-BUTTON_HALF = (CONTENT_W - CARD_GAP) // 2   # settings main.rs:2046
+MARGIN = _settings("MARGIN")             # = spacing::GRID_24
+CONTENT_X = _settings("CONTENT_X")
+CONTENT_W = _settings("CONTENT_W")
+CARD_GAP = _settings("CARD_GAP")
+BUTTON_H = _settings("BUTTON_H")         # = touch::PREFERRED_TARGET
+BUTTON_HALF = _settings("BUTTON_HALF")
 
 # --- Landing card grid ---
-GRID_X = CONTENT_X                     # settings main.rs:1933
-CARD_PAD = MARGIN                      # settings main.rs:1936
-CARD_LINE_GAP = GRID_16                # settings main.rs:1949
-GRID_GAP = 14                          # settings main.rs:1976
-CARD_W = (CONTENT_W - GRID_GAP) // 2   # settings main.rs:1947
-CARD_H = CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP   # settings main.rs:1970
-GRID_Y = 348                           # settings main.rs:1978
+GRID_X = _settings("GRID_X")
+CARD_PAD = _settings("CARD_PAD")
+CARD_LINE_GAP = _settings("CARD_LINE_GAP")
+GRID_GAP = _settings("GRID_GAP")
+CARD_W = _settings("CARD_W")
+CARD_H = _settings("CARD_H")             # CARD_PAD*2 + LINE_H*3 + CARD_LINE_GAP
+GRID_Y = _settings("GRID_Y")
 
 def landing_card_rect(i):
-    """card_rect() -- settings main.rs:2521-2534. Card 6 spans the full column."""
+    """card_rect() -- settings main.rs. Card 6 spans the full column."""
     if i == 6:
         return (GRID_X, GRID_Y + 3 * (CARD_H + GRID_GAP), CONTENT_W, CARD_H)
     col, row = i % 2, i // 2
@@ -86,50 +283,77 @@ def landing_card_centre(i):
     return (x + w // 2, y + h // 2)
 
 # --- Detail rows (stacked from DETAIL_TOP with ROW_GAP) ---
-DIVIDER_Y = HEADER_TOP + LINE_H_DISPLAY + GRID_16    # settings main.rs:1927
-DETAIL_TOP = DIVIDER_Y + GRID_32                     # settings main.rs:1930
-CONTENT_BOTTOM = H - GRID_32                         # settings main.rs:2658
-ROW_PAD_V = GRID_32                                  # settings main.rs:1997
-ROW_LINE_GAP = GRID_8                                # settings main.rs:1999
-ROW_H = (ROW_PAD_V + LINE_H + ROW_LINE_GAP) + LINE_H + ROW_PAD_V   # main.rs:2003-2005
-ROW_GAP = CARD_GAP                                   # settings main.rs:2007
+DIVIDER_Y = _settings("DIVIDER_Y")
+DETAIL_TOP = _settings("DETAIL_TOP")
+CONTENT_BOTTOM = _settings("CONTENT_BOTTOM")
+ROW_PAD_V = _settings("ROW_PAD_V")       # = spacing::GRID_32
+ROW_LINE_GAP = _settings("ROW_LINE_GAP")  # = spacing::GRID_8
+ROW_H = _settings("ROW_H")               # two line boxes and the row's padding
+ROW_GAP = _settings("ROW_GAP")
+
+# The header rule and the card grid are re-checked against the tokens rather than
+# only read back, so an app that re-factored its chain away from the platform's
+# step is reported instead of silently followed.
+assert MARGIN == GRID_24 and ROW_PAD_V == GRID_32 and ROW_LINE_GAP == GRID_8
+assert CARD_H == CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP, (
+    "a landing card no longer reserves three body line boxes and the step between them"
+)
+assert ROW_H == (ROW_PAD_V + LINE_H + ROW_LINE_GAP) + LINE_H + ROW_PAD_V, (
+    "a detail row no longer reserves two body line boxes and its own padding"
+)
+assert DIVIDER_Y == HEADER_TOP + LINE_H_DISPLAY + GRID_16, (
+    "the header rule no longer closes the screen title's line box"
+)
+assert HEADER_TOP >= STATUS_BAR_HEIGHT, (
+    "the app's content boundary moved inside the band the shell paints over"
+)
 
 def detail_row_centre(row):
     """detail_row_rect() for the equal-height rows that precede Personal's
-    document rows -- settings main.rs:2632 + stacked_row_rect :2615."""
+    document rows -- settings main.rs, `row_h` answers ROW_H for those rows."""
     top = DETAIL_TOP + row * (ROW_H + ROW_GAP)
     return (CONTENT_X + CONTENT_W // 2, top + ROW_H // 2)
 
 # --- Wallpaper picker panel ---
-WP_PREVIEW_Y = DETAIL_TOP                              # settings main.rs:2083
-WP_CELL_PAD = GRID_8                                   # main.rs:2133
-WP_CELL_LABEL_GAP = GRID_8                             # main.rs:2135
-WP_THUMB_H = 144                                       # main.rs:2137
-WP_CELL_GAP = GRID_24                                  # main.rs:2128
-WP_CELL_W = (CONTENT_W - 2 * WP_CELL_GAP) // 3         # main.rs:2131
-WP_CELL_H = WP_CELL_PAD + WP_THUMB_H + WP_CELL_LABEL_GAP + LINE_H + WP_CELL_PAD  # 2139
-SCENES = 6                                             # design/walls.rs:249 (`SCENES`)
-WP_ROWS = (SCENES + 2) // 3                            # main.rs:2140
-WP_GALLERY_H = WP_ROWS * WP_CELL_H + (WP_ROWS - 1) * WP_CELL_GAP   # main.rs:2141
-WP_FOOTER_H = (GRID_32 + PRIMARY_ACTION + GRID_32 + WP_GALLERY_H + GRID_32
-               + BUTTON_H + GRID_16 + BUTTON_H + CARD_GAP + LINE_H)  # main.rs:2087-2096
-WP_PREVIEW_H = CONTENT_BOTTOM - DETAIL_TOP - WP_FOOTER_H             # main.rs:2109
-WP_TARGET_Y = WP_PREVIEW_Y + WP_PREVIEW_H + GRID_32                  # main.rs:2122
-WP_TARGET_H = PRIMARY_ACTION                                         # main.rs:2124
-WP_GALLERY_Y = WP_TARGET_Y + WP_TARGET_H + GRID_32                   # main.rs:2126
-WP_ACTION_Y = WP_GALLERY_Y + WP_GALLERY_H + GRID_32                  # main.rs:2143
+WP_PREVIEW_Y = _settings("WP_PREVIEW_Y")            # = DETAIL_TOP
+WP_CELL_PAD = _settings("WP_CELL_PAD")
+WP_CELL_LABEL_GAP = _settings("WP_CELL_LABEL_GAP")
+WP_THUMB_H = _settings("WP_THUMB_H")
+WP_CELL_GAP = _settings("WP_CELL_GAP")
+WP_CELL_W = _settings("WP_CELL_W")
+WP_CELL_H = _settings("WP_CELL_H")                  # the thumb and its label's box
+SCENES = _usize("std::design::walls::SCENES.len()", _SETTINGS_SRC)  # design/walls.rs
+WP_ROWS = _settings("WP_ROWS")
+WP_GALLERY_H = _settings("WP_GALLERY_H")
+WP_FOOTER_H = _settings("WP_FOOTER_H")
+WP_PREVIEW_H = _settings("WP_PREVIEW_H")            # the room the panel has left
+WP_TARGET_Y = _settings("WP_TARGET_Y")
+WP_TARGET_H = _settings("WP_TARGET_H")              # = touch::PRIMARY_ACTION
+WP_GALLERY_Y = _settings("WP_GALLERY_Y")
+WP_ACTION_Y = _settings("WP_ACTION_Y")
+SEG_GAP = _settings("SEG_GAP")                      # the selector's 4px segment gap
+
+assert WP_CELL_H == WP_CELL_PAD + WP_THUMB_H + WP_CELL_LABEL_GAP + LINE_H + WP_CELL_PAD, (
+    "a gallery cell no longer reserves the thumb plus one whole body line box for its label"
+)
+assert WP_PREVIEW_H == CONTENT_BOTTOM - DETAIL_TOP - WP_FOOTER_H, (
+    "the preview is no longer the room the panel's chain leaves over"
+)
+assert (BUTTON_H, WP_TARGET_H, SEG_GAP) == (PREFERRED_TARGET, PRIMARY_ACTION, GRID_4), (
+    "the controls are no longer on the SDK's touch and segment tokens this suite reads"
+)
 
 def wp_cell_centre(i):
-    """wp_cell_origin() -- settings main.rs:5222-5229."""
+    """wp_cell_origin() -- settings main.rs, three cells to a row."""
     col, row = i % 3, i // 3
     x = CONTENT_X + col * (WP_CELL_W + WP_CELL_GAP)
     y = WP_GALLERY_Y + row * (WP_CELL_H + WP_CELL_GAP)
     return (x + WP_CELL_W // 2, y + WP_CELL_H // 2)
 
 def wp_segment_centre(i):
-    """wp_segment_rect() -- settings main.rs:5266-5274."""
-    seg_w = (CONTENT_W - 2 * GRID_4) // 3              # SEG_GAP, main.rs:2019
-    x = CONTENT_X + i * (seg_w + GRID_4)
+    """wp_segment_rect() -- settings main.rs."""
+    seg_w = (CONTENT_W - 2 * SEG_GAP) // 3
+    x = CONTENT_X + i * (seg_w + SEG_GAP)
     return (x + seg_w // 2, WP_TARGET_Y + WP_TARGET_H // 2)
 
 def wp_apply_centre():

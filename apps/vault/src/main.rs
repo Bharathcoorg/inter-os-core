@@ -34,7 +34,7 @@ mod font;
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use interos_std::design::components;
+use interos_std::design::{components, outline_text};
 use vault::theme::{spacing, THEME};
 use vault::{
     fletcher32, hex_decode, hex_encode, hit_test_pin_disc, key_material_row, BackupState,
@@ -1146,20 +1146,72 @@ const CARD_A_H: usize = 296;
 /// The air between two cards of the storage stack.
 const CARD_GAP: usize = 12;
 
-/// Card B: managed sector grid, 2 columns x 3 rows of 304x114 tiles.
+/// Card B: managed sector grid, 2 columns x 3 rows of tiles.
 const CARD_B_Y: usize = CARD_A_Y + CARD_A_H + CARD_GAP;
-const CARD_B_H: usize = 456;
 const TILE_W: usize = 304;
-const TILE_H: usize = 114;
+/// A tile's height: the three boxes it stacks, plus the air above and below.
+/// WHY derived: the tile was a remembered 114 while its name and hint boxes
+/// come from the type ladder, and the ladder's caption rung grew the stack past
+/// the frame -- the hint's box ending three rows under the tile's own bottom.
+const TILE_STACK_H: usize =
+    font::line_height(2) + TILE_STACK_GAP + TILE_BADGE_H + TILE_STACK_GAP + font::line_height(1);
+const TILE_PAD_BOTTOM: usize = 6;
+const TILE_H: usize = TILE_TITLE_Y + TILE_STACK_H + TILE_PAD_BOTTOM;
 const TILE_COL_X: [usize; 2] = [48, 368];
-/// The tiles' inset from the top of their card, and the pitch the grid advances.
-const TILE_INSET: usize = 60;
-const TILE_PITCH: usize = TILE_H + 10;
-const TILE_ROW_Y: [usize; 3] = [
+/// The grid's rows of tiles.
+///
+/// WHY named: the card's foot below is read from it, so a fourth row moves the
+/// wall with the grid rather than pushing the last row out of it.
+const TILE_ROWS: usize = 3;
+/// The air between two tile rows of the grid.
+///
+/// WHY one knob: it was a bare literal inside the pitch, where nothing could say
+/// what it was for or how many rows of the card it costs.
+const TILE_ROW_GAP: usize = 10;
+const TILE_PITCH: usize = TILE_H + TILE_ROW_GAP;
+
+/// The row a card's caption stands on inside its card.
+const CARD_CAPTION_Y: usize = 20;
+/// The rung every card's caption is set in.
+const CARD_CAPTION_RUNG: usize = 1;
+/// The rows the caption's band reserves at that rung.
+///
+/// WHY read from the renderer and not from the rung's line box alone: a caption
+/// is drawn by whichever face fits, and the bitmap cell's baseline can sit below
+/// the outline ascent, which makes the inked band taller than `line_height`.
+/// [`outline_text::row_band`] is the union of the two, so this is the number the
+/// card has to hold rather than the number one of the two faces needs.
+const CARD_CAPTION_ROWS: usize = outline_text::row_band(0, CARD_CAPTION_RUNG).1;
+/// The first tile row's inset from the top of its card: the whole of the
+/// caption's band, measured from the card's own top edge.
+///
+/// WHY derived: the inset was a remembered 60 fitted to the caption's old 27-row
+/// band, so the ladder growing that band left the grid where it was while the
+/// tiles under it grew -- the card was asked to pay for both and came up short.
+/// The grid now starts where the painter stops reserving rows, and the space the
+/// reader sees between the caption and the first plate is the tile's own
+/// `TILE_TITLE_Y` air, not a second copy of the caption's.
+const TILE_INSET: usize = CARD_CAPTION_Y + CARD_CAPTION_ROWS;
+const TILE_ROW_Y: [usize; TILE_ROWS] = [
     CARD_B_Y + TILE_INSET,
     CARD_B_Y + TILE_INSET + TILE_PITCH,
     CARD_B_Y + TILE_INSET + 2 * TILE_PITCH,
 ];
+/// The air the card keeps under its last row: the same step a tile keeps under
+/// its last box, so the grid's foot and the plates' feet read as one rhythm.
+const CARD_B_AIR: usize = TILE_PAD_BOTTOM;
+/// Card B's height: the grid's rows at the ladder's own tile height, the air
+/// between them, the caption's band above and the card's air below.
+///
+/// WHY read off the grid instead of remembered: the card held a literal 456 while
+/// the tiles standing inside it come from the type ladder, and the ladder raising
+/// the body rung put the third row's plate eleven rows past the card's own foot.
+/// Those rows are painted by nobody -- the card's branch claims the pixel first
+/// and stops at the card's edge -- while `handle_vault_touch` hit-tests the whole
+/// tile, so the last row's tiles stayed tappable in the band where the user could
+/// no longer see them.
+const CARD_B_H: usize =
+    TILE_INSET + TILE_ROWS * TILE_H + (TILE_ROWS - 1) * TILE_ROW_GAP + CARD_B_AIR;
 
 /// A tile's own three-row stack: name, verdict pill, hint.
 ///
@@ -1185,9 +1237,18 @@ const TILE_HINT_Y: usize = TILE_BADGE_Y + TILE_BADGE_H + TILE_STACK_GAP;
 /// of air, so it is a limit and not a tautology.
 const _: () = assert!(TILE_HINT_Y + font::line_height(1) <= TILE_H);
 /// WHY: the grid is allowed to grow only while its last row still sits inside
-/// card B. This is the same chain from the other end -- it is what a taller
-/// tile or a bigger inset would break first.
-const _: () = assert!(TILE_ROW_Y[2] + TILE_H <= CARD_B_Y + CARD_B_H);
+/// card B -- and sits there with the air the card's foot is authored to keep, not
+/// merely touching it, because two hairlines that meet read as one plate. This is
+/// the same chain from the other end: it is what a taller tile, a bigger inset or
+/// another row would break first.
+const _: () = assert!(TILE_ROW_Y[TILE_ROWS - 1] + TILE_H + CARD_B_AIR <= CARD_B_Y + CARD_B_H);
+/// WHY the grid is gated against the card under it and not only against its own:
+/// card C's top is the first row of the stack these tiles do not own, and the
+/// card's own foot is only a promise until that neighbour's edge answers to the
+/// same derivation. The step the reader sees between the two cards is the grid's
+/// air, the card's foot and `CARD_GAP` together; a card that grew its foot
+/// unnoticed would hand all three back.
+const _: () = assert!(TILE_ROW_Y[TILE_ROWS - 1] + TILE_H + CARD_GAP <= CARD_C_Y);
 
 /// Card C: backup export and entropy.
 const CARD_C_Y: usize = CARD_B_Y + CARD_B_H + CARD_GAP;
@@ -1200,7 +1261,13 @@ const BTN_W: usize = 328;
 const BTN_X: [usize; 2] = [24, 368];
 
 /// The status line, under the action row.
-const STATUS_Y: usize = BTN_Y + BTN_H + spacing::GRID_16;
+///
+/// WHY the step is the platform's smaller one: the grid above needed rows it did
+/// not have, and the rows this stack can still spend are air -- no rung was
+/// lowered, no plate shortened, and every target kept its minimum. Of the stack's
+/// bands the status line is the only one that is neither a control nor a plate,
+/// and the gate under it says what the foot may never cross.
+const STATUS_Y: usize = BTN_Y + BTN_H + spacing::GRID_8;
 
 /// WHY checked at compile time: `repaint` re-rasterises `STATUS_Y..STATUS_Y +
 /// STATUS_H`, and the gesture strip below it is the platform's -- a stack that
@@ -1291,7 +1358,7 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize) -> O
 
 /// 48x48 back control: canonical squircle with the chevron centred.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high)
+    std::design::back_button::pixel_for_theme(x, y, &THEME)
 }
 
 /// Width of the header action pill for a given label.
@@ -1334,7 +1401,7 @@ fn caption_pixel(
     text: &[u8],
     max_w: usize,
 ) -> Option<u32> {
-    if let Some(c) = font::ink(x, y, x0, y0, 1, text, max_w, THEME.primary, THEME.surface_container, true) {
+    if let Some(c) = font::ink(x, y, x0, y0, CARD_CAPTION_RUNG, text, max_w, THEME.primary, THEME.surface_container, true) {
         return Some(c);
     }
     None
@@ -1609,7 +1676,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card B: managed sectors ------------------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_B_Y, CARD_W, CARD_B_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + 20, b"MANAGED SECTORS", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + CARD_CAPTION_Y, b"MANAGED SECTORS", INNER_W) {
             return c;
         }
         for index in 0..6 {

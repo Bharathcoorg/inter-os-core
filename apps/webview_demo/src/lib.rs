@@ -3,7 +3,21 @@
 #![no_std]
 
 pub use interos_std as std;
+use interos_std::design::{back_button, viewport};
 use interos_std::webview::{InterWebView, WebViewConfig, WebViewSecurityPolicy};
+
+/// The address of the demo's first screen, and the only one the document can
+/// be at without having been navigated away from.
+pub const DEMO_URL: &str = "interos://demo/index.html";
+
+/// The column the document's band starts on: the shared back control's right edge.
+///
+/// WHY the band moves rather than the text: `InterWebView` sets its own runs a
+/// step inside its band and the band is the one edge this app owns, so the
+/// control keeps the header's first 72 columns and the title lands on the
+/// platform's header column. A band that starts past the control's box cannot
+/// put ink under it whatever the controller's inset turns out to be.
+pub const DOC_X: usize = back_button::X + back_button::SIZE;
 
 pub const DEMO_HTML: &str = r#"
 <!DOCTYPE html>
@@ -26,6 +40,8 @@ pub struct WebViewDemoApp {
 impl WebViewDemoApp {
     pub fn new() -> Result<Self, &'static str> {
         let mut config = WebViewConfig::default_portrait();
+        config.x = DOC_X as u32;
+        config.w = (viewport::LOGICAL_WIDTH - DOC_X) as u32;
         config.policy = WebViewSecurityPolicy {
             javascript_enabled: true,
             js_bridge_enabled: false, // Default secure: no bridge without grant
@@ -35,9 +51,24 @@ impl WebViewDemoApp {
 
         let mut webview = InterWebView::create_webview(config)?;
         // Use load_html for local rich demonstrator content
-        webview.load_html(DEMO_HTML, Some("interos://demo/index.html"))?;
+        webview.load_html(DEMO_HTML, Some(DEMO_URL))?;
 
         Ok(Self { webview })
+    }
+
+    /// Whether the document on the panel is the one the demo opened with.
+    pub fn at_first_screen(&self) -> bool {
+        self.webview.current_url() == DEMO_URL
+    }
+
+    /// Unwinds a document the reader reached through the feeder back to the
+    /// demo's own page, and puts the page back at its first line.
+    pub fn show_first_screen(&mut self) -> Result<(), &'static str> {
+        let res = self.webview.load_html(DEMO_HTML, Some(DEMO_URL));
+        if res.is_ok() {
+            self.webview.scroll_mut().offset = 0;
+        }
+        res
     }
 
     /// Feeds real host-fetched network responses into the embedded webview,
@@ -118,5 +149,43 @@ mod tests {
         let res = app.webview.load_url("https://unreachable.org");
         assert_eq!(res, Err("NetworkAccessDenied: network requests disabled by policy"));
         assert_eq!(app.webview.state(), WebViewState::Error);
+    }
+
+    /// The document's band starts clear of the control painted over the header.
+    ///
+    /// WHY the band edge and not the glyph: the app cannot move a run the
+    /// controller sets inside its own band, so the one position it can promise
+    /// is that the band itself begins past the control's box.
+    #[test]
+    fn demo_document_band_starts_right_of_the_back_control() {
+        let app = WebViewDemoApp::new().expect("demo app init");
+        assert_eq!(app.webview.x as usize, back_button::X + back_button::SIZE);
+        assert_eq!(
+            (app.webview.x + app.webview.w) as usize,
+            viewport::LOGICAL_WIDTH,
+            "an inset band that keeps its width overhangs the panel's right edge"
+        );
+    }
+
+    /// Back unwinds a fed document and only then leaves.
+    #[test]
+    fn back_control_unwinds_a_deeper_document() {
+        let mut app = WebViewDemoApp::new().expect("demo app init");
+        assert!(app.at_first_screen());
+
+        app.feed_fetched_content(
+            "https://interos.org/news",
+            200,
+            "text/html",
+            FETCHED_DEMO_BYTES,
+        )
+        .expect("feed content");
+        assert!(!app.at_first_screen());
+
+        app.show_first_screen().expect("unwind to the demo page");
+        assert!(app.at_first_screen());
+        assert_eq!(app.webview.title(), "InterWebView Demo");
+        assert_eq!(app.webview.current_url(), DEMO_URL);
+        assert_eq!(app.webview.scroll().offset, 0);
     }
 }

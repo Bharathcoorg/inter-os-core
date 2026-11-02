@@ -60,34 +60,93 @@ const _: () = assert!(
 pub const SUBTITLE_Y: usize = TITLE_Y + TITLE_ADVANCE;
 
 /// `SUBTITLE_Y` to `SOURCE_NOTE_Y`: the BODY subtitle's box plus one GRID_4 gap.
-const SUBTITLE_ADVANCE: usize = 36;
+///
+/// WHY 43 and not the 40 it carried: the step between two runs has to pay for the
+/// whole box of the run above it, and the body rung rose with the ladder, so its
+/// line box is `line_height(BODY)` rows rather than the 36 the step was solved
+/// against; the GRID_4 of air on top of it is a design decision and did not move.
+/// The gate beside it re-derives the number from the SDK's own metric, so this
+/// literal is that arithmetic written down for the contract's parser.
+const SUBTITLE_ADVANCE: usize = 43;
 const _: () = assert!(
     SUBTITLE_ADVANCE == launcher::font::line_height(type_scale::BODY) + space::GRID_4,
 );
 pub const SOURCE_NOTE_Y: usize = SUBTITLE_Y + SUBTITLE_ADVANCE;
 
+/// WHY this is an adjacency and not only a clearance: every step in the header
+/// pays for the whole box of the run above it and then one grid gap of air, and
+/// the note-to-pill-row step was the one line the file left as a bare `<=`. That
+/// worked while the caption's box was smaller than the row's slack and stopped
+/// working when the rung rose: the note's box reached three rows past the pill
+/// row it was clearing. The equality states the rule the other steps already
+/// follow -- box, then GRID_4 -- so the pill row moves with the ladder instead of
+/// being nudged by hand until the old gate passes.
 const _: () = assert!(
     SOURCE_NOTE_Y + launcher::font::line_height(type_scale::CAPTION) <= PILLS_Y,
     "the source note's line box must end above the filter pill row",
+);
+const _: () = assert!(
+    PILLS_Y == SOURCE_NOTE_Y + launcher::font::line_height(type_scale::CAPTION) + space::GRID_4,
+    "the pill row starts one caption box and a GRID_4 gap under the source note",
 );
 
 /// Filter note line placed below the pill row.
 pub const FILTER_NOTE_Y: usize = PILLS_Y + PILL_H;
 
 /// Height of one notification card, and the pitch its stack advances by.
-const ROW_H: usize = 176;
-const ROW_PITCH: usize = 184;
+///
+/// WHY 193 and not the old 176: a card is the app name, the title, the body and
+/// a row of action pills, each one whole line box under the last, and the raised
+/// body rung lengthened every advance in that stack. The gates beside these two
+/// literals re-derive both from the card stack solved below, so the numbers
+/// stated here cannot drift from the boxes they contain -- they stay literals
+/// because the contract parses `ROW_H` with the restricted expression reader.
+const ROW_H: usize = 193;
+const ROW_PITCH: usize = 201;
+
+/// Rows from a card's top edge to each line of its stack: the name row, the
+/// title a whole body box under it, the body a whole box under that, and the
+/// action pills under the body.
+///
+/// WHY these are advances and not four hand-typed offsets: the old stack stepped
+/// 14 / 48 / 82 / 120, which was the 32-row body box plus two rows of air. With
+/// a 36-row box each line began inside the box above it and the two runs read
+/// through one another.
+const ROW_NAME_DY: usize = 14;
+const ROW_TITLE_DY: usize = ROW_NAME_DY + BODY_LABEL_BOX_H;
+const ROW_BODY_DY: usize = ROW_TITLE_DY + BODY_LABEL_BOX_H;
+const ROW_ACTION_GAP: usize = 6;
+const ROW_ACTION_H: usize = 48;
+const ROW_ACTIONS_DY: usize = ROW_BODY_DY + BODY_LABEL_BOX_H + ROW_ACTION_GAP;
+const ROW_BOTTOM_PAD: usize = 8;
+
+const _: () = assert!(
+    ROW_ACTIONS_DY + ROW_ACTION_H + ROW_BOTTOM_PAD == ROW_H,
+    "the card must be exactly its stack: four body boxes, the pill row and its padding",
+);
+const _: () = assert!(
+    ROW_PITCH == ROW_H + 8,
+    "the feed advances one card plus the gutter between cards",
+);
 
 /// First row of the first section's stack: below the filter note's line box.
 ///
 /// WHY 296 and not 312: the heading placed at this row owns a line box of its
 /// own, and the cards used to start `space::MD` below the box's *top* -- which
-/// is inside the 22 rows the box reserves. This surface has no clipper, so the
+/// is inside the caption's reserved rows. This surface has no clipper, so the
 /// card a heading introduces simply claimed the pixels first and painted the
-/// heading's bottom four rows out: on the device "Last hour" arrived with its
-/// baseline shaved off by the card it names. 296 is the lowest this can sit
-/// without touching the filter note's box, which ends at 292.
-pub const SECTION_HEAD_Y: usize = 296;
+/// heading's bottom rows out: on the device "Last hour" arrived with its
+/// baseline shaved off by the card it names.
+///
+/// WHY 311 now: the same rule, re-solved against the raised caption rung. The
+/// filter note's box ends at `FILTER_NOTE_Y + SECTION_LABEL_BOX_H`, and this is
+/// that plus one GRID_4 of air -- the gate beside it checks the arithmetic, so
+/// the literal cannot drift from the box it is meant to clear.
+pub const SECTION_HEAD_Y: usize = 311;
+const _: () = assert!(
+    SECTION_HEAD_Y == FILTER_NOTE_Y + SECTION_LABEL_BOX_H + space::GRID_4,
+    "the first section head must start one caption box and a GRID_4 gap under the filter note"
+);
 
 /// Rows a section heading's line box reserves on the outline face -- the rung
 /// `SectionPlan::label` draws at.
@@ -95,7 +154,9 @@ pub const SECTION_HEAD_Y: usize = 296;
 /// WHY written down and pinned beside it: the same reason `TITLE_ADVANCE` is.
 /// A call expression here would make the contract fail to parse rather than
 /// fail on geometry, so the number is stated and tied to the SDK's own metric.
-const SECTION_LABEL_BOX_H: usize = 22;
+/// The statement moves whenever the caption rung's box does, which since the
+/// rungs rose is the outline face's caption box and not the bitmap cell's.
+const SECTION_LABEL_BOX_H: usize = 30;
 const _: () = assert!(
     SECTION_LABEL_BOX_H == launcher::font::line_height(type_scale::CAPTION),
     "the section heading's box must be the outline caption line box, not a remembered cell",
@@ -119,8 +180,9 @@ const SECTION_HEAD_ADVANCE: usize = SECTION_LABEL_BOX_H + SECTION_HEAD_GAP;
 /// surface. With that control gone the feed was still stopping at its old edge,
 /// so two cards arrived and then seven hundred rows of nothing before the
 /// indicator -- a feed that reads as broken rather than as short. The cutoff is
-/// the bottom chrome minus one card, so the stack ends where the surface does.
-const FEED_BOTTOM: usize = 1240;
+/// the bottom chrome minus one card, so the stack ends where the surface does:
+/// the card grew with the body rung, so the edge it stops at moves up to match.
+const FEED_BOTTOM: usize = 1223;
 const _: () = assert!(
     FEED_BOTTOM + ROW_H == HOME_PILL.y,
     "the feed must stop one card clear of the home indicator it is stacked above",
@@ -131,8 +193,16 @@ const _: () = assert!(
     "a section's first card must clear its own heading and still fit above the bottom chrome",
 );
 
+/// Top of the filter pill row.
+///
+/// WHY a literal at all: the events-header contract reads `PILLS_Y` with the
+/// restricted expression parser, the same reason `TITLE_ADVANCE` and `ROW_H` are
+/// written down. The gate above re-derives it from the source note's box plus one
+/// GRID_4 of air, so the number below is that arithmetic's answer, not a remembered
+/// row.
+///
 /// Height of the pill row, and the gap between pills.
-pub const PILLS_Y: usize = 214;
+pub const PILLS_Y: usize = 221;
 pub const PILL_H: usize = 56;
 const PILL_GAP: usize = space::SM + space::XS;
 
@@ -177,7 +247,7 @@ pub const HEADER_CLEAR_BTN: Rect = Rect::new(
 ///
 /// WHY one const and not three literals: the action and Clear pills centred
 /// their label against a remembered `36`, which was neither the outline BODY
-/// line box (32) nor the old bitmap cell (48). A label centred in a box the
+/// line box nor the old bitmap cell (48). A label centred in a box the
 /// painter never fills puts the ink above the pill's middle and leaves the gap
 /// below twice the gap above -- the header pill already fixed for exactly this.
 const BODY_LABEL_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
@@ -188,9 +258,9 @@ const CLEAR_LABEL_BOX_H: usize = BODY_LABEL_BOX_H;
 /// Where the "Clear all" label starts: centred in the pill by its line box.
 ///
 /// WHY derived and not the old hand-typed 36: the label was centred against a
-/// box height that no longer matched the rung it draws at -- the real BODY line
-/// box is 32 -- so the ink sat two rows high and the gap beneath it read as
-/// twice the gap above.
+/// box height that no longer matched the rung it draws at -- the pill's label is
+/// a BODY run whose box is `line_height(BODY)` -- so the ink sat high and the
+/// gap beneath it read as twice the gap above.
 const HEADER_CLEAR_LABEL_Y: usize =
     HEADER_CLEAR_BTN.y + (HEADER_CLEAR_BTN.h - CLEAR_LABEL_BOX_H) / 2;
 
@@ -199,8 +269,8 @@ const _: () = assert!(
     "the Clear all label's line box must fit the pill it is centred in",
 );
 const _: () = assert!(
-    BODY_LABEL_BOX_H == 32,
-    "the pill label box must be the outline BODY line box, not a remembered cell",
+    BODY_LABEL_BOX_H > launcher::font::line_height(type_scale::CAPTION),
+    "a pill label sits a rung above the captions on this surface, so its box must reserve more",
 );
 
 /// Home gesture indicator pill.
@@ -777,7 +847,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     let mut age = [0u8; 16];
     let age_len = write_age(&mut age, rec.timestamp_ticks, now);
 
-    let squircle = Rect::new(ROW_X + 16, y + 14, 32, 32);
+    let squircle = Rect::new(ROW_X + 16, y + ROW_NAME_DY, 32, 32);
     let icon_kind = match cat {
         Category::Messages => 0,
         Category::System => 1,
@@ -790,7 +860,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 
     let app_name = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 14,
+        y + ROW_NAME_DY,
         type_scale::BODY,
         240,
         app_name_bytes,
@@ -799,7 +869,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 
     let time = LabelRun::right(
         dismiss_btn.x - 12,
-        y + 14,
+        y + ROW_NAME_DY,
         type_scale::BODY,
         &age[..age_len],
         theme.on_surface_variant,
@@ -808,7 +878,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     let content_w = ROW_W - 84;
     let title = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 48,
+        y + ROW_TITLE_DY,
         type_scale::BODY,
         content_w,
         title_bytes,
@@ -817,7 +887,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
 
     let body = LabelRun::fitted(
         ROW_TEXT_X,
-        y + 82,
+        y + ROW_BODY_DY,
         type_scale::BODY,
         content_w,
         body_bytes,
@@ -835,7 +905,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
         _ => (b"Open", b"Dismiss"),
     };
 
-    let action1 = Rect::new(ROW_TEXT_X, y + 120, 130, 48);
+    let action1 = Rect::new(ROW_TEXT_X, y + ROW_ACTIONS_DY, 130, ROW_ACTION_H);
     let action1_label = LabelRun::centred(
         action1.x,
         action1.y + (action1.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,
@@ -845,7 +915,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
         theme.on_surface,
     );
 
-    let action2 = Rect::new(ROW_TEXT_X + 142, y + 120, 130, 48);
+    let action2 = Rect::new(ROW_TEXT_X + 142, y + ROW_ACTIONS_DY, 130, ROW_ACTION_H);
     let action2_label = LabelRun::centred(
         action2.x,
         action2.y + (action2.h.saturating_sub(BODY_LABEL_BOX_H)) / 2,

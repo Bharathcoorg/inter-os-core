@@ -49,7 +49,8 @@ use file_manager::{
     CATEGORY_Y0, CATEGORY_Y1, DETAILS_CARD, DETAILS_CLOSE, DETAILS_LINE_H, DETAILS_LINE_Y0,
     DETAILS_OPEN, DETAILS_TITLE_Y, ENTRIES_CARD, GRID_CELL_H, GRID_CELL_W, HEADER_H,
     HOME_BROWSE_BTN, HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y,
-    HOME_RECENTS_TITLE_Y, HOME_RECENT_ROW_H, HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
+    HOME_RECENTS_TITLE_Y, HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE, HOME_RECENT_ROW_H,
+    HOME_RECENT_TIME_DY, HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
     HOME_STORAGE_CARD, LINE_LEN, LIST_PILL, GRID_PILL, SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W,
     SCOPE_THIS_PILL, SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H, SHEET_NAME_Y,
     SORT_PILL, STATUS_Y, TOOLBAR_Y,
@@ -62,6 +63,34 @@ use file_manager::{
 /// cannot match, and the platform already says what a row looks like.
 const ROW: components::ListRowStyle = components::list_row_style(&THEME, false);
 const ROW_SELECTED: components::ListRowStyle = components::list_row_style(&THEME, true);
+
+/// The hairline a secondary control is outlined with.
+///
+/// WHY a control needs one at all: `draw_rounded_rect` with `border: None`
+/// paints fill only, so a control whose fill is within a hair of the surface
+/// behind it has no visible edge and the label reads as text floating on the
+/// panel. The tap target exists -- it is the same rectangle the hit test
+/// uses -- the person just cannot see it.
+///
+/// WHY `outline` and not `border`: `border` / `outline_variant` is the
+/// `#E5E5E5` hairline that separates two surfaces, 1.21:1 against the page and
+/// 1.08:1 against the raised sheet -- it separates, it does not say "press me".
+/// `outline` is the theme's strong hairline (`#0A0A0A`, 18.97:1 on the page,
+/// 17.04:1 on the sheet), and a boundary a person can see is exactly what a
+/// control's edge is for. It is a role the theme already names, so no colour
+/// and no new value enters the app.
+const CONTROL_OUTLINE: u32 = THEME.outline;
+
+/// The fill of a secondary control that sits on the raised `#EFEEE9` card or
+/// sheet -- the platform's own resting white.
+///
+/// WHY not the app's usual chip fill: every other chip here stands on the
+/// `#FAFAFA` page, where `surface_container_high` is a darker step and reads.
+/// Inside a `Raised` card the same token *is* the card's fill, so the control
+/// paints itself out completely. `surface_container` is the one role that
+/// differs from the sheet in the direction the platform already uses for a
+/// surface resting on a surface.
+const RAISED_CONTROL_FILL: u32 = THEME.surface_container;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -77,10 +106,6 @@ const STATUS_BAR_HEIGHT: usize = std::design::viewport::STATUS_BAR_HEIGHT;
 /// The clock lane's text: the RTC's `HH:MM`, or blanks when it did not answer.
 const CLOCK_LEN: usize = 5;
 
-/// The platform's minimum touch target, the size the back control is drawn and
-/// hit-tested at.
-const MIN_TOUCH: usize = std::design::touch::MIN_TARGET;
-
 /// The details card's handler line, and the notice shown when the registry
 /// answers that no installed package declared the document's type.
 const OPEN_WITH_LABEL: &[u8] = b"Open with: ";
@@ -92,44 +117,92 @@ const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 // -----------------------------------------------------------------------------
 // Header geometry - single source of truth for drawing and hit-testing
 // -----------------------------------------------------------------------------
-/// Screen margin (8pt grid value). Also the left inset of the back control and
-/// the right inset the storage readout is aligned to.
+/// Screen margin (8pt grid value): the right inset the storage readout is
+/// aligned to.
+///
+/// WHY it no longer also places the back control: the control's inset is the
+/// platform's, not the app's, and an app that re-declares it is an app that
+/// drifts the day the SDK moves the control. The control now comes from
+/// [`std::design::back_button`] and answers for itself.
 const HEADER_MARGIN: usize = spacing::GRID_24;
 
-/// The header's title run: where its line box stands and the rung it draws at.
-///
-/// WHY written out rather than pulled from a token: the native-UI truth contract
-/// pins the call below to `48, 64, 3`, so the geometry under the header is
-/// derived from these two numbers instead of drifting away from them.
-const TITLE_Y: usize = 64;
+/// The header's title rung.
 const TITLE_SCALE: usize = 3;
 
-/// The header's back control: a pill standing on the row under the title.
+/// The row the header's title and the back control are centred on: the middle
+/// of the control's own band.
+const HEADER_ROW: usize = std::design::back_button::Y + std::design::back_button::SIZE / 2;
+
+/// The later of two layout edges.
 ///
-/// WHY the back control exists at all: it is painted from the same rectangle
-/// the tap handler tests, so the region that leaves the screen is visible.
+/// WHY a local helper rather than `Ord::max`: `max` is not callable in a `const`
+/// context on this toolchain, and every edge of this header has to be a
+/// compile-time constant, because the pixel function compares against it once
+/// per pixel. Messages records the same workaround
+/// (`apps/messages/src/main.rs`, `later`).
+const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The row the title's line box stands on: the run's cap height centred on the
+/// control's row, which is the placement the dialer, messages and vault use for
+/// a title standing beside this control.
 ///
-/// WHY it stands on the title's foot row rather than at the band's foot: the
-/// surface answers one question per pixel and the first claimant it answers wins,
-/// so the pill that shared the title's rows had the foot of its own top edge
-/// given up to the title's "F" -- three rows of fill that never existed, and an
-/// edge that read as bitten. The title reserves its line box; the control
-/// reserves the row under it, and neither asks for a pixel the other has.
-const BACK: Rect = Rect::new(
-    HEADER_MARGIN,
-    TITLE_Y + font::line_height(TITLE_SCALE),
-    MIN_TOUCH,
-    MIN_TOUCH,
+/// WHY derived from the control and not written out: the title and the control
+/// are one row, and a row has one owner. Authored by hand as `64`, the title
+/// started eight rows below the band the control stands on, and the control was
+/// then pushed onto the row under the title's line box to escape it -- which is
+/// how this app came to paint its back control under its name while every other
+/// app paints it in the corner.
+///
+/// WHY clamped to `viewport::HEADER_TOP` rather than centred outright: the band
+/// the control stands in is 48 rows and this rung's box is 49, so the box no
+/// longer fits inside the band and exact centring lifts its top to row 54 -- two
+/// rows above the row the platform's chrome starts on. The clamp keeps the box
+/// off those two rows and spends its surplus under the control instead, so the
+/// gate below stays true as it was written rather than being relaxed to admit
+/// the band's own rows.
+const TITLE_Y: usize = later(
+    std::design::viewport::HEADER_TOP,
+    HEADER_ROW
+        - font::ascent_for_scale(TITLE_SCALE)
+        + font::cap_for_scale(TITLE_SCALE) as usize / 2,
 );
 
-/// WHY checked at compile time: the band owns `0..STATUS_BAR_HEIGHT`, the header
-/// branch owns every row below `HEADER_H`, and a run and a control that share a
-/// row are two claimants for one pixel. These three gates are the whole claim of
-/// this header's layout -- the title clears the band, the control clears the
-/// title's line box, and the pair fits inside the band the header owns.
+/// The x the title starts on: the control's right edge plus the platform's
+/// 16px gap, the same expression every app that puts a title beside this
+/// control uses.
+const TITLE_X: usize =
+    std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
+
+/// The widest the header's title run may get before it reaches the readout's
+/// lane. `font::measure` is not a `const fn`, so this is the bound the gate
+/// below checks against rather than a measured width; "Files" at this rung
+/// measures well inside it.
+const TITLE_MAX_W: usize = 160;
+
+/// WHY checked at compile time: the status band owns `0..STATUS_BAR_HEIGHT` and
+/// the header branch owns every row below `HEADER_H`, so the control and the
+/// title standing beside it must both fit inside the header, must not claim the
+/// same pixel as each other, and must leave the readout's lane clear of the
+/// title's reserved box. These are the whole claim of this header's layout.
 const _: () = assert!(TITLE_Y >= std::design::viewport::HEADER_TOP);
-const _: () = assert!(BACK.y >= TITLE_Y + font::line_height(TITLE_SCALE));
-const _: () = assert!(BACK.y + BACK.h <= HEADER_H);
+const _: () = assert!(
+    std::design::back_button::Y + std::design::back_button::SIZE <= HEADER_H,
+    "the back control must stand entirely inside the rows the header answers"
+);
+const _: () = assert!(
+    TITLE_Y + font::line_height(TITLE_SCALE) <= HEADER_H,
+    "the title's line box must stand entirely inside the rows the header answers"
+);
+const _: () = assert!(
+    TITLE_X >= std::design::back_button::X + std::design::back_button::SIZE,
+    "the title must start clear of the back control's right edge"
+);
 
 /// The system home indicator, and the strip that contains it.
 const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
@@ -137,12 +210,35 @@ const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 /// Right edge the header readout is aligned to (the 24px right margin).
 const READOUT_X1: usize = W - HEADER_MARGIN;
-/// Widest a header readout run may be. The title ends at x 180, so a readout
-/// longer than `READOUT_X1 - 180` would collide with it; `font::ellipsize`
-/// trims to this instead of letting a long path run under the title.
+/// Widest a header readout run may be: `font::ellipsize` trims to this instead
+/// of letting a long path run under the title, and the gate below is what keeps
+/// "instead of" honest -- the run's left edge stays right of the title's
+/// reserved box, so the path line and the item-count line clear both the back
+/// control and the title at whatever position the SDK gives them.
 const READOUT_MAX_W: usize = 400;
 const READOUT_LINE1_Y0: usize = 68;
 const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::line_height(1) + 8;
+
+/// WHY also checked: the title's box is now taller than the band it is centred
+/// on, so the header's claim on the rows it answers is the lowest of its three
+/// occupants rather than the control alone. The readout's second line is that
+/// lowest occupant, and `HEADER_H` is the row the browse stack starts on, so a
+/// line that reached past it would lose its descent to the search field.
+const _: () = assert!(
+    later(
+        later(
+            TITLE_Y + font::line_height(TITLE_SCALE),
+            std::design::back_button::Y + std::design::back_button::SIZE,
+        ),
+        READOUT_LINE2_Y0 + font::line_height(1),
+    ) <= HEADER_H,
+    "the header must answer every row the lowest thing standing in it occupies"
+);
+
+const _: () = assert!(
+    READOUT_X1 - READOUT_MAX_W >= TITLE_X + TITLE_MAX_W,
+    "the header readout's lane must start right of the title's reserved box"
+);
 
 /// Ink for an affordance that is painted but has nothing behind it.
 #[allow(dead_code)]
@@ -1734,43 +1830,38 @@ fn refresh_clock(app: &mut FileManagerApp) -> bool {
 
 /// The header: the platform band above, then the back control, the title and the measured readout.
 fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
-    // Title: "Files" at x: 48, y: 64 (scale 3).
+    // The platform's back control, asked first because it is the one occupant of
+    // this row the app does not own: its rect, radius, colours and chevron all
+    // come from [`std::design::back_button`], which is what Settings, Calculator,
+    // Dialer, Music, Vault, Camera and Gallery paint, so the control the user
+    // finds in the top-left corner of every other screen is the control here.
     //
-    // WHY the coordinates are written out instead of pulled from constants:
-    // the native-UI truth contract pins this exact call so the title's line
-    // box cannot be narrowed again. `TITLE_Y` and `TITLE_SCALE` carry the same
-    // two numbers into the layout under it, and the gate beside `BACK` is where
-    // that is checked.
-    //
-    // WHY it is asked before the back control: a surface answers the first
-    // claimant of a pixel and the other one's ink never exists, so the run asked
-    // first keeps its ink -- which is only a fair order while the two claim
-    // different rows. The control now stands on the row under this line box, so
-    // the order decides nothing here and both are whole.
-    if let Some(color) = test_text(x, y, 48, 64, 3, b"Files", THEME.on_surface, THEME.surface) {
+    // WHY the app's own pill rasteriser is gone: the chip it drew stood on the
+    // row *under* the title, at the app's own inset and size, and the tap handler
+    // tested that same hand-authored rectangle. It worked wherever it painted --
+    // and nowhere in the corner the rest of the device answers.
+    if let Some(color) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
         return color;
     }
 
-    // Back control, painted from the same rectangle the tap handler tests.
-    if BACK.contains(x, y) {
-        if let Some(color) =
-            draw_pill(x, y, BACK, THEME.surface_container_high, Some(THEME.border))
-        {
-            if color != THEME.surface_container_high {
-                return color;
-            }
-            if let Some(ink) = std::design::back_button::chevron_ink(
-                x,
-                y,
-                BACK.x + BACK.w / 2,
-                BACK.y + BACK.h / 2,
-                THEME.on_surface,
-            ) {
-                return ink;
-            }
-            return THEME.surface_container_high;
-        }
-        return THEME.surface;
+    // Title: "Files" on the control's row, starting clear of its right edge.
+    //
+    // WHY the coordinates are constants rather than written out: `TITLE_X` and
+    // `TITLE_Y` are derived from the control's own rect, so the row cannot be
+    // re-invented here, and the gates beside them are where the header's claim
+    // -- that the control and the title both fit the rows this branch answers
+    // and never claim one another's pixel -- is checked at compile time.
+    if let Some(color) = test_text(
+        x,
+        y,
+        TITLE_X,
+        TITLE_Y,
+        TITLE_SCALE,
+        b"Files",
+        THEME.on_surface,
+        THEME.surface,
+    ) {
+        return color;
     }
 
     // The path the app asked, and the platform's own answer. Line 1 is the
@@ -1923,7 +2014,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(ink) = glyph_ink(
                 mime,
                 x as isize - 47,
-                y as isize - (top as isize + 15),
+                y as isize - (top as isize + ((HOME_RECENT_ROW_H - 25) / 2) as isize),
                 THEME.on_surface,
             ) {
                 return ink;
@@ -1932,14 +2023,14 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             // matches the browse rows so a long name cannot reach the border.
             let max_w = 684 - 100 - 24;
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, 1, max_w, &mut name_buf);
+            let name_len = font::ellipsize(name, HOME_RECENT_NAME_SCALE, max_w, &mut name_buf);
             if name_len > 0 {
                 if let Some(color) = test_text(
                     x,
                     y,
                     100,
-                    top + 8,
-                    1,
+                    top + HOME_RECENT_NAME_DY,
+                    HOME_RECENT_NAME_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
                     THEME.surface,
@@ -1951,7 +2042,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 100,
-                top + 30,
+                top + HOME_RECENT_TIME_DY,
                 1,
                 &app.recent_time[index][..app.recent_time_len[index]],
                 THEME.on_surface_variant,
@@ -2045,12 +2136,17 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // 4. The browse-everything control.
     if HOME_BROWSE_BTN.contains(x, y) {
+        // WHY the outline: `border` (#E5E5E5) was 1.08:1 on this pill's own
+        // #EFEEE9 fill and 1.21:1 on the #FAFAFA page, and the fill is only
+        // 1.11:1 off the page, so the app's one entry-to-everything control was
+        // a word floating on the page. `outline` (#0A0A0A) is 17.04:1 on the
+        // pill and 18.97:1 on the page; the label stays 17.04:1.
         if let Some(base) = draw_pill(
             x,
             y,
             HOME_BROWSE_BTN,
             THEME.surface_container_high,
-            Some(THEME.border),
+            Some(CONTROL_OUTLINE),
         ) {
             let lx = centered_x(b"Browse all files", 1, HOME_BROWSE_BTN.x, HOME_BROWSE_BTN.w);
             let ly = HOME_BROWSE_BTN.y
@@ -2114,13 +2210,19 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         && x < SEARCH_FIELD.x + SEARCH_FIELD.w
     {
         let field_fill = THEME.surface_container_high;
+        // WHY the outline: `border` (#E5E5E5) is 1.08:1 against this field's own
+        // #EFEEE9 fill and 1.21:1 against the page, and the fill is 1.11:1 off
+        // the page, so the search field had no visible bounds. `outline`
+        // (#0A0A0A) is 17.04:1 on the field and 18.97:1 on the page; the
+        // magnifier and clear glyphs keep `on_surface_variant` at 6.53:1 on the
+        // fill, above the 3:1 this repo asks of an icon.
         let Some(base) = draw_rounded_rect(
             x,
             y,
             SEARCH_FIELD,
             THEME.radii.control,
             field_fill,
-            Some(THEME.border),
+            Some(CONTROL_OUTLINE),
             1,
         ) else {
             return THEME.surface;
@@ -2427,7 +2529,22 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             } else {
                 THEME.muted
             };
-            if let Some(base) = draw_pill(x, y, rect, fill, Some(THEME.border)) {
+            // WHY the ring moves with the state: `border` (#E5E5E5) is 1.08:1
+            // on the enabled pill's own #EFEEE9 fill and 1.21:1 on the page, and
+            // a disabled slot's fill *is* the page -- 1.00:1 against it -- so
+            // none of these controls had an edge a person could find. An enabled
+            // pill takes the theme's strong outline (17.04:1 on its fill,
+            // 18.97:1 on the page); a selected pill is the page's opposite and
+            // needs no edge; a disabled one keeps a boundary that still reads
+            // as quiet -- the muted ink, 5.11:1 against the page it sits on.
+            let ring = if selected {
+                None
+            } else if enabled {
+                Some(CONTROL_OUTLINE)
+            } else {
+                Some(THEME.muted)
+            };
+            if let Some(base) = draw_pill(x, y, rect, fill, ring) {
                 let lx = centered_x(label, 1, rect.x, rect.w);
                 let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
                 if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
@@ -2469,7 +2586,20 @@ fn pill_color(
     } else {
         THEME.on_surface
     };
-    let base = draw_pill(x, y, rect, fill, Some(THEME.border))?;
+    // WHY the ring is the strong outline and not `THEME.border`: `border` is
+    // #E5E5E5, 1.08:1 against this chip's own #EFEEE9 fill and 1.21:1 against
+    // the #FAFAFA page it stands on, so the edge said nothing and the chip
+    // itself was only 1.11:1 off the page -- an invisible control with a label
+    // on it. `outline` is #0A0A0A: 17.04:1 on the chip and 18.97:1 on the page,
+    // the same role the platform's own back chip takes for the same reason.
+    // A selected pill is the page's opposite (#0A0A0A, 18.97:1 on the page), so
+    // it needs no edge of its own -- see the detail card's primary button.
+    let ring = if selected {
+        None
+    } else {
+        Some(CONTROL_OUTLINE)
+    };
+    let base = draw_pill(x, y, rect, fill, ring)?;
     let lx = centered_x(label, 1, rect.x, rect.w);
     let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
     if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
@@ -2560,17 +2690,28 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if !rect.contains(x, y) {
             continue;
         }
-        let fill = if primary {
-            THEME.primary
+        let (fill, border, border_w) = if primary {
+            // The one filled control on the card: near-black on the raised
+            // card is 17.04:1 by itself, so it needs no edge.
+            (THEME.primary, None, 0)
         } else {
-            THEME.surface_container_high
+            // The card's own fill is `Raised` -- `surface_container_high`, the
+            // very token this button used to fill itself with -- so the
+            // secondary button was `#EFEEE9` on `#EFEEE9`: 1.00:1, no border,
+            // and only the word "Close" on screen. It now takes the
+            // platform's resting white (1.16:1 against the card, the same step
+            // a resting card takes on a raised one) and the theme's strong
+            // outline (17.04:1) so the tappable rectangle is visible.
+            (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
         };
         let ink = if primary {
             THEME.on_primary
         } else {
             THEME.on_surface
         };
-        if let Some(button) = draw_rounded_rect(x, y, rect, THEME.radii.control, fill, None, 0) {
+        if let Some(button) =
+            draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
+        {
             let lx = centered_x(label, 1, rect.x, rect.w);
             let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
             if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
@@ -2578,7 +2719,13 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
             }
             return Some(button);
         }
-        return Some(THEME.surface);
+        // Inside the button's rectangle but outside its corners: the card
+        // shows through, and `base` is that card's own pixel. It used to say
+        // `THEME.surface` -- the page's `#FAFAFA` -- which punched a pale
+        // quarter-disc of a colour that is nowhere on this card into each
+        // corner. The outline made that artefact worth naming: a control with
+        // a visible edge shows the blobs sitting right against its arc.
+        return Some(base);
     }
     Some(base)
 }
@@ -2626,19 +2773,28 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
                 continue;
             }
             let chosen = index == app.destination;
-            let fill = if chosen {
-                THEME.primary
+            let (fill, border, border_w) = if chosen {
+                (THEME.primary, None, 0)
             } else {
-                THEME.surface_container_high
+                // The unchosen destinations were `surface_container_high` on
+                // the `Raised` sheet -- the sheet's own `#EFEEE9` -- with no
+                // border, so the four selectable targets had no bounds at all
+                // and only their labels showed. Same treatment as the sheet's
+                // secondary button: the platform's white on the sheet, the
+                // theme's strong outline.
+                (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
             };
             let ink = if chosen {
                 THEME.on_primary
             } else {
                 THEME.on_surface
             };
-            let Some(button) = draw_rounded_rect(x, y, rect, THEME.radii.control, fill, None, 0)
+            let Some(button) =
+                draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
             else {
-                return Some(THEME.surface);
+                // Inside the chip's box but outside its corner arc: the sheet
+                // shows through, so the sheet's own pixel is the answer.
+                return Some(base);
             };
             let lx = centered_x(CATEGORY_LABELS[index], 1, rect.x, rect.w);
             let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
@@ -2660,7 +2816,23 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
     if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
         let field = Rect::new(SHEET.x + 20, SHEET_NAME_Y, SHEET.w - 40, SHEET_NAME_H);
         if field.contains(x, y) {
-            let fill = THEME.surface_container_high;
+            // WHY the plate moved: its old fill was `surface_container_high`,
+            // which is what the `Raised` sheet is painted with -- #EFEEE9 on
+            // #EFEEE9, 1.00:1, and no border at all. The place to type a name
+            // had no bounds, and one of the two states of this sheet (the state
+            // that asks you to edit text) was a bare word on the panel. It takes
+            // the same treatment as the sheet's secondary buttons: the
+            // platform's resting white (1.16:1 against the sheet) ringed with
+            // the theme's strong outline (17.04:1 against the sheet), and the
+            // typed run reads at 18.97:1 instead of 17.04:1. The radius stays 0:
+            // the rectangle, the label's position and the tap target are the
+            // ones the sheet already answers, and only the colours move.
+            let fill = RAISED_CONTROL_FILL;
+            let Some(plate) =
+                draw_rounded_rect(x, y, field, 0, fill, Some(CONTROL_OUTLINE), 1)
+            else {
+                return Some(base);
+            };
             if let Some(color) = test_text(
                 x,
                 y,
@@ -2673,7 +2845,7 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
             ) {
                 return Some(color);
             }
-            return Some(fill);
+            return Some(plate);
         }
     }
     for (index, label) in [b"Cancel".as_slice(), b"Confirm".as_slice()]
@@ -2684,19 +2856,26 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if !rect.contains(x, y) {
             continue;
         }
-        let fill = if index == 1 {
-            THEME.primary
+        let (fill, border, border_w) = if index == 1 {
+            (THEME.primary, None, 0)
         } else {
-            THEME.surface_container_high
+            // The sheet is `Raised`, so its `#EFEEE9` fill was this button's
+            // fill: `#EFEEE9` on `#EFEEE9`, borderless. The secondary action
+            // now takes the platform's white (1.16:1 against the sheet) and
+            // the theme's strong outline (17.04:1 against the sheet).
+            (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
         };
         let ink = if index == 1 {
             THEME.on_primary
         } else {
             THEME.on_surface
         };
-        let Some(button) = draw_rounded_rect(x, y, rect, THEME.radii.control, fill, None, 0)
+        let Some(button) =
+            draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
         else {
-            return Some(THEME.surface);
+            // Outside the button's corner arc the sheet shows through, so the
+            // sheet's own pixel is the answer, not the page's colour.
+            return Some(base);
         };
         let lx = centered_x(label, 1, rect.x, rect.w);
         let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
@@ -3488,8 +3667,9 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap
     if HOME_HIT.contains(x, y) {
         return Tap::Leave("[FILE_MANAGER] Home gesture pressed. Exiting to launcher.");
     }
-    // The drawn back control.
-    if BACK.contains(x, y) {
+    // The drawn back control, hit where every other app's control is hit: the
+    // SDK's rect is both the paint and the target, so the two cannot disagree.
+    if std::design::back_button::contains(x, y) {
         return handle_back(app);
     }
 

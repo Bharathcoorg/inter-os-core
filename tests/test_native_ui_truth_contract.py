@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -135,6 +136,93 @@ def _split_top_level(expr: str, operator: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
+# ---------------------------------------------------------------------------
+# The platform's type ladder, read off the Rust side
+# ---------------------------------------------------------------------------
+#
+# WHY parsed and not written down: the row box a rung reserves is what every
+# overlap assertion below is measured in, and `font::line_height` is its only
+# authority. This file used to carry its own numbers for those boxes, and when
+# the rungs rose the copy went on reserving 32 rows for a body and 22 for a
+# caption while the shell paid 36 and 27 -- so the checks passed against a
+# snapshot of the ladder and said nothing about the layout on the device. The
+# chain the SDK solves -- rung -> cap height -> em -> ascent + descent -- is
+# re-solved here from the same four sources it runs on:
+#   font::cap_for_scale                   sdk/rust/interos-std/src/font.rs
+#   outline_text::em_for_cap_height       .../src/design/outline_text.rs
+#   typeface::line_metrics                .../src/design/typeface.rs
+#   face::{ASCENT, DESCENT, UNITS_PER_EM}  .../src/design/face.rs
+# .../src/design/mod.rs::typography is where each named role's rung is declared.
+
+
+def _fn_body(src: str, signature: str) -> str:
+    """The body of a `const fn`, given its signature verbatim.
+
+    WHY the signature rather than a looser pattern: the reader here is a copy of
+    the SDK's arithmetic. If that arithmetic is re-plumbed the signature stops
+    matching and this fails loudly; a silent fallback would put the assertions
+    back to measuring a ladder that no longer exists.
+    """
+    match = re.search(re.escape(signature) + r" \{(.*?)\n\}", src, re.S)
+    assert match, f"{signature} is no longer shaped the way this contract reads it"
+    return match.group(1)
+
+
+def _cap_ladder() -> tuple[dict[int, int], int]:
+    """`font::cap_for_scale`: the rung -> cap-height table and its fallback step."""
+    body = _fn_body(read("sdk/rust/interos-std/src/font.rs"),
+                    "pub const fn cap_for_scale(scale: usize) -> u32")
+    ladder = {int(rung): int(cap)
+              for rung, cap in re.findall(r"^\s*(\d+)\s*=>\s*(\d+)", body, re.M)}
+    assert ladder, "font::cap_for_scale answers no rung"
+    fallback = re.search(r"\bs\s*=>\s*\(s as u32\)\.saturating_mul\((\d+)\)", body)
+    assert fallback, "font::cap_for_scale no longer answers an unknown rung by scaling it"
+    return ladder, int(fallback.group(1))
+
+
+def _em_arithmetic() -> tuple[int, int, int]:
+    """`outline_text::em_for_cap_height` as (cap * UNITS + ROUND) // CAP_HEIGHT."""
+    body = _fn_body(read("sdk/rust/interos-std/src/design/outline_text.rs"),
+                    "pub const fn em_for_cap_height(cap_px: u32) -> u32")
+    expr = re.search(r"\(\(cap_px as u64 \* (\d+) \+ (\d+)\) / (\d+)\)", body)
+    assert expr, ("outline_text::em_for_cap_height is no longer the arithmetic this "
+                  "contract solves, so the ladder has to be re-read here")
+    return tuple(int(group) for group in expr.groups())
+
+
+def _face_metrics() -> tuple[int, int, int]:
+    """`face`'s metrics, with `typeface::line_metrics`' rule pinned beside them."""
+    body = _fn_body(read("sdk/rust/interos-std/src/design/typeface.rs"),
+                    "pub const fn line_metrics(px_per_em: u32) -> (u32, u32)")
+    assert "let upem = face::UNITS_PER_EM as i32;" in body
+    assert "(face::ASCENT as i32 * px_per_em as i32) / upem" in body
+    assert "(-(face::DESCENT as i32) * px_per_em as i32) / upem" in body
+    face = read("sdk/rust/interos-std/src/design/face.rs")
+    upem = int(re.search(r"pub const UNITS_PER_EM: u16 = (\d+);", face).group(1))
+    ascent = int(re.search(r"pub const ASCENT: i16 = (-?\d+);", face).group(1))
+    descent = int(re.search(r"pub const DESCENT: i16 = (-?\d+);", face).group(1))
+    return upem, ascent, descent
+
+
+_LADDER, _LADDER_FALLBACK = _cap_ladder()
+_EM_UNITS_PER_EM, _EM_ROUNDING, _EM_CAP_UNITS = _em_arithmetic()
+_FACE_UPM, _FACE_ASCENT, _FACE_DESCENT = _face_metrics()
+
+
+def _line_height(rung: int) -> int:
+    """`font::line_height(rung)`: the outline face's box at that rung, in rows."""
+    if rung == 0:
+        return 0
+    cap = _LADDER.get(rung, rung * _LADDER_FALLBACK)
+    em = (cap * _EM_UNITS_PER_EM + _EM_ROUNDING) // _EM_CAP_UNITS
+    return (_FACE_ASCENT * em) // _FACE_UPM + ((-_FACE_DESCENT) * em) // _FACE_UPM
+
+
+def _rung(role: str) -> int:
+    """The rung the SDK's `typography` module gives a named role."""
+    return _const_usize(read("sdk/rust/interos-std/src/design/mod.rs"), f"{role}_SCALE")
+
+
 def test_events_header_bands_cannot_overlap_each_other_or_the_feed():
     """The Events header is four runs stacked above the first section head.
 
@@ -161,12 +249,36 @@ def test_events_header_bands_cannot_overlap_each_other_or_the_feed():
     # body), which under-reserved the HEADING title by 32 rows and so passed the
     # very overlap this test was written to catch.
     #
-    # WHY the numbers are written down rather than computed: the authority for
-    # them is the Rust side, where `TITLE_ADVANCE` and `SUBTITLE_ADVANCE` are
-    # each pinned by a `const _: () = assert!(...)` to the SDK's own
-    # `line_height` at the rung the paint site uses. Changing a rung therefore
-    # fails the build, not just this file.
-    heading_h, body_h, caption_h = 80, 32, 22
+    # WHY read from the SDK rather than written down: the authority for these
+    # boxes is `font::line_height` at the rung the paint site below uses, and the
+    # shell pins each of its own literals to that answer with a
+    # `const _: () = assert!(...)` -- `TITLE_ADVANCE` to the HEADING box, the
+    # section note to `SOURCE_NOTE_Y + line_height(CAPTION)`, `SECTION_LABEL_BOX_H`
+    # to the caption box. A copy of the numbers here would lag the ladder by
+    # exactly the margin this test exists to measure, so each rung is read off the
+    # source instead: heading 80 rows today, body 36, caption 27.
+    heading_h = _line_height(_rung("HEADING"))
+    body_h = _line_height(_rung("BODY"))
+    caption_h = _line_height(_rung("CAPTION"))
+
+    # The rungs above are asserted, not assumed: each band's box is only the
+    # right amount to reserve if the surface really paints that band at it.
+    assert "LabelRun::new(HEADER_X, TITLE_Y, type_scale::HEADING," in source, (
+        "the header title no longer draws at the HEADING rung this test reserves"
+    )
+    assert "        SUBTITLE_Y,\n        type_scale::BODY," in source, (
+        "the header subtitle no longer draws at the BODY rung this test reserves"
+    )
+    assert "        SOURCE_NOTE_Y,\n        type_scale::CAPTION," in source, (
+        "the source note no longer draws at the CAPTION rung this test reserves"
+    )
+    assert "        FILTER_NOTE_Y,\n        type_scale::CAPTION," in source, (
+        "the filter note no longer draws at the CAPTION rung this test reserves"
+    )
+    assert "launcher::font::line_height(type_scale::BODY) + space::GRID_4" in source, (
+        "the step from the subtitle to the source note no longer pays for the "
+        "whole body box, so the two runs share rows"
+    )
 
     assert title_y + heading_h <= subtitle_y, "title runs into the subtitle"
     assert subtitle_y + body_h <= source_note_y, "subtitle runs into the source note"
@@ -863,16 +975,49 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     # as the design system's "System Space" (light category grid + stack
     # detail screens), so the old dark tab-layout coordinates ("60, 270, 1"
     # etc.) no longer exist. The invariant they pinned is unchanged and still
-    # asserted here on the new geometry: every detail row reserves the bold
-    # title's full 48px glyph line (band starts at cy+16), the caption sits a
-    # full 24px line below it (cy+72), and rows with a second caption line
-    # reserve that line too (cy+98) -- i.e. no text band is allowed to start
-    # inside the line box above it.
+    # asserted here on the new geometry: every detail row reserves the title
+    # rung's whole line box, the caption starts a caption line box and a gap
+    # below it, and a row carrying a second caption line reserves that line's
+    # box too -- i.e. no text band is allowed to start inside the line box above
+    # it. WHY the offsets are pinned as derivations and not as the row numbers
+    # this comment used to quote: the boxes come off the type ladder, so the
+    # remembered 16 / 72 / 98 went stale the moment the rungs moved, while the
+    # layout that followed the ladder stayed correct. The sum is the contract.
     assert "cy + ROW_TITLE_DY," in settings
     assert "cy + ROW_CAP_DY," in settings
     assert "cy + ROW_CAP2_DY," in settings
+    assert "const LINE_H: usize = std::design::font::line_height(TYPE_H3);" in settings
+    assert "const CAPTION_LINE_H: usize = std::design::font::line_height(TYPE_CAPTION);" in settings
+    flat_settings = " ".join(settings.split())
+    assert "const ROW_CAP_DY: usize = ROW_TITLE_DY + LINE_H + ROW_LINE_GAP;" in flat_settings, (
+        "the settings caption no longer starts a whole title line box plus a gap "
+        "below the title it sits under"
+    )
+    assert "const ROW_CAP2_DY: usize = ROW_CAP_DY + CAPTION_LINE_H + ROW_LINE_GAP;" in flat_settings, (
+        "the settings row no longer reserves a whole caption line box for its "
+        "second caption line"
+    )
     assert "centered_x(detail_str, 1, 24, 672)" in calendar
-    assert "760," in calendar
+    # WHY this no longer greps the row's remembered y: the month view's "nothing
+    # listed" card takes its top from the list band, the list band takes its top
+    # from the section band, and the detail line stands MONTH_EMPTY_DETAIL_DY
+    # rows inside that card. 760 was that sum for the rungs the ladder no longer
+    # draws; the invariant -- the detail run reserves the caption rung's whole
+    # line box, the press answers exactly the band it is painted in, and that
+    # band ends above the "+ New Event" box it would otherwise fall under -- is
+    # carried by the derivation and the app's own const gate.
+    assert "const MONTH_EMPTY_CARD_Y0: usize = MONTH_LIST_Y0;" in calendar
+    assert "let detail_y = MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_DETAIL_DY;" in calendar
+    assert "let detail_h = std::design::font::line_height(1);" in calendar
+    assert "if y >= detail_y && y < detail_y + detail_h {" in calendar
+    flat_calendar = " ".join(calendar.split())
+    assert (
+        "const _: () = assert!( MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_DETAIL_DY "
+        "+ std::design::font::line_height(1) <= ACTION_BTN_Y0 );"
+    ) in flat_calendar, "the month view's detail line box is no longer held above the action band"
+    assert "760," not in _code_only(calendar), (
+        "the month view's detail row is authored from a remembered y again"
+    )
     # WHY this assertion names the constants now: the calendar's four views did
     # not share a number for "+ New Event". Month painted and tapped the band
     # these constants state; Week, Day and Agenda painted and tapped 816..872, so
@@ -885,7 +1030,17 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     assert "const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;" in calendar
     assert calendar.count("y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1") == 8
     assert "y >= 816 && y < 872" not in calendar
-    assert 'test_text(x, y, 48, 64, 3, b"Files"' in file_manager
+    # WHY these no longer pin the header's coordinates: "Files" was painted at a
+    # hand-authored (48, 64) while its back control stood on the row underneath,
+    # at the app's own inset and size -- a chip in the wrong corner of the one
+    # screen the rest of the device answers at the platform's rect. The title's
+    # box is now derived from that rect, so the invariant carried here is the
+    # derivation itself: paint and target both come from `back_button`, and the
+    # title starts to the right of it.
+    assert "back_button::pixel_for_theme(x, y, &THEME)" in file_manager
+    assert "back_button::contains(x, y)" in file_manager
+    assert "const TITLE_X: usize =\n    std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;" in file_manager
+    assert "test_text(x, y, 48, 64, 3, b\"Files\"" not in file_manager
     assert 'b"Messaging unavailable: no transport"' in messages
 
 

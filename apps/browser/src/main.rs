@@ -23,7 +23,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use browser::theme::{MIN_TOUCH_TARGET, THEME, radius, type_scale};
+use browser::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing, type_scale};
+use interos_std::design::back_button;
 use interos_std::design::components;
 use interos_std::design::font;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
@@ -1082,7 +1083,7 @@ const STATUS_H: usize = 48;
 const TOOLBAR_Y0: usize = STATUS_H;
 const TOOLBAR_Y1: usize = 116;
 
-/// Sovereign Omnibox URL Capsule (x 16..476)
+/// Sovereign Omnibox URL Capsule (x 88..476)
 /// Appends bytes to a small buffer, truncating rather than overrunning.
 fn append_text(buf: &mut [u8], n: usize, bytes: &[u8]) -> usize {
     let take = bytes.len().min(buf.len().saturating_sub(n));
@@ -1156,11 +1157,30 @@ fn append_signed_text(buf: &mut [u8], n: usize, value: i64) -> usize {
 /// and differed only in colour.
 const TYPE_H1_SCALE: usize = type_scale::BODY;
 
-const PILL: Rect = Rect::new(16, 56, 460, 52);
+/// The address capsule, clear of the platform's Back control at x 24..72.
+///
+/// WHY its left edge is the chip's right edge plus one grid step: the capsule
+/// used to start at x 16 and covered the canonical 48x48 rect, so the corner a
+/// person learns once in Settings, Dialer, Music, Camera and Vault answered
+/// here by focusing the keyboard instead of giving a way back. Its right edge
+/// stays at 476, where the reload control has always had its gutter, so only
+/// the field moves and no row of the bar does.
+const PILL: Rect = Rect::new(
+    back_button::X + back_button::SIZE + spacing::GRID_16,
+    56,
+    476 - (back_button::X + back_button::SIZE + spacing::GRID_16),
+    52,
+);
 const PILL_R: usize = 26;
-const PILL_TEXT_X: usize = 56;
+const PILL_TEXT_X: usize = PILL.x + 40;
 const PILL_TEXT_Y: usize = 70;
-const PILL_TEXT_MAX: usize = 380;
+const PILL_TEXT_MAX: usize = PILL.w - 80;
+
+/// WHY these gates: the chip and the field are one row, and a field that creeps
+/// back under the chip, or a chip that grows past the band that paints it, is
+/// the defect this row was rewritten for.
+const _: () = assert!(PILL.x >= back_button::X + back_button::SIZE);
+const _: () = assert!(back_button::Y + back_button::SIZE <= TOOLBAR_Y1);
 
 /// The tab switcher's "+ New Tab" control.
 ///
@@ -1175,7 +1195,13 @@ const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
 
 /// The square at the head of the address field that wears the page's own
 /// picture, where the padlock used to sit alone.
-const FAVICON_BOX: Rect = Rect::new(30, 74, 16, 16);
+const FAVICON_BOX: Rect = Rect::new(PILL.x + 14, 74, 16, 16);
+
+/// The centre the page's picture and the TLS mark share at the head of the
+/// field. WHY named: both are one mark about one address, drawn in one box, and
+/// the box now moves with the field rather than sitting at a memorised pixel.
+const MARK_CX: usize = FAVICON_BOX.x + FAVICON_BOX.w / 2;
+const MARK_CY: usize = FAVICON_BOX.y + FAVICON_BOX.h / 2;
 
 /// The pixels a page's face is drawn with: one RGBA quadruple for each pixel
 /// of [`FAVICON_BOX`].
@@ -1184,6 +1210,61 @@ const TABS_TOP_BTN: Rect = Rect::new(540, 60, 46, 44);
 const KEBAB_BTN: Rect = Rect::new(596, 60, 44, 44);
 const CLOSE_BTN: Rect = Rect::new(650, 60, 44, 44);
 const BTN_R: usize = 12;
+
+/// The pixel of a chrome control's box: the tile it is painted on and the
+/// edge that holds it.
+///
+/// WHY this exists: every control in the top toolbar and the bottom
+/// navigation bar used to be painted with a fill equal to the bar behind it
+/// and no border at all, so reload, the tab count, the overflow kebab, the
+/// close-to-launcher box and the back and forward boxes were `#FAFAFA` on
+/// `#FAFAFA` -- the navigation was invisible, and a person could not see
+/// that it existed let alone where its edges were.
+///
+/// WHY these two tokens: the tile is the platform's raised surface
+/// (`#EFEEE9`), the step the app already paints every chip and field with, so
+/// the control reads as an object resting on the bar rather than as the bar.
+/// The edge is the platform's secondary ink (`#525458`), because
+/// `Theme::border` is `#E5E5E5` -- 1.21:1 against a `#FAFAFA` bar and 1.08:1
+/// against the tile it would ring, which is a hairline nobody can see. At
+/// 6.53:1 on the tile, 7.27:1 on the bar and 7.59:1 on a card the edge clears
+/// the 3:1 a non-text control needs with room to spare while staying inside
+/// the black-white-grey ladder: no new colour, and no geometry, hit band or
+/// position moves.
+#[inline]
+fn chrome_control_px(x: usize, y: usize, rect: Rect, radius: usize) -> Option<u32> {
+    draw_rounded_rect(
+        x,
+        y,
+        rect,
+        radius,
+        THEME.surface_container_high,
+        Some(THEME.on_surface_variant),
+        1,
+    )
+}
+
+/// The ink a disabled navigation glyph is painted with.
+///
+/// WHY the muted role and not the hairline role: a disabled control is still
+/// a control, and the app used to ink it with `Theme::border` -- `#E5E5E5`,
+/// which is 1.21:1 against the `#FAFAFA` bar and 1.08:1 against the tile it
+/// now sits on, so the disabled state was indistinguishable from nothing being
+/// painted there at all. `Theme::muted` is the platform's disabled ink:
+/// `#6B6B6B` is 4.59:1 on the tile, and the enabled ink (`Theme::on_surface`)
+/// is 17.04:1 on it, so the two states are three-and-a-half stops apart from
+/// each other and cannot be confused. WCAG exempts an inactive control from
+/// the 3:1 a live one needs; what matters here is that "greyed out" is
+/// readable as greyed out -- and at 4.59:1 this disabled ink clears the 4.5:1
+/// the repo's contrast contract demands of body text anyway.
+#[inline]
+fn nav_glyph_ink(active: bool) -> u32 {
+    if active {
+        THEME.on_surface
+    } else {
+        THEME.muted
+    }
+}
 
 /// The kebab menu's rows: where the first row's ink sits and how tall a row is.
 ///
@@ -1341,13 +1422,14 @@ const BOOKMARK_CARD_H: usize = BOOKMARK_ROW_PITCH - BOOKMARK_ROW_GAP;
 // -----------------------------------------------------------------------------
 
 /// The stride between two history rows.
-const HISTORY_ROW_PITCH: usize = 60;
+const HISTORY_ROW_PITCH: usize = HISTORY_CARD_H + HISTORY_ROW_GAP;
 
 /// The gap left between one history card and the next.
 const HISTORY_ROW_GAP: usize = 8;
 
-/// The height of a history card.
-const HISTORY_CARD_H: usize = HISTORY_ROW_PITCH - HISTORY_ROW_GAP;
+/// The height of a history card: the block it carries, plus the air above and
+/// below it. The stride now follows the card rather than leading it.
+const HISTORY_CARD_H: usize = HISTORY_BLOCK_H + 2 * HISTORY_BLOCK_PAD_Y;
 
 /// How many history rows the sheet walks.
 const HISTORY_ROWS: usize = 8;
@@ -1375,6 +1457,9 @@ const HISTORY_TEXT_MAX: usize = HISTORY_CARD_W - 2 * HISTORY_TEXT_INSET;
 
 /// The two runs a named visit reserves, as one block.
 const HISTORY_BLOCK_H: usize = 2 * HISTORY_LINE_BOX;
+
+/// Air above and below that block inside the card, on each side.
+const HISTORY_BLOCK_PAD_Y: usize = 4;
 
 /// WHY the block is inset as a block: a row's title and address read as one
 /// paragraph, so the space above the first line equals the space below the
@@ -3772,7 +3857,7 @@ impl BrowserApp {
         self.fetch_favicon(&*dom);
 
         let height = out.height as usize;
-        let note = if out.truncated { 36 } else { 0 };
+        let note = if out.truncated { out.note_reserve() } else { 0 };
         self.scroll = browser::reader_scroll(
             height + browser::CONTENT_PADDING + note,
             READER_VIEWPORT_H,
@@ -6379,10 +6464,10 @@ fn blend_toward(colour: u32, toward: u32, amount: u32) -> u32 {
         | mix(colour & 0xFF, toward & 0xFF)
 }
 
-/// SSL Padlock Icon (centered around cx=38, cy=82)
-fn padlock_glyph(x: usize, y: usize) -> bool {
-    let dx = x as isize - 38;
-    let dy = y as isize - 82;
+/// SSL Padlock Icon, centred on the box the page's picture would occupy.
+fn padlock_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
     if dy >= -6 && dy <= -2 {
         let arc = dx.abs() >= 2 && dx.abs() <= 4;
         let top = dy == -6 && dx.abs() <= 3;
@@ -6903,10 +6988,21 @@ fn render_browser_soft_keyboard(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // Shift key (15..95)
             if x >= 15 && x <= 95 {
                 let rect = Rect::new(15, 1158, 80, 72);
-                let fill = if app.kb_shift { THEME.primary } else { THEME.surface_container };
+                let armed = app.kb_shift;
+                let fill = if armed { THEME.primary } else { THEME.surface_container };
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, fill, None, 0) {
+                    // WHY the ink trades places with the fill: when shift is
+                    // armed the key inverts to the filled primary so the state
+                    // a person is in is readable without reading the field, and
+                    // `Theme::on_surface` is the ink for a *page*, which on this
+                    // theme is `#0A0A0A` -- the same black as the fill it now
+                    // sits on (1.00:1). The "^" was therefore invisible exactly
+                    // in the one state the key exists to announce. Every other
+                    // filled control here already asks the theme for its on-primary
+                    // ink; this one now does too.
+                    let ink = if armed { THEME.on_primary } else { THEME.on_surface };
                     let txt = if app.kb_symbols { b"ABC" as &[u8] } else { b"^" as &[u8] };
-                    if let Some(px) = text_px(x, y, centred_text_left(rect, txt, 1), rect.y + centred_text_top(rect.h, 1), 1, txt, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(x, y, centred_text_left(rect, txt, 1), rect.y + centred_text_top(rect.h, 1), 1, txt, ink, c, true) {
                         return px;
                     }
                     return c;
@@ -7014,7 +7110,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
         if app.field_focus != NO_FIELD {
             // Clear button (x: 24..104)
             let c_clear = Rect::new(24, KB_ACC_Y0 + 6, 80, 44);
-            if let Some(c) = draw_rounded_rect(x, y, c_clear, R_CHIP, THEME.surface_container_high, None, 0) {
+            if let Some(c) = chrome_control_px(x, y, c_clear, R_CHIP) {
                 if let Some(px) = text_px(x, y, centred_text_left(c_clear, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
                     return px;
                 }
@@ -7035,7 +7131,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Chip 1: "https://" (x 24..134)
         let c1 = Rect::new(24, KB_ACC_Y0 + 6, 110, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c1, R_CHIP, THEME.surface_container_high, None, 0) {
+        if let Some(c) = chrome_control_px(x, y, c1, R_CHIP) {
             if let Some(px) = text_px(x, y, centred_text_left(c1, b"https://", 1), KB_ACC_Y0 + 16, 1, b"https://", THEME.on_surface, c, false) {
                 return px;
             }
@@ -7044,7 +7140,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Chip 2: ".com" (x 144..224)
         let c2 = Rect::new(144, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c2, R_CHIP, THEME.surface_container_high, None, 0) {
+        if let Some(c) = chrome_control_px(x, y, c2, R_CHIP) {
             if let Some(px) = text_px(x, y, centred_text_left(c2, b".com", 1), KB_ACC_Y0 + 16, 1, b".com", THEME.on_surface, c, false) {
                 return px;
             }
@@ -7053,7 +7149,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Chip 3: ".org" (x 234..314)
         let c3 = Rect::new(234, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c3, R_CHIP, THEME.surface_container_high, None, 0) {
+        if let Some(c) = chrome_control_px(x, y, c3, R_CHIP) {
             if let Some(px) = text_px(x, y, centred_text_left(c3, b".org", 1), KB_ACC_Y0 + 16, 1, b".org", THEME.on_surface, c, false) {
                 return px;
             }
@@ -7062,7 +7158,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Chip 4: "Clear" (x 324..404)
         let c4 = Rect::new(324, KB_ACC_Y0 + 6, 80, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c4, R_CHIP, THEME.surface_container_high, None, 0) {
+        if let Some(c) = chrome_control_px(x, y, c4, R_CHIP) {
             if let Some(px) = text_px(x, y, centred_text_left(c4, b"Clear", 1), KB_ACC_Y0 + 16, 1, b"Clear", THEME.on_surface_variant, c, false) {
                 return px;
             }
@@ -7071,7 +7167,7 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Dismiss Down Chevron (x 630..694)
         let c_down = Rect::new(630, KB_ACC_Y0 + 6, 64, 44);
-        if let Some(c) = draw_rounded_rect(x, y, c_down, R_CHIP, THEME.surface_container_high, None, 0) {
+        if let Some(c) = chrome_control_px(x, y, c_down, R_CHIP) {
             if let Some(col) = draw_chevron_down(x, y, 662, KB_ACC_Y0 + 28, THEME.primary) {
                 return col;
             }
@@ -7091,6 +7187,12 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // Secure only when both halves agree: the address says https, and the
     // document on screen came off a channel whose handshake completed.
     let is_https = parsed.scheme == UriScheme::Https && app.document_tls_verified;
+
+    // Back control, painted from the SDK so the chip is the same one every
+    // other app puts in the same rect.
+    if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
+        return c;
+    }
 
     // Omnibox Capsule
     if let Some(c) = draw_rounded_rect(
@@ -7118,7 +7220,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // WHY the lock yields to the page's own picture: both are marks about
         // the address in the field, and a face says more about what is loaded
         // here than a lock this app never verified does.
-        if app.favicon.is_none() && padlock_glyph(x, y) {
+        if app.favicon.is_none() && padlock_glyph(x, y, MARK_CX, MARK_CY) {
             // WHY the mark reflects an observed TLS channel: it is read from the
             // transport that delivered this document, so it appears only for a
             // page whose TLS 1.3 handshake completed and whose peer certificate
@@ -7164,7 +7266,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Reload / Stop Button
-    if let Some(c) = draw_rounded_rect(x, y, RELOAD_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, RELOAD_BTN, BTN_R) {
         let cx = RELOAD_BTN.x + RELOAD_BTN.w / 2;
         let cy = RELOAD_BTN.y + RELOAD_BTN.h / 2;
         let active = if app.is_loading() {
@@ -7180,16 +7282,22 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Tab Counter Badge `[N]` Button
-    if let Some(_) = draw_rounded_rect(x, y, TABS_TOP_BTN, BTN_R, THEME.surface, None, 0) {
+    //
+    // WHY the box is returned and not discarded: the badge paints its own
+    // 27-pixel square, and every pixel of the target outside it used to fall
+    // through to the bar's colour, so the rest of the 46x44 control a tap
+    // answers was invisible.
+    if let Some(c) = chrome_control_px(x, y, TABS_TOP_BTN, BTN_R) {
         let cx = TABS_TOP_BTN.x + TABS_TOP_BTN.w / 2;
         let cy = TABS_TOP_BTN.y + TABS_TOP_BTN.h / 2;
         if let Some(badge) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
             return badge;
         }
+        return c;
     }
 
     // Overflow Kebab Menu Button (`⋮`)
-    if let Some(c) = draw_rounded_rect(x, y, KEBAB_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, KEBAB_BTN, BTN_R) {
         let cx = KEBAB_BTN.x + KEBAB_BTN.w / 2;
         let cy = KEBAB_BTN.y + KEBAB_BTN.h / 2;
         return if kebab_glyph(x, y, cx, cy) {
@@ -7200,7 +7308,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Close Button (dismisses app to launcher)
-    if let Some(c) = draw_rounded_rect(x, y, CLOSE_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, CLOSE_BTN, BTN_R) {
         let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
         let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
         return if close_glyph(x, y, cx, cy) {
@@ -7970,22 +8078,38 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
 
     // 9. Truncation note: if PAGE_LAYOUT.truncated
     if layout.truncated {
-        let note_doc_y = layout.height as isize + 12;
-        let note_sy = READER_TOP_Y as isize + note_doc_y - app.scroll.offset as isize;
-        let note_h = font::line_height(1) as isize;
-        if (y as isize) >= note_sy && (y as isize) < note_sy + note_h && note_sy >= 0 {
-            if let Some(px) = text_px(
-                x,
-                y,
-                browser::CONTENT_PADDING,
-                note_sy as usize,
-                1,
-                layout::overflow_note(layout.overflow).as_bytes(),
-                THEME.on_surface_variant,
-                THEME.surface,
-                false,
-            ) {
-                return px;
+        // WHY the band is tested before the sentence is read: the break is
+        // already on the display list, so the only work here is picking the
+        // line this pixel falls in. A whole sentence measured per pixel is
+        // the cost the reader cannot pay.
+        let line_h = font::line_height(1) as isize;
+        let first_sy = READER_TOP_Y as isize + layout.note_line_y(0) as isize
+            - app.scroll.offset as isize;
+        let line = if (y as isize) >= first_sy && (y as isize) < first_sy + line_h {
+            Some((first_sy, layout.note_lines().0))
+        } else {
+            let second_sy = first_sy + line_h;
+            if (y as isize) >= second_sy && (y as isize) < second_sy + line_h {
+                Some((second_sy, layout.note_lines().1))
+            } else {
+                None
+            }
+        };
+        if let Some((line_sy, line)) = line {
+            if line_sy >= 0 && !line.is_empty() {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    browser::CONTENT_PADDING,
+                    line_sy as usize,
+                    1,
+                    line.as_bytes(),
+                    THEME.on_surface_variant,
+                    THEME.surface,
+                    false,
+                ) {
+                    return px;
+                }
             }
         }
     }
@@ -8828,8 +8952,23 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
 
                         // Close button: the target is painted, so the box a
                         // person can see is the box that answers the tap.
+                        //
+                        // WHY the box carries an edge: the tile is white and the
+                        // card it sits on is the raised surface, so the fill was
+                        // 1.16:1 against the card -- a target nobody could find.
+                        // The edge is the platform's secondary ink, 4.59:1 on
+                        // that card, and the rectangle is still the one
+                        // `tab_close_rect` answers a tap in.
                         let close_rect = tab_close_rect(card_y);
-                        if let Some(cc) = draw_rounded_rect(x, y, close_rect, R_SMALL, THEME.surface_container, None, 0) {
+                        if let Some(cc) = draw_rounded_rect(
+                            x,
+                            y,
+                            close_rect,
+                            R_SMALL,
+                            THEME.surface_container,
+                            Some(THEME.on_surface_variant),
+                            1,
+                        ) {
                             if close_glyph(x, y, close_rect.x + close_rect.w / 2, close_rect.y + close_rect.h / 2) {
                                 return Some(THEME.on_surface_variant);
                             }
@@ -9671,23 +9810,28 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return THEME.outline_variant;
     }
 
+    // WHY each block returns its own box: the bar used to discard the pixel the
+    // control was painted with and fall through to the bar's own colour, so the
+    // tile and the hairline below were never on the screen at all. Returning the
+    // control's pixel is what makes the box the tap already answered visible.
     // 1. Back Button `<`
-    if let Some(_) = draw_rounded_rect(x, y, BACK_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, BACK_BTN, BTN_R) {
         let cx = BACK_BTN.x + BACK_BTN.w / 2;
         let cy = BACK_BTN.y + BACK_BTN.h / 2;
         let active = app.tabs.can_go_back();
-        let col = if active { THEME.on_surface } else { THEME.border };
+        let col = nav_glyph_ink(active);
         if let Some(c) = std::design::back_button::chevron_ink(x, y, cx, cy, col) {
             return c;
         }
+        return c;
     }
 
     // 2. Forward Button `>`
-    if let Some(_) = draw_rounded_rect(x, y, FWD_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, FWD_BTN, BTN_R) {
         let cx = FWD_BTN.x + FWD_BTN.w / 2;
         let cy = FWD_BTN.y + FWD_BTN.h / 2;
         let active = app.tabs.can_go_forward();
-        let col = if active { THEME.on_surface } else { THEME.border };
+        let col = nav_glyph_ink(active);
         let mirrored_x = if (x as isize) <= cx as isize {
             cx + (cx - x)
         } else {
@@ -9696,10 +9840,11 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         if let Some(c) = std::design::back_button::chevron_ink(mirrored_x, y, cx, cy, col) {
             return c;
         }
+        return c;
     }
 
     // 3. Home / New Tab `+` Button
-    if let Some(_) = draw_rounded_rect(x, y, HOME_TAB_BTN, BTN_R, THEME.surface_container, Some(THEME.border), 1) {
+    if let Some(c) = chrome_control_px(x, y, HOME_TAB_BTN, BTN_R) {
         let cx = HOME_TAB_BTN.x + HOME_TAB_BTN.w / 2;
         let cy = HOME_TAB_BTN.y + HOME_TAB_BTN.h / 2;
         let dx = (x as isize - cx as isize).abs();
@@ -9707,25 +9852,28 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         if (dx <= 1 && dy <= 7) || (dy <= 1 && dx <= 7) {
             return THEME.on_surface;
         }
+        return c;
     }
 
     // 4. Bookmark Star Button
-    if let Some(_) = draw_rounded_rect(x, y, ADD_BOOK_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, ADD_BOOK_BTN, BTN_R) {
         let cx = ADD_BOOK_BTN.x + ADD_BOOK_BTN.w / 2;
         let cy = ADD_BOOK_BTN.y + ADD_BOOK_BTN.h / 2;
         let filled = app.bookmarks.len() + app.bookmarks.unsaved_len() > 0;
         if star_glyph(x, y, cx, cy, filled) {
-            return THEME.on_surface_variant;
+            return THEME.on_surface;
         }
+        return c;
     }
 
     // 5. Tabs Counter `[N]`
-    if let Some(_) = draw_rounded_rect(x, y, TABS_BTN, BTN_R, THEME.surface, None, 0) {
+    if let Some(c) = chrome_control_px(x, y, TABS_BTN, BTN_R) {
         let cx = TABS_BTN.x + TABS_BTN.w / 2;
         let cy = TABS_BTN.y + TABS_BTN.h / 2;
         if let Some(px) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
             return px;
         }
+        return c;
     }
 
     THEME.surface
@@ -10046,6 +10194,17 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             app.reload();
         }
         return Tap::Redraw;
+    }
+
+    // Back control, tested ahead of the capsule so the chip's box is never read
+    // as the field that no longer covers it.
+    if back_button::contains(x, y) {
+        let _ = std::audio_haptic_click();
+        if app.tabs.can_go_back() {
+            app.go_back();
+            return Tap::Redraw;
+        }
+        return Tap::Leave("[BROWSER APP] Back control pressed with no history. Exiting to launcher.");
     }
 
     // Omnibox URL Bar Tap

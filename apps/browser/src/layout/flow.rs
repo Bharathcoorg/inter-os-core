@@ -135,14 +135,70 @@ pub const OVERFLOW_BUDGETS: &[(u32, &str)] = &[
 
 /// What to tell a reader about a page that did not all fit.
 ///
-/// WHY one sentence: the note is drawn on the page, in a single line, and a
-/// list of bit flags is not a sentence. When several budgets were hit the
-/// reader hears about the worst one; the serial log carries every one.
+/// WHY one sentence: the note is drawn on the page, and a list of bit flags is
+/// not a sentence. When several budgets were hit the reader hears about the
+/// worst one; the serial log carries every one. The sentence itself is as long
+/// as it needs to be -- [`note_break`] gives it the second line it asks for.
 pub fn overflow_note(overflow: u32) -> &'static str {
     match OVERFLOW_BUDGETS.iter().find(|(bit, _)| overflow & *bit != 0) {
         Some((_, reason)) => reason,
         None => "The page reached a layout capacity; it is shown in part.",
     }
+}
+
+/// The rung the truncation note is drawn at.
+const NOTE_SCALE: usize = 1;
+
+/// The gap between the document's last box and the note's first line.
+pub const NOTE_GAP: usize = 12;
+
+/// Where a truncation note breaks onto its second line, as a byte offset into
+/// it: the offset of the note's own length when one line carries the whole
+/// sentence.
+///
+/// WHY the last word boundary whose line fits and not the first word that
+/// does not: the break is chosen so the first line carries all it can, which
+/// leaves the shortest possible tail -- the tail most likely to fit the column
+/// too. Two lines is the design, so a tail that still overflows is a sentence
+/// the gates report rather than a sentence clipped again.
+///
+/// WHY an offset into a `&'static str`: the note is asked for once per pixel
+/// the reader paints, and this break is a walk of one sentence. Done at the
+/// paint site it would be that walk per pixel, which is the cost this repo has
+/// already learned not to pay twice -- see the memo in
+/// `design::outline_text::run_box`.
+///
+/// WHY a byte offset that lands on a space: the break is at a word boundary,
+/// so it never splits a character, and the two halves together are the whole
+/// sentence. Not one word of what ran out is dropped to make the line fit.
+pub fn note_break(note: &str, column: usize) -> usize {
+    let bytes = note.as_bytes();
+    // The common case is a sentence the column already holds, and one walk
+    // says so instead of one walk per word.
+    if font::measure(bytes, NOTE_SCALE) <= column {
+        return bytes.len();
+    }
+    let mut split = bytes.len();
+    let mut word_start = 0usize;
+    while word_start < bytes.len() {
+        let mut word_end = word_start;
+        while word_end < bytes.len() && bytes[word_end] != b' ' {
+            word_end += 1;
+        }
+        // A word that opens the sentence is on the first line whatever its
+        // width: a second line cannot hold it either, and moving it would
+        // only move the overflow.
+        if word_start > 0
+            && font::measure(&bytes[..word_start], NOTE_SCALE)
+                + font::measure(&bytes[word_start..word_end], NOTE_SCALE)
+                > column
+        {
+            split = word_start;
+            break;
+        }
+        word_start = word_end + 1;
+    }
+    split
 }
 
 /// What a rectangle means to the renderer.
@@ -376,6 +432,15 @@ pub struct TextLayout {
     /// Which capacities were reached, as the `OVERFLOW_*` bits of this module
     /// and [`super::dom`]. Zero exactly when `truncated` is false.
     pub overflow: u32,
+    /// The byte offset in [`overflow_note(self.overflow)`] where the note's
+    /// second line begins, and that sentence's own length when the reader's
+    /// column carries it in one line.
+    ///
+    /// WHY stored on the display list: the painter asks for the note once per
+    /// pixel it paints, and the break is a walk of the whole sentence. It is
+    /// resolved here, when the page is laid out, so the screen reads an offset
+    /// instead of measuring. See [`note_break`].
+    pub note_split: u16,
 }
 
 impl TextLayout {
@@ -395,6 +460,7 @@ impl TextLayout {
             height: 0,
             truncated: false,
             overflow: 0,
+            note_split: 0,
         }
     }
 
@@ -408,6 +474,7 @@ impl TextLayout {
         self.height = 0;
         self.truncated = false;
         self.overflow = 0;
+        self.note_split = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -415,6 +482,49 @@ impl TextLayout {
             && self.rect_count == 0
             && self.image_count == 0
             && self.field_count == 0
+    }
+
+    /// Resolves where the truncation note the reader will show breaks onto its
+    /// second line, from the budget bits this list already carries.
+    ///
+    /// WHY a method rather than an inline expression at the paint site: the
+    /// screen and the gate that proves the screen have to agree on one break,
+    /// and a second implementation of the wrap proves nothing about what is
+    /// drawn.
+    pub fn resolve_note(&mut self) {
+        let note = overflow_note(self.overflow);
+        self.note_split = note_break(note, crate::CONTENT_WIDTH).min(u16::MAX as usize) as u16;
+    }
+
+    /// The truncation note as the reader draws it: its first line and its
+    /// second, which is empty exactly when the sentence needed only one.
+    ///
+    /// WHY byte slices: the two halves of the sentence are ranges into the
+    /// same `'static` string, so a note that wraps costs the app an offset and
+    /// no allocation.
+    pub fn note_lines(&self) -> (&'static str, &'static str) {
+        let note = overflow_note(self.overflow);
+        let split = (self.note_split as usize).min(note.len());
+        match (note.get(..split), note.get(split..)) {
+            (Some(first), Some(second)) => (first, second),
+            _ => (note, ""),
+        }
+    }
+
+    /// The strip the truncation note reserves below the document's last box.
+    ///
+    /// WHY derived from the type ladder: the note is a line of rung-one text
+    /// per line it wraps to, and a height remembered from an earlier ladder
+    /// scrolls the note off the end of the page it belongs to.
+    pub fn note_reserve(&self) -> usize {
+        let (_, second) = self.note_lines();
+        let lines = 1 + usize::from(!second.is_empty());
+        NOTE_GAP + lines * font::line_height(NOTE_SCALE)
+    }
+
+    /// The line box the note's `index`th line sits in, in document space.
+    pub fn note_line_y(&self, index: usize) -> usize {
+        self.height as usize + NOTE_GAP + index * font::line_height(NOTE_SCALE)
     }
 
     /// The link at a document-space point, if any.
@@ -1680,6 +1790,7 @@ impl<'a, 's> Builder<'a, 's> {
         self.out.height = height;
         self.out.overflow = overflow;
         self.out.truncated = overflow != 0;
+        self.out.resolve_note();
     }
 
     fn bump(&mut self, bottom: i32) {
@@ -2373,22 +2484,77 @@ mod tests {
         assert!(overflow_note(out.overflow).contains("more words"));
     }
 
-    /// WHY the width is checked for every reason: the note is drawn on one
-    /// line of the page, and a reason wider than the column is cut mid-word --
-    /// the exact failure the note exists to avoid.
+    /// WHY the width is checked for every reason: the note is drawn on the
+    /// reader's column, and a reason wider than the column is cut mid-word --
+    /// the exact failure the note exists to avoid. The note now takes the
+    /// second line a long sentence needs, so what is measured is the pair of
+    /// lines the painter draws, read back through the display list the painter
+    /// reads: a gate that re-implemented the wrap would prove nothing about the
+    /// screen. Two lines is the design, and the budget that cannot live inside
+    /// them is named by the assertion that fails.
+    ///
+    /// WHY the words are counted: the sentence is the platform's honest account
+    /// of what was dropped, so a break that loses one of its own words hides
+    /// the very thing it is drawn to report.
     #[test]
     fn every_overflow_reason_fits_the_line_it_is_drawn_on() {
         // The reader's column at the narrowest phone it runs on.
         let column = 720 - 2 * crate::CONTENT_PADDING;
+        let line_h = font::line_height(NOTE_SCALE);
         for (bit, reason) in OVERFLOW_BUDGETS {
-            let width = font::measure(reason.as_bytes(), 1) as usize;
-            assert!(width <= column, "budget {:#x} needs {} px", bit, width);
+            let mut out = TextLayout::new();
+            out.overflow = *bit;
+            out.truncated = true;
+            out.resolve_note();
+            let (first, second) = out.note_lines();
+            assert_eq!(
+                first.len() + second.len(),
+                reason.len(),
+                "budget {:#x} loses a word of its own reason",
+                bit
+            );
+            assert!(
+                font::measure(first.as_bytes(), NOTE_SCALE) <= column,
+                "budget {:#x} needs {} px on its first line",
+                bit,
+                font::measure(first.as_bytes(), NOTE_SCALE)
+            );
+            assert!(
+                font::measure(second.as_bytes(), NOTE_SCALE) <= column,
+                "budget {:#x} needs {} px on its second line, and two lines is \
+                 the note's whole design",
+                bit,
+                font::measure(second.as_bytes(), NOTE_SCALE)
+            );
+            let lines = 1 + usize::from(!second.is_empty());
+            if font::measure(reason.as_bytes(), NOTE_SCALE) <= column {
+                assert!(
+                    second.is_empty(),
+                    "budget {:#x} spends a second line it does not need",
+                    bit
+                );
+            }
+            // The strip the scroll extent reserves has to reach the bottom of
+            // the last box the painter fills, or the note is drawn off the end
+            // of the page it belongs to.
+            let drawn = out.note_line_y(lines - 1) + line_h - out.height as usize;
+            assert!(
+                drawn <= out.note_reserve(),
+                "budget {:#x} reserves {} px for {} px of note",
+                bit,
+                out.note_reserve(),
+                drawn
+            );
         }
-        let width = font::measure(
-            b"The page reached a layout capacity; it is shown in part.",
-            1,
-        ) as usize;
-        assert!(width <= column);
+        // The fallback for an overflow the table does not name is drawn by the
+        // same painter path, so it is gated by the same read.
+        let mut unnamed = TextLayout::new();
+        unnamed.truncated = true;
+        unnamed.resolve_note();
+        let (first, second) = unnamed.note_lines();
+        assert!(second.is_empty());
+        assert_eq!(first, "The page reached a layout capacity; it is shown in part.");
+        assert!(font::measure(first.as_bytes(), NOTE_SCALE) <= column);
     }
 
     #[test]

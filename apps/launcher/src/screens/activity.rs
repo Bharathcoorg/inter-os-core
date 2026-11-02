@@ -166,8 +166,18 @@ pub const SELECTOR_GAP: usize = 8;
 /// The focused card's frame.
 pub const HERO_Y: usize = 220;
 pub const HERO_H: usize = 904;
+/// Rows the header's name run sits below the card's top.
+const HEADER_NAME_DY: usize = 18;
 /// The header band inside the card, above the preview well.
-const HERO_HEADER_H: usize = 84;
+///
+/// WHY derived and not the 84 this carried: the band is the pad above the name plus
+/// the two line boxes stacked in it. `line_height` answers the ladder, so a rung that
+/// grew left the band the width it was and the status box spilling into the well; the
+/// band now grows with the type and `hero_preview_rect` takes whatever height is left,
+/// which is what it was already fitted by.
+const HERO_HEADER_H: usize =
+    HEADER_NAME_DY + launcher::font::line_height(HEADER_NAME_SCALE)
+        + launcher::font::line_height(HEADER_STATUS_SCALE);
 const HERO_PAD: usize = 16;
 
 /// The rung the focused card shows its app name at, and its state line at.
@@ -176,22 +186,33 @@ const HEADER_STATUS_SCALE: usize = type_scale::CAPTION;
 /// The name run's box top, and the status run's box top a whole name line box
 /// below it.
 ///
-/// WHY the derived stride: the name is a scale-3 run that reserves
-/// `line_height(3)` = 44 rows, and a name whose glyphs descend (a "g", a "p")
+/// WHY the derived stride: the name is a SECTION run that reserves
+/// `line_height(3)` = 48 rows, and a name whose glyphs descend (a "g", a "p")
 /// puts ink at the bottom of that box. The status run used to start only 34 rows
 /// below the name's top, so its own caps landed inside the name's reserved box
 /// and the two read through one another. One line box lower makes the boxes
 /// adjacent, so neither can paint into the other's rows.
-const HEADER_NAME_Y0: usize = HERO_Y + 18;
+const HEADER_NAME_Y0: usize = HERO_Y + HEADER_NAME_DY;
 const HEADER_STATUS_Y0: usize = HEADER_NAME_Y0 + launcher::font::line_height(HEADER_NAME_SCALE);
 
-/// Truth gates: the header's real ladder boxes (44 for a section name, 22 for a
-/// caption state), and the grown two-line stack must still close on the header
-/// band so the status box does not spill into the preview well beneath it.
-const _: () = assert!(launcher::font::line_height(HEADER_NAME_SCALE) == 44);
-const _: () = assert!(launcher::font::line_height(HEADER_STATUS_SCALE) == 22);
+/// Truth gates: the header's two runs reserve their rungs' own boxes -- which is what
+/// makes the band they live in a derived height rather than a remembered one -- and the
+/// stack still closes on the band so the status box cannot spill into the preview well
+/// beneath it.
+const _: () = assert!(
+    launcher::font::line_height(HEADER_NAME_SCALE)
+        + launcher::font::line_height(HEADER_STATUS_SCALE)
+        == HERO_HEADER_H - HEADER_NAME_DY,
+    "the header band is exactly its top pad plus the two line boxes it holds",
+);
 const _: () = assert!(
     HEADER_STATUS_Y0 + launcher::font::line_height(HEADER_STATUS_SCALE) <= HERO_Y + HERO_HEADER_H
+);
+/// WHY this one too: the well is fitted by height, so a header that outgrew the card
+/// would ask `hero_preview_rect` for a negative height and underflow the arithmetic.
+const _: () = assert!(
+    HERO_HEADER_H + HERO_PAD < HERO_H,
+    "the header band and the well's bottom pad must leave the well a height to fit",
 );
 
 pub const CARD_X: usize = 32;

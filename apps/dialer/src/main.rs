@@ -2347,10 +2347,10 @@ fn contact_avatar_color(_name: &[u8]) -> u32 {
     THEME.on_surface // Slate
 }
 
-/// Rows a `scale`-high text run occupies on the shared bitmap face.
-/// WHY a local `const fn`: this is exactly `font::line_height(scale)`, but that
-/// helper is not `const`, and every run box below is derived from a
-/// compile-time constant.
+/// Rows a run at `scale` reserves: the platform's own line box for that rung,
+/// which is the outline face's ascent plus descent rather than the bitmap cell.
+/// WHY a local `const fn`: every run box below is derived from a compile-time
+/// constant, and this names the rung's box once for all of them.
 const fn run_rows(scale: usize) -> usize {
     std::design::font::line_height(scale)
 }
@@ -2373,7 +2373,7 @@ const HEADER_ROW: usize = HEADER_TOP + std::design::back_button::SIZE / 2;
 /// The title's line box top.
 ///
 /// WHY the caps are centred on the control's row rather than the box: the box
-/// at this rung is fifty-nine rows and the button beside it is forty-eight, so
+/// at this rung is sixty-three rows and the button beside it is forty-eight, so
 /// centring the box puts the letters below the button and keeping the box
 /// inside the row puts them above it. Centring the cap height is the one
 /// placement where the word and the button read as a single row of chrome.
@@ -2441,8 +2441,8 @@ const PLUS_R: i32 = 20;
 const PLACEHOLDER_SCALE: usize = type_scale::BODY;
 const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
-/// run_rows(1) = 24 rows, so 340..364 clears the 96-row scale-4 digit box at
-/// 236..332 and stays inside the card's 380-row bottom edge.
+/// run_rows(1) = 27 rows, so 350..377 clears the 63-row scale-4 digit box at
+/// 215..278 and stays inside the card's 380-row bottom edge.
 const OUTCOME_Y0: usize = 350;
 
 // Backspace control in the action row (to the right of Call button, active when active_len > 0).
@@ -2490,7 +2490,7 @@ const ACTION_Y0: usize = 990;
 const ACTION_Y1: usize = 1140;
 
 // Recents ledger geometry. WHY it starts at 424 rather than 410: the first row
-// needs room for a scale-2 run (48 rows) plus a scale-1 run (24 rows) inside an
+// needs room for its two scale-1 runs, 27 rows each, inside an
 // 96 px row, and 410 would push the last of five rows past the action bar.
 //
 // WHY the numbers come from the library: the height of a list and the height
@@ -2544,7 +2544,30 @@ const CONTACT_ROW_H: usize = LIB_CONTACT_ROW_H;
 const LIST_VIEWPORT_Y1: usize = LIB_CONTACTS_VIEWPORT_Y1;
 /// Footer band: the honest capacity/durability notice.
 const NOTICE_Y0: usize = 938;
-const NOTICE_Y1: usize = 990;
+/// The rung both notice lines are drawn at, named once so the band's height and
+/// the two painters cannot disagree about it.
+const NOTICE_SCALE: usize = type_scale::CAPTION;
+/// The band's own top pad: the rows between its edge and the first line's box.
+const NOTICE_TOP_PAD: usize = 4;
+/// Rows one notice line reserves -- the rung's own line box, asked of the ladder
+/// rather than written down, so a change to the face moves the layout with it.
+const NOTICE_LINE_ROWS: usize = run_rows(NOTICE_SCALE);
+const NOTICE_LINE1_Y: usize = NOTICE_Y0 + NOTICE_TOP_PAD;
+/// The second line sits one whole box below the first, so the two never share a
+/// row however the ladder is scaled.
+const NOTICE_LINE2_Y: usize = NOTICE_LINE1_Y + NOTICE_LINE_ROWS;
+/// The band's end: every row both boxes ink, and nothing else.
+const NOTICE_Y1: usize = NOTICE_Y0 + NOTICE_TOP_PAD + 2 * NOTICE_LINE_ROWS;
+/// WHY these are compile-time gates: the band was once 52 hand-written rows under
+/// a ladder whose caption box had grown to 27, so the second line ran past its
+/// end and the `NOTICE_Y0..NOTICE_Y1` gate stopped answering its baseline rows.
+/// Deriving the band from the rung makes that impossible to author again, and
+/// these two make it fail to build rather than fail to render if the band is ever
+/// pinned by hand. The second is the one the action row cares about: the notice
+/// may widen downwards, but not until it covers a row the discs paint -- their
+/// topmost inked row is `C_ACTION_Y - CALL_R`.
+const _: () = assert!(NOTICE_Y1 >= NOTICE_LINE2_Y + NOTICE_LINE_ROWS);
+const _: () = assert!(NOTICE_Y1 <= C_ACTION_Y - CALL_R as usize);
 /// Star hit circle on the right edge of every contact row.
 const STAR_CX: usize = 660;
 const STAR_R: i32 = 20;
@@ -2771,13 +2794,13 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     // Standardized back button squircle (24..72, 24..72)
-    if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
+    if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
         return c;
     }
 
-    // Header Title: "Phone". The run is scale 3, so it needs
-    // run_rows(3) = 44 rows, and the line box is centred on the row the back
-    // control stands in rather than in the whole band -- a title centred from 0
+    // Header Title: "Phone". The run is on the title rung, so it needs
+    // run_rows(TITLE_SCALE) = 63 rows, and its caps are centred on the row the
+    // back control stands in rather than the box -- a title centred from 0
     // would sit with half its box inside the band that paints over it.
     let title_rows = run_rows(TITLE_SCALE);
     if y >= TITLE_Y0 && y < TITLE_Y0 + title_rows {
@@ -3269,13 +3292,13 @@ fn editor_keypad_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// the platform's, and the thumb beside the list says how much is below.
 fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if dialer.recents_len == 0 {
-        // Headline: a scale-2 run owns 48 rows (620..668).
+        // Headline: a scale-1 run owns 27 rows (620..647).
         let head: &[u8] = b"No calls yet";
         let head_x = DISPLAY_X0 + std::design::font::center_x(head, 1, DISPLAY_W);
         if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head,DISPLAY_W,  THEME.on_surface, THEME.surface) {
             return c;
         }
-        // Body: a scale-1 run owns 24 rows (680..704).
+        // Body: a scale-1 run owns 27 rows (680..707).
         let body: &[u8] = b"Every dial attempt and its real outcome is listed here";
         let mut buf = [0u8; 64];
         let n = std::design::font::ellipsize(body, 1, DISPLAY_W, &mut buf);
@@ -3314,7 +3337,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 THEME.surface_container,
             )
         };
-        // Number, scale 2: run_rows(2) = 48 rows at row_y + 8.
+        // Number, scale 1: run_rows(1) = 27 rows at row_y + 8.
         let mut nbuf = [0u8; 32];
         let nn = std::design::font::ellipsize(&rec.number[..rec.len], 1, DISPLAY_W - 96, &mut nbuf);
         let nx = DISPLAY_X0 + 24;
@@ -3330,7 +3353,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         ) {
             return c;
         }
-        // Outcome, scale 1: run_rows(1) = 24 rows at row_y + 56.
+        // Outcome, scale 1: run_rows(1) = 27 rows at row_y + 56.
         let out: &[u8] = if rec.emergency {
             if rec.accepted {
                 b"Emergency - accepted by telephony"
@@ -4102,8 +4125,8 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         x,
         y,
         DISPLAY_X0 + 24,
-        NOTICE_Y0 + 4,
-        1,
+        NOTICE_LINE1_Y,
+        NOTICE_SCALE,
         state.as_str().as_bytes(),DISPLAY_W - 48, 
         ink,
         THEME.surface,
@@ -4164,16 +4187,14 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         n += tail.len();
     }
     let mut buf = [0u8; 96];
-    let tn = std::design::font::ellipsize(&line[..n], 1, DISPLAY_W - 48, &mut buf);
+    let tn = std::design::font::ellipsize(&line[..n], NOTICE_SCALE, DISPLAY_W - 48, &mut buf);
     if tn > 0 {
         if let Some(c) = test_text(
             x,
             y,
             DISPLAY_X0 + 24,
-            // WHY +30 and not +34: the caption's 22 px box has to end at the
-            // band's bottom (NOTICE_Y1), or its descenders are never drawn.
-            NOTICE_Y0 + 30,
-            1,
+            NOTICE_LINE2_Y,
+            NOTICE_SCALE,
             &buf[..tn],DISPLAY_W - 48, 
             THEME.on_surface_variant,
             THEME.surface,

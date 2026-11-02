@@ -442,16 +442,38 @@ pub const SHUTTER_RING_INNER: usize = 56;
 /// The shutter's core.
 pub const SHUTTER_R_CORE: usize = 48;
 
+/// The rows the refusal caption's box needs at its rung, whatever its bytes are.
+///
+/// WHY read from the renderer and not from the rung's line box alone: a caption
+/// is drawn by whichever face fits, and the bitmap cell's baseline can sit below
+/// the outline ascent, which makes the inked band taller than `line_height`.
+/// [`row_band`] is the union of the two, so this is the number the dock has to
+/// hold rather than the number one of the two faces needs.
+pub const SHUTTER_NOTICE_ROWS: usize =
+    interos_std::design::outline_text::row_band(0, SHUTTER_NOTICE_SCALE).1;
+
+/// The air between the caption's box and the shutter's outer ring.
+pub const SHUTTER_NOTICE_AIR: usize = 4;
+
 /// The top of the dock: the band the shutter and the refusal caption live in.
-pub const DOCK_Y0: usize = 1210;
+///
+/// WHY derived from the caption's rung: the strip between the dock's top edge
+/// and the shutter's ring is the caption's only room, and it used to be a
+/// remembered 1210 while the caption was a remembered 36 rows -- so when the
+/// ladder raised the body rung the caption no longer fitted and nothing at the
+/// dock noticed until the test suite did. Deriving the edge from the band the
+/// text needs means a future rung moves the dock instead of clipping the answer
+/// the user caused.
+pub const DOCK_Y0: usize =
+    SHUTTER_CY - SHUTTER_RING_OUTER - SHUTTER_NOTICE_ROWS - SHUTTER_NOTICE_AIR;
 
 /// The refusal caption's line box: in the dock, above the shutter's ring.
 ///
 /// WHY it is here and not on the viewfinder: the caption answers a press of
 /// the shutter, so it belongs next to the shutter, and the strip between
 /// the dock's top edge and the shutter's outer ring is the only free space
-/// there. The shutter's ring starts at `SHUTTER_CY - SHUTTER_RING_OUTER`,
-/// which is four pixels below the end of this line box.
+/// there. That strip is [`SHUTTER_NOTICE_ROWS`] plus [`SHUTTER_NOTICE_AIR`]
+/// by construction.
 pub const SHUTTER_NOTICE_Y: usize = DOCK_Y0;
 
 /// The type scale of the refusal caption: the body scale, so a refusal the
@@ -1997,5 +2019,53 @@ mod tests {
         app.capture = CaptureOutcome::Published;
         app.show_capture_outcome();
         assert_eq!(app.shutter_notice_len, 0, "a published photo needs no caption");
+    }
+
+    fn srgb_luminance(argb: u32) -> f64 {
+        let channel = |c: u32| {
+            let c = c as f64 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel((argb >> 16) & 0xFF)
+            + 0.7152 * channel((argb >> 8) & 0xFF)
+            + 0.0722 * channel(argb & 0xFF)
+    }
+
+    fn wcag(a: u32, b: u32) -> f64 {
+        let (la, lb) = (srgb_luminance(a), srgb_luminance(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// WHY the assertion is on pixels and not on role names: the chip is only
+    /// real if the ARGB it emits clears WCAG 1.4.11's 3:1 floor for a non-text
+    /// control against the chassis it stands on, and the roles that clear it on
+    /// a light page are the roles that fail here.
+    #[test]
+    fn the_back_chip_paints_a_boundary_a_person_can_see_on_the_chassis() {
+        use interos_std::design::back_button;
+
+        let band = theme::chrome::BODY;
+        let ring = back_button::pixel_for_theme(back_button::X, 80, &theme::CHASSIS_THEME)
+            .expect("the SDK owns a border pixel at the chip's left edge");
+        let plate = back_button::pixel_for_theme(30, 60, &theme::CHASSIS_THEME)
+            .expect("the SDK fills the chip's interior");
+        let chevron = back_button::pixel_for_theme(48, 76, &theme::CHASSIS_THEME)
+            .expect("the SDK draws an arm at the glyph's apex");
+
+        assert!(wcag(ring, band) >= 3.0, "ring {} is {} over the band", ring, wcag(ring, band));
+        assert!(wcag(chevron, plate) >= 3.0, "chevron is {} over the plate", wcag(chevron, plate));
+
+        // WHY a failure is asserted too: the fleet hands this control the light
+        // roles, whose `#0A0A0A` outline is a measured 1.03:1 step off the
+        // `#0E0F11` band -- a boundary no evaluator can see. Pinning that number
+        // is what stops the chip flipping back to invisible with the theme.
+        let light_ring = back_button::pixel_for_theme(back_button::X, 80, &theme::THEME)
+            .expect("the light theme owns the same geometry");
+        assert!(wcag(light_ring, band) < 3.0, "the light ring reads at {} on the chassis", wcag(light_ring, band));
     }
 }

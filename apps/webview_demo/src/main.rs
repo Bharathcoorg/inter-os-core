@@ -3,6 +3,8 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use std::design::back_button;
+use std::design::monochrome;
 use std::design::viewport;
 use std::webview::InterWebView;
 use webview_demo::WebViewDemoApp;
@@ -16,6 +18,19 @@ use webview_demo::WebViewDemoApp;
 const W: usize = viewport::LOGICAL_WIDTH;
 const H: usize = viewport::LOGICAL_HEIGHT;
 
+/// The theme the back control is cut from: the dark half of the platform's
+/// monochrome ladder, because this app's band is dark.
+///
+/// WHY not the light one the rest of the fleet hands `pixel_for_theme`: the chip
+/// takes its ring, fill and ink from the theme it is given, and the light roles
+/// put a `#EFEFE9` plate with a `#0A0A0A` outline on this app's `#121212` band --
+/// a ring one hundredth of a step off the band it stands on, so the control
+/// reads as a lit panel rather than a button. The dark variant trades paper for
+/// ink: the plate lifts to `#232323` (1.19:1 over the band) and the ring and the
+/// chevron carry `#FAFAFA`, 17.95:1 against the band and 15.06:1 against the
+/// plate. All three are roles of one shipped theme; none is a colour here.
+const THEME: std::design::Theme = monochrome::THEME_DARK;
+
 /// The colour the page is set on, and the colour its chrome continues into.
 ///
 /// WHY repeated here: `InterWebView` paints its own container colour for every
@@ -26,8 +41,9 @@ const PAGE_BG: u32 = 0xFF121212;
 
 const _: () = assert!(W > 0 && H > W);
 
-/// One pixel of the demo's surface: the document's own pixel where the
-/// controller claims the position, and the page background everywhere else.
+/// One pixel of the demo's surface: the platform's back control where it stands,
+/// then the document's own pixel where the controller claims the position, and
+/// the page background everywhere else.
 ///
 /// WHY the app has to answer the rows the controller does not: the kernel only
 /// publishes a surface whose pixels have all been written, and
@@ -35,7 +51,15 @@ const _: () = assert!(W > 0 && H > W);
 /// `y .. y + h` of a 1440-row canvas. The rows outside it stay untouched, so the
 /// frame is never marked complete, `composite` skips the surface, and the demo
 /// shows nothing at all while logging that it presented a frame.
+///
+/// WHY the control is asked before the document: the webview band starts at row
+/// 84 and the control owns rows 56..104, so the top of the chip overlaps the
+/// document. A control that a page can paint over is a control that isn't there.
 fn demo_pixel(x: usize, y: usize, page: &InterWebView) -> u32 {
+    if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
+        return c;
+    }
+
     let px0 = page.x as usize;
     let py0 = page.y as usize;
     let px1 = px0 + page.w as usize;
@@ -106,6 +130,23 @@ pub extern "C" fn _start() -> ! {
 
         if events & std::EVENT_TOUCH_INPUT != 0 {
             while std::input_event_poll(&mut input).is_ok() {
+                if input.kind == 1 && back_button::contains(input.x as usize, input.y as usize) {
+                    // WHY answered before the controller and before the gesture
+                    // exit: a tap where the control is painted is the control's,
+                    // and the document underneath it cannot claim the point.
+                    if app.at_first_screen() {
+                        std::log("[WEBVIEW_DEMO] Back control pressed. Exiting to launcher.").ok();
+                        std::surface_destroy(surface).ok();
+                        std::exit_with_code(0);
+                    }
+                    if app.show_first_screen().is_ok() {
+                        std::log("[WEBVIEW_DEMO] Back control returned to the demo document.").ok();
+                        render_demo(surface, &app.webview);
+                        std::surface_flip().ok();
+                    }
+                    continue;
+                }
+
                 if input.kind == 4 || input.kind == 10 {
                     // Back gesture -> Exit application
                     std::surface_destroy(surface).ok();

@@ -1718,9 +1718,8 @@ pub const fn em_for_scale(scale: usize) -> u32 {
     // measuring the reference screens settles what those numbers are. On
     // the reference calculator the key labels stand fifteen pixels tall, the
     // title twenty-three and the result thirty-one, on a seven-hundred and
-    // twenty pixel screen. The document's own ranges are a caption of
-    // twelve to fourteen, a body of fifteen to eighteen and a section of
-    // twenty to twenty-four, so the numbers are cap heights.
+    // twenty pixel screen. Those numbers are cap heights, and the rungs are
+    // the band [`cap_for_scale`] documents now.
     //
     // A ladder written in font sizes drew every run a third smaller than
     // the document asks for, and an app that reserved the document's boxes
@@ -1735,18 +1734,36 @@ pub const fn em_for_scale(scale: usize) -> u32 {
 /// range per role, and a phone held at reading distance sits at the large end
 /// of it. The old rungs used the bottom of the body and section ranges, which
 /// left outline text and the 13px bitmap caption within a pixel or two of
-/// each other and flattened the hierarchy on every screen. Each value still
-/// falls inside the documented band, so the contract ranges are unchanged.
+/// each other and flattened the hierarchy on every screen.
 ///
-/// caption 13, body 18, section 24, title 32, heading 44, display 56, hero
+/// WHY the four lower rungs now sit above the range they were written in:
+/// a type scale only means something relative to the panel it is read on, and
+/// this one is read on a 720-pixel-wide panel. Measured as a share of the
+/// panel's own width, the rungs a person compares this device against are
+/// iOS's body at 3.00% (17pt of a 1206-wide panel, cap 36px), its footnote at
+/// 2.30%, its title3 at 3.54% and its title1 at 4.95%; Android's body-large at
+/// 2.77%, its label at 2.07%, and its 14sp body at 2.42%. The old ladder drew
+/// a body cap of 18 here -- 2.50%, i.e. between Android's 14sp and its
+/// body-large and 17% under iOS -- and a caption of 13, 1.81%, under every
+/// label either platform ships. So the smallest text on this device was
+/// smaller than the smallest text on a phone, which is what "the text is too
+/// small" measured. Each of the four lower rungs then moved to the top of the
+/// range its own role documents: caption 16 = 2.22%, body 21 = 2.92%, section
+/// 27 = 3.75%, title 35 = 4.86% -- each inside the band the two platforms
+/// actually occupy, and each still separated from its neighbour by more than
+/// the 1.15x a hierarchy needs to read as three sizes rather than two. The
+/// upper rungs are untouched: a heading of 44 is already 6.11% of the panel,
+/// above iOS's 34pt large title at 5.95%.
+///
+/// caption 16, body 21, section 27, title 35, heading 44, display 56, hero
 /// 76 -- with the hero rung above the display for a clock that is the whole
 /// point of a lock screen.
 pub const fn cap_for_scale(scale: usize) -> u32 {
     match scale {
-        1 => 13, // caption (12..=14)
-        2 => 18, // body (15..=18)
-        3 => 24, // card or section title (20..=24)
-        4 => 32, // title (28..=32)
+        1 => 16, // caption (15..=16)
+        2 => 21, // body (19..=21)
+        3 => 27, // card or section title (25..=27)
+        4 => 35, // title (33..=35)
         5 => 44, // page heading (36..=44)
         6 => 56, // display (48..=56)
         7 => 76, // hero

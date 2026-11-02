@@ -150,10 +150,12 @@ const POWER_H: usize = space::LG + VALUE_H + space::LG;
 
 /// Width of the Power entry pill.
 ///
-/// WHY it is content-derived: the 32 px power glyph, a gap, the measured width
-/// of "Power menu" at body scale (~132 px) and `space::XL` of padding inside each
-/// end. The literal is pinned by the textharness contract that measuring and
-/// rasterising agree.
+/// WHY it is content-derived: the 32 px power glyph, a gap, the room the value
+/// rung's own line needs for "Power menu", and `space::XL` of padding inside each
+/// end. That room is carried as the 132 literal rather than a `text::measure` call,
+/// pinned by the textharness contract that measuring and rasterising agree; the
+/// outline advance the run answers at the BODY rung is a couple of pixels wider
+/// than it today, and the pill's own padding absorbs the difference.
 const POWER_BTN_W: usize = ICON + space::MD + 132 + space::XL * 2;
 
 /// Home indicator, drawn at the foot of the surface.

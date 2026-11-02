@@ -25,6 +25,7 @@ use notes::theme::THEME;
 use interos_std::design::components;
 use interos_std::design::outline_text;
 use interos_std::design::scroll::ScrollState;
+use notes::chrome;
 use notes::keyboard::{self, KeyAction};
 use notes::library;
 pub use notes::{
@@ -74,6 +75,15 @@ const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 const SEARCH_Y0: usize = HEADER_TOP;
 const SEARCH_H: usize = 54;
 const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_H;
+
+/// The pill's own search icon, and the run beside it.
+///
+/// WHY they are pushed clear of the chip: the back control is painted over the
+/// pill's left end at the platform's rect, and a glyph authored inside that
+/// square is a picture nobody can see and a target nobody can hit. The pill
+/// itself keeps its width, so the row under it is untouched.
+const SEARCH_GLYPH_CX: usize = chrome::LABEL_X + 12;
+const SEARCH_TEXT_X: usize = chrome::LABEL_X + 30;
 
 /// The category chip row, 16 rows under the pill.
 const CHIP_Y0: usize = SEARCH_Y1 + 16;
@@ -803,7 +813,17 @@ fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
         return THEME.surface;
     }
 
-    // 2. View Mode Dispatch
+    // 2. The platform's back control, on the header row of both views.
+    //
+    // WHY here and not inside each view: the chip owns one rectangle on every
+    // screen this app draws, and the tap handler answers that same rectangle
+    // once. Two painters of one control is how the list came to have one and
+    // the editor came to have a different circle in its place.
+    if let Some(c) = chrome::back_pixel(x, y) {
+        return c;
+    }
+
+    // 3. View Mode Dispatch
     match state.view {
         ViewMode::List => render_notes_list(x, y, state),
         ViewMode::Editor => render_note_editor(x, y, state),
@@ -939,8 +959,8 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 return if state.search_active { THEME.primary } else { THEME.border };
             }
 
-            // Search Icon on Left
-            if let Some(c) = draw_search_glyph(x, y, 58, SEARCH_Y0 + SEARCH_H / 2, THEME.on_surface_variant) {
+            // Search Icon, right of the back control
+            if let Some(c) = draw_search_glyph(x, y, SEARCH_GLYPH_CX, SEARCH_Y0 + SEARCH_H / 2, THEME.on_surface_variant) {
                 return c;
             }
 
@@ -951,22 +971,22 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // bytes, which at scale 2 is wider than the pill's inner
                 // width, so the run has to be measured before it is drawn.
                 let mut q_buf = [0u8; 40];
-                let q_len = std::design::font::ellipsize(q, 2, 696 - 20 - 88, &mut q_buf);
+                let q_len = std::design::font::ellipsize(q, 2, 696 - 20 - SEARCH_TEXT_X, &mut q_buf);
                 let q = &q_buf[..q_len];
-                if let Some(c) = test_text(x, y, 88, SEARCH_Y0 + 14, 2, q, THEME.on_surface, THEME.surface_container, false) {
+                if let Some(c) = test_text(x, y, SEARCH_TEXT_X, SEARCH_Y0 + 14, 2, q, THEME.on_surface, THEME.surface_container, false) {
                     return c;
                 }
                 // Blinking cursor
                 if state.cursor_visible && state.search_active {
                     let cur_w = outline_text::drawn_advance(q, 2, None).unwrap_or_else(|| std::design::font::measure(q, 2));
-                    let cur_x = 88 + cur_w;
+                    let cur_x = SEARCH_TEXT_X + cur_w;
                     if x >= cur_x && x <= cur_x + 2 && y >= SEARCH_Y0 + 14 && y <= SEARCH_Y0 + 40 {
                         return THEME.primary;
                     }
                 }
             } else {
                 let hint = b"Search your notes...";
-                if let Some(c) = test_text(x, y, 88, SEARCH_Y0 + 14, 2, hint, THEME.on_surface_variant, THEME.surface_container, false) {
+                if let Some(c) = test_text(x, y, SEARCH_TEXT_X, SEARCH_Y0 + 14, 2, hint, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
             }
@@ -1386,13 +1406,8 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
     // --- A. Top Navigation Bar (y: 0..EDITOR_BAR_H) ---
     if y < EDITOR_BAR_H {
-        // Back Chevron on the toolbar's centre row
-        if in_circle(x, y, 50, EDITOR_TOOL_CY, 22) {
-            if let Some(c) = draw_chevron_left(x, y, 50, EDITOR_TOOL_CY, theme.title_ink) {
-                return c;
-            }
-            return theme.chip;
-        }
+        // The back control is painted by `render_pixel`, ahead of this bar, so
+        // the toolbar carries only the note's own tools and its status run.
 
         // Status metadata: "Saved", "Editing..." or "Not saved"
         // WHY three states: the old code derived "Saved" from the note's own
@@ -2006,6 +2021,26 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
         return TapAction::Exit;
     }
 
+    // 2. The platform's back control, before any row that shares its rect.
+    //
+    // WHY first: the list's search pill and the editor's toolbar both run
+    // under the chip's square, and whichever of them tested the point first
+    // took the tap -- which is how the control that is painted on the header
+    // row answered nothing at all.
+    if chrome::back_claims(ux, uy) {
+        if state.view == ViewMode::Editor {
+            state.sync_editor_to_note();
+            state.save_to_storage();
+            state.view = ViewMode::List;
+            state.sync_list_extent();
+            state.keyboard_visible = false;
+            state.swatch_picker_open = false;
+            return TapAction::Redraw;
+        }
+        std::log("[NOTES APP] Back control pressed at root. Exiting to launcher.").ok();
+        return TapAction::Exit;
+    }
+
     match state.view {
         ViewMode::List => {
             // Dismiss keyboard if tapped outside keyboard when keyboard is open
@@ -2156,17 +2191,6 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
         }
 
         ViewMode::Editor => {
-            // Top Bar: Back Chevron on the toolbar's centre row
-            if in_circle(ux, uy, 50, EDITOR_TOOL_CY, 24) {
-                state.sync_editor_to_note();
-                state.save_to_storage();
-                state.view = ViewMode::List;
-                state.sync_list_extent();
-                state.keyboard_visible = false;
-                state.swatch_picker_open = false;
-                return TapAction::Redraw;
-            }
-
             // Top Bar: Pin Toggle on the toolbar's centre row
             if in_circle(ux, uy, 520, EDITOR_TOOL_CY, 22) {
                 if let Some(note) = state.store.get_note_mut(state.selected_note_id) {

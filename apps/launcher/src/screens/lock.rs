@@ -8,14 +8,18 @@
 //! `launcher::text`, never from literals local to this file.
 //!
 //! WHY the type scales below are derived rather than read from `theme::type_scale`:
-//! they are this surface's own measured ems, and the reference panel fixes them
-//! independently of the shell's ladder. Each `*_SCALE` is the ladder rung whose em
-//! is that measured em -- `font::em_for_scale(LOCK_CLOCK_SCALE) == LOCK_CLOCK_EM`
-//! exactly, and the date's 28 sits between rung 2's 25 and rung 3's 34 and is taken
-//! at the rung below, which the gates at the foot of this block both assert. The rung
-//! is what the refusal path rasterises at, so a rung that is not the run's em draws
-//! the reference's text at a different size in that one branch. `theme::type_scale`
-//! still sizes every other surface in the shell.
+//! this surface's runs are sized by ems measured on the reference panel, and the
+//! gates below are what prove each of those ems is still a rung on the shell's
+//! ladder. Each `*_SCALE` is that rung.
+//! `font::em_for_scale(LOCK_CLOCK_SCALE) == LOCK_CLOCK_EM` exactly -- the hero's
+//! 107 is the reference's own measurement and rung 7 has never moved -- while
+//! `LOCK_DATE_EM` is rung 2's em derived, because the reference's remembered 28 was
+//! the body size the ladder stood at before its lower rungs rose, and rung 2's own
+//! em is now 30. The rule is unchanged either way: an em names the run, the rung
+//! names the largest one that does not overshoot it, and the two are the same size.
+//! The rung is what the refusal path rasterises at, so a rung that is not the run's
+//! em draws the reference's text at a different size in that one branch.
+//! `theme::type_scale` still sizes every other surface in the shell.
 //!
 //! WHY there is a [`Frame`] and a one-slot memo for it: this renderer is called
 //! once per pixel -- 1,036,800 times a frame -- through a function pointer the
@@ -81,9 +85,9 @@ const LOCK_STATUS_TIME_X: usize = LOCK_CONTENT_X;
 /// to draw the same five bytes at x 40 y 27 at scale 1 while the lock painter
 /// drew them at x 40 y 12 at scale 2 -- one clock, two cap heights, fifteen rows
 /// apart, in the one slot the module header says cannot be set twice. The lock's
-/// own placement is the one that reads: at y 27 the scale-1 run inks its 13 px cap
-/// across rows 32..=44, centred on 38, while the instrument marks it shares the
-/// band with occupy 14..=34, centred on 24, so the pad's clock sat fourteen rows
+/// own placement is the one that reads: at y 27 the scale-1 run inks its 15 px cap
+/// across rows 34..=48, centred on 41, while the instrument marks it shares the
+/// band with occupy 14..=34, centred on 24, so the pad's clock sat seventeen rows
 /// below its own neighbours.
 const LOCK_STATUS_TIME_Y: usize = 12;
 const LOCK_STATUS_TIME_SCALE: usize = 2;
@@ -99,12 +103,21 @@ const LOCK_STATUS_TIME_SCALE: usize = 2;
 /// line box the refusal path's painter reserves for a rung-2 run, and that
 /// painter puts its baseline `ascent_for_scale(2)` rows below whatever origin it
 /// is handed. Deriving it keeps that path's box on the same rows the reference-
-/// placed run occupies (the reference em 28 ascends 29 rows, so its own box starts
-/// three rows higher at 75 -- the two branches are three rows apart by the
-/// reference's own rounding, and each contains its own ink).
+/// placed run occupies: the em the reference-placed run is drawn at is the rung's
+/// own -- the first gate below asserts the equality -- so both branches ascend the
+/// same 31 rows and their boxes start on the same row, `LOCK_DATE_BASELINE` minus
+/// that ascent.
+///
+/// WHY `LOCK_DATE_EM` is derived and not the reference panel's remembered 28: the
+/// 28 was the body size the ladder stood at, measured off the reference, and the
+/// ladder has since raised the body rung. Keeping the 28 would have meant either
+/// dropping the date's run back to rung 1 to stay under it -- smaller text, the
+/// one thing this campaign refuses -- or letting the refusal path rasterise a 30-em
+/// run inside a box the reference-placed path never reaches. The em is the rung's,
+/// so the two branches are one size, exactly as the clock's 107 is rung 7's.
 pub const LOCK_DATE_Y: usize = LOCK_DATE_BASELINE - launcher::font::ascent_for_scale(LOCK_DATE_SCALE);
 pub const LOCK_DATE_SCALE: usize = 2;
-pub const LOCK_DATE_EM: u32 = 28;
+pub const LOCK_DATE_EM: u32 = launcher::font::em_for_scale(LOCK_DATE_SCALE);
 pub const LOCK_DATE_BASELINE: usize = 104;
 
 /// The hero clock: the reference panel's own 107 px em, which is a 76 px cap and
@@ -131,8 +144,8 @@ pub const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
 /// and lets the face solve its own baseline, and every rung on this surface reaches
 /// `interos_std::design::monochrome::text_px` -- the outline face -- whose box is
 /// the typeface's ascent plus descent at the rung's em. `text::line_height` answers
-/// the 16x24 bitmap cell instead: 48 rows at rung 2 against the 32 the face inks,
-/// 24 at rung 1 against 22, 120 at the clock's old rung against the 80 that rung
+/// the 16x24 bitmap cell instead: 48 rows at rung 2 against the 36 the face inks,
+/// 24 at rung 1 against 27, 120 at the clock's old rung against the 80 that rung
 /// actually painted. Gating on it handed the rasteriser rows outside its own run,
 /// let a band claim a height the ink never had, and is the reason the hint's box
 /// reached four rows into the control discs below it.
@@ -149,26 +162,64 @@ const HINT_BOX_H: usize = lh(LOCK_HINT_SCALE);
 const PIN_HEADING_BOX_H: usize = lh(PIN_HEADING_SCALE);
 const PIN_SUBHEADING_BOX_H: usize = lh(PIN_SUBHEADING_SCALE);
 
-/// The one box on this surface that is deliberately the *cell* height: the control
-/// captions are gated for `test_text`, and at the caption rung that funnel tries
-/// the outline face first (22 rows) and falls through to the bitmap pen walk
-/// (`text::line_height(1)` = 24 rows) for a run the outline face declines. The
-/// gate has to contain both branches, so it takes the wider of the two.
-const LOCK_NA_BOX_H: usize = text::line_height(type_scale::CAPTION);
+/// The one box on this surface that has to be the *union* of the two faces: the control
+/// captions are gated for `test_text`, and at the caption rung that funnel tries the
+/// outline face first (`lh(1)` = 27 rows) and falls through to the bitmap pen walk
+/// (`text::line_height(1)` = 24 rows) for a run the outline face declines. The gate has
+/// to contain both branches, so it takes the wider of the two -- which since the rungs
+/// rose is the outline face, not the cell. Taking the union rather than `lh` alone is
+/// deliberate: which side wins is the ladder's decision, and this box is the extent a
+/// pixel test trusts.
+const LOCK_NA_BOX_H: usize =
+    amax(text::line_height(type_scale::CAPTION), lh(type_scale::CAPTION));
 
 /// Truth gates: the ladder every box above trusts, and the fact that each run
 /// closes inside the band that claims to contain it.
 const _: () = assert!(launcher::font::em_for_scale(LOCK_CLOCK_SCALE) == LOCK_CLOCK_EM);
-const _: () = assert!(launcher::font::em_for_scale(LOCK_DATE_SCALE) <= LOCK_DATE_EM);
+/// WHY this asserts equality and not the `<=` it carried: `<=` allowed the two
+/// branches a run can take to sit at different sizes, which is exactly the drift
+/// the reference-em measurement was guarding -- it only held while the body rung's
+/// em and the reference's em happened to be the same number. With the em derived
+/// from the rung there is no room left between them, so the gate now says what the
+/// surface does: the date line is one size whichever face paints it.
+const _: () = assert!(launcher::font::em_for_scale(LOCK_DATE_SCALE) == LOCK_DATE_EM);
 const _: () = assert!(
     launcher::font::em_for_scale(LOCK_DATE_SCALE + 1) > LOCK_DATE_EM,
-    "the date's rung must be the largest one that does not exceed the reference em"
+    "the date's rung must be the largest one that does not exceed the run's own em"
 );
-const _: () = assert!(STATUS_TIME_BOX_H == 32 && DATE_BOX_H == 32 && CLOCK_BOX_H == 140);
-const _: () = assert!(HINT_BOX_H == 32 && PIN_HEADING_BOX_H == 32 && PIN_SUBHEADING_BOX_H == 22);
+/// WHY these assert the ladder's own arithmetic and not the row counts the boxes used to
+/// pin (32, 140, 22): a pinned count is a second copy of the ladder, and the ladder has
+/// just moved once. What this surface depends on is that each reserved box *is* its
+/// rung's line box -- so the band gates below measure the rungs and not remembered
+/// rows -- and that the rungs still stand in the order the design reads them in.
 const _: () = assert!(
-    LOCK_NA_BOX_H == 24 && launcher::font::line_height(type_scale::CAPTION) == 22,
-    "the caption box is the bitmap cell, which is two rows taller than the outline box it gates"
+    STATUS_TIME_BOX_H == launcher::font::line_height(LOCK_STATUS_TIME_SCALE)
+        && DATE_BOX_H == launcher::font::line_height(LOCK_DATE_SCALE)
+        && CLOCK_BOX_H == launcher::font::line_height(LOCK_CLOCK_SCALE),
+    "the status, date and clock boxes are their rungs' own line boxes",
+);
+const _: () = assert!(
+    HINT_BOX_H == launcher::font::line_height(LOCK_HINT_SCALE)
+        && PIN_HEADING_BOX_H == launcher::font::line_height(PIN_HEADING_SCALE)
+        && PIN_SUBHEADING_BOX_H == launcher::font::line_height(PIN_SUBHEADING_SCALE),
+    "the hint and the PIN headings are their rungs' own line boxes",
+);
+const _: () = assert!(
+    STATUS_TIME_BOX_H == DATE_BOX_H
+        && DATE_BOX_H == HINT_BOX_H
+        && HINT_BOX_H == PIN_HEADING_BOX_H,
+    "the status time, the date, the hint and the PIN heading are set at one rung and so reserve one box",
+);
+const _: () = assert!(
+    CLOCK_BOX_H > PIN_HEADING_BOX_H && PIN_HEADING_BOX_H > PIN_SUBHEADING_BOX_H,
+    "the hierarchy still reads: the hero clock is the largest box on the panel, the PIN caption the smallest rung it is stacked over"
+);
+/// The caption gate holds whichever face the funnel answers with, so it has to name both
+/// branches rather than the cell alone.
+const _: () = assert!(
+    LOCK_NA_BOX_H >= text::line_height(type_scale::CAPTION)
+        && LOCK_NA_BOX_H >= launcher::font::line_height(type_scale::CAPTION),
+    "the caption box must contain both faces its funnel can draw with"
 );
 const _: () = assert!(LOCK_STATUS_TIME_Y + STATUS_TIME_BOX_H <= LOCK_STATUS_BAND);
 const _: () = assert!(LOCK_DATE_Y + DATE_BOX_H <= LOCK_CLOCK_Y);
@@ -677,8 +728,10 @@ fn lock_button_disc(x: usize, y: usize, cx: i32, bg: u32) -> Option<u32> {
 /// WHY the position is still derived rather than typed: the label has to clear the
 /// control it belongs to and the home indicator, and both of those move when the
 /// disc moves or the type scale changes. It is centred on the disc, held one step
-/// below it, capped one step above the indicator, and clamped inside the surface,
-/// so it cannot end up off the edge or under the indicator whichever of them grows.
+/// below it, capped so that the whole of its own box clears the indicator by one
+/// step, and clamped inside the surface, so it cannot end up off the edge or under
+/// the indicator whichever of them grows -- which is why the cap measures the box
+/// and not the gap the ladder used to need.
 ///
 /// WHY the width it centres on is `text::measure` and not the rasteriser's cell:
 /// `measure` is the documented metric every other surface centres with, and it is
@@ -693,7 +746,7 @@ fn lock_na_origin() -> (usize, usize) {
         .saturating_sub(w / 2)
         .clamp(space::SM, W.saturating_sub(w + space::SM));
     let y = (LOCK_BTN_CY as usize + LOCK_BTN_R as usize + space::MD)
-        .min(LOCK_PILL_Y.saturating_sub(space::MD));
+        .min(LOCK_PILL_Y.saturating_sub(LOCK_NA_BOX_H + space::XS));
     (x, y)
 }
 
@@ -764,8 +817,8 @@ struct Frame {
     ///
     /// WHY it is the outline box and not the cell: the rung is 2, which
     /// `crate::test_text_aa` sends to the outline face, so the old
-    /// `text::line_height(2)` gated on 48 rows for the 32 the face inks -- and
-    /// the extra 16 rows were the band's own floor, not the run's.
+    /// `text::line_height(2)` gated on 48 rows for the 36 the face inks -- and
+    /// the extra 12 rows were the band's own floor, not the run's.
     status_h: usize,
     /// The date line, left-aligned on `LOCK_CONTENT_X`.
     date: Rect,
@@ -1141,18 +1194,18 @@ const PIN_DIGIT_BOLD: bool = true;
 /// The `CLR` label's scale.
 ///
 /// WHY 1: hierarchy, not fit. Measured on the committed tables the label inks
-/// 27 px wide at that rung, 13 px of cap against the figures' 68, and the disc's
-/// chord across its middle is 96 px, so it clears the rim by 34 px either side --
-/// and rung 2 would fit too, at 38 px of ink. But rung 2 is an 18 px cap, exactly
+/// 31 px wide at that rung, 15 px of cap against the figures' 68, and the disc's
+/// chord across its middle is 96 px, so it clears the rim by 32 px either side --
+/// and rung 2 would fit too, at 42 px of ink. But rung 2 is a 20 px cap, exactly
 /// the cap the prompt above the keypad carries, and a pad whose key label matches
 /// its prompt has lost the three levels it is built on: figures, prompt, caption.
 ///
 /// WHY the box is centred on `text::measure` and sits a few pixels left of the
 /// disc: at the caption rung `measure` walks the bitmap cell and answers 38 px,
-/// while `test_text_aa` rasterises the outline face, which advances 27. That
+/// while `test_text_aa` rasterises the outline face, which advances 31. That
 /// disagreement is `text::advance`'s scale-1 branch, not this surface's, and the
 /// same mismatch is documented at the pad's sub-prompt; centring on a hand-picked
-/// 27 here would be exactly wrong the moment the funnel is unified.
+/// 31 here would be exactly wrong the moment the funnel is unified.
 ///
 /// The numbers this constant's note used to quote (102 / 90 / 45 px against a
 /// 90 px chord) were measured against the pre-condensing fixed 8x8 face, which
@@ -1283,13 +1336,14 @@ const PIN_DIGIT_HALF_W: usize = amax(
 /// the ink on, and the fact that the whole ink box clears the drawn -- and
 /// tappable -- disc at its worst corner.
 ///
-/// WHY the second one is the finding: at `pin_face_y`'s answer for scale 4, which
-/// is `ascent_for_scale(4) - cap_for_scale(4)/2` = 47 - 16 = 31 rows above the
-/// centre, the cell's 72-row ink ran from `cy - 19` to `cy + 52` -- 4 rows past
-/// the key's own `cy + PIN_KEY_BOX` gate and 4 rows past the disc's radius, so
-/// every figure on the pad was drawn with its feet sawed off: the overshoot rows
-/// of 0/2/3/5/6/8/9 and the whole flat foot of 1/4/7. The 48 this derives puts the
-/// ink at `cy - 36 ..= cy + 35`, inside the rim on every row.
+/// WHY the second one is the finding: `pin_face_y` answers scale 4 as
+/// `ascent_for_scale(4) - cap_for_scale(4)/2` = 50 - 17 = 33 rows above the centre,
+/// and the cell's 72-row ink handed that origin runs from `cy - 21` to `cy + 50` --
+/// level with the key's own `cy + PIN_KEY_BOX` gate and two rows past the disc's
+/// radius, so its last rows fall outside the drawn circle: the overshoot rows of
+/// 0/2/3/5/6/8/9 and the whole flat foot of 1/4/7. That is the feet-sawed-off result
+/// the outline metric left on every figure when this run was centred with it. The 48
+/// this derives puts the ink at `cy - 36 ..= cy + 35`, inside the rim on every row.
 const _: () = assert!(BOLD_FIG_TOP == 3 && BOLD_FIG_BOTTOM == 20 && PIN_DIGIT_FACE_OFF == 48);
 const _: () = assert!(BOLD_FIG_LEFT == 1 && BOLD_FIG_RIGHT == 9 && BOLD_FIG_ADV == 48);
 const _: () = assert!(
@@ -1427,7 +1481,7 @@ fn pin_key_face(
         // of pure ink with a hard edge and nothing between the ink and the disc.
         //
         // WHY this is the right place to want hard edges and the header above it
-        // is not: the header is rung 2 -- an 18 px cap in a 32-row line box --
+        // is not: the header is rung 2 -- a 20 px cap in a 36-row line box --
         // and it is anti-aliased, where coverage buys real curve smoothing for a
         // line of type read once. The figure is 17 cell rows of cap magnified 4x
         // (68 px, 72 with the round figures' overshoot), where the same coverage
@@ -1600,17 +1654,17 @@ fn pin_messages(state: &LauncherState) -> (&'static [u8], &'static [u8]) {
     }
 }
 
-/// The prompt's scale: rung 2, i.e. an 18 px cap in a 32-row line box.
+/// The prompt's scale: rung 2, i.e. a 20 px cap in a 36-row line box.
 ///
 /// WHY 2: it is the line the user reads before every keystroke, and it is the
 /// shell's own body rung. Fit is not what fixes it: the widest of the strings
-/// [`pin_messages`] can return -- "Confirm Device PIN", 181 px of the surface's
-/// 720 at this rung -- clears both edges by 269 px, and even at rung 3 (250 px) it
-/// would clear them by 235. What would break is the hierarchy: the figures are a
-/// 68 px cap and the sub-prompt a 13 px one, and this line has to sit between them
+/// [`pin_messages`] can return is a little over a quarter of the 720 px panel at this
+/// rung and would still fit a rung up, so nothing here is chosen to make it fit.
+/// What would break is the hierarchy: the figures are a
+/// 68 px cap and the sub-prompt a 15 px one, and this line has to sit between them
 /// rather than beside either.
 const PIN_HEADING_SCALE: usize = 2;
-/// The sub-prompt's scale: rung 1, i.e. a 13 px cap in a 22-row line box -- one
+/// The sub-prompt's scale: rung 1, i.e. a 15 px cap in a 27-row line box -- one
 /// rung below the prompt and three below the figures, which is the ladder the pad
 /// reads down: figures, then prompt, then sub-prompt, then the entry dots.
 const PIN_SUBHEADING_SCALE: usize = 1;
@@ -1619,20 +1673,24 @@ const PIN_SUBHEADING_SCALE: usize = 1;
 /// WHY these two numbers and not the `250..295` and `300..330` row windows the
 /// pixel function used to gate on: those windows were typed for the old fixed 8x8
 /// cell, in which a run's ink began on the cell's very first row, and neither edge
-/// answers to a run any more -- `250` sits five rows above the 32-row box a
-/// rung-2 run occupies from 255, and `295` sits eight rows below where that box
+/// answers to a run any more -- `250` sits five rows above the 36-row box a
+/// rung-2 run occupies from 255, and `295` sits four rows below where that box
 /// closes.
 ///
-/// WHY that survived: both windows were *wider* than the runs they gated -- 45
-/// rows for a 32-row box and 30 for a 22-row one -- so nothing was ever clipped,
-/// and the 13 and 8 spare rows only cost the rasteriser calls that answered None.
-/// The real exposure was the overlap: `250..295` starts five rows above the run it
-/// gates and `300..330` ends three rows below its own, so a longer caption or one
-/// rung up would have walked into its neighbour's window with neither gate able to
-/// say so. A run is now gated on `Rect::contains` over the box `lh` answers for
-/// its rung, which is the face's own box rather than a remembered number, so the
-/// window follows the next typeface and the next scale by construction. Nothing
-/// moves on screen today; the slack is gone.
+/// WHY that survived: on the ladder of the day both windows were *wider* than the
+/// runs they gated -- 45 rows for a 32-row box and 30 for a 22-row one -- so
+/// nothing was ever clipped, and the 13 and 8 spare rows only cost the rasteriser
+/// calls that answered None. That is exactly the reasoning a window cannot carry:
+/// the rungs have since risen, and a window remembered beside a box derived from
+/// the ladder drifts away from it on the next ladder change -- the rung-1 box now
+/// closes two rows *past* `330`, which would have clipped a caption the window
+/// still claimed to contain. The real exposure was the overlap: `250..295` starts
+/// five rows above the run it gates and `300..330` ran past its own, so a longer
+/// caption or one rung up would have walked into its neighbour's window with
+/// neither gate able to say so. A run is now gated on `Rect::contains` over the box
+/// `lh` answers for its rung, which is the face's own box rather than a remembered
+/// number, so the window follows the next typeface and the next scale by
+/// construction. Nothing moves on screen today; the slack is gone.
 const PIN_HEADING_Y: usize = 255;
 const PIN_SUBHEADING_Y: usize = 305;
 
@@ -1673,7 +1731,7 @@ fn lock_pin_pad_pixel(
             // WHY the same gated box as the lock surface's own status clock and not
             // an open band test: the run is `STATUS_TIME_BOX_H` rows -- the outline
             // box of the rung this path paints at, asserted to close inside the
-            // band -- and nothing else, so the 56-row band hands the rasteriser 24
+            // band -- and nothing else, so the 56-row band hands the rasteriser 20
             // rows it can never ink.
             if y >= LOCK_STATUS_TIME_Y && y < LOCK_STATUS_TIME_Y + f.status_h {
                 if let Some(c) = test_text_aa(

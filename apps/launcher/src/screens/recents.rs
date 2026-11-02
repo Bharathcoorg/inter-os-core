@@ -57,7 +57,7 @@ pub const CLOSE_ALL_H: usize = 52;
 
 // --- Line-box geometry, derived from the type ladder -----------------------
 // WHY these are derived and not the old per-pixel literals: the card painted its
-// title inside a 26-row band while a BODY run reserves 32 on the outline face, so
+// title inside a 26-row band while a BODY run reserves 36 on the outline face, so
 // every title with a descender ('p', 'g', 'y') lost its tail to the band, and it
 // started the state line at a stride of 28 -- inside the title's own box. The
 // "Clear All" label was centred against a remembered offset rather than its line
@@ -74,9 +74,29 @@ const CARD_NAME_TOP: usize = 24;
 const CARD_NAME_CAP: usize = 32;
 /// Inset from a card's top to the state line: below the title's whole box.
 const CARD_STATE_TOP: usize = CARD_NAME_TOP + CARD_NAME_BOX_H;
+/// Rows the card keeps between the bottom of its state line and the top of the
+/// snapshot well.
+///
+/// WHY named: the well's top was the literal `84` in both the gate below and the
+/// painter's `card_y + 84`, which read as the state line's extent even though it was
+/// that extent plus this gap. The BODY rung grew, the gap did not, and the two copies
+/// of the number could no longer both be true.
+const CARD_WELL_GAP: usize = 4;
+/// Inset from a card's top to the snapshot well: the whole text stack plus the gap.
+const CARD_WELL_TOP: usize = CARD_STATE_TOP + CARD_STATE_BOX_H + CARD_WELL_GAP;
+/// Inset from a card's bottom to the well, so the snapshot is centred in the room the
+/// card has left under the text rather than in the card itself.
+const CARD_WELL_BOTTOM: usize = 20;
 const _: () = assert!(
-    CARD_STATE_TOP + CARD_STATE_BOX_H < 84,
+    CARD_STATE_TOP + CARD_STATE_BOX_H < CARD_WELL_TOP,
     "the card's title and state lines must sit above the snapshot well",
+);
+/// WHY the second gate is about the snapshot and not the text: the well's whole purpose
+/// is to hold a 360x720 frame, and a rung that pushed the well down by more than the
+/// slack below it would stop the frame fitting rather than stop it colliding.
+const _: () = assert!(
+    CARD_WELL_TOP + CARD_WELL_BOTTOM + SNAPSHOT_H <= CARD_H,
+    "the snapshot well must still hold a whole frame after the text stack moved it",
 );
 
 /// Inset from a card's left edge to the column its title and state lines share.
@@ -111,7 +131,7 @@ const EMPTY_TITLE_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
 
 // --- Header geometry --------------------------------------------------------
 // WHY the count line is derived from the title above it: the title is a TITLE run
-// and reserves 59 rows from its box top, but the count line started at a
+// and reserves 63 rows from its box top, but the count line started at a
 // remembered 112 -- eleven rows inside the title's own box. Nothing collided on
 // the day this was written only because the one descender in "Recent Apps" lands
 // to the right of where "2 active tasks" happens to end, so a longer count, a
@@ -808,7 +828,12 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // E. Live Snapshot Preview Well
         let snap_x = card_x + 20 + ((card_w - 40 - SNAPSHOT_W as i32) / 2);
-        let snap_y = card_y + 84 + ((card_h - 104 - SNAPSHOT_H as i32) / 2);
+        // WHY derived from the text stack: `84` and `104` were the well's two insets
+        // remembered as numbers, and `84` was also the top the gate above checked the
+        // title and state lines against. The well is centred between the bottom of that
+        // stack and the bottom inset, so the rungs move it and nothing else has to.
+        let snap_y = card_y + CARD_WELL_TOP as i32
+            + ((card_h - (CARD_WELL_TOP + CARD_WELL_BOTTOM) as i32 - SNAPSHOT_H as i32) / 2);
         let snap_w = SNAPSHOT_W as i32;
         let snap_h = SNAPSHOT_H as i32;
 

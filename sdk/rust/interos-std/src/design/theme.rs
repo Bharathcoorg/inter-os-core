@@ -552,6 +552,19 @@ pub struct Theme {
     /// Secondary ink: captions, metadata, units.
     pub on_surface_variant: u32,
     /// The least prominent ink: a subtitle, a unit, a disabled label.
+    ///
+    /// WHY these three are one ladder and not three greys picked in three
+    /// places: a reader tells two rungs apart only if they differ, and a rung
+    /// that is not legible is not a rung. So every ink here has to clear the
+    /// 4.5:1 the repo's contrast contract demands of text against every
+    /// surface rung in its own theme -- the page, the card, the raised chip
+    /// and the sunken well -- while staying at least 1.3:1 away from the ink
+    /// above it. `Theme::LIGHT`'s muted used to be `#6B7280`, which read
+    /// 3.94:1 on the sunken well; `Theme::DARK`'s used to be `#8A9199`,
+    /// 4.05:1 on the raised chip, and only 1.21:1 below its own secondary, so
+    /// the two lower rungs were one grey. Both moved for that reason, and
+    /// `every_ink_rung_clears_wcag_aa_on_every_surface_rung` in
+    /// `design::monochrome` holds the same rule for the platform's own theme.
     pub muted: u32,
     /// Ink on a [`Theme::primary`] fill.
     pub on_primary: u32,
@@ -664,7 +677,7 @@ impl Theme {
 
         on_surface: color::TEXT,
         on_surface_variant: color::TEXT_MUTED,
-        muted: 0xFF6B7280,
+        muted: 0xFF60_6773,
         on_primary: 0xFFFFFFFF,
         on_primary_container: 0xFF0A2A5E,
         ink_on_light: 0xFF111214,
@@ -718,8 +731,8 @@ impl Theme {
         overlay_border: color::DARK_BORDER,
 
         on_surface: color::DARK_TEXT,
-        on_surface_variant: color::DARK_TEXT_MUTED,
-        muted: 0xFF8A9199,
+        on_surface_variant: 0xFFB4BECD,
+        muted: 0xFF959DA5,
         on_primary: 0xFF111214,
         on_primary_container: 0xFFD6E6FF,
         ink_on_light: 0xFF111214,
@@ -789,7 +802,7 @@ impl Theme {
 
         on_surface: 0xFFFFFFFF,
         on_surface_variant: 0xFFB6B6B6,
-        muted: 0xFF7C7C7C,
+        muted: 0xFF868686,
         on_primary: 0xFF000000,
         on_primary_container: 0xFFFFFFFF,
         ink_on_light: 0xFF111214,

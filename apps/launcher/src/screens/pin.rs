@@ -37,7 +37,7 @@ const KEY_RADIUS: usize = 18;
 /// and lets the face solve its own baseline, and at rung 2 and above that face is
 /// the outline one, whose box is the typeface's ascent plus descent at the rung's
 /// em. `text::line_height` answers the 16x24 bitmap cell instead -- 48 rows for a
-/// rung-2 run that inks 32, 72 for the rung-3 prompt that inks 44 -- so centring or
+/// rung-2 run that inks 36, 72 for the rung-3 prompt that inks 48 -- so centring or
 /// striding on it puts the ink off the middle of the box the surface reserved for
 /// it.
 const fn lh(scale: usize) -> usize {
@@ -65,12 +65,13 @@ const ACTION_LABEL_SCALE: usize = 1;
 
 /// Rows a rung-1 run can ink, which is the rung every caption on this surface is
 /// set at: the union of the two faces the funnel answers with. The outline box is
-/// `lh(1)` = 22 rows; when the outline face declines a glyph the run falls back to
+/// `lh(1)` = 27 rows; when the outline face declines a glyph the run falls back to
 /// the bitmap cell at the nearest whole magnification its cap can reach, which is
 /// one -- `text::line_height(1)` = `GLYPH_H * 1` = 24 rows. A repaint band narrower
-/// than that leaves the tail of a fallback run on screen; at rung 2 and above the
-/// outline box is already wider than the cell the fallback picks, so `lh` alone is
-/// the union.
+/// than either leaves the tail of that run on screen. Which of the two is wider is
+/// a property of the ladder and not of this surface -- since the rungs rose it is the
+/// outline box, and at rung 2 and above it always was -- so the union is spelled out
+/// here rather than `lh` alone, and the gate below names which side wins.
 const CAPTION_BOX_H: usize = rows_max(lh(STATUS_SCALE), text::GLYPH_H * STATUS_SCALE);
 /// The prompt's and the figures' boxes, which need no union for the reason above.
 const PROMPT_BOX_H: usize = lh(PROMPT_SCALE);
@@ -80,10 +81,11 @@ const KEY_DIGIT_BOX_H: usize = lh(KEY_DIGIT_SCALE);
 /// the key, exactly the rule `text::cap_centred_top` applies for rung 2 and above,
 /// solved from the ladder -- `KEY_H/2 + cap/2 - ascent`.
 ///
-/// WHY not the `36` this carried: 36 is `(KEY_H - KEY_DIGIT_BOX_H)/2`, which
-/// centres the *line box* -- 6 rows of descent above and below a cap that is only
-/// 18 px tall -- and drops the figure a row below the key's middle. The figures
-/// move one row up; the keys, their radius and their hit test do not move.
+/// WHY not a line-box centring: `(KEY_H - KEY_DIGIT_BOX_H)/2` answers 34, and what it
+/// centres is the *line box* -- 29 rows of ascent above the origin against only 7 of
+/// descent below it, wrapped round a cap that is 20 px tall -- so the cap box's middle
+/// lands below the key's middle. The cap-box rule above answers 33, a row up. The
+/// keys, their radius and their hit test do not move.
 const KEY_DIGIT_Y: usize = KEY_H / 2
     + launcher::font::cap_for_scale(KEY_DIGIT_SCALE) as usize / 2
     - launcher::font::ascent_for_scale(KEY_DIGIT_SCALE);
@@ -97,8 +99,10 @@ const UNLOCK_X: usize = 130;
 const UNLOCK_W: usize = 300;
 const DEL_X: usize = 490;
 const DEL_W: usize = 100;
-/// The action labels' row: their outline box centred on the button row, which is
-/// the same row the literal `1070` answered.
+/// The action labels' row: their outline box centred on the button row. It is the row
+/// the literal `1070` answered while the rung-1 box was 22 rows; the box is 27, so the
+/// centre has moved two rows up and the gate at the bottom of this file re-checks that
+/// the taller box still closes inside the button.
 const ACTION_LABEL_Y: usize = ACTION_Y + ACTION_H / 2 - lh(ACTION_LABEL_SCALE) / 2;
 
 /// The status clock's origin and rung, named so the band below and the run it
@@ -117,7 +121,7 @@ const PROMPT_X: usize = 48;
 /// WHY these three are remembered numbers and not `text::center_x` results: every
 /// run set from them is at rung 1, and at rung 1 `text::measure` walks the bitmap
 /// cell while `test_text_aa` rasterises the outline face -- "Enter your device PIN"
-/// measures 202 px and inks 142, "Incorrect PIN" measures 124 and inks 88. A
+/// measures 202 px and inks 165, "Incorrect PIN" measures 124 and inks 103. A
 /// centring done here would therefore be wrong by half the difference, and wrong in
 /// the direction that depends on the string: the longer the caption, the further
 /// left its ink would sit of the middle. The literal is the lesser defect until
@@ -129,7 +133,16 @@ const UNLOCK_X_LABEL: usize = 238;
 
 /// Truth gates: what each ladder rung answers for these boxes, and that every run
 /// on this surface closes inside the room the layout gives it.
-const _: () = assert!(CAPTION_BOX_H == 24 && lh(1) == 22);
+///
+/// WHY the caption gate is a comparison against the two faces and not the rows each
+/// one answers: the union is only the outline box while the outline box is the wider
+/// face, and which of them wins is the ladder's business. Stating it as an order keeps
+/// the gate honest when the rungs move again -- and it fails loudly, in the one place
+/// a fallback run could be clipped, if the ladder ever drops below the bitmap cell.
+const _: () = assert!(
+    CAPTION_BOX_H == lh(STATUS_SCALE) && lh(STATUS_SCALE) >= text::GLYPH_H * STATUS_SCALE,
+    "the caption band must hold both faces; the outline box is only the union while it is the wider",
+);
 /// WHY: `CAPTION_BOX_H` is measured once, for `STATUS_SCALE`, and the status clock
 /// and the two action labels reserve it as though it were theirs. It is only theirs
 /// while all four are the same rung.
@@ -137,8 +150,21 @@ const _: () = assert!(
     STATUS_TIME_SCALE == STATUS_SCALE && ACTION_LABEL_SCALE == STATUS_SCALE,
     "the captions on this surface share one rung, and so one box"
 );
-const _: () = assert!(PROMPT_BOX_H == 44 && KEY_DIGIT_BOX_H == 32);
-const _: () = assert!(KEY_DIGIT_Y == 35);
+/// The prompt and the figures reserve their rung's own outline box, so these gates
+/// track the ladder instead of pinning it: a rung that moves moves the box with it.
+const _: () = assert!(
+    PROMPT_BOX_H == launcher::font::line_height(PROMPT_SCALE)
+        && KEY_DIGIT_BOX_H == launcher::font::line_height(KEY_DIGIT_SCALE),
+    "the prompt and the figures reserve the ladder's own boxes for their rungs",
+);
+/// The figures' row is the cap box centred on the key, restated as the invariant that
+/// defines it -- baseline at the key's middle plus half the cap -- rather than the row
+/// number it currently happens to answer.
+const _: () = assert!(
+    KEY_DIGIT_Y + launcher::font::ascent_for_scale(KEY_DIGIT_SCALE)
+        == KEY_H / 2 + launcher::font::cap_for_scale(KEY_DIGIT_SCALE) as usize / 2,
+    "the figure's baseline is the key's middle plus half the cap, not the line box's middle",
+);
 const _: () = assert!(STATUS_TIME_Y + CAPTION_BOX_H <= STATUS_BAR_HEIGHT);
 const _: () = assert!(PROMPT_Y + PROMPT_BOX_H <= DOT_Y - DOT_R);
 const _: () = assert!(DOT_Y + DOT_R + 1 <= STATUS_Y);
@@ -187,12 +213,12 @@ pub fn entry_band() -> (usize, usize) {
     /// WHY the band is what it is: the run's box is the outline face's, solved from
     /// the rung the caller names -- `baseline - ascent` to `baseline + descent`,
     /// which is exactly `lh(scale)` rows from `y0` because `ascent_for_scale` and
-    /// the typeface's own metrics divide the same em the same way. Concretely 22
-    /// rows at rung 1, 32 at rung 2 and 44 at rung 3, against the bitmap cell's 24,
+    /// the typeface's own metrics divide the same em the same way. Concretely 27
+    /// rows at rung 1, 36 at rung 2 and 48 at rung 3, against the bitmap cell's 24,
     /// 48 and 72; a band measured on the cell clips the larger rungs into the row
     /// the run never reaches and hands the smaller ones rows they cannot ink.
-    /// `CAPTION_BOX_H` above is the one place on this surface where the cell is
-    /// wider than the outline box, and why.
+    /// `CAPTION_BOX_H` above is the one place on this surface that still takes the
+    /// wider of the two, and why.
     ///
     /// WHY the caller's own control test still comes first: the keys, the discs and
     /// the status bar keep the hit tests and borders they had, so the wider band can

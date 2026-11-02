@@ -436,22 +436,28 @@ mod tests {
         let dt_large = DynamicType::from_level(2);
         let dt_xl = DynamicType::from_level(3);
 
-        // Caption scale 1 (normal: 13px)
-        assert_eq!(dt_normal.cap_height(1), 13);
-        assert_eq!(dt_compact.cap_height(1), 10); // 80% bounded to >= 10px
-        assert_eq!(dt_large.cap_height(1), 16);   // 125%
-        assert_eq!(dt_xl.cap_height(1), 20);      // 150%
+        // WHY the rungs are read from the ladder and not written here: this test
+        // checks what a person's text-size level does to a rung. A copy of the
+        // ladder's own numbers inside it fails every time the ladder is
+        // re-measured, which says nothing about the scaling being tested.
+        for rung in 1..=6usize {
+            let base = font::cap_for_scale(rung);
+            assert_eq!(dt_normal.cap_height(rung), base, "normal is the ladder itself");
+            assert_eq!(dt_compact.cap_height(rung), (base * 80 + 50) / 100);
+            assert_eq!(dt_large.cap_height(rung), (base * 125 + 50) / 100);
+            assert_eq!(dt_xl.cap_height(rung), (base * 150 + 50) / 100);
 
-        // Body scale 2 (normal: 18px, the top of the documented 15..=18 band)
-        assert_eq!(dt_normal.cap_height(2), 18);
-        assert_eq!(dt_compact.cap_height(2), 14);
-        assert_eq!(dt_large.cap_height(2), 23);
-        assert_eq!(dt_xl.cap_height(2), 27);
+            // Every rung stays legible at the smallest setting, and the levels
+            // grow in order.
+            assert!(dt_compact.cap_height(rung) >= 10);
+            assert!(dt_compact.cap_height(rung) <= dt_normal.cap_height(rung));
+            assert!(dt_normal.cap_height(rung) <= dt_large.cap_height(rung));
+            assert!(dt_large.cap_height(rung) <= dt_xl.cap_height(rung));
+        }
 
-        // Verify monotone growth across scaling levels
-        assert!(dt_compact.cap_height(2) <= dt_normal.cap_height(2));
-        assert!(dt_normal.cap_height(2) <= dt_large.cap_height(2));
-        assert!(dt_large.cap_height(2) <= dt_xl.cap_height(2));
+        // The floor is a floor: a rung whose eighty per cent is below ten pixels
+        // is drawn at ten rather than at its own percentage.
+        assert_eq!(font::scale_cap_height(11, 0), 10);
     }
 
     #[test]

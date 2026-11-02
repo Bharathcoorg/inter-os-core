@@ -653,13 +653,18 @@ def main():
             present_marker="Files UI presented to scanout buffer",
             dump_prefix="test_files",
             in_app_interactions=[
-                # WHY (360, 803) and not the old (260, 370): Files has no shortcut strip at
-                # the top of its home screen. Its four category rows begin at CATEGORY_Y0 668
-                # and the first is 100 tall while the three under it are 70, so the Photos
-                # row - the images shortcut - spans 768..838 across the 36..684 column. This
-                # point is the middle of that row, and the guest answered it with the
-                # app's own "Category filter shortcut switched." line.
-                ("Tap Images category shortcut", (360, 803), "Category filter shortcut switched", "shortcut_images"),
+                # WHY (360, 895) and not the old (260, 370) or a remembered row number:
+                # Files has no shortcut strip at the top of its home screen. Its four
+                # category rows begin at CATEGORY_Y0, which the recents block above pushes
+                # down -- and a recents row reserves the two line boxes the type ladder
+                # gives it, so with the rungs raised it is HOME_RECENT_NAME_DY 4 +
+                # line_height(2) 39 + line_height(1) 30 + 6 = 79 rows tall, the four
+                # visible ones end at 392 + 316 = 708, and CATEGORY_Y0 lands on 760. The
+                # first row (Storage) is 100 tall and the three under it 70, so the Photos
+                # row - the images shortcut - spans 860..930 across the 36..684 column;
+                # this point is the middle of that row, which is the one band a row the
+                # ladder grew cannot miss.
+                ("Tap Images category shortcut", (360, 895), "Category filter shortcut switched", "shortcut_images"),
             ],
             exit_gesture="home_bar"
         )

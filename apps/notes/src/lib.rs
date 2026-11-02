@@ -22,6 +22,9 @@ pub mod keyboard;
 /// The notes' documents in the shared storage area.
 pub mod library;
 
+/// The header row's back control, and the label beside it.
+pub mod chrome;
+
 use crate::theme::{THEME, THEME_DARK};
 
 pub const MAX_NOTES: usize = 16;
@@ -1726,19 +1729,29 @@ mod tests {
 
     #[test]
     fn test_typography_scale_2_body_line_metrics() {
-        // WHY this matters: Scale 2 (Body) text must have sufficient line height
-        // to prevent line overlap or clipping on 360x720 / 720x1440 screens.
+        // WHY this matters: a body line that reserves less than the run drawn
+        // inside it overlaps the next line, and on a note editor that is every
+        // line of the document reading as one grey band.
+        //
+        // WHY the ladder's pixel bands are not repeated here: the rung sizes
+        // are the SDK's, and they moved. An application that restates them
+        // fails whenever the ladder is re-measured while its own layout, which
+        // follows the ladder, was correct all along. What this screen needs is
+        // that the box is larger than the cap and larger than the caption's
+        // box, so the roles stay in order whatever the ladder is drawn at.
         let body_scale = crate::theme::type_scale::BODY;
         assert_eq!(body_scale, 2);
         let cap = std::design::font::cap_for_scale(body_scale);
-        assert!(
-            (15..=18).contains(&cap),
-            "body cap {} must stay inside the documented 15..=18 band",
-            cap
-        );
         let lh = std::design::font::line_height(body_scale);
-        // Line height must comfortably encompass cap height plus ascenders and descenders.
-        assert!(lh >= 24 && lh <= 32, "line height {} must be 24..32", lh);
+        assert!(
+            lh > cap as usize,
+            "a {cap}px body cap needs a line box taller than itself, got {lh}"
+        );
+        let caption_box = std::design::font::line_height(crate::theme::type_scale::CAPTION);
+        assert!(
+            lh > caption_box,
+            "body lines sit {lh}px apart and captions {caption_box}px, so the roles read as one"
+        );
     }
 
     #[test]
@@ -1795,10 +1808,120 @@ mod tests {
         let disp_unpinned = if len_unpinned > 0 { &buf[..len_unpinned] } else { long_title.as_slice() };
         assert!(font::measure(disp_unpinned, 2) <= 610);
 
-        // Keyboard action labels fit inside typical key width (kw >= 60)
-        for label in [b"ABC".as_slice(), b"^".as_slice(), b"?123".as_slice(), b"<X>".as_slice(), b"Space".as_slice()] {
-            assert!(font::measure(label, 1) <= 50);
+        // WHY the bound is the key and not a remembered width: the action labels
+        // sit on keys of four different widths -- shift, symbols, backspace and
+        // the space bar -- and the painter centres each run inside its own key,
+        // whose plate carves three columns off either side. One remembered 50
+        // covered every label only while the caption rung drew narrow; when the
+        // ladder raised it, "Space" passed 50 while still sitting comfortably in
+        // the bar it is actually drawn on. So ask the table, not the number: a
+        // label that would run off its own key fails here whatever the rung.
+        use crate::keyboard::{KeyAction, LETTER_ROWS, SYMBOL_ROWS};
+        // The columns the painted plate gives back on either side of the key.
+        const KEY_PLATE_INSET: usize = 3;
+        let widest_label = |action: KeyAction| -> &'static [&'static [u8]] {
+            match action {
+                // Both states, because either can be on screen when the key is
+                // drawn and the key's width cannot change between them.
+                KeyAction::Shift => &[b"^", b"ABC"],
+                KeyAction::Symbols => &[b"?123", b"ABC"],
+                KeyAction::Backspace => &[b"<X>"],
+                KeyAction::Space => &[b"Space"],
+                _ => &[],
+            }
+        };
+        for rows in [LETTER_ROWS, SYMBOL_ROWS] {
+            for row in rows {
+                for key in row.keys {
+                    for label in widest_label(key.action) {
+                        let needed = font::measure(label, 1);
+                        let plate = key.w.saturating_sub(2 * KEY_PLATE_INSET);
+                        assert!(
+                            needed <= plate,
+                            "{label:?} needs {needed} px on a {} px key that paints {plate} px",
+                            key.w
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    /// The defect this covers was measured on the device: Notes painted no
+    /// control at the platform's rect, so the header row it did paint answered
+    /// the tap at (48, 80) as a search field and the person stayed on a screen
+    /// with no way back.
+    #[test]
+    fn test_the_back_control_paints_the_canonical_rect() {
+        use crate::chrome;
+        use crate::theme::THEME;
+        use interos_std::design::back_button;
+
+        let cx = back_button::X + back_button::SIZE / 2;
+        let cy = back_button::Y + back_button::SIZE / 2;
+
+        // The chip's body and its ring are the theme's own roles, so a theme
+        // that moves moves the control with it.
+        assert_eq!(chrome::back_pixel(cx, cy), Some(THEME.surface_container_high));
+        assert_eq!(chrome::back_pixel(back_button::X, cy), Some(THEME.outline));
+
+        // The chevron is ink laid inside the chip, not the ring around it:
+        // on the monochrome theme the ring and the ink are the same role, so
+        // only a pixel away from the border can prove the mark is drawn.
+        let mut chevron = 0usize;
+        let mut body = 0usize;
+        for y in back_button::Y + 1..back_button::Y + back_button::SIZE - 1 {
+            for x in back_button::X + 1..back_button::X + back_button::SIZE - 1 {
+                match chrome::back_pixel(x, y) {
+                    Some(c) if c == THEME.on_surface => chevron += 1,
+                    Some(c) if c == THEME.surface_container_high => body += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(chevron > 0, "the back control paints no chevron in the notes header");
+        assert!(body > 0, "the back control paints a mark with no chip behind it");
+
+        // Nothing is painted outside the square the control owns.
+        assert!(chrome::back_pixel(back_button::X - 1, cy).is_none());
+        assert!(chrome::back_pixel(back_button::X + back_button::SIZE, cy).is_none());
+        assert!(chrome::back_pixel(cx, back_button::Y - 1).is_none());
+        assert!(chrome::back_pixel(cx, back_button::Y + back_button::SIZE).is_none());
+    }
+
+    /// The painter and the tap handler answer one square, and the label stands
+    /// outside it.
+    #[test]
+    fn test_the_back_control_claims_every_pixel_it_paints() {
+        use crate::chrome;
+        use interos_std::design::back_button;
+
+        // (48, 80) is the guest pixel the device reported the tap at.
+        assert!(chrome::back_claims(48, 80));
+
+        for y in 0..back_button::Y + back_button::SIZE + 8 {
+            for x in 0..back_button::X + back_button::SIZE + 8 {
+                if chrome::back_pixel(x, y).is_some() {
+                    assert!(
+                        chrome::back_claims(x, y),
+                        "the header paints ({x}, {y}) with no control to press there"
+                    );
+                }
+            }
+        }
+
+        // Outside the square, the row underneath keeps its taps: the search
+        // pill and the toolbar run under and beside the control.
+        assert!(!chrome::back_claims(back_button::X - 1, back_button::Y));
+        assert!(!chrome::back_claims(
+            back_button::X + back_button::SIZE,
+            back_button::Y + back_button::SIZE - 1
+        ));
+        assert!(!chrome::back_claims(48, back_button::Y + back_button::SIZE));
+
+        // The header's run starts clear of the chip, or the app would draw a
+        // label under the control and hit-test it first.
+        assert!(chrome::LABEL_X >= back_button::X + back_button::SIZE);
     }
 }
 

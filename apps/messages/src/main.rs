@@ -708,14 +708,13 @@ const TITLE_BOX_H: usize = std::design::font::line_height(TITLE_SCALE);
 ///
 /// WHY the cap height is centred on the control row instead of the box being
 /// dropped at the top of the control band: `TITLE_SCALE` is rung 4, whose line
-/// box is `line_height(4)` = 59 rows (ascent 47, descent 12 at the 45px em the
-/// rung's 32px cap implies), while the back control beside it is 48 rows. The
-/// box used to start at `HEADER_TOP + 4` = 60 and therefore ran to 119 -- seven
-/// rows past the header's hairline and under the search field, which begins
-/// below it. That is the cut-off tail of the "g" in "Messages". Centring the
-/// caps on the control row puts the box at 49..108, wholly inside the band, and
-/// is the placement the dialer already documents and uses
-/// (`apps/dialer/src/main.rs`, `TITLE_Y0`).
+/// box -- `line_height(4)`, ascent plus descent at the em the rung's cap
+/// implies -- is taller than the 48-row back control beside it. The box used to
+/// start at `HEADER_TOP + 4` and therefore ran past the header's hairline and
+/// under the search field, which begins below it. That is the cut-off tail of
+/// the "g" in "Messages". Centring the caps on the control row keeps the whole
+/// box inside the band, and is the placement the dialer already documents and
+/// uses (`apps/dialer/src/main.rs`, `TITLE_Y0`).
 const TITLE_Y: usize = HEADER_ROW
     - std::design::font::ascent_for_scale(TITLE_SCALE)
     + std::design::font::cap_for_scale(TITLE_SCALE) as usize / 2;
@@ -1166,19 +1165,23 @@ const ROW_CAPTION_Y: usize = ROW_TOP_PAD;
 const ROW_BODY_Y: usize = ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP;
 
 const DETAIL_ROW_H: usize = ROW_PITCH;
-const DETAIL_ROWS: usize = 12;
+/// HOW MANY rows the detail band can show: the viewport divided by the stride.
+/// WHY derived and not the twelve the arrays were typed at: the row grew when
+/// the type ladder's caption and body rungs were re-measured, and a twelfth
+/// row's card began below the band's bottom edge -- painted, and answered by
+/// the recipient field drawn over it. The builders cap themselves at the array
+/// length, so the capacity the band can actually hold is the capacity.
+const DETAIL_ROWS: usize = LIST_VIEWPORT_H / ROW_PITCH;
 const RECIP_ROW_TOP: usize = CONTENT_TOP;
 const RECIP_ROW_H: usize = ROW_PITCH;
-const RECIP_ROWS: usize = 12;
+const RECIP_ROWS: usize = LIST_VIEWPORT_H / ROW_PITCH;
 
 /// WHY checked at compile time: a card has to outlast the ink it carries, and
-/// the twelve rows a screen can produce have to fit the band they are painted
-/// in -- which is the thread list's viewport, since all three screens share the
-/// same top edge and the same bottom edge. Each of these is the cut-off row
-/// coming back.
+/// the band has to hold a whole row rather than the top of one. Each of these
+/// is the cut-off row coming back.
 const _: () = assert!(ROW_CAPTION_Y + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX < ROW_CARD_H);
-const _: () = assert!(DETAIL_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
-const _: () = assert!(RECIP_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
+const _: () = assert!(DETAIL_ROWS >= 1 && DETAIL_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
+const _: () = assert!(RECIP_ROWS >= 1 && RECIP_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
 const PICK_LABEL: &[u8] = b"PICK";
 const INFO_LABEL: &[u8] = b"INFO";
 
@@ -1912,7 +1915,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         // Standardized back button squircle (x 24..72, y HEADER_TOP..+48)
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
             return c;
         }
 

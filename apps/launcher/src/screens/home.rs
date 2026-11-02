@@ -98,8 +98,8 @@ const LABEL_SCALE: usize = type_scale::SECTION;
 /// The rows a run at the search field's rung reserves on the outline face.
 ///
 /// WHY the ladder and not `text::line_height`: the search text draws at
-/// `LABEL_SCALE` with the outline face, whose SECTION line box is
-/// `launcher::font::line_height` (44 rows) rather than the bitmap cell's
+/// `LABEL_SCALE` with the outline face, whose line box at that rung is
+/// `launcher::font::line_height` (48 rows) rather than the bitmap cell's
 /// `GLYPH_H * scale` (72 rows). Centring the taller bitmap box inside the
 /// 62-row field underflowed the reserve to zero and pressed the text against
 /// the field's top edge, so it no longer shared the magnifier's centre row.
@@ -306,10 +306,10 @@ const RUN_CAP: usize = 96;
 ///
 /// WHY the box is carried as well as the origin: `test_text` walks the pen of every
 /// glyph before it can say no, so a pixel that is nowhere near a run still costs a
-/// full pen walk per label. The stored box is exactly
-/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is precisely the
-/// region `test_text` can return `Some` for, so rejecting against it first changes
-/// no pixel and skips the walk for the overwhelming majority of them.
+/// full pen walk per label. The box stored here is the run's own line box -- the
+/// face that draws it reserves its height, and the wider of the bitmap `measure`
+/// and the outline advance its width -- which is the extent a rejection can be made
+/// against without changing a pixel and skipping the walk for most of the surface.
 #[allow(dead_code)]
 struct Run {
     x: usize,
@@ -320,23 +320,32 @@ struct Run {
     ink: u32,
     /// Pixels per em for this run's outline rendering.
     ///
-    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
-    /// multiplied by `scale`, so its cap height is 17*`scale` pixels. The
-    /// outline face is rasterised at an em, and its cap height is 1456 of 2048
-    /// em, so the em that matches the same cap height is
-    /// `17 * scale * 2048 / 1456`. Carrying it means the two faces can be
-    /// compared instead of guessed at.
+    /// WHY a separate number from `scale`: the two faces are on different
+    /// ladders. The bitmap face is a 16x24 cell multiplied by `scale`, so its
+    /// cap is 17*`scale` pixels; the outline face is rasterised at an em and
+    /// inks a cap of 1456 of 2048 em, so its cap is whatever the rung answers
+    /// -- `font::cap_for_scale(scale)`, the em being `outline_text::em_for_scale`
+    /// for that rung. Carrying it means the two faces can be compared instead of
+    /// guessed at.
     #[allow(dead_code)]
     em: u32,
-    /// Top row of the box that covers BOTH renderers.
+    /// Top row of the box this run reserves, on the outline face.
     ///
-    /// WHY the box is a union: the outline run's line box is not the bitmap
-    /// cell. At the em that matches a scale-3 cap, the outline's ascent reaches
-    /// 18px above the cell origin and its descent 4px past the cell bottom, so
-    /// a box measured for the cell alone would reject rows the outline inks and
-    /// the text would be silently clipped.
+    /// WHY the outline's box and not the cell's: the rung decides which face
+    /// paints, and `pixel_inked_aa` uses the outline run whenever the
+    /// rasteriser accepted the bytes, so this is the box the face that actually
+    /// draws reserves. At the rung the deck and the card print at, that box is
+    /// the face's own ascent plus descent at `em` -- `font::line_height(scale)`,
+    /// 48 rows at rung 3 and 36 at rung 2 -- measured from the baseline
+    /// `font::ascent_for_scale` puts below the run's origin. It is *not* a union
+    /// with the cell: `GLYPH_H * scale` is the taller of the two from rung 2 up
+    /// (72 rows against 48 at rung 3), so a run the outline declines and the
+    /// bitmap pen paints has descender rows outside this box. Nothing gates on
+    /// `top` or `box_h` today -- the painters ask the run's own face, which does
+    /// its own bounds check -- so the reserve is a note about the layout, not a
+    /// clip.
     top: usize,
-    /// Height of that union box.
+    /// Height of that outline box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
     outline: Option<launcher::outline_text::OutlineRun>,
@@ -932,9 +941,10 @@ fn build(state: &LauncherState) -> Paint {
 /// deck band, which is 15% of the surface, to draw sixteen glyphs in the middle.
 /// WHY 200 wide at a 30px margin and a 30px gutter: the tiles used to be 190 at a
 /// 48px margin, which left 174px for a name. The deck names are set at
-/// `LABEL_SCALE` (CAPTION, a 17px cap -- the smallest step the 16x24 face can
-/// render), so even the widest name fits with room on either side, and the
-/// padding stays XS so short names keep breathing room.
+/// `LABEL_SCALE` (rung 3, i.e. the SECTION rung: a 26px cap in a 48-row line box),
+/// and each is ellipsized to the tile less `space::XS` padding on both sides, so the
+/// widest name the registry can hold lands inside the tile with room on either side,
+/// and the padding stays XS so short names keep breathing room.
 pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(30, 805, 200, 180),
     Rect::new(260, 805, 200, 180),

@@ -638,11 +638,11 @@ pub fn action_for_mime(mime: &str) -> &'static [u8] {
 
 /// The header band.
 ///
-/// WHY this tall: the title's line box reserves rows 64..108 at the rung it
-/// draws on, and the back control is the platform's minimum target standing on
-/// the row under it. A header that stopped short of the control's own foot would
-/// hand the control's last rows to the screen below, which is the same loss the
-/// status band inflicts from above.
+/// WHY this tall: the header's row is the platform's back control band, rows
+/// `back_button::Y..Y + SIZE`, with the title centred on it, and the readout's
+/// second line runs a few rows below the pair. A header that stopped short of
+/// the lowest of those would hand its last rows to the screen below, which is
+/// the same loss the status band inflicts from above.
 pub const HEADER_H: usize = 152;
 
 // -----------------------------------------------------------------------------
@@ -658,16 +658,38 @@ pub const HOME_RECENTS_CAPTION_Y: usize = 364;
 /// The recents rows. The card holds the most recent documents the index
 /// reported, in the index's own modification-time order.
 pub const HOME_RECENTS_Y0: usize = 392;
-pub const HOME_RECENT_ROW_H: usize = 56;
+/// The rung a recent's name draws at: the Body rung, so a file's name reads as
+/// the row's title and its "Modified:" line reads as the caption under it.
+///
+/// WHY it was a caption: both lines drew at rung 1, which put a 13px cap under
+/// a 13px cap and made four rows of the list read as one grey texture.
+pub const HOME_RECENT_NAME_SCALE: usize = 2;
+/// The air between a row's top edge and the box its name draws in.
+pub const HOME_RECENT_NAME_DY: usize = 4;
+/// The "Modified:" line's box top: one whole name box under the name's, so a
+/// name with a descender cannot paint into it.
+pub const HOME_RECENT_TIME_DY: usize =
+    HOME_RECENT_NAME_DY + interos_std::font::line_height(HOME_RECENT_NAME_SCALE);
+/// A recents row: the two boxes it draws plus the air its divider needs below
+/// them.
+///
+/// WHY derived: the row was a remembered 56 rows, which is what the two caption
+/// boxes were when this list was written. The name moved to the Body rung and
+/// the ladder's boxes grew with it, so the only figure that stays true is the
+/// one that adds the boxes the row actually paints.
+pub const HOME_RECENT_ROW_H: usize =
+    HOME_RECENT_TIME_DY + interos_std::font::line_height(1) + 6;
 /// How many recents the home screen shows.
 pub const HOME_RECENTS_VISIBLE: usize = 4;
+/// Where the recents block ends, and so where the section under it begins.
+pub const HOME_RECENTS_Y1: usize = HOME_RECENTS_Y0 + HOME_RECENTS_VISIBLE * HOME_RECENT_ROW_H;
 /// The category section's heading, and the four rows under it.
 ///
-/// WHY 616 and not 608: the four recents rows start at 392 and are 56 rows
-/// each, so the last one ends exactly at 616. A heading at 608 would paint
-/// its first eight rows over the fourth recent.
-pub const HOME_CATEGORY_TITLE_Y: usize = 616;
-pub const CATEGORY_Y0: usize = 668;
+/// WHY it starts where the recents block ends: a heading that began inside the
+/// last recent's box would paint over the rows that box reserves, and the row
+/// that lost them still answers taps there.
+pub const HOME_CATEGORY_TITLE_Y: usize = HOME_RECENTS_Y1;
+pub const CATEGORY_Y0: usize = HOME_CATEGORY_TITLE_Y + 52;
 /// The first category row is the storage row, which carries a caption under
 /// its label, so it is taller than the three that follow it.
 pub const CATEGORY_FIRST_ROW_H: usize = 100;
@@ -675,10 +697,23 @@ pub const CATEGORY_OTHER_ROW_H: usize = 70;
 pub const CATEGORY_COUNT: usize = 4;
 pub const CATEGORY_Y1: usize =
     CATEGORY_Y0 + CATEGORY_FIRST_ROW_H + (CATEGORY_COUNT - 1) * CATEGORY_OTHER_ROW_H;
-/// The home screen's "browse everything" control.
-pub const HOME_BROWSE_BTN: Rect = Rect::new(36, 996, 648, 56);
+/// The home screen's "browse everything" control: the first thing below the
+/// last category row, with the gap it has always had.
+pub const HOME_BROWSE_BTN: Rect = Rect::new(36, CATEGORY_Y1 + 18, 648, 56);
 /// The honest note under it.
-pub const HOME_NOTE_Y: usize = 1072;
+pub const HOME_NOTE_Y: usize = HOME_BROWSE_BTN.y + HOME_BROWSE_BTN.h + 20;
+
+/// Truth gates: a recents row holds the two boxes it paints and the divider
+/// under them, and the note that closes the home screen still sits above the
+/// gesture bar the panel reserves at its foot.
+const _: () = assert!(
+    HOME_RECENT_TIME_DY + interos_std::font::line_height(1) + 1 < HOME_RECENT_ROW_H,
+    "a recents row must close over its caption's box and its own divider"
+);
+const _: () = assert!(
+    HOME_NOTE_Y + interos_std::font::line_height(1) < 1440 - 40,
+    "the home screen's closing note must stay on the panel"
+);
 
 /// The category row at a y, as `(index, top, height)`.
 ///

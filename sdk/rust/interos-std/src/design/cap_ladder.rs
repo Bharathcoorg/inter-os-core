@@ -5,45 +5,61 @@
 //! font sizes and as cap heights. They differ by a third, and getting it
 //! wrong made every screen's text smaller than the document asks for.
 //!
-//! Measuring the reference screens settles it. On the reference calculator
-//! -- a 720-pixel-wide screen -- the status clock stands thirteen pixels
-//! tall, a key label fifteen, the title twenty-three and the result
-//! thirty-one. The document's ranges are a caption of twelve to fourteen, a
-//! body of fifteen to eighteen, a section of twenty to twenty-four and a
-//! title of twenty-eight to thirty-two. Each measured size falls inside
-//! the range for the role it plays, so the numbers are cap heights.
+//! Measuring the reference screens settles the reading. On the reference
+//! calculator -- a 720-pixel-wide screen -- the status clock stands thirteen
+//! pixels tall, a key label fifteen, the title twenty-three and the result
+//! thirty-one. Those are cap heights, so the ladder names cap heights and the
+//! em follows from one.
 //!
-//! The ladder therefore names cap heights, and the em follows from one.
+//! The measured numbers are a floor, not a ceiling: they say what the smallest
+//! legible run on a panel of this size looks like. What the rungs are drawn
+//! *at* is settled against the panels this device is compared with, and a type
+//! scale only means something relative to the width it is read on -- see
+//! [`crate::font::cap_for_scale`], which owns the values. This module is where
+//! the bands each rung is allowed to sit in are written down once, and
+//! `tests/test_type_scale_contract.py` reads them from here rather than keeping
+//! its own copy.
 
 #[cfg(test)]
 mod cap_ladder_tests {
     use crate::design::outline_text;
     use crate::design::typography;
 
-    /// The ladder, and the range the design document gives each rung.
+    /// The band each rung is allowed to sit in.
     ///
-    /// WHY the ranges are the document's and not the ones this test invented:
-    /// the document is the specification, and the measured reference sizes
-    /// are what check the implementation against it.
+    /// WHY these are the bands and not the document's original ranges: the
+    /// document's caption of twelve to fourteen and body of fifteen to eighteen
+    /// were written for a page, and on a 720-pixel panel held at reading
+    /// distance they come out under what the phones this device is compared
+    /// with draw -- iOS sets its body at three per cent of the panel's width
+    /// and Android's body-large at 2.77%, where the document's body rung was
+    /// 2.50% and its caption 1.81%. Each rung was raised to the share those
+    /// systems use, and the band below is the raised role, so the ladder cannot
+    /// drift back to a size a person on this panel cannot read.
+    ///
+    /// The upper rungs are unchanged: a heading and a display were already
+    /// large enough for the panel.
+    pub const LADDER_BANDS: [(u32, u32, u32, u32); 6] = [
+        (1, typography::CAPTION_CAP_PX, 15, 16),
+        (2, typography::BODY_CAP_PX, 19, 21),
+        (3, typography::SECTION_CAP_PX, 25, 27),
+        (4, typography::TITLE_CAP_PX, 33, 35),
+        (5, typography::HEADING_CAP_PX, 36, 44),
+        (6, typography::DISPLAY_CAP_PX, 48, 56),
+    ];
+
+    /// Every rung sits inside the band written for it.
     #[test]
-    fn every_rung_is_inside_the_range_the_document_gives() {
-        let ladder = [
-            (typography::CAPTION_CAP_PX, 12, 14),
-            (typography::BODY_CAP_PX, 15, 18),
-            (typography::SECTION_CAP_PX, 20, 24),
-            (typography::TITLE_CAP_PX, 28, 32),
-            (typography::HEADING_CAP_PX, 36, 44),
-            (typography::DISPLAY_CAP_PX, 48, 56),
-        ];
-        for (cap, low, high) in ladder {
+    fn every_rung_is_inside_the_band_written_for_it() {
+        for (rung, cap, low, high) in LADDER_BANDS {
             assert!(
                 cap >= low && cap <= high,
-                "the cap height {cap} is outside the document's {low}..={high} range"
+                "rung {rung} draws a {cap}px cap, outside its {low}..={high} band"
             );
         }
     }
 
-    /// The sizes measured off the reference screens.
+    /// The sizes measured off the reference screens are all covered.
     ///
     /// WHY these are here and not only in a comment: the reading of the
     /// document's numbers is what the whole suite's typography rests on, and
@@ -53,21 +69,22 @@ mod cap_ladder_tests {
         // The reference calculator, measured on its seven-hundred and twenty
         // pixel wide screen: a status clock thirteen pixels tall, a key label
         // fifteen, the title twenty-three and the result thirty-one.
-        assert_eq!(typography::CAPTION_CAP_PX, 13);
-        assert!(typography::BODY_CAP_PX >= 15 && typography::BODY_CAP_PX <= 18);
-        // The title measured twenty-two and two thirds, and the ladder's
-        // section rung is the document's value for that role.
-        assert!(
-            typography::SECTION_CAP_PX >= 22 && typography::SECTION_CAP_PX <= 24,
-            "the section rung is {} and the measured title was twenty-two and two thirds",
-            typography::SECTION_CAP_PX
-        );
-        // The result measured thirty-one, which is the document's title band.
-        assert!(
-            typography::TITLE_CAP_PX >= 28 && typography::TITLE_CAP_PX <= 32,
-            "the title rung is {} and the measured result was thirty-one",
-            typography::TITLE_CAP_PX
-        );
+        let measured = [
+            (typography::CAPTION_CAP_PX, 13, "status clock"),
+            (typography::BODY_CAP_PX, 15, "key label"),
+            (typography::SECTION_CAP_PX, 23, "title"),
+            (typography::TITLE_CAP_PX, 31, "result"),
+        ];
+        for (rung, size, role) in measured {
+            assert!(
+                rung >= size,
+                "a {role} measured {size}px tall on the reference screen is drawn at {rung}px here"
+            );
+        }
+        // The smallest thing on the ladder is not smaller than the smallest
+        // thing measured on a screen a person could read: the reference
+        // calculator's key label, at fifteen pixels.
+        assert!(typography::CAPTION_CAP_PX >= 15);
     }
 
     #[test]
@@ -84,6 +101,25 @@ mod cap_ladder_tests {
             assert!(
                 pair[1] > pair[0],
                 "the ladder is not increasing: {pair:?}"
+            );
+        }
+    }
+
+    /// Roles must be distinguishable, or a screen of them reads as one size.
+    ///
+    /// WHY a floor on the gap: the complaint this guards against was a flat
+    /// hierarchy -- a card title and a caption within a pixel of each other,
+    /// so nothing on the screen looked like a heading. Ratio alone is not
+    /// enough at the small end (13 to 15 is a 1.15x step and is invisible), so
+    /// the two smallest steps are also pinned in pixels.
+    #[test]
+    fn neighbouring_rungs_are_separated() {
+        for (rung, cap, _, _) in LADDER_BANDS {
+            let next = crate::font::cap_for_scale((rung + 1) as usize);
+            assert!(
+                next >= cap + 4 && next * 100 >= cap * 113,
+                "rung {} at {}px and rung {} at {}px read as one size",
+                rung, cap, rung + 1, next
             );
         }
     }

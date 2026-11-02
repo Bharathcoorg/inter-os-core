@@ -13,7 +13,8 @@
 //! | background | `#FAFAFA` |
 //! | surface | `#FFFFFF` |
 //! | primary text | `#0A0A0A` |
-//! | secondary text | `#6B6B6B` |
+//! | secondary text | `#525458` |
+//! | disabled text | `#6B6B6B` |
 //! | border | `#E5E5E5` |
 //! | success | `#22C55E` |
 //! | warning | `#F59E0B` |
@@ -41,10 +42,18 @@ pub const THEME: Theme = Theme {
     overlay: 0xFFFFFFFF,
     overlay_border: 0xFFE5E5E5,
 
-    // The ink.
+    // The ink. These are the platform's three ink rungs, copied rather than
+    // re-derived.
+    //
+    // WHY they are copied: this app's page, card and well (`#FAFAFA`,
+    // `#FFFFFF`, `#F4F4F4`) sit one step apart in luminance, and an ink that
+    // is a whisper on a `#EFEEE9` chip is nearly invisible on a `#F4F4F4`
+    // well. `#0A0A0A` is 18.97:1 on the page, `#525458` 6.90:1 on the well,
+    // `#6B6B6B` 4.63:1 on the `#EFEFEF` primary container -- the faintest of
+    // the three still above the 4.5:1 this repo's contrast contract demands.
     on_surface: 0xFF0A0A0A,
-    on_surface_variant: 0xFF6B6B6B,
-    muted: 0xFFA3A3A3,
+    on_surface_variant: 0xFF52_5458,
+    muted: 0xFF6B_6B6B,
     on_primary: 0xFFFFFFFF,
     on_primary_container: 0xFF0A0A0A,
     ink_on_light: 0xFF0A0A0A,
@@ -63,7 +72,7 @@ pub const THEME: Theme = Theme {
     // reads as a marketing page.
     primary: 0xFF0A0A0A,
     primary_container: 0xFFEFEFEF,
-    secondary: 0xFF6B6B6B,
+    secondary: 0xFF52_5458,
     accent: 0xFF0A0A0A,
 
     // The three status colours, and only these three.

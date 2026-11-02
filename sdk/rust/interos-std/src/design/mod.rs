@@ -1175,6 +1175,7 @@ pub use crate::font;
 
 pub mod back_button {
     use super::radius::*;
+    use super::theme::Theme;
 
     pub const X: usize = 24;
     /// WHY it starts below the band: the control is painted by the app's header
@@ -1183,6 +1184,66 @@ pub mod back_button {
     pub const Y: usize = super::viewport::HEADER_TOP;
     pub const SIZE: usize = 48;
     pub const RADIUS: usize = CONTROL;
+
+    /// The control's three colours, read out of a theme's roles: the chevron's
+    /// ink, the ring's colour and the chip's fill.
+    ///
+    /// WHY this exists at all: every application drew this control with
+    /// [`Theme::border`] as its ring and a container role as its fill, and
+    /// [`Theme::border`] is the quietest line the platform draws -- `#E5E5E5`
+    /// on the monochrome theme's `#FAFAFA` page, a 1.21:1 step. Its former
+    /// fill, `surface_container_high`, is `#EFEEE9` on the same page: 1.11:1.
+    /// Neither step survives the device's own pixel density, so what a person
+    /// saw was a bare chevron with no button around it, and a control whose
+    /// hit box is 48x48 but whose visible mark is 9 pixels wide reads as a
+    /// screen with no way back. The ring is what says "this is a thing you can
+    /// press", so the ring now takes the role that means exactly that.
+    ///
+    /// WHAT THE THREE ROLES ARE, and WHY each is the one it is:
+    ///
+    /// - the ring is [`Theme::outline`], the role the theme documents as "a
+    ///   prominent outline: a focused field, a selected control". On the
+    ///   monochrome theme that is `#0A0A0A`: 18.97:1 against the page and
+    ///   17.15:1 against the chip's own fill. On the stock light theme it is
+    ///   `#3A3D42` at 10.08:1, and no theme the platform ships puts its
+    ///   `outline` below 9.5:1 against its own page. WCAG 1.4.11 asks 3:1 of
+    ///   the visual boundary of a user interface component, so this clears the
+    ///   floor by more than three times without leaving the neutral ladder.
+    /// - the fill is [`Theme::surface_container_high`], the elevation step the
+    ///   theme itself names "a raised card, a chip, a pressed control". It is
+    ///   a one-step lift, not a statement: 1.11:1 against the monochrome page
+    ///   and 1.15:1 against a white card, so the chip keeps a tone of its own
+    ///   on either backdrop while [`Theme::outline`] does the visible work.
+    /// - the chevron is [`Theme::on_surface`], the theme's own body ink, which
+    ///   is 17.15:1 on that fill on the monochrome theme and never below
+    ///   11.9:1 on any shipped theme.
+    ///
+    /// WHY a function and not a pair of constants: the three colours are one
+    /// decision about one control, and a decision that lives in the theme
+    /// follows the theme into its dark variant. An app that hard-codes the
+    /// ring it thinks is dark enough is an app that draws an invisible control
+    /// the moment the user turns the device dark.
+    #[inline]
+    pub const fn colors_for_theme(theme: &Theme) -> (u32, u32, u32) {
+        (theme.on_surface, theme.outline, theme.surface_container_high)
+    }
+
+    /// [`pixel`] drawn with [`colors_for_theme`]'s colours.
+    ///
+    /// WHY an entry point rather than nine hand-tuned call sites: the three
+    /// tokens are one decision, and a decision spelled out in nine places is
+    /// nine places that can drift. This is the place; the applications call
+    /// this and every Back control on the device is the same chip.
+    ///
+    /// WHAT IT DOES NOT CHANGE: the geometry, the radius, the hit box and
+    /// [`pixel`]'s own signature. A caller that wants a ring of its own -- a
+    /// control drawn over a photograph, over a dark chassis -- still has
+    /// [`pixel`].
+    #[inline]
+    pub fn pixel_for_theme(x: usize, y: usize, theme: &Theme) -> Option<u32> {
+        let (ink, ring, fill) = colors_for_theme(theme);
+        pixel(x, y, ink, ring, fill)
+    }
 
     #[inline]
     pub fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
@@ -1198,30 +1259,57 @@ pub mod back_button {
         None
     }
 
+    /// Whether a pixel lies inside the chip's outline, shrunk `inset` pixels on
+    /// every edge.
+    ///
+    /// WHY the ring is asked this way and not off the bounding box: the plate is
+    /// a rounded rect, and the ring used to be `x == X || y == Y || ...` -- the
+    /// four edges of a *square*. Only the flat middle of each edge is both box
+    /// edge and plate edge, so the ink that survived was four straight brackets
+    /// and the four corner arcs had no edge at all: measured off the device on
+    /// the Settings header, the ring painted rows 12..=35 of the top edge and
+    /// columns 12..=35 of the side edges and nothing on the arcs. A control
+    /// whose outline stops where its own rounding begins reads as a drawing
+    /// mistake rather than as a button. Asking "inside the shape, but not inside
+    /// the shape one pixel in" puts the ring on the boundary the plate actually
+    /// has, at every radius the theme's `Radii` may one day choose.
+    #[inline]
+    fn in_chip(x: i32, y: i32, inset: usize) -> bool {
+        let rad = (RADIUS - inset) as i32;
+        let left = (X + inset) as i32;
+        let right = (X + SIZE - 1 - inset) as i32;
+        let top = (Y + inset) as i32;
+        let bottom = (Y + SIZE - 1 - inset) as i32;
+        if x < left || x > right || y < top || y > bottom {
+            return false;
+        }
+        let cx = if x < left + rad {
+            left + rad
+        } else if x > right - rad {
+            right - rad
+        } else {
+            return true;
+        };
+        let cy = if y < top + rad {
+            top + rad
+        } else if y > bottom - rad {
+            bottom - rad
+        } else {
+            return true;
+        };
+        (x - cx) * (x - cx) + (y - cy) * (y - cy) <= rad * rad
+    }
+
     #[inline]
     pub fn pixel(x: usize, y: usize, text_color: u32, border_color: u32, bg_color: u32) -> Option<u32> {
         if x < X || x >= X + SIZE || y < Y || y >= Y + SIZE {
             return None;
         }
-        let rad = RADIUS;
-        let left = X + rad;
-        let right = X + SIZE - 1 - rad;
-        let top = Y + rad;
-        let bottom = Y + SIZE - 1 - rad;
-        let in_box = (x >= left && x <= right) || (y >= top && y <= bottom);
-        let in_corners = {
-            let cx = if x < left { left } else { right };
-            let cy = if y < top { top } else { bottom };
-            let dx = x as i32 - cx as i32;
-            let dy = y as i32 - cy as i32;
-            dx * dx + dy * dy <= (rad as i32) * (rad as i32)
-        };
-        if !in_box && !in_corners {
+        let (xi, yi) = (x as i32, y as i32);
+        if !in_chip(xi, yi, 0) {
             return None;
         }
-
-        let is_border = x == X || x == X + SIZE - 1 || y == Y || y == Y + SIZE - 1;
-        if is_border {
+        if !in_chip(xi, yi, 1) {
             return Some(border_color);
         }
 
@@ -1459,6 +1547,174 @@ mod tests {
         // The whole control clears the band that paints over it.
         assert!(back_button::Y >= STATUS_BAR_HEIGHT);
         assert!(back_button::pixel(48, back_button::Y + 24, 0xFF000000, 0xFF888888, 0xFFFFFFFF).is_some());
+    }
+
+    /// The ring is the chip's own outline, all the way round it.
+    ///
+    /// WHY this is a test: the ring used to be painted on the bounding box, so
+    /// the four corner arcs -- a quarter of the chip's visible edge -- had no
+    /// ring at all and the control read as four brackets around a soft square.
+    /// Nothing in the old assertions could see that, because each one sampled a
+    /// flat edge, where the box and the shape agree. This walks the whole chip
+    /// and asks the one question that matters: does the outline close?
+    #[test]
+    fn the_back_controls_ring_is_a_closed_outline() {
+        use super::back_button;
+        const INK: u32 = 0xFF000000;
+        const RING: u32 = 0xFF888888;
+        const PLATE: u32 = 0xFFFFFFFF;
+
+        let painted = |x: i32, y: i32| {
+            if x < 0 || y < 0 {
+                return None;
+            }
+            back_button::pixel(x as usize, y as usize, INK, RING, PLATE)
+        };
+
+        let mut arcs = 0;
+        for y in back_button::Y as i32..back_button::Y as i32 + back_button::SIZE as i32 {
+            for x in back_button::X as i32..back_button::X as i32 + back_button::SIZE as i32 {
+                if painted(x, y) == None {
+                    continue;
+                }
+                let on_edge = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(dx, dy)| painted(x + dx, y + dy).is_none());
+                if on_edge {
+                    assert_eq!(
+                        painted(x, y),
+                        Some(RING),
+                        "({x}, {y}) bounds the chip's own silhouette but is not ring: the outline has a gap"
+                    );
+                    if x != back_button::X as i32
+                        && x != back_button::X as i32 + back_button::SIZE as i32 - 1
+                        && y != back_button::Y as i32
+                        && y != back_button::Y as i32 + back_button::SIZE as i32 - 1
+                    {
+                        arcs += 1;
+                    }
+                }
+            }
+        }
+
+        // The ring pixels that are not on the box's own edge are the corner
+        // arcs. A square chip would score zero here, and so would the old
+        // box-edge ring: the arcs are the part that used to be missing.
+        assert!(
+            arcs > 4 * back_button::RADIUS / 2,
+            "the outline hugs the bounding box rather than the rounded plate: {arcs} arc pixels"
+        );
+    }
+
+    /// The Back control's colours come from roles that are visible on the page
+    /// the control sits on, in every theme the platform ships.
+    ///
+    /// WHY this is a test and not a comment: the defect it closes was a ring
+    /// at 1.21:1 and a fill at 1.11:1 against the page, each chosen by hand at
+    /// nine call sites. A contrast floor that lives only in prose is a floor
+    /// the next theme falls through quietly, and the failure is invisible --
+    /// the control does not error, it simply stops being a button.
+    #[test]
+    fn the_back_control_is_visible_on_every_shipped_theme() {
+        use super::accessibility::contrast_ratio_x100;
+        use super::back_button;
+        use super::monochrome;
+        use super::theme::Theme;
+
+        // WCAG 1.4.11's floor for the visual boundary of a user interface
+        // component, on the x100 scale the helper returns.
+        const MIN_BOUNDARY_X100: u32 = 300;
+
+        for theme in [
+            Theme::LIGHT,
+            Theme::DARK,
+            Theme::NEUTRAL,
+            monochrome::THEME,
+            monochrome::THEME_DARK,
+        ] {
+            let (ink, ring, fill) = back_button::colors_for_theme(&theme);
+
+            // The boundary has two sides, and both have to read: the ring
+            // against the page it stands on, and against the chip it encloses.
+            let ring_on_page = contrast_ratio_x100(ring, theme.surface);
+            let ring_on_fill = contrast_ratio_x100(ring, fill);
+            assert!(
+                ring_on_page >= MIN_BOUNDARY_X100,
+                "{}: the back ring {:08x} is {} on the page {:08x}, under the 3:1 floor",
+                theme.name,
+                ring,
+                ring_on_page,
+                theme.surface
+            );
+            assert!(
+                ring_on_fill >= MIN_BOUNDARY_X100,
+                "{}: the back ring {:08x} is {} against its own chip {:08x}, so the \
+                 chip has no edge",
+                theme.name,
+                ring,
+                ring_on_fill,
+                fill
+            );
+
+            // The chip is a step of its own rather than the page it sits on.
+            assert_ne!(
+                fill, theme.surface,
+                "{}: the back chip is filled with its own page, so it has no body",
+                theme.name
+            );
+
+            // And the chevron reads on the chip it is drawn into.
+            let ink_on_fill = contrast_ratio_x100(ink, fill);
+            assert!(
+                ink_on_fill >= MIN_BOUNDARY_X100,
+                "{}: the chevron {:08x} is {} on the chip {:08x}",
+                theme.name,
+                ink,
+                ink_on_fill,
+                fill
+            );
+
+            // The themed entry point paints those three roles in the three
+            // places they belong: the ring on the edge, the chevron in the
+            // middle, the fill between them.
+            let edge = back_button::X + back_button::RADIUS;
+            assert_eq!(
+                back_button::pixel_for_theme(edge, back_button::Y, &theme),
+                Some(ring),
+                "{}: the control's top edge is not its ring",
+                theme.name
+            );
+            assert_eq!(
+                back_button::pixel_for_theme(
+                    back_button::X + back_button::SIZE / 2 - 4,
+                    back_button::Y + back_button::SIZE / 2,
+                    &theme
+                ),
+                Some(ink),
+                "{}: the chevron's tip is not its ink",
+                theme.name
+            );
+            assert_eq!(
+                back_button::pixel_for_theme(
+                    back_button::X + back_button::SIZE / 2 + 8,
+                    back_button::Y + back_button::SIZE / 2,
+                    &theme
+                ),
+                Some(fill),
+                "{}: the control's body is not its fill",
+                theme.name
+            );
+        }
+
+        // The numbers the fix was chosen for, pinned so a later theme that
+        // trades `outline` for a hairline is a test failure and not a screen
+        // where the Back control has gone missing.
+        let (ink, ring, fill) = back_button::colors_for_theme(&monochrome::THEME);
+        assert_eq!((ink, ring, fill), (0xFF0A0A0A, 0xFF0A0A0A, 0xFFEF_EEE9));
+        assert!(
+            contrast_ratio_x100(ring, monochrome::THEME.surface) >= 1500,
+            "the monochrome back ring is no longer the dark edge it was chosen to be"
+        );
     }
 
     #[test]

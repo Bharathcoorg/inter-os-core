@@ -3086,205 +3086,6 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            if (events & std::EVENT_TIMER_TICK) != 0 {
-                refresh_ticks += 1;
-                if let Ok(power_state) = std::device_power(5) {
-                    let powered = power_state != 0;
-                    if !state.display_power_state_valid {
-                        state.display_was_powered = powered;
-                        state.display_power_state_valid = true;
-                    } else if powered != state.display_was_powered {
-                        state.display_was_powered = powered;
-                        if powered {
-                            state.current_view = ViewMode::LockScreen;
-                            state.pin_pad_visible = false;
-                            state.pin_len = 0;
-                            state.auth_error = false;
-                            render_view(surface, &state);
-                            surface_flip_display();
-                            std::log("[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
-                        } else {
-                            let _ = std::user_lock(1000);
-                            state.lock_state = std::UserLockState::Locked;
-                            state.current_view = ViewMode::LockScreen;
-                            state.pin_pad_visible = false;
-                            state.pin_len = 0;
-                            std::log("[LAUNCHER] Display sleep observed; locked to lock screen.").ok();
-                        }
-                    }
-                }
-                if state.current_view == ViewMode::PowerTransition {
-                    let now = current_ticks_opt().unwrap_or(state.power_transition_started_ticks);
-                    let elapsed = now.saturating_sub(state.power_transition_started_ticks);
-                    state.power_transition_progress = ((elapsed.min(POWER_TRANSITION_TICKS) * 1000) / POWER_TRANSITION_TICKS) as u16;
-                    render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
-                    surface_flip_display();
-                    if elapsed >= POWER_TRANSITION_TICKS {
-                        // Kernel power ABI: action 0 restarts (POWER.reset) and
-                        // action 1 shuts down (POWER.shutdown); every other
-                        // action passes through unchanged. The cards only record
-                        // the requested action, so dispatch stays in one place.
-                        let action = state.power_transition_action as u32;
-                        let dispatched = match action {
-                            0 => std::device_power(0),
-                            1 => std::device_power(1),
-                            _ => std::device_power(action),
-                        };
-                        match dispatched {
-                            Ok(_) => {}
-                            Err(_) => {
-                                std::log("[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
-                                state.current_view = ViewMode::PowerMenu;
-                                render_view(surface, &state);
-                                surface_flip_display();
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if state.current_view == ViewMode::BootScreen {
-                    let elapsed = current_ticks_opt().unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
-                    let boot_ticks = screens::boot::BOOT_TICKS;
-                    let next_progress = ((elapsed.min(boot_ticks) * 1000) / boot_ticks) as u16;
-                    // WHY the first boot frame paints the whole surface: the
-                    // aura and the void are full-screen, and a band-only first
-                    // frame left everything above the emblem at whatever the
-                    // lock screen or boot splash had put there. After that
-                    // frame the band is correct: every animated element lives
-                    // inside rows BAND_TOP..BAND_TOP+BAND_ROWS, and the present
-                    // path skips unchanged rows, so a per-tick band repaint
-                    // costs a fraction of a full-surface repaint under TCG.
-                    let first_frame = state.boot_frame == 0;
-                    state.boot_frame = state.boot_frame.wrapping_add(1);
-                    if next_progress != state.boot_progress {
-                        state.boot_progress = next_progress;
-                    }
-                    if first_frame {
-                        render_view(surface, &state);
-                    } else {
-                        render_band(
-                            surface,
-                            &state,
-                            screens::boot::BAND_TOP,
-                            (screens::boot::BAND_TOP + screens::boot::BAND_ROWS).min(H),
-                        );
-                        surface_flip_display();
-                    }
-                    if elapsed >= boot_ticks {
-                        // WHY boot never demands a credential now: an owner who
-                        // has not set a lock gets the plain lock screen, and the
-                        // account layer already unlocks a credential-less owner
-                        // on the swipe gesture - `UserManager::unlock` succeeds
-                        // when `credential.is_none()`. Forcing first-boot PIN
-                        // setup made every device pass through a screen it could
-                        // not skip, and put PIN entry, rather than Settings,
-                        // where a lock is configured. A PIN set from
-                        // Settings > Security is still demanded on every later
-                        // unlock and still survives a reboot.
-                        state.current_view = ViewMode::LockScreen;
-                        state.boot_progress = 1000;
-                        render_view(surface, &state);
-                        surface_flip_display();
-                        std::log("[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
-                    }
-                    continue;
-                }
-                let old_clock = state.clock_time;
-                refresh_clock(&mut state);
-                if old_clock != state.clock_time || refresh_ticks % 10 == 0 {
-                                        refresh_schedule(&mut state);
-                }
-                refresh_notifications(&mut state);
-                refresh_open_shade(surface, &mut state);
-                if refresh_ticks % 10 == 0 {
-                    if let Ok(volume) = std::audio_query_volume() {
-                        let volume_now = volume.min(100) as u8;
-                        if !state.volume_state_valid {
-                            state.last_volume_percent = volume_now;
-                            state.volume_state_valid = true;
-                        } else if volume_now != state.last_volume_percent {
-                            state.last_volume_percent = volume_now;
-                            state.volume_hud_until = current_ticks().saturating_add(180);
-                            if let Some(id) = volume_surface {
-                                render_volume_hud(id, volume_now);
-                                let _ = std::window_set_geometry(id, 100, 220, 100, true);
-                                surface_flip_display();
-                            }
-                        }
-                    }
-                }
-                if state.volume_hud_until != 0
-                    && current_ticks() >= state.volume_hud_until
-                {
-                    state.volume_hud_until = 0;
-                    if let Some(id) = volume_surface {
-                        let _ = std::window_set_geometry(id, 100, 220, 100, false);
-                        surface_flip_display();
-                    }
-                }
-                if refresh_ticks % 10 == 0 {
-                    let previous_count = state.app_count;
-                    refresh_package_catalog(&mut state);
-                    refresh_runtime_recents(&mut state);
-                    if previous_count != state.app_count {
-                        let _ = std::log("[LAUNCHER] Package catalogue count updated dynamically.");
-                        match state.current_view {
-                            ViewMode::HomeScreen | ViewMode::AppDrawer => {
-                                render_view(surface, &state);
-                                surface_flip_display();
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // The task switcher's previews are live, not a photograph.
-                //
-                // WHY this is on a timer and not only on entry: a preview is a
-                // picture of the app's last frame, and an app that is running
-                // keeps changing what it is showing. A preview captured once
-                // and never refreshed is a photograph, and the switcher is
-                // where somebody looks to see what their apps are doing.
-                if state.current_view == ViewMode::ActivitySpace && refresh_ticks % 100 == 0 {
-                    refresh_recents_cards(&mut state);
-                    screens::activity::refresh_previews(&mut state);
-                    present_dirty(surface, &state, Dirty::ActivityCards);
-                }
-                // The foreground app's picture.
-                //
-                // WHY the shell reads a running app's surface while the app is
-                // running: an app in this platform exits when the person
-                // leaves it, so the only way the switcher can hold a picture
-                // of an app at all is to take it while that app is still
-                // drawing. The picture is the app's own pixels, read through
-                // the platform's capture capability.
-                if refresh_ticks % 50 == 0 {
-                    capture_foreground(&mut state);
-                }
-                // The dashboard's numbers are readings, so the screen that shows
-                // them re-reads them while it is up.
-                //
-                // WHY it is not read once at entry: capacity changes when a disk
-                // is attached or a task dies, and a card that keeps whatever the
-                // entry happened to see is a photograph of the device rather than
-                // a report from it.
-                if state.current_view == ViewMode::LiveWidgets
-                    && refresh_ticks % 10 == 0
-                    && refresh_system_readings(&mut state)
-                {
-                    present_dirty(surface, &state, Dirty::WidgetsReadings);
-                }
-                if matches!(state.current_view, ViewMode::HomeScreen | ViewMode::LiveWidgets)
-                    && state.clock_time != old_clock
-                {
-                    render_band(surface, &state, 0, 48);
-                    surface_flip_display();
-                }
- else if state.current_view == ViewMode::LockScreen && state.clock_time != old_clock {
-                    render_band(surface, &state, 0, 360);
-                    surface_flip_display();
-                }
-            }
-
             // Consume normalized touch input pipeline
             let mut input = std::InputEvent {
                 kind: 0,
@@ -4736,7 +4537,7 @@ pub extern "C" fn _start() -> ! {
                                 // were a legend with real counts that no tap
                                 // reached, so the surface printed "Filter reads
                                 // All" while drawing no way to change it. The
-                                // pill row sits at PILLS_Y (214) with PILL_H,
+                                // pill row sits at PILLS_Y with PILL_H,
                                 // above the feed body, below the header, and
                                 // clear of the CLEAR_BTN the layout harness pins.
                                 //
@@ -5414,6 +5215,241 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                 }
+
+            // WHY this is polled and not delivered: the kernel's account layer
+            // records a lock from the side button, from Settings and from its
+            // own timeout, and none of those paths can wake the shell -- the
+            // shell only learned the lock state when an application it had
+            // launched exited. So a person pressing the lock key got
+            // `[LOCK] locked` in the kernel and went on looking at their home
+            // grid.
+            //
+            // WHY it runs on every wake and not inside the timer branch below:
+            // measured on the device, an idle shell at the home grid receives no
+            // `EVENT_TIMER_TICK` at all -- 22 s of idling produced no launcher
+            // wake-up carrying the tick bit -- so a read placed there only ever
+            // runs while an animation is armed, which is precisely when a person
+            // is not pressing the lock key. The wake itself is the poll's own
+            // timeout, and the read is a plain syscall with no port I/O behind
+            // it, so asking it once per wake costs the input path nothing it was
+            // not already paying.
+            let lock_now = std::user_get_lock_state(1000).unwrap_or(state.lock_state);
+            if lock_now != state.lock_state {
+                state.lock_state = lock_now;
+                if lock_now != std::UserLockState::Unlocked
+                    && !matches!(
+                        state.current_view,
+                        ViewMode::LockScreen | ViewMode::PinEntry | ViewMode::PowerMenu
+                    )
+                {
+                    state.current_view = ViewMode::LockScreen;
+                    state.pin_pad_visible = false;
+                    state.pin_len = 0;
+                    state.auth_error = false;
+                    render_view(surface, &state);
+                    surface_flip_display();
+                    std::log("[LAUNCHER] Lock observed; presenting the lock screen.").ok();
+                }
+            }
+
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                refresh_ticks += 1;
+                if let Ok(power_state) = std::device_power(5) {
+                    let powered = power_state != 0;
+                    if !state.display_power_state_valid {
+                        state.display_was_powered = powered;
+                        state.display_power_state_valid = true;
+                    } else if powered != state.display_was_powered {
+                        state.display_was_powered = powered;
+                        if powered {
+                            state.current_view = ViewMode::LockScreen;
+                            state.pin_pad_visible = false;
+                            state.pin_len = 0;
+                            state.auth_error = false;
+                            render_view(surface, &state);
+                            surface_flip_display();
+                            std::log("[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                        } else {
+                            let _ = std::user_lock(1000);
+                            state.lock_state = std::UserLockState::Locked;
+                            state.current_view = ViewMode::LockScreen;
+                            state.pin_pad_visible = false;
+                            state.pin_len = 0;
+                            std::log("[LAUNCHER] Display sleep observed; locked to lock screen.").ok();
+                        }
+                    }
+                }
+                if state.current_view == ViewMode::PowerTransition {
+                    let now = current_ticks_opt().unwrap_or(state.power_transition_started_ticks);
+                    let elapsed = now.saturating_sub(state.power_transition_started_ticks);
+                    state.power_transition_progress = ((elapsed.min(POWER_TRANSITION_TICKS) * 1000) / POWER_TRANSITION_TICKS) as u16;
+                    render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
+                    surface_flip_display();
+                    if elapsed >= POWER_TRANSITION_TICKS {
+                        // Kernel power ABI: action 0 restarts (POWER.reset) and
+                        // action 1 shuts down (POWER.shutdown); every other
+                        // action passes through unchanged. The cards only record
+                        // the requested action, so dispatch stays in one place.
+                        let action = state.power_transition_action as u32;
+                        let dispatched = match action {
+                            0 => std::device_power(0),
+                            1 => std::device_power(1),
+                            _ => std::device_power(action),
+                        };
+                        match dispatched {
+                            Ok(_) => {}
+                            Err(_) => {
+                                std::log("[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
+                                state.current_view = ViewMode::PowerMenu;
+                                render_view(surface, &state);
+                                surface_flip_display();
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if state.current_view == ViewMode::BootScreen {
+                    let elapsed = current_ticks_opt().unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
+                    let boot_ticks = screens::boot::BOOT_TICKS;
+                    let next_progress = ((elapsed.min(boot_ticks) * 1000) / boot_ticks) as u16;
+                    // WHY the first boot frame paints the whole surface: the
+                    // aura and the void are full-screen, and a band-only first
+                    // frame left everything above the emblem at whatever the
+                    // lock screen or boot splash had put there. After that
+                    // frame the band is correct: every animated element lives
+                    // inside rows BAND_TOP..BAND_TOP+BAND_ROWS, and the present
+                    // path skips unchanged rows, so a per-tick band repaint
+                    // costs a fraction of a full-surface repaint under TCG.
+                    let first_frame = state.boot_frame == 0;
+                    state.boot_frame = state.boot_frame.wrapping_add(1);
+                    if next_progress != state.boot_progress {
+                        state.boot_progress = next_progress;
+                    }
+                    if first_frame {
+                        render_view(surface, &state);
+                    } else {
+                        render_band(
+                            surface,
+                            &state,
+                            screens::boot::BAND_TOP,
+                            (screens::boot::BAND_TOP + screens::boot::BAND_ROWS).min(H),
+                        );
+                        surface_flip_display();
+                    }
+                    if elapsed >= boot_ticks {
+                        // WHY boot never demands a credential now: an owner who
+                        // has not set a lock gets the plain lock screen, and the
+                        // account layer already unlocks a credential-less owner
+                        // on the swipe gesture - `UserManager::unlock` succeeds
+                        // when `credential.is_none()`. Forcing first-boot PIN
+                        // setup made every device pass through a screen it could
+                        // not skip, and put PIN entry, rather than Settings,
+                        // where a lock is configured. A PIN set from
+                        // Settings > Security is still demanded on every later
+                        // unlock and still survives a reboot.
+                        state.current_view = ViewMode::LockScreen;
+                        state.boot_progress = 1000;
+                        render_view(surface, &state);
+                        surface_flip_display();
+                        std::log("[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
+                    }
+                    continue;
+                }
+                let old_clock = state.clock_time;
+                refresh_clock(&mut state);
+                if old_clock != state.clock_time || refresh_ticks % 10 == 0 {
+                    refresh_schedule(&mut state);
+                }
+                refresh_notifications(&mut state);
+                refresh_open_shade(surface, &mut state);
+                if refresh_ticks % 10 == 0 {
+                    if let Ok(volume) = std::audio_query_volume() {
+                        let volume_now = volume.min(100) as u8;
+                        if !state.volume_state_valid {
+                            state.last_volume_percent = volume_now;
+                            state.volume_state_valid = true;
+                        } else if volume_now != state.last_volume_percent {
+                            state.last_volume_percent = volume_now;
+                            state.volume_hud_until = current_ticks().saturating_add(180);
+                            if let Some(id) = volume_surface {
+                                render_volume_hud(id, volume_now);
+                                let _ = std::window_set_geometry(id, 100, 220, 100, true);
+                                surface_flip_display();
+                            }
+                        }
+                    }
+                }
+                if state.volume_hud_until != 0
+                    && current_ticks() >= state.volume_hud_until
+                {
+                    state.volume_hud_until = 0;
+                    if let Some(id) = volume_surface {
+                        let _ = std::window_set_geometry(id, 100, 220, 100, false);
+                        surface_flip_display();
+                    }
+                }
+                if refresh_ticks % 10 == 0 {
+                    let previous_count = state.app_count;
+                    refresh_package_catalog(&mut state);
+                    refresh_runtime_recents(&mut state);
+                    if previous_count != state.app_count {
+                        let _ = std::log("[LAUNCHER] Package catalogue count updated dynamically.");
+                        match state.current_view {
+                            ViewMode::HomeScreen | ViewMode::AppDrawer => {
+                                render_view(surface, &state);
+                                surface_flip_display();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // The task switcher's previews are live, not a photograph.
+                //
+                // WHY this is on a timer and not only on entry: a preview is a
+                // picture of the app's last frame, and an app that is running
+                // keeps changing what it is showing. A preview captured once
+                // and never refreshed is a photograph, and the switcher is
+                // where somebody looks to see what their apps are doing.
+                if state.current_view == ViewMode::ActivitySpace && refresh_ticks % 100 == 0 {
+                    refresh_recents_cards(&mut state);
+                    screens::activity::refresh_previews(&mut state);
+                    present_dirty(surface, &state, Dirty::ActivityCards);
+                }
+                // The foreground app's picture.
+                //
+                // WHY the shell reads a running app's surface while the app is
+                // running: an app in this platform exits when the person
+                // leaves it, so the only way the switcher can hold a picture
+                // of an app at all is to take it while that app is still
+                // drawing. The picture is the app's own pixels, read through
+                // the platform's capture capability.
+                if refresh_ticks % 50 == 0 {
+                    capture_foreground(&mut state);
+                }
+                // The dashboard's numbers are readings, so the screen that shows
+                // them re-reads them while it is up.
+                //
+                // WHY it is not read once at entry: capacity changes when a disk
+                // is attached or a task dies, and a card that keeps whatever the
+                // entry happened to see is a photograph of the device rather than
+                // a report from it.
+                if state.current_view == ViewMode::LiveWidgets
+                    && refresh_ticks % 10 == 0
+                    && refresh_system_readings(&mut state)
+                {
+                    present_dirty(surface, &state, Dirty::WidgetsReadings);
+                }
+                if matches!(state.current_view, ViewMode::HomeScreen | ViewMode::LiveWidgets)
+                    && state.clock_time != old_clock
+                {
+                    render_band(surface, &state, 0, 48);
+                    surface_flip_display();
+                }
+ else if state.current_view == ViewMode::LockScreen && state.clock_time != old_clock {
+                    render_band(surface, &state, 0, 360);
+                    surface_flip_display();
+                }
+            }
             }
         std::yield_now();
     }

@@ -10,11 +10,17 @@
 //!
 //! The showcases in `Ui Samples/apps` all describe the *same* system in the
 //! *same* words: a background of `#FAFAFA`, a surface of `#FFFFFF`, a hairline
-//! of `#E5E5E5`, text that is `#0A0A0A` or `#6B6B6B` or `#A3A3A3`, and colour
-//! reserved for status -- `#22C55E` for good, `#F59E0B` for a warning,
+//! of `#E5E5E5`, text on three rungs of the same black-to-grey ladder, and
+//! colour reserved for status -- `#22C55E` for good, `#F59E0B` for a warning,
 //! `#EF4444` for an error. The type scale is a ladder of cap heights and the
 //! spacing is a ladder of four-pixel steps. This module writes that down once
 //! so that an application can be *right* rather than merely *consistent*.
+//!
+//! WHY the ink rungs are not the three greys the showcases name: the mockups
+//! put the whisper rung at `#A3A3A3`, which is 2.42:1 on the page they stand on
+//! -- below the 4.5:1 this repository's own contrast contract names as the
+//! floor for text. See [`TEXT_MUTED`] for the arithmetic and for why fixing that
+//! rung moves the rung above it with it.
 //!
 //! WHY the widgets are per-pixel and not drawn: the guest applications paint
 //! a frame one pixel at a time, because a surface write is capped at 4,096
@@ -53,9 +59,35 @@ pub const BORDER: u32 = 0xFFE5_E5E5;
 /// The text a reader reads first.
 pub const TEXT_PRIMARY: u32 = 0xFF0A_0A0A;
 /// The text a reader reads second.
-pub const TEXT_SECONDARY: u32 = 0xFF6B_6B6B;
+///
+/// WHY this is `#525458` and not a lighter grey: the three ink roles are one
+/// ladder, and a ladder only works if every rung is readable. See
+/// [`TEXT_MUTED`] for the arithmetic that moved this rung down when the rung
+/// below it was lifted.
+pub const TEXT_SECONDARY: u32 = 0xFF52_5458;
 /// The text that is a whisper: a timestamp, a hint.
-pub const TEXT_MUTED: u32 = 0xFFA3_A3A3;
+///
+/// WHY `#6B6B6B` and not the `#A3A3A3` this constant held: at `#A3A3A3` a
+/// caption measured 2.42:1 against the page and 2.52:1 against a card, and
+/// WCAG 2.1 AA -- which this repository's own contrast contract names as its
+/// floor -- asks 4.5:1 of text at the size captions are drawn. The platform's
+/// status colours and hairlines were audited against that floor; the muted ink
+/// was never in the pair list, so the step that took it under the floor passed
+/// the test suite. Every caption, timestamp, placeholder and hint on every
+/// screen is drawn with this role, and a person reading the device at the
+/// Studio's presentation scale experiences that as text that has gone soft.
+///
+/// WHY `#6B6B6B` specifically: it is the lightest grey that clears 4.5:1 on the
+/// *worst* surface a caption actually sits on, not only on the page. The four
+/// surfaces in this palette are the page (`#FAFAFA`), a card (`#FFFFFF`), a
+/// well (`#F2F2F2`) and a raised chip (`#EFEEE9`); `#6B6B6B` is 4.59:1 on the
+/// darkest of them and 5.11:1 on the page, while any grey lighter than it fails
+/// on the chip. That left one option: the muted ink took the value the
+/// secondary ink held, and the secondary ink moved down to the platform's own
+/// stock secondary (`#525458`), so the ladder keeps three visibly different
+/// rungs -- `#0A0A0A` at 18.97:1, `#525458` at 7.27:1, `#6B6B6B` at 5.11:1 --
+/// every one of them above the floor this theme already promises.
+pub const TEXT_MUTED: u32 = 0xFF6B_6B6B;
 /// A state that is good.
 pub const SUCCESS: u32 = 0xFF22_C55E;
 /// A state that wants attention.
@@ -80,10 +112,26 @@ pub const DARK_SURFACE_HIGH: u32 = 0xFF23_2323;
 pub const DARK_MUTED: u32 = 0xFF18_1818;
 /// The hairline on the dark pages.
 pub const DARK_BORDER: u32 = 0xFF2E_2E2E;
-/// Secondary ink on the dark pages.
-pub const TEXT_MUTED_ON_DARK: u32 = 0xFFA3_A3A3;
+/// Secondary ink on the dark pages: the dark ladder's second rung.
+///
+/// WHY it moved up to `#C7C7C7`: [`TEXT_MUTED_DARK`] is the whisper rung and
+/// has to stay under the floor-free end of the scale, and the light side's
+/// fix moved this ladder's muted ink to the value that used to be the page's
+/// secondary. The dark names read backwards from what they are for --
+/// `TEXT_MUTED_ON_DARK` is the theme's `on_surface_variant`, i.e. its
+/// secondary -- so both are pinned to the roles they feed rather than to their
+/// own names. `#C7C7C7` is 11.71:1 on the dark page and 8.03:1 on the
+/// lightest dark surface a run can be drawn over.
+pub const TEXT_MUTED_ON_DARK: u32 = 0xFFC7_C7C7;
 /// The least prominent ink on the dark pages.
-pub const TEXT_MUTED_DARK: u32 = 0xFF52_5252;
+///
+/// WHY `#A3A3A3` and not the `#525252` this held: 2.53:1 against the dark page
+/// and 1.90:1 against a dark card, which is the same AA failure the light side
+/// had, for the same reason -- the role was never in the contrast contract's
+/// pair list. `#A3A3A3` is 7.85:1 on the page and 6.23:1 on `#232323`, the
+/// lightest surface in this half of the ladder, and it stays a visibly quieter
+/// rung than [`TEXT_MUTED_ON_DARK`] above it.
+pub const TEXT_MUTED_DARK: u32 = 0xFFA3_A3A3;
 
 // ---------------------------------------------------------------------------
 // The type scale
@@ -1182,11 +1230,90 @@ mod tests {
         assert_eq!(SURFACE, 0xFF_FFFF);
         assert_eq!(BORDER, 0xFFE5_E5E5);
         assert_eq!(TEXT_PRIMARY, 0xFF0A_0A0A);
-        assert_eq!(TEXT_SECONDARY, 0xFF6B_6B6B);
-        assert_eq!(TEXT_MUTED, 0xFFA3_A3A3);
+        assert_eq!(TEXT_SECONDARY, 0xFF52_5458);
+        assert_eq!(TEXT_MUTED, 0xFF6B_6B6B);
         assert_eq!(SUCCESS, 0xFF22_C55E);
         assert_eq!(WARNING, 0xFFF5_9E0B);
         assert_eq!(ERROR, 0xFFEF_4444);
+    }
+
+    /// The claim the palette has to keep: every ink rung is readable on every
+    /// surface rung, and the three inks stay three distinct steps.
+    ///
+    /// WHY a test of the arithmetic rather than of the three literals above: the
+    /// literals are what a showcase painted, and a showcase that names a 2.4:1
+    /// caption is a showcase that fails this repository's own contrast contract.
+    /// That is exactly how the whisper ink slid under the floor without a test
+    /// noticing -- the contract's pair list never included `muted`. This is the
+    /// pair list for the ink ladder itself, so the next time a rung moves the
+    /// floor moves with it.
+    #[test]
+    fn every_ink_rung_clears_wcag_aa_on_every_surface_rung() {
+        let surfaces = [
+            ("page", BG),
+            ("card", SURFACE),
+            ("well", SURFACE_MUTED),
+            ("raised", SURFACE_RAISED),
+        ];
+        let inks = [
+            ("primary", TEXT_PRIMARY),
+            ("secondary", TEXT_SECONDARY),
+            ("muted", TEXT_MUTED),
+        ];
+        for (ink_name, ink) in inks {
+            for (surface_name, surface) in surfaces {
+                let ratio = contrast_ratio(ink, surface);
+                assert!(
+                    ratio >= 4.5,
+                    "the {ink_name} ink on the {surface_name} surface is {ratio:.2}:1, \
+                     under the 4.5:1 this repository's contrast contract promises"
+                );
+            }
+        }
+        for dark_surfaces in [DARK_BG, DARK_SURFACE, DARK_MUTED, DARK_SURFACE_HIGH] {
+            assert!(contrast_ratio(TEXT_MUTED_ON_DARK, dark_surfaces) >= 4.5);
+            assert!(contrast_ratio(TEXT_MUTED_DARK, dark_surfaces) >= 4.5);
+        }
+
+        // Three AA floors in a 256-step grey scale leave little room, so the
+        // ladder's separation is worth pinning: each rung has to be a step a
+        // reader can see, not merely a different number.
+        assert!(
+            contrast_ratio(TEXT_PRIMARY, TEXT_SECONDARY) >= 1.3,
+            "primary and secondary ink are the same shade"
+        );
+        assert!(
+            contrast_ratio(TEXT_SECONDARY, TEXT_MUTED) >= 1.3,
+            "secondary and muted ink are the same shade"
+        );
+        assert!(
+            contrast_ratio(TEXT_MUTED_ON_DARK, TEXT_MUTED_DARK) >= 1.3,
+            "the dark ladder's two quiet inks are the same shade"
+        );
+    }
+
+    /// WCAG 2.1 relative luminance and the contrast ratio it defines.
+    ///
+    /// WHY the arithmetic is spelled out here: it needs `powf`, which the guest
+    /// build of this crate does not have, and this test module is the one place
+    /// compiled against host `std` (see the `extern crate std` in the crate
+    /// root). The same formula lives in `tests/test_contrast_contract.py`, which
+    /// reads the shipped theme blocks from source.
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        fn channel(v: u32, shift: u32) -> f64 {
+            let x = ((v >> shift) & 0xFF) as f64 / 255.0;
+            if x <= 0.04045 {
+                x / 12.92
+            } else {
+                ((x + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(v: u32) -> f64 {
+            0.2126 * channel(v, 16) + 0.7152 * channel(v, 8) + 0.0722 * channel(v, 0)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
     }
 
     #[test]

@@ -20,7 +20,7 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use camera::theme::{chrome, radius, spacing, typography, Theme, MIN_TOUCH_TARGET, THEME};
+use camera::theme::{chrome, radius, spacing, typography, Theme, CHASSIS_THEME, MIN_TOUCH_TARGET, THEME};
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
 
@@ -271,7 +271,14 @@ const TIMER_RING_INNER_R: usize = 44;
 /// The video mode's record chip, dropped this many rows below the top of the
 /// active cut.
 const REC_CHIP_W: usize = 120;
-const REC_CHIP_H: usize = 36;
+/// WHY the height is derived from the body rung and not pinned: the raised
+/// rung grew the run's line box to 39 rows, and a 36-row chip no longer holds
+/// it. Twice (ascent - cap / 2) is the shortest chip whose middle is deep
+/// enough for `centred_text_top` to place the run rather than refuse it, so
+/// the cap block sits centred and the whole line box stays inside.
+const REC_CHIP_H: usize = (std::design::font::ascent_for_scale(typography::BODY_SCALE)
+    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize / 2)
+    * 2;
 const REC_CHIP_TOP: usize = 16;
 /// The dot's centre, measured into the chip, and its radius.
 const REC_DOT_CX_OFF: usize = 16;
@@ -358,20 +365,44 @@ const _: () = assert!(SHUTTER_CY - SHUTTER_RING_OUTER >= DOCK_Y0);
 // -----------------------------------------------------------------------------
 // The settings surface.
 // -----------------------------------------------------------------------------
-/// The sheet the rows live on.
-const SHEET_RECT: Rect = Rect::new(24, 140, 672, 960);
+/// The sheet the rows live on. WHY its height is derived: the sheet used to be
+/// a remembered 960 while the plate count, the plate height and the row pitch
+/// were remembered too, and none of them followed the type ladder. The bottom
+/// edge is now wherever the last plate's is, and the gate beside it fails the
+/// build if that edge ever reaches the mode strip.
 const SHEET_TITLE_Y0: usize = 160;
-const SHEET_ROW_Y0: usize = 200;
+/// The gap between the sheet title's line box and the hairline under it.
+const SHEET_RULE_GAP: usize = 6;
+const SHEET_ROW_Y0: usize = SHEET_TITLE_Y0 + SHEET_TITLE_BOX + SHEET_RULE_GAP;
+/// The air above and below the three runs inside one plate.
+const SHEET_PLATE_PAD: usize = 1;
+/// The gap between two plates.
+const SHEET_ROW_GAP: usize = 4;
 /// The pitch two plates stand on: a plate and the gap under it.
-const SHEET_ROW_H: usize = 96;
-const SHEET_ROW_GAP: usize = 8;
+const SHEET_ROW_H: usize = SHEET_PLATE_H + SHEET_ROW_GAP;
 /// A plate's own height -- the box its runs are centred in, and the box the
 /// tap answers.
 ///
 /// WHY the plate and not the pitch: the row used to be tapped on the 96-row
 /// pitch it is laid out on, so the 8 gap rows under a plate answered that
 /// plate although no pixel of it is drawn there.
-const SHEET_PLATE_H: usize = SHEET_ROW_H - SHEET_ROW_GAP;
+const SHEET_PLATE_H: usize = SHEET_STACK_H + SHEET_PLATE_PAD * 2;
+/// How many plate pitches the sheet can show between its first row and the
+/// mode strip, derived from the pitch the plates actually stand on.
+///
+/// WHY the list pages: the raised rungs grew the stack to 108 rows, a plate
+/// 110 and a pitch 114, so nine rows reached row 1231 -- 81 rows past the
+/// strip at 1150 -- and no lawful trimming of the air above the title buys
+/// them back. The sheet keeps the rungs, shows the seven rows its slots hold
+/// and turns a page for the rest.
+const SHEET_SLOTS: usize = (MODE_STRIP_Y0 - SHEET_ROW_Y0) / SHEET_ROW_H;
+/// The plates one page shows: every slot but the last, which is the pager.
+const SHEET_PAGE_ROWS: usize = SHEET_SLOTS - 1;
+/// How many pages the full row order needs at that window.
+const SHEET_PAGES: usize = (camera::SETTINGS_ROWS + SHEET_PAGE_ROWS - 1) / SHEET_PAGE_ROWS;
+/// Where the sheet ends: the last slot's pitch, so the frame is the page.
+const SHEET_BOTTOM: usize = SHEET_ROW_Y0 + SHEET_SLOTS * SHEET_ROW_H;
+const SHEET_RECT: Rect = Rect::new(24, 140, 672, SHEET_BOTTOM - 140);
 const SHEET_ROW_X0: usize = 36;
 const SHEET_ROW_W: usize = 648;
 const SHEET_TEXT_X: usize = 48;
@@ -414,18 +445,20 @@ const fn settings_row_rect(index: usize) -> Rect {
 
 /// WHY checked at compile time: the stack is only legal while the note's line
 /// box still ends inside its plate -- raise a rung and that is the first gate
-/// to fail. The chain gates are what a ninth row, a taller plate or a shorter
-/// sheet breaks, and they are the difference between a list that fits and one
-/// whose last plate runs under the sheet's own hairline.
+/// to fail. The chain gates are what a taller plate, a wider pitch or a
+/// shorter sheet breaks, and they are the difference between a page whose last
+/// plate fits and one that runs under the sheet's own hairline; the last two
+/// keep the sheet clear of the mode strip and every row inside some page.
 const _: () = assert!(SHEET_NOTE_OFF + SHEET_NOTE_BOX <= SHEET_PLATE_H);
 const _: () = assert!(SHEET_TITLE_Y0 + SHEET_TITLE_BOX <= SHEET_HAIRLINE_Y);
-const _: () = assert!(SHEET_ROW_Y0 + camera::SETTINGS_ROWS * SHEET_ROW_H <= SHEET_RECT.y + SHEET_RECT.h);
+const _: () = assert!(SHEET_ROW_Y0 + SHEET_SLOTS * SHEET_ROW_H <= SHEET_RECT.y + SHEET_RECT.h);
 const _: () = assert!(
-    settings_row_rect(camera::SETTINGS_ROWS - 1).y + SHEET_PLATE_H <= SHEET_RECT.y + SHEET_RECT.h
+    settings_row_rect(SHEET_SLOTS - 1).y + SHEET_PLATE_H <= SHEET_RECT.y + SHEET_RECT.h
 );
 const _: () = assert!(SHEET_TEXT_X + SHEET_TEXT_W <= SHEET_ROW_X0 + SHEET_ROW_W);
 const _: () = assert!(SHEET_ROW_X0 + SHEET_ROW_W <= SHEET_RECT.x + SHEET_RECT.w);
 const _: () = assert!(SHEET_RECT.y + SHEET_RECT.h <= MODE_STRIP_Y0);
+const _: () = assert!(SHEET_PAGES * SHEET_PAGE_ROWS >= camera::SETTINGS_ROWS);
 
 const RETICLE_ARM: usize = 40;
 
@@ -778,7 +811,7 @@ fn mode_slot_at(x: usize, y: usize) -> Option<usize> {
 }
 
 #[inline(never)]
-fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
+fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
     // 0. Status Band (y < STATUS_BAR_HEIGHT)
     if y < STATUS_BAR_HEIGHT {
         let band = interos_std::design::components::StatusBand::new(W);
@@ -790,19 +823,20 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
     // 1. Status Bar & Top Controls (y: 0..112)
     if y < TOP_BAND_Y1 {
-        if y >= TOP_BAND_Y1 - 2 {
-            return chrome::BORDER;
+        // WHY the control is asked before the band's own surfaces: it owns rows
+        // 56..104 and every row it does not claim falls through to raw chassis,
+        // so a chip asked after them is a chip that never reaches the scanout.
+        // WHY [`CHASSIS_THEME`] and not the chassis hairline drawn here before:
+        // that ring measured 1.90:1 over the band on a plate 1.09:1 above it, so
+        // the control read as a bare chevron with no pressable thing around it,
+        // while the dark roles put the ring at 18.37:1 and the chevron at 15.06:1
+        // over the plate it sits on.
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &CHASSIS_THEME) {
+            return c;
         }
 
-        // Back control: the SDK's 48x48 back button on the chassis.
-        if let Some(c) = std::design::back_button::pixel(
-            x,
-            y,
-            chrome::TEXT,
-            chrome::BORDER_STRONG,
-            chrome::SURFACE,
-        ) {
-            return c;
+        if y >= TOP_BAND_Y1 - 2 {
+            return chrome::BORDER;
         }
 
         // Flash / torch pill (116x48px)
@@ -897,7 +931,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
     // 2. The settings surface (when open)
     if camera.screen == CameraScreen::Settings && SHEET_RECT.contains(x, y) {
-        return settings_pixel(x, y, camera);
+        return settings_pixel(x, y, camera, page);
     }
 
     // 3. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, inside gutters)
@@ -1257,7 +1291,10 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 }
 
 /// The settings surface: a dark sheet with amber-accented rows.
-fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
+///
+/// `page` windows the row order into the sheet's content plates; the last
+/// slot is the pager that turns it.
+fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
     if let Some(c) = std::design::primitives::draw_rounded_rect(
         x,
         y,
@@ -1301,13 +1338,18 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // The rows: each one's plate is the box `settings_row_rect` names, so
-        // the painter fills exactly what the tap handler answers.
-        for index in 0..SETTINGS_ROW_ORDER.len() {
-            let plate = settings_row_rect(index);
+        // the painter fills exactly what the tap handler answers. The slot
+        // wears the row order's entry at `page * SHEET_PAGE_ROWS + slot`.
+        for slot in 0..SHEET_PAGE_ROWS {
+            let row_index = page * SHEET_PAGE_ROWS + slot;
+            if row_index >= camera::SETTINGS_ROWS {
+                continue;
+            }
+            let plate = settings_row_rect(slot);
             if !plate.contains(x, y) {
                 continue;
             }
-            let row = SETTINGS_ROW_ORDER[index];
+            let row = SETTINGS_ROW_ORDER[row_index];
             let row_y = plate.y;
             let plate_c = std::design::primitives::draw_rounded_rect(
                 x,
@@ -1320,8 +1362,8 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             );
             let title = camera.settings_row_title(row);
             // WHY the bands are the line boxes and the block is centred: the
-            // title and the value are body-scale runs (32 rows each) and the
-            // note is a caption (22), so 86 rows of type stand in a plate 88
+            // title and the value are body-scale runs (39 rows each) and the
+            // note is a caption (30), so 108 rows of type stand in a plate 110
             // tall. The plate used to start them at row 2, which left no air
             // under the block at all and let the note's descenders ink the
             // plate's own bottom hairline.
@@ -1342,8 +1384,8 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                     return tc;
                 }
             } else if y < row_y + SHEET_NOTE_OFF {
-                let len = camera.settings_value_lens[index];
-                let value = &camera.settings_values[index][..len];
+                let len = camera.settings_value_lens[row_index];
+                let value = &camera.settings_values[row_index][..len];
                 let val_scale =
                     if std::design::font::measure(value, 2) <= SHEET_TEXT_W { 2 } else { 1 };
                 if let Some(tc) = test_text(
@@ -1381,16 +1423,50 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 return plate_c;
             }
         }
+        // The pager: the sheet's last slot, named in `settings_row_rect` so
+        // the plate the painter fills is the plate the tap handler answers.
+        // Its label says which way the page turns, in the caption rung.
+        let pager = settings_row_rect(SHEET_PAGE_ROWS);
+        if pager.contains(x, y) {
+            if let Some(plate_c) = std::design::primitives::draw_rounded_rect(
+                x,
+                y,
+                pager,
+                radius::CHIP,
+                chrome::SURFACE_HIGH,
+                Some(chrome::BORDER),
+                1,
+            ) {
+                let label: &[u8] =
+                    if page + 1 < SHEET_PAGES { b"MORE SETTINGS" } else { b"FIRST SETTINGS" };
+                let lx = camera::centred_x(label, typography::CAPTION_SCALE, pager.x, pager.w);
+                let ly = pager.y + centred_text_top(pager.h, typography::CAPTION_SCALE);
+                if let Some(tc) = test_text(
+                    x,
+                    y,
+                    lx,
+                    ly,
+                    typography::CAPTION_SCALE,
+                    label,
+                    pager.w,
+                    chrome::SKY,
+                    chrome::SURFACE_HIGH,
+                ) {
+                    return tc;
+                }
+                return plate_c;
+            }
+        }
         return c;
     }
     chrome::BODY
 }
 
-fn render_camera_ui(surface: u32, camera: &CameraApp) {
-    render_camera_band(surface, camera, 0, H);
+fn render_camera_ui(surface: u32, camera: &CameraApp, page: usize) {
+    render_camera_band(surface, camera, 0, H, page);
 }
 
-fn render_camera_band(surface: u32, camera: &CameraApp, y0: usize, y1: usize) {
+fn render_camera_band(surface: u32, camera: &CameraApp, y0: usize, y1: usize, page: usize) {
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -1399,7 +1475,7 @@ fn render_camera_band(surface: u32, camera: &CameraApp, y0: usize, y1: usize) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_camera_pixel(x, y, camera);
+            chunk[i] = get_camera_pixel(x, y, camera, page);
             x += 1;
             if x == W {
                 x = 0;
@@ -1509,10 +1585,12 @@ fn log_capture_code(prefix: &[u8], code: i64) {
     }
 }
 
-/// The row whose plate is under `(x, y)`, on the box [`settings_pixel`] fills.
+/// The content slot whose plate is under `(x, y)`, on the box
+/// [`settings_pixel`] fills. The pager slot is not a content row: it is
+/// answered where the page is turned.
 fn settings_row_at(x: usize, y: usize) -> Option<usize> {
     let mut index = 0usize;
-    while index < SETTINGS_ROW_ORDER.len() {
+    while index < SHEET_PAGE_ROWS {
         if settings_row_rect(index).contains(x, y) {
             return Some(index);
         }
@@ -1521,11 +1599,20 @@ fn settings_row_at(x: usize, y: usize) -> Option<usize> {
     None
 }
 
-fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize) -> Tap {
-    let index = match settings_row_at(x, y) {
-        Some(index) => index,
+fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize, page: &mut usize) -> Tap {
+    if settings_row_rect(SHEET_PAGE_ROWS).contains(x, y) {
+        *page = (*page + 1) % SHEET_PAGES;
+        std::log("[CAMERA APP] Settings page turned.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+    let slot = match settings_row_at(x, y) {
+        Some(slot) => slot,
         None => return Tap::None,
     };
+    let index = *page * SHEET_PAGE_ROWS + slot;
+    if index >= camera::SETTINGS_ROWS {
+        return Tap::None;
+    }
     let row = SETTINGS_ROW_ORDER[index];
     match row {
         SettingsRow::Filter => {
@@ -1581,7 +1668,7 @@ fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize) -> Tap {
     }
 }
 
-fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
+fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32, page: &mut usize) -> Tap {
     let x = x as usize;
     let y = y as usize;
 
@@ -1596,7 +1683,7 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
 
     // 2. The settings surface, when it is open
     if camera.screen == CameraScreen::Settings {
-        return handle_settings_tap(camera, x, y);
+        return handle_settings_tap(camera, x, y, page);
     }
 
     // 3. Flash mode toggle pill (Auto -> On -> Off -> Auto)
@@ -1676,6 +1763,9 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     // 8. Bottom-right Settings Button (radius 32, diameter 64px >= 48px)
     if side_button_hit(x, y, SETTINGS_CX) {
         camera.screen = CameraScreen::Settings;
+        // WHY the sheet opens on its first page: a stale page from a previous
+        // visit has no meaning once the surface has been closed.
+        *page = 0;
         camera.refresh_settings_values();
         std::audio_haptic_click().ok();
         return Tap::Redraw(Dirty::Viewfinder);
@@ -1748,6 +1838,10 @@ pub extern "C" fn _start() -> ! {
     std::log("[CAMERA APP (Ring 3)] Camera online.").ok();
 
     let mut camera = CameraApp::new();
+    // The settings sheet's page, held here rather than in the model: it is
+    // this renderer's window over the row order, and the row order is the
+    // model's. Zero heap, one usize, reset when the surface is reopened.
+    let mut sheet_page = 0usize;
     refresh_clock(&mut camera);
     camera.refresh_shots_label();
     camera.refresh_status_text();
@@ -1781,7 +1875,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     camera.mode = CameraMode::Photo;
-    render_camera_ui(surface, &camera);
+    render_camera_ui(surface, &camera, sheet_page);
     let _ = std::surface_flip();
     std::log("[CAMERA APP] Step 3: Initial frame presented to hardware scanout.").ok();
 
@@ -1795,7 +1889,7 @@ pub extern "C" fn _start() -> ! {
                 if camera.shutter_feedback_ticks > 0 {
                     camera.shutter_feedback_ticks = camera.shutter_feedback_ticks.saturating_sub(1);
                     if surface > 0 {
-                        render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1);
+                        render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1, sheet_page);
                         needs_redraw = true;
                     }
                 }
@@ -1807,11 +1901,11 @@ pub extern "C" fn _start() -> ! {
                         let _ = camera.capture_still_photo();
                         camera.refresh_settings_values();
                         if surface > 0 {
-                            render_camera_ui(surface, &camera);
+                            render_camera_ui(surface, &camera, sheet_page);
                             let _ = std::surface_flip();
                         }
                     } else if surface > 0 {
-                        render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1);
+                        render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1, sheet_page);
                         needs_redraw = true;
                     }
                 }
@@ -1837,7 +1931,7 @@ pub extern "C" fn _start() -> ! {
                         exit_to_launcher(surface);
                     }
                     if input.kind == 1 {
-                        match handle_camera_touch(&mut camera, input.x, input.y) {
+                        match handle_camera_touch(&mut camera, input.x, input.y, &mut sheet_page) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();
                                 exit_to_launcher(surface);
@@ -1850,16 +1944,17 @@ pub extern "C" fn _start() -> ! {
                 if dirty != Dirty::None {
                     match dirty {
                         Dirty::TopRow => {
-                            render_camera_band(surface, &camera, TOP_BAND_Y0, TOP_BAND_Y1)
+                            render_camera_band(surface, &camera, TOP_BAND_Y0, TOP_BAND_Y1, sheet_page)
                         }
                         Dirty::Viewfinder => render_camera_band(
                             surface,
                             &camera,
                             VIEWFINDER_Y0,
                             VIEWFINDER_Y1,
+                            sheet_page,
                         ),
-                        Dirty::Dock => render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1),
-                        Dirty::All => render_camera_ui(surface, &camera),
+                        Dirty::Dock => render_camera_band(surface, &camera, DOCK_Y0, DOCK_Y1, sheet_page),
+                        Dirty::All => render_camera_ui(surface, &camera, sheet_page),
                         Dirty::None => {}
                     }
                     let _ = std::surface_flip();

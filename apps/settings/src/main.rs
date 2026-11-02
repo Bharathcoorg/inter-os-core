@@ -1805,33 +1805,55 @@ fn blend_over(fg: u32, bg: u32, alpha: u32) -> u32 {
 }
 
 // -----------------------------------------------------------------------------
-// Typography: the rungs this face can actually draw
+// Typography: the rungs this app draws with
 // -----------------------------------------------------------------------------
-// WHY two names instead of the design doc's seven: the guest's bitmap face
-// rasterises a 16x24 cell at INTEGER scales only, so a "size" here is one of
-// 24px (scale 1), 48px (scale 2) or 72px (scale 3). Against the doc's rungs:
+// WHY these are rungs and not sizes: the outline face draws a run at whatever
+// cap height the platform's ladder names, so a size written here is a role, and
+// the role's pixels come from `font::cap_for_scale`. The bitmap face the guest
+// used to fall back on rasterised a 16x24 cell at INTEGER scales only -- 24,
+// 48, 72 -- and against the design document's roles that left caption, body, H1
+// and H2 all recorded here as NOT EXPRESSIBLE. That is no longer true: the
+// ladder's rungs are 15, 20, 26, 34, 44 and 56 pixel caps, which cover the
+// document's caption, body, section, title, heading and display roles.
 //
-//   Display 48-56 -> TYPE_DISPLAY (48)
-//   H1 36-44      -> NOT EXPRESSIBLE (48 overshoots it, 24 undershoots it)
-//   H2 28-32      -> NOT EXPRESSIBLE
-//   H3 20-24      -> TYPE_H3 (24)
-//   Body 15-18    -> NOT EXPRESSIBLE (24 is the nearest rung and sits above it)
-//   Caption 12-14 -> NOT EXPRESSIBLE (24 is the floor and sits far above it)
-//
-// So the doc's own instruction for this case is followed literally: hierarchy is
-// built from spacing, weight and ink, and the unreachable rungs are recorded
-// here rather than silently approximated. A screen title is Display, a row title
-// is H3 bold in primary ink, and a caption is H3 regular in secondary ink. The
-// launcher's `theme::type_scale` documents the same consequence for its own
-// BADGE and CAPTION rungs, which coincide for exactly this reason.
+// What the doc names for a flat screen is the reason the ladder has a rung
+// below the body: a title and a caption one pixel apart read as one size, so
+// hierarchy is built from spacing, weight and ink as well as from the rung. A
+// screen title is TYPE_DISPLAY, a row or card title is TYPE_H3 bold in primary
+// ink, and the line supporting it is TYPE_CAPTION regular in secondary ink --
+// a 15px cap under a 20px one, so a stacked pair reads as two ranks rather
+// than as one size drawn in two weights.
 
-/// Standard mobile type scale steps (from canonical steps {1, 2, 3, 6}):
-/// Scale 2 (cap 16px): list row labels, category card titles, button labels.
+/// The rung a list row's label, a category card's title and a button's label
+/// are drawn at: the platform's body rung.
 const TYPE_H3: usize = 2;
-/// Scale 3 (cap 22px): screen titles, section headings, landing title.
+/// The rung a screen's own title is drawn at: the platform's section rung.
 const TYPE_DISPLAY: usize = 3;
-/// One line box at the H3 rung: the face's own cell height.
+/// The rung a title's supporting line is drawn at: the platform's caption
+/// rung. WHY it is a rung of its own rather than `TYPE_H3` in a lighter ink:
+/// two roles at one rung are what makes a card read as a block of same-sized
+/// text, and the ladder already names a caption size below body.
+const TYPE_CAPTION: usize = 1;
+/// One line box at the H3 rung: the face's own box at that rung, so a row can
+/// never reserve less than the run drawn in it.
 const LINE_H: usize = std::design::font::line_height(TYPE_H3);
+/// One line box at the caption rung. WHY the pair needs two boxes rather than
+/// one: a stacked title and caption advance by the title's box and are closed
+/// off by the caption's, so a layout that only knows `LINE_H` either reserves
+/// nine rows more than the caption can ink -- every card that carries one
+/// grows by that much -- or, if the ladder ever inverts, clips it.
+const CAPTION_LINE_H: usize = std::design::font::line_height(TYPE_CAPTION);
+
+// WHY these gates: the caption only earns its name by sitting strictly below
+// the label rung it supports, and both boxes are derived from `line_height`
+// rather than written down, so a change to the face moves the layout with it
+// instead of leaving a caption clipped by its own row.
+const _: () = assert!(TYPE_CAPTION < TYPE_H3 && TYPE_H3 < TYPE_DISPLAY);
+const _: () = assert!(
+    std::design::font::cap_for_scale(TYPE_CAPTION) < std::design::font::cap_for_scale(TYPE_H3)
+);
+const _: () = assert!(CAPTION_LINE_H == std::design::font::line_height(TYPE_CAPTION));
+const _: () = assert!(CAPTION_LINE_H < LINE_H);
 
 // -----------------------------------------------------------------------------
 // Layout constants (spacing, radius and touch targets from the SDK tokens)
@@ -1875,8 +1897,51 @@ const CARD_R: usize = CARD.radius;
 const ROW: components::ListRowStyle = components::list_row_style(&THEME, false);
 
 /// Height of a document-handler row: the list row's own padding above and
-/// below its two line boxes.
-const HANDLER_ROW_H: usize = ROW.pad * 2 + LINE_H * 2;
+/// below its title's box and its caption's box.
+///
+/// WHY two different boxes: the row's second line is a caption, so the row
+/// closes at the caption's box; the title's box is only the distance between
+/// the two baselines.
+const HANDLER_ROW_H: usize = ROW.pad * 2 + LINE_H + CAPTION_LINE_H;
+/// A badge's top edge on a handler row's caption line: centred on that line's
+/// own box, the same way `BADGE_DY` centres one inside a row card. WHY it is
+/// not simply the caption's top: the plate is the grid step or the body box
+/// whichever is larger and so overhangs the shorter caption box, and the row
+/// clips its content -- an uncentred plate lost its bottom pixel to the
+/// divider the row draws between itself and the next.
+const HANDLER_BADGE_DY: usize =
+    ROW.pad + LINE_H - if BADGE_H >= CAPTION_LINE_H { (BADGE_H - CAPTION_LINE_H) / 2 } else { 0 };
+/// WHY the gate: the plate is taller than the caption box it is centred on, so
+/// it is the row's lowest ink and the one that would reach the divider the
+/// next row draws at its own top edge.
+const _: () = assert!(HANDLER_BADGE_DY + BADGE_H <= HANDLER_ROW_H);
+
+/// The resting edge of a Settings control: the outline of an inactive segment,
+/// a keypad key, an empty entry dot, a gallery thumbnail, a secondary pill and
+/// the hairline rule under a card header.
+///
+/// WHY it is not `Theme::border` / `outline_variant` (#E5E5E5): that is the
+/// colour the platform uses for a card hairline, and measured with WCAG 2.1
+/// relative luminance against the surfaces Settings actually paints on it is
+/// 1.08:1 on `surface_container_high` (#EFEEE9), 1.21:1 on the page
+/// (`surface` #FAFAFA) and 1.26:1 on a card (`surface_container` #FFFFFF). A
+/// control edge is non-text UI, so the repo floor is 3:1 and a divider floor
+/// is 1.3:1: neither is met, so a band that should read as an object reads as
+/// flat. `Theme::muted` (#6B6B6B) is the same theme's own ink role and measures
+/// 4.59:1 / 5.11:1 / 5.33:1 on those three surfaces, clearing every floor,
+/// while still sitting 3.72:1 below `Theme::primary` (#0A0A0A) so a resting
+/// edge stays visibly quieter than a selected one.
+const VISIBLE_HAIRLINE: u32 = THEME.muted;
+
+/// Ink for a positive-status word ("Online", "Charging", "Optimal", the green
+/// availability badge).
+///
+/// WHY it is not `Theme::success` (#22C55E): a status word is text, so its
+/// floor is 4.5:1, and #22C55E measures 1.96:1 on `surface_container_high`,
+/// 2.28:1 on a card and 2.18:1 on the page - invisible as glyphs. The theme
+/// already ships the readable half of that pair, `Theme::on_success_container`
+/// (#15803D), which measures 5.02:1 on a card and 4.81:1 on the page.
+const SUCCESS_LABEL: u32 = THEME.on_success_container;
 
 /// Control radius: the doc's "controls/keypad 12-14 px" rung. Used by the back
 /// control, every segmented-control segment, every keypad key and the inner rim
@@ -1963,11 +2028,20 @@ const IDENTITY_TITLE_Y: usize = 264;
 const IDENTITY_SUB_Y: usize = 296;
 
 /// Landing card height: the card's own vertical rhythm — one 24px pad, the
-/// title's line box, the 16px step, both subtitle line boxes, and the pad
-/// again. WHY derived rather than a round number: the subtitle is a real body
-/// run now, and a card that reserves less than its text needs clips the second
-/// line at the bottom edge.
-const CARD_H: usize = CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP;
+/// title's line box, the 16px step, both caption line boxes, and the pad
+/// again. WHY derived rather than a round number: the subtitle is a real
+/// caption run now, and a card that reserves less than its text needs clips
+/// the second line at the bottom edge; reserving the title's box for the
+/// caption instead leaves nine rows of dead band above the card's lower pad.
+const CARD_H: usize = CARD_PAD * 2 + LINE_H + CARD_LINE_GAP + CAPTION_LINE_H * 2;
+/// WHY the gate: the pair a card stacks is its title's box, the step and two
+/// caption boxes, and the card has to hold all of it inside its own padding.
+/// `CARD_H` is that sum, so this only fails once a box stops being derived or
+/// the card stops matching it -- which is exactly when a caption would start
+/// colliding with the card's edge.
+const _: () = assert!(
+    CARD_PAD + LINE_H + CARD_LINE_GAP + CAPTION_LINE_H * 2 + CARD_PAD <= CARD_H
+);
 /// Gutter between landing cards.
 ///
 /// WHY 14 and not a step of the platform's spacing scale: the scale steps in
@@ -1976,6 +2050,11 @@ const CARD_H: usize = CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP;
 const GRID_GAP: usize = 14;
 /// Top of the landing grid: spaced comfortably below the identity hero block.
 const GRID_Y: usize = 348;
+/// WHY the gate: the landing is the one screen that does not scroll, so its
+/// four card rows and three gutters have to end above the content band on
+/// their own. Re-runging a card's subtitle moves that boundary, and this is
+/// what notices.
+const _: () = assert!(GRID_Y + 4 * CARD_H + 3 * GRID_GAP <= CONTENT_BOTTOM);
 /// Compatibility aliases for old landing titles.
 #[allow(dead_code)]
 const LANDING_TITLE_Y: usize = 96;
@@ -2000,19 +2079,37 @@ const ROW_LINE_GAP: usize = std::design::spacing::GRID_8;
 /// Title offset from a row's top edge.
 const ROW_TITLE_DY: usize = ROW_PAD_V;
 /// Caption offset from a row's top edge.
+///
+/// WHY the advance is the title's box and not the caption's: the caption has
+/// to clear the label's whole descent, and it is the smaller box that would
+/// let it ride up into the title if either could be used here.
 const ROW_CAP_DY: usize = ROW_TITLE_DY + LINE_H + ROW_LINE_GAP;
-/// A single-line row's height.
-const ROW_H: usize = ROW_CAP_DY + LINE_H + ROW_PAD_V;
+/// A single-line row's height: the row's upper pad, the title's box, the step,
+/// the caption's box and the row's lower pad.
+const ROW_H: usize = ROW_CAP_DY + CAPTION_LINE_H + ROW_PAD_V;
+/// WHY the gate: the row card holds exactly one title box and one caption box
+/// between its pads. Restating the sum is what catches a row that stops being
+/// derived from the boxes it paints, which is when a caption would start
+/// colliding with the divider or the next row.
+const _: () = assert!(ROW_TITLE_DY + LINE_H + ROW_LINE_GAP + CAPTION_LINE_H + ROW_PAD_V <= ROW_H);
 /// Gap between stacked rows.
 const ROW_GAP: usize = CARD_GAP;
 /// Gap between a row's caption and the control below it.
 const ROW_CONTROL_GAP: usize = std::design::spacing::GRID_24;
-/// Second caption line's offset, for the row that names its store key.
-const ROW_CAP2_DY: usize = ROW_CAP_DY + LINE_H + ROW_LINE_GAP;
+/// Second caption line's offset, for the row that names its store key. WHY the
+/// advance is the caption's box: both lines are captions, so the second clears
+/// the first by the box the first actually inks.
+const ROW_CAP2_DY: usize = ROW_CAP_DY + CAPTION_LINE_H + ROW_LINE_GAP;
 /// A two-caption-line row's height.
-const ROW_TALL_ALT: usize = ROW_CAP2_DY + LINE_H + ROW_PAD_V;
+const ROW_TALL_ALT: usize = ROW_CAP2_DY + CAPTION_LINE_H + ROW_PAD_V;
+/// WHY the gate: this row holds one title box and two caption boxes, and the
+/// second caption is the ink closest to its bottom edge.
+const _: () = assert!(
+    ROW_TITLE_DY + LINE_H + ROW_LINE_GAP + CAPTION_LINE_H * 2 + ROW_LINE_GAP + ROW_PAD_V
+        <= ROW_TALL_ALT
+);
 /// The DVFS selector's offset from its row's top edge.
-const SEG_DY: usize = ROW_CAP_DY + LINE_H + ROW_CONTROL_GAP;
+const SEG_DY: usize = ROW_CAP_DY + CAPTION_LINE_H + ROW_CONTROL_GAP;
 /// One selector segment's height: the preferred touch target.
 const SEG_H: usize = std::design::touch::PREFERRED_TARGET;
 /// Gap between segmented-control segments.
@@ -2025,17 +2122,42 @@ const FONT_SEG_GAP: usize = std::design::spacing::GRID_4;
 const FONT_SEG_W: usize = (DETAIL_W - 2 * ROW_PAD - 3 * FONT_SEG_GAP) / 4;
 /// The DVFS feedback line's offset: one 16px step below the selector.
 const SEG_FEEDBACK_DY: usize = SEG_DY + SEG_H + CARD_GAP;
-/// The DVFS row's height: it carries the selector and its feedback line.
+/// The DVFS row's height: it carries the selector and its feedback line. WHY
+/// the feedback line still closes on `LINE_H` and not on the caption's box: it
+/// is a standalone status sentence under a control, not a line supporting a
+/// label, so it stays at the body rung with the row's other body runs.
 const ROW_TALL: usize = SEG_FEEDBACK_DY + LINE_H + ROW_PAD_V;
 
-/// Badge height. WHY 32: a pill has to read as a chip rather than as text, and 32
+/// Badge height: the grid step a pill reads as at, or the label's own line box
+/// when the label needs more rows than the step gives.
+///
+/// WHY 32 is the floor: a pill has to read as a chip rather than as text, and 32
 /// is the grid step that gives a 24px cell four pixels of air above and below.
-const BADGE_H: usize = std::design::spacing::GRID_32;
+/// WHY the line box can win: the plate frames a Body run, and a plate shorter
+/// than the run it frames clips that run's descenders -- the ladder's Body rung
+/// grew past the 32px step, so the pill grows with the type it carries instead
+/// of cutting the type back to the old step.
+const BADGE_H: usize = if std::design::spacing::GRID_32 >= LINE_H {
+    std::design::spacing::GRID_32
+} else {
+    LINE_H
+};
 /// Horizontal padding inside a badge.
 const BADGE_PAD: usize = std::design::spacing::GRID_24;
-/// A badge's top edge inside a row: centred on the caption's line box, which it
-/// overhangs by four pixels because it is one grid step taller.
-const BADGE_DY: usize = ROW_CAP_DY - (BADGE_H - LINE_H) / 2;
+/// A badge's top edge inside a row: centred on the caption's line box, which
+/// it overhangs when it is taller than the box and sits inside when the box has
+/// grown past it. WHY both arms: the plate follows the grid step or the body
+/// line box whichever is larger, while the box it is centred on is the
+/// caption's own, so the two heights only coincide by accident and neither may
+/// be assumed to be the taller.
+const BADGE_DY: usize = if BADGE_H >= CAPTION_LINE_H {
+    ROW_CAP_DY - (BADGE_H - CAPTION_LINE_H) / 2
+} else {
+    ROW_CAP_DY + (CAPTION_LINE_H - BADGE_H) / 2
+};
+/// WHY the gate: a plate centred on the caption line must still sit inside the
+/// row that carries it, or its rim lands on the next row's divider.
+const _: () = assert!(BADGE_DY + BADGE_H <= ROW_H);
 /// Gap between a row's caption and its badge.
 const BADGE_GAP: usize = std::design::spacing::GRID_16;
 
@@ -2362,7 +2484,7 @@ fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: u
 /// no token expresses it), and the control, the segmented-control segments and
 /// the keypad keys are all the same class of object.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high)
+    std::design::back_button::pixel_for_theme(x, y, &THEME)
 }
 
 // Category icon family: rounded geometric marks on a ~24px grid, 2px strokes,
@@ -2983,7 +3105,7 @@ fn hardware_availability(category: &str) -> HardwareAvailability {
 /// The badge for a hardware-category card: the platform's own verdict.
 fn availability_badge(state: HardwareAvailability) -> (&'static [u8], u32) {
     match state {
-        HardwareAvailability::Available => (b"AVAILABLE", THEME.success),
+        HardwareAvailability::Available => (b"AVAILABLE", SUCCESS_LABEL),
         HardwareAvailability::Emulated => (b"EMULATED", THEME.on_surface_variant),
         HardwareAvailability::Unavailable => (b"UNAVAILABLE", THEME.on_surface_variant),
         HardwareAvailability::Unknown => (b"UNAVAILABLE", THEME.on_surface_variant),
@@ -3130,9 +3252,20 @@ fn handler_row_caption(out: &mut [u8; 96], slot: &DocumentSlot) -> usize {
     )
 }
 
-/// Pill badge, right-aligned helper: soft fill, 1px ink rim, label centred.
-/// The width is derived from the measured label so the pill always fits its
-/// text and the caller can reserve exactly that much horizontal space.
+/// Pill badge, right-aligned helper: the label's own surface as the plate, a
+/// 1px ink rim, label centred. The width is derived from the measured label so
+/// the pill always fits its text and the caller can reserve exactly that much
+/// horizontal space.
+///
+/// WHY the plate is the caller's surface and not `surface_container_high`: the
+/// chip used to be painted as a plate inside the badge, and against the white
+/// card the badge sits on (#FFFFFF) that chip (#EFEEE9) measures 1.16:1 - and
+/// 1.11:1 on the page. A plate that is invisible against the surface it is
+/// supposed to sit on is not a plate, it is a smudge; it made the badge read as
+/// flat text with a ragged edge. The rim (one pixel of the label's own ink) is
+/// what defines the badge, so it is the part measured: `on_surface_variant`
+/// #525458 on the card is 7.59:1 and the readable green is 5.02:1, both over
+/// the 3:1 floor for a control's defining edge.
 fn badge_w(label: &[u8]) -> usize {
     run_w(label, TYPE_H3, false) + BADGE_PAD
 }
@@ -3160,7 +3293,7 @@ fn badge_pixel(
     if let Some(c) = run_ink(x, y, tx, ty, TYPE_H3, label, tw + 1, ink, bg, false) {
         return Some(c);
     }
-    Some(THEME.surface_container_high)
+    Some(bg)
 }
 
 /// One action button: a pill with a fitted, centred label.
@@ -3220,13 +3353,21 @@ fn button_pixel(
     Some(fill)
 }
 
-/// One segment of a segmented control: dark fill when selected, soft fill with a
-/// hairline when not.
+/// One segment of a segmented control: dark fill when selected, soft fill with
+/// a visible resting edge when not.
 ///
 /// WHY this is shared by the DVFS selector and the wallpaper target selector:
 /// a segmented control is one component with one selected/unselected treatment,
 /// and two treatments for "the chosen of three" would make the same interaction
 /// mean two things.
+///
+/// WHY the inactive rim is `VISIBLE_HAIRLINE` and not `Theme::border`: the rim
+/// is the only thing marking an unselected segment as a control you can press,
+/// so it carries the 3:1 non-text floor by itself, and #E5E5E5 on the segment's
+/// own chip fill (#EFEEE9) measures 1.08:1 - 1.21:1 against the page and 1.26:1
+/// against the card the control sits on. `Theme::muted` measures 4.59 / 5.11 /
+/// 5.33:1 on those three, and stays 3.72:1 away from the selected segment's
+/// `on_surface` fill, so chosen-vs-resting is still readable as two states.
 fn segment_pixel(
     x: usize,
     y: usize,
@@ -3241,7 +3382,7 @@ fn segment_pixel(
         return None;
     }
     if !active && !in_round_rect(x, y, sx0 + 1, sy0 + 1, sw - 2, sh - 2, CONTROL_R - 1) {
-        return Some(THEME.border);
+        return Some(VISIBLE_HAIRLINE);
     }
     let fill = if active { THEME.on_surface } else { THEME.surface_container_high };
     let lw = run_w(label, TYPE_H3, true);
@@ -3277,6 +3418,12 @@ fn segment_pixel(
 /// rows read as one flat rank. The doc's H2 (28-32) is not expressible, so H3 is
 /// the nearest rung that is *below* the screen title rather than a silent
 /// approximation of Body.
+///
+/// WHY the caption is the rung below its title rather than the title's own rung
+/// in a lighter ink: the two roles then differ only by weight, and a row whose
+/// label and supporting line are the same cap height reads as one block of text
+/// with an accent on the first word. The ladder has a caption rung, and this is
+/// the pair it was meant for.
 fn row_head(
     x: usize,
     y: usize,
@@ -3310,7 +3457,7 @@ fn row_head(
         y,
         DETAIL_X + ROW_PAD,
         cy + ROW_CAP_DY,
-        TYPE_H3,
+        TYPE_CAPTION,
         caption,
         cap_fit,
         cap_ink,
@@ -3327,7 +3474,15 @@ fn row_head(
 /// WHY it is a list row and not a card: the row answers a question about
 /// the platform's intent registry, and a list of the apps that declared a
 /// handler is a list. The platform's own list-row treatment supplies the
-/// fill, the divider's ink and the padding.
+/// divider's ink and the padding.
+///
+/// WHY the plate is `CARD.fill` and not `ROW.fill`: the row is drawn inside its
+/// own card (see `detail_pixel`, which clips every row with `card_pixel`), so
+/// `ROW.fill` (#FAFAFA) painted a second plate 1.04:1 away from the card
+/// (#FFFFFF) under it - the flat band this row was flagged for. The row now
+/// takes the card's own fill, and only the divider marks the row boundary: the
+/// platform's `outline_variant` (#E5E5E5) is 1.21:1 on that white, under the
+/// 1.3:1 divider floor, so the divider uses `VISIBLE_HAIRLINE` (5.33:1).
 fn handler_row_pixel(
     x: usize,
     y: usize,
@@ -3338,7 +3493,7 @@ fn handler_row_pixel(
 ) -> Option<u32> {
     // The divider the platform's list row draws between rows.
     if y == cy && x >= DETAIL_X && x < DETAIL_X + DETAIL_W {
-        return Some(ROW.divider);
+        return Some(VISIBLE_HAIRLINE);
     }
     let text_x = DETAIL_X + ROW.pad;
     let text_w = DETAIL_W - 2 * ROW.pad;
@@ -3351,7 +3506,7 @@ fn handler_row_pixel(
         title,
         text_w,
         THEME.on_surface,
-        ROW.fill,
+        CARD.fill,
         true,
     ) {
         return Some(c);
@@ -3363,18 +3518,18 @@ fn handler_row_pixel(
         y,
         text_x,
         cy + ROW.pad + LINE_H,
-        TYPE_H3,
+        TYPE_CAPTION,
         &cap[..cap_len],
         text_w,
         THEME.on_surface_variant,
-        ROW.fill,
+        CARD.fill,
         false,
     ) {
         return Some(c);
     }
     // The outcome of the last dispatch, in the platform's own terms.
     let (badge, badge_ink): (&[u8], u32) = match outcome {
-        DispatchOutcome::Dispatched => (&b"DISPATCHED"[..], THEME.success),
+        DispatchOutcome::Dispatched => (&b"DISPATCHED"[..], SUCCESS_LABEL),
         DispatchOutcome::NoHandler => (&b"NO HANDLER"[..], THEME.on_surface_variant),
         DispatchOutcome::Refused => (&b"REFUSED"[..], THEME.on_surface_variant),
         DispatchOutcome::Unattempted => (&b"TAP TO SEND"[..], THEME.on_surface_variant),
@@ -3385,14 +3540,14 @@ fn handler_row_pixel(
         x,
         y,
         bx0,
-        cy + ROW.pad + LINE_H,
+        cy + HANDLER_BADGE_DY,
         badge,
         badge_ink,
-        ROW.fill,
+        CARD.fill,
     ) {
         return Some(c);
     }
-    Some(ROW.fill)
+    Some(CARD.fill)
 }
 
 /// One segment of the DVFS profile selector.
@@ -3491,7 +3646,7 @@ fn diag_row_head(
         y,
         DETAIL_X + ROW_PAD,
         cy + cap_dy,
-        TYPE_H3,
+        TYPE_CAPTION,
         caption,
         cap_fit,
         cap_ink,
@@ -3506,7 +3661,7 @@ fn diag_row_head(
             y,
             DETAIL_X + ROW_PAD,
             cy + cap2_dy,
-            TYPE_H3,
+            TYPE_CAPTION,
             caption2,
             cap_fit,
             cap_ink,
@@ -3522,7 +3677,7 @@ fn diag_row_head(
 /// The badge for a sensor-bus row: the platform's verdict, not this app's.
 fn sensor_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.sensor_outcome {
-        QueryOutcome::Reported => (b"ONLINE", THEME.success),
+        QueryOutcome::Reported => (b"ONLINE", SUCCESS_LABEL),
         QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
         _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
@@ -3531,7 +3686,7 @@ fn sensor_badge(app: &SettingsApp) -> (&'static [u8], u32) {
 /// The badge for a fuel-gauge row: the platform's verdict, not this app's.
 fn battery_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.battery_outcome {
-        QueryOutcome::Reported => (b"REPORTED", THEME.success),
+        QueryOutcome::Reported => (b"REPORTED", SUCCESS_LABEL),
         QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
         _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
@@ -3540,7 +3695,7 @@ fn battery_badge(app: &SettingsApp) -> (&'static [u8], u32) {
 /// The badge for a thermal row: the platform's verdict, not this app's.
 fn thermal_badge(app: &SettingsApp) -> (&'static [u8], u32) {
     match app.thermal_outcome {
-        QueryOutcome::Reported => (b"REPORTED", THEME.success),
+        QueryOutcome::Reported => (b"REPORTED", SUCCESS_LABEL),
         QueryOutcome::Absent => (b"UNBOUND", THEME.on_surface_variant),
         _ => (b"UNAVAILABLE", THEME.on_surface_variant),
     }
@@ -3579,10 +3734,10 @@ fn diag_row_pixel(
                     cy,
                     b"Accelerometer (3-Axis IMU)",
                     &cap_buf[..n],
-                    THEME.success,
+                    SUCCESS_LABEL,
                     b"",
                     b"ONLINE",
-                    THEME.success,
+                    SUCCESS_LABEL,
                     false,
                 )
             } else {
@@ -3640,10 +3795,10 @@ fn diag_row_pixel(
                         cy,
                         b"Screen Orientation",
                         &cap_buf[..n],
-                        THEME.success,
+                        SUCCESS_LABEL,
                         b"",
                         b"ONLINE",
-                        THEME.success,
+                        SUCCESS_LABEL,
                         false,
                     )
                 } else {
@@ -3697,10 +3852,10 @@ fn diag_row_pixel(
                     cy,
                     b"Ambient Light Sensor",
                     &cap_buf[..n],
-                    THEME.success,
+                    SUCCESS_LABEL,
                     b"",
                     b"ONLINE",
-                    THEME.success,
+                    SUCCESS_LABEL,
                     false,
                 )
             } else {
@@ -3748,10 +3903,10 @@ fn diag_row_pixel(
                         cy,
                         b"Proximity Sensor (IR ToF)",
                         b"Infrared proximity: clear (>=30 mm)",
-                        THEME.success,
+                        SUCCESS_LABEL,
                         b"",
                         b"ONLINE",
-                        THEME.success,
+                        SUCCESS_LABEL,
                         false,
                     )
                 }
@@ -3786,10 +3941,10 @@ fn diag_row_pixel(
                     cy,
                     b"Fuel Gauge (Battery)",
                     &cap_buf[..n],
-                    THEME.success,
+                    SUCCESS_LABEL,
                     &cap2_buf[..n2],
                     b"REPORTED",
-                    THEME.success,
+                    SUCCESS_LABEL,
                     true,
                 )
             } else {
@@ -3823,10 +3978,10 @@ fn diag_row_pixel(
                     cy,
                     b"Thermal Telemetry Zones",
                     &cap_buf[..n],
-                    THEME.success,
+                    SUCCESS_LABEL,
                     &cap2_buf[..n2],
                     b"REPORTED",
-                    THEME.success,
+                    SUCCESS_LABEL,
                     true,
                 )
             } else {
@@ -3866,7 +4021,11 @@ fn sensors_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         return c;
     }
     if y == DIVIDER_Y {
-        return THEME.border;
+        // WHY `VISIBLE_HAIRLINE`: this one-pixel rule separates the screen
+        // header from the content below it, so it carries the divider floor of
+        // 1.3:1 against the page - and `Theme::border` measured 1.21:1 there,
+        // i.e. no rule at all. `Theme::muted` measures 5.11:1 on the same page.
+        return VISIBLE_HAIRLINE;
     }
     // WHY the band is clipped: the diagnostics page is a stack, and a stack
     // that scrolls may reach up under the screen title.
@@ -4028,7 +4187,7 @@ fn row_pixel(
                 // difference to the user.
                 let mut cap_buf = [0u8; 96];
                 let (cap, cap_ink): (&[u8], u32) = if app.sensor_telemetry.is_present {
-                    (b"Hardware IMU & ambient photodiode online", THEME.success)
+                    (b"Hardware IMU & ambient photodiode online", SUCCESS_LABEL)
                 } else {
                     let n = sensor_absence_caption(&mut cap_buf, app);
                     (&cap_buf[..n], THEME.on_surface_variant)
@@ -4054,7 +4213,7 @@ fn row_pixel(
                     (
                         &b"Wireless telemetry reported"[..],
                         &b"REPORTED"[..],
-                        THEME.success,
+                        SUCCESS_LABEL,
                     )
                 } else {
                     (
@@ -4069,7 +4228,7 @@ fn row_pixel(
                     cy,
                     b"Wi-Fi Radio",
                     caption,
-                    if reported { THEME.success } else { THEME.on_surface_variant },
+                    if reported { SUCCESS_LABEL } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
                 ) {
@@ -4166,7 +4325,7 @@ fn row_pixel(
                     (
                         &app.owner_name[..app.owner_name_len],
                         &b"REPORTED"[..],
-                        THEME.success,
+                        SUCCESS_LABEL,
                     )
                 } else {
                     (
@@ -4196,7 +4355,7 @@ fn row_pixel(
                     (
                         &app.user_status[..app.user_status_len],
                         &b"REPORTED"[..],
-                        THEME.success,
+                        SUCCESS_LABEL,
                     )
                 } else {
                     (
@@ -4308,7 +4467,7 @@ fn row_pixel(
                     Some(count) => {
                         let an = write_decimal(count as u32, &mut abuf);
                         let an = push_suffix(&mut abuf, an, b" sovereign packages");
-                        (an, &b"VERIFIED"[..], THEME.success)
+                        (an, &b"VERIFIED"[..], SUCCESS_LABEL)
                     }
                     None => {
                         let msg = b"Package registry did not answer";
@@ -4339,7 +4498,7 @@ fn row_pixel(
                         let mb = (bytes / (1024 * 1024)) as u32;
                         let sn = write_decimal(mb, &mut sbuf);
                         let sn = push_suffix(&mut sbuf, sn, b" MB root block storage");
-                        (sn, &b"REPORTED"[..], THEME.success)
+                        (sn, &b"REPORTED"[..], SUCCESS_LABEL)
                     }
                     None => {
                         let msg = b"Storage capacity not reported by the platform";
@@ -4412,7 +4571,7 @@ fn row_pixel(
                         &cap_buf[..n],
                         THEME.on_surface_variant,
                         b"REPORTED",
-                        THEME.success,
+                        SUCCESS_LABEL,
                     ) {
                         return c;
                     }
@@ -4421,7 +4580,7 @@ fn row_pixel(
                         y,
                         DETAIL_X + ROW_PAD,
                         cy + ROW_CAP2_DY,
-                        TYPE_H3,
+                        TYPE_CAPTION,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
                         THEME.on_surface_variant,
@@ -4459,7 +4618,7 @@ fn row_pixel(
                 };
                 let gov_reported = app.governor.is_some();
                 let (gov_badge, gov_badge_ink): (&[u8], u32) = if gov_reported {
-                    (b"REPORTED", THEME.success)
+                    (b"REPORTED", SUCCESS_LABEL)
                 } else {
                     (b"UNAVAILABLE", THEME.on_surface_variant)
                 };
@@ -4549,7 +4708,7 @@ fn row_pixel(
                         &cap_buf[..n],
                         THEME.on_surface_variant,
                         b"REPORTED",
-                        THEME.success,
+                        SUCCESS_LABEL,
                     ) {
                         return c;
                     }
@@ -4558,7 +4717,7 @@ fn row_pixel(
                         y,
                         DETAIL_X + ROW_PAD,
                         cy + ROW_CAP2_DY,
-                        TYPE_H3,
+                        TYPE_CAPTION,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
                         THEME.on_surface_variant,
@@ -4604,7 +4763,7 @@ fn row_pixel(
                     KeystoreProbe::Derived => (
                         b"Application key derivation succeeded",
                         b"REPORTED",
-                        THEME.success,
+                        SUCCESS_LABEL,
                     ),
                     KeystoreProbe::Short => (
                         b"Derivation returned a short, unusable key",
@@ -4672,7 +4831,7 @@ fn row_pixel(
                 );
                 let reported = app.os_version_len > 0;
                 let (badge, badge_ink) = if reported {
-                    (&b"REPORTED"[..], THEME.success)
+                    (&b"REPORTED"[..], SUCCESS_LABEL)
                 } else {
                     (&b"UNAVAILABLE"[..], THEME.on_surface_variant)
                 };
@@ -4702,7 +4861,7 @@ fn row_pixel(
                             &mut ubuf[n..],
                         ) + n;
                         n = push_suffix(&mut ubuf, n, b" s");
-                        (&ubuf[..n], THEME.on_surface, b"REPORTED", THEME.success)
+                        (&ubuf[..n], THEME.on_surface, b"REPORTED", SUCCESS_LABEL)
                     } else {
                         (
                             b"Kernel uptime not reported",
@@ -4738,7 +4897,7 @@ fn row_pixel(
                     s.len()
                 };
                 let (badge, badge_ink) = if reported {
-                    (&b"REPORTED"[..], THEME.success)
+                    (&b"REPORTED"[..], SUCCESS_LABEL)
                 } else {
                     (&b"UNAVAILABLE"[..], THEME.on_surface_variant)
                 };
@@ -4792,7 +4951,7 @@ fn row_pixel(
                     n2 = m;
                     ink = THEME.on_surface;
                     badge = b"REPORTED";
-                    badge_ink = THEME.success;
+                    badge_ink = SUCCESS_LABEL;
                 } else {
                     n1 = push_suffix(&mut cap1, 0, b"Platform identity not reported");
                     n2 = push_suffix(&mut cap2, 0, b"HAL identity query refused or unavailable");
@@ -4817,7 +4976,7 @@ fn row_pixel(
                     y,
                     DETAIL_X + ROW_PAD,
                     cy + ROW_CAP2_DY,
-                    TYPE_H3,
+                    TYPE_CAPTION,
                     &cap2[..n2],
                     DETAIL_W - 2 * ROW_PAD,
                     THEME.on_surface_variant,
@@ -4851,7 +5010,7 @@ fn row_pixel(
                     m = push_suffix(&mut cap2, m, b" MiB free");
                     n2 = m;
                     badge = b"REPORTED";
-                    badge_ink = THEME.success;
+                    badge_ink = SUCCESS_LABEL;
                 } else {
                     n1 = push_suffix(&mut cap1, 0, NO_MEM);
                     n2 = push_suffix(&mut cap2, 0, b"memory_telemetry refused or unavailable");
@@ -4875,7 +5034,7 @@ fn row_pixel(
                     y,
                     DETAIL_X + ROW_PAD,
                     cy + ROW_CAP2_DY,
-                    TYPE_H3,
+                    TYPE_CAPTION,
                     &cap2[..n2],
                     DETAIL_W - 2 * ROW_PAD,
                     THEME.on_surface_variant,
@@ -4914,7 +5073,11 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
         return c;
     }
     if y == DIVIDER_Y {
-        return THEME.border;
+        // WHY `VISIBLE_HAIRLINE`: this one-pixel rule separates the screen
+        // header from the content below it, so it carries the divider floor of
+        // 1.3:1 against the page - and `Theme::border` measured 1.21:1 there,
+        // i.e. no rule at all. `Theme::muted` measures 5.11:1 on the same page.
+        return VISIBLE_HAIRLINE;
     }
     // WHY the band is clipped: a scrolled row may reach up under the screen
     // title, and a row drawn over the title would read as part of the
@@ -4943,10 +5106,16 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
 /// title is the H3 rung: it is a card heading, which the doc sizes at H3, and it
 /// keeps the card one rank below the screen's own Display title.
 ///
-/// WHY the subtitle is the same rung as the title but starts under the icon:
+/// WHY the subtitle starts under the icon rather than beside the title:
 /// sharing the title's text column (about 220px) forced a body run into half a
-/// phrase. Starting at the card's own 24px inset gives the body the whole inner
-/// width, which is what lets both authored lines fit without an ellipsis.
+/// phrase. Starting at the card's own 24px inset gives the caption the whole
+/// inner width, which is what lets both authored lines fit without an ellipsis.
+///
+/// WHY the subtitle is the rung below the title and not the title's own rung in
+/// secondary ink: a card whose heading and supporting line are the same cap
+/// height reads as one block of text, and the only thing telling the two roles
+/// apart is then weight and grey. The ladder's caption rung is what makes the
+/// title sit one rank above the line under it.
 fn landing_card_pixel(x: usize, y: usize, i: usize, app: &SettingsApp) -> Option<u32> {
     let (cx0, cy0, cw, ch) = card_rect(i);
     if let Some(fill) = card_pixel(x, y, cx0, cy0, cw, ch, CARD_R) {
@@ -4988,7 +5157,7 @@ fn landing_card_pixel(x: usize, y: usize, i: usize, app: &SettingsApp) -> Option
         let sub_w = cw.saturating_sub(CARD_PAD * 2);
         let sub_y = cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP;
         if let Some(c) = run_ink(
-            x, y, sub_x, sub_y, TYPE_H3, sub_a, sub_w, THEME.on_surface_variant, fill, false,
+            x, y, sub_x, sub_y, TYPE_CAPTION, sub_a, sub_w, THEME.on_surface_variant, fill, false,
         ) {
             return Some(c);
         }
@@ -4996,8 +5165,8 @@ fn landing_card_pixel(x: usize, y: usize, i: usize, app: &SettingsApp) -> Option
             x,
             y,
             sub_x,
-            sub_y + LINE_H,
-            TYPE_H3,
+            sub_y + CAPTION_LINE_H,
+            TYPE_CAPTION,
             sub_b,
             sub_w,
             THEME.on_surface_variant,
@@ -5059,6 +5228,23 @@ fn vitality_orb_pixel(
     let g_outer = (c_outer >> 8) & 0xFF;
     let b_outer = c_outer & 0xFF;
 
+    // The orb's edge ink: the theme's `outline` role, dragged half-way into
+    // this state's deep colour so it still reads as this orb's own rim rather
+    // than as a black ring pasted on a gradient.
+    //
+    // WHY the silhouette needs one at all: the orb is the landing screen's one
+    // control, so the band that defines it is non-text UI and its floor is
+    // 3:1 against the page (#FAFAFA). The two rim pixels used to be lifted
+    // TOWARDS WHITE (`+ (dist + 2 - r_core) * 36` on every channel), i.e.
+    // towards the page they are supposed to stand out from: measured across
+    // all 64 breathing frames the worst rim pixel was Sapphire 2.11:1,
+    // Ultraviolet 1.85:1, Emerald 1.21:1 and Amber 1.20:1 - a flat band.
+    // Blending the same two pixels towards this ink instead gives, worst frame
+    // first, 8.80 / 7.79 / 5.26 / 4.70:1 on the outer rim pixel and
+    // 6.30 / 5.49 / 3.40 / 3.04:1 on the inner one (Sapphire / Ultraviolet /
+    // Emerald / Amber). No geometry moves: same disc, same 2px band.
+    let edge_ink = blend_over(THEME.outline, c_outer, 128);
+
     // Continuous breathing pulse of core radius (period 64 frames)
     let pulse_phase = (frame % 64) as i32;
     let pulse_tri = if pulse_phase < 32 { pulse_phase } else { 64 - pulse_phase };
@@ -5081,15 +5267,6 @@ fn vitality_orb_pixel(
         let mut g = (g_inner * (255 - t) + g_outer * t) / 255;
         let mut b = (b_inner * (255 - t) + b_outer * t) / 255;
 
-        // Rim lift: two pixels at the core edge keep a clean silhouette
-        // against the halo instead of letting the disc dissolve into it.
-        if dist + 2 >= r_core {
-            let rim = (dist + 2 - r_core) * 36;
-            r = (r + rim).min(255);
-            g = (g + rim).min(255);
-            b = (b + rim).min(255);
-        }
-
         // Soft specular highlight, upper-left, fading with the square of the
         // distance rather than linearly: a linear falloff leaves a visible
         // ring where the highlight stops.
@@ -5104,6 +5281,17 @@ fn vitality_orb_pixel(
         }
 
         color = 0xFF000000 | (r << 16) | (g << 8) | b;
+
+        // Rim edge: the two pixels at the core edge keep a clean silhouette
+        // against the halo instead of letting the disc dissolve into it.
+        // WHY a blend towards `edge_ink` and not an additive lift: see that
+        // binding. Same band, same two pixels, same weights scaled by 96
+        // instead of 36, but towards the dark half of the page instead of the
+        // light half.
+        if dist + 2 >= r_core {
+            let w = ((dist + 2 - r_core) * 96).min(255);
+            color = blend_over(edge_ink, color, w);
+        }
     } else {
         // Ambient halo with continuous outward-pulsing wave shimmer
         let halo_span = (HALO_R as u32).saturating_sub(r_core);
@@ -5138,21 +5326,24 @@ fn vitality_orb_pixel(
             let ring_r = r_core + (span * elapsed) / ORB_RIPPLE_FRAMES;
             let gap = dist.abs_diff(ring_r);
             if gap <= 2 {
-                let edge = match gap {
+                let ring_weight = match gap {
                     0 => 255u32,
                     1 => 168,
                     _ => 84,
                 };
                 let strength = ((ORB_RIPPLE_FRAMES - elapsed) * 200) / ORB_RIPPLE_FRAMES;
-                let a = (strength * edge) / 255;
-                let inv = 255 - a;
-                let cr = (c_inner >> 16) & 0xFF;
-                let cg = (c_inner >> 8) & 0xFF;
-                let cb = c_inner & 0xFF;
-                let r = (cr * a + ((color >> 16) & 0xFF) * inv) / 255;
-                let g = (cg * a + ((color >> 8) & 0xFF) * inv) / 255;
-                let b = (cb * a + (color & 0xFF) * inv) / 255;
-                color = 0xFF000000 | (r << 16) | (g << 8) | b;
+                let a = (strength * ring_weight) / 255;
+                // WHY the ripple now takes `edge_ink` and not `c_inner`: the
+                // ring leaves the core into the halo, whose painted colour is
+                // the state's outer colour over the page at a fading alpha, so
+                // a same-family light ink on top of it dissolves. Measured
+                // against that near-page halo the old `c_inner` ripple peaked
+                // at Sapphire 1.78:1, Emerald 1.28:1, Ultraviolet 2.10:1 and
+                // Amber 1.59:1 against the page's 3:1 control floor - the tap
+                // answer was invisible. The rim's own edge ink puts the first
+                // frame at 5.96 / 4.35 / 5.44 / 3.98:1 in the same order, and
+                // the tail still fades to the page by design.
+                color = blend_over(edge_ink, color, a);
             }
         }
     }
@@ -5400,7 +5591,15 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             }
             let scene = &std::design::walls::SCENES[i];
             let is_pending = app.wallpaper_pending == Some(scene);
-            let ring = if is_pending { THEME.primary } else { THEME.border };
+            // WHY the resting ring is `VISIBLE_HAIRLINE`: a gallery cell is
+            // tappable, so its ring carries the 3:1 control-edge floor, and
+            // `Theme::border` measured 1.21:1 against the page the cell sits on -
+            // an unselected cell had no edge at all. `Theme::muted` measures
+            // 5.11:1 there and stays 3.72:1 from the pending cell's
+            // `Theme::primary` ring (18.97:1 on the page), so "this is the one
+            // you chose" still reads instantly. The band itself is untouched:
+            // same cell rect, same 3px ring.
+            let ring = if is_pending { THEME.primary } else { VISIBLE_HAIRLINE };
             if !in_round_rect(
                 x + 3,
                 y + 3,
@@ -5494,13 +5693,22 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         // WHY Apply is the palette's primary ink and Reset the soft fill: the
         // reference `PrimaryButton` is a dark pill and `SecondaryButton` a soft
         // one, and this panel has exactly one of each.
+        //
+        // WHY every soft rim here is `VISIBLE_HAIRLINE`: the rim is the only
+        // edge a secondary pill has - its chip fill (#EFEEE9) is 1.11:1 against
+        // the page and the old `Theme::border` rim 1.08:1 against its own fill,
+        // 1.21:1 against the page - so an unpressed pill painted as a flat band
+        // where the 3:1 control-edge floor applies. `Theme::muted` measures
+        // 4.59:1 on the pill's fill and 5.11:1 against the page. The enabled
+        // Apply pill needs no rim at all - its `on_surface` fill is 18.97:1
+        // against the page - so only the soft pills carry one.
         let (label, bx, fill, ink, rim) = if apply {
             (
                 b"Apply".as_slice(),
                 CONTENT_X,
                 if enabled { THEME.on_surface } else { THEME.surface_container_high },
                 if enabled { THEME.surface_container } else { THEME.on_surface_variant },
-                if enabled { None } else { Some(THEME.border) },
+                if enabled { None } else { Some(VISIBLE_HAIRLINE) },
             )
         } else {
             (
@@ -5508,7 +5716,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 CONTENT_X + BUTTON_HALF + CARD_GAP,
                 THEME.surface_container_high,
                 THEME.on_surface,
-                Some(THEME.border),
+                Some(VISIBLE_HAIRLINE),
             )
         };
         if let Some(c) = button_pixel(
@@ -5540,7 +5748,7 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             b"Choose from Gallery",
             THEME.surface_container_high,
             THEME.on_surface,
-            Some(THEME.border),
+            Some(VISIBLE_HAIRLINE),
         ) {
             return c;
         }
@@ -5829,7 +6037,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     }
 
     // Status card: the account layer's own answer, with its badge. It is a detail
-    // row card in every respect — same width, radius, padding and type rungs —
+    // row card in every respect — same width, radius, padding, type rungs and the
+    // platform card's own hairline (`CARD_BORDER`, not a private copy of it) —
     // because it is the same component playing the same role on another screen.
     if (SL_STATUS_Y..SL_STATUS_Y + SL_STATUS_H).contains(&y) {
         let (_, _, _, badge) = sl_state_line(app);
@@ -5846,7 +6055,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 CARD_R - 1,
             );
             if !inner {
-                return THEME.border;
+                return CARD_BORDER;
             }
             let (headline, detail, ink, _) = sl_state_line(app);
             // WHY the headline is the H3 rung and not the Display rung it used to
@@ -5872,7 +6081,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 y,
                 CONTENT_X + ROW_PAD,
                 SL_STATUS_Y + ROW_CAP_DY,
-                TYPE_H3,
+                TYPE_CAPTION,
                 detail,
                 CONTENT_W - 2 * ROW_PAD,
                 THEME.on_surface_variant,
@@ -5910,7 +6119,17 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         }
         let line = sl_error_line(app);
         if !line.is_empty() {
-            let ink = THEME.error;
+            // WHY this line is not painted in the danger role: an error line is
+            // text, so its floor is 4.5:1, and the monochrome theme has no
+            // legible red ink at all - `error` and `emergency` are the same
+            // #EF4444, which measures 3.61:1 on this panel's page surface
+            // (#FAFAFA) and 3.76:1 on a card, and there is no
+            // `on_error_container` role to move to. Inventing one is out of
+            // scope for this app. The sentence itself names the failure ("That
+            // is not the current PIN"), so the meaning survives the ink change;
+            // the danger role stays where 3:1 does apply, on the destructive
+            // pill's rim.
+            let ink = THEME.on_surface;
             if let Some(c) = run_ink(
                 x,
                 y,
@@ -5940,7 +6159,15 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             if in_round_rect(x, y, cx0, cy0, dot, dot, SL_DOT_R) {
                 let inner = in_round_rect(x, y, cx0 + 2, cy0 + 2, dot - 4, dot - 4, SL_DOT_R - 2);
                 if !inner {
-                    return THEME.border;
+                    // WHY `VISIBLE_HAIRLINE`: this ring is the only thing that
+                    // shows a slot the PIN has not filled yet, so it carries the
+                    // 3:1 control-edge floor. `Theme::border` measured 1.08:1 on
+                    // the dot's own chip fill and 1.21:1 against the page - the
+                    // eight slots read as one flat band. `Theme::muted` measures
+                    // 4.59:1 / 5.11:1 there, and an empty slot still sits 17.04:1
+                    // from a filled one (`Theme::primary`), so the count of
+                    // digits typed so far is still readable at a glance.
+                    return VISIBLE_HAIRLINE;
                 }
                 return if i < filled { THEME.primary } else { THEME.surface_container_high };
             }
@@ -5965,7 +6192,15 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     SL_KEY_R - 2,
                 );
                 if !inner {
-                    return THEME.border;
+                    // WHY `VISIBLE_HAIRLINE`: the rim is the only edge a keypad
+                    // key has - its white fill on the page is 1.04:1, so with the
+                    // #E5E5E5 rim (1.26:1 on the key, 1.21:1 on the page) the
+                    // whole 12-key pad painted as one flat band instead of twelve
+                    // pressable controls. The floor here is 3:1; `Theme::muted`
+                    // gives 5.33:1 against the key's own fill and 5.11:1 against
+                    // the page behind it. Geometry is untouched: same key rect,
+                    // same 2px band, same hit test.
+                    return VISIBLE_HAIRLINE;
                 }
                 let label: &[u8] = match sl_digit(row, col) {
                     Some(d) => {
@@ -6055,8 +6290,20 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         //
         // WHY the fills follow the reference buttons: "Set a screen lock PIN" is
         // this panel's one primary action and takes the dark pill; the other two
-        // are secondary and take the soft fill, with the destructive one in the
-        // palette's danger ink rather than a filled red block.
+        // are secondary and take the soft fill, with the destructive one marked
+        // by the palette's danger colour rather than a filled red block.
+        //
+        // WHY the destructive pill's danger colour sits on the rim and not on the
+        // label: a label is text, so its floor is 4.5:1, and `Theme::error`
+        // (#EF4444) measures 3.24:1 on the pill's chip fill / 3.61:1 on the page -
+        // it cannot be readable red text, and this theme ships no darker error
+        // ink (`emergency` is the same #EF4444 and there is no
+        // `on_error_container` role), so inventing one is out of scope here. The
+        // rim is non-text UI, where 3:1 does apply, so the danger colour moves
+        // there and the label takes `Theme::on_surface`, which measures 17.04:1
+        // on the same chip fill. "Change PIN" gets `VISIBLE_HAIRLINE` for the
+        // same reason the wallpaper pills do: the #E5E5E5 rim was 1.08:1 on its
+        // own fill.
         let (label, bx, bw, fill, ink, rim): (&[u8], usize, usize, u32, u32, Option<u32>) = if !has_pin {
             (
                 &b"Set a screen lock PIN"[..],
@@ -6073,7 +6320,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 half,
                 THEME.surface_container_high,
                 THEME.on_surface,
-                Some(THEME.border),
+                Some(VISIBLE_HAIRLINE),
             )
         } else {
             (
@@ -6081,8 +6328,8 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 CONTENT_X + half + CARD_GAP,
                 half,
                 THEME.surface_container_high,
-                THEME.error,
-                Some(THEME.border),
+                THEME.on_surface,
+                Some(THEME.error),
             )
         };
         if let Some(c) = button_pixel(

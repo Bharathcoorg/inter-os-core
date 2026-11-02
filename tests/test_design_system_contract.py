@@ -93,19 +93,28 @@ LEGACY_PALETTE_NAMES = (
     "DIVIDER_HAIRLINE",
 )
 
+# A colour literal: eight hex digits, with Rust's digit separators allowed
+# between them.
+#
+# WHY the separators are part of the pattern: a palette reads more clearly as
+# `0xFF60_6773` than as `0xFF606773`, and a parser that only accepted the
+# unseparated form silently dropped whatever role was written that way -- the
+# contract then reported that the theme did not assign the role at all.
+HEX8 = r"0x[0-9A-Fa-f](?:_?[0-9A-Fa-f]){7}"
+
 # A colour constant: a named value written as a literal.
 COLOUR_CONSTANT = re.compile(
-    r"(?:pub\s+)?const\s+([A-Z_0-9]+)\s*:\s*u32\s*=\s*(0x[0-9A-Fa-f]{8})"
+    r"(?:pub\s+)?const\s+([A-Z_0-9]+)\s*:\s*u32\s*=\s*(" + HEX8 + r")"
 )
 
 # A colour literal anywhere in a source file.
-COLOUR_LITERAL = re.compile(r"0x[0-9A-Fa-f]{8}")
+COLOUR_LITERAL = re.compile(HEX8)
 
 # A role assignment inside a theme variant: `role: expression,`.
 ROLE_ASSIGNMENT = re.compile(r"(\w+):\s*([^,\n]+),")
 
 # A `u32` constant in the SDK's design module.
-SDK_U32_CONSTANT = re.compile(r"pub const (\w+): u32 = (0x[0-9A-Fa-f]{8});")
+SDK_U32_CONSTANT = re.compile(r"pub const (\w+): u32 = (" + HEX8 + r");")
 
 
 def _design_module() -> str:
@@ -138,7 +147,7 @@ def _palette() -> dict[str, int]:
 def _role_value(expression: str, palette: dict[str, int]) -> int | None:
     """The value a role assignment resolves to, or None if it is not a colour."""
     expression = expression.strip()
-    if re.fullmatch(r"0x[0-9A-Fa-f]{8}", expression):
+    if re.fullmatch(HEX8, expression):
         return int(expression, 16)
     match = re.fullmatch(r"color::(\w+)", expression)
     if match:

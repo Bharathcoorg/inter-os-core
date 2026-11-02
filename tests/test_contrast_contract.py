@@ -3,9 +3,13 @@
 Verifies:
 1. All standard theme surface and ink token pairs meet or exceed the WCAG 2.1 AA
    minimum contrast ratio of 4.5:1 across Light, Dark, and Neutral theme systems.
-2. Dynamic type scaling provides bounded, monotonic cap height scaling driven by
+2. Every ink rung -- body, secondary, muted -- clears that same 4.5:1 floor on
+   every surface rung of its theme (the stock themes and the monochrome platform
+   theme, light and dark), and stays at least MINIMUM_RUNG_SEPARATION away from
+   the rung above it, so a three-step ladder is three visible steps.
+3. Dynamic type scaling provides bounded, monotonic cap height scaling driven by
    user text scale levels (0=compact 80%, 1=normal 100%, 2=large 125%, 3=extra large 150%).
-3. UiNode carries `accessibility_label` and is consumed by accessibility tree walkers
+4. UiNode carries `accessibility_label` and is consumed by accessibility tree walkers
    and screen reader readout formatters with zero heap allocations.
 """
 
@@ -15,12 +19,25 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 THEME_RS = ROOT / "sdk/rust/interos-std/src/design/theme.rs"
+MONOCHROME_RS = ROOT / "sdk/rust/interos-std/src/design/monochrome.rs"
 COLOR_RS = ROOT / "sdk/rust/interos-std/src/design/mod.rs"
 FONT_RS = ROOT / "sdk/rust/interos-std/src/font.rs"
 ACCESSIBILITY_RS = ROOT / "sdk/rust/interos-std/src/design/accessibility.rs"
 NODE_RS = ROOT / "sdk/rust/interos-std/src/design/node.rs"
 
 WCAG_AA_MINIMUM_CONTRAST = 4.5
+# WHY 1.3 and not a WCAG number: WCAG bounds legibility of ink against its
+# background, and says nothing about two inks against each other. A ladder is
+# only a ladder if its rungs differ, and 1.3:1 is the smallest separation that
+# reads as "quieter" rather than "the same grey, rounded differently".
+MINIMUM_RUNG_SEPARATION = 1.3
+SURFACE_RUNGS = (
+    "surface",
+    "surface_container",
+    "surface_container_high",
+    "surface_container_low",
+)
+INK_RUNGS = ("on_surface", "on_surface_variant", "muted")
 
 
 def srgb_to_linear(channel: int) -> float:
@@ -46,11 +63,30 @@ def contrast_ratio(color_a: int, color_b: int) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def parse_cap_ladder() -> list[int]:
+    """The platform's own cap-height ladder, read out of `font::cap_for_scale`.
+
+    WHY parsed and not written down: this suite is about what a person can read on
+    the device, and `cap_for_scale` is the only authority for what a rung is. A
+    copy of the table here passes even when it contradicts the SDK, which is how
+    this suite ended up certifying a ladder the platform no longer draws.
+    """
+    text = FONT_RS.read_text(encoding="utf-8")
+    match = re.search(
+        r"pub const fn cap_for_scale\(scale: usize\) -> u32 \{(.*?)\n\}", text, re.S
+    )
+    assert match, "font::cap_for_scale is no longer shaped the way this suite reads it"
+    ladder = {int(rung): int(cap)
+              for rung, cap in re.findall(r"^\s*(\d+)\s*=>\s*(\d+)", match.group(1), re.M)}
+    assert ladder, "font::cap_for_scale answers no rung"
+    return [ladder[rung] for rung in sorted(ladder)]
+
+
 def parse_color_constants() -> dict[str, int]:
     """Extracts raw color definitions from design/mod.rs."""
     text = COLOR_RS.read_text(encoding="utf-8")
     constants = {}
-    pattern = r"pub const ([A-Z0-9_]+):\s*u32\s*=\s*(0x[0-9A-Fa-f]+);"
+    pattern = r"pub const ([A-Z0-9_]+):\s*u32\s*=\s*(0x[0-9A-Fa-f_]+);"
     for match in re.finditer(pattern, text):
         name = match.group(1)
         val = int(match.group(2), 16)
@@ -89,6 +125,93 @@ def parse_themes() -> dict[str, dict[str, int]]:
         themes[theme_name] = tokens
 
     return themes
+
+
+def parse_monochrome_constants() -> dict[str, int]:
+    """Extracts the raw palette names design/monochrome.rs resolves its roles to."""
+    text = MONOCHROME_RS.read_text(encoding="utf-8")
+    constants = {}
+    pattern = r"pub const ([A-Z0-9_]+):\s*u32\s*=\s*(0x[0-9A-Fa-f_]+);"
+    for match in re.finditer(pattern, text):
+        constants[match.group(1)] = int(match.group(2), 16)
+    return constants
+
+
+def parse_monochrome_themes() -> dict[str, dict[str, int]]:
+    """Extracts the surface and ink tokens of the platform's own light and dark themes.
+
+    WHY these are parsed separately from LIGHT/DARK/NEUTRAL: `Theme::LIGHT` and
+    friends are written against `color::*`, while `monochrome::THEME` is what
+    every application in `apps/` actually paints with -- it resolves its roles to
+    names declared beside it (`TEXT_MUTED`, `SURFACE_RAISED`, `DARK_SURFACE_HIGH`)
+    and carries its own dark half for the shell's lock screen, power menu and pin
+    keypad. A contract that read only the stock themes would have kept passing
+    while the shipped pixels sat at 2.42:1.
+    """
+    palette = parse_monochrome_constants()
+    text = MONOCHROME_RS.read_text(encoding="utf-8")
+
+    themes = {}
+    for theme_name in ("THEME", "THEME_DARK"):
+        block_pattern = rf"pub const {theme_name}\s*:[^={{]*=\s*[^{{]*\{{(.*?)\n\s*\}};"
+        match = re.search(block_pattern, text, re.DOTALL)
+        assert match, f"Could not find monochrome::{theme_name} definition"
+
+        tokens = {}
+        for line in match.group(1).splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line.startswith("//"):
+                continue
+            if ":" in line:
+                key, val = [x.strip() for x in line.split(":", 1)]
+                if val.startswith("0x"):
+                    tokens[key] = int(val, 16)
+                elif val in palette:
+                    tokens[key] = palette[val]
+
+        themes[f"monochrome::{theme_name}"] = tokens
+
+    return themes
+
+
+def assert_ladder_is_legible(theme_name: str, tokens: dict[str, int], failures: list[str]) -> None:
+    """Every ink rung must read on every surface rung, and each rung must differ from the one above."""
+    for surface_token in SURFACE_RUNGS:
+        assert surface_token in tokens, f"Missing surface token {surface_token} in {theme_name}"
+        for ink_token in INK_RUNGS:
+            assert ink_token in tokens, f"Missing ink token {ink_token} in {theme_name}"
+            ratio = contrast_ratio(tokens[surface_token], tokens[ink_token])
+            if ratio < WCAG_AA_MINIMUM_CONTRAST:
+                failures.append(
+                    f"{theme_name}: ink {ink_token}=0x{tokens[ink_token]:08X} on "
+                    f"surface {surface_token}=0x{tokens[surface_token]:08X} is {ratio:.2f}:1, "
+                    f"below the WCAG AA minimum of {WCAG_AA_MINIMUM_CONTRAST}:1"
+                )
+
+    for upper, lower in zip(INK_RUNGS, INK_RUNGS[1:]):
+        separation = contrast_ratio(tokens[upper], tokens[lower])
+        if separation < MINIMUM_RUNG_SEPARATION:
+            failures.append(
+                f"{theme_name}: ink {lower}=0x{tokens[lower]:08X} sits only {separation:.2f}:1 "
+                f"from {upper}=0x{tokens[upper]:08X}, so the two rungs read as one grey "
+                f"(minimum {MINIMUM_RUNG_SEPARATION}:1)"
+            )
+
+
+def test_monochrome_ink_ladder_is_legible_on_every_surface_rung():
+    """The palette the applications ship with must hold the same ladder rule the stock themes do."""
+    failures = []
+    for theme_name, tokens in parse_monochrome_themes().items():
+        assert_ladder_is_legible(theme_name, tokens, failures)
+    assert not failures, "Contract violation: platform theme rungs that are not legible:\n" + "\n".join(failures)
+
+
+def test_stock_theme_ink_ladder_is_legible_on_every_surface_rung():
+    """Body, secondary and muted ink must each clear AA on the page, card, raised and sunken surfaces."""
+    failures = []
+    for theme_name, tokens in parse_themes().items():
+        assert_ladder_is_legible(theme_name, tokens, failures)
+    assert not failures, "Contract violation: theme rungs that are not legible:\n" + "\n".join(failures)
 
 
 def test_standard_theme_surface_and_ink_contrast():
@@ -155,7 +278,7 @@ def test_dynamic_type_scaling_bounds_and_rungs():
         else:
             return (base * 150 + 50) // 100
 
-    canonical_rungs = [13, 16, 22, 30, 40, 52, 72]
+    canonical_rungs = parse_cap_ladder()
 
     # Level 0 (Compact 80%): must be >= 10px and <= normal
     compact_rungs = [scale_cap(r, 0) for r in canonical_rungs]

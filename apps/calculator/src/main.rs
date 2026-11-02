@@ -129,10 +129,9 @@ const DISPLAY_PAD: usize = spacing::GRID_24;
 /// The cap heights the display draws at.
 ///
 /// WHY the rungs and not the scales: the scale ladder and the cap ladder
-/// are not the same ladder -- the title *scale* is three, whose cap is
-/// twenty-two -- and the reference calculator's own result stands thirty
-/// pixels of cap tall on a seven-hundred and twenty pixel screen. These
-/// are the sizes the design ladder names in the units a reader sees.
+/// are not the same ladder -- a rung names a scale, and the cap it draws is
+/// a different number -- and these are the sizes the design ladder names in
+/// the units a reader sees, taken from `typography` rather than restated.
 const CAP_EXPRESSION: u32 = calculator::EXPRESSION_CAP_PX;
 const CAP_RESULT: u32 = typography::DISPLAY_CAP_PX;
 const CAP_LABEL: u32 = typography::SECTION_CAP_PX;
@@ -169,7 +168,13 @@ const PILL_INK_DY: usize = (PILL_H - run_rows(typography::BODY_CAP_PX)) / 2;
 /// are neighbours in one column, and the row's height has to close around
 /// the pair. A literal offset fitted to the old bitmap cell let the result's
 /// cap start inside the expression's box.
-const HIST_ROW_H: usize = 125;
+/// The history row's height: where its result's box ends, plus the air below
+/// it. WHY derived rather than remembered: the row used to be a literal 125
+/// while the two boxes it stacks come from the type ladder, and the ladder's
+/// title rung grew the pair past the frame -- the result's last two rows
+/// painted outside the row that owns them.
+const HIST_ROW_BOTTOM_PAD: usize = 2;
+const HIST_ROW_H: usize = HIST_RES_DY + run_rows(CAP_SECTION) + HIST_ROW_BOTTOM_PAD;
 const HIST_LIST_Y0: usize = 195;
 const HIST_ROW_PITCH: usize = 140;
 const HIST_EXPR_DY: usize = 16;
@@ -568,7 +573,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // 1. Header row: title, back chevron and history toggle (y: 48..110)
     if y < HEADER_H {
         // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
             return c;
         }
 

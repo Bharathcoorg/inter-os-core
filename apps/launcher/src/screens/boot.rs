@@ -73,11 +73,12 @@ const FADE_DEPTH: u32 = 210;
 // Layout Geometry
 // -----------------------------------------------------------------------------
 //
-// The ink span runs ICON_Y0..STATUS_Y + line_height(1) = 561..883, whose middle
-// is row 722 -- two rows below the 720 line, inside the tolerance the eye reads
-// as centred. Each gap is stated as a gap between ink, not between boxes, so a
-// larger wordmark or a descender cannot quietly eat the space between it and
-// the tagline.
+// The ink span runs ICON_Y0..STATUS_Y + line_height(1) = 561..886, whose middle
+// is row 723 -- three rows below the 720 line, inside the tolerance the eye
+// reads as centred. The bottom is the caption run's line box; the run's own ink
+// ends two rows above it, at STATUS_Y + 22. Each gap is stated as a gap between
+// ink, not between boxes, so a larger wordmark or a descender cannot quietly
+// eat the space between it and the tagline.
 
 /// Sovereign Emblem Container (120x120).
 const ICON_SIZE: usize = 120;
@@ -135,16 +136,25 @@ const BAR_X0: usize = (W - BAR_W) / 2; // (720 - 280) / 2 = 220
 const BAR_Y0: usize = 828;
 const BAR_R: i32 = 4;
 
-/// System Status Phase subtitle (bitmap caption rung).
+/// System Status Phase subtitle (the caption rung, drawn with the outline face).
 ///
-/// WHY the band and the ink bottom are stated separately: `test_text_aa` at
-/// scale 1 rasterises the caption at its 13 px cap through the outline face
-/// (em 18, ascent 18, descent 3), so the ink runs from `STATUS_Y + 5` to
-/// `STATUS_Y + 18` inside a 21 px line box. Reserving the bitmap's 24 px cell
-/// here would leave a three pixel hole under the last line and pull the stack's
-/// optical centre down with it.
+/// WHY the band is the ladder's own line box and not a remembered number: the
+/// phase line goes through `test_text_aa` at rung 1, which hands it to the
+/// outline face at `cap_for_scale(1)` = 15 px -- em 21, ascent 22, descent 5 --
+/// so the run reserves `font::line_height(1)` = 27 rows and its coverage buffer
+/// is exactly that tall: rows `STATUS_Y..STATUS_Y + 27` are all the run can ever
+/// paint, and a row below that is a row nothing can ink. Measured off the three
+/// phase strings the solid ink runs from `STATUS_Y + 7` to `STATUS_Y + 21` and
+/// the anti-aliased overshoot of the round letters reaches `STATUS_Y + 22`, so
+/// the 21 rows this constant used to hard-code -- the retired ladder's caption
+/// box, for a 13 px cap at em 18 with ascent 18 and descent 3 -- cut the
+/// baseline row off every capital. The bitmap face's 24 px cell would clip a
+/// descender (a control string inks as low as `STATUS_Y + 26`), and that cell is
+/// a different quantity anyway: it is what the face the outline run falls back to
+/// inks from `STATUS_Y`, not what this layout reserves.
+const STATUS_SCALE: usize = 1;
 const STATUS_Y: usize = 859;
-const STATUS_BAND_H: usize = 21;
+const STATUS_BAND_H: usize = launcher::font::line_height(STATUS_SCALE);
 const STATUS_COPY: [&[u8]; 3] = [
     b"STARTING SOVEREIGN LAUNCHER",
     b"PREPARING HOME SURFACE",
@@ -595,7 +605,7 @@ fn status_subtitle_pixel(x: usize, y: usize, state: &LauncherState, bg: u32) -> 
         }
         let ink = Theme::blend(bg, COLOR_MUTED_TEXT, alpha);
         if let Some(c) =
-            crate::test_text_aa(x, y, x0, STATUS_Y, 1, STATUS_COPY[i], ink, bg)
+            crate::test_text_aa(x, y, x0, STATUS_Y, STATUS_SCALE, STATUS_COPY[i], ink, bg)
         {
             return Some(c);
         }
@@ -748,12 +758,12 @@ fn tagline_layout() -> &'static Layout {
 
         for i in 0..STATUS_COPY.len() {
             // The caption rung is rasterised through the outline face at its
-            // 13 px cap, so its width is the outline advance at that cap -- the
+            // 15 px cap, so its width is the outline advance at that cap -- the
             // bitmap cell advance is wider and would hang the line left of
             // centre by the difference.
             let w = interos_std::design::monochrome::text_width(
                 STATUS_COPY[i],
-                interos_std::font::cap_for_scale(1),
+                interos_std::font::cap_for_scale(STATUS_SCALE),
             );
             slot.status_w[i] = w;
             slot.status_x[i] = (W.saturating_sub(w)) / 2;
@@ -816,15 +826,32 @@ mod tests {
     #[test]
     fn the_stack_stays_inside_the_rows_main_rs_repaints() {
         assert!(ICON_Y0 >= BAND_TOP);
-        assert!(STATUS_Y + launcher::font::line_height(1) <= BAND_TOP + BAND_ROWS);
+        assert!(STATUS_Y + STATUS_BAND_H <= BAND_TOP + BAND_ROWS);
+        // The band is the rung's own line box rather than a remembered number,
+        // so the phase line can never be clipped by a box narrower than the run
+        // drawn in it.
+        assert_eq!(STATUS_BAND_H, launcher::font::line_height(STATUS_SCALE));
+    }
+
+    #[test]
+    fn the_phase_line_band_holds_the_run_and_its_neighbour() {
+        // The outline run paints rows STATUS_Y..STATUS_Y + line_height(1) and
+        // the bitmap face it can fall back to inks that face's 24 px cell from
+        // the same top, so the band has to contain both.
+        assert!(STATUS_BAND_H >= launcher::font::line_height(STATUS_SCALE));
+        assert!(STATUS_BAND_H >= launcher::text::line_height(STATUS_SCALE));
+        // Growing the band downward must not walk it into the tagline above or
+        // the capsule that sits between them.
+        assert!(TAGLINE_Y + TAGLINE_BAND_H <= STATUS_Y);
+        assert!(BAR_Y0 + BAR_H <= STATUS_Y);
     }
 
     #[test]
     fn the_stack_is_optically_centred_on_the_surface() {
         let top = ICON_Y0;
-        // Caption ink ends at the outline baseline (STATUS_Y + 18), not at the
-        // bitmap cell's 24 px bottom.
-        let bottom = STATUS_Y + 18;
+        // The stack's bottom is the caption run's line box, which is the space
+        // the surface reserves for it; its inked rows land two inside that.
+        let bottom = STATUS_Y + STATUS_BAND_H;
         let centre = (top + bottom) / 2;
         assert!(
             (centre as i32 - (H / 2) as i32).abs() <= 4,

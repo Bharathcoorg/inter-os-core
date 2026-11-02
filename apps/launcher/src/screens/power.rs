@@ -23,25 +23,56 @@ const SHEET_BORDER: u32 = 0xFF282F3D;
 const HANDLE_RECT: Rect = Rect::new(330, 76, 60, 5);
 const HANDLE_COLOR: u32 = 0xFF3B4454;
 
+// Sheet header: the title and the line of instruction under it.
+//
+// WHY these two rows are derived from each other and not both typed: the title is a
+// rung-4 run and reserves `line_height(4)` = 63 rows from its top. `158` was chosen
+// against the 59-row box the same rung reserved before it rose, so the description
+// began one row inside the title's own box again -- exactly the collision the
+// description's own advance is there to prevent. The button bands under the header
+// start at the bottom of the description's box for the same reason.
+const TITLE_SCALE: usize = 4;
+const DESC_SCALE: usize = 2;
+const TITLE_Y0: usize = 96;
+const DESC_Y0: usize = TITLE_Y0 + launcher::font::line_height(TITLE_SCALE);
+/// The first row the two top button bands answer: one row past the whole description
+/// box, so a tap on the header is never read as the control painted under it.
+///
+/// WHY this replaces the literal `190`: 190 was the row the description's 32-row box
+/// closed on. The box is 36, so its last four rows were inside the Power Off and Lock
+/// Screen hit ranges while the painter still drew ink there.
+const ROW0_HIT_TOP_Y: usize = DESC_Y0 + launcher::font::line_height(DESC_SCALE);
+
 // Circle button geometry: radius 36 (72x72px diameter)
 const BTN_RADIUS: i32 = 36;
 const BTN_R2: i32 = BTN_RADIUS * BTN_RADIUS;
 
-// Centers for the 2x2 grid
+/// Centers for the 2x2 grid
 const COL0_CX: usize = 220;
 const COL1_CX: usize = 500;
 const ROW0_CY: usize = 240;
-/// WHY row 1 stands 156 rows under row 0 rather than the 140 it used to: a
-/// button's two-line block is a name box and a subject box, and at the ladder
-/// that is `line_height(3) + line_height(2)` = 76 rows. A 140-row pitch left
-/// only 68 rows between the two circles' rims, so no stride that cleared the
-/// name could keep the subject off the circle below it.
-const ROW1_CY: usize = 396;
 
 /// The rung a button's name is drawn at, and the rung its subject line is
 /// drawn at.
 const NAME_SCALE: usize = 3;
 const SUBJECT_SCALE: usize = 2;
+
+/// Rows a button's two-line block reserves below its circle: the name's whole
+/// line box plus the subject's.
+///
+/// WHY it is named: the row pitch, the band boundary between the two rows and
+/// the top of the Cancel hit range are all solved from this one number, so a
+/// ladder that changes the boxes moves the modal instead of overrunning it.
+const BTN_BLOCK_H: usize =
+    launcher::font::line_height(NAME_SCALE) + launcher::font::line_height(SUBJECT_SCALE);
+
+/// WHY row 1 stands a whole block plus two circle radii under row 0 rather than
+/// the 140 it used to: a button's two-line block is a name box and a subject
+/// box, so the pitch that clears row 0's ink and keeps row 1's subject off its
+/// own circle is `2 * BTN_RADIUS + BTN_BLOCK_H`. At the raised ladder that is
+/// 156 rows, which is where the old hand-tuned pitch had already arrived.
+const ROW_PITCH: usize = 2 * BTN_RADIUS as usize + BTN_BLOCK_H;
+const ROW1_CY: usize = ROW0_CY + ROW_PITCH;
 
 /// WHY the name sits a full button-radius below the centre: the circle's own
 /// ink ends at its radius, so a name any higher is painted on the button it
@@ -50,9 +81,9 @@ const ROW0_NAME_Y0: usize = ROW0_CY + BTN_RADIUS as usize;
 const ROW1_NAME_Y0: usize = ROW1_CY + BTN_RADIUS as usize;
 
 /// WHY the subject's top is the name's whole line box below the name and not a
-/// fixed 36 rows: at ladder scale 3 a run reserves `line_height(3)` = 44 rows,
-/// and the old 36-row stride was the 8x16 bitmap cell's, shorter than the name
-/// it followed, so the subject's first rows painted straight through the name's
+/// fixed 36 rows: a name run reserves `line_height(NAME_SCALE)` rows, and the
+/// old 36-row stride was the 8x16 bitmap cell's, shorter than the name it
+/// followed, so the subject's first rows painted straight through the name's
 /// descender. Starting exactly one line box lower makes the two boxes adjacent,
 /// so no descender can be read through.
 const ROW0_SUBJECT_Y0: usize = ROW0_NAME_Y0 + launcher::font::line_height(NAME_SCALE);
@@ -63,18 +94,52 @@ const ROW1_SUBJECT_Y0: usize = ROW1_NAME_Y0 + launcher::font::line_height(NAME_S
 /// the circle is the primary target, so a tap on it must never be read as the
 /// row above, and a label block that grew toward it is the row's own.
 const ROW_BOUNDARY_Y: usize = ROW1_CY - BTN_RADIUS as usize;
-/// The first row the Cancel pill answers. WHY it is named: the row-1 band ends
-/// where the pill begins, and the two ranges cannot then be edited apart.
-const CANCEL_HIT_TOP_Y: usize = 510;
+/// The first row the Cancel pill answers. WHY it is named and derived: the
+/// row-1 band ends where the pill begins, and the two ranges cannot then be
+/// edited apart - and row 1's two-line block, which the raised ladder made
+/// taller, must close above it rather than lean on it.
+const CANCEL_HIT_GAP: usize = 4;
+const CANCEL_HIT_TOP_Y: usize = ROW1_CY + BTN_RADIUS as usize + BTN_BLOCK_H + CANCEL_HIT_GAP;
 
-/// Truth gates: the subject begins where its name's box ends, a whole two-line
+/// Truth gates: the two rungs still stand in the order the buttons read in (a
+/// name above a subject), each box holds its rung's own caps, a whole two-line
 /// block clears the circle beneath it, and row 1's block closes above the Cancel
 /// pill rather than leaning on it.
-const _: () = assert!(launcher::font::line_height(NAME_SCALE) == 44);
-const _: () = assert!(launcher::font::line_height(SUBJECT_SCALE) == 32);
+///
+/// WHY the first two no longer read `line_height(3) == 44` and
+/// `line_height(2) == 32`: those were the previous ladder's boxes, a second copy
+/// of the ladder that failed the day it moved while saying nothing about this
+/// layout. What the modal depends on is the ordering and the containment below.
+const _: () = assert!(
+    launcher::font::line_height(NAME_SCALE) > launcher::font::line_height(SUBJECT_SCALE),
+    "a button's name box must reserve more rows than its subject box under it"
+);
+const _: () = assert!(
+    launcher::font::line_height(SUBJECT_SCALE)
+        >= launcher::font::cap_for_scale(SUBJECT_SCALE) as usize,
+    "a subject line box must at least hold its rung's cap height"
+);
 const _: () = assert!(ROW0_SUBJECT_Y0 + launcher::font::line_height(SUBJECT_SCALE) <= ROW_BOUNDARY_Y);
 const _: () = assert!(ROW1_SUBJECT_Y0 + launcher::font::line_height(SUBJECT_SCALE) <= CANCEL_HIT_TOP_Y);
 const _: () = assert!(ROW_BOUNDARY_Y > ROW0_SUBJECT_Y0);
+/// The header's two lines, in order: the description starts where the title's box
+/// closes, and the button bands start where the description's does -- so the sheet
+/// reads title, instruction, controls, with no line painted into another's rows.
+const _: () = assert!(DESC_Y0 == TITLE_Y0 + launcher::font::line_height(TITLE_SCALE));
+const _: () = assert!(
+    ROW0_HIT_TOP_Y < ROW0_CY - BTN_RADIUS as usize,
+    "the header's own box must close above the first button circle it is stacked over"
+);
+/// WHY: the header's description and a button's subject are the same rung, so the
+/// one box the gates above measure is theirs in common. If either is re-tuned alone,
+/// the band derived here stops matching the run it covers.
+const _: () = assert!(
+    DESC_SCALE == SUBJECT_SCALE,
+    "the sheet's instruction line and a button's subject line share one rung, and so one box"
+);
+/// WHY this closes the modal on the sheet: the sheet is the container the pill
+/// and both button rows live in, so the grown blocks must still fit it.
+const _: () = assert!(CANCEL_HIT_TOP_Y < 590, "the Cancel band must stay inside the sheet");
 
 // Button 1: Power Off (Col 0, Row 0)
 const BTN_POWER_CX: usize = COL0_CX;
@@ -102,6 +167,19 @@ const COLOR_EMERGENCY_RING: u32 = 0xFFB91C1C;
 
 // Cancel button
 pub const CANCEL_RECT: Rect = Rect::new(200, 524, 320, 54);
+/// Where the "Cancel" label starts: its line box centred in the pill.
+///
+/// WHY derived and not the `533` this carried: 533 was remembered from when the rung
+/// reserved a 44-row box in a 54-row pill. The box is 48 rows now, so the remembered
+/// row left the label's last four rows outside the pill the painter clips to -- an
+/// invisible overflow today only because "Cancel" has no descender. The label is set
+/// at the same rung a button's name is, which is why one const serves both.
+const CANCEL_LABEL_Y: usize =
+    CANCEL_RECT.y + (CANCEL_RECT.h - launcher::font::line_height(NAME_SCALE)) / 2;
+const _: () = assert!(
+    launcher::font::line_height(NAME_SCALE) <= CANCEL_RECT.h,
+    "the Cancel label's line box must fit the pill it is centred in"
+);
 const CANCEL_RADIUS: usize = 27;
 const COLOR_CANCEL_FILL: u32 = 0xFF1E2430;
 const COLOR_CANCEL_BORDER: u32 = 0xFF333E50;
@@ -119,11 +197,11 @@ pub enum PowerMenuAction {
 
 pub fn power_menu_hit(x: usize, y: usize) -> PowerMenuAction {
     // 1. Power off: Col 0, Row 0 (name and grown subject ride in this band).
-    if (80..340).contains(&x) && (190..ROW_BOUNDARY_Y).contains(&y) {
+    if (80..340).contains(&x) && (ROW0_HIT_TOP_Y..ROW_BOUNDARY_Y).contains(&y) {
         return PowerMenuAction::PowerOff;
     }
     // 2. Lock screen: Col 1, Row 0 (contains (500, 225)!)
-    if (360..640).contains(&x) && (190..ROW_BOUNDARY_Y).contains(&y) {
+    if (360..640).contains(&x) && (ROW0_HIT_TOP_Y..ROW_BOUNDARY_Y).contains(&y) {
         return PowerMenuAction::LockScreen;
     }
     // 3. Restart: Col 0, Row 1 (band starts at this row's circle top).
@@ -315,19 +393,23 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return HANDLE_COLOR;
         }
 
-        // Header Title: "Power & Safety" (scale 4 bold white)
+        // Header Title: "Power & Safety" (rung 4 bold white)
         let title_bytes = b"Power & Safety";
-        let title_w = text::measure(title_bytes, 4);
+        let title_w = text::measure(title_bytes, TITLE_SCALE);
         let title_x = (720 - title_w) / 2;
-        if let Some(c) = text_pixel(x, y, title_x, 96, 4, title_bytes, 0xFFFFFFFF, SHEET_FILL) {
+        if let Some(c) = text_pixel(
+            x, y, title_x, TITLE_Y0, TITLE_SCALE, title_bytes, 0xFFFFFFFF, SHEET_FILL,
+        ) {
             return c;
         }
 
-        // Header Description: "Select an option or tap Cancel to return"
+        // Header Description: "Select an option or tap Cancel to return" (rung 2)
         let desc_bytes = b"Select an option or tap Cancel to return";
-        let desc_w = text::measure(desc_bytes, 2);
+        let desc_w = text::measure(desc_bytes, DESC_SCALE);
         let desc_x = (720 - desc_w) / 2;
-        if let Some(c) = text_pixel(x, y, desc_x, 158, 2, desc_bytes, 0xFF94A3B8, SHEET_FILL) {
+        if let Some(c) = text_pixel(
+            x, y, desc_x, DESC_Y0, DESC_SCALE, desc_bytes, 0xFF94A3B8, SHEET_FILL,
+        ) {
             return c;
         }
 
@@ -450,9 +532,11 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return COLOR_CANCEL_BORDER;
             }
             let cancel_bytes = b"Cancel";
-            let c_w = text::measure(cancel_bytes, 3);
+            let c_w = text::measure(cancel_bytes, NAME_SCALE);
             let c_x = CANCEL_RECT.x + (CANCEL_RECT.w - c_w) / 2;
-            if let Some(c) = text_pixel(x, y, c_x, 533, 3, cancel_bytes, COLOR_CANCEL_TEXT, COLOR_CANCEL_FILL) {
+            if let Some(c) = text_pixel(
+                x, y, c_x, CANCEL_LABEL_Y, NAME_SCALE, cancel_bytes, COLOR_CANCEL_TEXT, COLOR_CANCEL_FILL,
+            ) {
                 return c;
             }
             return COLOR_CANCEL_FILL;

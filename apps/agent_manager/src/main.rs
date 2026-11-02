@@ -2853,13 +2853,11 @@ fn appbar_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     // It is drawn in the platform's own place and tested with the
     // platform's own hit region, so the button a person sees and the
     // button a person presses are the same button.
-    if let Some(c) = std::design::back_button::pixel(
-        x,
-        y,
-        THEME.on_surface,
-        THEME.border,
-        THEME.surface,
-    ) {
+    //
+    // WHY the colours come from the theme rather than from this call: the chip
+    // used to be filled with `THEME.surface` and ringed with `THEME.border`,
+    // which is the page wearing the page -- nothing of it survived the screen.
+    if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
         colour = c;
     }
 

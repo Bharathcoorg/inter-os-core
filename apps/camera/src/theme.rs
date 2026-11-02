@@ -55,6 +55,25 @@ pub const THEME: Theme = Theme {
     ..interos_std::design::monochrome::THEME
 };
 
+/// The theme a control that stands on the chassis is cut from: the dark half
+/// of the platform's monochrome ladder.
+///
+/// WHY not [`THEME`], which the rest of the fleet hands the platform's back
+/// control: the chip takes its ring, its plate and its chevron from the theme
+/// it is given, and the light roles put a `#0A0A0A` outline on this app's
+/// `#0E0F11` band -- a measured 1.03:1 step, so the control's own boundary is
+/// one hundredth of a step off the surface it stands on and the button is not
+/// there. The dark variant trades paper for ink: ring and chevron carry
+/// `#FAFAFA`, 18.37:1 against the band and 15.06:1 against the chip's own
+/// `#232323` plate, against the 3:1 WCAG 1.4.11 floor for a non-text control.
+///
+/// WHY the plate is allowed to stay quiet: `#232323` over `#0E0F11` is 1.22:1,
+/// under the 1.3:1 step a divider must earn, because the plate is not the
+/// divider here -- the ring is, and the ring clears the floor by more than
+/// five times. The same reasoning and the same arithmetic as
+/// `apps/webview_demo`, whose band is dark for the same reason.
+pub const CHASSIS_THEME: Theme = interos_std::design::monochrome::THEME_DARK;
+
 /// The camera's own chassis palette.
 ///
 /// WHY this sits beside [`THEME`] instead of replacing it: `THEME` is the

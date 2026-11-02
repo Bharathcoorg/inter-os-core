@@ -621,20 +621,48 @@ const _: () = assert!(DAY_EMPTY_Y1 <= ACTION_BTN_Y0);
 //
 // WHY the pill's radius comes from the band's height: the corner test asks
 // whether a pixel lies inside a circle of the radius, centred one radius in
-// from each edge. The band is twenty-eight rows tall and the platform's soft
-// pill radius is sixteen, so the two corner circles of one end overlapped and
-// their union covered the whole end of the box: at the first column the test
-// dropped every row, at the second all but six of them, and the count pill read
-// as torn rather than round. The platform's own primitive clamps a radius to
-// half the box it is given; this box is drawn by hand, so it now asks the same
-// question the clamp asks.
+// from each edge. The band used to be a remembered twenty-eight rows carrying
+// the platform's soft pill radius of sixteen, so the two corner circles of one
+// end overlapped and their union covered the whole end of the box: at the first
+// column the test dropped every row, at the second all but six of them, and the
+// count pill read as torn rather than round. The platform's own primitive
+// clamps a radius to half the box it is given; this box is drawn by hand, so it
+// now asks the same question the clamp asks. Because the height it asks about
+// comes from the rung the caption is set in, a ladder that raises the caption
+// widens the pill with it instead of underflowing the centring below.
 // -----------------------------------------------------------------------------
 
 /// The top of the Month view's "Events on <date>" band.
 const SECTION_BAND_Y0: usize = 516;
 
-/// The height of that band.
-const SECTION_BAND_H: usize = 28;
+/// The rung the band's title and its event count are set in.
+const SECTION_TITLE_SCALE: usize = type_scale::CAPTION;
+
+/// The rows the band's caption inks.
+///
+/// WHY read from the renderer and not from the rung's line box alone: a caption
+/// is drawn by whichever face fits, and the bitmap cell's baseline can sit below
+/// the outline ascent, which makes the inked band taller than `line_height`.
+/// [`outline_text::row_band`] is the union of the two, so this is the number the
+/// band has to hold rather than the number one of the two faces needs.
+const SECTION_TITLE_ROWS: usize = outline_text::row_band(0, SECTION_TITLE_SCALE).1;
+
+/// The air between the caption's box and each edge of the band.
+///
+/// WHY two rows: the hairline that opens the band is painted in its first two
+/// rows and the count pill's own border in its last two, so a box set at the
+/// band's top would have both of them inked across the run's own leading.
+const SECTION_BAND_PAD: usize = 2;
+
+/// The height of that band: the caption's box, plus the air it needs.
+///
+/// WHY derived: the band was a remembered twenty-eight rows for a caption whose
+/// box grew to thirty with the ladder, and the centring underflowed the moment
+/// the content outgrew the frame. The container follows the text.
+const SECTION_BAND_H: usize = SECTION_TITLE_ROWS + SECTION_BAND_PAD * 2;
+
+/// The row the band ends on -- exclusive.
+const SECTION_BAND_Y1: usize = SECTION_BAND_Y0 + SECTION_BAND_H;
 
 /// Where the band's title sits inside it.
 ///
@@ -642,7 +670,7 @@ const SECTION_BAND_H: usize = 28;
 /// it are one line of text, and the count was centred from the band's line box
 /// while the title was set six rows down, so the two sat on baselines three rows
 /// apart and the line read as two unrelated labels.
-const SECTION_TEXT_Y: usize = (SECTION_BAND_H - std::design::font::line_height(1)) / 2;
+const SECTION_TEXT_Y: usize = (SECTION_BAND_H - SECTION_TITLE_ROWS) / 2;
 
 /// The left edge of the event-count pill.
 const BADGE_X0: usize = 540;
@@ -655,16 +683,35 @@ const BADGE_R: usize = SECTION_BAND_H / 2;
 
 const _: () = assert!(2 * BADGE_R <= SECTION_BAND_H);
 const _: () = assert!(SECTION_TEXT_Y + std::design::font::line_height(1) <= SECTION_BAND_H);
+const _: () = assert!(SECTION_TEXT_Y + SECTION_TITLE_ROWS <= SECTION_BAND_H);
 const _: () = assert!(BADGE_X0 + BADGE_W <= W);
+/// WHY the band is gated against both of its neighbours: it starts on the row the
+/// month grid ends on, and the list starts below it, so a band that grew
+/// unnoticed would have climbed into the grid's last row -- which the grid's
+/// branch claims first, so the band simply lost its top -- or painted over the
+/// first card's border, which its own branch claims first. The list's top is now
+/// read from the band's bottom, so the second gate says out loud what that
+/// derivation promises: if the list is ever pinned back to a remembered row, the
+/// band cannot silently overlap it.
+const _: () = assert!(GRID_START_Y + GRID_ROWS * ROW_PITCH <= SECTION_BAND_Y0);
+const _: () = assert!(SECTION_BAND_Y1 <= MONTH_LIST_Y0);
 
 /// The top of the Agenda view's chronological cards.
 const AGENDA_CARDS_Y0: usize = 232;
 
-/// The height of an Agenda view card.
-const AGENDA_CARD_H: usize = 104;
-
 /// The line box every run in an Agenda card reserves.
 const AGENDA_LINE_H: usize = std::design::font::line_height(2);
+
+/// The air above and below the three lines inside the card.
+const AGENDA_LINE_PAD: usize = 4;
+
+/// The height of an Agenda view card: the three lines it carries, plus the air
+/// around them. WHY derived: the card was a remembered 104 while the ladder's
+/// body rung grew its three boxes to 108, and the centring arithmetic below
+/// underflows the moment the content outgrows the frame -- which is the same
+/// overflow, stated the other way, that used to draw the third line across the
+/// card's own bottom border.
+const AGENDA_CARD_H: usize = AGENDA_LINE_H * 3 + AGENDA_LINE_PAD * 2;
 
 /// The inset that puts an Agenda card's three lines inside its own border.
 ///
@@ -679,8 +726,11 @@ const AGENDA_TITLE_Y: usize = AGENDA_LINE_STACK_Y + AGENDA_LINE_H;
 
 const _: () = assert!(AGENDA_LINE_STACK_Y + AGENDA_LINE_H * 3 <= AGENDA_CARD_H - 2);
 
+/// The gap between one Agenda card's bottom border and the next's top.
+const AGENDA_CARD_GAP: usize = 12;
+
 /// The stride between two Agenda view cards.
-const AGENDA_CARD_PITCH: usize = 116;
+const AGENDA_CARD_PITCH: usize = AGENDA_CARD_H + AGENDA_CARD_GAP;
 
 /// How many Agenda view cards fit above the action button.
 const AGENDA_CARD_MAX: usize =
@@ -691,8 +741,21 @@ const _: () = assert!(
     (AGENDA_CARD_MAX - 1) * AGENDA_CARD_PITCH + AGENDA_CARD_H <= ACTION_BTN_Y0 - AGENDA_CARDS_Y0
 );
 
+/// The air between the section band's bottom edge and the list under it.
+///
+/// WHY it is named: the list's top was a remembered row of its own, two under a
+/// remembered band, so the band had nowhere to grow -- a band that takes the rows
+/// its caption needs would have spent the surplus over the first card's top
+/// border, and the band's branch claims those rows first, so the card would only
+/// lose its edge.
+const MONTH_LIST_GAP: usize = 2;
+
 /// The band the Month view's saved-day list is drawn and tapped in.
-const MONTH_LIST_Y0: usize = 546;
+///
+/// WHY its top is derived from the band above it: the list sits on that band, so
+/// the band decides where the list starts and a ladder that raises the caption
+/// moves the list down instead of painting over it.
+const MONTH_LIST_Y0: usize = SECTION_BAND_Y1 + MONTH_LIST_GAP;
 const MONTH_LIST_Y1: usize = 1360;
 /// The height and stride of one card in that list.
 const MONTH_CARD_H: usize = 114;
@@ -706,6 +769,33 @@ const _: () = assert!(MONTH_CARD_H <= MONTH_LIST_Y1 - MONTH_LIST_Y0);
 const _: () = assert!(
     (MONTH_CARD_MAX - 1) * MONTH_CARD_PITCH + MONTH_CARD_H <= MONTH_LIST_Y1 - MONTH_LIST_Y0
 );
+
+/// The Month view's "nothing listed" card: one box over the list band.
+///
+/// WHY its top is the list band's own: the card stands in for the cards, so it
+/// starts where they start and a band that moves down carries the card with it.
+/// Left behind, the card's first rows would fall in the section band above, whose
+/// branch claims those pixels first, and the box would lose its top border and
+/// both rounded caps.
+const MONTH_EMPTY_CARD_H: usize = 324;
+const MONTH_EMPTY_CARD_Y0: usize = MONTH_LIST_Y0;
+const MONTH_EMPTY_CARD_Y1: usize = MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_CARD_H;
+
+/// The rows from the empty card's top to the tear-sheet mark's centre, to the
+/// headline's box and to the detail line's box.
+///
+/// WHY measured from the card and not from the surface: they are the card's own
+/// composition, so a card that moves has to move what it holds with it.
+const MONTH_EMPTY_MARK_DY: usize = 90;
+const MONTH_EMPTY_HEADLINE_DY: usize = 160;
+const MONTH_EMPTY_DETAIL_DY: usize = 214;
+
+const _: () = assert!(MONTH_EMPTY_CARD_Y1 <= MONTH_LIST_Y1);
+const _: () = assert!(
+    MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_DETAIL_DY + std::design::font::line_height(1)
+        <= ACTION_BTN_Y0
+);
+const _: () = assert!(ACTION_BTN_Y1 <= MONTH_EMPTY_CARD_Y1);
 
 // Segmented Navigation Tabs (y: 100..152) - comfortable >= 48px touch targets
 const TAB_SCALE: usize = type_scale::BODY;
@@ -1148,9 +1238,10 @@ const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 /// badge are both 48 tall and start at HEADER_TOP, so the row has to end below
 /// 104 or the surface under it is painted over their last rows.
 const HEADER_H: usize = 112;
-/// WHY nine rows into the control band: the title's line box is a little
-/// shorter than the 48 the controls stand in, and starting it at the band's own
-/// top would hang its descent below the row.
+/// WHY nine rows into the control band: the title's line box is forty-eight rows
+/// at this rung, so from here the box reaches the row `HEADER_H` names and its
+/// last descent row falls to the surface under the header. The same start with
+/// the box's former 44 rows left three rows clear.
 const TITLE_Y0: usize = HEADER_TOP + 9;
 
 pub fn status_band() -> (usize, usize) {
@@ -1180,7 +1271,7 @@ fn get_calendar_pixel(
     // 1. Header row: back control, title and month badge (y: 48..112)
     if y < HEADER_H {
         // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
             return c;
         }
 
@@ -1437,8 +1528,8 @@ fn month_view_pixel(
         return THEME.surface;
     }
 
-    // Section Divider & Header (y: 516..544)
-    if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + SECTION_BAND_H {
+    // Section Divider & Header (SECTION_BAND_Y0..SECTION_BAND_Y1)
+    if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y1 {
         // The hairline that opens this band.
         //
         // WHY it keeps to the band's first two rows and stops at the badge: it
@@ -1446,16 +1537,18 @@ fn month_view_pixel(
         // pill's own border is drawn at offsets 0..1 -- so the rule thickened
         // that pill to a four-row top, filled the two columns beside each
         // rounded cap that the pill had already decided were surface, and
-        // stepped one row into the header's line box, which starts at offset 3.
+        // stepped one row into the header's line box, which the caption's box
+        // of 22 rows then placed at offset 3.
         if y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + 2 && x >= 24 && x < BADGE_X0 {
             return THEME.border;
         }
 
         let mut title_buf = [0u8; 16];
         let section_title = app.agenda_title_into(&mut title_buf);
-        // WHY the header is caption scale: the band is 28 px tall and a
-        // body-scale run reserves 32 px, so a larger run could only ever be
-        // clipped by the band it is drawn in.
+        // WHY the header is caption scale: the band is the caption's own box
+        // plus the air named beside it, and a body-scale run reserves a taller
+        // box than that, so a larger run could only ever be clipped by the band
+        // it is drawn in.
         if y >= SECTION_BAND_Y0 + SECTION_TEXT_Y
             && y < SECTION_BAND_Y0 + SECTION_TEXT_Y + std::design::font::line_height(1)
         {
@@ -1475,10 +1568,10 @@ fn month_view_pixel(
         }
 
         // Event Count Pill
-        if x >= BADGE_X0 && x < BADGE_X0 + BADGE_W && y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y0 + SECTION_BAND_H {
+        if x >= BADGE_X0 && x < BADGE_X0 + BADGE_W && y >= SECTION_BAND_Y0 && y < SECTION_BAND_Y1 {
             let mut on_badge_border = false;
             let rx = (x - BADGE_X0).min(BADGE_X0 + BADGE_W - 1 - x);
-            let ry = (y - SECTION_BAND_Y0).min(SECTION_BAND_Y0 + SECTION_BAND_H - 1 - y);
+            let ry = (y - SECTION_BAND_Y0).min(SECTION_BAND_Y1 - 1 - y);
             if rx < BADGE_R && ry < BADGE_R {
                 let cdx = (BADGE_R - rx) as isize;
                 let cdy = (BADGE_R - ry) as isize;
@@ -1521,8 +1614,8 @@ fn month_view_pixel(
         return THEME.surface;
     }
 
-    // Agenda List / Empty State Container (y: 546..1360)
-    if y >= 546 && y < 1360 {
+    // Agenda List / Empty State Container (MONTH_LIST_Y0..MONTH_LIST_Y1)
+    if y >= MONTH_LIST_Y0 && y < MONTH_LIST_Y1 {
         if agenda.len == 0 {
             return empty_state_pixel(x, y, app);
         } else {
@@ -1959,10 +2052,10 @@ fn agenda_view_pixel(
 // -----------------------------------------------------------------------------
 
 fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
-    if x >= 24 && x < 696 && y >= 546 && y < 870 {
+    if x >= 24 && x < 696 && y >= MONTH_EMPTY_CARD_Y0 && y < MONTH_EMPTY_CARD_Y1 {
         let mut on_card_border = false;
         let rx = (x - 24).min(695 - x);
-        let ry = (y - 546).min(869 - y);
+        let ry = (y - MONTH_EMPTY_CARD_Y0).min(MONTH_EMPTY_CARD_Y1 - 1 - y);
         if rx < R_CARD && ry < R_CARD {
             let cdx = (R_CARD - rx) as isize;
             let cdy = (R_CARD - ry) as isize;
@@ -1977,9 +2070,10 @@ fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             on_card_border = true;
         }
 
-        // Calendar Tear-Sheet Pictogram at cx: 360, cy: 636
+        // Calendar Tear-Sheet Pictogram, on the card's own centre column and
+        // hung from the card's top rather than the surface's row.
         let cx = 360;
-        let cy = 636;
+        let cy = MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_MARK_DY;
         if (y >= cy - 44 && y < cy - 28) && ((x >= cx - 26 && x < cx - 18) || (x >= cx + 18 && x < cx + 26)) {
             return THEME.on_surface_variant;
         }
@@ -2005,13 +2099,14 @@ fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             b"No Events On This Day"
         };
         let headline_h = std::design::font::line_height(2);
-        if y >= 706 && y < 706 + headline_h {
+        let headline_y = MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_HEADLINE_DY;
+        if y >= headline_y && y < headline_y + headline_h {
             let hx = centered_x(headline, 2, 24, 672);
             if let Some(c) = test_text(
                 x,
                 y,
                 hx,
-                706,
+                headline_y,
                 2,
                 headline,
                 672,
@@ -2023,7 +2118,8 @@ fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         }
 
         let detail_h = std::design::font::line_height(1);
-        if y >= 760 && y < 760 + detail_h {
+        let detail_y = MONTH_EMPTY_CARD_Y0 + MONTH_EMPTY_DETAIL_DY;
+        if y >= detail_y && y < detail_y + detail_h {
             let mut detail = [0u8; 40];
             let detail_str: &[u8] =
                 if matches!(app.store.state, StoreState::ReadRefused | StoreState::Invalid) {
@@ -2052,7 +2148,7 @@ fn empty_state_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
                 x,
                 y,
                 dx,
-                760,
+                detail_y,
                 1,
                 detail_str,
                 672,
@@ -3271,9 +3367,10 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             // WHY it is gated on an empty list: the month view reaches this
             // button only through `empty_state_pixel`, so once one event is
             // stored the control has no pixels on the surface -- and its band,
-            // y 800..856, lands squarely on the third card (546 + 2*130 = 806),
-            // across the row that card draws its title on. A press on a visible
-            // event opened the create flow instead of showing that event.
+            // ACTION_BTN_Y0..ACTION_BTN_Y1, lands squarely on the third card,
+            // which starts at `MONTH_LIST_Y0 + 2 * MONTH_CARD_PITCH`, across the
+            // row that card draws its title on. A press on a visible event
+            // opened the create flow instead of showing that event.
             if agenda.len == 0 && x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
                 open_flow(app);
                 std::log("[CALENDAR APP] Create-event flow opened: title entry.").ok();

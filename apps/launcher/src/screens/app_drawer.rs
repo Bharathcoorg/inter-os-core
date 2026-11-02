@@ -48,20 +48,33 @@ const BADGE_SCALE: usize = type_scale::BADGE;
 /// The rows an app name reserves on the outline face at its rung.
 ///
 /// WHY the ladder and not `text::line_height`: the tile name draws with the
-/// outline face, whose BODY line box is 32 rows; `text::line_height` answers the
-/// bitmap cell's `GLYPH_H * scale` (48 here). Reserving the cell the face does
-/// not paint made the icon-plus-name group taller than its content, so every
-/// tile's name floated below the centre of the cell it was centred in.
+/// outline face, whose BODY line box `font::line_height` answers at 36 rows;
+/// `text::line_height` answers the bitmap cell's `GLYPH_H * scale` (48 here).
+/// Reserving the cell the face does not paint made the icon-plus-name group taller
+/// than its content, so every tile's name floated below the centre of the cell it
+/// was centred in.
 const TILE_LABEL_BOX_H: usize = launcher::font::line_height(LABEL_SCALE);
-const _: () = assert!(
-    TILE_LABEL_BOX_H == 32,
-    "the tile name must reserve the outline BODY line box, not the bitmap cell",
-);
 
 /// The rows the empty-state heading reserves on the outline face at its rung.
 const EMPTY_HEAD_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+
+/// WHY these two gates state a relationship and not the row count they used to pin
+/// (32 and 59): the boxes are the ladder's own, so a rung that moves must move the box
+/// with it rather than fail the build on a number that carries no meaning here. What
+/// the gates *do* keep honest is the choice the paragraphs above argue for -- that each
+/// box is the outline face's and that the outline face is still the narrower of the two
+/// at these rungs. A rung that ever came back wider than the bitmap cell would fail
+/// here, which is exactly when reserving the ladder's box would start clipping. The
+/// matching *fit* gates are in the geometry section below, beside the band they measure
+/// against.
 const _: () = assert!(
-    EMPTY_HEAD_BOX_H == 59,
+    TILE_LABEL_BOX_H == launcher::font::line_height(LABEL_SCALE)
+        && TILE_LABEL_BOX_H < text::line_height(LABEL_SCALE),
+    "the tile name must reserve the outline BODY line box, not the bitmap cell",
+);
+const _: () = assert!(
+    EMPTY_HEAD_BOX_H == launcher::font::line_height(type_scale::TITLE)
+        && EMPTY_HEAD_BOX_H < text::line_height(type_scale::TITLE),
     "the empty-state heading must reserve the outline TITLE line box, not the bitmap cell",
 );
 
@@ -97,6 +110,39 @@ const LOG_TAIL: &[u8] = b"App drawer surface rendered.";
 // Geometry
 // -----------------------------------------------------------------------------
 
+/// The tile field's own band, named so the two fit gates below measure the layout
+/// against the same rows `frame()` builds it from. Until now the height was a literal
+/// inside a `Rect::new`, so a rung that grew a text box could not be checked against
+/// it at compile time at all.
+const GRID_Y: usize = 175;
+const GRID_H: usize = 895;
+/// The top inset and the inter-run gap the empty state stacks with, read back from the
+/// rows it paints at.
+const EMPTY_HEAD_INSET: usize = 32;
+const EMPTY_BODY_GAP: usize = 20;
+/// A tile's icon disc, and the rows that separate it from the name under it.
+const TILE_ICON_D: usize = 80;
+const TILE_ICON_LABEL_GAP: usize = 10;
+/// The shortest cell the grid ever builds. `layout::grid_fixed_columns` divides the
+/// band by the rows it actually needs, so a half-empty page gets *taller* cells; five
+/// rows is the tightest case, and the one a name's rung has to fit inside.
+const TILE_CELL_H: usize = (GRID_H - (DRAWER_ROWS - 1) * TILE_GUTTER) / DRAWER_ROWS;
+
+/// Both boxes above are derived from the ladder now, so the ladder is free to move --
+/// and these are the gates that notice when it has moved past the room the drawer
+/// gives it. The empty state is the only stack of two rungs this file makes; the tile
+/// group is centred in its cell, so what has to hold is that the group fits the cell.
+const _: () = assert!(
+    EMPTY_HEAD_INSET + EMPTY_HEAD_BOX_H + EMPTY_BODY_GAP
+        + launcher::font::line_height(type_scale::BODY)
+        <= GRID_H,
+    "the empty state's heading and caption must close inside the grid band",
+);
+const _: () = assert!(
+    TILE_ICON_D + TILE_ICON_LABEL_GAP + TILE_LABEL_BOX_H <= TILE_CELL_H,
+    "a tile's icon-plus-name group must fit the shortest cell the grid can build",
+);
+
 /// The drawer's chrome, stacked down the screen from the theme's metrics.
 struct Frame {
     search: Rect,
@@ -118,9 +164,9 @@ fn frame() -> Frame {
     );
     let grid = Rect::new(
         50,
-        175,
+        GRID_Y,
         620,
-        895,
+        GRID_H,
     );
     let nav_top = SCREEN_HEIGHT - NAV_BAR_HEIGHT;
     let pill = Rect::new(
@@ -490,9 +536,10 @@ const RUN_CAP: usize = 96;
 ///
 /// WHY the box is carried as well as the origin: `test_text` walks the pen of every
 /// glyph before it can answer "no", so a pixel nowhere near a run still costs a pen
-/// walk per label. The stored box is exactly
-/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is the region
-/// `test_text` can return `Some` for.
+/// walk per label. The stored box is the run's own line box -- the height the face
+/// that draws it reserves at the rung, and the wider of the bitmap `measure` and the
+/// outline advance for its width -- which is the extent a rejection can be made
+/// against without changing a pixel.
 #[allow(dead_code)]
 struct Run {
     x: usize,
@@ -503,25 +550,31 @@ struct Run {
     ink: u32,
     /// Pixels per em for this run's outline rendering.
     ///
-    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
-    /// multiplied by `scale`, so its cap height is 17*`scale` pixels. The
-    /// outline face is rasterised at an em, and its cap height is 1456 of 2048
-    /// em, so the em that matches the same cap height is
-    /// `17 * scale * 2048 / 1456`. `outline_text::em_for_scale` is that
-    /// derivation, kept in one place so every screen that migrates a run
-    /// derives it the same way.
+    /// WHY a separate number from `scale`: the two faces are on different ladders.
+    /// The bitmap face is a 16x24 cell multiplied by `scale`, so its cap height is
+    /// 17*`scale` pixels; the outline face is rasterised at an em and inks a cap of
+    /// 1456 of 2048 em, so its cap is the rung's own -- `font::cap_for_scale(scale)`
+    /// at the em `outline_text::em_for_scale` answers for that rung. The two only
+    /// coincide when the ladder says so, and carrying the em is what lets the faces
+    /// be compared instead of guessed at. `outline_text::em_for_scale` holds that
+    /// derivation in one place so every screen that migrates a run derives it the
+    /// same way.
     #[allow(dead_code)]
     em: u32,
-    /// Top row of the box that covers BOTH renderers.
+    /// Top row of the box this run reserves, on the outline face.
     ///
-    /// WHY the box is a union: the outline run's line box is not the bitmap
-    /// cell. At the em matching a scale-2 cap the outline's ascent reaches 50
-    /// rows above the run's baseline while the bitmap's own ascender reaches 4
-    /// rows into its cell, so a box measured for the cell alone rejects rows
-    /// the outline inks and the text is silently clipped. `home.rs` hit exactly
-    /// this and the lesson is carried here.
+    /// WHY the outline's box and not a union with the cell: the rung decides which
+    /// face paints, and `pixel_on` asks the outline run `placed_styled` builds
+    /// whenever the rasteriser accepted the bytes. At the body rung that run's box is
+    /// its own 29 rows of ascent above the baseline plus 7 of descent below it -- 36
+    /// rows, `font::line_height(2)` -- from the origin, while the bitmap cell is
+    /// `GLYPH_H * 2` = 48 rows and starts its cap on `font::CAP_TOP` = 3, the fourth
+    /// row of the cell. The cell is the taller of the two from rung 2 up, so a run the outline
+    /// declines and the pen paints reaches rows this box does not name; nothing gates
+    /// on `top` or `box_h` -- each run's own face bounds itself -- so the reserve
+    /// describes the layout rather than clipping a glyph.
     top: usize,
-    /// Height of that union box.
+    /// Height of that outline box.
     box_h: usize,
     bytes: [u8; RUN_CAP],
     outline: Option<launcher::outline_text::OutlineRun>,
@@ -604,18 +657,22 @@ impl Run {
 
     /// A run from an already-resolved buffer.
     ///
-    /// WHY the width and the box are wider than the bitmap's own: the run now
-    /// has two renderers, and the box has to admit both. The bitmap's measure
-    /// and line height bound one; the outline's advance and its ascent-plus-
-    /// descent bound the other. Taking the union of each costs nothing at this
-    /// point -- it runs once per frame per run -- and is the difference between
-    /// text that renders and text that is silently clipped.
+    /// WHY the width is the wider of the two faces: the run has two renderers --
+    /// the outline run built here and the bitmap pen it falls back to -- and
+    /// `text::measure` follows the face the run is drawn with, so above rung 1 it
+    /// answers the outline and reports the cell's step only for bytes the outline has
+    /// no glyph for. Taking the max of that measure and the outline advance costs
+    /// nothing here -- it runs once per frame per run -- and keeps the box honest
+    /// whichever face is the wider.
     ///
-    /// WHY the union width is measured rather than assumed: the outline face is
-    /// condensed and is not always the narrower of the two. "System" measures
-    /// 67 bitmap advances at scale 3 (a 201px measure) and a 206px outline
-    /// advance, so the outline is the wider face on this very surface's
-    /// vocabulary and a bitmap-only box would clip it.
+    /// WHY that is measured rather than assumed: the two faces step by different
+    /// amounts for the same word. "System" is 67 bitmap cell advances -- 201px once
+    /// the cell is magnified to scale 3 -- against 104px of outline advance at the
+    /// rung's own em of 37, 105 with this surface's bold stroke, so the cell is the
+    /// wider face today; size the outline to the cell's cap, which is what this run's
+    /// em used to be, and the outline answered 206px and a cell-only box clipped it.
+    /// Which face wins is the ladder's decision, so neither one is trusted with the
+    /// width alone.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
         Self::placed_styled(x, y, scale, buf, len, ink, true)
     }
@@ -850,8 +907,8 @@ fn build(state: &LauncherState) -> Paint {
         let Some(cell) = layout::grid_cell(&grid, slot) else {
             continue;
         };
-        let icon_d = 80usize;
-        let group_h = icon_d + 10 + TILE_LABEL_BOX_H;
+        let icon_d = TILE_ICON_D;
+        let group_h = icon_d + TILE_ICON_LABEL_GAP + TILE_LABEL_BOX_H;
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
         let badge = app_badge(state, index);
@@ -883,7 +940,7 @@ fn build(state: &LauncherState) -> Paint {
             badge: badge_run,
             label: Run::centred(
                 cell.x,
-                top + icon_d + 10,
+                top + TILE_ICON_D + TILE_ICON_LABEL_GAP,
                 LABEL_SCALE,
                 cell.w + 16,
                 cell.w,
@@ -908,8 +965,8 @@ fn build(state: &LauncherState) -> Paint {
                 _ => (&b"No apps installed"[..], &b"The app catalogue is empty"[..]),
             }
         };
-        let head_y = f.grid.y + 32;
-        let body_y = head_y + EMPTY_HEAD_BOX_H + 20;
+        let head_y = f.grid.y + EMPTY_HEAD_INSET;
+        let body_y = head_y + EMPTY_HEAD_BOX_H + EMPTY_BODY_GAP;
         Some(EmptyPlan {
             head: Run::whole(f.grid.x, head_y, type_scale::TITLE, head_bytes, theme.on_surface),
             body: [

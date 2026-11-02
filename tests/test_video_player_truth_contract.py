@@ -193,8 +193,13 @@ def test_typography_and_touch_affordances():
 
     # Touch targets >= 48px. The three header controls stand on the platform's
     # content boundary, so the contract names the constant the row comes from
-    # rather than the row it happened to have.
-    assert "CLOSE_BTN: Rect = Rect::new(24, HEADER_TOP, 52, 52)" in main
+    # rather than the row it happened to have. The back control is the platform
+    # chip itself -- `std::design::back_button`, 48x48 at (24, HEADER_TOP) --
+    # drawn and hit-tested through its functions, so the contract binds the
+    # adoption rather than a private rectangle that can drift from it.
+    assert "back_button::pixel_for_theme" in main
+    assert "back_button::contains(" in main
+    assert "CLOSE_BTN" not in main
     assert "ORIENT_BTN: Rect = Rect::new(568, HEADER_TOP, 52, 52)" in main
     assert "KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52)" in main
     assert "const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;" in main
@@ -252,12 +257,54 @@ def test_what_is_painted_is_what_answers_the_press():
 
     # The landscape HUD stands below the status band, and one rect serves both
     # the painter and the press.
-    assert "const LAND_BAR: Rect = Rect::new(24, HEADER_TOP, 672, 80);" in main
+    #
+    # WHY the bar's height is no longer pinned as a remembered number: the bar is
+    # the scrim that holds the two runs painted inside it -- the body rung's line
+    # box and the caption's -- so its height is that pair plus the air the bar
+    # keeps above and below. The 80 this gate used to grep was a copy of that sum
+    # for the rungs the ladder no longer draws, so it went stale the moment the
+    # rungs moved while the layout stayed correct. What is pinned here is the
+    # derivation, which moves with the ladder and cannot be silently retuned.
+    flat = " ".join(main.split())
+    assert (
+        "const LAND_BAR: Rect = Rect::new( 24, HEADER_TOP, 672, "
+        "LAND_BAR_AIR + font::line_height(2) + font::line_height(1) + LAND_BAR_AIR, );"
+    ) in flat, (
+        "the landscape bar is no longer the two rungs it holds plus its air; its "
+        "height is a remembered number again"
+    )
+    assert "const LAND_BAR_AIR: usize =" in flat, (
+        "the bar's air has to be one named constant, or the height and the runs "
+        "inside it are authored from two numbers that can drift apart"
+    )
+    # The two runs stand on that same air and on each other's line boxes, and the
+    # bar's foot is gated against the lower of them, so neither run's tail is
+    # answered by the video the scrim stops asking for.
+    assert "const LAND_TITLE_Y: usize = LAND_BAR.y + LAND_BAR_AIR;" in flat
+    assert "const LAND_BADGE_Y: usize = LAND_TITLE_Y + font::line_height(2);" in flat
+    assert (
+        "const _: () = assert!(LAND_BADGE_Y + font::line_height(1) "
+        "<= LAND_BAR.y + LAND_BAR.h);"
+    ) in flat, "the bar no longer holds the caption run it paints"
+    assert (
+        "const _: () = assert!(LAND_BACK_BTN.y + LAND_BACK_BTN.h <= LAND_BAR.y + LAND_BAR.h);"
+    ) in flat, "the landscape back control is no longer gated inside the bar"
+    # The bar grows downward into the strip it shares with the transport panel,
+    # so the panel is a named bound and both the bar and the painter read it.
+    assert "const LAND_PANEL: Rect = Rect::new" in flat
+    assert "const _: () = assert!(LAND_BAR.y + LAND_BAR.h <= LAND_PANEL.y);" in flat, (
+        "the landscape bar is no longer gated against the lower scrim it can grow into"
+    )
+    assert "let bot_panel = LAND_PANEL;" in painter
     assert "assert!(LAND_BAR.y >= std::design::viewport::STATUS_BAR_HEIGHT);" in main
     assert "let top_bar = LAND_BAR;" in painter
     assert "let back_hit = LAND_BACK_BTN;" in painter
     assert "if LAND_BACK_BTN.contains(x, y)" in touch
-    for orphan in ("Rect::new(24, 24, 672, 80)", "Rect::new(36, 36, 52, 52)"):
+    for orphan in (
+        "Rect::new(24, 24, 672, 80)",
+        "Rect::new(36, 36, 52, 52)",
+        "Rect::new( 24, HEADER_TOP, 672, 80,",
+    ):
         assert orphan not in main, f"the landscape HUD is authored from a literal again: {orphan}"
     assert "draw_text_bold(x, y, 104, 38, 2," not in painter
     assert "draw_text(x, y, 104, 70, 1," not in painter

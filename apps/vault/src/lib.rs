@@ -532,15 +532,27 @@ mod tests {
 
     #[test]
     fn the_typography_scale_2_body_meets_line_height() {
+        use interos_std::design::typography;
         use interos_std::font;
-        let cap = font::cap_for_scale(2);
-        assert!(
-            (15..=18).contains(&cap),
-            "Scale 2 Body cap height {} must stay inside the documented 15..=18 band",
-            cap
+        // The rung this app draws its body at is the platform's Body rung, so
+        // a change to the ladder moves this screen with every other one
+        // instead of leaving it behind.
+        assert_eq!(
+            font::cap_for_scale(2),
+            typography::BODY_CAP_PX,
+            "rung 2 must draw the Body cap the platform names"
         );
-        let line = font::line_height(2);
-        assert!(line >= 24, "Scale 2 line height should reserve at least 24px");
+        assert_eq!(
+            font::line_height(2),
+            typography::BODY_LINE_PX,
+            "rung 2 must reserve the Body line box the platform names"
+        );
+        // A line box only separates rows if it is taller than the caps it
+        // carries, which is the whole point of raising the ladder.
+        assert!(
+            font::line_height(2) > font::cap_for_scale(2) as usize,
+            "the Body line box has no air above and below its caps"
+        );
     }
 
     #[test]

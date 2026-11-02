@@ -234,6 +234,24 @@ const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + 
 const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;
 
 const HEADER_H: usize = 144;
+/// Where the header's two runs start, clear of the back control's box.
+///
+/// WHY derived from the control and not typed: the column is the control's right
+/// edge plus one grid step, and the inspection bar one screen deeper already puts
+/// its title there. A literal here is a second answer to "where does the header
+/// text begin", and the two drift the moment the control moves.
+const HEADER_TEXT_X: usize =
+    std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
+/// WHY checked at compile time: the header branch answers every pixel below
+/// `HEADER_H`, so a control whose box reached past it would lose its own bottom
+/// rows to the row underneath -- the chip is 48 tall and stands at
+/// `HEADER_TOP`, one band below the status band, which is what keeps it whole.
+const _: () =
+    assert!(std::design::back_button::Y + std::design::back_button::SIZE <= HEADER_H);
+/// WHY also checked: `gallery_pixel` answers the band before any header code is
+/// reached, so a chip whose box crept above it would be painted over by a
+/// surface that was never asked about it.
+const _: () = assert!(std::design::back_button::Y >= STATUS_BAR_HEIGHT);
 /// Where the title's line box starts. WHY centred in the 48 the pills stand in:
 /// the box at this rung is shorter than the control, and a title authored at the
 /// control's own top reads high against a round button beside it.
@@ -328,12 +346,31 @@ const CAPTION_H: usize = 46;
 /// vertically centred by reserving `font::line_height(1)` in the strip, and that
 /// line box is the platform's own ascent plus descent. If the caption rung's
 /// metrics ever grew, the ink would be pushed into the card's bottom corner arc
-/// with no call site changing. At the current rung the line box is 22px in a
-/// 46px strip, so the ink clears the bottom edge by 12px against an 8px corner,
+/// with no call site changing. At the current rung the line box is 27px in a
+/// 46px strip, so nine rows stand above the run and ten below it -- the ink
+/// clears the bottom edge by 10px against an 8px corner,
 /// and `storage_cell_pixel`'s run is ellipsized to `CELL - 16` and drawn 8px in,
 /// so its right edge stays at least 8px inside the card.
 const CAPTION_INSET: usize = (CAPTION_H - font::line_height(1)) / 2;
 const _: () = assert!(CAPTION_INSET >= radius::SMALL);
+
+/// The border row a thumbnail badge plate carries on each side of its run.
+const BADGE_BORDER: usize = 1;
+/// The plate every caption-rung badge shares: the run's line box and the two
+/// border rows around it.
+///
+/// WHY derived from the ladder and not remembered: the plate was a hand-written
+/// 24 rows from before the caption rung grew, and that rung's box reserves 27
+/// now, so the run's last rows fell on the plate's own bottom border and the
+/// badge read as clipped type.
+const BADGE_PLATE_H: usize = font::line_height(1) + 2 * BADGE_BORDER;
+/// Where a badge's run starts inside its plate, below the top border row.
+const BADGE_TEXT_INSET: usize = BADGE_BORDER;
+/// WHY checked at compile time: the plate is only legal while its run's box ends
+/// a border row above the plate's bottom edge -- raise the caption rung, or move
+/// the inset, and this gate fails instead of the badge losing its descenders
+/// again with no call site changed.
+const _: () = assert!(BADGE_TEXT_INSET + font::line_height(1) + BADGE_BORDER <= BADGE_PLATE_H);
 
 /// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
 ///
@@ -368,9 +405,9 @@ const DETAIL_BAR_RULE_H: usize = 1;
 ///
 /// WHY derived rather than typed: this branch answers every pixel below the
 /// bottom, so a bar shorter than its content does not clip -- it paints the
-/// surplus straight over the preview underneath. The old literal 120 was already
-/// two rows short of the meta line's box before the type ladder moved, and 30
-/// rows short of it after.
+/// surplus straight over the preview underneath. The old literal 120 was short
+/// of the meta line's box before the type ladder moved, and 18 rows short of it
+/// now: the box ends at `DETAIL_META_Y + font::line_height(2)`, which is 138.
 const DETAIL_BAR_H: usize =
     DETAIL_META_Y + font::line_height(2) + DETAIL_BAR_PAD_BOTTOM + DETAIL_BAR_RULE_H;
 const _: () = assert!(
@@ -396,7 +433,6 @@ const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 // they belong to is the header's, so authored at 32 or 34 their top quarter fell
 // inside the band that answers the pixel function first.
 const CAPTURE_BTN: Rect = Rect::new(540, HEADER_TOP, 144, 48);
-const HEADER_BACK: Rect = Rect::new(MARGIN, HEADER_TOP, 48, 48);
 const PLAY_PAUSE_BTN: Rect = Rect::new(W / 2 - 28, DETAIL_VIEW_Y1 + 16, 56, 56);
 const SCRUB_BAR: Rect = Rect::new(MARGIN, DETAIL_VIEW_Y1 + 84, W - 2 * MARGIN, 20);
 /// The scrub track's touch region.
@@ -2556,13 +2592,14 @@ fn storage_cell_pixel(x: usize, y: usize, app: &GalleryApp, idx: usize, col: usi
             let bw = font::measure(badge, 1) + 8;
             let bx0 = x0 + 6;
             let by0 = y0 + 6;
-            // WHY 24 and not 16: the badge label is a caption run (22 px), and
-            // a 16 px plate clipped the bottom rows of every letter.
-            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 24 {
-                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 23 {
+            // WHY the plate is the ladder's and not a row count: the badge is a
+            // caption run, and a plate shorter than that run's line box cuts the
+            // last rows of every letter onto its own bottom border.
+            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + BADGE_PLATE_H {
+                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + BADGE_PLATE_H - 1 {
                     return 0x88FFFFFF;
                 }
-                if let Some(tc) = text(x, y, bx0 + 4, by0 + 1, 1, badge, 0xFFFFFFFF, 0xCC111214) {
+                if let Some(tc) = text(x, y, bx0 + 4, by0 + BADGE_TEXT_INSET, 1, badge, 0xFFFFFFFF, 0xCC111214) {
                     return tc;
                 }
                 return 0xCC111214;
@@ -3014,11 +3051,11 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
             let bw = font::measure(codec_badge, 1) + 8;
             let bx0 = x0 + 6;
             let by0 = y0 + 6;
-            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + 24 {
-                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + 23 {
+            if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + BADGE_PLATE_H {
+                if x == bx0 || x == bx0 + bw - 1 || y == by0 || y == by0 + BADGE_PLATE_H - 1 {
                     return 0x88FFFFFF;
                 }
-                if let Some(tc) = text(x, y, bx0 + 4, by0 + 1, 1, codec_badge, 0xFFFFFFFF, 0xCC111214) {
+                if let Some(tc) = text(x, y, bx0 + 4, by0 + BADGE_TEXT_INSET, 1, codec_badge, 0xFFFFFFFF, 0xCC111214) {
                     return tc;
                 }
             }
@@ -3039,7 +3076,18 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
         // file. The gallery cannot know a video's duration without parsing
         // its container, but the file's size is a real measurement from the
         // directory listing.
-        let badge_rect = Rect::new(x0 + VIDEO_COL_W - 92, y0 + thumb_h - 30, 80, 22);
+        //
+        // WHY the plate is the ladder's, anchored on its bottom edge: 22 rows
+        // could not hold a 27-row caption box, so `saturating_sub` pinned the run
+        // to the rect's top and its last five rows fell outside the rect that
+        // answers them. Growing upward keeps the 8 rows of air the plate had
+        // above it over the rule at `y0 + thumb_h`.
+        let badge_rect = Rect::new(
+            x0 + VIDEO_COL_W - 92,
+            y0 + thumb_h - BADGE_PLATE_H - 8,
+            80,
+            BADGE_PLATE_H,
+        );
         if badge_rect.contains(x, y) {
             // WHY the badge's own scrim and not a platform role: the badge
             // sits on a *photo*, and a scrim over a picture has to be the
@@ -3855,7 +3903,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         if y == DETAIL_BAR_H - 1 {
             return THEME.border;
         }
-        if let Some(c) = std::design::back_button::pixel(x, y, THEME.on_surface, THEME.border, THEME.surface_container_high) {
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
             return c;
         }
 
@@ -4556,22 +4604,13 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return detail_pixel(x, y, app, media);
     }
 
-    // 1. Header: screen title + the measured subtitle + capture button
+    // 1. Header: back control + screen title + the measured subtitle + capture button
     if y < HEADER_H {
-        if app.launched_from_caller {
-            if let Some(bc) = draw_pill(x, y, HEADER_BACK, THEME.surface_container_high, Some(THEME.border)) {
-                if bc != THEME.surface_container_high {
-                    return bc;
-                }
-                let lbl = b"<";
-                let lw = outline_text::drawn_advance(lbl, 2, None).unwrap_or_else(|| font::measure(lbl, 2));
-                let lx = HEADER_BACK.x + (HEADER_BACK.w.saturating_sub(lw)) / 2;
-                let ly = HEADER_BACK.y + (HEADER_BACK.h.saturating_sub(font::line_height(2))) / 2;
-                if let Some(tc) = text(x, y, lx, ly, 2, lbl, THEME.on_surface, THEME.surface_container_high) {
-                    return tc;
-                }
-                return THEME.surface_container_high;
-            }
+        // WHY the platform's chip and not this header's own pill: the pill was
+        // drawn only for a caller-launched gallery, so the screen most people
+        // reach -- opened from the launcher -- painted no way back at all.
+        if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
+            return c;
         }
         if let Some(c) = draw_pill(x, y, CAPTURE_BTN, THEME.surface_container_high, Some(THEME.border)) {
             if c != THEME.surface_container_high {
@@ -4586,7 +4625,6 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
             }
             return THEME.surface_container_high;
         }
-        let title_x = if app.launched_from_caller { MARGIN + 56 } else { MARGIN };
         // WHY the title is the tab's own word: the bar used to say "Photos"
         // whatever was underneath it, so the Videos, Albums and Screenshots
         // destinations each opened under a header naming a different screen --
@@ -4595,7 +4633,7 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         if let Some(c) = text_bold(
             x,
             y,
-            title_x,
+            HEADER_TEXT_X,
             TITLE_Y,
             2,
             TAB_LABELS[app.tab as usize],
@@ -4609,18 +4647,27 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         // under the title they read as diagnostics rather than as a gallery's
         // description of what it holds. `build_subtitle` states both in one
         // sentence, with the device's own photo count named as such.
-        let sub_x = if app.launched_from_caller { MARGIN + 56 } else { MARGIN };
-        if let Some(c) = text(
-            x,
-            y,
-            sub_x,
-            SUBTITLE_Y,
-            2,
-            &app.subtitle[..app.subtitle_len],
-            THEME.on_surface_variant,
-            THEME.surface,
-        ) {
-            return c;
+        // WHY the run is measured against the capture pill's left edge: standing
+        // this column behind the back control moved its start 64px right, and at
+        // rung 2 the longest honest subtitle ("N wallpapers - M photos on this
+        // device") reached past the pill, where the branch above it answers the
+        // pixel first and cuts the tail mid-glyph.
+        if y >= SUBTITLE_Y && y < SUBTITLE_Y + font::line_height(2) {
+            let sub_w = CAPTURE_BTN.x.saturating_sub(HEADER_TEXT_X + spacing::GRID_8);
+            let mut sub_buf = [0u8; 96];
+            let sub_n = font::ellipsize(&app.subtitle[..app.subtitle_len], 2, sub_w, &mut sub_buf);
+            if let Some(c) = text(
+                x,
+                y,
+                HEADER_TEXT_X,
+                SUBTITLE_Y,
+                2,
+                &sub_buf[..sub_n],
+                THEME.on_surface_variant,
+                THEME.surface,
+            ) {
+                return c;
+            }
         }
         return THEME.surface;
     }
@@ -5098,8 +5145,14 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
         return Tap::Redraw(Dirty::All);
     }
 
-    if app.launched_from_caller && app.open.is_none() && HEADER_BACK.contains(x, y) {
-        return Tap::Leave("[GALLERY] Returning to caller.");
+    // The root header's back control, tested ahead of the chips, the tab row and
+    // the grid: it is painted at the top of the screen, and a control is only
+    // honest if a tap where it is drawn is taken by it and by nothing else.
+    if app.open.is_none() && std::design::back_button::contains(x, y) {
+        if app.launched_from_caller {
+            return Tap::Leave("[GALLERY] Returning to caller.");
+        }
+        return Tap::Leave("[GALLERY] Back control pressed at root. Exiting to launcher.");
     }
 
     // Bottom home gesture: closes the inspection view, else leaves the app.

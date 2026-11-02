@@ -21,6 +21,7 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+use std::design::back_button;
 use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_rounded_rect, Rect};
@@ -29,7 +30,7 @@ use video_player::avi::{self, AviChunk, AviError, AviInfo, AviStream};
 use video_player::theme::{
     COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
     COLOR_PROGRESS_ACTIVE, COLOR_PROGRESS_BG, COLOR_SHEET_CARD, COLOR_SURFACE,
-    COLOR_SURFACE_SUNKEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
+    COLOR_SURFACE_SUNKEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY, THEME,
 };
 use video_player::{
     blend_argb, format_file_size, format_resolution, format_time, map_canvas_to_source,
@@ -46,9 +47,13 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-// Band 0: Top Bar (Close, Title, Orientation, Library / Kebab)
+// Band 0: Top Bar (Back, Title, Orientation, Library / Kebab)
 const BAND0_Y0: usize = 0;
-const BAND0_Y1: usize = 120;
+/// The band's bottom: the header's rule, plus the air the gate below asks for.
+/// WHY derived and not a remembered 120: the band's two runs come from the type
+/// ladder, and when the ladder's rungs grew the pair ended past the boundary --
+/// the rule was then authored in band 1, whose repaint never draws it.
+const BAND0_Y1: usize = HEADER_RULE_Y + 4;
 
 /// The first row this app's own chrome may author from.
 ///
@@ -85,7 +90,7 @@ const _: () = assert!(HEADER_LINE_Y + font::line_height(1) < HEADER_RULE_Y);
 const _: () = assert!(HEADER_RULE_Y + 4 <= BAND0_Y1);
 
 // Band 1: Centered 16:9 Video Canvas (680x382)
-const BAND1_Y0: usize = 120;
+const BAND1_Y0: usize = BAND0_Y1;
 const BAND1_Y1: usize = 560;
 
 // Band 2: Scrubber Seek Bar (Elapsed, Seek Bar, Remaining)
@@ -112,13 +117,34 @@ const _BAND6_Y1: usize = 1440;
 // Control Rectangles (All Touch Targets >= 48px)
 // -----------------------------------------------------------------------------
 
-/// WHY every control here stands on `HEADER_TOP`: the painter and the press test
-/// the same rectangle, so the row these three carry is the row the tap lands on,
-/// and the rule under the header is the foot they must stop above.
-const CLOSE_BTN: Rect = Rect::new(24, HEADER_TOP, 52, 52);
+// WHY every control here stands on `HEADER_TOP`: the painter and the press test
+// the same rectangle, so the row these carry is the row the tap lands on, and
+// the rule under the header is the foot they must stop above.
+//
+// The top-left control is deliberately NOT authored here. It is the platform's
+// Back chip, and `back_button` owns that rect outright: `X` 24, `Y` = the same
+// `HEADER_TOP` = 56, `SIZE` 48 with `RADIUS` 12, and a left-pointing chevron
+// rather than a cross. What this screen drew here before was a 52x52 square of
+// page colour with a bare ✕ in it: a sweep of that rect on the running guest
+// found 93 pixels that were not the page, where every other app's chip footprint
+// is 2120 -- the control a person has learned to look for was absent, and the
+// mark that was there said "discard", not "back".
 const ORIENT_BTN: Rect = Rect::new(568, HEADER_TOP, 52, 52);
 const KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52);
-const _: () = assert!(CLOSE_BTN.y + CLOSE_BTN.h < HEADER_RULE_Y);
+// WHY the chip is gated against the rule and not against the band: the painter
+// answers all of band 0 (rows 0..120), so the hairline under the title is the
+// last thing the chip can genuinely collide with. Its foot lands at row 104,
+// where the square it replaced reached 108.
+const _: () = assert!(back_button::Y + back_button::SIZE < HEADER_RULE_Y);
+
+/// The air the landscape HUD's top bar keeps around its two runs.
+///
+/// WHY one constant serves both edges: the bar is the title's line box, the
+/// badge's line box under it, and this much free row above and below -- so the
+/// number that separates the ink from the scrim is authored once and the bar's
+/// height is read off the same pair. Written twice it drifts, and the drift is
+/// the bar clipping the badge while the top edge stays roomy.
+const LAND_BAR_AIR: usize = 12;
 
 /// The landscape HUD's top bar, and the controls that stand inside it.
 ///
@@ -128,14 +154,73 @@ const _: () = assert!(CLOSE_BTN.y + CLOSE_BTN.h < HEADER_RULE_Y);
 /// control at y=36, which left the first twelve rows of that control under the
 /// status bar -- ink the user could not see, on a band the press still answered.
 /// Both orientations now stand on the one header row.
-const LAND_BAR: Rect = Rect::new(24, HEADER_TOP, 672, 80);
-const LAND_BACK_BTN: Rect = Rect::new(36, LAND_BAR.y + (LAND_BAR.h - 52) / 2, 52, 52);
+///
+/// WHY the height is derived from the ladder rather than remembered: the bar is
+/// the scrim the two runs are painted inside, and a run whose box reaches the
+/// bar's foot is a run whose tail is answered by the video underneath -- the
+/// scrim stops asking for those pixels, so the tail is drawn over a frame the
+/// painter already returned. The pair's boxes come from the type ladder, so the
+/// wall that has to hold them is the ladder's sum plus the air on either side.
+const LAND_BAR: Rect = Rect::new(
+    24,
+    HEADER_TOP,
+    672,
+    LAND_BAR_AIR + font::line_height(2) + font::line_height(1) + LAND_BAR_AIR,
+);
+/// The landscape HUD's lower scrim: the transport, scrubber and volume panel the
+/// same `hud_visible` branch paints.
+///
+/// WHY it is named here instead of built where the painter uses it: the bar's
+/// foot grows downward into the strip between the two scrims, and that strip is
+/// the one place the taller bar can still collide with something it does not
+/// own. A gate needs both bounds to exist in a const context, and the panel's
+/// top row only existed inside the per-pixel branch.
+const LAND_PANEL: Rect = Rect::new(24, 1100, 672, 280);
+// WHY the bar is gated against the chip before the chip is centred in it: the
+// centre is found by halving the difference between the bar's rows and the
+// plate's, and that difference is a `usize` -- a bar the ladder ever made
+// shorter than the chip would panic the const evaluator on the subtraction
+// rather than name the bound that broke.
+const _: () = assert!(LAND_BAR.h >= back_button::SIZE);
+/// The landscape HUD's own back control: the platform chip's 48x48 plate, stood
+/// 12 columns inside the scrim's left edge and centred in the bar's rows.
+///
+/// WHY the position is the app's and the size is the platform's: the chip's home
+/// rect starts at `back_button::X` = 24 and `back_button::Y` = 56, which are
+/// exactly the scrim's own left edge and top row, so a landscape copy of it
+/// would sit flush on the bar with no inset on either side. The bar is the
+/// layout owner here. What the bar may not own is the shape:
+/// `back_button::pixel` draws the plate, the 1px ring and the chevron, and it is
+/// handed this rect's point translated into the chip's own coordinate space.
+///
+/// WHY the square went from 52 to 48: the plate is 48 across, so the old rect's
+/// outer two columns and rows on every side were tappable area the user could
+/// not see -- the same mismatch the portrait control had, in miniature.
+const LAND_BACK_BTN: Rect = Rect::new(36, LAND_BAR.y + (LAND_BAR.h - back_button::SIZE) / 2, back_button::SIZE, back_button::SIZE);
 /// The title run, and the badge run one line box below it.
-const LAND_TITLE_Y: usize = LAND_BAR.y + 12;
+///
+/// WHY the badge stands on the title's own box: the two runs are one column of
+/// text, and the row the second one starts on is where the first one's descent
+/// ends. A gap between them is a gap the bar then has to hold twice.
+const LAND_TITLE_Y: usize = LAND_BAR.y + LAND_BAR_AIR;
 const LAND_BADGE_Y: usize = LAND_TITLE_Y + font::line_height(2);
 const _: () = assert!(LAND_BAR.y >= std::design::viewport::STATUS_BAR_HEIGHT);
 const _: () = assert!(LAND_BACK_BTN.y + LAND_BACK_BTN.h <= LAND_BAR.y + LAND_BAR.h);
 const _: () = assert!(LAND_BADGE_Y + font::line_height(1) <= LAND_BAR.y + LAND_BAR.h);
+// WHY the bar's foot is gated against the lower scrim and not against the
+// surface: the bar is a translucent plate over live video, so growing it costs
+// nothing it does not already own -- until it reaches the transport panel, whose
+// rows that branch blends from the frame on its own terms. Two scrims that meet
+// read as one panel, and the strip the user reads as the picture is gone.
+const _: () = assert!(LAND_BAR.y + LAND_BAR.h <= LAND_PANEL.y);
+// WHY this is pinned: the HUD painter moves a point by the difference between
+// this rect's origin and `back_button`'s own, and that shift is only a faithful
+// copy of the chip while the two rects are the same size. Were this rect larger,
+// its extra rows would land outside the plate and show scrim where the user read
+// a button.
+const _: () = assert!(
+    LAND_BACK_BTN.w == back_button::SIZE && LAND_BACK_BTN.h == back_button::SIZE
+);
 
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
@@ -1367,15 +1452,28 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if top_bar.contains(x, y) {
                 let bg_hud = blend_argb(video_pixel, COLOR_SURFACE_SUNKEN, 210);
 
-                // Back / Orientation Toggle Button (✕ / ⛶)
+                // The back control: the platform chip, pressed here returns the
+                // player to Portrait.
+                //
+                // WHY the subtraction: `back_button::pixel` only answers inside
+                // its own rect, and this copy stands at `LAND_BACK_BTN`'s origin.
+                // Shifting the point by the difference of the two origins hands
+                // the SDK the very pixel it was drawn for, and `LAND_BACK_BTN` is
+                // the chip's own 48x48, so the shift is exact rather than an
+                // approximation. The plate is then the same shape, ring and
+                // chevron as the one portrait puts in the corner.
+                //
+                // WHY the scrim still shows: the SDK returns None on the four
+                // corner cut-outs of the rounded rect, and this falls through to
+                // `bg_hud` there, which is what a rounded plate over a live frame
+                // should look like.
                 let back_hit = LAND_BACK_BTN;
                 if back_hit.contains(x, y) {
-                    let cx = back_hit.x + back_hit.w / 2;
-                    let cy = back_hit.y + back_hit.h / 2;
-                    let dx = (x as i32) - (cx as i32);
-                    let dy = (y as i32) - (cy as i32);
-                    if dx.abs() <= 8 && dy.abs() <= 8 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                        return COLOR_TEXT_PRIMARY;
+                    let (ink, ring, fill) = back_button::colors_for_theme(&THEME);
+                    let lx = x - back_hit.x + back_button::X;
+                    let ly = y - back_hit.y + back_button::Y;
+                    if let Some(c) = back_button::pixel(lx, ly, ink, ring, fill) {
+                        return c;
                     }
                     return bg_hud;
                 }
@@ -1406,8 +1504,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 return bg_hud;
             }
 
-            // Bottom Translucent Controls Panel (y: 1100..1380, x: 24..696)
-            let bot_panel = Rect::new(24, 1100, 672, 280);
+            // Bottom Translucent Controls Panel -- `LAND_PANEL`, the bound the
+            // top bar's foot is gated against above.
+            let bot_panel = LAND_PANEL;
             if bot_panel.contains(x, y) {
                 let bg_hud = blend_argb(video_pixel, COLOR_SURFACE_SUNKEN, 220);
 
@@ -1522,16 +1621,14 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     if app.library_open || (app.pip_mode && !PIP_RECT.contains(x, y)) {
         // Drawer Top Bar (y: 0..LIB_LIST_Y0)
         if y < LIB_LIST_Y0 {
-            // Close / Back button (✕)
-            if CLOSE_BTN.contains(x, y) {
-                let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
-                let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
-                let dx = (x as i32) - (cx as i32);
-                let dy = (y as i32) - (cy as i32);
-                if dx.abs() <= 8 && dy.abs() <= 8 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                    return COLOR_TEXT_PRIMARY;
-                }
-                return COLOR_BG;
+            // The back control, asked first because it is the one occupant of
+            // this row the app does not own: its rect, radius, ring and chevron
+            // all come from `back_button`, and pressing it closes the drawer --
+            // or leaves picture-in-picture -- exactly as the ✕ it replaced did.
+            // The drawer's title starts at column 96, 24 clear of the chip's
+            // right edge at 72, so the two never share a pixel.
+            if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
+                return c;
             }
 
             // Header Title: Scale 2 Body Bold
@@ -1743,19 +1840,18 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // =========================================================================
 
     // -------------------------------------------------------------------------
-    // Band 0: Top Bar (Close, Title, Orientation, Kebab)
+    // Band 0: Top Bar (Back, Title, Orientation, Kebab)
     // -------------------------------------------------------------------------
     if y < BAND0_Y1 {
-        // Close Button (✕)
-        if CLOSE_BTN.contains(x, y) {
-            let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
-            let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
-            let dx = (x as i32) - (cx as i32);
-            let dy = (y as i32) - (cy as i32);
-            if dx.abs() <= 8 && dy.abs() <= 8 && ((dx - dy).abs() <= 1 || (dx + dy).abs() <= 1) {
-                return COLOR_TEXT_PRIMARY;
-            }
-            return COLOR_BG;
+        // The platform Back chip -- the same plate, ring and chevron every other
+        // screen in this device puts in the top-left corner, painted by
+        // `back_button::pixel_for_theme` with this app's own `THEME` (the dark
+        // media theme in src/theme.rs: ink #F5F6F7, ring #B4B9C2, plate #2F3235
+        // on the #111214 page). It is asked before the title and before the two
+        // controls to its right because it is the one rect on this row the app
+        // does not author, and it owns columns 24..72 outright.
+        if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
+            return c;
         }
 
         // Orientation Mode Button (⛶ Fullscreen / Landscape Toggle)
@@ -2584,8 +2680,10 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
             return EventAction::Redraw(Dirty::All);
         }
 
-        // Close Library button
-        if CLOSE_BTN.contains(x, y) {
+        // The platform Back chip. It is tested through `back_button::contains`
+        // rather than an app rect so the press answers the very plate the drawer
+        // painter put there -- columns 24..72, rows 56..104, no invisible margin.
+        if back_button::contains(x, y) {
             if app.library_open {
                 app.library_open = false;
                 let _ = std::audio_haptic_click();
@@ -2634,9 +2732,12 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     // 3. PORTRAIT NORMAL MODE TOUCH DISPATCH
     // =========================================================================
 
-    // Top Bar: Close button -> Exit to launcher
-    if CLOSE_BTN.contains(x, y) {
-        return EventAction::Exit("[VIDEO PLAYER] Close pressed. Exiting.");
+    // Top Bar: the platform Back control -> Exit to launcher. Tested through
+    // `back_button::contains` for the same reason it is painted through
+    // `back_button::pixel_for_theme`: one rect, 24..72 by 56..104, is what a
+    // person sees and what the press answers.
+    if back_button::contains(x, y) {
+        return EventAction::Exit("[VIDEO PLAYER] Back pressed. Exiting.");
     }
 
     // Top Bar: Orientation Mode button -> Toggle Landscape
