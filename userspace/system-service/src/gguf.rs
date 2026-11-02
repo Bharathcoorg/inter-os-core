@@ -39,6 +39,15 @@ pub const MODEL_SOURCE_TREES: &[&str] = &["/storage/downloads", "/data/incoming"
 
 /// Maximum length for a tensor name in zero-allocation buffer.
 pub const MAX_TENSOR_NAME_LEN: usize = 64;
+/// Where a file's tensor data begins when the file does not say.
+///
+/// WHY a default exists: `general.alignment` is an optional key, and every writer
+/// that leaves it out means this number. A file that names no alignment therefore
+/// has a known layout rather than an unknown one.
+pub const DEFAULT_ALIGNMENT: u64 = 32;
+/// The widest placement the format allows, past which a declared alignment is a
+/// corrupt number rather than an unusual one.
+pub const MAX_TENSOR_ALIGNMENT: u64 = 1 << 20;
 /// Longest metadata key the configuration reader will name. A longer key is
 /// not one of the keys it recognises, so it costs nothing to step over it.
 pub const MAX_METADATA_KEY_LEN: usize = 48;
@@ -106,6 +115,10 @@ pub enum GgufError {
     ArithmeticOverflow,
     /// Tensor descriptor or block data structure corruption.
     CorruptedTensor,
+    /// `general.alignment` states a number the format cannot place data with:
+    /// zero, a width that is not a power of two, or one past
+    /// `MAX_TENSOR_ALIGNMENT`. Carries the number the file declared.
+    InvalidAlignment(u64),
     /// A parameter the engine cannot run without was not declared in the part of
     /// the metadata this reader can reach. Names the key and carries everything
     /// the file did declare, so the answer can quote the model rather than guess.
@@ -1590,6 +1603,10 @@ pub fn parse_tensor_info_stream(stream: &mut GgufStream) -> Result<GgufTensorInf
 }
 
 /// Scans a streaming GGUF source for a tensor by exact name without heap allocation.
+///
+/// The `offset` this reports is the one the file states, which the format defines
+/// relative to the start of the tensor data section -- not a position a read can
+/// be given. `locate_tensor_stream` resolves it.
 pub fn find_tensor_stream(
     stream: &mut GgufStream,
     target_name: &[u8],
@@ -1605,6 +1622,125 @@ pub fn find_tensor_stream(
     }
 
     Ok(None)
+}
+
+/// Where one tensor's bytes actually sit in a model file.
+///
+/// WHY this is not simply `GgufTensorInfo` with the offset rewritten: the offset
+/// the file states is what the file states, and a reader that has to name the
+/// section it counts from cannot silently move it. The three numbers -- what the
+/// file declared, where its data begins, and the position in between -- are what a
+/// positioned read needs and what a refusal has to quote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TensorLocation {
+    /// The descriptor exactly as the file states it.
+    pub tensor: GgufTensorInfo,
+    /// The placement the file asked for, or `DEFAULT_ALIGNMENT` if it named none.
+    pub alignment: u64,
+    /// The position every descriptor's `offset` counts from: the end of the tensor
+    /// descriptor table, rounded up to `alignment`.
+    pub data_start: u64,
+    /// `data_start + tensor.offset`, which is the argument a positioned read takes.
+    pub file_position: u64,
+}
+
+/// Rounds a position up to the next multiple of an alignment the caller has
+/// already checked is a power of two and no wider than `MAX_TENSOR_ALIGNMENT`.
+fn align_up(position: u64, alignment: u64) -> Result<u64, GgufError> {
+    let remainder = position % alignment;
+    if remainder == 0 {
+        return Ok(position);
+    }
+    position
+        .checked_add(alignment - remainder)
+        .ok_or(GgufError::ArithmeticOverflow)
+}
+
+/// Walks the metadata block for the one key that says where the data starts.
+///
+/// WHY it reads rather than skips the whole block: `general.alignment` changes
+/// where every tensor in the file is, and a walk that passed the key by without
+/// consulting it would place all of them at the default -- silently, and wrong for
+/// any file that declared otherwise.
+fn read_alignment_stream(stream: &mut GgufStream, kv_count: u64) -> Result<u64, GgufError> {
+    let mut alignment = DEFAULT_ALIGNMENT;
+    let mut declared = false;
+
+    for _ in 0..kv_count {
+        let key_len = stream.read_u64()? as usize;
+        let mut key_buf = [0u8; MAX_METADATA_KEY_LEN];
+        let matches = if key_len == 0 || key_len > MAX_METADATA_KEY_LEN {
+            stream.skip(key_len)?;
+            false
+        } else {
+            stream.read_exact(&mut key_buf[..key_len])?;
+            &key_buf[..key_len] == b"general.alignment"
+        };
+        let val_type = stream.read_u32()?;
+
+        // The first statement wins: a key named twice is a file two writers
+        // disagree about, and the second is not the one that laid out the data.
+        if matches && !declared {
+            alignment = u64::from(read_count(stream, val_type)?);
+            declared = true;
+        } else {
+            skip_metadata_value_stream(stream, val_type)?;
+        }
+    }
+
+    Ok(alignment)
+}
+
+/// Resolves a tensor's name to the file position its bytes are at.
+///
+/// WHY the source is the caller's choice: a published model file keeps its
+/// vocabulary between the metadata and the tensor table, so this walk passes it.
+/// Over a windowed source (`GgufStream::buffered_from_file`) that costs one request
+/// per window of bytes; over a bare one it costs a request per token, which on a
+/// device whose every read goes through the kernel is a dead path rather than a
+/// slow one.
+pub fn locate_tensor_stream(
+    stream: &mut GgufStream,
+    target_name: &[u8],
+) -> Result<Option<TensorLocation>, GgufError> {
+    let header = GgufHeader::parse_stream(stream)?;
+    let alignment = read_alignment_stream(stream, header.kv_count)?;
+    if !alignment.is_power_of_two() || alignment > MAX_TENSOR_ALIGNMENT {
+        return Err(GgufError::InvalidAlignment(alignment));
+    }
+
+    let mut found: Option<GgufTensorInfo> = None;
+    for _ in 0..header.tensor_count {
+        let tensor = parse_tensor_info_stream(stream)?;
+        if found.is_none() && tensor.matches_name(target_name) {
+            found = Some(tensor);
+        }
+        // WHY the table is walked to its end after a hit: the data section starts
+        // after the last descriptor, so the position of the one already found is
+        // not knowable until the table itself has been passed.
+    }
+
+    let tensor = match found {
+        Some(tensor) => tensor,
+        None => return Ok(None),
+    };
+
+    let data_start = align_up(stream.position() as u64, alignment)?;
+    let file_position = data_start
+        .checked_add(tensor.offset)
+        .ok_or(GgufError::ArithmeticOverflow)?;
+    Ok(Some(TensorLocation {
+        tensor,
+        alignment,
+        data_start,
+        file_position,
+    }))
+}
+
+/// Resolves a tensor's name to a file position out of a contiguous GGUF image.
+pub fn locate_tensor(buf: &[u8], target_name: &[u8]) -> Result<Option<TensorLocation>, GgufError> {
+    let mut stream = GgufStream::from_slice(buf);
+    locate_tensor_stream(&mut stream, target_name)
 }
 
 /// Calculates the byte size of a tensor from its GGML type and dimensions with checked arithmetic.
@@ -2355,14 +2491,40 @@ mod tests {
 
     /// Starts a metadata-only GGUF file with `kv_count` pairs to follow.
     fn begin_file(buf: &mut [u8], kv_count: u64) -> usize {
+        begin_gguf(buf, kv_count, 0)
+    }
+
+    /// Starts a GGUF file that declares `kv_count` metadata pairs and then
+    /// `tensor_count` tensor descriptors.
+    fn begin_gguf(buf: &mut [u8], kv_count: u64, tensor_count: u64) -> usize {
         let header = GgufHeader {
             magic: GGUF_MAGIC,
             version: 3,
-            tensor_count: 0,
+            tensor_count,
             kv_count,
         };
         header.write_to(buf).expect("header fits");
         GgufHeader::HEADER_SIZE
+    }
+
+    /// Writes one tensor descriptor: the name, its dimensions, its GGML type and
+    /// the offset the file states -- which the spec makes relative to the start of
+    /// the data section, not to the start of the file.
+    fn put_tensor(
+        buf: &mut [u8],
+        off: &mut usize,
+        name: &[u8],
+        dims: &[u64],
+        tensor_type: u32,
+        offset: u64,
+    ) {
+        put_key(buf, off, name);
+        put_u32_at(buf, off, dims.len() as u32);
+        for dim in dims {
+            put_u64_at(buf, off, *dim);
+        }
+        put_u32_at(buf, off, tensor_type);
+        put_u64_at(buf, off, offset);
     }
 
     #[test]
@@ -2577,15 +2739,40 @@ mod tests {
     }
 
     fn begin_vec_file(out: &mut host_std::vec::Vec<u8>, kv_count: u64) {
+        begin_vec_gguf(out, kv_count, 0)
+    }
+
+    /// Starts a Vec-held GGUF file that declares `kv_count` pairs and then
+    /// `tensor_count` descriptors -- for the shaped files too wide for a fixed
+    /// buffer to hold.
+    fn begin_vec_gguf(out: &mut host_std::vec::Vec<u8>, kv_count: u64, tensor_count: u64) {
         let header = GgufHeader {
             magic: GGUF_MAGIC,
             version: 3,
-            tensor_count: 0,
+            tensor_count,
             kv_count,
         };
         let mut buf = [0u8; GgufHeader::HEADER_SIZE];
         header.write_to(&mut buf).expect("header fits");
         out.extend_from_slice(&buf);
+    }
+
+    /// Appends one tensor descriptor to a Vec-held file.
+    fn vt_tensor(
+        out: &mut host_std::vec::Vec<u8>,
+        name: &[u8],
+        dims: &[u64],
+        tensor_type: u32,
+        offset: u64,
+    ) {
+        out.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for dim in dims {
+            out.extend_from_slice(&dim.to_le_bytes());
+        }
+        out.extend_from_slice(&tensor_type.to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
     }
 
     /// A file shaped the way a Gemma conversion leaves one: the vocabulary first,
@@ -2844,5 +3031,166 @@ mod tests {
 
         // And past the end of the source the window reports the file ran out.
         assert_eq!(stream.skip(600), Err(GgufError::BufferTooShort));
+    }
+
+    /// The position the data section starts at is not in the file as a number: it
+    /// is where the tensor descriptors stop, rounded up to `general.alignment`, and
+    /// every tensor offset counts from there. A reader that takes the offset as a
+    /// file position reads the header instead of the weights -- on the published
+    /// EmbeddingGemma file, 6,530,464 bytes instead of the tensor it named.
+    #[test]
+    fn test_locate_tensor_adds_where_the_data_section_starts() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_gguf(&mut buf, 1, 2);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        // Four dimensions with the trailing ones written out, as gguf-py emits for
+        // some writers -- which is what leaves this table ending at 206 rather than
+        // 190, and 206 is a position where rounding to 16, to 32 and to 64 give
+        // three different answers (208, 224 and 256). A fixture that landed
+        // anywhere else would pass against the wrong alignment.
+        put_tensor(
+            &mut buf,
+            &mut off,
+            b"dense_2.weight",
+            &[768, 3072, 1, 1],
+            8,
+            0,
+        );
+        put_tensor(
+            &mut buf,
+            &mut off,
+            b"token_embd.weight",
+            &[768, 262144],
+            8,
+            5_016_576,
+        );
+        assert_eq!(off, 206);
+
+        let located = locate_tensor(&buf, b"token_embd.weight")
+            .expect("the file reads")
+            .expect("the tensor the file holds");
+        assert_eq!(located.alignment, DEFAULT_ALIGNMENT);
+        assert_eq!(located.data_start, 224);
+        // Rounded up to the alignment, and not one quantum further than the table
+        // needed: the data starts at the first multiple at or after the table end.
+        assert_eq!(located.data_start % located.alignment, 0);
+        assert!(located.data_start - located.alignment < off as u64);
+        assert_eq!(located.tensor.offset, 5_016_576);
+        assert_eq!(located.file_position, 5_016_800);
+        assert_ne!(
+            located.file_position, located.tensor.offset,
+            "a tensor's stated offset is not where its bytes are"
+        );
+
+        // The first tensor is looked for the same way, and its data start is the
+        // same number: the walk finishes the table before it can know where the
+        // table ended, whatever position it was asked about.
+        let first = locate_tensor(&buf, b"dense_2.weight")
+            .expect("the file reads")
+            .expect("the tensor the file holds");
+        assert_eq!(first.data_start, 224);
+        assert_eq!(first.file_position, 224);
+    }
+
+    #[test]
+    fn test_locate_tensor_honours_the_alignment_the_file_declares() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_gguf(&mut buf, 2, 1);
+        // 256 rather than 64: this table ends at 166, where rounding to 16 gives
+        // 176, to 32 gives 192 and to 64 gives 192 -- so only a placement wider
+        // than the default proves the declared number was consulted at all.
+        put_count(&mut buf, &mut off, b"general.alignment", 256);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_tensor(&mut buf, &mut off, b"dense_3.weight", &[3072, 768], 8, 2_506_752);
+        assert_eq!(off, 166);
+
+        let located = locate_tensor(&buf, b"dense_3.weight")
+            .expect("the file reads")
+            .expect("the tensor the file holds");
+        assert_eq!(located.alignment, 256);
+        assert_eq!(located.data_start, 256);
+        assert_eq!(located.file_position, 2_507_008);
+    }
+
+    /// An alignment that is not a power of two is not a file the reader can place
+    /// a section in, and one wider than the format's own ceiling is a corrupt
+    /// number rather than a large one. Both are refused with the value stated.
+    #[test]
+    fn test_locate_tensor_refuses_an_alignment_a_file_cannot_have() {
+        for stated in [24u32, 0, 48, 2_097_152] {
+            let mut buf = [0u8; 512];
+            let mut off = begin_gguf(&mut buf, 1, 1);
+            put_count(&mut buf, &mut off, b"general.alignment", stated);
+            put_tensor(&mut buf, &mut off, b"dense_2.weight", &[768, 3072], 8, 0);
+            assert_eq!(
+                locate_tensor(&buf, b"dense_2.weight"),
+                Err(GgufError::InvalidAlignment(stated as u64)),
+                "a file declaring an alignment of {} is not a file to place data in",
+                stated
+            );
+        }
+
+        // The widest the format allows is still honoured, not refused.
+        let mut buf = [0u8; 512];
+        let mut off = begin_gguf(&mut buf, 1, 1);
+        put_count(&mut buf, &mut off, b"general.alignment", 1_048_576);
+        put_tensor(&mut buf, &mut off, b"dense_2.weight", &[768, 3072], 8, 0);
+        let located = locate_tensor(&buf, b"dense_2.weight")
+            .expect("the file reads")
+            .expect("the tensor the file holds");
+        assert_eq!(located.data_start, 1_048_576);
+    }
+
+    #[test]
+    fn test_locate_tensor_reports_a_tensor_the_file_does_not_hold() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_gguf(&mut buf, 1, 1);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_tensor(&mut buf, &mut off, b"dense_2.weight", &[768, 3072], 8, 0);
+        assert_eq!(locate_tensor(&buf, b"output.weight"), Ok(None));
+    }
+
+    /// The published EmbeddingGemma file puts its 262,144-entry vocabulary in the
+    /// middle of the metadata the alignment walk has to pass to reach the tensor
+    /// table. Reaching it must cost a window of bytes at a time, not a request per
+    /// token -- which is what a stream over the same file would otherwise be.
+    #[test]
+    fn test_locate_tensor_passes_a_published_vocabulary_by_window_not_by_request() {
+        const VOCAB: u64 = 262_144;
+        let mut file = host_std::vec::Vec::new();
+        begin_vec_gguf(&mut file, 3, 1);
+        v_string(&mut file, b"general.architecture", b"gemma-embedding");
+        v_vocab(&mut file, VOCAB, 6);
+        v_u32(&mut file, b"general.file_type", 7);
+        vt_tensor(&mut file, b"token_embd.weight", &[768, 262144], 8, 5_016_576);
+
+        let table_end = file.len();
+        let mut stream = GgufStream::buffered_from_slice(&file);
+        let located = locate_tensor_stream(&mut stream, b"token_embd.weight")
+            .expect("the walk reaches the table")
+            .expect("the tensor the file holds");
+
+        // The walk stopped at the end of the descriptor it was told about, so the
+        // data start is the first aligned position after the whole file so far.
+        assert_eq!(stream.position(), table_end);
+        assert_eq!(located.alignment, DEFAULT_ALIGNMENT);
+        assert_eq!(located.data_start % DEFAULT_ALIGNMENT, 0);
+        assert!(located.data_start - DEFAULT_ALIGNMENT < table_end as u64);
+        assert!((table_end as u64) <= located.data_start);
+        assert_eq!(
+            located.file_position,
+            located.data_start + 5_016_576,
+            "the offset the file states counts from the data section"
+        );
+
+        // One window full of requests per window of bytes, not two per token: at
+        // this vocabulary that is the difference between thousands of requests and
+        // half a million.
+        assert!(
+            stream.pulls() <= file.len() / METADATA_WINDOW_BYTES + 2,
+            "the walk made {} requests over {} bytes",
+            stream.pulls(),
+            file.len()
+        );
     }
 }

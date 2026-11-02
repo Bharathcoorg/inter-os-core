@@ -885,6 +885,188 @@ def test_the_ranged_read_contract_can_fail():
     assert _ranged_read_defects(gguf, blamed, sdk, kernel), "an unreadable file called corrupt passed"
 
 
+def _call_args(source: str, callee: str) -> list[str]:
+    """The argument text of every call to `callee`, with comments already dropped."""
+    calls = []
+    needle = callee + "("
+    cursor = 0
+    while True:
+        index = source.find(needle, cursor)
+        if index < 0:
+            return calls
+        open_at = index + len(needle) - 1
+        depth = 0
+        for position in range(open_at, len(source)):
+            char = source[position]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(source[open_at + 1 : position])
+                    break
+        cursor = index + len(needle)
+
+
+def _tensor_position_defects(gguf: str, readers: dict) -> list[str]:
+    """What would put a tensor's bytes at the wrong position in the file.
+
+    A GGUF descriptor's `offset` counts from the start of the tensor data section,
+    which begins after the descriptor table plus whatever padding the file's own
+    alignment asks for. The published EmbeddingGemma file puts that start 6,530,464
+    bytes into the file, so a reader that hands the descriptor's number straight to
+    a positioned read asks for the vocabulary instead of the weights -- and asks
+    successfully, because the bytes it names really exist.
+    """
+    defects = []
+
+    locate = function_body(gguf, "pub fn locate_tensor_stream(")
+    walk = locate.index("for _ in 0..header.tensor_count")
+    placement = locate.index("align_up(stream.position()") if "align_up(stream.position()" in locate else -1
+    if placement < 0:
+        defects.append("the data section does not start where the tensor table ended")
+    elif placement < walk:
+        defects.append("the data section is placed before the tensor table has been passed")
+    if "checked_add(tensor.offset)" not in locate:
+        defects.append("a tensor's file position is the offset the file states, unplaced")
+    if "is_power_of_two()" not in locate:
+        defects.append("an alignment the format cannot place data with is rounded instead")
+    if "InvalidAlignment" not in locate:
+        defects.append("a corrupt alignment is used to place the tensors anyway")
+    if "MAX_TENSOR_ALIGNMENT" not in locate:
+        defects.append("a declared alignment is bounded by nothing")
+
+    alignment_walk = function_body(gguf, "fn read_alignment_stream(")
+    if "let mut alignment = DEFAULT_ALIGNMENT;" not in alignment_walk:
+        defects.append("a file that names no alignment is treated as having an unknown layout")
+    if 'b"general.alignment"' not in alignment_walk:
+        defects.append("the key that says where the data starts is never read")
+
+    # `offset` means two different things in this file, and only one of them can be
+    # given to a read. A caller that reaches for the wrong one is not caught by the
+    # compiler, so it is caught here.
+    for name, source in readers.items():
+        for args in _call_args(without_comments(source), "std::fs_read_at"):
+            if ".offset" in args and "file_position" not in args:
+                defects.append(f"{name} gives a positioned read the offset a file states")
+    return defects
+
+
+def test_a_tensor_read_is_given_where_the_data_section_starts():
+    """A tensor's offset is resolved to a file position before anything reads it."""
+    readers = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(SERVICE.rglob("*.rs"))
+        if path.name != "gguf.rs"
+    }
+    defects = _tensor_position_defects(read("gguf.rs"), readers)
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_tensor_position_contract_can_fail():
+    """Each detector is tripped by the fault it exists for.
+
+    The sources below are the live resolver with one rule reversed: the data section
+    counted from the header instead of the end of the table, the table placed before
+    it was walked, the offset handed over as the whole position, an odd alignment
+    rounded up, a corrupt alignment accepted, an unbounded one, a default of zero
+    where the format means thirty-two, the alignment key never read, and a caller
+    that gives a positioned read the number relative to the section.
+    """
+    gguf = read("gguf.rs")
+    readers = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(SERVICE.rglob("*.rs"))
+        if path.name != "gguf.rs"
+    }
+    assert _tensor_position_defects(gguf, readers) == []
+
+    from_header = gguf.replace(
+        "let data_start = align_up(stream.position() as u64, alignment)?;",
+        "let data_start = align_up(GgufHeader::HEADER_SIZE as u64, alignment)?;",
+    )
+    assert from_header != gguf, "the fixture no longer matches the resolver"
+    assert _tensor_position_defects(from_header, readers), (
+        "a data section counted from the header was accepted"
+    )
+
+    early = gguf.replace(
+        "    let mut found: Option<GgufTensorInfo> = None;",
+        "    let data_start = align_up(stream.position() as u64, alignment)?;\n"
+        "    let mut found: Option<GgufTensorInfo> = None;",
+    )
+    assert early != gguf, "the ordering fixture no longer matches the resolver"
+    assert _tensor_position_defects(early, readers), (
+        "a data section placed before the tensor table was walked was accepted"
+    )
+
+    unplaced = gguf.replace(
+        "    let file_position = data_start\n        .checked_add(tensor.offset)\n"
+        "        .ok_or(GgufError::ArithmeticOverflow)?;",
+        "    let file_position = tensor.offset;",
+    )
+    assert unplaced != gguf, "the unplaced-offset fixture no longer matches the resolver"
+    assert _tensor_position_defects(unplaced, readers), (
+        "an offset relative to the data section was accepted as a file position"
+    )
+
+    rounded = gguf.replace(
+        "if !alignment.is_power_of_two() || alignment > MAX_TENSOR_ALIGNMENT {",
+        "if alignment == 0 {",
+    )
+    assert rounded != gguf, "the rounding fixture no longer matches the resolver"
+    assert _tensor_position_defects(rounded, readers), "a non-power-of-two alignment was placed with"
+
+    used_anyway = gguf.replace(
+        "return Err(GgufError::InvalidAlignment(alignment));",
+        "let alignment = DEFAULT_ALIGNMENT;",
+    )
+    assert used_anyway != gguf, "the refusal fixture no longer matches the resolver"
+    assert _tensor_position_defects(used_anyway, readers), "a corrupt alignment went unrefused"
+
+    unbounded = gguf.replace(
+        "if !alignment.is_power_of_two() || alignment > MAX_TENSOR_ALIGNMENT {",
+        "if !alignment.is_power_of_two() {",
+    )
+    assert unbounded != gguf, "the bound fixture no longer matches the resolver"
+    assert _tensor_position_defects(unbounded, readers), "a huge declared alignment was honoured"
+
+    no_default = gguf.replace(
+        "let mut alignment = DEFAULT_ALIGNMENT;",
+        "let mut alignment = 0;",
+    )
+    assert no_default != gguf, "the default fixture no longer matches the resolver"
+    assert _tensor_position_defects(no_default, readers), (
+        "a file that names no alignment was called unplaceable"
+    )
+
+    key_unread = gguf.replace('b"general.alignment"', 'b"general.file_type"')
+    assert key_unread != gguf, "the key fixture no longer matches the resolver"
+    assert _tensor_position_defects(key_unread, readers), (
+        "a file that declares an alignment was placed at the default"
+    )
+
+    lying_caller = {
+        "loader.rs": (
+            "fn pull(weights: &TensorLocation, scratch: &mut [u8], fd: u32) {\n"
+            "    let _ = std::fs_read_at(fd, weights.tensor.offset, scratch);\n"
+            "}\n"
+        )
+    }
+    assert _tensor_position_defects(gguf, lying_caller), (
+        "a read handed the section-relative offset passed the contract"
+    )
+    # The same call with the resolved position is what the loader is meant to write.
+    honest_caller = {
+        "loader.rs": (
+            "fn pull(weights: &TensorLocation, scratch: &mut [u8], fd: u32) {\n"
+            "    let _ = std::fs_read_at(fd, weights.file_position, scratch);\n"
+            "}\n"
+        )
+    }
+    assert _tensor_position_defects(gguf, honest_caller) == []
+
+
 def test_the_contract_can_fail():
     """A contract that cannot fail is a comment.
 
