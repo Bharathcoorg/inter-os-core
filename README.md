@@ -290,9 +290,9 @@ python tools/interos.py stop
 
 | Architecture | Microkernel Crate | Target Triple | Target Platform | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`q35`), BIOS | Primary emulation contract; runtime validation pending |
-| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Source-level architecture target; runtime validation pending |
-| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Source-level architecture target; runtime validation pending |
+| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`q35`), BIOS | Primary emulation contract; boot- and app-runtime verified in QEMU/Device Studio |
+| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Boot-verified in QEMU `virt` from the flat arm64 Image (device tree, RAM, interrupt controller); physical hardware source-only |
+| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Boot-verified in QEMU `virt` (U-mode syscall round trip); physical hardware source-only |
 
 For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
 

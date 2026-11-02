@@ -34,6 +34,7 @@ import platform
 import shutil
 import subprocess
 import socket
+import struct
 import time
 import sys
 import urllib.error
@@ -147,9 +148,9 @@ SUPPORTED_DEVICES = {
         "arch": "aarch64",
         "machine": "virt",
         "cpu": "cortex-a53",
-        "boot_type": "Direct Kernel ELF",
-        "image": "target/aarch64-unknown-none/debug/kernel-aarch64",
-        "status": "Source-level architecture target; runtime validation pending",
+        "boot_type": "Direct Kernel flat arm64 Image",
+        "image": "target/kernel-aarch64.img",
+        "status": "Boot-verified in QEMU virt from the flat Image; physical hardware source-only",
     },
     "riscv64": {
         "name": "InterOS RISC-V Virt Mobile",
@@ -158,7 +159,7 @@ SUPPORTED_DEVICES = {
         "cpu": "rv64",
         "boot_type": "OpenSBI / Direct Kernel ELF",
         "image": "target/riscv64gc-unknown-none-elf/debug/kernel-riscv64",
-        "status": "Source-level architecture target; runtime validation pending",
+        "status": "Boot-verified in QEMU virt (U-mode syscall round trip); physical hardware source-only",
     },
 }
 
@@ -452,6 +453,149 @@ def _build_x86_kernel_and_image():
     return 0
 
 
+# =============================================================================
+# AArch64 flat arm64 Image packing
+# =============================================================================
+# WHY this step exists at all: `cargo build` stops at an ELF, and an ELF can
+# never reach the device tree. QEMU's arm64 direct boot only hands the FDT
+# address to the kernel for a *flat* file passed to -kernel: hw/arm/boot.c's
+# load_aarch64_image() loads the whole file at `loader_start + text_offset` and
+# runs a stub whose first instruction is `ldr x0, arg`, so x0 is the DTB. An ELF
+# is entered at its own entry point with x0 = 0 instead, so kernel-aarch64's FDT
+# parser is never given a blob to walk and every device-tree discovery silently
+# degrades to the built-in defaults it prints as defaults. Nothing in this
+# repository produced the flat Image, which is why the aarch64 leg of
+# tests/qemu/test_qemu_boot.py could only ever report NOT BUILT (issue #175).
+#
+# WHY the segments are re-laid in Python instead of shelling out to objcopy: no
+# objcopy is on PATH on the Windows hosts this repo is developed on, and the only
+# copies are inside a rustup toolchain's private `lib/rustlib/<host>/bin/`
+# directory, whose layout is a toolchain implementation detail, not an interface.
+# A packaging step that succeeds only while one particular toolchain happens to
+# be installed is not a packaging step. The output of this function is
+# byte-for-byte identical to `llvm-objcopy -O binary` on the same ELF (checked
+# against the kernel-aarch64 debug ELF on 2026-11-02).
+AARCH64_KERNEL_DIR = WORKSPACE_ROOT / "kernel-aarch64"
+AARCH64_TARGET_TRIPLE = "aarch64-unknown-none"
+AARCH64_FLAT_IMAGE = TARGET_DIR / "kernel-aarch64.img"
+
+# ELF64 / arm64 boot-header fields, from the ELF and arm64 boot specifications.
+ELF64_IDENT = b"\x7fELF"
+ELF64_CLASS = 2
+ELF64_MACHINE_AARCH64 = 183
+ELF_PT_LOAD = 1
+ARM64_MAGIC_OFFSET = 0x38
+ARM64_MAGIC_VALUE = b"ARM\x64"
+ARM64_TEXT_OFFSET_FIELD = 0x08
+ARM64_IMAGE_SIZE_FIELD = 0x10
+
+
+def aarch64_elf_candidates():
+    """Every place cargo may have written the aarch64 kernel ELF.
+
+    WHY more than one: the crate is excluded from the root workspace, so its own
+    `kernel-aarch64/target/` holds the normal build, but a build driven from a
+    different `CARGO_TARGET_DIR` lands in the workspace target instead. Picking
+    the newest existing candidate reports the image that was just built instead
+    of packing a stale ELF from the other directory.
+    """
+    candidates = []
+    for root in (AARCH64_KERNEL_DIR / "target", TARGET_DIR):
+        for profile in ("debug", "release"):
+            candidates.append(root / AARCH64_TARGET_TRIPLE / profile / "kernel-aarch64")
+    return candidates
+
+
+def pack_aarch64_flat_image(elf_path, image_path):
+    """Relays an AArch64 ELF's PT_LOAD segments as a flat arm64 Image.
+
+    The image's byte 0 is the byte the linker placed at the lowest physical
+    address, so the flat file occupies exactly the physical window the kernel was
+    linked for; gaps between segments are zero-filled and a segment's `memsz`
+    beyond its `filesz` stays zero, because that region is `.bss` -- `_start`
+    clears it, but it still has to be present for the stack and heap that follow
+    it to sit at their linked addresses.
+
+    Returns the packed image's size, or None when the ELF cannot be packed; a
+    caller must not write an artefact it cannot vouch for.
+    """
+    data = Path(elf_path).read_bytes()
+    if data[:len(ELF64_IDENT)] != ELF64_IDENT or data[4] != ELF64_CLASS:
+        log_error(f"{elf_path} is not an ELF64 object; refusing to pack it")
+        return None
+
+    (_, _, e_machine, _, e_entry, e_phoff, _, _, _, e_phentsize, e_phnum,
+     _, _, _) = struct.unpack_from("<16sHHIQQQIHHHHHH", data, 0)
+    if e_machine != ELF64_MACHINE_AARCH64:
+        log_error(f"{elf_path} is not an AArch64 object (e_machine={e_machine})")
+        return None
+
+    segments = []
+    for index in range(e_phnum):
+        (p_type, _, p_offset, _, p_paddr, p_filesz, p_memsz,
+         _) = struct.unpack_from("<IIQQQQQQ", data, e_phoff + index * e_phentsize)
+        if p_type == ELF_PT_LOAD and p_memsz:
+            segments.append((p_paddr, p_offset, p_filesz, p_memsz))
+    if not segments:
+        log_error(f"{elf_path} has no loaded segments to pack")
+        return None
+
+    base = min(paddr for paddr, _, _, _ in segments)
+    end = max(paddr + memsz for paddr, _, _, memsz in segments)
+    image = bytearray(end - base)
+    for paddr, offset, filesz, _memsz in sorted(segments):
+        start = paddr - base
+        image[start:start + filesz] = data[offset:offset + filesz]
+
+    # WHY the boot header is verified rather than assumed: QEMU reads the magic
+    # at 0x38 and only honours the text_offset field at 0x08 when image_size is
+    # non-zero; without both it stops using what the image says about itself and
+    # falls back to its own guess of where an arm64 kernel lives in RAM. Checking
+    # here keeps a linker-script edit from silently shipping an image that is
+    # loaded somewhere the kernel was not linked for.
+    if bytes(image[ARM64_MAGIC_OFFSET:ARM64_MAGIC_OFFSET + 4]) != ARM64_MAGIC_VALUE:
+        log_error(
+            f"packed image has no arm64 boot header magic at 0x{ARM64_MAGIC_OFFSET:X}; "
+            "kernel-aarch64/linker.ld must emit it at the image base"
+        )
+        return None
+    text_offset = struct.unpack_from("<Q", image, ARM64_TEXT_OFFSET_FIELD)[0]
+    image_size = struct.unpack_from("<Q", image, ARM64_IMAGE_SIZE_FIELD)[0]
+    if image_size == 0:
+        log_error("arm64 boot header declares image_size 0, so QEMU ignores its text_offset")
+        return None
+
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(bytes(image))
+    log(
+        f"ELF entry 0x{e_entry:016X}, segments based at 0x{base:016X}, "
+        f"header text_offset 0x{text_offset:X}"
+    )
+    return len(image)
+
+
+def _pack_aarch64_image():
+    """Build-step entry point: pack the aarch64 ELF into the flat QEMU Image."""
+    existing = [path for path in aarch64_elf_candidates() if path.exists()]
+    if not existing:
+        log_error(
+            "aarch64 kernel ELF not found; tried: "
+            + ", ".join(str(p.relative_to(WORKSPACE_ROOT)) for p in aarch64_elf_candidates())
+        )
+        return 1
+    elf_path = max(existing, key=lambda path: path.stat().st_mtime)
+    log(f"Packing flat arm64 Image for QEMU direct boot from {elf_path.name}...")
+    size = pack_aarch64_flat_image(elf_path, AARCH64_FLAT_IMAGE)
+    if size is None:
+        return 1
+    log_success(
+        f"AArch64 flat Image ready: {AARCH64_FLAT_IMAGE.relative_to(WORKSPACE_ROOT)} "
+        f"({size} bytes). QEMU loads it at its RAM base + text_offset and enters "
+        "its first byte, the boot header, whose code0 branches to _start."
+    )
+    return 0
+
+
 def cmd_build(args):
     target_arg = getattr(args, "target", None) or getattr(args, "name", "all")
     target_lower = target_arg.lower().replace("-", "_")
@@ -509,14 +653,21 @@ def cmd_build(args):
             if rc != 0:
                 return rc
         elif t == "aarch64":
-            log("Building InterOS Kernel [aarch64-unknown-none]...")
+            log(f"Building InterOS Kernel [{AARCH64_TARGET_TRIPLE}]...")
             res = subprocess.run([
                 "cargo", "build", "--locked", "--manifest-path", "kernel-aarch64/Cargo.toml",
-                "--target", "aarch64-unknown-none"
+                "--target", AARCH64_TARGET_TRIPLE
             ], cwd=str(WORKSPACE_ROOT))
             if res.returncode != 0:
                 log_error("aarch64 kernel build failed")
                 return res.returncode
+            # WHY the build does not stop at the ELF: only the flat arm64 Image
+            # can reach the device tree under QEMU's direct boot, so an ELF-only
+            # build leaves the aarch64 boot contract untestable. See the packing
+            # block above for the protocol detail that makes the ELF a dead end.
+            rc = _pack_aarch64_image()
+            if rc != 0:
+                return rc
         elif t == "riscv64":
             log("Building InterOS Kernel [riscv64gc-unknown-none-elf]...")
             res = subprocess.run([

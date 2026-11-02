@@ -26,9 +26,13 @@ A NOT BUILT or SKIP leg is therefore an *unverified* leg, never a passing one:
 the run ends with a summary naming exactly which machines were booted and which
 were not, so a green exit can never be read as "both architectures boot".
 
-On the current tree the AArch64 leg is NOT BUILT by construction: no build
-script in this repository produces the flat arm64 Image that the boot protocol
-requires (only the ELF, which QEMU enters with x0 = 0 and so no device tree).
+On the current tree both legs boot. Their artefacts are build output and are not
+kept on a small disk, so a checkout that has not run the two builds reports both
+legs NOT BUILT -- and this suite then exits non-zero, because a run that booted
+nothing while QEMU is on PATH verified nothing. Build first:
+
+    python tools/interos.py build --target aarch64
+    python tools/interos.py build --target riscv64
 """
 
 import os
@@ -49,9 +53,10 @@ RISCV_KERNEL = os.path.join(
     ROOT, "kernel-riscv64", "target", RISCV_TARGET, "debug", "kernel-riscv64"
 )
 
-# The flat arm64 Image, the only artefact that can reach the device tree: QEMU
-# loads a file passed to -kernel at a fixed address and hands its base to the
-# kernel in x0, but entering an ELF leaves x0 = 0, so the ELF path can never
+# The flat arm64 Image, the only artefact that can reach the device tree: for a
+# flat file QEMU's direct boot runs its own stub whose first instruction loads
+# the device tree address into x0, which is where this kernel reads it from. An
+# ELF is entered at its own address with x0 = 0, so the ELF path can never
 # discover a device tree no matter how healthy the kernel is.
 AARCH64_FLAT_IMAGE = os.path.join(ROOT, "target", "kernel-aarch64.img")
 
@@ -63,10 +68,8 @@ AARCH64_KERNEL_PRODUCER = (
     "would have to produce it"
 )
 AARCH64_IMAGE_PRODUCER = (
-    "no script in this repository produces it; the build stops at the ELF, so "
-    "a packer step on top of tools/interos.py build --target aarch64 "
-    "(llvm-objcopy -O binary the ELF to target/kernel-aarch64.img) would have "
-    "to produce it"
+    "tools/interos.py build --target aarch64 packs it from the kernel ELF, so "
+    "this leg means that build has not been run on this checkout"
 )
 RISCV_KERNEL_PRODUCER = (
     "tools/interos.py build --target riscv64, which runs cargo build "

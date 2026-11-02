@@ -145,8 +145,16 @@ def test_service_discovery_exposes_stable_metadata_without_task_identity():
 def test_platform_documentation_does_not_claim_unverified_qemu_or_hardware_validation():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "Runtime execution is actively verified across three primary emulation targets" not in readme
-    assert "| Primary emulation contract; runtime validation pending |" in readme
-    assert "| Source-level architecture target; runtime validation pending |" in readme
+    # Each architecture's row is pinned to the evidence it has earned. x86_64 is
+    # the target applications are actually run on; the other two boot in QEMU and
+    # nothing more, so their rows say which QEMU proof exists and keep the silicon
+    # labelled source-only. A packer step landing for arm64 moves one row and must
+    # not move the claim about hardware.
+    assert "| Primary emulation contract; boot- and app-runtime verified in QEMU/Device Studio |" in readme
+    assert "| Boot-verified in QEMU `virt` from the flat arm64 Image (device tree, RAM, interrupt controller); physical hardware source-only |" in readme
+    assert "| Boot-verified in QEMU `virt` (U-mode syscall round trip); physical hardware source-only |" in readme
+    for silicon_overclaim in ("verified on PinePhone", "verified on VisionFive"):
+        assert silicon_overclaim not in readme
 
 
 
