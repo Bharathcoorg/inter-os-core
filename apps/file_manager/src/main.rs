@@ -38,25 +38,37 @@ pub use file_manager::{
 // the renderer and the hit test can call the same functions.
 use file_manager::{
     action_for_slot, action_slot_rect, action_supported, apply_search_scope, breadcrumb_crumbs,
-    build_details_with_provenance, category_row_at, entry_at_point, entry_row_rect, format_mtime,
+    build_details_with_provenance, category_row_at, control_label_lane, crumb_step,
+    entry_at_point, entry_row_rect, format_mtime,
     format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path, list_scroll,
     parse_indexed_documents, problem_text, row_is_visible, search_needle_is_usable,
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
-    validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap, FileAction,
+    validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap,
+    FileAction,
     IndexedDocument, LayoutMode, MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
     SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
-    ACTION_LABELS, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_ROWS, BREADCRUMB_SCALE,
-    BREADCRUMB_Y, CATEGORY_COUNT, CATEGORY_Y0, CATEGORY_Y1, DETAILS_CARD, DETAILS_CLOSE,
-    DETAILS_LINE_H, DETAILS_LINE_Y0, DETAILS_OPEN, DETAILS_TITLE_Y, ENTRIES_CARD, GRID_CELL_H,
-    GRID_CELL_W, HEADER_BOTTOM_AIR, HEADER_H, HEADER_READOUT_LINE1_Y, HEADER_READOUT_LINE2_Y,
+    ACTION_LABELS, ACTION_SLOT_W, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_ROWS,
+    BREADCRUMB_SCALE, BREADCRUMB_Y, CATEGORY_CAPTION_SCALE, CATEGORY_COUNT, CATEGORY_LABEL_LANE,
+    CATEGORY_LABEL_SCALE, CATEGORY_LABEL_X, CATEGORY_ROW_X1, CATEGORY_Y0, CATEGORY_Y1, CRUMB_ROW_X0, CRUMB_ROW_X1,
+    CRUMB_SEP, DETAILS_CARD, DETAILS_CLOSE, DETAILS_INSET, DETAILS_LINE_LANE,
+    DETAILS_LINE_SCALE, DETAILS_LINE_H, DETAILS_LINE_Y0, DETAILS_OPEN, DETAILS_TITLE_LANE,
+    DETAILS_TITLE_SCALE, DETAILS_TITLE_Y, EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE,
+    EMPTY_SUBLINE_SCALE, ENTRY_GLYPH_X, ENTRY_NAME_LANE, ENTRY_NAME_SCALE,
+    ENTRY_RIGHT_AIR, ENTRY_SUB_SCALE, ENTRY_TEXT_X,
+    ENTRIES_CARD, fitted_run, GRID_CELL_H, GRID_CELL_W, GRID_NAME_LANE, GRID_NAME_SCALE,
+    GRID_TEXT_INSET, HEADER_BOTTOM_AIR, HEADER_H, HEADER_READOUT_LINE1_Y, HEADER_READOUT_LINE2_Y,
     HEADER_READOUT_MAX_W, HEADER_READOUT_ROWS, HEADER_READOUT_SCALE, HEADER_TITLE_MAX_W,
     HEADER_TITLE_ROWS, HEADER_TITLE_SCALE, HEADER_TITLE_Y, HOME_BROWSE_BTN,
     HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y, HOME_RECENTS_TITLE_Y,
     HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE, HOME_RECENT_ROW_H, HOME_RECENT_TIME_DY,
     HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
-    HOME_STORAGE_CARD, LINE_LEN, LIST_PILL, GRID_PILL, SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W,
-    SCOPE_THIS_PILL, SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H,
-    SHEET_NAME_Y, SORT_PILL, STATUS_Y, TOOLBAR_Y,
+    HOME_ROW_X, HOME_ROW_W, HOME_STORAGE_CARD, LABEL_RUNG, LINE_LEN, LIST_PILL, GRID_PILL,
+    PANEL_CONTENT_X1,
+    SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W, SCOPE_CAPTION_SCALE, SCOPE_THIS_PILL, SCOPE_TEXT_X,
+    SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SEARCH_TEXT_LANE, SEARCH_TEXT_SCALE, SEARCH_TEXT_X,
+    SHEET, SHEET_NAME_H,
+    SHEET_NAME_Y, SHEET_DEST_SLOT_W, SORT_PILL, STATUS_LANE, STATUS_SCALE, STATUS_TEXT_X,
+    STATUS_Y, TOOLBAR_Y,
 };
 
 /// The platform's list-row treatment, at the two states the file list uses.
@@ -1605,9 +1617,21 @@ fn read_origin_url(path: &str, out: &mut [u8]) -> Option<usize> {
 }
 
 /// Trims a details card's title and lines to what the card can draw.
+///
+/// WHY the two bounds are the library's: `fit_details` is the card's own text-fit
+/// gate, and the card's title rung and line rung live beside the card's box in
+/// the model -- so the trim is checked by `test_file_manager_ui_text_bounds_and_ellipsize`
+/// against the lane the card actually owns rather than a width this function
+/// remembered. A run that no longer fits is reported by that test, not hidden
+/// here.
 fn fit_details(view: &mut DetailsView) {
     let mut title = [0u8; 64];
-    let title_len = font::ellipsize(&view.title[..view.title_len], 2, 600, &mut title);
+    let title_len = font::ellipsize(
+        &view.title[..view.title_len],
+        DETAILS_TITLE_SCALE,
+        DETAILS_TITLE_LANE,
+        &mut title,
+    );
     if title_len > 0 {
         view.title = [0u8; 64];
         view.title[..title_len].copy_from_slice(&title[..title_len]);
@@ -1617,8 +1641,8 @@ fn fit_details(view: &mut DetailsView) {
         let mut line = [0u8; MAX_DETAILS_LINE];
         let line_len = font::ellipsize(
             &view.lines[index][..view.line_lens[index]],
-            1,
-            600,
+            DETAILS_LINE_SCALE,
+            DETAILS_LINE_LANE,
             &mut line,
         );
         if line_len > 0 {
@@ -1977,15 +2001,23 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         } else {
             (b"The document index holds no documents", THEME.on_surface_variant)
         };
-        if let Some(color) = test_text(x, y, 36, HOME_RECENTS_Y0 + 8, 1, line, ink, THEME.surface)
-        {
+        if let Some(color) = test_text(
+            x,
+            y,
+            HOME_ROW_X,
+            HOME_RECENTS_Y0 + 8,
+            LABEL_RUNG,
+            line,
+            ink,
+            THEME.surface,
+        ) {
             return color;
         }
     } else {
         let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
         for index in 0..visible {
             let top = HOME_RECENTS_Y0 + index * HOME_RECENT_ROW_H;
-            if y < top || y >= top + HOME_RECENT_ROW_H || x < 36 || x >= 684 {
+            if y < top || y >= top + HOME_RECENT_ROW_H || x < HOME_ROW_X || x >= PANEL_CONTENT_X1 {
                 continue;
             }
             if y == top + HOME_RECENT_ROW_H - 1 {
@@ -2050,13 +2082,15 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return color;
     }
 
-    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x) {
+    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y)
+        && (HOME_ROW_X..CATEGORY_ROW_X1).contains(&x)
+    {
         let Some((index, row_top, row_h)) = category_row_at(y) else {
             return THEME.surface;
         };
         let selected = app.selected_shortcut == index;
         let fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
-        let rect = Rect::new(36, row_top, 648, row_h.saturating_sub(1));
+        let rect = Rect::new(HOME_ROW_X, row_top, HOME_ROW_W, row_h.saturating_sub(1));
         let Some(base) = draw_rounded_rect(x, y, rect, ROW.radius, fill, Some(ROW.divider), 1)
         else {
             return THEME.surface;
@@ -2087,26 +2121,47 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         } else {
             row_top + 11
         };
+        // The row's own label lane: the row's right edge, less the column the
+        // label stands in and the air it keeps there. The four directories are
+        // the app's own words and they fit whole -- the gate beside
+        // `CATEGORY_LABEL_LANE` measures them at `CATEGORY_LABEL_SCALE` and
+        // refuses the day the row narrows under them -- while the storage
+        // caption under the first row is the platform's sentence, so it is cut
+        // with an ellipsis rather than run past the row it belongs to.
+        let mut label_buf = [0u8; LINE_LEN];
+        let label = fitted_run(
+            CATEGORY_LABELS[index],
+            CATEGORY_LABEL_SCALE,
+            CATEGORY_LABEL_LANE,
+            &mut label_buf,
+        );
         if let Some(color) = test_text(
             x,
             y,
-            108,
+            CATEGORY_LABEL_X,
             label_y,
-            2,
-            CATEGORY_LABELS[index],
+            CATEGORY_LABEL_SCALE,
+            label,
             THEME.on_surface,
             fill,
         ) {
             return color;
         }
         if index == 0 {
+            let mut status_buf = [0u8; LINE_LEN];
+            let status = fitted_run(
+                app.storage_status(),
+                CATEGORY_CAPTION_SCALE,
+                CATEGORY_LABEL_LANE,
+                &mut status_buf,
+            );
             if let Some(color) = test_text(
                 x,
                 y,
-                108,
+                CATEGORY_LABEL_X,
                 row_top + 72,
-                1,
-                app.storage_status(),
+                CATEGORY_CAPTION_SCALE,
+                status,
                 THEME.on_surface_variant,
                 fill,
             ) {
@@ -2130,16 +2185,23 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             THEME.surface_container_high,
             Some(CONTROL_OUTLINE),
         ) {
-            let lx = centered_x(b"Browse all files", 1, HOME_BROWSE_BTN.x, HOME_BROWSE_BTN.w);
+            let mut label_buf = [0u8; LINE_LEN];
+            let shown = fitted_run(
+                b"Browse all files",
+                LABEL_RUNG,
+                control_label_lane(HOME_BROWSE_BTN.w),
+                &mut label_buf,
+            );
+            let lx = centered_x(shown, LABEL_RUNG, HOME_BROWSE_BTN.x, HOME_BROWSE_BTN.w);
             let ly = HOME_BROWSE_BTN.y
-                + HOME_BROWSE_BTN.h.saturating_sub(font::line_height(1)) / 2;
+                + HOME_BROWSE_BTN.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
             if let Some(color) = test_text(
                 x,
                 y,
                 lx,
                 ly,
-                1,
-                b"Browse all files",
+                LABEL_RUNG,
+                shown,
                 THEME.primary,
                 THEME.surface_container_high,
             ) {
@@ -2237,13 +2299,19 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         } else {
             THEME.on_surface
         };
+        // The needle is trimmed to the field's own lane -- the column it is typed
+        // in, up to the air before the clear action -- so a long query stays
+        // inside the box the tap handler answers instead of running under the
+        // control that clears it.
+        let mut needle = [0u8; LINE_LEN];
+        let shown = fitted_run(text, SEARCH_TEXT_SCALE, SEARCH_TEXT_LANE, &mut needle);
         if let Some(color) = test_text(
             x,
             y,
-            SEARCH_FIELD.x + 48,
+            SEARCH_TEXT_X,
             SEARCH_FIELD.y + 16,
-            1,
-            text,
+            SEARCH_TEXT_SCALE,
+            shown,
             ink,
             field_fill,
         ) {
@@ -2253,25 +2321,25 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 2. The search scope caption and its two pills.
-    if (SCOPE_Y..SCOPE_Y + font::line_height(1)).contains(&y)
-        && x >= 36
+    if (SCOPE_Y..SCOPE_Y + font::line_height(SCOPE_CAPTION_SCALE)).contains(&y)
+        && x >= SCOPE_TEXT_X
         && x < SCOPE_THIS_PILL.x
     {
         let mut buf = [0u8; LINE_LEN];
-        let len = font::ellipsize(
+        let shown = fitted_run(
             &app.scope[..app.scope_len],
-            1,
+            SCOPE_CAPTION_SCALE,
             SCOPE_CAPTION_MAX_W,
             &mut buf,
         );
-        if len > 0 {
+        if !shown.is_empty() {
             if let Some(color) = test_text(
                 x,
                 y,
-                36,
+                SCOPE_TEXT_X,
                 SCOPE_Y,
-                1,
-                &buf[..len],
+                SCOPE_CAPTION_SCALE,
+                shown,
                 THEME.on_surface_variant,
                 THEME.surface,
             ) {
@@ -2301,12 +2369,22 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // 3. The breadcrumbs. The painted rows are the whole union box the rungs
     // reserve, centred inside the touch strip beside them, so a crumb is
-    // answered wherever its ink reaches.
-    if (BREADCRUMB_Y..BREADCRUMB_Y + BREADCRUMB_ROWS).contains(&y) && (36..684).contains(&x) {
-        let mut cursor = 36usize;
+    // answered wherever its ink reaches -- and the row is laid out by
+    // `crumb_step`, the same function the tap handler walks, so a crumb is only
+    // inked where it can be tapped and a run never straddles the strip's edge.
+    if (BREADCRUMB_Y..BREADCRUMB_Y + BREADCRUMB_ROWS).contains(&y)
+        && (CRUMB_ROW_X0..CRUMB_ROW_X1).contains(&x)
+    {
+        let mut cursor = CRUMB_ROW_X0;
         for index in 0..app.crumb_count {
             let crumb = app.crumbs[index];
             let label = &app.current_path[crumb.label_start..crumb.label_start + crumb.label_len];
+            let mut buf = [0u8; MAX_PATH_LEN];
+            let Some(step) = crumb_step(label, cursor, index + 1 == app.crumb_count, &mut buf)
+            else {
+                break;
+            };
+            let run = &buf[..step.len];
             let ink = if index + 1 == app.crumb_count {
                 THEME.on_surface
             } else {
@@ -2315,31 +2393,30 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(color) = test_text(
                 x,
                 y,
-                cursor,
+                step.x,
                 BREADCRUMB_Y,
                 BREADCRUMB_SCALE,
-                label,
+                run,
                 ink,
                 THEME.surface,
             ) {
                 return color;
             }
-            cursor += font::measure(label, BREADCRUMB_SCALE) + 6;
-            if index + 1 < app.crumb_count {
+            if let Some(sep_x) = step.sep_x {
                 if let Some(color) = test_text(
                     x,
                     y,
-                    cursor,
+                    sep_x,
                     BREADCRUMB_Y,
                     BREADCRUMB_SCALE,
-                    b">",
+                    CRUMB_SEP,
                     THEME.on_surface_variant,
                     THEME.surface,
                 ) {
                     return color;
                 }
-                cursor += font::measure(b">", BREADCRUMB_SCALE) + 6;
             }
+            cursor = step.next_x;
         }
         return THEME.surface;
     }
@@ -2447,26 +2524,36 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     ),
                 }
             };
-            let hx = centered_x(headline, 2, ENTRIES_CARD.x, ENTRIES_CARD.w);
+            // The card's two runs are cut to the card's own lane before they are
+            // centred: an explanation of why nothing is listed that leaves the
+            // card is worse than no explanation, and the gate beside
+            // `EMPTY_CARD_LANE` is what says the platform's own refusals fit.
+            let mut headline_buf = [0u8; LINE_LEN];
+            let headline =
+                fitted_run(headline, EMPTY_HEADLINE_SCALE, EMPTY_CARD_LANE, &mut headline_buf);
+            let hx = centered_x(headline, EMPTY_HEADLINE_SCALE, ENTRIES_CARD.x, ENTRIES_CARD.w);
             if let Some(color) = test_text(
                 x,
                 y,
                 hx,
                 ENTRIES_CARD.y + 150,
-                2,
+                EMPTY_HEADLINE_SCALE,
                 headline,
                 headline_ink,
                 style.fill,
             ) {
                 return color;
             }
-            let sx = centered_x(subline, 1, ENTRIES_CARD.x, ENTRIES_CARD.w);
+            let mut subline_buf = [0u8; LINE_LEN];
+            let subline =
+                fitted_run(subline, EMPTY_SUBLINE_SCALE, EMPTY_CARD_LANE, &mut subline_buf);
+            let sx = centered_x(subline, EMPTY_SUBLINE_SCALE, ENTRIES_CARD.x, ENTRIES_CARD.w);
             if let Some(color) = test_text(
                 x,
                 y,
                 sx,
                 ENTRIES_CARD.y + 214,
-                1,
+                EMPTY_SUBLINE_SCALE,
                 subline,
                 THEME.on_surface_variant,
                 style.fill,
@@ -2478,15 +2565,24 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 8. The status line.
-    if (STATUS_Y..STATUS_Y + font::line_height(1)).contains(&y) && (36..684).contains(&x) {
+    if (STATUS_Y..STATUS_Y + font::line_height(STATUS_SCALE)).contains(&y)
+        && (STATUS_TEXT_X..CRUMB_ROW_X1).contains(&x)
+    {
         if app.status_len > 0 {
+            let mut status_buf = [0u8; LINE_LEN];
+            let shown = fitted_run(
+                &app.status[..app.status_len],
+                STATUS_SCALE,
+                STATUS_LANE,
+                &mut status_buf,
+            );
             if let Some(color) = test_text(
                 x,
                 y,
-                36,
+                STATUS_TEXT_X,
                 STATUS_Y,
-                1,
-                &app.status[..app.status_len],
+                STATUS_SCALE,
+                shown,
                 THEME.on_surface_variant,
                 THEME.surface,
             ) {
@@ -2534,9 +2630,12 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 Some(THEME.muted)
             };
             if let Some(base) = draw_pill(x, y, rect, fill, ring) {
-                let lx = centered_x(label, 1, rect.x, rect.w);
-                let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
-                if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
+                let mut label_buf = [0u8; LINE_LEN];
+                let shown =
+                    fitted_run(label, LABEL_RUNG, control_label_lane(ACTION_SLOT_W), &mut label_buf);
+                let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+                let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+                if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
                     return color;
                 }
                 return base;
@@ -2589,9 +2688,16 @@ fn pill_color(
         Some(CONTROL_OUTLINE)
     };
     let base = draw_pill(x, y, rect, fill, ring)?;
-    let lx = centered_x(label, 1, rect.x, rect.w);
-    let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
-    if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
+    // WHY the label goes through `fitted_run` before it is centred:
+    // `centered_x` left-aligns a run wider than the control it is centred in, and
+    // the run then paints over the control's right edge into its neighbour. The
+    // lane is the control's own width less one grid step of air, and it is the
+    // number the host gate measures this app's labels against.
+    let mut label_buf = [0u8; LINE_LEN];
+    let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
+    let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+    let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+    if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
         return Some(color);
     }
     Some(base)
@@ -2637,9 +2743,9 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
     if let Some(color) = test_text(
         x,
         y,
-        DETAILS_CARD.x + 24,
+        DETAILS_CARD.x + DETAILS_INSET,
         DETAILS_TITLE_Y,
-        2,
+        DETAILS_TITLE_SCALE,
         app.details.title_str().as_bytes(),
         THEME.on_surface,
         style.fill,
@@ -2651,9 +2757,9 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if let Some(color) = test_text(
             x,
             y,
-            DETAILS_CARD.x + 24,
+            DETAILS_CARD.x + DETAILS_INSET,
             DETAILS_LINE_Y0 + index * DETAILS_LINE_H,
-            1,
+            DETAILS_LINE_SCALE,
             line,
             if index == 3 && !app.details.has_handler {
                 THEME.warning
@@ -2701,9 +2807,11 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if let Some(button) =
             draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
         {
-            let lx = centered_x(label, 1, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
-            if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
+            let mut label_buf = [0u8; LINE_LEN];
+            let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
+            let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+            let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+            if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
                 return Some(color);
             }
             return Some(button);
@@ -2785,15 +2893,22 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
                 // shows through, so the sheet's own pixel is the answer.
                 return Some(base);
             };
-            let lx = centered_x(CATEGORY_LABELS[index], 1, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
+            let mut label_buf = [0u8; LINE_LEN];
+            let shown = fitted_run(
+                CATEGORY_LABELS[index],
+                LABEL_RUNG,
+                control_label_lane(SHEET_DEST_SLOT_W),
+                &mut label_buf,
+            );
+            let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+            let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
             if let Some(color) = test_text(
                 x,
                 y,
                 lx,
                 ly,
-                1,
-                CATEGORY_LABELS[index],
+                LABEL_RUNG,
+                shown,
                 ink,
                 fill,
             ) {
@@ -2866,9 +2981,11 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
             // sheet's own pixel is the answer, not the page's colour.
             return Some(base);
         };
-        let lx = centered_x(label, 1, rect.x, rect.w);
-        let ly = rect.y + rect.h.saturating_sub(font::line_height(1)) / 2;
-        if let Some(color) = test_text(x, y, lx, ly, 1, label, ink, fill) {
+        let mut label_buf = [0u8; LINE_LEN];
+        let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
+        let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+        let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+        if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
             return Some(color);
         }
         return Some(button);
@@ -2952,7 +3069,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             buffer,
             ROW_BUFFER_W,
             ROW_BUFFER_H,
-            20,
+            ENTRY_GLYPH_X,
             16,
             mime,
             ink,
@@ -2961,18 +3078,20 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         if app.searching {
             // A search result shows its name and the path it was found at:
             // two files with the same name in different folders must not look
-            // like the same result.
-            let max_w = ROW_BUFFER_W - 64 - 20;
+            // like the same result. Both runs answer the row's own lane --
+            // `ENTRY_NAME_LANE`, the row's width less the text column it starts
+            // in and the air before its right edge -- at the caption rung, so
+            // the trim the row applies is the trim the gate measures.
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, 1, max_w, &mut name_buf);
+            let name_len = font::ellipsize(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf);
             if name_len > 0 {
                 draw_buffer_text(
                     buffer,
                     ROW_BUFFER_W,
                     ROW_BUFFER_H,
-                    64,
+                    ENTRY_TEXT_X,
                     6,
-                    1,
+                    ENTRY_SUB_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
                 );
@@ -2980,34 +3099,38 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             let mut path = [0u8; MAX_PATH_LEN];
             if let Some(path_len) = app.card_item_path(index, &mut path) {
                 let mut path_buf = [0u8; MAX_PATH_LEN];
-                let shown = font::ellipsize(&path[..path_len], 1, max_w, &mut path_buf);
+                let shown =
+                    font::ellipsize(&path[..path_len], ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut path_buf);
                 if shown > 0 {
                     draw_buffer_text(
                         buffer,
                         ROW_BUFFER_W,
                         ROW_BUFFER_H,
-                        64,
+                        ENTRY_TEXT_X,
                         28,
-                        1,
+                        ENTRY_SUB_SCALE,
                         &path_buf[..shown],
                         THEME.on_surface_variant,
                     );
                 }
             }
         } else {
+            // The name gives up exactly the room its trailing fact occupies, so
+            // the two runs never claim the same column of the row, and the lane
+            // they split is still the row's own.
             let trailing = app.card_item_trailing(index);
-            let trailing_w = font::measure(trailing, 2);
-            let max_w = ROW_BUFFER_W.saturating_sub(64 + trailing_w + 20);
+            let trailing_w = font::measure(trailing, ENTRY_NAME_SCALE);
+            let max_w = ENTRY_NAME_LANE.saturating_sub(trailing_w);
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, 2, max_w, &mut name_buf);
+            let name_len = font::ellipsize(name, ENTRY_NAME_SCALE, max_w, &mut name_buf);
             if name_len > 0 {
                 draw_buffer_text(
                     buffer,
                     ROW_BUFFER_W,
                     ROW_BUFFER_H,
-                    64,
-                    (ROW_BUFFER_H - font::line_height(2)) / 2,
-                    2,
+                    ENTRY_TEXT_X,
+                    (ROW_BUFFER_H - font::line_height(ENTRY_NAME_SCALE)) / 2,
+                    ENTRY_NAME_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
                 );
@@ -3017,9 +3140,9 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
                     buffer,
                     ROW_BUFFER_W,
                     ROW_BUFFER_H,
-                    ROW_BUFFER_W - 20 - trailing_w,
-                    (ROW_BUFFER_H - font::line_height(2)) / 2,
-                    2,
+                    ROW_BUFFER_W - ENTRY_RIGHT_AIR - trailing_w,
+                    (ROW_BUFFER_H - font::line_height(ENTRY_NAME_SCALE)) / 2,
+                    ENTRY_NAME_SCALE,
                     trailing,
                     THEME.on_surface_variant,
                 );
@@ -3089,16 +3212,20 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
         }
         paint_glyph(buffer, CELL_BUFFER_W, CELL_BUFFER_H, 83, 30, mime, ink);
 
+        // The cell's own lane: `GRID_CELL_W` less the inset it stands on each
+        // side. The name and the fact under it both answer that lane, so a long
+        // name is trimmed with an ellipsis the user can see rather than cut off
+        // at the cell's edge, where the next cell's ink begins.
         let mut name_buf = [0u8; 48];
-        let name_len = font::ellipsize(name, 1, CELL_BUFFER_W - 24, &mut name_buf);
+        let name_len = font::ellipsize(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf);
         if name_len > 0 {
             draw_buffer_text(
                 buffer,
                 CELL_BUFFER_W,
                 CELL_BUFFER_H,
-                12,
+                GRID_TEXT_INSET,
                 66,
-                1,
+                GRID_NAME_SCALE,
                 &name_buf[..name_len],
                 ink,
             );
@@ -3107,15 +3234,16 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
             let mut path = [0u8; MAX_PATH_LEN];
             if let Some(path_len) = app.card_item_path(index, &mut path) {
                 let mut path_buf = [0u8; MAX_PATH_LEN];
-                let shown = font::ellipsize(&path[..path_len], 1, CELL_BUFFER_W - 24, &mut path_buf);
+                let shown =
+                    font::ellipsize(&path[..path_len], GRID_NAME_SCALE, GRID_NAME_LANE, &mut path_buf);
                 if shown > 0 {
                     draw_buffer_text(
                         buffer,
                         CELL_BUFFER_W,
                         CELL_BUFFER_H,
-                        12,
+                        GRID_TEXT_INSET,
                         96,
-                        1,
+                        GRID_NAME_SCALE,
                         &path_buf[..shown],
                         THEME.on_surface_variant,
                     );
@@ -3123,15 +3251,17 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
             }
         } else {
             let trailing = app.card_item_trailing(index);
-            if !trailing.is_empty() {
+            let mut trailing_buf = [0u8; 48];
+            let shown = font::ellipsize(trailing, GRID_NAME_SCALE, GRID_NAME_LANE, &mut trailing_buf);
+            if shown > 0 {
                 draw_buffer_text(
                     buffer,
                     CELL_BUFFER_W,
                     CELL_BUFFER_H,
-                    12,
+                    GRID_TEXT_INSET,
                     96,
-                    1,
-                    trailing,
+                    GRID_NAME_SCALE,
+                    &trailing_buf[..shown],
                     THEME.on_surface_variant,
                 );
             }
@@ -3614,22 +3744,25 @@ fn exit_to_launcher(surface: u32) -> ! {
 
 /// The breadcrumb whose label contains `x`, and the path prefix it opens.
 fn crumb_at(app: &FileManagerApp, x: usize) -> Option<usize> {
-    let mut cursor = 36usize;
+    let mut cursor = CRUMB_ROW_X0;
     for index in 0..app.crumb_count {
         let crumb = app.crumbs[index];
         let label = &app.current_path[crumb.label_start..crumb.label_start + crumb.label_len];
-        // WHY the model's rung and not a written `1`: the painter lays this row
-        // out at [`BREADCRUMB_SCALE`], and a hit test that re-types the rung is a
-        // hit test that lands on the wrong letters the day the ladder moves while
-        // the drawn row keeps moving with it.
-        let width = font::measure(label, BREADCRUMB_SCALE);
-        if x >= cursor && x < cursor + width {
+        // WHY the model's layout function and not a measurement of its own: the
+        // painter lays this row out through `crumb_step`, which trims a run to the
+        // room the strip has left and stops when there is none. A hit test that
+        // measured the raw label answered letters that were never inked, and kept
+        // answering crumbs the strip had already dropped -- and a rung or a
+        // separator move changed one site and not the other.
+        let mut buf = [0u8; MAX_PATH_LEN];
+        let Some(step) = crumb_step(label, cursor, index + 1 == app.crumb_count, &mut buf) else {
+            break;
+        };
+        let width = font::measure(&buf[..step.len], BREADCRUMB_SCALE);
+        if x >= step.x && x < step.x + width {
             return Some(index);
         }
-        cursor += width + 6;
-        if index + 1 < app.crumb_count {
-            cursor += font::measure(b">", BREADCRUMB_SCALE) + 6;
-        }
+        cursor = step.next_x;
     }
     None
 }
@@ -3710,7 +3843,9 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
         for index in 0..visible {
             let top = HOME_RECENTS_Y0 + index * HOME_RECENT_ROW_H;
-            if y >= top && y < top + HOME_RECENT_ROW_H && (36..684).contains(&x) {
+            if y >= top && y < top + HOME_RECENT_ROW_H
+                && (HOME_ROW_X..PANEL_CONTENT_X1).contains(&x)
+            {
                 app.open_recent(index);
                 std::log("[FILE_MANAGER] Opened a recent document from the index.").ok();
                 return Tap::Redraw(Dirty::All);
@@ -3719,7 +3854,9 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
 
     // The category rows.
-    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y) && (36..684).contains(&x) {
+    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y)
+        && (HOME_ROW_X..PANEL_CONTENT_X1).contains(&x)
+    {
         let Some((index, _, _)) = category_row_at(y) else {
             return Tap::None;
         };

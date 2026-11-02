@@ -210,3 +210,132 @@ def test_the_text_is_drawn_with_the_outline_typeface():
     source = fm_main()
     assert "outline_text::place_run" in source
     assert "outline_text::drawn_advance" in source
+
+
+def fm_lib() -> str:
+    return read("apps/file_manager/src/lib.rs")
+
+
+def test_every_text_lane_is_derived_from_the_container_that_holds_it():
+    """A lane authored inside the branch that paints it is a number no test can
+    check.
+
+    The app's binary is built without a test harness, so its fit gate can only be
+    a `#[test]` in the library, and a `#[test]` can only ask a container the
+    library exports. The lanes used to be literals in the painter -- the details
+    card trimmed to `600`, a list row to `ROW_BUFFER_W - 64 - 20`, a grid cell to
+    `CELL_BUFFER_W - 24` -- and the one host gate that claimed to bound the app's
+    text measured `510`, `150` and `260`, widths no row, cell, card or chip on
+    this screen owns. Raise a rung or narrow a container and the suite stayed
+    green while the words on the device lost their tails.
+
+    Every lane below is derived from the box it is drawn in, and the remembered
+    numbers are refused so they cannot come back as literals.
+    """
+    lib = fm_lib()
+    for derived in (
+        "pub const ENTRY_NAME_LANE: usize = ENTRIES_CARD.w - ENTRY_TEXT_X - ENTRY_RIGHT_AIR;",
+        "pub const GRID_NAME_LANE: usize = GRID_CELL_W - 2 * GRID_TEXT_INSET;",
+        "pub const DETAILS_TITLE_LANE: usize = DETAILS_CARD.w - 2 * DETAILS_INSET;",
+        "pub const SCOPE_CAPTION_MAX_W: usize = SCOPE_THIS_PILL.x - SCOPE_TEXT_X"
+        " - SCOPE_PILL_CLEARANCE;",
+        "pub const CATEGORY_LABEL_LANE: usize = CATEGORY_ROW_X1 - CATEGORY_LABEL_X"
+        " - CATEGORY_RIGHT_AIR;",
+        "pub const SEARCH_TEXT_LANE: usize = SEARCH_CLEAR.x - SEARCH_TEXT_X"
+        " - SEARCH_CLEAR_CLEARANCE;",
+        "pub const EMPTY_CARD_LANE: usize = control_label_lane(ENTRIES_CARD.w);",
+    ):
+        assert derived in lib, f"the lane stopped describing its container: {derived}"
+
+    # The remembered literals are gone from both halves of the app. Checked
+    # against the code with the comments out: this file's own prose names the
+    # numbers it refuses, and a gate that trips on the explanation is a gate that
+    # gets deleted rather than obeyed.
+    main_code = code_only(fm_main())
+    for remembered in (
+        ", 2, 600,",
+        ", 1, 600,",
+        "CELL_BUFFER_W - 24",
+        "ROW_BUFFER_W - 64 - 20",
+        "SCOPE_CAPTION_MAX_W: usize = 380",
+    ):
+        assert remembered not in main_code, f"a lane came back as a literal: {remembered}"
+    lib_code = code_only(lib)
+    for remembered in (", 2, 510,", ", 1, 150)", ", 1, 260)"):
+        assert remembered not in lib_code, f"the fit gate went back to a remembered width: {remembered}"
+
+
+def test_the_fit_gate_measures_at_the_rung_the_painter_inks():
+    """Measuring a run at one rung and drawing it at another measures nothing.
+
+    The gate ellipsized a file name at a typed `2` while the row that shows it
+    inked its search result at a typed `1`, and it checked the directory labels at
+    a typed `1` against a width the destination slot stopped using the day the
+    sheet was re-laid. Each measurement now names the rung the matching draw site
+    passes, in both files, so the ladder cannot move one and not the other.
+    """
+    lib = fm_lib()
+    main = fm_main()
+    for rung_lane in (
+        "font::ellipsize(long_name, ENTRY_NAME_SCALE, ENTRY_NAME_LANE, &mut buf)",
+        "font::ellipsize(&held_name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut buf)",
+        "font::ellipsize(&held_name, DETAILS_TITLE_SCALE, DETAILS_TITLE_LANE, &mut buf)",
+        "font::measure(label, LABEL_RUNG) <= control_label_lane(SHEET_DEST_SLOT_W)",
+        "font::measure(btn, LABEL_RUNG) <= control_label_lane(SHEET_BUTTON_W)",
+    ):
+        assert rung_lane in lib, f"the fit gate stopped measuring the painter's rung: {rung_lane}"
+
+    for painter_site in (
+        "font::ellipsize(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf)",
+        "font::ellipsize(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf)",
+        "DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
+        "fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf)",
+    ):
+        assert painter_site in main, f"the painter stopped using the library's rung and lane: {painter_site}"
+
+
+def test_a_cut_run_says_so_rather_than_disappearing():
+    """`font::ellipsize` answers zero when even the ellipsis will not fit.
+
+    A painter that drew nothing in that case would not be trimming a word, it
+    would be dropping it -- the same class of loss as the label that ran past its
+    control because `centered_x` left-aligns what it cannot centre. Every centred
+    label now goes through the model's `fitted_run`, and the gate beside it
+    refuses a container narrower than the mark that says a run was cut.
+    """
+    lib = fm_lib()
+    main = fm_main()
+    assert "pub fn fitted_run" in lib
+    assert "let len = font::ellipsize(label, scale, lane, buf);" in lib
+    assert lib.count("cut without an ellipsis") + lib.count("silent clip") >= 2
+    # The centred labels of this app go through the helper rather than straight
+    # to the rasteriser.
+    assert main.count("fitted_run(") >= 8
+
+
+def test_the_crumb_row_painted_is_the_crumb_row_tapped():
+    """The crumb strip laid its runs out at one rung and its tap handler measured
+    them at another, with no edge on either side.
+
+    The painter gated its branch on the remembered columns `(36..684)` and walked
+    every crumb, so a component longer than the strip painted past the band that
+    answers it while the tap handler still measured the raw label -- at a typed
+    `1` -- and answered letters that were never inked. Both halves now walk the
+    model's `crumb_step`, which trims a run to the room the strip has left and
+    stops when there is none.
+    """
+    lib = fm_lib()
+    main = fm_main()
+    assert "pub fn crumb_step(" in lib
+    assert "pub const CRUMB_ROW_X0: usize = ENTRIES_CARD.x;" in lib
+    assert "pub const CRUMB_ROW_X1: usize = ENTRIES_CARD.x + ENTRIES_CARD.w;" in lib
+    assert "let Some(step) = crumb_step(" in main
+    start = main.index("fn crumb_at(")
+    hit_test = main[start : main.index("fn handle_tap(")]
+    assert "crumb_step(label, cursor" in hit_test
+    assert "font::measure(label, BREADCRUMB_SCALE)" not in hit_test, (
+        "the tap handler went back to measuring the raw label instead of the run"
+        " the strip actually inked"
+    )
+    assert "(36..684)" not in code_only(main), "the crumb row went back to remembered columns"
+

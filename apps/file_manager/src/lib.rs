@@ -951,8 +951,8 @@ pub const SCOPE_Y: usize = BROWSE_STACK_Y + 62;
 /// The two search scopes, as pills the user can press.
 pub const SCOPE_THIS_PILL: Rect = Rect::new(432, BROWSE_STACK_Y + 58, 120, 48);
 pub const SCOPE_ALL_PILL: Rect = Rect::new(560, BROWSE_STACK_Y + 58, 124, 48);
-/// The widest the scope caption may run before it meets the first pill.
-pub const SCOPE_CAPTION_MAX_W: usize = 380;
+// The scope caption's own lane is derived from the first pill's column in
+// "The lanes the painter draws into" below, as `SCOPE_CAPTION_MAX_W`.
 
 /// The sort and layout toolbar.
 pub const TOOLBAR_Y: usize = BROWSE_STACK_Y + 154;
@@ -1058,6 +1058,310 @@ pub const SHEET_BUTTON_H: usize = 48;
 
 /// The longest a status or scope line may be.
 pub const LINE_LEN: usize = 128;
+
+// -----------------------------------------------------------------------------
+// The lanes the painter draws into
+//
+// WHY these live in the library and not beside the per-pixel branch that draws
+// them: this app's binary is built with `test = false`, so a fit gate can only
+// be a `#[test]` in this library -- and a `#[test]` can only ask a container it
+// can reach. Every width below used to be a literal inside the branch that
+// painted it (`600` for the details card, `64`/`20` for a list row, `24` for a
+// grid cell, `1` and `2` for the rungs), and the one host gate that claimed to
+// check the app's text measured `510`, `150` and `260` -- numbers no container
+// on this screen owns. That is the defect class where a real clip passes the
+// suite: raise a rung, the run grows, the remembered lane stays, and nothing
+// answers.
+//
+// Every lane here is derived from the box the painter actually draws into, and
+// every gap of air is its own named constant, so moving the box moves the lane
+// and the gate with it. The rungs are named on the platform's ladder rather than
+// written as multipliers, because a draw site that types its own multiplier can
+// measure a run at one rung and ink it at another.
+// -----------------------------------------------------------------------------
+
+/// The rung this app's control labels read at: the caption rung.
+///
+/// WHY named: the pills, the sheet's destination slots and the sheet's two
+/// buttons each passed a bare `1` to the rasteriser, so a rung move could not be
+/// checked against the label it drew.
+pub const LABEL_RUNG: usize = theme::type_scale::CAPTION;
+
+/// The air a control's label keeps inside the control that carries it.
+///
+/// WHY one grid step of air in total rather than one per side: the label is
+/// centred, so its air is split across its two sides by `centered_x` -- a
+/// measure per side is a bound this app's own words ("Rename" in an 86-row slot)
+/// do not keep, and inventing a stricter bound than the control owns is how a
+/// gate starts refusing runs the screen shows honestly.
+pub const CONTROL_LABEL_PAD: usize = 8;
+
+/// The lane a control's label owns inside a control `w` rows wide.
+///
+/// WHY a function and not a table: the same claim covers the scope pills, the
+/// toolbar pills, the action slots, the sheet's four destination slots and its
+/// two buttons, and one copy of the arithmetic is what lets the painter and the
+/// gate disagree about nothing.
+pub const fn control_label_lane(w: usize) -> usize {
+    if w > CONTROL_LABEL_PAD {
+        w - CONTROL_LABEL_PAD
+    } else {
+        w
+    }
+}
+
+/// The list row's glyph column, the text column beside it, and the air the name
+/// keeps from the row's right edge.
+pub const ENTRY_GLYPH_X: usize = 20;
+pub const ENTRY_TEXT_X: usize = 64;
+pub const ENTRY_RIGHT_AIR: usize = 20;
+
+/// The rungs a list row inks: its name at the body rung, its found-in path at
+/// the caption rung.
+pub const ENTRY_NAME_SCALE: usize = theme::type_scale::BODY;
+pub const ENTRY_SUB_SCALE: usize = theme::type_scale::CAPTION;
+
+/// The lane a list row's name is ellipsized to.
+///
+/// Derived from the row's own box: the card's width, less the text column the
+/// run starts in and the air before the row's right edge. The painter used to
+/// write `ROW_BUFFER_W - 64 - 20` inside the branch that drew it.
+pub const ENTRY_NAME_LANE: usize = ENTRIES_CARD.w - ENTRY_TEXT_X - ENTRY_RIGHT_AIR;
+
+/// The grid cell's text inset and the lane its name is ellipsized to.
+pub const GRID_TEXT_INSET: usize = 12;
+pub const GRID_NAME_SCALE: usize = theme::type_scale::CAPTION;
+pub const GRID_NAME_LANE: usize = GRID_CELL_W - 2 * GRID_TEXT_INSET;
+
+/// The details card's inset, its two rungs and the two lanes they answer.
+///
+/// WHY one lane for both: the title and the lines stand on the same two edges of
+/// the same card, so a line that outgrows the card and a title that outgrows it
+/// are the same defect; the rungs differ, so the two lanes are checked at their
+/// own rung by the gate beside this.
+pub const DETAILS_INSET: usize = 24;
+pub const DETAILS_TITLE_SCALE: usize = theme::type_scale::BODY;
+pub const DETAILS_LINE_SCALE: usize = theme::type_scale::CAPTION;
+pub const DETAILS_TITLE_LANE: usize = DETAILS_CARD.w - 2 * DETAILS_INSET;
+pub const DETAILS_LINE_LANE: usize = DETAILS_TITLE_LANE;
+
+/// The home screen's category rows: the box each row is drawn in, the column its
+/// label starts in and the air it keeps from the row's right edge.
+pub const HOME_ROW_X: usize = 36;
+pub const HOME_ROW_W: usize = 648;
+pub const CATEGORY_LABEL_X: usize = 108;
+pub const CATEGORY_RIGHT_AIR: usize = 24;
+pub const CATEGORY_LABEL_SCALE: usize = theme::type_scale::BODY;
+pub const CATEGORY_CAPTION_SCALE: usize = theme::type_scale::CAPTION;
+pub const CATEGORY_ROW_X1: usize = HOME_ROW_X + HOME_ROW_W;
+pub const CATEGORY_LABEL_LANE: usize = CATEGORY_ROW_X1 - CATEGORY_LABEL_X - CATEGORY_RIGHT_AIR;
+
+/// The search scope's caption: its column, its rung, the air it keeps from the
+/// first pill, and the lane that answers both.
+///
+/// WHY derived rather than written: the remembered `380` was this same distance,
+/// measured by hand off the first pill; the day a pill moves, the remembered
+/// number is what lets the caption run under it.
+pub const SCOPE_TEXT_X: usize = HOME_ROW_X;
+pub const SCOPE_CAPTION_SCALE: usize = theme::type_scale::CAPTION;
+pub const SCOPE_PILL_CLEARANCE: usize = 16;
+pub const SCOPE_CAPTION_MAX_W: usize = SCOPE_THIS_PILL.x - SCOPE_TEXT_X - SCOPE_PILL_CLEARANCE;
+
+/// The crumb strip: the two columns it answers, the rung it inks, the gap it
+/// spends between a run and its separator, and the least room a run must have
+/// before drawing it says anything.
+///
+/// WHY the strip's edges come from the entries card: the painter's branch gated
+/// itself on `(36..684)`, a remembered pair of columns, while the hit test walked
+/// the whole crumb list with no edge at all. Both now answer the same strip, so a
+/// crumb that is drawn is a crumb that can be tapped, and a run never straddles
+/// the edge of the band that owns it.
+pub const CRUMB_ROW_X0: usize = ENTRIES_CARD.x;
+pub const CRUMB_ROW_X1: usize = ENTRIES_CARD.x + ENTRIES_CARD.w;
+/// The panel's content column: the right edge every full-width row of this app
+/// answers, taken from the card those rows are drawn on rather than written as
+/// the remembered `684` at each hit band.
+pub const PANEL_CONTENT_X1: usize = ENTRIES_CARD.x + ENTRIES_CARD.w;
+pub const CRUMB_STRIP_W: usize = CRUMB_ROW_X1 - CRUMB_ROW_X0;
+pub const CRUMB_SEP: &[u8] = b">";
+pub const CRUMB_SEP_GAP: usize = 6;
+/// The least lane worth drawing: the separator's own advance plus its two gaps,
+/// so a crumb that would land in less than that is not drawn at all rather than
+/// drawn as a sliver the hit test cannot answer.
+pub const CRUMB_MIN_ROOM: usize = 14;
+
+/// One crumb's place in the strip: where its run stands, how many bytes of the
+/// caller's buffer it wrote, where the separator stands when the row keeps going,
+/// and where the next crumb's run starts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CrumbStep {
+    pub x: usize,
+    pub len: usize,
+    pub sep_x: Option<usize>,
+    pub next_x: usize,
+}
+
+/// Lays one crumb out inside the strip, trimming its run to the room the strip
+/// has left at `x`.
+///
+/// WHY the painter and the hit test both call this: it is the only way the two
+/// can be kept answering the same letters. `crumb_at` used to measure the raw
+/// label at a typed rung while the painter inked the same label through the
+/// ladder's caption rung, and `ellipsize` spends its trim budget in the outline
+/// face's advances -- so a run that was trimmed for the screen was still walked
+/// at its full width by the tap handler, and a tap landed on the wrong directory.
+///
+/// `None` means the strip has no room left for this crumb; the caller stops, and
+/// the path the strip cannot show is already shown whole in the header's readout.
+pub fn crumb_step(label: &[u8], x: usize, is_last: bool, buf: &mut [u8]) -> Option<CrumbStep> {
+    // The gap the run spends before the next mark is paid for out of the strip
+    // too, so a crumb that fills the strip's last rows leaves its own cursor
+    // inside the edge instead of one gap past it.
+    let room = CRUMB_ROW_X1
+        .saturating_sub(x)
+        .saturating_sub(CRUMB_SEP_GAP);
+    if room < CRUMB_MIN_ROOM {
+        return None;
+    }
+    let len = font::ellipsize(label, BREADCRUMB_SCALE, room, buf);
+    if len == 0 {
+        return None;
+    }
+    let w = font::measure(&buf[..len], BREADCRUMB_SCALE);
+    let after_run = x + w + CRUMB_SEP_GAP;
+    let sep_w = font::measure(CRUMB_SEP, BREADCRUMB_SCALE);
+    let sep_x = if !is_last && after_run + sep_w <= CRUMB_ROW_X1 {
+        Some(after_run)
+    } else {
+        None
+    };
+    let next_x = match sep_x {
+        Some(sx) => sx + sep_w + CRUMB_SEP_GAP,
+        None => after_run,
+    };
+    Some(CrumbStep {
+        x,
+        len,
+        sep_x,
+        next_x,
+    })
+}
+
+/// The search field's text column, its rung, the air it keeps from the clear
+/// action inside the same field, and the lane that answers both.
+///
+/// WHY a lane at all: the field inked whatever the user had typed from a fixed
+/// column with no bound, so a long needle ran under the clear control and past
+/// the field's own edge, and the pixels that disagreed with the field's box were
+/// the pixels the tap handler still answered.
+pub const SEARCH_TEXT_X: usize = SEARCH_FIELD.x + 48;
+pub const SEARCH_TEXT_SCALE: usize = theme::type_scale::CAPTION;
+pub const SEARCH_CLEAR_CLEARANCE: usize = 8;
+pub const SEARCH_TEXT_LANE: usize = SEARCH_CLEAR.x - SEARCH_TEXT_X - SEARCH_CLEAR_CLEARANCE;
+
+/// The card's empty state: the two centred runs it draws, their rungs, and the
+/// lane they share inside the card.
+///
+/// WHY a lane here too: the headline and the subline are the only words on the
+/// screen that explain why nothing is listed, and they were centred against the
+/// card's width with no bound of their own -- a refusal the platform phrased at
+/// length simply left the card.
+pub const EMPTY_HEADLINE_SCALE: usize = theme::type_scale::BODY;
+pub const EMPTY_SUBLINE_SCALE: usize = theme::type_scale::CAPTION;
+pub const EMPTY_CARD_LANE: usize = control_label_lane(ENTRIES_CARD.w);
+
+/// The status line: its column, its rung and the lane the panel gives it.
+pub const STATUS_TEXT_X: usize = ENTRIES_CARD.x;
+pub const STATUS_SCALE: usize = theme::type_scale::CAPTION;
+pub const STATUS_LANE: usize = ENTRIES_CARD.w;
+
+/// The run a container hands its painter: `label` whole when the container holds
+/// it, otherwise the same label cut to `lane` with an ellipsis on it.
+///
+/// WHY it lives in the model: every call site is a per-pixel branch this app's
+/// binary cannot test, and the claim a fit gate is worth making -- a run this app
+/// draws is either whole or visibly cut, never silently missing -- has to be
+/// checked against the same function the painter calls. A lane narrower than the
+/// ellipsis itself answers `font::ellipsize` with nothing, which is the one case
+/// where a word would vanish rather than be trimmed; the gate beside this refuses
+/// that for every lane in this file.
+/// `label` and `buf` share one lifetime because the answer is either of them: the
+/// caller's borrow ends where the painted run does, which is the block that draws
+/// it.
+pub fn fitted_run<'a>(
+    label: &'a [u8],
+    scale: usize,
+    lane: usize,
+    buf: &'a mut [u8],
+) -> &'a [u8] {
+    let len = font::ellipsize(label, scale, lane, buf);
+    if len == 0 {
+        return label;
+    }
+    &buf[..len]
+}
+
+/// The confirmation sheet's destination slots: the first slot's column, the slot
+/// width, and the gap between two slots.
+///
+/// WHY 140 and not 150: four slots of 150 with three 16px gaps span 648px
+/// starting 24px inside a 648px sheet, so the last slot hung 24px past the
+/// sheet's own edge. 140 and 12 put all four inside it.
+pub const SHEET_DEST_X0: usize = 60;
+pub const SHEET_DEST_SLOT_W: usize = 140;
+pub const SHEET_DEST_SLOT_GAP: usize = 12;
+/// The sheet's two buttons: their columns and their shared width.
+pub const SHEET_CANCEL_X: usize = 80;
+pub const SHEET_CONFIRM_X: usize = 380;
+pub const SHEET_BUTTON_W: usize = 260;
+
+/// Truth gates: every lane is a lane -- it owns room of its own and it never
+/// reaches past the box it is drawn in. These are the checks that fire if a
+/// container moves and its lane is left where the remembered number had it.
+const _: () = assert!(ENTRIES_CARD.x == HOME_ROW_X && ENTRIES_CARD.w == HOME_ROW_W);
+const _: () = assert!(ENTRY_TEXT_X > ENTRY_GLYPH_X);
+const _: () = assert!(ENTRY_NAME_LANE > 0);
+const _: () = assert!(
+    ENTRY_TEXT_X + ENTRY_NAME_LANE <= ENTRIES_CARD.x + ENTRIES_CARD.w,
+    "a list row's name lane must end inside the row it is drawn on"
+);
+const _: () = assert!(GRID_NAME_LANE > 0);
+const _: () = assert!(
+    GRID_TEXT_INSET + GRID_NAME_LANE <= GRID_CELL_W,
+    "a grid cell's name lane must end inside the cell it is drawn on"
+);
+const _: () = assert!(DETAILS_TITLE_LANE > 0);
+const _: () = assert!(
+    DETAILS_CARD.x + DETAILS_INSET + DETAILS_TITLE_LANE <= DETAILS_CARD.x + DETAILS_CARD.w,
+    "the details card's title lane must end inside the card"
+);
+const _: () = assert!(CATEGORY_LABEL_X > 36 + 44);
+const _: () = assert!(
+    CATEGORY_LABEL_X + CATEGORY_LABEL_LANE <= CATEGORY_ROW_X1,
+    "a category row's label lane must end inside the row"
+);
+const _: () = assert!(
+    SCOPE_TEXT_X + SCOPE_CAPTION_MAX_W <= SCOPE_THIS_PILL.x,
+    "the scope caption must stop before the first pill it sits beside"
+);
+const _: () = assert!(SEARCH_TEXT_LANE > 0);
+const _: () = assert!(
+    SEARCH_TEXT_X + SEARCH_TEXT_LANE <= SEARCH_CLEAR.x,
+    "the search field's text lane must stop before the clear action it is typed beside"
+);
+const _: () = assert!(control_label_lane(SCOPE_THIS_PILL.w) > 0);
+const _: () = assert!(control_label_lane(SHEET_DEST_SLOT_W) > 0);
+const _: () = assert!(control_label_lane(SHEET_BUTTON_W) > 0);
+const _: () = assert!(CRUMB_STRIP_W > 0);
+const _: () = assert!(PANEL_CONTENT_X1 == CATEGORY_ROW_X1);
+const _: () = assert!(PANEL_CONTENT_X1 == CRUMB_ROW_X1);
+const _: () = assert!(EMPTY_CARD_LANE > 0);
+const _: () = assert!(
+    STATUS_TEXT_X + STATUS_LANE <= CRUMB_ROW_X1,
+    "the status line must stay inside the panel's own column"
+);
+const _: () = assert!(CRUMB_ROW_X1 <= ENTRIES_CARD.x + ENTRIES_CARD.w);
+const _: () = assert!(CRUMB_MIN_ROOM > CRUMB_SEP_GAP);
 
 /// The height of the list's content for a given number of items.
 pub fn list_content_height(item_count: usize) -> usize {
@@ -1187,20 +1491,18 @@ pub fn action_slot_rect(index: usize) -> Rect {
 
 /// The confirmation sheet's destination slot.
 ///
-/// WHY 140 and not 150: four slots of 150 with three 16px gaps span 648px
-/// starting 24px inside a 648px sheet, so the last slot hung 24px past the
-/// sheet's own edge. 140 and 12 put all four inside it.
+/// WHY the slot's width and gap are the library's constants above: the label the
+/// sheet centres in this slot is ellipsized to `control_label_lane` of this very
+/// width, and a slot authored twice is a slot whose lane the gate cannot trust.
 pub fn sheet_destination_rect(index: usize) -> Rect {
-    let w = 140usize;
-    let gap = 12usize;
-    let x = 60 + index * (w + gap);
-    Rect::new(x, SHEET_DEST_Y, w, SHEET_DEST_H)
+    let x = SHEET_DEST_X0 + index * (SHEET_DEST_SLOT_W + SHEET_DEST_SLOT_GAP);
+    Rect::new(x, SHEET_DEST_Y, SHEET_DEST_SLOT_W, SHEET_DEST_H)
 }
 
 /// The confirmation sheet's confirm and cancel slots.
 pub fn sheet_button_rect(confirm: bool) -> Rect {
-    let x = if confirm { 380 } else { 80 };
-    Rect::new(x, SHEET_BUTTON_Y, 260, SHEET_BUTTON_H)
+    let x = if confirm { SHEET_CONFIRM_X } else { SHEET_CANCEL_X };
+    Rect::new(x, SHEET_BUTTON_Y, SHEET_BUTTON_W, SHEET_BUTTON_H)
 }
 
 // -----------------------------------------------------------------------------
@@ -2778,22 +3080,268 @@ mod tests {
         }
     }
 
+    /// Every run this app's text-fit gate speaks of is measured against the
+    /// container the painter draws it into, at the rung that draw site inks.
+    ///
+    /// WHY this replaces the remembered numbers: the gate used to ellipsize a
+    /// 72-byte name at a typed rung `2` into `510`, then measure the category
+    /// labels against `150` and the sheet's two buttons against `260` at a typed
+    /// rung `1`. No row, cell, card or chip on this screen is 510 or 150 wide --
+    /// the destination slots the app actually draws those labels into are
+    /// `SHEET_DEST_SLOT_W` wide, and the lane a name owns is
+    /// [`ENTRY_NAME_LANE`] -- so the measurement checked nothing the user sees:
+    /// narrow a slot or raise a rung and the gate kept passing while the word on
+    /// screen lost its tail. Each lane below is read from the derived container,
+    /// and each run is measured at the rung the matching draw site passes.
     #[test]
     fn test_file_manager_ui_text_bounds_and_ellipsize() {
         use interos_std::design::font;
-        let mut buf = [0u8; 64];
-        let long_name = b"A_very_long_directory_name_that_exceeds_normal_breadcrumb_display_limits";
-        let len = font::ellipsize(long_name, 2, 510, &mut buf);
-        let disp = if len > 0 { &buf[..len] } else { long_name.as_slice() };
-        assert!(font::measure(disp, 2) <= 510);
-        assert!(disp.ends_with(b"...") || disp == long_name.as_slice());
+        let mut buf = [0u8; MAX_PATH_LEN];
 
-        // Test category labels and action buttons fit inside their sheet bounds
-        for label in [b"Storage".as_slice(), b"Photos".as_slice(), b"Pictures".as_slice(), b"Videos".as_slice()] {
-            assert!(font::measure(label, 1) <= 150);
+        // 1. A file's name on a list row: the row's own lane, the row's own rung.
+        let long_name =
+            b"A_very_long_directory_name_that_exceeds_normal_breadcrumb_display_limits.bin";
+        let len = font::ellipsize(long_name, ENTRY_NAME_SCALE, ENTRY_NAME_LANE, &mut buf);
+        assert!(
+            len > 0,
+            "a name trimmed to the row's lane came back empty -- the row would draw nothing"
+        );
+        let disp = &buf[..len];
+        assert!(font::measure(disp, ENTRY_NAME_SCALE) <= ENTRY_NAME_LANE);
+        assert!(
+            disp.ends_with(b"...") || disp == long_name.as_slice(),
+            "the row's name was cut without an ellipsis -- a silent clip"
+        );
+
+        // The longest name the model can hold at all -- `sort_entries` and the
+        // parser both cap a name at `MAX_ENTRY_NAME_LEN` -- has to reach the row
+        // whole, or be trimmed visibly. A name the app is allowed to hold is not
+        // the app's business to shorten behind the user's back.
+        let held_name = [b'n'; MAX_ENTRY_NAME_LEN];
+        let len = font::ellipsize(&held_name, ENTRY_NAME_SCALE, ENTRY_NAME_LANE, &mut buf);
+        assert!(len > 0, "a name the model holds does not fit the row that shows it");
+        assert!(font::measure(&buf[..len], ENTRY_NAME_SCALE) <= ENTRY_NAME_LANE);
+        assert!(
+            buf[..len].ends_with(b"...") || len == held_name.len(),
+            "a held name lost bytes on the row without an ellipsis"
+        );
+
+        // 2. A file's name in a grid cell: the cell's inset lane at the cell's rung.
+        let len = font::ellipsize(&held_name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut buf);
+        assert!(
+            len > 0,
+            "a name trimmed to the cell's lane came back empty -- the cell would draw nothing"
+        );
+        assert!(font::measure(&buf[..len], GRID_NAME_SCALE) <= GRID_NAME_LANE);
+        assert!(
+            buf[..len].ends_with(b"...") || len == held_name.len(),
+            "a cell's name lost bytes without an ellipsis"
+        );
+
+        // 3. The details card: its title at the card's title rung, its longest
+        // line at the card's line rung. `fit_details` hands both of these to
+        // `font::ellipsize` before the card is drawn, so a refusal here is the
+        // card blanking a fact, not a tail going missing.
+        let len = font::ellipsize(&held_name, DETAILS_TITLE_SCALE, DETAILS_TITLE_LANE, &mut buf);
+        assert!(len > 0, "a document's name does not fit the details card that names it");
+        assert!(font::measure(&buf[..len], DETAILS_TITLE_SCALE) <= DETAILS_TITLE_LANE);
+        let long_line = [b's'; MAX_DETAILS_LINE];
+        let len = font::ellipsize(&long_line, DETAILS_LINE_SCALE, DETAILS_LINE_LANE, &mut buf);
+        assert!(
+            len > 0,
+            "a details line trimmed to the card's lane came back empty -- the card would drop a fact"
+        );
+        assert!(font::measure(&buf[..len], DETAILS_LINE_SCALE) <= DETAILS_LINE_LANE);
+
+        // 4. The app's own words, which are never trimmed: the four destination
+        // slots the copy/move sheet draws the category labels into, and the
+        // sheet's two buttons. Measured at [`LABEL_RUNG`] because that is the
+        // rung `pill_color` and the sheet's painter ink them at, and against
+        // `control_label_lane` of the slot's real width.
+        for label in [
+            b"Storage".as_slice(),
+            b"Photos".as_slice(),
+            b"Pictures".as_slice(),
+            b"Videos".as_slice(),
+        ] {
+            assert!(
+                font::measure(label, LABEL_RUNG) <= control_label_lane(SHEET_DEST_SLOT_W),
+                "a directory the sheet offers no longer fits the slot that offers it"
+            );
         }
         for btn in [b"Cancel".as_slice(), b"Confirm".as_slice()] {
-            assert!(font::measure(btn, 1) <= 260);
+            assert!(
+                font::measure(btn, LABEL_RUNG) <= control_label_lane(SHEET_BUTTON_W),
+                "one of the sheet's two buttons no longer fits its own slot"
+            );
+        }
+        for label in [
+            b"Select".as_slice(),
+            b"All".as_slice(),
+            b"Open".as_slice(),
+            b"Copy".as_slice(),
+            b"Move".as_slice(),
+            b"Rename".as_slice(),
+            b"Delete".as_slice(),
+            b"New".as_slice(),
+        ] {
+            assert!(
+                font::measure(label, LABEL_RUNG) <= control_label_lane(ACTION_SLOT_W),
+                "an action bar label no longer fits the slot the bar gives it"
+            );
+        }
+
+        // 5. A run the container cannot hold says so. `font::ellipsize` answers
+        // zero when the ellipsis itself will not fit, and a painter that ignored
+        // that answer would draw nothing at all -- which is how a card ends up
+        // blank instead of trimmed. Every lane this app draws into has to be wide
+        // enough for the mark that says the run was cut.
+        for lane in [
+            ENTRY_NAME_LANE,
+            GRID_NAME_LANE,
+            DETAILS_TITLE_LANE,
+            DETAILS_LINE_LANE,
+            SCOPE_CAPTION_MAX_W,
+            CATEGORY_LABEL_LANE,
+            CRUMB_STRIP_W,
+        ] {
+            assert!(
+                font::measure(b"...", ENTRY_SUB_SCALE) <= lane,
+                "a lane of {} rows cannot even hold the ellipsis that would mark a cut run",
+                lane
+            );
+        }
+    }
+
+    /// The crumb row: the strip the painter lays the crumbs in is the strip the
+    /// tap handler answers, and no crumb is drawn past either of its edges.
+    ///
+    /// WHY a layout function rather than a draw-site width: the painter walked
+    /// every crumb at a typed rung while the hit test measured the raw label at
+    /// a typed `1`, so the two could only agree by luck. Both now ask
+    /// [`crumb_step`], which trims a crumb to the room the strip has left, so a
+    /// crumb is tappable exactly where it is inked and a component longer than
+    /// the strip ends in an ellipsis instead of running off the band.
+    #[test]
+    fn the_crumb_row_is_laid_out_inside_the_strip_that_answers_it() {
+        use interos_std::design::font;
+        let mut crumbs = [Crumb::EMPTY; 6];
+        let mut buf = [0u8; MAX_PATH_LEN];
+
+        // The deepest path the app can be pointed at by its own category rows.
+        let path = b"/storage/photos/pictures/videos";
+        let count = breadcrumb_crumbs(path, &mut crumbs);
+        assert!(count > 1, "the fixture path no longer splits into crumbs");
+
+        let mut cursor = CRUMB_ROW_X0;
+        let mut whole_row = 0usize;
+        for index in 0..count {
+            let crumb = crumbs[index];
+            let label = &path[crumb.label_start..crumb.label_start + crumb.label_len];
+            let step = crumb_step(label, cursor, index + 1 == count, &mut buf)
+                .expect("a category crumb the app can navigate to does not fit its own strip");
+            let run = &buf[..step.len];
+            assert_eq!(step.x, cursor);
+            assert!(
+                font::measure(run, BREADCRUMB_SCALE) <= CRUMB_ROW_X1 - step.x,
+                "a crumb run paints past the right edge of the strip that answers it"
+            );
+            assert!(
+                run == label,
+                "a crumb the platform itself names was trimmed -- the strip is too narrow for its own paths"
+            );
+            assert!(step.len <= MAX_PATH_LEN);
+            cursor = step.next_x;
+            whole_row = cursor;
+        }
+        assert!(
+            whole_row <= CRUMB_ROW_X1,
+            "the crumb row ran past the strip: the last crumb had nowhere to be tapped"
+        );
+
+        // A component longer than the whole strip is trimmed, and the row stops
+        // rather than laying ink past the edge.
+        let deep = b"/storage/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let count = breadcrumb_crumbs(deep, &mut crumbs);
+        let mut cursor = CRUMB_ROW_X0;
+        let mut drawn = 0usize;
+        for index in 0..count {
+            let crumb = crumbs[index];
+            let label = &deep[crumb.label_start..crumb.label_start + crumb.label_len];
+            match crumb_step(label, cursor, index + 1 == count, &mut buf) {
+                Some(step) => {
+                    let run = &buf[..step.len];
+                    assert!(
+                        font::measure(run, BREADCRUMB_SCALE) <= CRUMB_ROW_X1 - step.x
+                    );
+                    assert!(
+                        run.ends_with(b"...") || run == label,
+                        "a crumb was cut without an ellipsis -- a silent clip"
+                    );
+                    drawn += 1;
+                    cursor = step.next_x;
+                    assert!(cursor <= CRUMB_ROW_X1 + CRUMB_SEP_GAP);
+                }
+                None => {
+                    assert!(cursor >= CRUMB_ROW_X1 - CRUMB_MIN_ROOM);
+                    break;
+                }
+            }
+        }
+        assert!(drawn >= 1, "a crumb row with a deep path drew nothing at all");
+        assert!(cursor <= CRUMB_ROW_X1);
+    }
+
+    /// A run handed to [`fitted_run`] -- the helper every centred label in this
+    /// app now goes through -- is either whole or visibly cut, and never wider
+    /// than the container that asked for it.
+    ///
+    /// WHY this is a gate and not a convenience: the painter used to hand
+    /// `centered_x` a run of any length. `centered_x` left-aligns what it cannot
+    /// centre, so the label simply ran over the control's right edge and the
+    /// pixels outside it belonged to whatever was drawn next.
+    #[test]
+    fn a_fitted_run_is_whole_or_visibly_cut_never_missing() {
+        use interos_std::design::font;
+        let mut buf = [0u8; MAX_PATH_LEN];
+
+        // A word the container holds is handed back byte for byte.
+        let whole = b"Directory Empty";
+        assert_eq!(
+            fitted_run(whole, EMPTY_HEADLINE_SCALE, EMPTY_CARD_LANE, &mut buf),
+            whole.as_slice(),
+            "a headline the card holds was altered on its way to the screen"
+        );
+
+        // A run the container cannot hold is cut, and says so.
+        let long = [b'e'; MAX_PATH_LEN - 1];
+        let cut = fitted_run(&long, ENTRY_NAME_SCALE, ENTRY_NAME_LANE, &mut buf);
+        assert!(
+            font::measure(cut, ENTRY_NAME_SCALE) <= ENTRY_NAME_LANE,
+            "a run cut to the row's lane still overflowed it"
+        );
+        assert!(
+            cut.ends_with(b"..."),
+            "a run cut to a lane lost its ellipsis -- the silent clip this helper exists to refuse"
+        );
+
+        // The one case the helper hands back the whole run is the case where the
+        // ellipsis itself would not fit, so no container this app draws into may
+        // be narrower than the mark that says a run was cut.
+        for lane in [
+            ENTRY_NAME_LANE,
+            GRID_NAME_LANE,
+            EMPTY_CARD_LANE,
+            STATUS_LANE,
+            CATEGORY_LABEL_LANE,
+            control_label_lane(ACTION_SLOT_W),
+            control_label_lane(SHEET_DEST_SLOT_W),
+        ] {
+            assert!(
+                font::measure(b"...", ENTRY_SUB_SCALE) <= lane,
+                "a lane of {} rows cannot hold the ellipsis that marks a cut run",
+                lane
+            );
         }
     }
 
