@@ -1758,6 +1758,17 @@ pub const fn em_for_scale(scale: usize) -> u32 {
 /// caption 16, body 21, section 27, title 35, heading 44, display 56, hero
 /// 76 -- with the hero rung above the display for a clock that is the whole
 /// point of a lock screen.
+///
+/// WHY this stays the ladder itself, and does not read the text-size setting:
+/// it is a `const fn` called from const contexts throughout the tree -- the
+/// SDK's `typography::*_CAP_PX`, the ladder's own band table, and the
+/// `const _: () = assert!(...)` gates in `webview`, the launcher and the
+/// camera -- and a const evaluation cannot read a cell a person's setting
+/// writes at run time. The setting is applied beside it, by
+/// [`cap_for_scale_user`] and its family, which a surface that re-derives its
+/// geometry at draw time calls. An application that wants the person's text
+/// size publishes it once, where it already reads `display.text_scale`:
+/// see [`crate::design::accessibility::DynamicType::publish`].
 pub const fn cap_for_scale(scale: usize) -> u32 {
     match scale {
         1 => 16, // caption (15..=16)
@@ -1857,6 +1868,130 @@ pub fn measure_user_scale(text: &[u8], scale: usize, user_text_scale: u8) -> usi
 /// Measures bold text advance under dynamic user text scaling.
 pub fn measure_bold_user_scale(text: &[u8], scale: usize, user_text_scale: u8) -> usize {
     measure_user_scale(text, scale, user_text_scale) + usize::from(!text.is_empty())
+}
+
+// --- The published rung, and the helpers that draw at it ---------------------
+
+/// The text-size level this process draws at, as a `UserTextScale` value: 0
+/// compact, 1 normal, 2 large, 3 extra large.
+///
+/// WHY a static rather than an argument threaded inside [`cap_for_scale`]:
+/// `cap_for_scale` is a `const fn` and is called from const contexts across
+/// the tree -- this crate's own `typography::*_CAP_PX` and the
+/// `LADDER_BANDS` table, the `const _: () = assert!(...)` gates in the
+/// launcher and in `webview`, the camera's `SHEET_ACCENT_H` -- and a const
+/// evaluation cannot read an atomic. Threading the rung inside it therefore
+/// does not compile, and dropping `const` from it breaks every one of those
+/// sites. The ladder stays the compile-time ladder and this cell carries the
+/// person's setting beside it: the helpers below are the runtime faces of the
+/// same arithmetic, and a layout that re-derives its boxes at draw time calls
+/// them.
+///
+/// WHY the default is [`TEXT_SCALE_NORMAL`]: level one multiplies every cap by
+/// one hundred per cent (`scale_cap_height` returns its argument), so an
+/// application that never publishes a rung draws the pixels it drew before
+/// this cell existed. Nothing here changes a box, a rung or an assertion until
+/// an application calls [`set_user_text_scale`].
+///
+/// WHY one cell per process: every application links its own copy of this
+/// static, so publishing a rung cannot resize another application's layout. An
+/// application adopts the person's setting by reading `display.text_scale`
+/// from the settings store -- the path it already polls -- and publishing what
+/// it read. That is what this cell exists for; see
+/// [`crate::design::accessibility::DynamicType::publish`].
+pub static USER_TEXT_SCALE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(crate::font::TEXT_SCALE_NORMAL);
+
+/// The level this process draws at: 0 compact, 1 normal, 2 large, 3 extra
+/// large. See [`USER_TEXT_SCALE`].
+#[inline]
+pub fn user_text_scale() -> u8 {
+    USER_TEXT_SCALE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Hands the person's text-size setting to the renderer.
+///
+/// Returns the level actually stored. A level above [`TEXT_SCALE_EXTRA_LARGE`]
+/// is stored as [`TEXT_SCALE_EXTRA_LARGE`] -- the ladder's largest setting --
+/// so a caller can show the clamp it got rather than assume the number it
+/// asked for was used.
+///
+/// WHY this is the only writer: the value comes from one place -- the
+/// application's own poll of `display.text_scale` -- and a render path that
+/// reads a cell with one writer and four readers costs nothing at draw time.
+/// Reading it per glyph would put a settings query inside the paint loop,
+/// which is not what a 60fps frame budget pays for; publishing it where the
+/// setting is already read costs one store per refresh.
+#[inline]
+pub fn set_user_text_scale(level: u8) -> u8 {
+    let stored = if level > TEXT_SCALE_EXTRA_LARGE {
+        TEXT_SCALE_EXTRA_LARGE
+    } else {
+        level
+    };
+    USER_TEXT_SCALE.store(stored, core::sync::atomic::Ordering::Relaxed);
+    stored
+}
+
+/// The cap height a rung draws at, at the published level.
+///
+/// The same arithmetic as [`cap_for_user_scale`] with the cached level in
+/// place of the argument, so a call site that re-derives its geometry at draw
+/// time never has to carry a `UserTextScale` through its own signature. At the
+/// default level this returns [`cap_for_scale`]'s number exactly.
+#[inline]
+pub fn cap_for_scale_user(scale: usize) -> u32 {
+    cap_for_user_scale(scale, user_text_scale())
+}
+
+/// The em a rung draws at, at the published level.
+#[inline]
+pub fn em_for_scale_user(scale: usize) -> u32 {
+    em_for_user_scale(scale, user_text_scale())
+}
+
+/// The line box a rung reserves, at the published level.
+///
+/// WHY this exists beside [`cap_for_scale_user`]: a line box is the space a run
+/// reserves, and a run drawn at a scaled cap inside an unscaled box is the
+/// clipped-text class of defect this repo keeps being asked to fix. A caller
+/// that moves its ink must move its box by the same rung, and this is the box
+/// half of that pair.
+#[inline]
+pub fn line_height_user(scale: usize) -> usize {
+    line_height_for_user_scale(scale, user_text_scale())
+}
+
+/// The ascent a rung reserves, at the published level.
+#[inline]
+pub fn ascent_for_scale_user(scale: usize) -> usize {
+    ascent_for_user_scale(scale, user_text_scale())
+}
+
+/// The advance a run takes at the published level.
+#[inline]
+pub fn measure_user(text: &[u8], scale: usize) -> usize {
+    measure_user_scale(text, scale, user_text_scale())
+}
+
+/// The advance a bold run takes at the published level.
+#[inline]
+pub fn measure_bold_user(text: &[u8], scale: usize) -> usize {
+    measure_bold_user_scale(text, scale, user_text_scale())
+}
+
+/// A run's width at the published level, in the given weight.
+#[inline]
+pub fn measure_runs_user(runs: &[(&[u8], bool)], scale: usize) -> usize {
+    runs.iter()
+        .map(|&(text, bold)| {
+            if bold {
+                measure_bold_user(text, scale)
+            } else {
+                measure_user(text, scale)
+            }
+        })
+        .sum()
 }
 
 /// The ascent, in pixels, of a run at the size a scale rung names.
@@ -2150,6 +2285,39 @@ pub fn test_text_aa(
     bold: bool,
 ) -> Option<u32> {
     crate::design::monochrome::text_px(x, y, x0, y0, cap_for_scale(scale), text, color, bg, bold)
+}
+
+/// [`test_text_aa`] at the published text-size level.
+///
+/// WHY a second entry point and not a change to the first: a caller that keeps
+/// its boxes at the platform rung keeps its ink there too, and an app that
+/// draws at a scaled cap inside an unscaled box clips the scaled cap. The pair
+/// is therefore opt-in per surface: a surface that re-derives its geometry
+/// through [`line_height_user`] draws with this, and one that does not keeps
+/// [`test_text_aa`]. At the default level the two answer identically, because
+/// [`cap_for_scale_user`] is [`cap_for_scale`].
+pub fn test_text_aa_user(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    crate::design::monochrome::text_px(
+        x,
+        y,
+        x0,
+        y0,
+        cap_for_scale_user(scale),
+        text,
+        color,
+        bg,
+        bold,
+    )
 }
 
 /// The bitmap cell face, renamed to make its role explicit.

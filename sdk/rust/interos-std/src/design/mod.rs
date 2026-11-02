@@ -106,6 +106,29 @@ pub mod typography {
     pub const HEADING_LINE_PX: usize = font::line_height(5);
     pub const DISPLAY_LINE_PX: usize = font::line_height(6);
 
+    /// The same ladder at the text-size level the platform has published.
+    ///
+    /// WHY these are functions and the twelve constants above are constants:
+    /// a constant is the ladder, and the ladder is what every layout in this
+    /// tree is authored against -- the rungs are read in const contexts by the
+    /// `TextStyle`s below, by `LADDER_BANDS`, and by the layout gates in the
+    /// applications, and a const evaluation cannot read a setting. The
+    /// person's text-size level is therefore applied by the runtime face of
+    /// the same arithmetic, and an application reaches it here or through
+    /// [`crate::font`] by name. An app that takes its ink from
+    /// [`crate::font::cap_for_scale_user`] must take its boxes from
+    /// [`crate::font::line_height_user`]: the box and the ink move together or
+    /// the scaled ink is clipped by the box, which is the defect class these
+    /// two are the pair for.
+    ///
+    /// At the default level -- [`crate::font::TEXT_SCALE_NORMAL`] -- every one
+    /// of these answers the constant above it, so a surface that adopts them
+    /// draws the same pixels until someone changes the setting.
+    pub use crate::font::{
+        ascent_for_scale_user, cap_for_scale_user, em_for_scale_user, line_height_user,
+        measure_bold_user, measure_user, set_user_text_scale, user_text_scale,
+    };
+
     /// Badge glyphs inside an icon, e.g. a call badge.
     ///
     /// WHY it exists: the shell draws a badge in the corner of an icon, and the

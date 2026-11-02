@@ -59,6 +59,45 @@ mod cap_ladder_tests {
         }
     }
 
+    /// WHAT THE BANDS CONSTRAIN, and what the person's text-size setting does.
+    ///
+    /// The bands above are the platform's ladder: the number a rung draws at
+    /// when nobody has asked for anything else. A published text-size level is
+    /// not a new rung on the ladder -- it is the same rung multiplied by the
+    /// setting's percentage, and it therefore lands outside these bands by
+    /// design. This test writes that down as a number rather than as a comment,
+    /// because the honest reading of "the display rung may not exceed 56px" and
+    /// "extra large draws the display rung at 84px" look like a contradiction
+    /// until someone checks which of the two the band governs.
+    ///
+    /// WHY the largest setting is not clamped back inside the band: a band is a
+    /// floor and a ceiling for a *default*, and a person who asks for 150%
+    /// asked to leave it. What bounds the top instead is the legibility floor
+    /// below (`scale_cap_height` never draws a cap under ten pixels at
+    /// compact) and the fact that a surface only scales where its own boxes are
+    /// re-derived from the same rung -- a box that cannot grow is a box that
+    /// does not take the setting, and says so.
+    #[test]
+    fn the_bands_govern_the_ladder_and_the_published_rung_sits_above_them() {
+        // The display rung's band is 48..=56; extra large draws it at 84.
+        assert!(crate::font::cap_for_user_scale(6, 3) > 56);
+        // And compact draws it below the band's own floor.
+        assert!(crate::font::cap_for_user_scale(6, 0) < 48);
+        // Normal is the ladder: every rung inside its band at the default level.
+        for (rung, cap, low, high) in LADDER_BANDS {
+            let at_normal = crate::font::cap_for_user_scale(rung as usize, 1);
+            assert_eq!(at_normal, cap, "the default level must not move a rung");
+            assert!(at_normal >= low && at_normal <= high);
+        }
+        // The legibility floor holds at every rung the ladder has, compact
+        // included -- the one bound the setting does respect.
+        for rung in 1..=7usize {
+            assert!(crate::font::cap_for_user_scale(rung, 0) >= 10);
+            assert!(crate::font::cap_for_user_scale(rung, 3)
+                >= crate::font::cap_for_scale(rung));
+        }
+    }
+
     /// The sizes measured off the reference screens are all covered.
     ///
     /// WHY these are here and not only in a comment: the reading of the

@@ -5,6 +5,14 @@
 //! - Accessibility tree extraction and focus navigation from `UiNode` hierarchies
 //! - Screen reader readout formatters and announcements for non-visual interaction
 //! - WCAG 2.1 AA relative luminance and contrast ratio validation (4.5:1 floor)
+//!
+//! The dynamic type here is not a parallel ladder. [`DynamicType::publish`]
+//! hands the level to `crate::font::USER_TEXT_SCALE`, and the runtime helpers
+//! beside the ladder (`cap_for_scale_user`, `line_height_user`,
+//! `em_for_scale_user`, `measure_user`) draw at it -- cap height, em, line box
+//! and advance all from the one published level, because a scaled ink in an
+//! unscaled box is clipped text. An application that has published nothing
+//! draws the ladder exactly: the default level is a hundred per cent.
 
 use super::node::{UiBounds, UiNode, UiPoint, UiRole, UiTree};
 use crate::font;
@@ -50,6 +58,46 @@ impl UserTextScale {
             Self::ExtraLarge => 150,
         }
     }
+
+    /// Reads the level out of the value the settings store carries.
+    ///
+    /// WHY both spellings: `display.text_scale` is written by the platform's
+    /// own Settings app as a word (`b"large"`), and a numeric level is what the
+    /// `UserTextScale` discriminant is, so a store that holds either must answer
+    /// the same way for every reader. An unrecognised value answers `None`,
+    /// which is the caller's signal to keep its own default rather than to
+    /// invent a rung the person never chose.
+    ///
+    /// WHY the longest form first: `extra_large`, `extralarge` and `3` all mean
+    /// the ladder's largest setting, and a match that stopped at the numeric
+    /// prefix would read `3` as its own answer twice over.
+    pub fn from_settings_value(value: &[u8]) -> Option<Self> {
+        const WORDS: [(&[u8], UserTextScale); 8] = [
+            (b"compact", UserTextScale::Compact),
+            (b"normal", UserTextScale::Normal),
+            (b"large", UserTextScale::Large),
+            (b"extralarge", UserTextScale::ExtraLarge),
+            (b"extra_large", UserTextScale::ExtraLarge),
+            (b"extra-large", UserTextScale::ExtraLarge),
+            (b"extra large", UserTextScale::ExtraLarge),
+            (b"xl", UserTextScale::ExtraLarge),
+        ];
+        for (word, level) in WORDS {
+            if value.eq_ignore_ascii_case(word) {
+                return Some(level);
+            }
+        }
+        if value.len() == 1 {
+            return match value[0] {
+                b'0' => Some(UserTextScale::Compact),
+                b'1' => Some(UserTextScale::Normal),
+                b'2' => Some(UserTextScale::Large),
+                b'3' => Some(UserTextScale::ExtraLarge),
+                _ => None,
+            };
+        }
+        None
+    }
 }
 
 /// Dynamic type engine applying user text scaling to typography metrics.
@@ -67,6 +115,39 @@ impl DynamicType {
         Self {
             scale: UserTextScale::from_u8(level),
         }
+    }
+
+    /// The dynamic type the platform is drawing with right now.
+    ///
+    /// WHY this reads a cell and not a settings query: the store is the person's
+    /// answer, and this cell is the answer the renderer was handed. They agree
+    /// because an application publishes the one it read -- see
+    /// [`DynamicType::publish`] -- and an application that never read the store
+    /// keeps the default, which is [`UserTextScale::Normal`] and therefore the
+    /// unscaled ladder.
+    #[inline]
+    pub fn current() -> Self {
+        Self::from_level(crate::font::user_text_scale())
+    }
+
+    /// Hands this level to the renderer, and returns what was stored.
+    ///
+    /// This is the hop between the setting and a painted pixel: after it, the
+    /// `*_user` helpers in [`crate::font`] -- [`crate::font::cap_for_scale_user`],
+    /// [`crate::font::line_height_user`], [`crate::font::em_for_scale_user`] and
+    /// [`crate::font::measure_user`] -- answer at this level, and every surface
+    /// that re-derives its geometry from them moves its boxes with its ink.
+    ///
+    /// WHY the return value: a level above the ladder's largest setting is
+    /// clamped, and a caller that shows the person the setting it took should
+    /// show the one the platform actually drew with.
+    ///
+    /// WHY it is not called per glyph: publishing once where the application
+    /// already polls the store keeps the settings query out of the paint loop;
+    /// the render path then reads one integer.
+    #[inline]
+    pub fn publish(self) -> UserTextScale {
+        UserTextScale::from_u8(crate::font::set_user_text_scale(self.scale.as_u8()))
     }
 
     /// The scaled cap height in pixels for a given type scale rung.
@@ -427,6 +508,126 @@ mod tests {
         assert_eq!(UserTextScale::Normal.percentage(), 100);
         assert_eq!(UserTextScale::Large.percentage(), 125);
         assert_eq!(UserTextScale::ExtraLarge.percentage(), 150);
+    }
+
+    /// The stored setting reaches the renderer.
+    ///
+    /// WHY this is one test and not four: `font::USER_TEXT_SCALE` is one
+    /// process-wide cell and the test harness runs test functions on parallel
+    /// threads, so a second function that read the published rung would race
+    /// with the writes below. Every other check in this module uses the pure
+    /// `*_user_scale` arithmetic, which takes its level as an argument and so
+    /// cannot be moved by this test.
+    ///
+    /// WHY the first block is the one that matters: at the default level every
+    /// runtime helper has to answer with the ladder's own number, or the
+    /// setting would already be resizing screens that never asked for it -- and
+    /// every layout constant and contract assertion in the tree is written
+    /// against the ladder.
+    #[test]
+    fn the_published_rung_reaches_the_renderer() {
+        // 1. Nothing published yet: the rung is Normal and changes no number.
+        assert_eq!(
+            UserTextScale::from_u8(crate::font::user_text_scale()),
+            UserTextScale::Normal,
+            "the published rung must default to the setting that scales nothing"
+        );
+        for rung in 1..=7usize {
+            assert_eq!(font::cap_for_scale_user(rung), font::cap_for_scale(rung));
+            assert_eq!(font::em_for_scale_user(rung), font::em_for_scale(rung));
+            assert_eq!(font::line_height_user(rung), font::line_height(rung));
+            assert_eq!(
+                font::ascent_for_scale_user(rung),
+                font::ascent_for_scale(rung)
+            );
+        }
+        assert_eq!(font::measure_user(b"Settings", 2), font::measure(b"Settings", 2));
+        assert_eq!(
+            font::measure_bold_user(b"Settings", 2),
+            font::measure_bold(b"Settings", 2)
+        );
+        assert_eq!(DynamicType::current().scale, UserTextScale::Normal);
+
+        // 2. Publishing a level moves the runtime helpers to the level's own
+        // arithmetic, and the row box moves with the cap.
+        for (level, dt) in [
+            (UserTextScale::Compact, DynamicType::from_level(0)),
+            (UserTextScale::Large, DynamicType::from_level(2)),
+            (UserTextScale::ExtraLarge, DynamicType::from_level(3)),
+            (UserTextScale::Normal, DynamicType::from_level(1)),
+        ] {
+            assert_eq!(dt.publish(), level, "{level:?} must store as itself");
+            for rung in 1..=7usize {
+                let want = level.as_u8();
+                assert_eq!(
+                    font::cap_for_scale_user(rung),
+                    font::cap_for_user_scale(rung, want),
+                    "{level:?} at rung {rung}: the cap must follow the published rung"
+                );
+                assert_eq!(
+                    font::line_height_user(rung),
+                    font::line_height_for_user_scale(rung, want),
+                    "{level:?} at rung {rung}: the box must follow the same rung as the ink"
+                );
+                assert_eq!(
+                    font::em_for_scale_user(rung),
+                    font::em_for_user_scale(rung, want)
+                );
+                assert_eq!(
+                    font::ascent_for_scale_user(rung),
+                    font::ascent_for_user_scale(rung, want)
+                );
+            }
+            assert_eq!(DynamicType::current().scale, level);
+        }
+
+        // 3. The largest setting is the ceiling: a level above it is stored as
+        // it, so a caller that shows the person what was applied shows the one
+        // the platform drew with.
+        assert_eq!(
+            crate::font::set_user_text_scale(9),
+            UserTextScale::ExtraLarge.as_u8()
+        );
+        assert_eq!(UserTextScale::from_u8(crate::font::user_text_scale()), UserTextScale::ExtraLarge);
+        assert_eq!(font::cap_for_scale_user(2), font::cap_for_user_scale(2, 3));
+
+        // 4. Restored, so a later reader of the cell -- a test, or this crate's
+        // own host-side checks -- finds the default rather than this test's
+        // last write.
+        assert_eq!(DynamicType::from_level(1).publish(), UserTextScale::Normal);
+        assert_eq!(font::cap_for_scale_user(2), font::cap_for_scale(2));
+    }
+
+    /// The store's spelling and the enum's number reach the same rung.
+    #[test]
+    fn the_settings_value_and_the_level_agree() {
+        for (word, want) in [
+            (b"compact".as_slice(), UserTextScale::Compact),
+            (b"Compact".as_slice(), UserTextScale::Compact),
+            (b"COMPACT".as_slice(), UserTextScale::Compact),
+            (b"0".as_slice(), UserTextScale::Compact),
+            (b"normal".as_slice(), UserTextScale::Normal),
+            (b"1".as_slice(), UserTextScale::Normal),
+            (b"large".as_slice(), UserTextScale::Large),
+            (b"Large".as_slice(), UserTextScale::Large),
+            (b"2".as_slice(), UserTextScale::Large),
+            (b"extralarge".as_slice(), UserTextScale::ExtraLarge),
+            (b"extra_large".as_slice(), UserTextScale::ExtraLarge),
+            (b"ExtraLarge".as_slice(), UserTextScale::ExtraLarge),
+            (b"3".as_slice(), UserTextScale::ExtraLarge),
+        ] {
+            assert_eq!(
+                UserTextScale::from_settings_value(word),
+                Some(want),
+                "{:?} must read as {want:?}",
+                core::str::from_utf8(word)
+            );
+        }
+        // A value the store does not spell is no level at all: the caller keeps
+        // its own default rather than inventing a rung the person never chose.
+        for unknown in [b"".as_slice(), b"4".as_slice(), b"huge".as_slice(), b"larg".as_slice()] {
+            assert_eq!(UserTextScale::from_settings_value(unknown), None);
+        }
     }
 
     #[test]
