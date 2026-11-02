@@ -130,7 +130,14 @@ def test_launcher_uses_live_system_state_not_fake_home_state():
     assert "notification_count" in source
     assert "refresh_notifications" in source
     assert "std::rtc::Reading::now()" in source
-    assert "System status" in source
+    # WHY this no longer pins the words "System status": they were a comment in this
+    # file, and the card they named is now headed "Today" where it is painted. A
+    # contract that reads prose fails when somebody rewords the prose, and it never
+    # proved anything about the state. What makes the surface live is the reader that
+    # fills its rows and the heading the person sees over them, so those are pinned.
+    assert "fn refresh_system_readings" in source
+    home = (ROOT / "apps/launcher/src/screens/home.rs").read_text(encoding="utf-8")
+    assert 'b"Today"' in home, "the card the live readings fill no longer names itself"
     assert "InterOS Stock" in source
 
 
