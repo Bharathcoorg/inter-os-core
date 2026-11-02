@@ -1234,15 +1234,72 @@ fn keyboard_key_at(x: usize, y: usize) -> Option<(usize, usize)> {
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
 const HEADER_TOP: usize = interos_std::design::viewport::HEADER_TOP;
 
-/// The header row's own box. WHY it reaches 112: the back control and the month
-/// badge are both 48 tall and start at HEADER_TOP, so the row has to end below
-/// 104 or the surface under it is painted over their last rows.
-const HEADER_H: usize = 112;
-/// WHY nine rows into the control band: the title's line box is forty-eight rows
-/// at this rung, so from here the box reaches the row `HEADER_H` names and its
-/// last descent row falls to the surface under the header. The same start with
-/// the box's former 44 rows left three rows clear.
-const TITLE_Y0: usize = HEADER_TOP + 9;
+/// The rows the header's back control and month pill stand in.
+///
+/// WHY read from the control and not from the band: the header's ink line is the
+/// control band's floor, and a band authored from a remembered height has its
+/// floor move whenever the platform's control does.
+const HEADER_CONTROL_ROWS: usize = std::design::back_button::SIZE;
+
+/// The rung the header's title run is set in.
+///
+/// WHY named and read by the painter as well as the band: the band is derived
+/// from this rung's box, so a painter hard-coding a different rung is exactly how
+/// the run and its container came to disagree.
+const TITLE_SCALE: usize = type_scale::SECTION;
+
+/// The rows a run at the title's rung inks, whatever its bytes are.
+///
+/// WHY read from the renderer and not from the rung's line box alone: a title is
+/// drawn by whichever face fits, and the bitmap cell's baseline can sit below the
+/// outline ascent, which makes the inked band taller than `line_height`.
+/// [`outline_text::row_band`] is the union of the two, so this is the number the
+/// header has to hold rather than the number one of the two faces needs.
+const TITLE_ROWS: usize = outline_text::row_band(0, TITLE_SCALE).1;
+
+/// The air the header band keeps between the title's box and its own floor.
+///
+/// WHY two rows: it is the air this app already keeps between a run's box and its
+/// band's edge (`SECTION_BAND_PAD`), so a title gets the same floor as the Month
+/// view's section caption.
+const HEADER_BOTTOM_AIR: usize = SECTION_BAND_PAD;
+
+/// The row the title run starts on: the control band's floor less the run's own
+/// ascent, so the title's baseline lands on the back control's last row.
+///
+/// WHY derived from the ladder: it was a remembered nine rows, which is the same
+/// number the ascent leaves over at this rung, and a rung the ladder raises would
+/// have kept the old offset and slid its baseline off the header's ink line.
+const TITLE_Y0: usize = HEADER_TOP + HEADER_CONTROL_ROWS
+    - std::design::font::ascent_for_scale(TITLE_SCALE);
+
+/// The header row's own box, one past its last row.
+///
+/// WHY derived and not 112: the back control and the month badge are both
+/// `HEADER_CONTROL_ROWS` tall and start at `HEADER_TOP`, but the title's box
+/// reaches `TITLE_Y0 + TITLE_ROWS`, which is ten rows below the controls' floor
+/// and two below the remembered 112 the band carried once the ladder grew this
+/// rung's box. The view under the header claimed those two rows before the header
+/// branch was reached, so the run's last descent rows were painted over. The
+/// container follows the text.
+const HEADER_H: usize = TITLE_Y0 + TITLE_ROWS + HEADER_BOTTOM_AIR;
+
+/// WHY strict: the band's floor has to stay below the run's box by real air rather
+/// than have the box land exactly on the row the band names, which is the
+/// off-by-one this gate replaces.
+const _: () = assert!(TITLE_Y0 + TITLE_ROWS < HEADER_H);
+/// WHY also against the control band: the header holds both the controls and the
+/// title, and a container derived from the text alone could one day stop short of
+/// the back control's last row and hand it to the view below.
+const _: () = assert!(HEADER_TOP + HEADER_CONTROL_ROWS <= HEADER_H);
+/// WHY gated against the tab band and the weekday row: the header branch answers
+/// every row up to `HEADER_H`, the segmented tabs claim theirs from
+/// `TAB_BAND_Y0`, and the weekday row claims the view's top from `WEEKDAY_Y0` --
+/// a band that grew past either would silently lose its last rows to the
+/// neighbour that claims them first, which is the same loss it just suffered from
+/// below.
+const _: () = assert!(HEADER_H <= TAB_BAND_Y0);
+const _: () = assert!(TAB_BAND_Y0 + TAB_BAND_H <= WEEKDAY_Y0);
 
 pub fn status_band() -> (usize, usize) {
     (0, STATUS_BAR_HEIGHT)
@@ -1268,7 +1325,7 @@ fn get_calendar_pixel(
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Header row: back control, title and month badge (y: 48..112)
+    // 1. Header row: back control, title and month badge (y: HEADER_TOP..HEADER_H)
     if y < HEADER_H {
         // Standardized back button squircle (24..72, HEADER_TOP..HEADER_TOP+48)
         if let Some(c) = std::design::back_button::pixel_for_theme(x, y, &THEME) {
@@ -1276,8 +1333,8 @@ fn get_calendar_pixel(
         }
 
         // Header Title: "Calendar"
-        if y >= TITLE_Y0 && y < TITLE_Y0 + std::design::font::line_height(3) {
-            if let Some(c) = test_text(x, y, 116, TITLE_Y0, 3, b"Calendar", 480 - 116, THEME.on_surface, THEME.surface_container) {
+        if y >= TITLE_Y0 && y < TITLE_Y0 + TITLE_ROWS {
+            if let Some(c) = test_text(x, y, 116, TITLE_Y0, TITLE_SCALE, b"Calendar", 480 - 116, THEME.on_surface, THEME.surface_container) {
                 return c;
             }
         }
