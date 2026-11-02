@@ -54,6 +54,15 @@ pub const MAX_METADATA_KEY_LEN: usize = 48;
 /// Architecture names are short, and the engine only ever reports this one
 /// back to the user, so it is held in a fixed window.
 pub const MAX_ARCH_NAME_LEN: usize = 32;
+/// Longest `general.name` / `tokenizer.ggml.model` the reader will hold.
+///
+/// WHY a cap and a refusal instead of a cut: the name is the model's identity,
+/// and a notice that showed the first 48 bytes of a 200-byte name would read as
+/// the file's own words while being the reader's truncation of them. A name past
+/// the window is reported by the length the file stated, exactly as every other
+/// value this module refuses for width, and never as a shorter name the file did
+/// not give.
+pub const MAX_MODEL_NAME_LEN: usize = 48;
 /// How many elements of a string array the reader is willing to step over.
 ///
 /// WHY the vocabulary is not walked the way every other value is: a GGUF
@@ -853,11 +862,43 @@ pub fn skip_all_kv_pairs_stream(stream: &mut GgufStream, kv_count: u64) -> Resul
 /// Every field is `Option`: a file that does not name a parameter is reported as
 /// not naming it, rather than being filled in with the value the engine happens
 /// to have been compiled with.
+///
+/// WHY the identity fields -- the name, the architecture, the tokenizer family,
+/// the declared quantisation and the header's own counts -- sit in this record
+/// beside the dimensions and not in anything keyed by the path the file was
+/// opened at: the path says where the bytes sit, which is not a statement about
+/// what they are. A file renamed `embeddinggemma-2.gguf` whose metadata says
+/// `general.name` "Some Other Model" is Some Other Model, and every report the
+/// platform makes about it has to say so or the platform is inventing a model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GgufModelInfo {
     /// `general.architecture`, e.g. `gemma2`.
+    ///
+    /// Recorded with the reading the walk made of it, so an architecture name
+    /// past `MAX_ARCH_NAME_LEN` is reported as refused rather than shown cut
+    /// down to a prefix the file never claimed to be the whole name.
     pub architecture: [u8; MAX_ARCH_NAME_LEN],
-    pub architecture_len: usize,
+    pub architecture_reading: StringReading,
+    /// `general.name` -- the name the file's own author gave this model.
+    pub name: [u8; MAX_MODEL_NAME_LEN],
+    pub name_reading: StringReading,
+    /// `tokenizer.ggml.model` -- the tokenizer family the file says it ships.
+    pub tokenizer_model: [u8; MAX_MODEL_NAME_LEN],
+    pub tokenizer_model_reading: StringReading,
+    /// `general.file_type` -- the quantisation the file declares for its tensors,
+    /// as the GGUF spec numbers that type. The reader carries the number the file
+    /// stated and no more: naming "Q8_0" for a bare `7` would be the platform's
+    /// table of what numbers mean, not the file's declaration.
+    pub file_type: Option<u32>,
+    /// `general.quantization_version`
+    pub quantization_version: Option<u32>,
+    /// Tensor descriptors the header counted, before one of them was read.
+    pub tensor_count: Option<u64>,
+    /// Metadata pairs the header counted, which is what makes an unread key
+    /// provable as unread instead of merely assumed absent.
+    pub kv_pair_count: Option<u64>,
+    /// Pairs the walk actually stepped through.
+    pub pairs_walked: u64,
     /// `<arch>.embedding_length` -- the width every residual stream has.
     pub hidden_dim: Option<u32>,
     /// `<arch>.feed_forward_length`
@@ -907,7 +948,16 @@ impl GgufModelInfo {
     pub const fn empty() -> Self {
         Self {
             architecture: [0u8; MAX_ARCH_NAME_LEN],
-            architecture_len: 0,
+            architecture_reading: StringReading::Absent,
+            name: [0u8; MAX_MODEL_NAME_LEN],
+            name_reading: StringReading::Absent,
+            tokenizer_model: [0u8; MAX_MODEL_NAME_LEN],
+            tokenizer_model_reading: StringReading::Absent,
+            file_type: None,
+            quantization_version: None,
+            tensor_count: None,
+            kv_pair_count: None,
+            pairs_walked: 0,
             hidden_dim: None,
             intermediate_dim: None,
             num_layers: None,
@@ -923,18 +973,59 @@ impl GgufModelInfo {
     }
 
     pub fn architecture(&self) -> Option<&str> {
-        if self.architecture_len == 0 {
-            return None;
+        match self.architecture_reading.bytes() {
+            Some(len) => core::str::from_utf8(&self.architecture[..len]).ok(),
+            None => None,
         }
-        core::str::from_utf8(&self.architecture[..self.architecture_len]).ok()
+    }
+
+    /// `general.name`, when the file declared one the reader could hold.
+    pub fn name(&self) -> Option<&str> {
+        match self.name_reading.bytes() {
+            Some(len) => core::str::from_utf8(&self.name[..len]).ok(),
+            None => None,
+        }
+    }
+
+    /// `tokenizer.ggml.model`, when the file declared one the reader could hold.
+    pub fn tokenizer_model(&self) -> Option<&str> {
+        match self.tokenizer_model_reading.bytes() {
+            Some(len) => core::str::from_utf8(&self.tokenizer_model[..len]).ok(),
+            None => None,
+        }
+    }
+
+    /// Whether the walk returned before stepping every pair the header counted.
+    ///
+    /// WHY this is a question and not a detail: the walk stops at the vocabulary
+    /// by design, so a key it never reached is not a key the file left out. A
+    /// report that called an unreachable key "absent" would be inventing a
+    /// silence the file never had; `NotReached` is what this reading knows.
+    pub fn walk_stopped_early(&self) -> bool {
+        match self.kv_pair_count {
+            Some(total) => self.pairs_walked < total,
+            None => false,
+        }
     }
 
     /// The first parameter the file has not declared, named by the key it would
     /// have been declared under. `None` means the engine has everything it asks
     /// the file for.
     pub fn missing_key(&self) -> Option<&'static str> {
-        if self.architecture_len == 0 {
-            return Some("general.architecture");
+        match self.architecture_reading {
+            StringReading::Read(len) if len > 0 => {}
+            // A name wider than the window is still a name the file declared, and
+            // the engine matches a parameter by its last dotted segment rather
+            // than by this string, so the run does not need the bytes the reader
+            // would not hold. Calling the key missing here would tell the person
+            // the file never stated it, which is the opposite of what happened;
+            // the notice for that file says how many bytes it refused.
+            StringReading::RefusedTooLong(_) => {}
+            // A file that wrote the key and left it empty names no architecture,
+            // which is the case this arm was always for.
+            StringReading::Absent | StringReading::Read(_) => {
+                return Some("general.architecture");
+            }
         }
         if self.hidden_dim.is_none() {
             return Some("<arch>.embedding_length");
@@ -1043,11 +1134,24 @@ fn read_bool(stream: &mut GgufStream, val_type: u32) -> Result<bool, GgufError> 
 /// 12-byte header. Continuing past that to reach anything else would mean
 /// paying for the array, so a parameter a file declares after its vocabulary is
 /// reported as unreachable instead of being read half-way.
+///
+/// WHY the identity keys are gathered by this same walk: what a model *is* is a
+/// declaration inside its own metadata -- `general.name`, `general.architecture`,
+/// `tokenizer.ggml.model`, `general.file_type` -- plus the two counts the header
+/// itself states. None of them sizes the engine, so none of them joins
+/// `missing_key`: a file that names no `general.name` still configures a run. Each
+/// is carried for what the reading made of it -- held, absent, refused for width,
+/// or sitting past the walk's stop -- and `pairs_walked` against the header's own
+/// pair count is what tells "the file never named it" from "this reading did not
+/// get that far".
 pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, GgufError> {
     let header = GgufHeader::parse_stream(stream)?;
     let mut info = GgufModelInfo::empty();
+    info.tensor_count = Some(header.tensor_count);
+    info.kv_pair_count = Some(header.kv_count);
 
     for _ in 0..header.kv_count {
+        info.pairs_walked += 1;
         let key_len = stream.read_u64()? as usize;
         if key_len == 0 || key_len > MAX_METADATA_KEY_LEN {
             stream.skip(key_len)?;
@@ -1062,13 +1166,17 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
         let val_type = stream.read_u32()?;
 
         if key == b"general.architecture" {
-            let str_len = stream.read_u64()? as usize;
-            let copy_len = str_len.min(MAX_ARCH_NAME_LEN);
-            stream.read_exact(&mut info.architecture[..copy_len])?;
-            info.architecture_len = copy_len;
-            if str_len > copy_len {
-                stream.skip(str_len - copy_len)?;
-            }
+            info.architecture_reading =
+                read_bounded_string(stream, val_type, &mut info.architecture)?;
+        } else if key == b"general.name" {
+            info.name_reading = read_bounded_string(stream, val_type, &mut info.name)?;
+        } else if key == b"tokenizer.ggml.model" {
+            info.tokenizer_model_reading =
+                read_bounded_string(stream, val_type, &mut info.tokenizer_model)?;
+        } else if key == b"general.file_type" {
+            info.file_type = Some(read_count(stream, val_type)?);
+        } else if key == b"general.quantization_version" {
+            info.quantization_version = Some(read_count(stream, val_type)?);
         } else if key == b"tokenizer.ggml.tokens" {
             let elem_type = stream.read_u32()?;
             let elem_count = stream.read_u64()?;
@@ -2734,6 +2842,141 @@ mod tests {
         // token, and on a file the kernel holds on the data disk every one of those
         // remounts and rescans the inode table.
         assert_eq!(stream.position(), after_vocab_header);
+    }
+
+    #[test]
+    fn test_read_model_info_reports_the_identity_the_file_declares_for_itself() {
+        // The seven dimensions the engine asks for, plus everything the file says
+        // about itself that sizes nothing: its own name, the tokenizer family it
+        // ships, the quantisation it declares and the header's two counts.
+        let mut buf = [0u8; 1024];
+        let mut off = begin_gguf(&mut buf, 11, 3);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_string(&mut buf, &mut off, b"general.name", b"Falcon Junior");
+        put_string(&mut buf, &mut off, b"tokenizer.ggml.model", b"gemma");
+        put_count(&mut buf, &mut off, b"general.file_type", 7);
+        put_count(&mut buf, &mut off, b"general.quantization_version", 1);
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_length", 32);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+        // Three tensors are declared, and the section that holds them starts here.
+        // Without even one byte of it the file would be a truncated one, and the
+        // walk's answer would be about the fixture rather than about the model.
+        put_tensor(&mut buf, &mut off, b"token_output_weight", &[64, 290], 10, 0);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the file declares every dimension and its own name");
+        assert_eq!(info.name(), Some("Falcon Junior"));
+        assert_eq!(info.architecture(), Some("gemma2"));
+        assert_eq!(info.tokenizer_model(), Some("gemma"));
+        assert_eq!(info.file_type, Some(7));
+        assert_eq!(info.quantization_version, Some(1));
+        assert_eq!(info.tensor_count, Some(3));
+        assert_eq!(info.kv_pair_count, Some(11));
+        assert!(!info.walk_stopped_early(), "every pair was stepped");
+    }
+
+    /// A file that names no model is a file that names no model. Nothing in this
+    /// reader may answer that with the name of the file, the architecture's vendor
+    /// or the shape of the fixture, because every one of those is a model the
+    /// platform invented.
+    #[test]
+    fn test_read_model_info_reports_a_file_that_declares_no_identity() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 6);
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_length", 32);
+        // Two tokens, both written: a file with no architecture to configure the
+        // engine with never reaches the walk's stopping rule, so this one is read
+        // to the end and its silence is proved to be the file's own.
+        put_vocab(
+            &mut buf,
+            &mut off,
+            b"tokenizer.ggml.tokens",
+            2,
+            &[b"one", b"two"],
+        );
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        let partial = match result {
+            Err(GgufError::MissingMetadata(key, info)) => {
+                assert_eq!(key, "general.architecture", "the omitted key is the one named");
+                info
+            }
+            other => panic!("a file that declares no architecture must say so, got {other:?}"),
+        };
+        assert_eq!(partial.name_reading, StringReading::Absent);
+        assert_eq!(partial.architecture_reading, StringReading::Absent);
+        assert_eq!(partial.tokenizer_model_reading, StringReading::Absent);
+        assert_eq!(partial.file_type, None);
+        assert_eq!(partial.name(), None);
+        assert_eq!(partial.architecture(), None);
+        assert_eq!(partial.tokenizer_model(), None);
+        // The walk read all six pairs, so the silence above is the file's own and
+        // not this reader's stopping point.
+        assert!(!partial.walk_stopped_early());
+        assert_eq!(partial.pairs_walked, 6);
+        // The dimensions the file did state survive: an undeclared name is not an
+        // undeclared model.
+        assert_eq!(partial.hidden_dim, Some(64));
+        assert_eq!(partial.vocab_size, Some(2));
+    }
+
+    /// A name is not truncated to fit a window: the file stated a length, and the
+    /// only honest report of a value wider than the window is that width.
+    #[test]
+    fn test_read_model_info_refuses_an_identity_wider_than_its_window() {
+        let mut buf = [0u8; 512];
+        let long = [b'n'; MAX_MODEL_NAME_LEN + 12];
+        let mut off = begin_file(&mut buf, 2);
+        put_string(&mut buf, &mut off, b"general.name", &long);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        let partial = match result {
+            Err(GgufError::MissingMetadata(key, info)) => {
+                assert_eq!(key, "<arch>.embedding_length");
+                info
+            }
+            other => panic!("a file with two keys is incomplete, got {other:?}"),
+        };
+        assert_eq!(
+            partial.name_reading,
+            StringReading::RefusedTooLong((MAX_MODEL_NAME_LEN + 12) as u64)
+        );
+        assert_eq!(partial.name(), None, "a refused name was copied anyway");
+        assert_eq!(partial.architecture(), Some("gemma2"));
+        assert!(!partial.walk_stopped_early());
+    }
+
+    /// The distinction the whole type exists for: a key the walk never got to is
+    /// not a key the file left out.
+    #[test]
+    fn test_read_model_info_marks_an_identity_past_the_vocabulary_as_unreached() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 4);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 256_000, &[]);
+        put_string(&mut buf, &mut off, b"general.name", b"Named After The Walk Stopped");
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        let partial = match result {
+            Err(GgufError::MissingMetadata(_, info)) => info,
+            other => panic!("256,000 tokens must not be walked, got {other:?}"),
+        };
+        // The reading is the same one a file that named nothing answers with...
+        assert_eq!(partial.name_reading, StringReading::Absent);
+        // ...and the pair count is what tells the two files apart.
+        assert!(partial.walk_stopped_early());
+        assert_eq!(partial.pairs_walked, 3);
+        assert_eq!(partial.kv_pair_count, Some(4));
     }
 
     #[test]

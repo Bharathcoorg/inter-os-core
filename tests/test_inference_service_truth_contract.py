@@ -305,12 +305,16 @@ def test_the_notice_carries_what_the_walk_read_counted_and_refused():
     arm = generative_arm(lib)
     assert "gguf::read_tokenizer_info(path)" in arm
     assert "tokenizer.as_ref()" in arm
-    # The refusals the walk cannot speak about keep their old 240-byte window, and
-    # the scratch refusal -- three byte counts longer than the declaration it
-    # replaced -- has a window of its own.
-    assert arm.count("let mut scratch = [0u8; 448];") == 1
-    assert arm.count("let mut scratch = [0u8; 320];") == 1
-    assert arm.count("let mut scratch = [0u8; 240];") == 2
+    # Every arm writes into the one window the service names. WHY this replaced the
+    # per-arm literals (448 for the walk, 320 for the empty file, 240 twice for the
+    # refusals the walk cannot speak about): each literal had been measured against
+    # the sentence a test fixture produced, not the widest sentence the reader can
+    # be handed, and Notice cuts mid-word once its window is full. The measurement
+    # now lives in the Rust guard it is named after.
+    assert arm.count("let mut scratch = [0u8; NOTICE_WINDOW_BYTES];") == 4
+    for stale in ("[0u8; 448]", "[0u8; 320]", "[0u8; 240]", "[0u8; 512]", "[0u8; 704]"):
+        assert stale not in arm, f"an arm kept its own narrower window {stale!r}"
+    assert "const NOTICE_WINDOW_BYTES: usize = 768;" in lib
 
 
 def test_the_real_shape_is_proved_where_a_256k_array_can_be_built():
@@ -376,7 +380,16 @@ def test_a_declaration_beyond_the_engine_is_refused_not_clamped():
     inference = read("inference.rs")
     assert "ModelDeclaration(" in inference
     assert "fn fits(" in inference
-    body = function_body(inference, "pub fn from_gguf")
+    # WHY the whole signature and not the bare name: this file now carries a second
+    # `pub fn from_gguf` -- the one that builds the identity clause -- and
+    # `function_body` reads the first match it finds. Pointed at the name alone,
+    # this guard would have spent the last change checking a builder that holds no
+    # dimensions for clamps, and reported nothing.
+    body = function_body(
+        inference,
+        "pub fn from_gguf(info: &crate::gguf::GgufModelInfo) -> Result<Self, InferenceError>",
+    )
+    assert "hidden_dim" in body, "the guard is reading a function that prices no dimensions"
     for clamp in (".min(", ".max(", "unwrap_or(MAX_"):
         assert clamp not in body, f"from_gguf clamps a dimension with {clamp!r}"
     # The size answer is one computed byte budget, not a per-dimension ceiling:
@@ -598,7 +611,7 @@ def test_the_notice_is_built_without_a_heap():
     lib = lib_source()
     assert "struct Notice<'a>" in lib
     assert "fn finish(self) -> &'a [u8]" in lib
-    assert "let mut scratch = [0u8; 240];" in generative_arm(lib)
+    assert "let mut scratch = [0u8; NOTICE_WINDOW_BYTES];" in generative_arm(lib)
     assert "pub(crate) fn format_u32" in read("rag.rs")
 
 
@@ -774,7 +787,7 @@ def _tokenizer_defects(gguf: str, lib: str) -> list:
         defects.append("the notice has lost the length a refused template stated")
     if "tokenizer absent, built-in template in use" not in notice:
         defects.append("a file with no tokenizer is reported as an empty template")
-    if "let mut scratch = [0u8; 320];" not in generative_arm(lib):
+    if "let mut scratch = [0u8; NOTICE_WINDOW_BYTES];" not in generative_arm(lib):
         defects.append("the notice that carries the walk has no window of its own")
     if function_body(gguf, "pub fn missing_key").count("return Some(") != 7:
         defects.append("a tokenizer key was made mandatory, so a loadable file is now refused")

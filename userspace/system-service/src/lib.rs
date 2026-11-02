@@ -780,13 +780,138 @@ fn tokenizer_clause(tok: &gguf::GgufTokenizerInfo, notice: &mut Notice) {
     }
 }
 
+/// Writes what the file said about itself, field by field.
+///
+/// WHY every clause is a statement about one reading: the name a model is
+/// reported by used to come from the path the bytes were opened at, so a file
+/// renamed `embeddinggemma-2.gguf` was answered as EmbeddingGemma 2 whatever its
+/// own metadata claimed. Each clause here has one of five answers and they are not
+/// the same answer: the file declared it, the file named no such key, the file
+/// stated a value this reader will not hold, the value it stated is not text, or
+/// the key sits past where the walk stops. Printing a filename stem, an
+/// architecture's vendor name or the dimensions of a test fixture in place of any
+/// of those is the invented model this repository's truth rule forbids.
+///
+/// WHY the name is the clause that carries the model's name: `general.name` is the
+/// field its author filled in, and the architecture is the family the tensors are
+/// laid out for. They are both quoted, and neither is inferred.
+fn identity_clause(identity: &inference::ModelIdentity<'_>, notice: &mut Notice) {
+    use inference::{NumField, StrField};
+
+    // The first clause joins the subject with a space; every clause after it is a
+    // member of the same list and carries its own comma, so the sentence stays
+    // readable whichever of the five readings each field answers with.
+    match identity.name {
+        StrField::Declared("") => notice.word(b" named nothing"),
+        StrField::Declared(name) => {
+            notice.word(b" named ");
+            notice.word(name.as_bytes());
+        }
+        StrField::Absent => notice.word(b" names no model"),
+        StrField::RefusedTooLong(stated) => {
+            notice.word(b" name ");
+            notice.byte_count(stated);
+            notice.word(b" bytes refused");
+        }
+        StrField::NotText(stated) => {
+            notice.word(b" name ");
+            notice.byte_count(stated);
+            notice.word(b" bytes not text");
+        }
+        StrField::NotReached => notice.word(b" name past the walk's stop"),
+    }
+    match identity.architecture {
+        StrField::Declared("") => notice.word(b", states an empty architecture"),
+        StrField::Declared(arch) => {
+            notice.word(b", declares ");
+            notice.word(arch.as_bytes());
+        }
+        StrField::Absent => notice.word(b", states no architecture"),
+        StrField::RefusedTooLong(stated) => {
+            notice.word(b", architecture ");
+            notice.byte_count(stated);
+            notice.word(b" bytes refused");
+        }
+        StrField::NotText(stated) => {
+            notice.word(b", architecture ");
+            notice.byte_count(stated);
+            notice.word(b" bytes not text");
+        }
+        StrField::NotReached => notice.word(b", architecture past the walk's stop"),
+    }
+    match identity.tokenizer_model {
+        StrField::Declared("") => notice.word(b", tokenizer model empty"),
+        StrField::Declared(model) => {
+            notice.word(b", tokenizer model ");
+            notice.word(model.as_bytes());
+        }
+        StrField::Absent => notice.word(b", tokenizer model undeclared"),
+        StrField::RefusedTooLong(stated) => {
+            notice.word(b", tokenizer model ");
+            notice.byte_count(stated);
+            notice.word(b" bytes refused");
+        }
+        StrField::NotText(stated) => {
+            notice.word(b", tokenizer model ");
+            notice.byte_count(stated);
+            notice.word(b" bytes not text");
+        }
+        StrField::NotReached => notice.word(b", tokenizer model past the walk's stop"),
+    }
+    // The quantisation the file declares for its tensors, as the number the file
+    // states it by. WHY the number and not a name: the reader has no table here
+    // that would turn a `7` into "Q8_0" and report that word as the file's own.
+    match identity.quantization_type {
+        NumField::Declared(kind) => {
+            notice.word(b", quantisation type ");
+            notice.byte_count(kind);
+        }
+        NumField::Absent => notice.word(b", quantisation type undeclared"),
+        NumField::NotReached => notice.word(b", quantisation type past the walk's stop"),
+    }
+    match identity.tensor_count {
+        NumField::Declared(tensors) => {
+            notice.word(b", ");
+            notice.byte_count(tensors);
+            notice.word(b" tensors");
+        }
+        NumField::Absent | NumField::NotReached => notice.word(b", tensors uncounted"),
+    }
+    match identity.embedding_length {
+        NumField::Declared(width) => {
+            notice.word(b", embedding length ");
+            notice.byte_count(width);
+        }
+        NumField::Absent => notice.word(b", embedding length undeclared"),
+        NumField::NotReached => notice.word(b", embedding length past the walk's stop"),
+    }
+}
+
+/// The window every `model_gap_notice` is written into.
+///
+/// WHY one number for every arm: each arm used to carry its own literal, and the
+/// literal that survived was the one someone had measured against the sentence a
+/// test fixture produced, not the widest sentence the reader can be handed. The
+/// identity clause quotes the name, the architecture and the tokenizer family at
+/// the lengths `gguf` caps them to, so the worst case is set by those caps and by
+/// the digit counts of every number the notice can write -- and it is the same
+/// worst case whichever arm writes it, because the identity clause opens all of
+/// them. `test_the_longest_notice_still_fits_the_window_it_is_written_in` measures
+/// it, per arm, from the widest file the reader can report.
+///
+/// WHY 768 and not "as small as possible": the answer travels the shared-memory
+/// pipe in one `ANSWER_SLOT_BYTES` slot and the reader holds a slot, so a window
+/// at or under 1024 reaches the app whole. A narrower window that cut a sentence
+/// mid-word would be the defect this notice exists to fix.
+const NOTICE_WINDOW_BYTES: usize = 768;
+
 /// Builds the notice that answers a generative query when the model file is on
 /// the disk and nothing was run from it.
 ///
 /// WHY it quotes the file: "no local model weights loaded" was the reply a real
 /// Gemma got too, because the code that loads weights was never reached. Naming
-/// the architecture and the dimensions the file declares says which of the cases
-/// the user is in, and writes down the number the next stage has to satisfy.
+/// the identity the file declares and the dimensions it states says which of the
+/// cases the user is in, and writes down the number the next stage has to satisfy.
 /// Counting the prompt's bytes says the words arrived, which is the one thing
 /// the user can no longer infer from an answer that never came.
 ///
@@ -803,29 +928,30 @@ fn model_gap_notice<'a>(
 ) -> &'a [u8] {
     let mut notice = Notice::new(out);
     notice.word(b"Model file");
-    match info.architecture() {
-        Some(arch) => {
-            notice.word(b" declares ");
-            notice.word(arch.as_bytes());
-        }
-        None => notice.word(b" states no architecture"),
-    }
+    identity_clause(&inference::ModelIdentity::from_gguf(info), &mut notice);
     match gap {
         ModelGap::Configured | ModelGap::NoTensors => {
-            notice.word(b" at ");
-            notice.number(info.hidden_dim.unwrap_or(0));
-            notice.word(b" wide over ");
-            notice.number(info.num_layers.unwrap_or(0));
+            // WHY no `unwrap_or(0)`: a file that states no block count is not a
+            // file with zero blocks, and printing the engine's own empty number
+            // as though the file had given it is the invention this notice is for.
+            match info.num_layers {
+                Some(blocks) => {
+                    notice.word(b", over ");
+                    notice.number(blocks);
+                    notice.word(b" blocks");
+                }
+                None => notice.word(b", block count undeclared"),
+            }
             // WHY the vocabulary is named as undeclared when the file never stated
             // it: "vocabulary 0 tokens" is a number the file did not give, and a
             // stripped embedding model is the case that reads it.
             match info.vocab_size {
                 Some(tokens) => {
-                    notice.word(b" blocks, vocabulary ");
+                    notice.word(b", vocabulary ");
                     notice.number(tokens);
                     notice.word(b" tokens");
                 }
-                None => notice.word(b" blocks, vocabulary undeclared"),
+                None => notice.word(b", vocabulary undeclared"),
             }
             // WHY two endings for one shape: a file whose tensors the engine cannot
             // read and a file that holds no tensors at all call for different next
@@ -1150,15 +1276,16 @@ pub fn handle_ipc_inference_query(
                                     // the walk that can pass the vocabulary the walk
                                     // above stops at.
                                     let tokenizer = gguf::read_tokenizer_info(path).ok();
-                                    // WHY this window is wider than the one the
-                                    // branch below uses: this notice carries the
-                                    // vocabulary's count and where the template came
-                                    // from as well, and the shorter one would cut the
-                                    // sentence off mid-word. The scratch refusal adds
-                                    // three full byte counts to that sentence, so the
-                                    // window is sized for them too -- see
+                                    // WHY the window is `NOTICE_WINDOW_BYTES` and
+                                    // not a literal at this site: this arm writes
+                                    // the longest sentence the service can produce
+                                    // -- the identity clause, three byte counts and
+                                    // everything the tokenizer walk reached -- and
+                                    // every other arm writes a shorter one into the
+                                    // same window instead of its own narrower
+                                    // guess. The measurement is in
                                     // `test_the_longest_notice_still_fits_the_window_it_is_written_in`.
-                                    let mut scratch = [0u8; 448];
+                                    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
                                     let notice = model_gap_notice(
                                         &info,
                                         gap,
@@ -1174,7 +1301,7 @@ pub fn handle_ipc_inference_query(
                                     );
                                 }
                                 Err(gguf::GgufError::MissingMetadata(key, info)) => {
-                                    let mut scratch = [0u8; 240];
+                                    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
                                     let notice = model_gap_notice(
                                         &info,
                                         ModelGap::Declaration(key, None, 0),
@@ -1210,7 +1337,7 @@ pub fn handle_ipc_inference_query(
                             match gguf::read_model_info(path) {
                                 Ok(info) => {
                                     let tokenizer = gguf::read_tokenizer_info(path).ok();
-                                    let mut scratch = [0u8; 320];
+                                    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
                                     let notice = model_gap_notice(
                                         &info,
                                         ModelGap::NoTensors,
@@ -1226,7 +1353,7 @@ pub fn handle_ipc_inference_query(
                                     );
                                 }
                                 Err(gguf::GgufError::MissingMetadata(key, info)) => {
-                                    let mut scratch = [0u8; 240];
+                                    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
                                     let notice = model_gap_notice(
                                         &info,
                                         ModelGap::Declaration(key, None, 0),
@@ -1939,17 +2066,54 @@ mod tests {
     fn declared(arch: &[u8], hidden: u32, layers: u32, vocab: u32) -> gguf::GgufModelInfo {
         let mut info = gguf::GgufModelInfo::empty();
         info.architecture[..arch.len()].copy_from_slice(arch);
-        info.architecture_len = arch.len();
+        info.architecture_reading = gguf::StringReading::Read(arch.len());
         info.hidden_dim = Some(hidden);
         info.num_layers = Some(layers);
         info.vocab_size = Some(vocab);
         info
     }
 
+    /// A file that states every identity field as well as the dimensions.
+    fn declaring(
+        name: &[u8],
+        arch: &[u8],
+        tokenizer_model: &[u8],
+        file_type: u32,
+        tensors: u64,
+        hidden: u32,
+        layers: u32,
+        vocab: u32,
+    ) -> gguf::GgufModelInfo {
+        let mut info = declared(arch, hidden, layers, vocab);
+        info.name[..name.len()].copy_from_slice(name);
+        info.name_reading = gguf::StringReading::Read(name.len());
+        info.tokenizer_model[..tokenizer_model.len()].copy_from_slice(tokenizer_model);
+        info.tokenizer_model_reading = gguf::StringReading::Read(tokenizer_model.len());
+        info.file_type = Some(file_type);
+        info.quantization_version = Some(1);
+        info.tensor_count = Some(tensors);
+        info.kv_pair_count = Some(12);
+        info.pairs_walked = 12;
+        info
+    }
+
     #[test]
     fn test_model_gap_notice_quotes_the_file_and_counts_the_prompt() {
-        let info = declared(b"gemma2", 64, 2, 290);
-        let mut out = [0u8; 240];
+        // A file that names itself: the notice quotes the name its author wrote,
+        // the architecture its tensors are laid out for, the quantisation it
+        // states by number and the tensors it counted -- none of them supplied by
+        // the path the bytes were opened at.
+        let info = declaring(
+            b"EmbeddingGemma 2",
+            b"gemma2",
+            b"gpt2",
+            7,
+            196,
+            64,
+            2,
+            290,
+        );
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::Configured,
@@ -1959,7 +2123,27 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
+            b"Model file named EmbeddingGemma 2, declares gemma2, tokenizer model gpt2, quantisation type 7, 196 tensors, embedding length 64, over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
+        );
+    }
+
+    /// The same sentence for a file whose `general.name` the walk never reached a
+    /// value for: the name is reported as not stated, and no stand-in -- not the
+    /// architecture, not a vendor's model family, not the path -- takes its place.
+    #[test]
+    fn test_model_gap_notice_says_a_file_named_nothing_rather_than_naming_it_by_its_path() {
+        let info = declared(b"gemma2", 64, 2, 290);
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+        let notice = model_gap_notice(
+            &info,
+            ModelGap::Configured,
+            b"Summarize my notifications",
+            None,
+            &mut out,
+        );
+        assert_eq!(
+            notice,
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
         );
     }
 
@@ -1968,18 +2152,18 @@ mod tests {
     #[test]
     fn test_model_gap_notice_says_so_when_the_file_holds_no_tensors() {
         let info = declared(b"gemma2", 64, 2, 290);
-        let mut out = [0u8; 240];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(&info, ModelGap::NoTensors, b"hello", None, &mut out);
         assert_eq!(
             notice,
-            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 290 tokens, and holds no tensors; the prompt's 5 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 290 tokens, and holds no tensors; the prompt's 5 bytes were not answered."
         );
     }
 
     #[test]
     fn test_model_gap_notice_reports_a_declaration_beyond_the_engine() {
         let info = declared(b"gemma2", 2304, 26, 256_000);
-        let mut out = [0u8; 240];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::Declaration("<arch>.embedding_length", Some(2304), 256),
@@ -1989,13 +2173,13 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2, and states <arch>.embedding_length as 2304 against the engine's bound of 256; the prompt's 2 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 2304, and states <arch>.embedding_length as 2304 against the engine's bound of 256; the prompt's 2 bytes were not answered."
         );
     }
 
     #[test]
     fn test_model_gap_notice_names_the_key_a_file_omitted() {
-        let mut out = [0u8; 240];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &gguf::GgufModelInfo::empty(),
             ModelGap::Declaration("<arch>.block_count", None, 0),
@@ -2005,7 +2189,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file states no architecture, and states no <arch>.block_count; the prompt's 0 bytes were not answered."
+            b"Model file names no model, states no architecture, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length undeclared, and states no <arch>.block_count; the prompt's 0 bytes were not answered."
         );
     }
 
@@ -2016,7 +2200,7 @@ mod tests {
     #[test]
     fn test_the_scratch_refusal_names_the_budget_and_the_overage() {
         let info = declared(b"gemma2", 3072, 48, 256_000);
-        let mut out = [0u8; 320];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::Scratch(437_421_056, 125_829_120),
@@ -2026,7 +2210,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2, whose run needs 437421056 scratch bytes against the 125829120 byte budget, over by 311591936 bytes; the prompt's 2 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 3072, whose run needs 437421056 scratch bytes against the 125829120 byte budget, over by 311591936 bytes; the prompt's 2 bytes were not answered."
         );
     }
 
@@ -2036,7 +2220,7 @@ mod tests {
     /// smaller file when the machine is what is full.
     #[test]
     fn test_the_budget_refusal_names_the_memory_the_device_would_not_map() {
-        let mut out = [0u8; 240];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &gguf::GgufModelInfo::empty(),
             ModelGap::ScratchUnavailable,
@@ -2046,7 +2230,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file states no architecture, whose scratch the byte budget prices as fitting but the device would not map; the prompt's 0 bytes were not answered."
+            b"Model file names no model, states no architecture, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length undeclared, whose scratch the byte budget prices as fitting but the device would not map; the prompt's 0 bytes were not answered."
         );
     }
 
@@ -2070,7 +2254,7 @@ mod tests {
     #[test]
     fn test_the_notice_carries_the_counted_vocabulary_and_the_template_it_read() {
         let info = declared(b"gemma2", 64, 2, 256_000);
-        let mut out = [0u8; 320];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::Configured,
@@ -2080,7 +2264,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 28 bytes from file, bos 2 eos 1 pad 0, add-bos 1, pre gemma; the prompt's 5 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 28 bytes from file, bos 2 eos 1 pad 0, add-bos 1, pre gemma; the prompt's 5 bytes were not answered."
         );
     }
 
@@ -2091,7 +2275,7 @@ mod tests {
     fn test_the_notice_names_the_built_in_default_when_the_file_declared_no_tokenizer() {
         let mut info = declared(b"gemma2", 64, 2, 290);
         info.vocab_size = None;
-        let mut out = [0u8; 320];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::NoTensors,
@@ -2101,7 +2285,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary undeclared, and holds no tensors, tokenizer absent, built-in template in use; the prompt's 5 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary undeclared, and holds no tensors, tokenizer absent, built-in template in use; the prompt's 5 bytes were not answered."
         );
     }
 
@@ -2114,7 +2298,7 @@ mod tests {
         info.intermediate_dim = Some(128);
         info.num_heads = Some(4);
         info.head_dim = Some(16);
-        let mut out = [0u8; 320];
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
         let notice = model_gap_notice(
             &info,
             ModelGap::Configured,
@@ -2124,7 +2308,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file declares gemma2 at 64 wide over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 4096 bytes refused, no token ids; the prompt's 0 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 4096 bytes refused, no token ids; the prompt's 0 bytes were not answered."
         );
         // A refused template is not an empty one: the engine runs the default, and
         // the walk keeps the length the file gave.
@@ -2134,56 +2318,139 @@ mod tests {
         );
     }
 
-    /// WHY the worst case is measured and not assumed: `Notice` stops at the end of
-    /// its window without complaining, and a notice cut mid-sentence is a sentence
-    /// that no longer says what the file said. Every clause the walk can write is
-    /// set at once here -- the widest numbers, a counted vocabulary, a read
-    /// template, all three token ids, the flag, the pre-name and a truncation --
-    /// because that is the only shape that reaches the window's end.
+    /// The widest model file the reader can hand to a notice: every string at the
+    /// length `gguf` caps it to, and every number at the most digits it holds.
+    ///
+    /// WHY the caps and not the fixture's short names: the identity clause quotes
+    /// the bytes the file wrote, so the sentence's worst case is set by how long a
+    /// name a file is allowed to state -- not by the six characters `gemma2` takes.
+    fn widest_file() -> gguf::GgufModelInfo {
+        let mut info = gguf::GgufModelInfo::empty();
+        info.name[..].copy_from_slice(&[b'n'; gguf::MAX_MODEL_NAME_LEN]);
+        info.name_reading = gguf::StringReading::Read(gguf::MAX_MODEL_NAME_LEN);
+        info.architecture[..].copy_from_slice(&[b'a'; gguf::MAX_ARCH_NAME_LEN]);
+        info.architecture_reading = gguf::StringReading::Read(gguf::MAX_ARCH_NAME_LEN);
+        info.tokenizer_model[..].copy_from_slice(&[b't'; gguf::MAX_MODEL_NAME_LEN]);
+        info.tokenizer_model_reading = gguf::StringReading::Read(gguf::MAX_MODEL_NAME_LEN);
+        info.file_type = Some(u32::MAX);
+        info.quantization_version = Some(u32::MAX);
+        info.tensor_count = Some(u64::MAX);
+        info.hidden_dim = Some(u32::MAX);
+        info.num_layers = Some(u32::MAX);
+        info.vocab_size = Some(u32::MAX);
+        info.kv_pair_count = Some(12);
+        info.pairs_walked = 12;
+        info
+    }
+
+    /// The widest tokenizer walk: a counted vocabulary over the load cap, a
+    /// template refused at the most bytes a length can name, all three ids, the
+    /// flag, a pre-name at its cap and a truncation on the longest key the walk
+    /// holds.
+    fn widest_walk() -> gguf::GgufTokenizerInfo {
+        let mut tok = gguf::GgufTokenizerInfo::empty();
+        tok.vocab = gguf::VocabReading::Counted { elements: u32::MAX };
+        tok.bos_token_id = Some(u32::MAX);
+        tok.eos_token_id = Some(u32::MAX);
+        tok.pad_token_id = Some(u32::MAX);
+        tok.add_bos_token = Some(true);
+        tok.pre[..].copy_from_slice(&[b'p'; gguf::MAX_TOKENIZER_PRE_LEN]);
+        tok.pre_reading = gguf::StringReading::Read(gguf::MAX_TOKENIZER_PRE_LEN);
+        tok.template_reading = gguf::StringReading::RefusedTooLong(u64::MAX);
+        tok.truncated_in = Some(b"tokenizer.ggml.padding_token_id");
+        tok
+    }
+
+    /// WHY the worst case is measured and not assumed: `Notice` stops at the end
+    /// of its window without complaining, and a notice cut mid-sentence is a
+    /// sentence that no longer says what the file said. Every arm the dispatch
+    /// site can take is written here at its widest, into the window that site
+    /// hands it, because the arm a fixture happens to exercise is not the arm a
+    /// real file lands on.
     #[test]
     fn test_the_longest_notice_still_fits_the_window_it_is_written_in() {
-        let mut tok = walked_vocab_and_template();
-        tok.truncated_in = Some(b"tokenizer.ggml.tokens");
-        let info = declared(b"gemma2", 2_048, 26, 256_000);
-        let mut out = [0u8; 320];
-        let window = out.len();
-        let notice = model_gap_notice(
-            &info,
-            ModelGap::Configured,
-            b"a prompt of thirty bytes or thereabouts",
+        let info = widest_file();
+        let tok = widest_walk();
+        let widest_key: &'static str = "<arch>.attention.head_count";
+
+        // The prompt is the one number this measurement leaves short: the fixture
+        // hands an empty one, so its count writes a single digit where a `u32`'s
+        // longest answer would write ten.
+        const PROMPT_DIGIT_SLACK: usize = 10;
+
+        let measure = |label: &str, gap: ModelGap, quoted: Option<&gguf::GgufTokenizerInfo>| {
+            let mut out = [0u8; NOTICE_WINDOW_BYTES];
+            let notice = model_gap_notice(&info, gap, b"", quoted, &mut out);
+            let text = core::str::from_utf8(notice).unwrap_or("<unprintable>");
+            assert!(
+                notice.len() + PROMPT_DIGIT_SLACK <= NOTICE_WINDOW_BYTES,
+                "the {label} would not survive the {NOTICE_WINDOW_BYTES}-byte window it is \
+                 written in ({} bytes before the prompt's own digits): {text}",
+                notice.len(),
+            );
+            assert!(
+                text.ends_with("bytes were not answered."),
+                "the {label} did not reach the end of its sentence: {text}"
+            );
+            notice.len()
+        };
+
+        let scratch = measure(
+            "scratch refusal",
+            ModelGap::Scratch(usize::MAX, inference::SCRATCH_BYTE_BUDGET),
             Some(&tok),
-            &mut out,
         );
-        let text = core::str::from_utf8(notice).unwrap_or("<unprintable>");
-        assert!(
-            notice.len() < window,
-            "the {window}-byte window is exactly full, so Notice was cutting words off: {text}"
+        let configured = measure("configured tensors", ModelGap::Configured, Some(&tok));
+        let empty_file = measure("empty file", ModelGap::NoTensors, Some(&tok));
+        let unmappable = measure("unmappable scratch", ModelGap::ScratchUnavailable, Some(&tok));
+        let over_bound = measure(
+            "declaration over the bound",
+            ModelGap::Declaration(widest_key, Some(u32::MAX), usize::MAX),
+            Some(&tok),
         );
-        assert!(
-            text.ends_with("bytes were not answered."),
-            "the whole sentence did not survive the walk's clauses: {text}"
+        let omitted = measure(
+            "omitted declaration",
+            ModelGap::Declaration(widest_key, None, 0),
+            None,
         );
 
-        // The scratch refusal is the longest sentence this window carries: three
-        // byte counts at their widest on top of everything the walk adds, so it is
-        // the case the dispatch site's window is sized for.
-        let mut scratch_out = [0u8; 448];
-        let scratch_window = scratch_out.len();
-        let scratch_text = model_gap_notice(
+        // WHY the widest sentence is also checked for its fields: a guard that only
+        // measures a length goes quiet the day its fixture stops filling them, and
+        // the window would then be sized by a sentence no file can produce.
+        use alloc::string::ToString;
+        let mut widest_out = [0u8; NOTICE_WINDOW_BYTES];
+        let widest = model_gap_notice(
             &info,
             ModelGap::Scratch(usize::MAX, inference::SCRATCH_BYTE_BUDGET),
-            b"a prompt of thirty bytes or thereabouts",
+            b"",
             Some(&tok),
-            &mut scratch_out,
+            &mut widest_out,
         );
-        let scratch_text = core::str::from_utf8(scratch_text).unwrap_or("<unprintable>");
+        let widest_text = core::str::from_utf8(widest).unwrap_or("<unprintable>");
+        let quoted_name = " named ".to_string() + &"n".repeat(gguf::MAX_MODEL_NAME_LEN);
+        let quoted_arch = ", declares ".to_string() + &"a".repeat(gguf::MAX_ARCH_NAME_LEN);
         assert!(
-            scratch_text.len() < scratch_window,
-            "the {scratch_window}-byte window is exactly full, so Notice was cutting words off: {scratch_text}"
+            widest_text.contains(&quoted_name),
+            "the name the file stated is not quoted at the cap the reader holds: {widest_text}"
         );
         assert!(
-            scratch_text.ends_with("bytes were not answered."),
-            "the scratch refusal did not survive the walk's clauses: {scratch_text}"
+            widest_text.contains(&quoted_arch),
+            "the architecture the file stated is not quoted at the cap the reader holds: {widest_text}"
+        );
+
+        // WHY the arm is named rather than the largest length taken: the window's
+        // doc says the scratch refusal is the sentence it is sized for. If another
+        // arm ever grows past it, that sentence is what stops being true, and this
+        // is where it gets said.
+        assert!(
+            scratch >= configured
+                && scratch >= empty_file
+                && scratch >= unmappable
+                && scratch >= over_bound
+                && scratch >= omitted,
+            "the scratch refusal is no longer the widest arm the window is sized for: \
+             scratch {scratch}, configured {configured}, empty {empty_file}, unmappable \
+             {unmappable}, over bound {over_bound}, omitted {omitted}"
         );
     }
 

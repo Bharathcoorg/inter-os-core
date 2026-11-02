@@ -648,12 +648,18 @@ def _service_notice_bytes() -> int:
     source = (
         ROOT / "userspace" / "system-service" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")
-    widths = [
-        int(match.group(1))
-        for match in re.finditer(r"scratch\s*=\s*\[0u8;\s*(\d+)\]", source)
-    ]
-    assert widths, "the inference service builds its notices in no scratch of its own"
-    return max(widths)
+    # WHY a named window and not the per-arm literals this used to read: each arm
+    # carried its own number, measured against the sentence a fixture produced, and
+    # the widest sentence the reader can be handed is set by the caps the `gguf`
+    # reader puts on the file's own strings. All four refusals now write into the
+    # one window the service names, so that constant is the sentence's width.
+    named = re.search(r"const\s+NOTICE_WINDOW_BYTES\s*:\s*usize\s*=\s*(\d+)\s*;", source)
+    assert named, "the service no longer names the window its notices are written into"
+    window = int(named.group(1))
+    for literal in re.finditer(r"scratch\s*=\s*\[0u8;\s*(\d+)\]", source):
+        width = int(literal.group(1))
+        assert width <= window, f"an arm kept its own {width}-byte notice"
+    return window
 
 
 def _width_defects(lib: str, main: str, notice_bytes: int) -> list:

@@ -118,6 +118,188 @@ pub enum InferenceError {
 }
 
 // -----------------------------------------------------------------------------
+// The Model's Identity, as the File States It
+// -----------------------------------------------------------------------------
+
+/// How the reading answered one string field of the file's self-description.
+///
+/// WHY four states and not an `Option<&str>`: `None` cannot tell the file's
+/// silence from the reader's stopping point, and those are different answers to
+/// give a person -- one says the file names no model, the other says the walk
+/// stopped at a 262,144-entry vocabulary before it got there. A name wider than
+/// the reader's window is a third answer again (the file did state one, and not
+/// one byte of it was copied), and bytes that are not text a fourth. Collapsing
+/// any of them into "absent" reports a silence the file never had, and the whole
+/// reason this type exists is that the report has to be the file's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrField<'a> {
+    /// The file declared it and the reader holds what it said, verbatim.
+    Declared(&'a str),
+    /// The pairs the walk read name no such key.
+    Absent,
+    /// The file stated this many bytes, more than the reader holds; the walk
+    /// stepped past the value and copied none of it.
+    RefusedTooLong(u64),
+    /// The file stated this many bytes and they are not text the report can quote.
+    NotText(u64),
+    /// The key sits past where the walk stops, so this reading cannot say whether
+    /// the file names it.
+    NotReached,
+}
+
+impl<'a> StrField<'a> {
+    /// The text the file stated, and `None` for every other reading.
+    ///
+    /// WHY this is the only accessor a caller gets: the four refusals are
+    /// different facts and a caller that flattened them into `Option` would be
+    /// back to not knowing whether the file named nothing or the walk stopped
+    /// early -- which is the difference this type exists to keep.
+    pub fn held(self) -> Option<&'a str> {
+        match self {
+            Self::Declared(text) => Some(text),
+            _ => None,
+        }
+    }
+}
+
+/// How the reading answered one integer field of the file's self-description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumField {
+    /// The file stated this number under this key.
+    Declared(u64),
+    /// The metadata the walk read names no such key.
+    Absent,
+    /// Past the walk's stopping point -- see `StrField::NotReached`.
+    NotReached,
+}
+
+impl NumField {
+    /// The number the file stated, and nothing for a file that did not state one.
+    ///
+    /// WHY there is no `unwrap_or(0)` friend of this: a report that printed `0`
+    /// where the file printed nothing hands the reader a number the file gave,
+    /// which is the defect this type replaces.
+    pub fn value(self) -> Option<u64> {
+        match self {
+            Self::Declared(number) => Some(number),
+            _ => None,
+        }
+    }
+}
+
+/// What the model file says it is, taken from the file's own declarations.
+///
+/// WHY a type of its own: the service names a model in three places -- the record
+/// the probe holds, the notice that explains why a model did not run, and anything
+/// it logs about the file -- and every one of them used the path the bytes were
+/// opened at to decide what to call them. A file at
+/// `/data/models/embeddinggemma-2.gguf` that declares `general.name` "Falcon
+/// Junior" is Falcon Junior, and the platform saying otherwise is not a label
+/// choice but an invented model. This type has no path in its inputs, so there is
+/// nothing here for a filename to leak from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelIdentity<'a> {
+    /// `general.name`
+    pub name: StrField<'a>,
+    /// `general.architecture`, e.g. `gemma2`
+    pub architecture: StrField<'a>,
+    /// `tokenizer.ggml.model`
+    pub tokenizer_model: StrField<'a>,
+    /// `general.file_type` -- the quantisation the file declares for its tensors,
+    /// by the number the spec gives that type. The number is the report: the
+    /// platform has no table here that would call a `7` "Q8_0" and say so as
+    /// though the file had named the quantisation in words.
+    pub quantization_type: NumField,
+    /// `general.quantization_version`
+    pub quantization_version: NumField,
+    /// Tensor descriptors the header counted. `Absent` here means the reading
+    /// carries no header at all -- a walk over a file's metadata always has both
+    /// counts, because the header is where the walk starts.
+    pub tensor_count: NumField,
+    /// Metadata pairs the header counted, which is the number that makes an
+    /// unread key provable as unread instead of merely assumed absent.
+    pub metadata_pair_count: NumField,
+    /// `<arch>.embedding_length` -- the width the residual stream declares.
+    pub embedding_length: NumField,
+}
+
+impl<'a> ModelIdentity<'a> {
+    /// Reads the identity out of what the file declared, field by field.
+    ///
+    /// WHY an absent field stays absent: the alternative is a plausible-looking
+    /// stand-in -- the filename's stem, the architecture's vendor name, the
+    /// dimensions of whichever fixture the code was written against -- and the
+    /// platform-truth rule says a thing the file did not state is reported as not
+    /// stated, even when the invention would read better on the screen.
+    pub fn from_gguf(info: &'a crate::gguf::GgufModelInfo) -> Self {
+        let reached = !info.walk_stopped_early();
+        Self {
+            name: string_field(info.name_reading, info.name(), reached),
+            architecture: string_field(info.architecture_reading, info.architecture(), reached),
+            tokenizer_model: string_field(
+                info.tokenizer_model_reading,
+                info.tokenizer_model(),
+                reached,
+            ),
+            quantization_type: count_field(info.file_type.map(u64::from), reached),
+            quantization_version: count_field(info.quantization_version.map(u64::from), reached),
+            tensor_count: info.tensor_count.map(NumField::Declared).unwrap_or(NumField::Absent),
+            metadata_pair_count: info
+                .kv_pair_count
+                .map(NumField::Declared)
+                .unwrap_or(NumField::Absent),
+            embedding_length: count_field(info.hidden_dim.map(u64::from), reached),
+        }
+    }
+
+    /// Whether the file named itself at all: no name, no architecture and no
+    /// tokenizer family, each of them absent rather than unread.
+    ///
+    /// WHY that is worth a question: a header that parses over metadata naming
+    /// nothing is a placeholder the install left behind, and the notice for it has
+    /// to say "this file declares no identity" instead of printing a model name
+    /// the platform supplied.
+    pub fn declares_nothing(&self) -> bool {
+        matches!(
+            (self.name, self.architecture, self.tokenizer_model),
+            (StrField::Absent, StrField::Absent, StrField::Absent)
+        )
+    }
+}
+
+/// One string the walk may or may not have held.
+fn string_field<'a>(
+    reading: crate::gguf::StringReading,
+    held: Option<&'a str>,
+    reached: bool,
+) -> StrField<'a> {
+    use crate::gguf::StringReading;
+    match reading {
+        StringReading::Absent => {
+            if reached {
+                StrField::Absent
+            } else {
+                StrField::NotReached
+            }
+        }
+        StringReading::RefusedTooLong(stated) => StrField::RefusedTooLong(stated),
+        StringReading::Read(len) => match held {
+            Some(text) => StrField::Declared(text),
+            None => StrField::NotText(len as u64),
+        },
+    }
+}
+
+/// One number the walk may or may not have reached.
+fn count_field(declared: Option<u64>, reached: bool) -> NumField {
+    match declared {
+        Some(number) => NumField::Declared(number),
+        None if reached => NumField::Absent,
+        None => NumField::NotReached,
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Software Math Functions (#![no_std] without external runtime dependencies)
 // -----------------------------------------------------------------------------
 
@@ -2292,7 +2474,7 @@ pub mod tests {
         let mut info = crate::gguf::GgufModelInfo::empty();
         let arch = b"gemma2";
         info.architecture[..arch.len()].copy_from_slice(arch);
-        info.architecture_len = arch.len();
+        info.architecture_reading = crate::gguf::StringReading::Read(arch.len());
         info.hidden_dim = Some(hidden);
         info.intermediate_dim = Some(ffn);
         info.num_layers = Some(layers);
@@ -2300,6 +2482,138 @@ pub mod tests {
         info.head_dim = Some(head_dim);
         info.vocab_size = Some(vocab);
         info
+    }
+
+    // --- the identity the file declares for itself -----------------------------
+    //
+    // WHY these cases are about readings and not about names: the service used to
+    // call a model by the path its bytes were opened at, and every name below is
+    // what the file's own metadata states. `ModelIdentity::from_gguf` takes no
+    // path, so a filename has nowhere to enter the report -- and each case below
+    // refuses one of the four ways a reader can quietly invent a name anyway: the
+    // stem of the file, the architecture's vendor, the shape of the fixture, or a
+    // silence the walk never proved.
+
+    /// Completes the pair counts of a hand-written record so the reading can say
+    /// whether it got to the end of the file it describes.
+    fn walked_every_pair(info: &mut crate::gguf::GgufModelInfo, pairs: u64) {
+        info.kv_pair_count = Some(pairs);
+        info.pairs_walked = pairs;
+    }
+
+    #[test]
+    fn test_model_identity_is_the_name_the_file_gives_itself() {
+        let mut info = declared(64, 128, 2, 2, 32, 290);
+        let name = b"Falcon Junior";
+        info.name[..name.len()].copy_from_slice(name);
+        info.name_reading = crate::gguf::StringReading::Read(name.len());
+        let family = b"gemma";
+        info.tokenizer_model[..family.len()].copy_from_slice(family);
+        info.tokenizer_model_reading = crate::gguf::StringReading::Read(family.len());
+        info.file_type = Some(7);
+        info.quantization_version = Some(1);
+        info.tensor_count = Some(334);
+        walked_every_pair(&mut info, 11);
+
+        let identity = ModelIdentity::from_gguf(&info);
+        assert_eq!(identity.name, StrField::Declared("Falcon Junior"));
+        assert_eq!(identity.architecture, StrField::Declared("gemma2"));
+        assert_eq!(identity.tokenizer_model, StrField::Declared("gemma"));
+        assert_eq!(identity.quantization_type, NumField::Declared(7));
+        assert_eq!(identity.quantization_version, NumField::Declared(1));
+        assert_eq!(identity.tensor_count, NumField::Declared(334));
+        assert_eq!(identity.metadata_pair_count, NumField::Declared(11));
+        assert_eq!(identity.embedding_length, NumField::Declared(64));
+        assert!(!identity.declares_nothing());
+    }
+
+    /// A file that names no model, no tokenizer family and no quantisation is
+    /// reported as naming none of them. Every stand-in this could have used -- the
+    /// filename's stem, "gemma2" turned into the vendor's product name, the
+    /// `unknown` a placeholder file is usually shipped with -- would be the
+    /// platform describing a model the model did not describe.
+    #[test]
+    fn test_model_identity_reports_a_field_the_file_never_named_as_unnamed() {
+        let mut info = declared(64, 128, 2, 2, 32, 290);
+        walked_every_pair(&mut info, 9);
+
+        let identity = ModelIdentity::from_gguf(&info);
+        assert_eq!(identity.name, StrField::Absent);
+        assert_eq!(identity.tokenizer_model, StrField::Absent);
+        assert_eq!(identity.quantization_type, NumField::Absent);
+        assert_eq!(identity.quantization_version, NumField::Absent);
+        assert_eq!(identity.tensor_count, NumField::Absent);
+        assert_eq!(identity.metadata_pair_count, NumField::Declared(9));
+        // What the file did state stays stated, so an unnamed file is not an
+        // unread one.
+        assert_eq!(identity.architecture, StrField::Declared("gemma2"));
+        assert_eq!(identity.embedding_length, NumField::Declared(64));
+        assert!(!identity.declares_nothing(), "the architecture is declared");
+    }
+
+    #[test]
+    fn test_a_file_that_names_neither_model_nor_architecture_declares_nothing() {
+        let unread = crate::gguf::GgufModelInfo::empty();
+        let identity = ModelIdentity::from_gguf(&unread);
+        assert_eq!(identity.name, StrField::Absent);
+        assert_eq!(identity.architecture, StrField::Absent);
+        assert_eq!(identity.tokenizer_model, StrField::Absent);
+        assert!(identity.declares_nothing());
+        assert_eq!(identity.name.held(), None, "an absent name has no stand-in");
+        assert_eq!(identity.embedding_length.value(), None);
+    }
+
+    /// The two silences are not one silence: identical readings, and the header's
+    /// own pair count decides whether the file left the key out or the walk never
+    /// got that far. Collapsing them would tell the person that a real Gemma file
+    /// named no model, when what happened is that the walk stopped at a 262,144
+    /// entry vocabulary.
+    #[test]
+    fn test_model_identity_tells_an_unnamed_file_from_one_the_walk_did_not_finish() {
+        let mut finished = declared(64, 128, 2, 2, 32, 290);
+        finished.name_reading = crate::gguf::StringReading::Absent;
+        walked_every_pair(&mut finished, 40);
+        let identity = ModelIdentity::from_gguf(&finished);
+        assert_eq!(identity.name, StrField::Absent);
+        assert_eq!(identity.tokenizer_model, StrField::Absent);
+        assert_eq!(identity.quantization_type, NumField::Absent);
+        assert_eq!(identity.embedding_length, NumField::Declared(64));
+
+        let mut stopped_early = finished;
+        stopped_early.pairs_walked = 4;
+        assert!(
+            stopped_early.walk_stopped_early(),
+            "the record must know it did not finish"
+        );
+        let identity = ModelIdentity::from_gguf(&stopped_early);
+        assert_eq!(identity.name, StrField::NotReached);
+        assert_eq!(identity.tokenizer_model, StrField::NotReached);
+        assert_eq!(identity.quantization_type, NumField::NotReached);
+        assert_eq!(identity.embedding_length, NumField::Declared(64));
+        // A value the walk did hold is still held, whatever it later gave up on.
+        assert_eq!(identity.architecture, StrField::Declared("gemma2"));
+    }
+
+    /// A name the reader will not copy is reported by the length the file stated,
+    /// never as the prefix the window happened to have room for.
+    #[test]
+    fn test_model_identity_reports_a_refused_name_by_the_length_the_file_stated() {
+        let mut info = declared(64, 128, 2, 2, 32, 290);
+        walked_every_pair(&mut info, 9);
+        info.name_reading = crate::gguf::StringReading::RefusedTooLong(60);
+        let identity = ModelIdentity::from_gguf(&info);
+        assert_eq!(identity.name, StrField::RefusedTooLong(60));
+        assert_eq!(identity.name.held(), None);
+
+        // Bytes that are held but are not text are a third answer again: the file
+        // stated a length and the reader copied it, and what it copied cannot be
+        // quoted as a name.
+        let mut unprintable = info;
+        unprintable.name_reading = crate::gguf::StringReading::Read(3);
+        unprintable.name[..3].copy_from_slice(&[0xff, 0xfe, 0xfd]);
+        let identity = ModelIdentity::from_gguf(&unprintable);
+        assert_eq!(identity.name, StrField::NotText(3));
+        assert_eq!(identity.name.held(), None);
     }
 
     #[test]
