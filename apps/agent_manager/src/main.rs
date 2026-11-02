@@ -242,13 +242,15 @@ const WIDE_W: usize = GUTTER + CONTENT_W - CARD_PAD_X - (GUTTER + CARD_PAD_X);
 const MAX_RUN_BYTES: usize = std::design::outline_text::KEY_MAX;
 /// How many physical rows a wide line can have.
 ///
-/// WHY eight and not four: a wide line's rows are found by measuring, and
+/// WHY twenty and not eight: a wide line's rows are found by measuring, and
 /// the widest glyph the face has advances thirteen pixels at the caption
-/// rung, so the column carries no fewer than forty-eight bytes a row however
-/// the letters fall. Eight rows is what a whole message needs once the space
-/// a wrap leaves at a row's end is paid for; four rows left the tail of a
-/// long sentence unpainted with the bytes still in the line.
-const WIDE_ROWS: usize = 8;
+/// rung, so the column carries no fewer than the contract's measured floor of
+/// forty bytes a row however the letters fall. The transcript holds the
+/// service's whole seven-hundred-and-sixty-eight-byte notice window, and
+/// twenty rows of the floor paint it whole: 20 * 40 = 800 >= 768. Eight rows
+/// painted only 320 of the bytes the transcript kept, and the screen cut the
+/// platform's own explanation of the model file mid-word.
+const WIDE_ROWS: usize = 20;
 
 // The type scale rungs the app draws with.
 //
@@ -752,6 +754,28 @@ pub struct AgentManagerApp {
     pub clock_ok: bool,
 }
 
+// WHY at compile time: the app is a stack local in `_start`, and the user
+// stack the kernel gives an app is `USER_STACK_SIZE = 256 * 1024`
+// (kernel/src/task/user.rs). Widening the transcript to the service's whole
+// notice window widens every one of the `MAX_LINES` wide buffers with it, so
+// the cost is measured, not assumed: the app's own frame may not eat more
+// than half the stack it lives on, and the body's line array -- the term
+// that grows with `WIDE_MAX` -- is named beside it so the next widening sees
+// what it is paying for. Measured at the window's width: the app is 64.6 KiB
+// and the line array 52.9 KiB of the 256 KiB the kernel hands out, the
+// deepest chain (`_start` -> event -> `rebuild`/`layout`, and the per-pixel
+// painters) adds single-digit kilobytes on top, and `rebuild` clears its
+// lines in place so no frame ever carries a second copy of the array.
+const USER_STACK_BYTES: usize = 256 * 1024;
+const _: () = assert!(
+    core::mem::size_of::<AgentManagerApp>() * 2 <= USER_STACK_BYTES,
+    "the app's own stack frame outgrew half of the kernel's user stack"
+);
+const _: () = assert!(
+    core::mem::size_of::<Line>() * MAX_LINES * 2 <= USER_STACK_BYTES,
+    "the body's line array outgrew half of the kernel's user stack"
+);
+
 impl AgentManagerApp {
     /// Builds the app and takes the first measurement.
     pub fn new() -> Self {
@@ -1227,7 +1251,18 @@ impl AgentManagerApp {
 
     /// Rebuilds the body for the current surface.
     pub fn rebuild(&mut self) {
-        self.lines = [Line::empty(); MAX_LINES];
+        // WHY the lines are cleared in place: `MAX_LINES * size_of::<Line>()`
+        // is a body of bytes on the order of the app's own stack frame, and
+        // `self.lines = [Line::empty(); MAX_LINES]` hands the compiler a
+        // temporary that wide to build on this frame before the move. The
+        // app already lives on the entry frame; a second copy of the body
+        // on top of it, inside a callee frame, is how a widening silently
+        // eats the user stack. One line of scratch at a time, written where
+        // it belongs, costs what it costs whether or not the optimiser sees
+        // through the temporary.
+        for line in self.lines.iter_mut() {
+            *line = Line::empty();
+        }
         self.cards = [Card::empty(); MAX_CARDS];
         self.line_count = 0;
         self.card_count = 0;

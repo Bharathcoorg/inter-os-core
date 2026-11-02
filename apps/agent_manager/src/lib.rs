@@ -182,15 +182,17 @@ impl ChatRole {
 
 /// The longest message the transcript holds.
 ///
-/// WHY three hundred and twenty and not ninety-six: the platform builds its
-/// sentence about a model file inside a scratch of its own, and a transcript
-/// that holds less cuts that sentence in half and then has to report the cut
-/// its own buffer caused. The widest sentence the service builds today is the
-/// one that names a model file's vocabulary count and where its chat template
-/// came from, and it is built in a three-hundred-and-twenty-byte scratch -- so
-/// that is what the transcript holds. The painted line is sized from this
-/// number, so eight wrapped rows of the measured floor still carry it whole.
-pub const CHAT_TEXT_MAX: usize = 320;
+/// WHY it is the service's own window: the platform builds its sentence
+/// about a model file — why the model file was not run — inside a scratch it
+/// names `NOTICE_WINDOW_BYTES` (userspace/system-service/src/lib.rs), and
+/// every refusal arm writes into that one window. A transcript that holds
+/// less cuts that sentence in half and then has to report the cut its own
+/// buffer caused, which is what "Transcript holds 320 of 686 bytes." on the
+/// status strip was. The widest sentence the service can hand the reader is
+/// bounded by the window, so the transcript holds the window: 768 bytes.
+/// The painted line is sized from this number, and twenty wrapped rows of
+/// the measured floor (forty bytes a row) carry the whole held message.
+pub const CHAT_TEXT_MAX: usize = 768;
 
 /// The longest prompt the composer holds.
 pub const CHAT_PROMPT_MAX: usize = 160;
@@ -218,12 +220,11 @@ pub struct ChatMessage {
     pub text: [u8; CHAT_TEXT_MAX],
     /// How much of the text buffer the message uses.
     ///
-    /// WHY a u16 and not a byte: a byte counted to two hundred and fifty-five,
-    /// which was room enough while the transcript held two hundred and forty,
-    /// and is not room enough now that it holds the whole three-hundred-and-
-    /// twenty-byte sentence the platform can say about a model file. A length
-    /// field that cannot name the buffer it measures would report a full
-    /// message as a short one.
+    /// WHY a u16 and not a byte: a byte names lengths up to two hundred and
+    /// fifty-five, and the transcript now holds the whole seven-hundred-and-
+    /// sixty-eight-byte window the service writes its refusal sentences into.
+    /// A length field that cannot name the buffer it measures would report a
+    /// full message as a short one.
     pub text_len: u16,
 }
 
