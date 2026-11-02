@@ -438,6 +438,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
 
+    let clock = kernel::interrupts::init_timekeeping();
+    serial_println!("[OK] System clock source: {}.", clock);
     kernel::interrupts::init_pit();
     serial_println!("[OK] PIT system timer configured at {} Hz.", kernel::interrupts::SYSTEM_TICK_HZ);
 

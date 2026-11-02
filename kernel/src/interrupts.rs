@@ -30,8 +30,152 @@ pub const PIT_BASE_HZ: u32 = 1_193_182;
 pub const SYSTEM_TICK_HZ: u32 = 1_000;
 pub const PIT_DIVISOR: u16 = (PIT_BASE_HZ / SYSTEM_TICK_HZ) as u16;
 
-/// Global atomic system tick counter (incremented every PIT timer interrupt).
+/// Global atomic system tick counter (milliseconds of real time since boot).
 pub static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Real-time clock source
+// ---------------------------------------------------------------------------
+//
+// WHY the tick counter is not the number of timer interrupts: the PIT's
+// delivery is scheduled by the *host's* timer, and a host that resolves timers
+// at 15.6 ms — which is what a Windows host gives a VM unless it raises its own
+// resolution — services a 1 kHz PIT only ~64 times a second. Every timeout,
+// animation frame, event-poll deadline and gesture in this OS is denominated in
+// these ticks, so a guest that counted deliveries ran its whole clock as much
+// as 20x slower than the device it sits in: a 180 ms volume HUD held for
+// 3.6 seconds and a 100 ms `event_poll` slept for 2. The HPET main counter is a
+// free-running real-time counter that costs one MMIO read per delivery, so the
+// tick counter can advance by the milliseconds that actually passed whatever
+// rate the host delivers the timer at.
+//
+// The counter register's address is fixed by the HPET specification, and the
+// page is mapped no-cache rather than through the direct map, because the
+// bootloader's direct map covers RAM and this aperture is not RAM.
+#[cfg(not(target_os = "windows"))]
+const HPET_PHYS_BASE: u64 = 0xFED0_0000;
+/// The E1000's aperture owns the first two pages at this virtual base.
+#[cfg(not(target_os = "windows"))]
+const HPET_VIRT_BASE: u64 = 0xFFFF_9000_0010_0000;
+/// Every 64-bit HPET register sits in a 16-byte slot: the low half at the slot
+/// address, the high half four bytes above it. Writing the enable bit to 0x08
+/// instead - the offset the spec-free guess suggests - aims at a reserved hole,
+/// and the device drops it without saying so.
+#[cfg(not(target_os = "windows"))]
+const HPET_GEN_CAP_ID: usize = 0x00;
+#[cfg(not(target_os = "windows"))]
+const HPET_GEN_CFG: usize = 0x10;
+#[cfg(not(target_os = "windows"))]
+const HPET_MAIN_CNT_LO: usize = 0xF0;
+#[cfg(not(target_os = "windows"))]
+const HPET_MAIN_CNT_HI: usize = 0xF4;
+#[cfg(not(target_os = "windows"))]
+const HPET_ENABLE: u64 = 1 << 0;
+/// Femtoseconds in one millisecond, the unit the counter period is reported in.
+const FEMTOSECONDS_PER_MS: u64 = 1_000_000_000_000;
+/// A counter slower than 1 MHz cannot be divided into whole milliseconds
+/// without rounding away, and an all-ones read (no device behind the aperture)
+/// is far above this bound, so the bound doubles as the absent-device test.
+const MAX_COUNTER_PERIOD_FS: u64 = 1_000_000_000;
+/// The most time one delivery may account for. Beyond a second the vCPU was
+/// stopped rather than slow, and the clock loses that interval instead of
+/// jumping every deadline in the OS at once. The RTC owns the wall clock.
+pub const MAX_TICKS_PER_DELIVERY: u64 = 1_000;
+
+/// `0` unprobed, `1` the HPET counter, `2` timer deliveries only.
+#[cfg(not(target_os = "windows"))]
+static CLOCK_SOURCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "windows"))]
+static HPET_COUNTS_PER_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_os = "windows"))]
+static HPET_LAST_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Whole milliseconds spanned by `delta` counter steps, or `None` when the
+/// counter cannot be expressed in milliseconds at all.
+pub const fn millis_between(delta: u64, counts_per_ms: u64) -> Option<u64> {
+    if counts_per_ms < 2 {
+        return None;
+    }
+    Some(delta / counts_per_ms)
+}
+
+/// What one timer delivery does to the clock: the ticks to charge and the
+/// counter value the next delivery ages from.
+///
+/// The anchor is deliberately not `now`. Charging the whole milliseconds that
+/// passed and then ageing from wherever the counter happened to be discards the
+/// fraction of a millisecond left over, and on a host that delivers every
+/// 1.23 ms that discard is 0.23 ms per delivery - the clock runs at 813 ticks to
+/// the real second and every timeout in the OS is 23 % late, the same class of
+/// error as counting deliveries was. Leaving the leftover un-credited keeps it
+/// for the next delivery, so the average is exactly the counter's rate.
+///
+/// `Some(0)` therefore charges nothing and moves nothing rather than rounding
+/// up to one tick: a host that delivers faster than the counter resolves would
+/// otherwise run the clock faster than real time. It cannot stall it, because an
+/// interval that is too short to credit is always still in the anchor for the
+/// next delivery to collect.
+pub const fn age_clock(now: u64, previous: u64, counts_per_ms: u64) -> (u64, u64) {
+    let delta = now.wrapping_sub(previous);
+    match millis_between(delta, counts_per_ms) {
+        // Only reachable with a counter too coarse to divide into milliseconds,
+        // where a delivery is the only thing worth counting.
+        None => (1, now),
+        Some(0) => (0, previous),
+        Some(ms) if ms > MAX_TICKS_PER_DELIVERY => (MAX_TICKS_PER_DELIVERY, now),
+        Some(ms) => (ms, previous.wrapping_add(ms.wrapping_mul(counts_per_ms))),
+    }
+}
+
+/// `counts_per_ms` decoded from one HPET capability register, or `None` when
+/// the register does not describe a usable free-running counter.
+///
+/// The counter clock period is the register's upper 32 bits, in femtoseconds:
+/// QEMU composes it as `HPET_CLK_PERIOD * FS_PER_NS << 32`, and the guest this
+/// kernel boots on reads `0x00989680_8086a201` — 10,000,000 fs, the 100 MHz
+/// counter QEMU emulates. Nothing here trusts that number on its own: the
+/// caller has to watch the counter move before the clock is believed.
+pub const fn hpet_counts_per_ms(capability: u64) -> Option<u64> {
+    let period_fs = capability >> 32;
+    if period_fs == 0 || period_fs > MAX_COUNTER_PERIOD_FS {
+        return None;
+    }
+    // Rounded so a counter whose period does not divide a millisecond exactly
+    // is not biased down by a whole fraction of a step.
+    let counts = (FEMTOSECONDS_PER_MS + period_fs / 2) / period_fs;
+    if counts < 2 {
+        return None;
+    }
+    Some(counts)
+}
+
+/// One 64-bit main counter reading, stitched from the two 32-bit halves.
+///
+/// The counter is addressed as a low half and a high half four bytes apart, so
+/// a value read across a roll of the low half would otherwise come out either
+/// one whole 32-bit cycle early or late. Reading low, high, low and keeping the
+/// larger low pairs the high half with a low half it can genuinely follow: the
+/// low half only rises between the two reads unless it rolled past the high
+/// half's boundary, and when it rolled the pre-roll low is the one that belongs
+/// to this high.
+pub const fn main_count(high: u32, first_low: u32, second_low: u32) -> u64 {
+    let low = if second_low >= first_low {
+        second_low
+    } else {
+        first_low
+    };
+    ((high as u64) << 32) | low as u64
+}
+
+/// Whether a counter that moved from `previous` to `current` crossed a
+/// multiple of `period`.
+///
+/// WHY a crossing test rather than `current % period == 0`: the counter now
+/// advances in jumps, so a modulo would print only when a jump happened to
+/// land exactly on the boundary and would silently skip the rest.
+pub const fn period_crossed(previous: u64, current: u64, period: u64) -> bool {
+    period > 0 && current / period != previous / period
+}
 
 /// Dual 8259 Programmable Interrupt Controllers.
 pub static PICS: Mutex<ChainedPics> =
@@ -168,7 +312,128 @@ pub fn init_pics() {
 #[cfg(target_os = "windows")]
 pub fn init_pics() {}
 
-/// Returns the current total system timer ticks since kernel boot.
+/// Maps and enables the HPET main counter, returning its period in counts per
+/// millisecond once it has been seen to advance.
+///
+/// The counter only runs while the global enable bit is set, and firmware does
+/// not always set it, so the bit is raised here and the counter is then read
+/// twice: trusting a clock without having observed it move is a claim about a
+/// device that may not be there.
+///
+/// The error is the reason the clock fell back, because the difference between
+/// "this platform has no HPET" and "this mapping went wrong" is only visible
+/// from inside the guest that tried to read it.
+#[cfg(not(target_os = "windows"))]
+unsafe fn probe_hpet() -> Result<u64, &'static str> {
+    use crate::memory::map_mmio_region;
+    use x86_64::{PhysAddr, VirtAddr};
+
+    let mapped = map_mmio_region(
+        PhysAddr::new(HPET_PHYS_BASE),
+        0x400,
+        VirtAddr::new(HPET_VIRT_BASE),
+    )
+    .map_err(|_| "the HPET page could not be mapped")?;
+    let base = mapped.as_u64() as usize;
+    let read = |offset: usize| core::ptr::read_volatile((base + offset) as *const u64);
+    let write = |offset: usize, value: u64| {
+        core::ptr::write_volatile((base + offset) as *mut u64, value)
+    };
+    let counter = || {
+        let first_low = core::ptr::read_volatile((base + HPET_MAIN_CNT_LO) as *const u32);
+        let high = core::ptr::read_volatile((base + HPET_MAIN_CNT_HI) as *const u32);
+        let second_low = core::ptr::read_volatile((base + HPET_MAIN_CNT_LO) as *const u32);
+        main_count(high, first_low, second_low)
+    };
+
+    let capability = read(HPET_GEN_CAP_ID);
+    let counts_per_ms = hpet_counts_per_ms(capability)
+        .ok_or("the HPET capability register does not describe a usable counter period")?;
+    let config_before = read(HPET_GEN_CFG);
+    write(HPET_GEN_CFG, config_before | HPET_ENABLE);
+    let config_after = read(HPET_GEN_CFG);
+
+    // Watch for movement with a budget rather than a fixed pause: the counter
+    // steps every 10 ns, so anything that is really running will move well
+    // inside this loop, and a device that does not move is reported with the
+    // registers it answered.
+    let before = counter();
+    let mut after = before;
+    for _ in 0..200_000 {
+        after = counter();
+        if after != before {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    serial_println!(
+        "[HPET] capability 0x{:x}, cfg 0x{:x} -> 0x{:x}, {} steps/ms, counter {} -> {}",
+        capability,
+        config_before,
+        config_after,
+        counts_per_ms,
+        before,
+        after
+    );
+    if after > before {
+        Ok(counts_per_ms)
+    } else {
+        Err("the HPET main counter did not advance")
+    }
+}
+
+/// Chooses the clock the tick counter follows. Called once before the timer
+/// interrupt is unmasked, and says in plain words which clock the device
+/// actually got, because the difference shows up in every timeout the shell
+/// draws.
+#[cfg(not(target_os = "windows"))]
+pub fn init_timekeeping() -> &'static str {
+    match unsafe { probe_hpet() } {
+        Ok(counts) => {
+            HPET_COUNTS_PER_MS.store(counts, Ordering::Relaxed);
+            HPET_LAST_COUNT.store(unsafe { hpet_main_count() }, Ordering::Relaxed);
+            CLOCK_SOURCE.store(1, Ordering::Relaxed);
+            "HPET main counter: 1 tick is 1 ms of real time"
+        }
+        Err(reason) => {
+            CLOCK_SOURCE.store(2, Ordering::Relaxed);
+            serial_println!("[TIMEKEEPING] falling back: {}", reason);
+            "timer deliveries only: the device clock runs as fast as this host delivers the timer"
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn init_timekeeping() -> &'static str {
+    "host test build: no hardware clock is read"
+}
+
+/// One read of the HPET main counter, through the no-cache page it is mapped to.
+#[cfg(not(target_os = "windows"))]
+#[inline]
+unsafe fn hpet_main_count() -> u64 {
+    let base = HPET_VIRT_BASE as usize;
+    let first_low = core::ptr::read_volatile((base + HPET_MAIN_CNT_LO) as *const u32);
+    let high = core::ptr::read_volatile((base + HPET_MAIN_CNT_HI) as *const u32);
+    let second_low = core::ptr::read_volatile((base + HPET_MAIN_CNT_LO) as *const u32);
+    main_count(high, first_low, second_low)
+}
+
+/// The ticks one timer delivery should age the clock by, from the counter.
+#[cfg(not(target_os = "windows"))]
+#[inline]
+fn elapsed_ticks() -> u64 {
+    if CLOCK_SOURCE.load(Ordering::Relaxed) != 1 {
+        return 1;
+    }
+    let now = unsafe { hpet_main_count() };
+    let previous = HPET_LAST_COUNT.load(Ordering::Relaxed);
+    let (ms, anchor) = age_clock(now, previous, HPET_COUNTS_PER_MS.load(Ordering::Relaxed));
+    HPET_LAST_COUNT.store(anchor, Ordering::Relaxed);
+    ms
+}
+
+/// Returns the number of milliseconds since kernel boot.
 #[allow(dead_code)]
 pub fn get_system_ticks() -> u64 {
     SYSTEM_TICKS.load(Ordering::Relaxed)
@@ -441,12 +706,16 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let ticks = SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
-    // Periodically log heartbeat every 1000 ticks to avoid serial flood
-    if ticks > 0 && ticks % 1000 == 0 {
+    // WHY the clock is read here and not simply incremented: one delivery can
+    // stand for many milliseconds of real time, and the whole OS measures
+    // timeouts in these ticks. See the clock source at the top of this file.
+    let elapsed = elapsed_ticks();
+    let previous = SYSTEM_TICKS.fetch_add(elapsed, Ordering::Relaxed);
+    let ticks = previous.saturating_add(elapsed);
+    if period_crossed(previous, ticks, 1000) {
         serial_println!("[KERNEL TICK HEARTBEAT] System uptime: {} ticks", ticks);
     }
-    if ticks > 0 && ticks % 2000 == 0 {
+    if period_crossed(previous, ticks, 2000) {
         if let Some(sched) = crate::task::SCHEDULER.try_lock() {
             sched.dump_process_table();
         }
@@ -460,7 +729,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     crate::serial::poll_serial_rx();
 
     // Dispatch timer deadlines & wakeups to Event Reactor
-    crate::event::on_timer_tick(ticks + 1);
+    crate::event::on_timer_tick(ticks);
 
     // Preemptive multitasking time slice accounting & rescheduling
     crate::task::on_timer_tick();
@@ -555,6 +824,124 @@ extern "x86-interrupt" fn irq15_ata_secondary_handler(_stack_frame: InterruptSta
         let mut status_port = x86_64::instructions::port::PortReadOnly::<u8>::new(0x177);
         let _ = status_port.read();
         PICS.lock().notify_end_of_interrupt(47);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Real-time clock tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod timekeeping_tests {
+    use super::*;
+
+    /// One HPET capability register: the flags byte QEMU writes plus the
+    /// counter period in femtoseconds, which the register carries in its upper
+    /// 32 bits.
+    const fn capability(period_fs: u64) -> u64 {
+        (period_fs << 32) | 0x8086_a201
+    }
+
+    #[test]
+    fn a_qemu_hpet_counts_a_millisecond_in_hundred_thousand_steps() {
+        // QEMU programs 10 ns per step; a real HPET is 69.8 ns (14.318 MHz).
+        assert_eq!(hpet_counts_per_ms(capability(10_000_000)), Some(100_000));
+        assert_eq!(hpet_counts_per_ms(capability(69_845_857)), Some(14_317));
+        // The register this device booted with, read from the live guest.
+        assert_eq!(hpet_counts_per_ms(0x0098_9680_8086_a201), Some(100_000));
+    }
+
+    #[test]
+    fn an_absent_or_absurd_counter_period_is_refused() {
+        // What an unmapped aperture reads back: every bit set, so the period is
+        // 1.8e19 fs, far outside anything a clock could be.
+        assert_eq!(hpet_counts_per_ms(u64::MAX), None);
+        // A zero period is what a register that is all flags reads back.
+        assert_eq!(hpet_counts_per_ms(0x8086_a201), None);
+        // Slower than one step per microsecond cannot be divided into whole
+        // milliseconds without rounding the clock away.
+        assert_eq!(hpet_counts_per_ms(capability(2_000_000_000)), None);
+    }
+
+    #[test]
+    fn a_delivery_charges_the_milliseconds_that_actually_passed() {
+        // QEMU programs 10 ns per step; a real HPET is 69.8 ns (14.318 MHz).
+        assert_eq!(age_clock(15_600_000, 0, 100_000), (156, 15_600_000));
+        // 1.23 ms is what this host's deliveries are actually spaced by. One
+        // tick is charged and the remaining 0.23 ms stays owed, not discarded.
+        assert_eq!(age_clock(123_000, 0, 100_000), (1, 100_000));
+        assert_eq!(age_clock(246_000, 100_000, 100_000), (1, 200_000));
+    }
+
+    #[test]
+    fn ten_deliveries_at_the_measured_spacing_buy_only_the_time_that_passed() {
+        // The regression this replaces floored every delivery to one whole
+        // millisecond, so 12.3 ms of real time bought 10 ticks and each timeout
+        // in the OS ran 23 % long. Charging whole milliseconds and carrying the
+        // rest gives the counter's own rate.
+        let mut now = 0;
+        let mut anchor = 0;
+        let mut charged = 0;
+        for _ in 0..10 {
+            now += 123_000;
+            let (ms, next) = age_clock(now, anchor, 100_000);
+            charged += ms;
+            anchor = next;
+        }
+        assert_eq!(charged, 12);
+        assert_eq!(now - anchor, 30_000, "the part of a millisecond still owed");
+    }
+
+    #[test]
+    fn a_delivery_faster_than_the_counter_earns_nothing_and_loses_nothing() {
+        // A host delivering every 0.4 ms: two of them are 0.8 ms, still no whole
+        // millisecond to charge, and the third is the one that pays. Rounding
+        // each up here would run the clock faster than the device it measures.
+        assert_eq!(age_clock(40_000, 0, 100_000), (0, 0));
+        assert_eq!(age_clock(80_000, 0, 100_000), (0, 0));
+        assert_eq!(age_clock(120_000, 0, 100_000), (1, 100_000));
+    }
+
+    #[test]
+    fn a_stopped_vcpu_cannot_jump_every_deadline_at_once() {
+        // An hour of stopped counter is charged as one second and the rest is
+        // dropped: holding the remainder would spend 3 600 deliveries catching
+        // up and expire every timeout, animation and lease in the OS at once.
+        let one_hour = 3_600 * 100_000;
+        assert_eq!(age_clock(one_hour, 0, 100_000), (MAX_TICKS_PER_DELIVERY, one_hour));
+        assert_eq!(age_clock(1_000 * 100_000, 0, 100_000), (1_000, 1_000 * 100_000));
+        assert_eq!(age_clock(999 * 100_000, 0, 100_000), (999, 999 * 100_000));
+    }
+
+    #[test]
+    fn a_clock_without_a_usable_period_counts_deliveries() {
+        assert_eq!(age_clock(15_600_000, 0, 0), (1, 15_600_000));
+        assert_eq!(age_clock(15_600_000, 0, 1), (1, 15_600_000));
+    }
+
+    #[test]
+    fn two_halves_read_apart_become_the_count_that_actually_happened() {
+        // Ordinary rising: the second low is later, so it is the value.
+        assert_eq!(main_count(1, 0x0000_0100, 0x0000_0200), 0x1_0000_0200);
+        // The low half rolled over between the two reads, so the high half was
+        // captured before the roll and only the first low belongs with it.
+        // Keeping the second low here would report a count 4.29 seconds early.
+        assert_eq!(main_count(1, 0xFFFF_FFF0, 0x0000_0004), 0x1_FFFF_FFF0);
+        // Equal lows: a counter that did not move at all in the interval.
+        assert_eq!(main_count(0, 0x1234_5678, 0x1234_5678), 0x1234_5678);
+    }
+
+    #[test]
+    fn a_jumped_counter_still_prints_its_periodic_reports() {
+        // The regression this replaces was `ticks % 1000 == 0`, which only
+        // printed when a jump landed exactly on the boundary.
+        assert!(period_crossed(990, 1_500, 1_000));
+        assert!(period_crossed(0, 1, 1_000) == false);
+        assert!(period_crossed(1_000, 1_999, 1_000) == false);
+        assert!(period_crossed(1_999, 2_000, 1_000));
+        assert!(period_crossed(900, 2_100, 1_000));
+        assert!(period_crossed(5, 5, 2_000) == false);
+        assert!(period_crossed(0, 0, 0) == false);
     }
 }
 
