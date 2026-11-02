@@ -1173,3 +1173,303 @@ fn the_category_chips_share_the_band_they_are_drawn_in() {
         "the last chip runs past the band"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bottom navigation bar: the paint and the tap are one geometry
+// ---------------------------------------------------------------------------
+
+/// What a mark actually inks, reduced to the numbers that describe it.
+///
+/// WHY a walk over `mark_at` rather than a check of the declared box: the defect
+/// this closes is a control that is built into the frame plan and never read by a
+/// pixel function -- it had a geometry and showed nothing. Only asking the paint
+/// predicate itself can fail for a mark that is not drawn, so every assertion below
+/// starts from the pixels `mark_at` claims.
+struct MarkInk {
+    pixels: usize,
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+    /// Inked pixels whose tap is answered by a different control, or by none.
+    tap_mismatch: usize,
+    /// Inked pixels outside the band's rows.
+    outside_band: usize,
+}
+
+fn walk_mark(target: crate::nav::NavTarget) -> MarkInk {
+    let mut ink = MarkInk {
+        pixels: 0,
+        min_x: usize::MAX,
+        max_x: 0,
+        min_y: usize::MAX,
+        max_y: 0,
+        tap_mismatch: 0,
+        outside_band: 0,
+    };
+    for y in 0..H {
+        for x in 0..W {
+            if crate::nav::mark_at(x, y) != Some(target) {
+                continue;
+            }
+            ink.pixels += 1;
+            ink.min_x = ink.min_x.min(x);
+            ink.max_x = ink.max_x.max(x);
+            ink.min_y = ink.min_y.min(y);
+            ink.max_y = ink.max_y.max(y);
+            if crate::nav::target_at(x, y) != Some(target) {
+                ink.tap_mismatch += 1;
+            }
+            if y < crate::nav::BAND_TOP || y >= crate::nav::BAND_BOTTOM {
+                ink.outside_band += 1;
+            }
+        }
+    }
+    ink
+}
+
+const NAV_MARKS: [crate::nav::NavTarget; 3] = [
+    crate::nav::NavTarget::Back,
+    crate::nav::NavTarget::Home,
+    crate::nav::NavTarget::Recents,
+];
+
+#[test]
+fn all_three_nav_controls_are_painted() {
+    // WHY this is the first gate: two of the three controls on the committed bar
+    // answered a tap and drew nothing at all, and nothing in the suite noticed
+    // because the hit test was tested and the paint was not. A control that inks no
+    // pixel is not a control.
+    for target in NAV_MARKS {
+        let ink = walk_mark(target);
+        assert!(ink.pixels > 0, "{target:?} answers a tap and paints nothing");
+    }
+}
+
+#[test]
+fn every_nav_mark_is_painted_inside_the_band_that_answers_it() {
+    // The one assertion this module exists for: the box a person aims at is the box
+    // that answers, pixel for pixel, not on average.
+    for target in NAV_MARKS {
+        let ink = walk_mark(target);
+        assert_eq!(
+            ink.tap_mismatch,
+            0,
+            "{target:?} inks pixels another control answers"
+        );
+        assert_eq!(
+            ink.outside_band,
+            0,
+            "{target:?} inks pixels outside the band's rows"
+        );
+
+        // And inside its own third, so three marks never fuse into one blob.
+        let third = target.index() * crate::nav::THIRD_W;
+        assert!(ink.min_x >= third, "{target:?} runs left out of its third");
+        assert!(
+            ink.max_x < third + crate::nav::THIRD_W,
+            "{target:?} runs right out of its third"
+        );
+
+        // The reserved box is honest: it is exactly what the mark inks, so a painter
+        // that clips to it cannot cut the mark and a plan that reserves it reserves
+        // no more than the ink.
+        let mark = target.mark_box();
+        assert_eq!(
+            (ink.min_x, ink.max_x),
+            (mark.x, mark.x + mark.w - 1),
+            "{target:?}'s box width is not its ink"
+        );
+        assert_eq!(
+            (ink.min_y, ink.max_y),
+            (mark.y, mark.y + mark.h - 1),
+            "{target:?}'s box height is not its ink"
+        );
+    }
+}
+
+#[test]
+fn the_nav_tap_bands_are_the_committed_ones() {
+    // WHY pinned to literals: these three 240 x 60 boxes are what the runtime suites
+    // tap (`tests/test_serial_tcp.py` taps 360, 1420) and what a person's muscle
+    // memory is trained on. The marks may be re-derived; the tap may not move, so
+    // this test is the fence around it.
+    assert_eq!(crate::nav::BAND_TOP, 1380);
+    assert_eq!(crate::nav::BAND_BOTTOM, H);
+    assert_eq!(crate::nav::THIRD_W, 240);
+
+    use crate::nav::NavTarget::{Back, Home, Recents};
+    assert_eq!(crate::nav::target_at(0, 1379), None, "the row above the band is dead");
+    assert_eq!(crate::nav::target_at(0, 1380), Some(Back));
+    assert_eq!(crate::nav::target_at(239, 1439), Some(Back));
+    assert_eq!(crate::nav::target_at(240, 1380), Some(Home));
+    assert_eq!(crate::nav::target_at(479, 1439), Some(Home));
+    assert_eq!(crate::nav::target_at(480, 1380), Some(Recents));
+    assert_eq!(crate::nav::target_at(719, 1439), Some(Recents));
+    assert_eq!(crate::nav::target_at(W, 1400), None, "no column off the panel answers");
+
+    // Every pixel of the band answers exactly one control: no seam, no overlap.
+    let mut answered = 0;
+    for y in crate::nav::BAND_TOP..crate::nav::BAND_BOTTOM {
+        for x in 0..W {
+            if crate::nav::target_at(x, y).is_some() {
+                answered += 1;
+            }
+        }
+    }
+    assert_eq!(answered, crate::nav::THIRD_W * 3 * crate::nav::BAND_H);
+}
+
+#[test]
+fn the_nav_marks_are_sizes_a_person_can_see() {
+    // WHY in pixels rather than as a comment: the report from the device was "is
+    // that a fault or a button?" about a 5-row pill and a 9-row glyph. Each mark's
+    // thinnest painted dimension now has to clear a quarter of the touch target --
+    // 11 rows -- and the old pill's 5 is named here so the floor cannot be quietly
+    // lowered back to it.
+    assert!(crate::nav::MARK >= MIN_TOUCH_TARGET);
+    let floor = crate::nav::MARK / 4;
+    assert!(floor > 5, "the nav marks may not go back to the 5-row hairline");
+    for target in NAV_MARKS {
+        let ink = walk_mark(target);
+        let w = ink.max_x - ink.min_x + 1;
+        let h = ink.max_y - ink.min_y + 1;
+        assert!(w >= floor, "{target:?} is {w} columns wide, under the {floor} floor");
+        assert!(h >= floor, "{target:?} is {h} rows tall, under the {floor} floor");
+    }
+}
+
+#[test]
+fn the_back_mark_is_a_chevron_pointing_left() {
+    // WHY the shape is asserted and not assumed: "back" is a direction, and a mark
+    // symmetric about its vertical axis says nothing. The vertex is the single pixel
+    // in the leftmost column, on the centre row, and the arm tips are the two pixels
+    // in the rightmost column -- those three facts together are the arrowhead.
+    let mark = crate::nav::NavTarget::Back.mark_box();
+    let cy = crate::nav::BAND_CENTRE_Y;
+    let rows_at = |x: usize| (0..H).filter(|y| crate::nav::back_inks(x, *y)).count();
+
+    assert_eq!(rows_at(mark.x), 1, "the chevron's vertex is not one row");
+    assert_eq!(
+        (0..H).find(|y| crate::nav::back_inks(mark.x, *y)),
+        Some(cy),
+        "the vertex is not on the centre row",
+    );
+    assert_eq!(rows_at(mark.x + mark.w - 1), 2, "the chevron's tips are not two rows");
+
+    // Symmetric about the centre row: an arm that climbs must match one that falls.
+    for row in 0..mark.h / 2 {
+        let top = mark.y + row;
+        let bottom = mark.y + mark.h - 1 - row;
+        for x in 0..W {
+            assert_eq!(
+                crate::nav::back_inks(x, top),
+                crate::nav::back_inks(x, bottom),
+                "the chevron is not symmetric about row {cy} at column {x}",
+            );
+        }
+    }
+}
+
+#[test]
+fn the_recents_mark_is_an_outline_not_a_block() {
+    // WHY: a filled square reads as a swatch; the overview is a stack of frames and
+    // the affordance for it is an outline. The centre therefore stays unpainted and
+    // the ring keeps one thickness on either axis.
+    let mark = crate::nav::NavTarget::Recents.mark_box();
+    let (cx, cy) = (mark.center_x(), mark.center_y());
+    assert!(!crate::nav::recents_inks(cx, cy), "the recents mark is solid");
+    assert!(crate::nav::recents_inks(cx, mark.y), "the ring is broken at the top");
+    assert!(
+        crate::nav::recents_inks(cx, mark.y + mark.h - 1),
+        "the ring is broken at the bottom"
+    );
+    assert!(crate::nav::recents_inks(mark.x, cy), "the ring is broken at the left");
+    assert!(
+        crate::nav::recents_inks(mark.x + mark.w - 1, cy),
+        "the ring is broken at the right"
+    );
+
+    let rows = (mark.y..mark.y + mark.h)
+        .filter(|y| crate::nav::recents_inks(cx, *y))
+        .count();
+    let cols = (mark.x..mark.x + mark.w)
+        .filter(|x| crate::nav::recents_inks(*x, cy))
+        .count();
+    assert_eq!(rows, cols, "the recents ring has unequal walls");
+    assert!(
+        rows % 2 == 0 && rows / 2 >= 3,
+        "the recents ring is a {rows}-row pair, not two strokes"
+    );
+
+    // Closed as well as hollow: across the centre row the ink reads ink, clean, ink
+    // -- two runs and no gap in the loop.
+    let mut runs = 0;
+    let mut prev = false;
+    for x in mark.x..mark.x + mark.w {
+        let inked = crate::nav::recents_inks(x, cy);
+        if inked != prev {
+            runs += 1;
+            prev = inked;
+        }
+    }
+    assert_eq!(runs, 3, "the recents centre row is not wall, gap, wall");
+}
+
+#[test]
+fn the_home_mark_is_a_capsule_wider_than_it_is_tall() {
+    // WHY not a house glyph: the shell has no house raster, and drawing a shape the
+    // registry cannot name is the fiction this repo already rejects. The capsule the
+    // bar has always painted is the affordance a phone reader calls Home -- it was
+    // simply too thin to see, and now is not.
+    let bar = crate::nav::NavTarget::Home.mark_box();
+    assert!(bar.w > bar.h * 3, "the home mark is not a capsule");
+    assert_eq!(bar.w, 2 * crate::nav::MARK, "the home capsule is not derived from MARK");
+    assert_eq!(bar.center_x(), crate::nav::NavTarget::Home.centre_x());
+
+    // Rounded at both ends: the centre row is the full width and the end rows are
+    // strictly shorter, so the capsule cannot regress to a rectangle.
+    let span = |y: usize| {
+        (bar.x..bar.x + bar.w)
+            .filter(|x| crate::nav::home_inks(*x, y))
+            .count()
+    };
+    assert_eq!(span(bar.center_y()), bar.w, "the capsule is not full width at its centre");
+    assert!(span(bar.y) < bar.w, "the home capsule has square ends");
+    assert_eq!(
+        span(bar.y),
+        span(bar.y + bar.h - 1),
+        "the capsule is not symmetric about its centre row"
+    );
+}
+
+#[test]
+fn the_three_nav_marks_do_not_touch_each_other() {
+    // WHY: three marks that fuse read as one wide control, which is how a bar with
+    // three targets came to be described to the user as a button and a line.
+    let marks = [
+        crate::nav::NavTarget::Back.mark_box(),
+        crate::nav::NavTarget::Home.mark_box(),
+        crate::nav::NavTarget::Recents.mark_box(),
+    ];
+    for pair in marks.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        assert!(a.x + a.w < b.x, "two nav marks overlap: {a:?} then {b:?}");
+    }
+
+    // And no pixel is claimed by two marks: `mark_at` resolves by precedence, which
+    // would hide an overlap rather than report it.
+    for y in crate::nav::BAND_TOP..crate::nav::BAND_BOTTOM {
+        for x in 0..W {
+            let owned = [
+                crate::nav::back_inks(x, y),
+                crate::nav::home_inks(x, y),
+                crate::nav::recents_inks(x, y),
+            ]
+            .iter()
+            .filter(|inked| **inked)
+            .count();
+            assert!(owned <= 1, "({x}, {y}) is inked by {owned} nav marks");
+        }
+    }
+}

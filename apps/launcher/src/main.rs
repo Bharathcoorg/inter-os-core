@@ -4,6 +4,9 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+// The bottom navigation bar's one geometry: this binary answers taps from it and
+// `screens/home.rs` paints from it, so the two cannot disagree.
+use launcher::nav::{self, NavTarget};
 use launcher::theme::*;
 // Wallpaper catalogue shared with the Settings app that writes it.
 use std::design::walls;
@@ -2182,57 +2185,24 @@ fn press_point(input: &std::InputEvent) -> (i64, i64) {
 /// same bare literal, so the literal is what gets pinned to a name.
 const LONG_PRESS: u8 = 3;
 
-/// Topmost row of the launcher's bottom navigation band.
-///
-/// WHY 1380 and not the drawn bar's top: `screens/home.rs` fills the nav bar as
-/// `Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT)`,
-/// which is y 1376..1440, but the universal search bar above it is drawn at
-/// y 1320..1384 and its tap is answered first in the chain. Rows 1376..1380 are
-/// therefore already claimed by the surface above, and starting the band at its
-/// true top would let one press match both. Every drawn target -- the back
-/// chevron, the home pill at 1416..1423, the recents glyph -- sits inside
-/// 1380..1440, so nothing drawn falls outside this band.
-const NAV_BAR_TOP: usize = 1380;
-
-/// One of the three controls the launcher paints in its bottom navigation bar.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum NavTarget {
-    Back,
-    Home,
-    Recents,
-}
-
-/// Which drawn navigation control a completed tap selected, or `None` if the tap
-/// was nowhere near the bar.
-///
-/// WHY the bar is split into equal thirds rather than three hand-written
-/// rectangles: `screens/home.rs` places its three marks at exactly `nav.w / 6`
-/// (120), `SCREEN_WIDTH / 2` (360) and `nav.w * 5 / 6` (600), which are the
-/// centres of thirds of the 720-wide bar, and its home pill is `space::XXL * 5`
-/// (240) wide centred on 360, so it spans 240..479 -- the middle third exactly.
-/// Deriving the thirds from `SCREEN_WIDTH` therefore puts every drawn mark at the
-/// centre of its own target without restating one number the painter owns, and a
-/// future change of surface width moves the targets with it.
-///
-/// WHY this replaced two overlapping bands: the old rules were "x in 240..=480
-/// and y >= 1400 opens the overview" and "y >= 1380 and x in 520..640 opens the
-/// overview, anything else goes Home". The drawn Home pill spans y 1416..1423,
-/// so the same painted button opened Recents above y 1400 and did nothing below
-/// it, and the drawn back chevron at x 120 fell into the "anything else" arm and
-/// performed Home.
-fn nav_target_at(x: usize, y: usize) -> Option<NavTarget> {
-    if y < NAV_BAR_TOP || x >= SCREEN_WIDTH {
-        return None;
-    }
-    let third = SCREEN_WIDTH / 3;
-    Some(if x < third {
-        NavTarget::Back
-    } else if x < third * 2 {
-        NavTarget::Home
-    } else {
-        NavTarget::Recents
-    })
-}
+// The bottom navigation bar.
+//
+// WHY there is no geometry for it in this file any more: the three tap bands used
+// to be written here and the three marks painted inside them used to be written in
+// `screens/home.rs`, each from numbers that side typed for itself, and the only
+// thing holding them together was a comment claiming they agreed. What they had
+// actually drifted to is what the person on the device reported: the home pill was
+// drawn 140 x 5 at y 1418, and the back and recents marks were built into the
+// frame plan and never read by a pixel function, so the left and right thirds of
+// the bottom of the screen answered a tap and showed nothing.
+//
+// WHAT DID NOT MOVE: `launcher::nav::target_at` is the committed hit test --
+// y 1380..1440 split into three equal 240-wide thirds, which is what
+// `tests/test_serial_tcp.py` taps (360, 1420) and what a person's muscle memory is
+// trained on. This task makes the paint match the tap; it does not move the tap.
+//
+// The per-control behaviour, and why Back reports rather than re-rendering, is on
+// the arm that runs it, in the input loop.
 
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
     let draw = screen_renderer(state.current_view);
@@ -5188,15 +5158,22 @@ pub extern "C" fn _start() -> ! {
                                 // Bottom navigation bar: the three painted targets
                                 // each do the one thing they are drawn to do.
                                 //
-                                // WHY this arm replaced two overlapping bands: the
+                                // WHY the box comes from `launcher::nav`: the three
+                                // bands and the three marks are now one geometry, so
+                                // the control a person aims at is the control that
+                                // answers. The rules themselves are the ones committed
+                                // before this change -- y 1380..1440 in three equal
+                                // thirds; see the note under `const LONG_PRESS`.
+                                //
+                                // WHY this replaced two overlapping bands: the
                                 // old rules were "x in 240..=480 and y >= 1400
                                 // opens the overview" plus "y >= 1380 and x in
                                 // 520..640 opens the overview, anything else goes
-                                // Home". The drawn home pill spans y 1416..1423, so
-                                // the painted Home control opened Recents when hit
-                                // above y 1400 and did nothing at all when hit
-                                // below it, and the drawn back chevron at x 120
-                                // fell into the catch-all and performed Home.
+                                // Home". Both reached the rows the Home control is
+                                // drawn on, so the painted Home button opened Recents
+                                // above y 1400 and did nothing at all below it, and
+                                // the back control at x 120 fell into the catch-all
+                                // and performed Home.
                                 //
                                 // WHY Back reports instead of pretending: the
                                 // launcher home surface is the root of the view
@@ -5211,7 +5188,7 @@ pub extern "C" fn _start() -> ! {
                                 // 490..645, which overlaps the Recents target.
                                 // Without the gate a single press would open the
                                 // overview and then immediately the drawer.
-                                if let Some(target) = nav_target_at(x, y) {
+                                if let Some(target) = nav::target_at(x, y) {
                                     match target {
                                         NavTarget::Recents => {
                                             refresh_runtime_recents(&mut state);

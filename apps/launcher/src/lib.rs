@@ -12,6 +12,8 @@
 //! * [`theme`] — the visual language as data: colours, type scale, radii, spacing.
 //! * [`layout`] — geometry computed from counts, so the shell adapts to whatever
 //!   apps and options exist rather than asserting a fixed set.
+//! * [`nav`] — the bottom navigation bar's one geometry: the three bands a tap is
+//!   answered from and the three marks that are painted inside them.
 //! * [`text`] — glyph metrics, so centring and wrapping agree with the rasteriser.
 //! * [`search`] — the one index the search runs against, and the ranking seam a
 //!   model-backed ranker plugs into.
@@ -34,6 +36,7 @@ extern crate interos_std;
 pub use interos_std::font;
 pub mod icons;
 pub mod layout;
+pub mod nav;
 pub mod recents;
 pub use interos_std::design::outline_text;
 pub mod search;

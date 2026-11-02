@@ -43,8 +43,7 @@ use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
-    space, type_scale, Theme, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
-    SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
+    space, type_scale, Theme, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
 };
 
 /// The visual language this surface draws in.
@@ -149,10 +148,6 @@ const TILE_MAX: usize = space::XXL * 4;
 #[allow(dead_code)]
 const TILE_GUTTER: usize = space::XL;
 
-/// Height of the home gesture pill, and the gap above the bottom of the surface.
-#[allow(dead_code)]
-const GESTURE_PILL_H: usize = space::SM;
-
 /// Capacity of the formatted render-complete log line.
 pub const HOME_LOG_CAP: usize = 128;
 
@@ -212,7 +207,12 @@ fn frame() -> Frame {
         660,
         415,
     );
-    let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
+    // The band the shell answers taps from, asked of the module that owns the bar.
+    // WHY not `SCREEN_HEIGHT - NAV_BAR_HEIGHT` as this line used to read: the
+    // painter filled rows 1376..1440 while `main.rs` answered 1380..1440, so the
+    // four rows above the band were painted and dead, and the marks inside the
+    // band were positioned off a rectangle no tap agreed with.
+    let nav = launcher::nav::band();
     Frame {
         greeting,
         date_widget,
@@ -537,9 +537,9 @@ impl Run {
 
     /// As [`Run::pixel`], with the ink chosen by the caller.
     ///
-    /// WHY two of them need this: the greeting and the navigation bar are drawn
-    /// straight onto the wallpaper ramp, whose colour is a function of `y`, so their
-    /// ink cannot be settled until the pixel's row is known.
+    /// WHY the two callers need this: the weather line and the empty-deck message
+    /// are drawn straight onto the wallpaper ramp, whose colour is a function of
+    /// `y`, so their ink cannot be settled until the pixel's row is known.
     fn pixel_inked(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         self.pixel_inked_aa(px, py, ink, bg)
     }
@@ -716,11 +716,6 @@ struct Paint {
     deck: DeckPlan,
     search_magnifier: (usize, usize, i32),
     search: Run,
-    #[allow(dead_code)]
-    nav_back: Run,
-    #[allow(dead_code)]
-    nav_recents: Run,
-    nav_pill: Rect,
 }
 
 /// Deck slots this surface will hold in one frame.
@@ -936,24 +931,11 @@ fn build(state: &LauncherState) -> Paint {
         Run::whole(0, 0, LABEL_SCALE, b"", 0)
     };
 
-    let nav_scale = type_scale::CAPTION;
-    let nav_cy = f.nav.y + f.nav.h.saturating_sub(text::line_height(nav_scale)) / 2;
-    let nav_back = Run::whole(
-        (f.nav.w / 6).saturating_sub(text::measure(b"<", nav_scale) / 2),
-        nav_cy,
-        nav_scale,
-        b"<",
-        0,
-    );
-    let nav_recents = Run::whole(
-        (f.nav.w * 5 / 6).saturating_sub(text::measure(b"[]", nav_scale) / 2),
-        nav_cy,
-        nav_scale,
-        b"[]",
-        0,
-    );
-    let pill_w = 140;
-
+    // WHY the plan holds nothing for the navigation bar: its three marks are pure
+    // arithmetic on `launcher::nav::MARK`, so a `Run` per mark would have been a
+    // box built every frame for a shape the painter can answer in four adds. The
+    // plan used to carry exactly that -- a `<` glyph and a `[]` glyph, both built
+    // and neither ever read by `nav_pixel`, which drew only a five-row pill.
     Paint {
         frame: f,
         clock,
@@ -968,14 +950,6 @@ fn build(state: &LauncherState) -> Paint {
         deck,
         search_magnifier,
         search,
-        nav_back,
-        nav_recents,
-        nav_pill: Rect::new(
-            (SCREEN_WIDTH - pill_w) / 2,
-            1418,
-            pill_w,
-            5,
-        ),
         scene: state.home_wallpaper,
         scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
         wallpaper_document: state.home_wallpaper_document,
@@ -1672,17 +1646,29 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
 // Navigation
 // -----------------------------------------------------------------------------
 
+/// Paint one pixel of the bottom navigation bar, or `None` for the backdrop.
+///
+/// WHY the shape lives in `launcher::nav` and not here: this function used to own
+/// a 140 x 5 rectangle at y 1418 and the shell used to own three 240 x 60 tap
+/// bands, and the two were kept in agreement only by a comment. The marks are now
+/// one arithmetic asked of the module that also answers the tap, so a painted
+/// control and the control that answers cannot drift apart -- which is the defect
+/// this rewrite exists to close.
+///
+/// WHY one backdrop sample per mark instead of per pixel: `ink_on` flips polarity
+/// at a luminance crossover, and a graded wallpaper crosses it inside a 33-row
+/// chevron. Sampling the mark's own centre means the whole of one control is
+/// drawn in one ink, and the reads are still integer-only and heap-free.
 fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     if !f.nav.contains(x, y) {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
-
-    // Home pill, the width the theme can name and the height the shell measures.
-    if p.nav_pill.contains(x, y) {
-        return Some(ink);
-    }
-    None
+    let target = launcher::nav::mark_at(x, y)?;
+    let plate = target.mark_box();
+    Some(layout::ink_on(
+        theme,
+        backdrop_ref(p, plate.center_x(), plate.center_y()),
+    ))
 }
 
 // -----------------------------------------------------------------------------
@@ -1712,7 +1698,7 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 1390 {
+    } else if y >= launcher::nav::BAND_TOP {
         if let Some(c) = nav_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
