@@ -2817,12 +2817,23 @@ pub extern "C" fn _start() -> ! {
         // is also the only way "Today" stays true across a session that
         // crosses midnight -- but it is only ever allowed to carry a time
         // the clock actually reported.
+        //
+        // WHY the redraw follows the reading rather than the counter: the
+        // list's timestamps are minute-granular, so a per-second redraw
+        // painted the same page sixty times a minute. Measured on the guest,
+        // that made a backgrounded Notes the busiest app on the device --
+        // 129 timeslices in twelve seconds against the shell's two -- and the
+        // render it paid for was a full 720x1440 surface nobody was looking
+        // at.
         clock_counter += 1;
         if clock_counter >= 20 {
             clock_counter = 0;
-            state.now_civil = current_civil_time();
-            if state.view == ViewMode::List {
-                needs_redraw = true;
+            let read = current_civil_time();
+            if read != state.now_civil {
+                state.now_civil = read;
+                if state.view == ViewMode::List {
+                    needs_redraw = true;
+                }
             }
         }
 
