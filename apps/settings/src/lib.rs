@@ -21,6 +21,98 @@ pub const PIN_MIN_DIGITS: usize = 4;
 pub use interos_std::settings::Section;
 pub use interos_std::design::accessibility::UserTextScale;
 
+/// What the Font Scaling row says about the level it holds.
+///
+/// WHY a type and not three literals at the call site: the row's caption is a
+/// claim about the renderer -- which screens take the person's size and which
+/// keep the platform's -- and a claim written where nothing can measure it
+/// goes stale the moment a surface starts or stops honouring the rung. Held
+/// here, the same test that measures the strings against the boxes they are
+/// painted in at every level can fail when the sentence outgrows the claim.
+///
+/// WHY the scope is stated rather than implied: a setting that resized
+/// "everything" would be a lie, and a notice that only names the percentage
+/// lets a reader assume the lie.
+///
+/// WHAT THE SENTENCES ARE ALLOWED TO SAY, and this is the whole of it: the rung
+/// a level publishes moves a detail page's ROWS -- the row's height, its
+/// title's and captions' line boxes, the badge plate, and a selector's position
+/// and feedback line, all derived together through `RowBoxes::user()` -- and
+/// nothing else on the device. It does not move a screen's own title (drawn
+/// with `run_ink`, at the platform rung, whose line box the divider is derived
+/// from), not a button or segment's label (that control's height is a touch
+/// target, so its glyph is the one number in a row that must not follow the
+/// type), not the landing grid's cards, not the Sensors & Diagnostics,
+/// wallpaper or screen-lock panels (`RowBoxes::platform()`), and not any other
+/// application, which never reads this setting at all.
+///
+/// WHY "Detail page rows" and not "Detail pages": a detail page also carries a
+/// screen title and a rule under it, and both stay the ladder's. A sentence
+/// naming the page would claim the header too, and the header is the first
+/// thing on that page that does not move. WHY "Everything else" rather than a
+/// list of surfaces: a list can only name some of what stays put, and an
+/// unfinished list reads as "the rest does move"; the negative half, stated this
+/// way, is complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextScaleNotice {
+    /// The row's caption: the level as a percentage, and where it applies.
+    pub caption: &'static [u8],
+    /// The line under the selector: everything that keeps the platform's size.
+    pub scope: &'static [u8],
+    /// The row's badge: the setting took effect, in the rows it names.
+    pub badge: &'static [u8],
+}
+
+/// The notice for one level.
+pub const fn text_scale_notice(scale: UserTextScale) -> TextScaleNotice {
+    match scale {
+        UserTextScale::Compact => TextScaleNotice {
+            caption: b"Detail page rows: 80%",
+            scope: b"Everything else: 100%",
+            badge: b"APPLIED",
+        },
+        UserTextScale::Normal => TextScaleNotice {
+            caption: b"Detail page rows: 100%",
+            scope: b"Everything else: 100%",
+            badge: b"APPLIED",
+        },
+        UserTextScale::Large => TextScaleNotice {
+            caption: b"Detail page rows: 125%",
+            scope: b"Everything else: 100%",
+            badge: b"APPLIED",
+        },
+        UserTextScale::ExtraLarge => TextScaleNotice {
+            caption: b"Detail page rows: 150%",
+            scope: b"Everything else: 100%",
+            badge: b"APPLIED",
+        },
+    }
+}
+
+/// The content column a detail row paints inside: the panel less the page
+/// margin and the card's own padding on both sides.
+///
+/// WHY derived from the SDK's tokens and written down: `main.rs` gates this
+/// number against its own `DETAIL_W - 2 * ROW_PAD` at compile time, so the
+/// measurement below and the row that draws the notice cannot drift apart.
+pub const NOTICE_INNER_W: usize = std::design::viewport::LOGICAL_WIDTH
+    - 2 * std::design::spacing::GRID_24
+    - 2 * std::design::spacing::GRID_24;
+
+/// The width the notice's caption has beside its badge, at one level.
+///
+/// WHY the badge is measured at the same level: the badge is a run of the body
+/// rung inside the same row, and a row that grew its title and caption while
+/// its plate stayed the platform's size would put the caption's budget in one
+/// rung and the plate in another.
+pub fn notice_caption_max_w(badge: &[u8], level: u8) -> usize {
+    let plate = std::design::font::measure_user_scale(badge, 2, level)
+        + std::design::spacing::GRID_24;
+    NOTICE_INNER_W
+        .saturating_sub(plate)
+        .saturating_sub(std::design::spacing::GRID_16)
+}
+
 /// Dynamic Voltage and Frequency Scaling (DVFS) Governor profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerProfile {
@@ -847,6 +939,134 @@ pub enum DispatchOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notice's sentences say what the code does, in the words it is allowed
+    /// to use, and the percentage they quote is the level's own.
+    ///
+    /// WHY this is a test and not a review note: the caption is the only place on
+    /// the device where this setting states its scope, and it is the WORDING, not
+    /// the arithmetic, that can quietly become false. "Detail pages: 150%" was
+    /// such a sentence: those pages carry a screen title and a rule that stay the
+    /// platform's, and a button's label inside the very row that states the
+    /// setting stays the platform's too, so the page as named was not 150% of
+    /// anything. The pin is on the noun -- the caption names the rows, the notice
+    /// quotes the level's percentage, and the sentence cannot grow back into a
+    /// claim about a page, a screen or an application the rung does not draw.
+    #[test]
+    fn the_notice_names_the_rows_and_not_the_page() {
+        const PREFIX: &[u8] = b"Detail page rows: ";
+        assert_eq!(
+            text_scale_notice(UserTextScale::Compact).caption,
+            b"Detail page rows: 80%"
+        );
+        assert_eq!(
+            text_scale_notice(UserTextScale::Normal).caption,
+            b"Detail page rows: 100%"
+        );
+        assert_eq!(
+            text_scale_notice(UserTextScale::Large).caption,
+            b"Detail page rows: 125%"
+        );
+        assert_eq!(
+            text_scale_notice(UserTextScale::ExtraLarge).caption,
+            b"Detail page rows: 150%"
+        );
+        for level in 0..=3u8 {
+            let notice = text_scale_notice(UserTextScale::from_u8(level));
+            assert!(
+                notice.caption.starts_with(PREFIX),
+                "the notice's caption no longer names the rows the rung moves"
+            );
+            // The number in the sentence is the level's percentage, read back out
+            // of the bytes rather than written down beside them.
+            let tail = &notice.caption[PREFIX.len()..];
+            let (percent_sign, digits) = tail.split_last().unwrap();
+            assert_eq!(percent_sign, &b'%');
+            let mut quoted = 0u32;
+            for &d in digits {
+                quoted = quoted * 10 + (d - b'0') as u32;
+            }
+            assert_eq!(
+                quoted,
+                UserTextScale::from_u8(level).percentage() as u32,
+                "the caption quotes a percentage the ladder does not draw at that level"
+            );
+            assert_eq!(notice.scope, b"Everything else: 100%");
+            assert_eq!(notice.badge, b"APPLIED");
+        }
+    }
+
+    /// The notice's own margins at the level that stresses them most.
+    ///
+    /// WHY the figures are recorded here and not only compared: a fit test passes
+    /// whether a run has one pixel of room or three hundred, and only the written
+    /// margin shows a future rung eating it. Measured at level 3 (extra large),
+    /// in the caption rung, against the column the Font Scaling row actually
+    /// gives -- the row's content width less the badge plate measured at the same
+    /// level: the caption "Detail page rows: 150%" takes 283px of a 432px budget,
+    /// and the scope line "Everything else: 100%" takes 253px of the 624px column.
+    /// The gate below is the difference, not the fit.
+    #[test]
+    fn the_notice_leaves_the_row_room_at_the_largest_level() {
+        let notice = text_scale_notice(UserTextScale::ExtraLarge);
+        let caption_w = std::design::font::measure_user_scale(notice.caption, 1, 3);
+        let budget = notice_caption_max_w(notice.badge, 3);
+        assert!(
+            caption_w + 96 <= budget,
+            "the 150% caption has {}px of a {}px column left -- a sentence that \
+             fits by less than two words is one edit away from being ellipsised",
+            budget - caption_w,
+            budget
+        );
+        let scope_w = std::design::font::measure_user_scale(notice.scope, 1, 3);
+        assert!(
+            scope_w + 96 <= NOTICE_INNER_W,
+            "the scope line has {}px of the {}px column left",
+            NOTICE_INNER_W - scope_w,
+            NOTICE_INNER_W
+        );
+    }
+
+    /// The Font Scaling notice still fits the boxes it is painted in, at every
+    /// level -- including the one the row itself is drawn at when the person has
+    /// chosen the largest setting.
+    ///
+    /// WHY this is a test and not a review note: the notice is the row's
+    /// caption, so it is fitted with `fit_run` like any other run, and a
+    /// caption that does not fit is ellipsised. "Detail page rows: 150%"
+    /// arriving on the screen as "Detail page rows: 1..." is both unreadable
+    /// and, in a sentence whose job is to state a scope, a broken claim -- the
+    /// clipped text this app's rung history keeps producing. The budget is the
+    /// caption's own: the row's content column less the badge plate measured
+    /// at the same level.
+    #[test]
+    fn the_text_scale_notice_fits_the_row_that_states_it() {
+        for level in 0..=3u8 {
+            let notice = text_scale_notice(UserTextScale::from_u8(level));
+            let caption_w = std::design::font::measure_user_scale(notice.caption, 1, level);
+            let cap = notice_caption_max_w(notice.badge, level);
+            assert!(
+                caption_w <= cap,
+                "the {}% notice's caption measures {}px and the row gives it {}px",
+                UserTextScale::from_u8(level).percentage(),
+                caption_w,
+                cap
+            );
+            let scope_w = std::design::font::measure_user_scale(notice.scope, 1, level);
+            assert!(
+                scope_w <= NOTICE_INNER_W,
+                "the {}% notice's scope line measures {}px in a {}px column",
+                UserTextScale::from_u8(level).percentage(),
+                scope_w,
+                NOTICE_INNER_W
+            );
+            // The notice's own numbers are the level's, so the sentence cannot
+            // disagree with the rung the page is drawing at.
+            assert!(caption_w > 0 && scope_w > 0);
+        }
+        assert_eq!(UserTextScale::ExtraLarge.percentage(), 150);
+        assert_eq!(UserTextScale::Compact.percentage(), 80);
+    }
 
     #[test]
     fn test_sections() {

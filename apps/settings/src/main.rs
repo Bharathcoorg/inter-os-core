@@ -32,10 +32,12 @@ use settings::{
     UserTextScale,
     display_caption, handler_caption, json_i64, json_str, parse_battery_payload,
     parse_hardware_availability, parse_sensor_payload, parse_thermal_payload, stacked_height,
-    stacked_row_rect, syscall_status_name, BatteryTelemetry, DispatchOutcome, DocumentSlot,
-    HardwareAvailability, OrbState, QueryOutcome, SensorTelemetry, ThermalTelemetry,
+    stacked_row_rect, syscall_status_name, text_scale_notice, NOTICE_INNER_W, BatteryTelemetry,
+    DispatchOutcome, DocumentSlot, HardwareAvailability, OrbState, QueryOutcome, SensorTelemetry,
+    ThermalTelemetry,
 };
 
+use interos_std::design::accessibility::DynamicType;
 use interos_std::design::components;
 use interos_std::design::outline_text;
 use interos_std::design::scroll::ScrollState;
@@ -1030,17 +1032,39 @@ impl SettingsApp {
     pub fn refresh_display_settings(&mut self) {
         let mut buf = [0u8; 32];
         if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
-            let val = &buf[..n];
-            if val == b"0" || val == b"compact" || val == b"Compact" {
-                self.text_scale = UserTextScale::Compact;
-            } else if val == b"2" || val == b"large" || val == b"Large" {
-                self.text_scale = UserTextScale::Large;
-            } else if val == b"3" || val == b"extralarge" || val == b"extra_large" || val == b"ExtraLarge" {
-                self.text_scale = UserTextScale::ExtraLarge;
-            } else {
-                self.text_scale = UserTextScale::Normal;
+            // WHY the shared parser and not this app's own chain of compares: the
+            // store accepts both the digit and the word for a level, and a page
+            // that understood fewer spellings than the writer produced would read
+            // an existing preference as "unset" and quietly reset the rung. The
+            // SDK's parser is the one the writer is defined beside.
+            //
+            // WHY `if let` and not `unwrap_or(Normal)`: a value this app cannot
+            // read is not a level the person chose, and publishing a rung the
+            // store never named would resize the page on a guess. The rung the
+            // process already holds stands -- which at launch is Normal, i.e. one
+            // hundred per cent, i.e. the ladder -- and the row's notice states the
+            // percentage actually drawn rather than the string in the store.
+            if let Some(scale) = UserTextScale::from_settings_value(&buf[..n]) {
+                self.text_scale = scale;
             }
         }
+        self.publish_text_scale();
+    }
+
+    /// Hands the rung the page is drawing at to the renderer, and re-stacks the
+    /// page against the boxes that rung reserves.
+    ///
+    /// WHY a method and not a call inside the paint loop: the published cell is
+    /// read once per row that derives its geometry, and a frame that asked the
+    /// settings store per glyph would put a syscall inside the paint budget. The
+    /// rung changes when a person changes it, which is when this is called.
+    /// WHY the scroll model is refreshed here: the content height is a sum of
+    /// `row_h`, and an offset clamped against the previous rung's page height
+    /// would let the last row of a taller page sit below the band forever.
+    fn publish_text_scale(&mut self) {
+        let published = DynamicType::new(self.text_scale).publish();
+        self.text_scale = published;
+        self.refresh_scroll();
     }
 
     pub fn apply_text_scale(&mut self, scale: UserTextScale) {
@@ -1052,6 +1076,12 @@ impl SettingsApp {
             UserTextScale::ExtraLarge => b"extralarge",
         };
         let _ = std::settings_set("display.text_scale", val);
+        // WHY the publish follows the store instead of the other way round: the
+        // rung is what the screen is about to draw with, and a person who picks
+        // "Large" and sees nothing change has been told a lie by the control.
+        // The store failing keeps the setting unpersisted for the next launch;
+        // it does not keep this page at the old size.
+        self.publish_text_scale();
         std::log("[SETTINGS APP] Display text scale updated.").ok();
     }
 
@@ -1856,6 +1886,411 @@ const _: () = assert!(CAPTION_LINE_H == std::design::font::line_height(TYPE_CAPT
 const _: () = assert!(CAPTION_LINE_H < LINE_H);
 
 // -----------------------------------------------------------------------------
+// The row boxes, at the text-size level the person chose
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// The same sums, at a written-down level: what the compile-time gates measure
+// -----------------------------------------------------------------------------
+
+/// WHY these derivations exist beside [`RowBoxes`] rather than only inside it:
+/// `RowBoxes` reads the published cell at run time, and no
+/// `const _: () = assert!(...)` can read a cell a person's setting writes after
+/// the binary is built -- a layout gate that could only ever see the default
+/// level would not be a gate on the levels the setting actually has. The
+/// published helpers are this same arithmetic (`line_height_user(s)` *is*
+/// `line_height_for_user_scale(s, user_text_scale())`), so each row's painted
+/// box and the number a gate checks below are one function of a level rather
+/// than two derivations that happen to agree today.
+///
+/// The platform's rung is [`PLATFORM_LEVEL`], and [`RowBoxes::platform`] answers
+/// these functions at it -- which is what makes "adopting the published helpers
+/// changed no pixel" a compile-time fact instead of a promise.
+/// The ladder's own level: one hundred per cent, what a surface built from
+/// [`RowBoxes::platform`] draws and what a person who never touched the setting
+/// is left with.
+const PLATFORM_LEVEL: u8 = std::design::font::TEXT_SCALE_NORMAL;
+/// The largest level the setting can hold: the rung every gate below is measured
+/// at too, because a row that only fits at one hundred per cent does not fit the
+/// setting at all.
+const EXTRA_LARGE_LEVEL: u8 = std::design::font::TEXT_SCALE_EXTRA_LARGE;
+
+/// The line box rung `scale` reserves at `level`.
+const fn line_at(scale: usize, level: u8) -> usize {
+    std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The cap height a run at `scale` is inked at on `level` -- the same arithmetic
+/// [`std::design::font::cap_for_scale_user`] performs at the cached level.
+const fn cap_at(scale: usize, level: u8) -> u32 {
+    std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The em a run at `scale` is rasterised at on `level`.
+const fn em_at(scale: usize, level: u8) -> u32 {
+    std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The row's title rung's line box at `level`.
+const fn title_at(level: u8) -> usize {
+    line_at(TYPE_H3, level)
+}
+
+/// The row's caption rung's line box at `level`.
+const fn caption_at(level: u8) -> usize {
+    line_at(TYPE_CAPTION, level)
+}
+
+/// A row's caption offset at `level`: the whole title box and a step below the
+/// pad the title starts at -- the sum `ROW_CAP_DY` states at the platform's rung.
+const fn cap_dy_at(level: u8) -> usize {
+    ROW_TITLE_DY + title_at(level) + ROW_LINE_GAP
+}
+
+/// A row's second caption offset at `level`: the whole caption box and a step
+/// below the first, the sum `ROW_CAP2_DY` states.
+const fn cap2_dy_at(level: u8) -> usize {
+    cap_dy_at(level) + caption_at(level) + ROW_LINE_GAP
+}
+
+/// A single-line row's height at `level`.
+const fn row_h_at(level: u8) -> usize {
+    cap_dy_at(level) + caption_at(level) + ROW_PAD_V
+}
+
+/// A two-caption-line row's height at `level`.
+const fn tall_alt_at(level: u8) -> usize {
+    cap2_dy_at(level) + caption_at(level) + ROW_PAD_V
+}
+
+/// A selector's offset from its row's top edge at `level`.
+const fn seg_dy_at(level: u8) -> usize {
+    cap_dy_at(level) + caption_at(level) + ROW_CONTROL_GAP
+}
+
+/// A selector's feedback-line offset at `level`. The segment itself is a touch
+/// target, so its height is the rung's one number that does not follow.
+const fn seg_feedback_dy_at(level: u8) -> usize {
+    seg_dy_at(level) + SEG_H + CARD_GAP
+}
+
+/// The row carrying a selector and its feedback line, at `level`.
+const fn tall_at(level: u8) -> usize {
+    seg_feedback_dy_at(level) + title_at(level) + ROW_PAD_V
+}
+
+/// A badge plate's height at `level`: the grid step or the title's box, the
+/// larger, which is the rule `BADGE_H` states at the platform's rung.
+const fn badge_h_at(level: u8) -> usize {
+    let body = title_at(level);
+    if std::design::spacing::GRID_32 >= body {
+        std::design::spacing::GRID_32
+    } else {
+        body
+    }
+}
+
+/// A badge's top edge inside a row at `level`, centred on the caption's box.
+const fn badge_dy_at(level: u8) -> usize {
+    let plate = badge_h_at(level);
+    let box_h = caption_at(level);
+    if plate >= box_h {
+        cap_dy_at(level) - (plate - box_h) / 2
+    } else {
+        cap_dy_at(level) + (box_h - plate) / 2
+    }
+}
+
+/// A document-handler row's height at `level`.
+const fn handler_h_at(level: u8) -> usize {
+    ROW.pad * 2 + title_at(level) + caption_at(level)
+}
+
+/// A handler row's badge top edge at `level`.
+const fn handler_badge_dy_at(level: u8) -> usize {
+    let plate = badge_h_at(level);
+    let box_h = caption_at(level);
+    ROW.pad + title_at(level) - if plate >= box_h { (plate - box_h) / 2 } else { 0 }
+}
+
+// WHAT THIS BLOCK GATES, in two halves.
+//
+// Half one: at the platform's level every derived number equals the constant
+// this app drew before the setting could be read at all. Any one of these
+// failing means a page that never asked for a text size was resized by the code
+// that reads one, which is the opposite of what the published helpers promise.
+const _: () = assert!(line_at(TYPE_H3, PLATFORM_LEVEL) == LINE_H);
+const _: () = assert!(line_at(TYPE_CAPTION, PLATFORM_LEVEL) == CAPTION_LINE_H);
+const _: () = assert!(cap_dy_at(PLATFORM_LEVEL) == ROW_CAP_DY);
+const _: () = assert!(cap2_dy_at(PLATFORM_LEVEL) == ROW_CAP2_DY);
+const _: () = assert!(row_h_at(PLATFORM_LEVEL) == ROW_H);
+const _: () = assert!(tall_alt_at(PLATFORM_LEVEL) == ROW_TALL_ALT);
+const _: () = assert!(seg_dy_at(PLATFORM_LEVEL) == SEG_DY);
+const _: () = assert!(seg_feedback_dy_at(PLATFORM_LEVEL) == SEG_FEEDBACK_DY);
+const _: () = assert!(tall_at(PLATFORM_LEVEL) == ROW_TALL);
+const _: () = assert!(badge_h_at(PLATFORM_LEVEL) == BADGE_H);
+const _: () = assert!(badge_dy_at(PLATFORM_LEVEL) == BADGE_DY);
+const _: () = assert!(handler_h_at(PLATFORM_LEVEL) == HANDLER_ROW_H);
+const _: () = assert!(handler_badge_dy_at(PLATFORM_LEVEL) == HANDLER_BADGE_DY);
+// Half two: the setting really does move the box it scales. A row whose ink grew
+// while its height stayed would clip, and a row whose height grew while its ink
+// stayed is a page that got taller to say nothing -- either way the notice's
+// percentage would be a number the pixels do not back up.
+const _: () = assert!(row_h_at(EXTRA_LARGE_LEVEL) > ROW_H);
+const _: () = assert!(title_at(EXTRA_LARGE_LEVEL) > LINE_H);
+const _: () = assert!(caption_at(EXTRA_LARGE_LEVEL) > CAPTION_LINE_H);
+const _: () = assert!(row_h_at(std::design::font::TEXT_SCALE_LARGE) > ROW_H);
+
+/// WHAT THIS GATES: at every level the setting can hold, no band starts inside
+/// the band above it and no row stops reserving the whole of a band it paints.
+///
+/// WHY a loop over the four levels and not three asserts at the platform rung:
+/// the asserts the constants carry can only ever see one hundred per cent, and a
+/// text-size setting is precisely the case where the level changes. A caption
+/// that clears its title at 100% and rides into it at 150% is the defect this
+/// app has had to be asked to fix repeatedly, and the platform rung cannot show
+/// it. The bands are compared against the boxes the rungs actually reserve, so a
+/// rung whose line box grew and whose step did not is caught here, at compile
+/// time, and not on a screen.
+const fn bands_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        // A caption starts only once the title's whole box is behind it.
+        if ROW_TITLE_DY + title_at(level) > cap_dy_at(level) {
+            return false;
+        }
+        // A second caption starts only once the first's whole box is behind it.
+        if cap_dy_at(level) + caption_at(level) > cap2_dy_at(level) {
+            return false;
+        }
+        // A row reserves the whole of every band it paints, and the pad below.
+        if cap_dy_at(level) + caption_at(level) > row_h_at(level) {
+            return false;
+        }
+        if cap2_dy_at(level) + caption_at(level) > tall_alt_at(level) {
+            return false;
+        }
+        // A badge plate stays inside the row that carries it, and does not rise
+        // into the title band it is not centred on.
+        if badge_dy_at(level) + badge_h_at(level) > row_h_at(level) {
+            return false;
+        }
+        if badge_dy_at(level) < ROW_TITLE_DY + title_at(level) {
+            return false;
+        }
+        // A selector and its feedback line stay inside the row that carries them,
+        // and the feedback line starts below the segment rather than on it.
+        if seg_dy_at(level) + SEG_H > seg_feedback_dy_at(level) {
+            return false;
+        }
+        if seg_feedback_dy_at(level) + title_at(level) > tall_at(level) {
+            return false;
+        }
+        // A document-handler row holds its two bands and its plate.
+        if ROW.pad + title_at(level) + caption_at(level) > handler_h_at(level) {
+            return false;
+        }
+        if handler_badge_dy_at(level) + badge_h_at(level) > handler_h_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(bands_clear_at_every_level());
+
+/// The line boxes a row lays its title, its caption and its badge out with.
+///
+/// WHY a value and not the two constants just above them: the constants are the
+/// ladder at the platform's own level, and a layout built only from constants
+/// cannot follow a setting a person changes after the binary is compiled. The
+/// row heights in this app are derived -- `ROW_H` is pads, a title box, a step
+/// and a caption box -- so the derivation is what has to be asked at the
+/// published rung. A row that took its *ink* from the published rung and kept
+/// its *box* from the constant would clip the descenders of the very run it
+/// enlarged, which is the defect every rung raise in this app's history has had
+/// to be followed by; this type is the one place a row asks "what box does this
+/// rung reserve here" and gets the answer from the same rung the ink is drawn
+/// at. Ink and box therefore move together or not at all.
+///
+/// WHY two constructors: `user()` is for a surface whose geometry is a stack of
+/// derived row boxes -- the detail pages, which scroll, so a taller row is a
+/// taller page rather than an overflow. `platform()` is for a surface whose
+/// canvas is fixed by something other than its text: the landing grid, which
+/// has nothing to scroll and would run off the panel, and the wallpaper,
+/// screen-lock and Sensors & Diagnostics cards, whose controls sit at
+/// touch-target heights a type rung must not move. A surface built from
+/// `platform()` keeps the ladder's boxes and therefore, since the ink follows
+/// the box, the ladder's ink.
+///
+/// WHY every method is one of the const derivations above, asked at
+/// [`RowBoxes::level`]: the gate that proves a row still reserves the whole of
+/// the band it paints has to see the same arithmetic the painter sees, and a
+/// level is the only thing that differs between the two rungs.
+#[derive(Clone, Copy)]
+struct RowBoxes {
+    /// Whether these boxes follow the published text-size level.
+    u: bool,
+}
+
+impl RowBoxes {
+    /// The boxes of a surface that follows the person's text-size setting.
+    #[inline]
+    const fn user() -> Self {
+        Self { u: true }
+    }
+
+    /// The boxes of a surface that keeps the platform's ladder.
+    #[inline]
+    const fn platform() -> Self {
+        Self { u: false }
+    }
+
+    /// The level these boxes are drawn at.
+    ///
+    /// WHY this is the one place the published cell is read: a surface either
+    /// follows the person's setting, in which case its boxes and its ink come
+    /// from the rung it published, or it keeps the platform's ladder, in which
+    /// case its level is [`PLATFORM_LEVEL`] and every number below is the
+    /// constant it was before this type existed. A row cannot take a scaled
+    /// title and an unscaled caption, because there is only one place a level
+    /// enters and one sum each box is made of.
+    #[inline]
+    fn level(&self) -> u8 {
+        if self.u {
+            std::design::font::user_text_scale()
+        } else {
+            PLATFORM_LEVEL
+        }
+    }
+
+    /// The row's title line box (the body rung).
+    ///
+    /// WHY this is the rung's box and not a number the row remembers: the badge
+    /// plate centres its glyph run on it and a handler row puts its caption under
+    /// it, so a plate that grew with the type and a caption that did not are the
+    /// same clipped-text defect the gates above are written against.
+    #[inline]
+    fn title(&self) -> usize {
+        title_at(self.level())
+    }
+
+    /// A row's upper pad: whitespace, not type, so the rung does not move it.
+    ///
+    /// WHY the named offset and not the pad it is defined from: `ROW_TITLE_DY` is
+    /// the number the first band of every row starts at, and the sums below are
+    /// the same sums that constant is defined by -- so the row's painted bands
+    /// and the offsets the gates above clear against one another are one chain,
+    /// not two that happen to agree.
+    #[inline]
+    fn title_dy(&self) -> usize {
+        ROW_TITLE_DY
+    }
+
+    /// Caption offset from a row's top edge: the same advance rule as
+    /// `ROW_CAP_DY`, at this surface's rung.
+    #[inline]
+    fn cap_dy(&self) -> usize {
+        cap_dy_at(self.level())
+    }
+
+    /// Second caption line's offset, at this surface's rung.
+    #[inline]
+    fn cap2_dy(&self) -> usize {
+        cap2_dy_at(self.level())
+    }
+
+    /// A single-line row's height at this surface's rung.
+    #[inline]
+    fn h(&self) -> usize {
+        row_h_at(self.level())
+    }
+
+    /// A two-caption-line row's height at this surface's rung.
+    #[inline]
+    fn tall_alt(&self) -> usize {
+        tall_alt_at(self.level())
+    }
+
+    /// A selector's offset from its row's top edge, at this surface's rung.
+    #[inline]
+    fn seg_dy(&self) -> usize {
+        seg_dy_at(self.level())
+    }
+
+    /// A selector's feedback line: below the segment itself, whose height is a
+    /// touch target and therefore does not follow the rung.
+    #[inline]
+    fn seg_feedback_dy(&self) -> usize {
+        seg_feedback_dy_at(self.level())
+    }
+
+    /// The row that carries a selector and its feedback line.
+    #[inline]
+    fn tall(&self) -> usize {
+        tall_at(self.level())
+    }
+
+    /// A badge plate's height: the grid step or the title's box, whichever is
+    /// larger -- the rule `BADGE_H` states at the platform's rung.
+    #[inline]
+    fn badge_h(&self) -> usize {
+        badge_h_at(self.level())
+    }
+
+    /// A badge's top edge inside a row, centred on the caption's box.
+    #[inline]
+    fn badge_dy(&self) -> usize {
+        badge_dy_at(self.level())
+    }
+
+    /// A document-handler row's height: the platform's list-row padding around
+    /// two line boxes, at this surface's rung.
+    #[inline]
+    fn handler_h(&self) -> usize {
+        handler_h_at(self.level())
+    }
+
+    /// A handler row's badge, centred on its caption line the same way.
+    #[inline]
+    fn handler_badge_dy(&self) -> usize {
+        handler_badge_dy_at(self.level())
+    }
+
+    /// The advance a run takes in a row laid out with these boxes.
+    #[inline]
+    fn w(&self, text: &[u8], scale: usize, bold: bool) -> usize {
+        run_w_at(text, scale, bold, self.level())
+    }
+
+    /// Paints a run inside the line box these boxes reserve for it.
+    ///
+    /// WHY the painter is a method of the boxes rather than a free function
+    /// with a flag: the band a run may ink inside and the size the run is
+    /// inked at are one decision, and a call site that took the box from this
+    /// type and the ink from the ladder is the bug this type exists to make
+    /// unrepresentable. Every run drawn in a row built from these boxes goes
+    /// through here.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn ink(
+        &self,
+        x: usize,
+        y: usize,
+        x0: usize,
+        y0: usize,
+        scale: usize,
+        text: &[u8],
+        max_w: usize,
+        color: u32,
+        bg: u32,
+        bold: bool,
+    ) -> Option<u32> {
+        run_ink_at(x, y, x0, y0, scale, text, max_w, color, bg, bold, self.level())
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Layout constants (spacing, radius and touch targets from the SDK tokens)
 // -----------------------------------------------------------------------------
 
@@ -2066,6 +2501,12 @@ const DETAIL_X: usize = CONTENT_X;
 const DETAIL_W: usize = CONTENT_W;
 /// Horizontal padding inside a row card.
 const ROW_PAD: usize = MARGIN;
+// WHY this gate exists: the notice's fit is measured in the lib against
+// `NOTICE_INNER_W`, and the row that paints the notice gives its runs
+// `DETAIL_W - 2 * ROW_PAD`. Two numbers for one column is two columns the
+// moment a margin moves, and the measurement would then certify a width no
+// painter uses. The gate is what makes the test's budget the row's budget.
+const _: () = assert!(NOTICE_INNER_W == DETAIL_W - 2 * ROW_PAD);
 /// Vertical padding of a row card.
 ///
 /// WHY 32 and not the 16 a dense settings list would use: the smallest text rung
@@ -2325,27 +2766,60 @@ const SL_NOTE_Y: usize = SL_ACTION_Y + SL_ACTION_H + CARD_GAP;
 /// Minimum digits the account layer will accept for a PIN.
 const SL_MIN_DIGITS: usize = 4;
 
+/// The advance a run takes at `scale`, at the level `level` names.
+///
+/// WHY the level is a number the caller already holds and not a flag: measuring
+/// and drawing have to be answered by the same rung as the box the run sits in,
+/// or a run measured at the platform's size gets fitted to a box the published
+/// size no longer matches. `RowBoxes::platform` answers
+/// [`PLATFORM_LEVEL`], and at that level this is the ladder's own `measure` --
+/// the number this app measured before the setting could be read at all -- so a
+/// surface that keeps the ladder cannot drift from it by construction.
 #[inline]
-fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
-    if bold {
-        std::design::font::measure_bold(text, scale)
+fn run_w_at(text: &[u8], scale: usize, bold: bool, level: u8) -> usize {
+    if level == PLATFORM_LEVEL {
+        if bold {
+            std::design::font::measure_bold(text, scale)
+        } else {
+            std::design::font::measure(text, scale)
+        }
+    } else if bold {
+        std::design::font::measure_bold_user_scale(text, scale, level)
     } else {
-        std::design::font::measure(text, scale)
+        std::design::font::measure_user_scale(text, scale, level)
     }
 }
 
+#[inline]
+fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
+    run_w_at(text, scale, bold, PLATFORM_LEVEL)
+}
+
 /// Copies `text` into `out`, appending an ellipsis when it does not fit
-/// `max_w` at `scale` in the given weight. Returns the number of bytes
-/// written (0 when even the ellipsis itself cannot fit, so the caller draws
-/// nothing rather than a sliced word).
-fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) -> usize {
-    if run_w(text, scale, bold) <= max_w {
+/// `max_w` at `scale` on the rung `level` names, in the given weight. Returns
+/// the number of bytes written (0 when even the ellipsis itself cannot fit, so
+/// the caller draws nothing rather than a sliced word).
+///
+/// WHY the cut has to follow the rung: the budget is the width of the box the
+/// row reserved, and the advances are compared against it one glyph at a time.
+/// Cutting a run that is being drawn at a scaled em with the platform's
+/// advances keeps glyphs that no longer fit -- the ellipsis lands past the
+/// card's edge, which is the overflow the fitting pass exists to prevent.
+fn fit_run_at(
+    text: &[u8],
+    scale: usize,
+    max_w: usize,
+    bold: bool,
+    out: &mut [u8],
+    level: u8,
+) -> usize {
+    if run_w_at(text, scale, bold, level) <= max_w {
         let n = text.len().min(out.len());
         out[..n].copy_from_slice(&text[..n]);
         return n;
     }
     const DOTS: &[u8] = b"...";
-    let dots_w = run_w(DOTS, scale, bold);
+    let dots_w = run_w_at(DOTS, scale, bold, level);
     if dots_w > max_w || out.len() < 3 {
         return 0;
     }
@@ -2356,13 +2830,13 @@ fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) 
     // less than halfway across the space they had. A byte the face has no
     // glyph for still walks the bitmap's advance, or the cursor would never
     // reach the end of the budget.
-    let em = std::design::font::em_for_scale(scale);
+    let em = em_at(scale, level);
     let mut used = 0usize;
     let mut fit = 0usize;
     for (i, &c) in text.iter().enumerate() {
         let mut adv = std::design::typeface::advance_px(c, em) as usize;
         if adv == 0 {
-            adv = std::design::font::advance_of(c, bold) * scale;
+            adv = cell_advance(c, bold, scale, level);
         }
         if used + adv > budget || fit + 3 > out.len() {
             break;
@@ -2373,6 +2847,29 @@ fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) 
     out[..fit].copy_from_slice(&text[..fit]);
     out[fit..fit + 3].copy_from_slice(DOTS);
     fit + 3
+}
+
+/// The advance of a byte the outline face has no glyph for.
+///
+/// WHY the ratio at the rung the run is drawn at: the cell is a fixed 16px grid
+/// times the scale, and a run drawn at a scaled em walks wider than that grid --
+/// an unknown byte charged at the unscaled grid lets the fit pass keep glyphs
+/// the painted run then pushes out of the box. Scaling the grid by the two
+/// ems is the same move the ladder makes, and at the platform level the ratio
+/// is one, so nothing moves.
+#[inline]
+fn cell_advance(c: u8, bold: bool, scale: usize, level: u8) -> usize {
+    let cell = std::design::font::advance_of(c, bold) * scale;
+    if level == PLATFORM_LEVEL {
+        return cell;
+    }
+    let em = em_at(scale, level) as usize;
+    let base = em_at(scale, PLATFORM_LEVEL) as usize;
+    if base == 0 {
+        cell
+    } else {
+        cell.saturating_mul(em) / base
+    }
 }
 
 /// Anti-aliased text draw that (a) only tests pixels inside the run's own
@@ -2409,22 +2906,77 @@ fn run_ink(
     bg: u32,
     bold: bool,
 ) -> Option<u32> {
-    let h = std::design::font::line_height(scale);
-    let upper_w = max_w.min(text.len().saturating_mul(16 * scale) + 2);
+    run_ink_at(
+        x, y, x0, y0, scale, text, max_w, color, bg, bold, PLATFORM_LEVEL,
+    )
+}
+
+/// [`run_ink`] at the level `level` names, for a surface whose boxes came from
+/// the same level.
+///
+/// WHY the band, the placement and the fallback all move together: the band is
+/// the row's line box, the placement is the cap the run is rasterised at, and
+/// the fallback is the size the bitmap face draws when the outline face refuses
+/// the run. Moving one of the three and not the others is the clipped-text
+/// class of defect -- a scaled cap inside the platform's box loses its
+/// descenders, and a platform cap inside a scaled box leaves a gap where the
+/// line used to be. At [`PLATFORM_LEVEL`] all three answer what [`run_ink`]
+/// answers: `line_at`, `cap_at` and `em_at` are the ladder's own numbers there,
+/// which is what the gates beside [`RowBoxes`] prove, and the bitmap fallback
+/// below is `test_text_aa`'s own call with the cap height `cap_for_scale`
+/// returns.
+///
+/// WHY the width band is wider at a scaled level: `16 * scale` is the bitmap
+/// cell's widest byte, and a run at a scaled em walks past it, so the band would
+/// have rejected pixels of the very run it enlarged. The bound is still capped by
+/// `max_w`, the box the layout reserved, so a widening here cannot let a run ink
+/// outside its row -- it only stops the cell grid from cutting a run that the
+/// face draws wider than the grid.
+#[inline(always)]
+fn run_ink_at(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+    level: u8,
+) -> Option<u32> {
+    let scaled = level != PLATFORM_LEVEL;
+    let h = line_at(scale, level);
+    let upper_w = if scaled {
+        text.len()
+            .saturating_mul(em_at(scale, level) as usize + 4)
+            + 2
+    } else {
+        text.len().saturating_mul(16 * scale) + 2
+    };
+    let upper_w = max_w.min(upper_w);
     if y < y0 || y >= y0 + h || x < x0 || x >= x0 + upper_w {
         return None;
     }
     let mut buf = [0u8; RUN_CAP];
-    let n = fit_run(text, scale, max_w, bold, &mut buf);
+    let n = fit_run_at(text, scale, max_w, bold, &mut buf, level);
     if n == 0 {
         return None;
     }
-    if let Some(run) =
+    let cap = cap_at(scale, level);
+    // WHY the ladder's own entry point at the platform level: `place_run` takes
+    // the size as a scale rung, which is the number every screen in this app was
+    // laid out against, and it is the call the platform level has always made.
+    let placed = if scaled {
+        outline_text::place_run_cap(x0, y0, cap, &buf[..n], Some(max_w), bold)
+    } else {
         outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), bold)
-    {
+    };
+    if let Some(run) = placed {
         return run.pixel(x, y, color, bg);
     }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
+    std::design::monochrome::text_px(x, y, x0, y0, cap, &buf[..n], color, bg, bold)
 }
 
 // -----------------------------------------------------------------------------
@@ -2691,19 +3243,30 @@ fn row_count(section: Section) -> usize {
 }
 
 /// Height of row `row` on `section`'s detail screen.
+///
+/// WHY the height is asked at the published rung and not read from `ROW_H`:
+/// this function is the single geometry choke point of a detail page -- the
+/// draw loop stacks rows with it, `section_content_height` sums it to get the
+/// scroll range, and every tap hit-test resolves the row through
+/// `detail_row_rect_scrolled`. Deriving it here therefore moves the painted
+/// box, the scroll extent and the touch target together, which is the property
+/// that keeps a taller line from being clipped by its own row or a row from
+/// moving out from under the finger aimed at it. At the default level every
+/// number is the constant the page used before this line existed.
 fn row_h(section: Section, row: usize) -> usize {
+    let boxes = RowBoxes::user();
     match (section, row) {
-        (Section::Power, 1) | (Section::Device, 1) => ROW_TALL,
+        (Section::Power, 1) | (Section::Device, 1) => boxes.tall(),
         // WHY the fuel gauge and the thermal governor are the tall kind: the
         // platform's payloads for both carry more than one reading, and the
         // honest caption for them is two lines.
-        (Section::Power, 0) | (Section::Power, 3) => ROW_TALL_ALT,
-        (Section::System, 3) | (Section::System, 4) => ROW_TALL_ALT,
+        (Section::Power, 0) | (Section::Power, 3) => boxes.tall_alt(),
+        (Section::System, 3) | (Section::System, 4) => boxes.tall_alt(),
         // WHY the document rows are the list row's own height: the platform
         // says what a list row is, and its height is its padding around two
         // line boxes.
-        (Section::Personal, 4) | (Section::Personal, 5) => HANDLER_ROW_H,
-        _ => ROW_H,
+        (Section::Personal, 4) | (Section::Personal, 5) => boxes.handler_h(),
+        _ => boxes.h(),
     }
 }
 
@@ -3266,8 +3829,8 @@ fn handler_row_caption(out: &mut [u8; 96], slot: &DocumentSlot) -> usize {
 /// what defines the badge, so it is the part measured: `on_surface_variant`
 /// #525458 on the card is 7.59:1 and the readable green is 5.02:1, both over
 /// the 3:1 floor for a control's defining edge.
-fn badge_w(label: &[u8]) -> usize {
-    run_w(label, TYPE_H3, false) + BADGE_PAD
+fn badge_w(label: &[u8], boxes: RowBoxes) -> usize {
+    boxes.w(label, TYPE_H3, false) + BADGE_PAD
 }
 
 fn badge_pixel(
@@ -3278,19 +3841,20 @@ fn badge_pixel(
     label: &[u8],
     ink: u32,
     bg: u32,
+    boxes: RowBoxes,
 ) -> Option<u32> {
-    let w = badge_w(label);
-    let h = BADGE_H;
+    let w = badge_w(label, boxes);
+    let h = boxes.badge_h();
     if !in_round_rect(x, y, bx0, by0, w, h, h / 2) {
         return None;
     }
     if !in_round_rect(x, y, bx0 + 1, by0 + 1, w - 2, h - 2, h / 2 - 1) {
         return Some(ink);
     }
-    let tw = run_w(label, TYPE_H3, false);
+    let tw = boxes.w(label, TYPE_H3, false);
     let tx = bx0 + (w - tw) / 2;
-    let ty = by0 + (h - LINE_H) / 2;
-    if let Some(c) = run_ink(x, y, tx, ty, TYPE_H3, label, tw + 1, ink, bg, false) {
+    let ty = by0 + (h - boxes.title()) / 2;
+    if let Some(c) = boxes.ink(x, y, tx, ty, TYPE_H3, label, tw + 1, ink, bg, false) {
         return Some(c);
     }
     Some(bg)
@@ -3433,16 +3997,17 @@ fn row_head(
     cap_ink: u32,
     badge: &[u8],
     badge_ink: u32,
+    boxes: RowBoxes,
 ) -> Option<u32> {
-    let bw = badge_w(badge);
+    let bw = badge_w(badge, boxes);
     let bx0 = DETAIL_X + DETAIL_W - ROW_PAD - bw;
     let cap_fit = DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP;
     let title_fit = if bw > 0 { cap_fit } else { DETAIL_W - 2 * ROW_PAD };
-    if let Some(c) = run_ink(
+    if let Some(c) = boxes.ink(
         x,
         y,
         DETAIL_X + ROW_PAD,
-        cy + ROW_TITLE_DY,
+        cy + boxes.title_dy(),
         TYPE_H3,
         title,
         title_fit,
@@ -3452,11 +4017,11 @@ fn row_head(
     ) {
         return Some(c);
     }
-    if let Some(c) = run_ink(
+    if let Some(c) = boxes.ink(
         x,
         y,
         DETAIL_X + ROW_PAD,
-        cy + ROW_CAP_DY,
+        cy + boxes.cap_dy(),
         TYPE_CAPTION,
         caption,
         cap_fit,
@@ -3466,7 +4031,16 @@ fn row_head(
     ) {
         return Some(c);
     }
-    badge_pixel(x, y, bx0, cy + BADGE_DY, badge, badge_ink, THEME.surface_container)
+    badge_pixel(
+        x,
+        y,
+        bx0,
+        cy + boxes.badge_dy(),
+        badge,
+        badge_ink,
+        THEME.surface_container,
+        boxes,
+    )
 }
 
 /// One row of the document-handler list.
@@ -3490,6 +4064,7 @@ fn handler_row_pixel(
     slot: &DocumentSlot,
     title: &[u8],
     outcome: &DispatchOutcome,
+    boxes: RowBoxes,
 ) -> Option<u32> {
     // The divider the platform's list row draws between rows.
     if y == cy && x >= DETAIL_X && x < DETAIL_X + DETAIL_W {
@@ -3497,7 +4072,7 @@ fn handler_row_pixel(
     }
     let text_x = DETAIL_X + ROW.pad;
     let text_w = DETAIL_W - 2 * ROW.pad;
-    if let Some(c) = run_ink(
+    if let Some(c) = boxes.ink(
         x,
         y,
         text_x,
@@ -3513,11 +4088,11 @@ fn handler_row_pixel(
     }
     let mut cap = [0u8; 96];
     let cap_len = handler_row_caption(&mut cap, slot);
-    if let Some(c) = run_ink(
+    if let Some(c) = boxes.ink(
         x,
         y,
         text_x,
-        cy + ROW.pad + LINE_H,
+        cy + ROW.pad + boxes.title(),
         TYPE_CAPTION,
         &cap[..cap_len],
         text_w,
@@ -3534,16 +4109,17 @@ fn handler_row_pixel(
         DispatchOutcome::Refused => (&b"REFUSED"[..], THEME.on_surface_variant),
         DispatchOutcome::Unattempted => (&b"TAP TO SEND"[..], THEME.on_surface_variant),
     };
-    let bw = badge_w(badge);
+    let bw = badge_w(badge, boxes);
     let bx0 = DETAIL_X + DETAIL_W - ROW.pad - bw;
     if let Some(c) = badge_pixel(
         x,
         y,
         bx0,
-        cy + HANDLER_BADGE_DY,
+        cy + boxes.handler_badge_dy(),
         badge,
         badge_ink,
         CARD.fill,
+        boxes,
     ) {
         return Some(c);
     }
@@ -3561,7 +4137,16 @@ fn font_scale_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i:
         _ => b"X-Large",
     };
     let active = app.text_scale.as_u8() as usize == i;
-    segment_pixel(x, y, sx, cy + SEG_DY, FONT_SEG_W, SEG_H, label, active)
+    segment_pixel(
+        x,
+        y,
+        sx,
+        cy + RowBoxes::user().seg_dy(),
+        FONT_SEG_W,
+        SEG_H,
+        label,
+        active,
+    )
 }
 
 fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: usize) -> Option<u32> {
@@ -3576,7 +4161,16 @@ fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: us
     // segment. Previously this defaulted to a hardcoded Balanced, which drew a
     // committed-looking selection the kernel had never reported.
     let active = app.power_profile.map(|p| p.index()) == Some(i);
-    segment_pixel(x, y, sx, cy + SEG_DY, SEG_W, SEG_H, label, active)
+    segment_pixel(
+        x,
+        y,
+        sx,
+        cy + RowBoxes::user().seg_dy(),
+        SEG_W,
+        SEG_H,
+        label,
+        active,
+    )
 }
 
 /// Diagnostic row item text and badge positioning offsets.
@@ -3613,6 +4207,11 @@ fn diag_row_head(
     badge_ink: u32,
     tall: bool,
 ) -> Option<u32> {
+    // WHY this surface pins the platform's own boxes: the diagnostic cards are a
+    // fixed stack of `DIAG_ROW_H` cards at written-down offsets, and a rung that
+    // moved the caption would move ink off the plate the reading sits on. The
+    // rows are not derived from the ladder, so the ladder is what they draw.
+    let boxes = RowBoxes::platform();
     let (title_dy, cap_dy, cap2_dy, badge_dy) = if tall {
         (
             DIAG_TALL_TITLE_DY,
@@ -3623,11 +4222,11 @@ fn diag_row_head(
     } else {
         (DIAG_TITLE_DY, DIAG_CAP_DY, DIAG_CAP_DY, DIAG_BADGE_DY)
     };
-    let bw = badge_w(badge);
+    let bw = badge_w(badge, boxes);
     let bx0 = DETAIL_X + DETAIL_W - ROW_PAD - bw;
     let cap_fit = DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP;
     let title_fit = if bw > 0 { cap_fit } else { DETAIL_W - 2 * ROW_PAD };
-    if let Some(c) = run_ink(
+    if let Some(c) = boxes.ink(
         x,
         y,
         DETAIL_X + ROW_PAD,
@@ -3671,7 +4270,16 @@ fn diag_row_head(
             return Some(c);
         }
     }
-    badge_pixel(x, y, bx0, cy + badge_dy, badge, badge_ink, THEME.surface_container)
+    badge_pixel(
+        x,
+        y,
+        bx0,
+        cy + badge_dy,
+        badge,
+        badge_ink,
+        THEME.surface_container,
+        boxes,
+    )
 }
 
 /// The badge for a sensor-bus row: the platform's verdict, not this app's.
@@ -4060,6 +4668,12 @@ fn row_pixel(
     fill: u32,
 ) -> u32 {
     let _ = fill; // rows are drawn on the white card surface
+
+    // WHY the whole row is painted through one value: every offset and every run below
+    // comes from the same rung the row's height was derived from, so a page that grew
+    // its rows grew their ink with them and the tap targets stacked by `row_h` still
+    // land on the card the finger was aimed at.
+    let boxes = RowBoxes::user();
     match section {
         Section::Device => match row {
             0 => {
@@ -4086,30 +4700,33 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
             }
             1 => {
-                // WHY the caption says "saved" and not the percentage twice:
-                // the selection is a real stored preference (`display.text_scale`)
-                // but no app in this build consumes it yet, so the row must not
-                // imply the system has already rescaled its type.
-                let (cap, badge): (&[u8], &[u8]) = match app.text_scale {
-                    UserTextScale::Compact => (b"Saved: Compact; apps do not apply it", b"STORED"),
-                    UserTextScale::Normal => (b"Saved: Normal; apps do not apply it", b"STORED"),
-                    UserTextScale::Large => (b"Saved: Large; apps do not apply it", b"STORED"),
-                    UserTextScale::ExtraLarge => (b"Saved: Extra Large; apps do not apply it", b"STORED"),
-                };
+                // WHY the notice names the surfaces instead of the percentage
+                // alone: this row used to say "Saved: ...; apps do not apply it",
+                // which was the honest sentence for a build where nothing read
+                // `display.text_scale`. The detail pages of this app now do --
+                // their rows, captions, badges and scroll height are derived at
+                // the published rung -- and the landing grid, the wallpaper and
+                // screen-lock panels, the Sensors & Diagnostics page and every
+                // other application still draw the platform's ladder. Both
+                // halves are stated, because a notice that only names what
+                // changed is read as "everything changed".
+                let notice = text_scale_notice(app.text_scale);
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
                     b"Font Scaling",
-                    cap,
+                    notice.caption,
                     THEME.on_surface_variant,
-                    badge,
+                    notice.badge,
                     THEME.primary,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4117,6 +4734,25 @@ fn row_pixel(
                     if let Some(c) = font_scale_segment_pixel(x, y, cy, app, i) {
                         return c;
                     }
+                }
+                // The scope line, in the feedback slot the tall row already
+                // reserves. WHY the caption rung: the row's height was derived
+                // from a title's box for this line, so a caption's ink in a
+                // title's box has room and cannot collide with the card's edge,
+                // at any level.
+                if let Some(c) = boxes.ink(
+                    x,
+                    y,
+                    DETAIL_X + ROW_PAD,
+                    cy + boxes.seg_feedback_dy(),
+                    TYPE_CAPTION,
+                    notice.scope,
+                    DETAIL_W - 2 * ROW_PAD,
+                    THEME.on_surface_variant,
+                    THEME.surface_container,
+                    false,
+                ) {
+                    return c;
                 }
             }
             2 => {
@@ -4145,6 +4781,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4162,6 +4799,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4176,6 +4814,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"BUILT IN",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4201,6 +4840,7 @@ fn row_pixel(
                     cap_ink,
                     b"VIEW",
                     THEME.primary,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4231,6 +4871,7 @@ fn row_pixel(
                     if reported { SUCCESS_LABEL } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4263,6 +4904,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4280,6 +4922,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"UNAVAILABLE",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4311,6 +4954,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4343,6 +4987,7 @@ fn row_pixel(
                     if app.owner_name_len > 0 { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4373,6 +5018,7 @@ fn row_pixel(
                     if app.user_status_len > 0 { THEME.primary } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4410,6 +5056,7 @@ fn row_pixel(
                     } else {
                         THEME.on_surface_variant
                     },
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4429,6 +5076,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4451,7 +5099,7 @@ fn row_pixel(
                         &b"Ringtone document"[..],
                     )
                 };
-                if let Some(c) = handler_row_pixel(x, y, cy, slot, title, outcome) {
+                if let Some(c) = handler_row_pixel(x, y, cy, slot, title, outcome, RowBoxes::user()) {
                     return c;
                 }
             }
@@ -4485,6 +5133,7 @@ fn row_pixel(
                     if app.app_count.is_some() { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4516,6 +5165,7 @@ fn row_pixel(
                     if app.storage_bytes.is_some() { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4533,6 +5183,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"POLICY",
                     THEME.primary,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4547,6 +5198,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"POLICY",
                     THEME.primary,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4572,14 +5224,15 @@ fn row_pixel(
                         THEME.on_surface_variant,
                         b"REPORTED",
                         SUCCESS_LABEL,
+                        RowBoxes::user(),
                     ) {
                         return c;
                     }
-                    if let Some(c) = run_ink(
+                    if let Some(c) = boxes.ink(
                         x,
                         y,
                         DETAIL_X + ROW_PAD,
-                        cy + ROW_CAP2_DY,
+                        cy + boxes.cap2_dy(),
                         TYPE_CAPTION,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
@@ -4601,6 +5254,7 @@ fn row_pixel(
                         THEME.on_surface_variant,
                         badge,
                         badge_ink,
+                        RowBoxes::user(),
                     ) {
                         return c;
                     }
@@ -4631,6 +5285,7 @@ fn row_pixel(
                     gov_ink,
                     gov_badge,
                     gov_badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4658,11 +5313,11 @@ fn row_pixel(
                         (s.len(), THEME.on_surface_variant)
                     }
                 };
-                if let Some(c) = run_ink(
+                if let Some(c) = boxes.ink(
                     x,
                     y,
                     DETAIL_X + ROW_PAD,
-                    cy + SEG_FEEDBACK_DY,
+                    cy + boxes.seg_feedback_dy(),
                     TYPE_H3,
                     &fb[..fb_len],
                     DETAIL_W - 2 * ROW_PAD,
@@ -4686,6 +5341,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4709,14 +5365,15 @@ fn row_pixel(
                         THEME.on_surface_variant,
                         b"REPORTED",
                         SUCCESS_LABEL,
+                        RowBoxes::user(),
                     ) {
                         return c;
                     }
-                    if let Some(c) = run_ink(
+                    if let Some(c) = boxes.ink(
                         x,
                         y,
                         DETAIL_X + ROW_PAD,
-                        cy + ROW_CAP2_DY,
+                        cy + boxes.cap2_dy(),
                         TYPE_CAPTION,
                         &cap2_buf[..n2],
                         DETAIL_W - 2 * ROW_PAD,
@@ -4738,6 +5395,7 @@ fn row_pixel(
                         THEME.on_surface_variant,
                         badge,
                         badge_ink,
+                        RowBoxes::user(),
                     ) {
                         return c;
                     }
@@ -4751,7 +5409,7 @@ fn row_pixel(
                 // rather than the "UNAVAILABLE" treatment the rows below use for
                 // subsystems this platform has no way to read.
                 let (_, detail, ink, badge) = sl_state_line(app);
-                if let Some(c) = row_head(x, y, cy, b"Screen lock", detail, ink, badge, THEME.on_surface) {
+                if let Some(c) = row_head(x, y, cy, b"Screen lock", detail, ink, badge, THEME.on_surface, RowBoxes::user()) {
                     return c;
                 }
             }
@@ -4783,6 +5441,7 @@ fn row_pixel(
                 };
                 if let Some(c) = row_head(
                     x, y, cy, b"Hardware Keystore", cap, THEME.on_surface_variant, badge, badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4801,6 +5460,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4815,6 +5475,7 @@ fn row_pixel(
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
                     THEME.on_surface_variant,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4844,6 +5505,7 @@ fn row_pixel(
                     if reported { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4879,6 +5541,7 @@ fn row_pixel(
                     ink,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4910,6 +5573,7 @@ fn row_pixel(
                     if reported { THEME.primary } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
@@ -4968,14 +5632,15 @@ fn row_pixel(
                     ink,
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
-                if let Some(c) = run_ink(
+                if let Some(c) = boxes.ink(
                     x,
                     y,
                     DETAIL_X + ROW_PAD,
-                    cy + ROW_CAP2_DY,
+                    cy + boxes.cap2_dy(),
                     TYPE_CAPTION,
                     &cap2[..n2],
                     DETAIL_W - 2 * ROW_PAD,
@@ -5026,14 +5691,15 @@ fn row_pixel(
                     if app.memory_reported { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
                     badge_ink,
+                    RowBoxes::user(),
                 ) {
                     return c;
                 }
-                if let Some(c) = run_ink(
+                if let Some(c) = boxes.ink(
                     x,
                     y,
                     DETAIL_X + ROW_PAD,
-                    cy + ROW_CAP2_DY,
+                    cy + boxes.cap2_dy(),
                     TYPE_CAPTION,
                     &cap2[..n2],
                     DETAIL_W - 2 * ROW_PAD,
@@ -6042,7 +6708,11 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // because it is the same component playing the same role on another screen.
     if (SL_STATUS_Y..SL_STATUS_Y + SL_STATUS_H).contains(&y) {
         let (_, _, _, badge) = sl_state_line(app);
-        let bw = badge_w(badge);
+        // WHY the platform's boxes here and not the published ones: this card is
+        // fixed at `SL_STATUS_H`, a canvas the panel writes down rather than a
+        // row `row_h` derives, so it keeps the ladder -- see `RowBoxes::platform`.
+        let boxes = RowBoxes::platform();
+        let bw = badge_w(badge, boxes);
         let bx0 = CONTENT_X + CONTENT_W - ROW_PAD - bw;
         if in_round_rect(x, y, CONTENT_X, SL_STATUS_Y, CONTENT_W, SL_STATUS_H, CARD_R) {
             let inner = in_round_rect(
@@ -6090,7 +6760,7 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             ) {
                 return c;
             }
-            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + BADGE_DY, badge, THEME.on_surface, THEME.surface_container) {
+            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + BADGE_DY, badge, THEME.on_surface, THEME.surface_container, boxes) {
                 return c;
             }
             return THEME.surface_container;
@@ -6583,9 +7253,10 @@ fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
 /// Hit-test for the text scale selector segments on the Device detail.
 fn font_scale_segment_at(px: u32, py: u32, offset: usize) -> Option<usize> {
     let (cy, _) = detail_row_rect_scrolled(Section::Device, 1, offset);
+    let dy = RowBoxes::user().seg_dy();
     for i in 0..4 {
         let sx = CONTENT_X + ROW_PAD + i * (FONT_SEG_W + FONT_SEG_GAP);
-        if in_round_rect(px as usize, py as usize, sx, cy + SEG_DY, FONT_SEG_W, SEG_H, CONTROL_R) {
+        if in_round_rect(px as usize, py as usize, sx, cy + dy, FONT_SEG_W, SEG_H, CONTROL_R) {
             return Some(i);
         }
     }
@@ -6594,9 +7265,10 @@ fn font_scale_segment_at(px: u32, py: u32, offset: usize) -> Option<usize> {
 
 fn profile_segment_at(px: u32, py: u32) -> Option<usize> {
     let (cy, _) = detail_row_rect(Section::Power, 1);
+    let dy = RowBoxes::user().seg_dy();
     for i in 0..3 {
         let sx = CONTENT_X + ROW_PAD + i * (SEG_W + SEG_GAP);
-        if in_round_rect(px as usize, py as usize, sx, cy + SEG_DY, SEG_W, SEG_H, CONTROL_R) {
+        if in_round_rect(px as usize, py as usize, sx, cy + dy, SEG_W, SEG_H, CONTROL_R) {
             return Some(i);
         }
     }

@@ -10,17 +10,26 @@ def read(path: str) -> str:
 
 def test_messages_empty_state_has_non_overlapping_text_and_no_dead_action():
     source = read("apps/messages/src/main.rs")
+    layout = read("apps/messages/src/lib.rs")
     assert 'b"NO TRANSPORT"' in source
-    assert 'b"Messaging unavailable: no transport"' in source
+    # WHY the sentence is read from the layout module and the choice from the
+    # painter: the empty state's lines now sit beside the boxes that hold them, so
+    # grepping the painted bytes out of `main.rs` passed on a screen that no longer
+    # spells them anywhere. Both halves are still pinned -- that the sentence
+    # exists, and that the branch a device with no transport takes is the one that
+    # paints it.
+    assert 'pub const EMPTY_TRANSPORT_SUBLINE' in layout
+    assert 'b"Messaging unavailable: no transport"' in layout
+    assert "_ => (layout::EMPTY_TRANSPORT_SUBLINE," in source
     assert 'b"P2P E2EE"' not in source
     assert 'b"Encrypted P2P Wire Client Active"' not in source
     assert 'b"Hardware Keystore Slot 3 Ready"' not in source
     # The scale-2 title occupies a 48px glyph line. Status lines must reserve
     # that space, and an unavailable backend must not expose a dead action.
-    assert 'b"No Conversations Yet"' in source
+    assert "layout::EMPTY_THREADS_TITLE," in source
+    assert "pub const EMPTY_THREADS_TITLE: &[u8] = b\"No Conversations Yet\";" in layout
     assert '740' in source
     assert '810' in source
-    assert 'b"Messaging unavailable: no transport"' in source
     assert 'b"+ Start New Chat"' not in source
 
 
@@ -971,6 +980,7 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     calendar = read("apps/calendar/src/main.rs")
     file_manager = read("apps/file_manager/src/main.rs")
     messages = read("apps/messages/src/main.rs")
+    messages_layout = read("apps/messages/src/lib.rs")
     # WHY these three settings assertions changed: the Settings app was rebuilt
     # as the design system's "System Space" (light category grid + stack
     # detail screens), so the old dark tab-layout coordinates ("60, 270, 1"
@@ -983,9 +993,24 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     # this comment used to quote: the boxes come off the type ladder, so the
     # remembered 16 / 72 / 98 went stale the moment the rungs moved, while the
     # layout that followed the ladder stayed correct. The sum is the contract.
-    assert "cy + ROW_TITLE_DY," in settings
-    assert "cy + ROW_CAP_DY," in settings
-    assert "cy + ROW_CAP2_DY," in settings
+    #
+    # WHY these three now name `boxes.*_dy()` instead of `ROW_*_DY` constants --
+    # and why that is the same contract, not a weakened one: the Font Scaling
+    # setting is read after the binary is built, so the offset a band starts at
+    # cannot be a constant at the call site any more; a row asks its surface's
+    # rung through `RowBoxes`. The constants kept their names and their sums are
+    # still pinned below. What is pinned here instead is the whole chain, so a
+    # painted band still reaches a line box in one link and cannot be paired with
+    # another rung: `cy + boxes.cap_dy()` -> `fn cap_dy() { cap_dy_at(self.level()) }`
+    # -> `cap_dy_at(level) = ROW_TITLE_DY + title_at(level) + ROW_LINE_GAP` ->
+    # asserted equal to `ROW_CAP_DY` at the platform's level. The rule the comment
+    # above states is now also measured at EVERY level the setting can hold
+    # (`bands_clear_at_every_level`, gated by a `const assert!`), which is exactly
+    # the case the old fixed pin could not see: a caption that clears its title at
+    # 100% and rides into it at 150% used to pass here.
+    assert "cy + boxes.title_dy()," in settings
+    assert "cy + boxes.cap_dy()," in settings
+    assert "cy + boxes.cap2_dy()," in settings
     assert "const LINE_H: usize = std::design::font::line_height(TYPE_H3);" in settings
     assert "const CAPTION_LINE_H: usize = std::design::font::line_height(TYPE_CAPTION);" in settings
     flat_settings = " ".join(settings.split())
@@ -997,6 +1022,53 @@ def test_layout_fixes_reserve_full_glyph_line_height():
         "the settings row no longer reserves a whole caption line box for its "
         "second caption line"
     )
+    # The accessors the painted bands call are the ladder derivations, one link
+    # each, and the derivations are the sums the constants state.
+    assert "fn title_dy(&self) -> usize { ROW_TITLE_DY }" in flat_settings, (
+        "a detail row's title band no longer starts at the offset this file pins; "
+        "the band's top is the row's pad -- whitespace, not type -- so it is the "
+        "one band a text-size rung must not move"
+    )
+    assert "fn cap_dy(&self) -> usize { cap_dy_at(self.level()) }" in flat_settings, (
+        "the caption band no longer starts at the offset derived from the same "
+        "rung its ink is drawn at"
+    )
+    assert "fn cap2_dy(&self) -> usize { cap2_dy_at(self.level()) }" in flat_settings, (
+        "the second caption band no longer starts at the offset derived from the "
+        "same rung its ink is drawn at"
+    )
+    assert (
+        "const fn cap_dy_at(level: u8) -> usize { "
+        "ROW_TITLE_DY + title_at(level) + ROW_LINE_GAP }"
+    ) in flat_settings, (
+        "the caption's derivation is no longer a whole title line box plus a gap "
+        "below the offset the title starts at"
+    )
+    assert (
+        "const fn cap2_dy_at(level: u8) -> usize { "
+        "cap_dy_at(level) + caption_at(level) + ROW_LINE_GAP }"
+    ) in flat_settings, (
+        "the row no longer reserves a whole caption line box for its second "
+        "caption line, at whatever rung the row is drawn at"
+    )
+    # At the platform's rung the derivation is the constant, so a page that never
+    # asked for a text size is not resized by the code that reads one.
+    assert "const _: () = assert!(cap_dy_at(PLATFORM_LEVEL) == ROW_CAP_DY);" in settings
+    assert "const _: () = assert!(cap2_dy_at(PLATFORM_LEVEL) == ROW_CAP2_DY);" in settings
+    # A level enters the row's geometry in exactly one place, and the band rule is
+    # measured over every level the setting holds rather than compiled for one.
+    assert (
+        "fn level(&self) -> u8 { if self.u { std::design::font::user_text_scale() } "
+        "else { PLATFORM_LEVEL } }"
+    ) in flat_settings, (
+        "a row can now take its ink from one rung and its box from another"
+    )
+    assert "const _: () = assert!(bands_clear_at_every_level());" in settings
+    assert "while level <= EXTRA_LARGE_LEVEL {" in settings
+    assert "if ROW_TITLE_DY + title_at(level) > cap_dy_at(level) {" in settings
+    assert "if cap_dy_at(level) + caption_at(level) > cap2_dy_at(level) {" in settings
+    assert "if cap2_dy_at(level) + caption_at(level) > tall_alt_at(level) {" in settings
+    assert "if cap_dy_at(level) + caption_at(level) > row_h_at(level) {" in settings
     assert "centered_x(detail_str, 1, 24, 672)" in calendar
     # WHY this no longer greps the row's remembered y: the month view's "nothing
     # listed" card takes its top from the list band, the list band takes its top
@@ -1041,7 +1113,14 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     assert "back_button::contains(x, y)" in file_manager
     assert "const TITLE_X: usize =\n    std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;" in file_manager
     assert "test_text(x, y, 48, 64, 3, b\"Files\"" not in file_manager
-    assert 'b"Messaging unavailable: no transport"' in messages
+    # WHY this names the constant and the branch rather than the bytes at the
+    # painter: the empty state's sentences moved beside the boxes that hold them,
+    # and the line the transport-refused branch paints has to clear the title's
+    # whole glyph line box -- which is what 740 and 810 are for.
+    assert 'pub const EMPTY_TRANSPORT_SUBLINE' in messages_layout
+    assert 'b"Messaging unavailable: no transport"' in messages_layout
+    assert "_ => (layout::EMPTY_TRANSPORT_SUBLINE," in messages
+    assert "layout::EMPTY_THREADS_TITLE," in messages
 
 
 def test_device_studio_does_not_infer_guest_cpu_state_from_qemu_liveness():
