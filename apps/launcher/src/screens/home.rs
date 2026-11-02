@@ -236,6 +236,54 @@ pub fn system_card_band() -> (usize, usize) {
     (card.y, card.y + card.h)
 }
 
+/// The column every system row's icon is drawn in.
+///
+/// WHY named and shared with the painter: the glyph is what a tap has to land on
+/// to be a tap on the control, and the shell hit-tests that column. Typed twice
+/// it is one rename away from a control that answers somewhere else.
+const CARD_ICON_X: usize = 78;
+
+/// How far either side of that column a tap still counts as landing on the glyph.
+const CARD_ICON_HIT_HALF: usize = 20;
+
+/// The three system rows' bands, in painted order.
+///
+/// WHY read back from `frame` rather than typed where the tap is routed: the
+/// shell answers a touch from literals it wrote itself -- 280..385, 385..505,
+/// 505..625 -- and the card paints its rows at 275..395, 395..515, 515..635. Ten
+/// rows of drift meant the last ten rows of the Notifications row toggled the
+/// task underneath it, and the Tasks row's own last ten rows answered nothing at
+/// all. The painted rectangle is the only one a person can see.
+pub fn card_row_bands() -> [(usize, usize); CARD_ROWS] {
+    let rows = frame().card_rows;
+    let h = card_row_h();
+    let mut bands = [(0usize, 0usize); CARD_ROWS];
+    let mut row = 0;
+    while row < CARD_ROWS {
+        let y0 = rows.y + row * h;
+        bands[row] = (y0, y0 + h);
+        row += 1;
+    }
+    bands
+}
+
+/// The box that owns the Tasks row's toggle: the row's own glyph, not the row.
+///
+/// WHY the glyph and not the whole row: the row is also a link -- its chevron and
+/// its words open the task list -- and the control that flips the bit has to be
+/// smaller than the thing it sits inside, or the two cannot be told apart by
+/// touch.
+pub fn tasks_toggle_band() -> (usize, usize, usize, usize) {
+    let (y0, y1) = card_row_bands()[CARD_ROWS - 1];
+    let cy = (y0 + y1) / 2;
+    (
+        CARD_ICON_X - CARD_ICON_HIT_HALF,
+        CARD_ICON_X + CARD_ICON_HIT_HALF,
+        cy - CARD_ICON_HIT_HALF,
+        cy + CARD_ICON_HIT_HALF,
+    )
+}
+
 /// Rows the home surface's app deck occupies.
 ///
 /// WHY the deck is one band even though the tiles are six rectangles: the six
@@ -526,9 +574,9 @@ struct CardRowPlan {
     rect: Rect,
     name: Run,
     detail: Run,
-    /// Row 0 task-checkbox state for the pinned Today toggle (main.rs hit
-    /// x60..100, y300..340): the painter reads this so the box on screen
-    /// always matches the bit the toggle flips.
+    /// Row 0 task-checkbox state for the pinned Today toggle
+    /// (see [`tasks_toggle_band`]): the painter reads this so the glyph on
+    /// screen always matches the bit the toggle flips.
     done: bool,
 }
 
@@ -1440,7 +1488,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
             return Some(theme.on_surface_variant);
         }
 
-        let icon_cx = 78i32;
+        let icon_cx = CARD_ICON_X as i32;
         let icon_cy = (row.rect.y + row.rect.h / 2) as i32;
         let idx = x as i32 - icon_cx;
         let idy = y as i32 - icon_cy;

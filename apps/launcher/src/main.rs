@@ -2888,8 +2888,16 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         // painted rectangles below are the tiles a person can see, so they are
         // the only ones allowed to answer a touch.
 
-        // Today card Row 0 tap (outside checkbox): launches Calendar
-        if (280..385).contains(&y) && (100..680).contains(&x) {
+        // Today card Row 0 tap: launches Calendar.
+        // WHY the band comes from the painter, and why it starts at the icon
+        // column: this used to be the literal 280..385 against x from 100,
+        // while the card paints the Schedule row at 275..395 with its glyph at
+        // x=78. The bottom ten rows of the row therefore answered for nothing,
+        // and a tap aimed at the calendar icon itself fell through to the deck
+        // beneath -- so the one glyph on the card that names an app launched
+        // whatever tile happened to share its y.
+        let card_bands = screens::home::card_row_bands();
+        if (card_bands[0].0..card_bands[0].1).contains(&y) && (60..680).contains(&x) {
             return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
         }
 
@@ -5026,8 +5034,9 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Today card / System status card task checkbox (x: 60..100, y: 300..340)
-                                if (60..100).contains(&x) && ((300..340).contains(&y) || (550..600).contains(&y)) {
+                                // Today card Tasks row toggle: the row's own glyph.
+                                let (tb_x0, tb_x1, tb_y0, tb_y1) = screens::home::tasks_toggle_band();
+                                if (tb_x0..tb_x1).contains(&x) && (tb_y0..tb_y1).contains(&y) {
                                     // WHY flip real state: the log below used to fire
                                     // with no state behind it. `task0_done` is the
                                     // bit this control owns, so the log reports an
@@ -5079,8 +5088,14 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Today card Row 1 tap: opens Notifications view
-                                if (385..505).contains(&y) && (60..680).contains(&x) {
+                                // Today card Row 1 tap: opens Notifications view.
+                                // WHY the band comes from the painter: these rows
+                                // used to be literals written here, and they had
+                                // drifted ten rows above the rectangles the card
+                                // actually paints -- so the foot of one row answered
+                                // for the row beneath it.
+                                let row_bands = screens::home::card_row_bands();
+                                if (row_bands[1].0..row_bands[1].1).contains(&y) && (60..680).contains(&x) {
                                     open_notifications_shade(surface, &mut state, "Today card tap");
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -5095,7 +5110,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Today card Row 2 tap: toggles task
-                                if (505..625).contains(&y) && (60..680).contains(&x) {
+                                if (row_bands[2].0..row_bands[2].1).contains(&y) && (60..680).contains(&x) {
                                     state.task0_done = !state.task0_done;
                                     present_dirty(surface, &state, Dirty::HomeCard);
                                     std::log("[LAUNCHER] Contextual task 0 toggled.").ok();
