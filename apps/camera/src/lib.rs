@@ -334,18 +334,62 @@ pub const ERR_NO_PHOTO: i64 = -2;
 /// The surface the camera draws on.
 pub const SURFACE_W: usize = 720;
 
-/// The column the viewfinder's text is measured against.
-pub const VIEWFINDER_TEXT_X0: usize = 20;
+/// The width of the card the platform's verdict is drawn on.
+///
+/// WHY the model owns it: the words are chosen here and the column they are
+/// drawn into is this width less the dot's gutter and the card's right
+/// margin, so only here can the two be checked against each other. The
+/// renderer builds the card from these numbers, which is what the camera's
+/// own viewfinder geometry already does.
+pub const STATUS_CARD_W: usize = 520;
 
-/// The width of the column the viewfinder's text is measured against.
-pub const VIEWFINDER_TEXT_W: usize = SURFACE_W - 40;
+/// The gutter the card's status dot lives in.
+pub const STATUS_ICON_GUTTER: usize = 64;
+
+/// The margin the card keeps on its right.
+pub const STATUS_TEXT_MARGIN: usize = theme::spacing::GRID_24;
+
+/// The column the card's runs are drawn in.
+pub const STATUS_TEXT_W: usize = STATUS_CARD_W - STATUS_ICON_GUTTER - STATUS_TEXT_MARGIN;
+
+/// The rung the card's headline is drawn with.
+pub const STATUS_HEAD_RUNG: usize = theme::typography::BODY_SCALE;
+
+/// The rung the card's reason is drawn with.
+pub const STATUS_REASON_RUNG: usize = theme::typography::CAPTION_SCALE;
+
+/// How many lines the card reserves for the reason.
+///
+/// WHY the card reserves the worst case rather than each verdict's own: the
+/// card floats over the viewfinder and the verdict changes under it; a card
+/// that resized as the words changed would move the frame lines with it.
+pub const STATUS_REASON_LINES: usize = 2;
+
+/// The x a settings plate stands at: the sheet's own frame, one grid in.
+///
+/// WHY the model owns the plate: the renderer fills the plate and taps it, and
+/// the model measures the row's runs against the column inside it. Splitting
+/// those two numbers across the crates is what let the status card clip a
+/// refusal the gate had just passed.
+pub const SETTINGS_PLATE_X: usize = VIEWFINDER_GUTTER + theme::spacing::GRID_12;
+
+/// The width of a settings plate: the surface less the gutter on each side.
+pub const SETTINGS_PLATE_W: usize = SURFACE_W - 2 * SETTINGS_PLATE_X;
+
+/// The inset the plate's runs stand off its own left edge.
+pub const SETTINGS_TEXT_INSET: usize = theme::spacing::GRID_12;
+
+/// The margin the plate keeps on its right.
+pub const SETTINGS_TEXT_MARGIN: usize = theme::spacing::GRID_24;
 
 /// The width the settings surface's text is measured against.
 ///
-/// WHY it is a constant and not the sheet's width: a label that does not fit
-/// its column is a label that runs into the next one, and the settings
-/// surface is where the camera states what the platform supports.
-pub const SETTINGS_TEXT_MAX: usize = 600;
+/// WHY it is the plate's own column and not a remembered number: a label that
+/// does not fit its column is a label that runs off the plate it is drawn on,
+/// and the settings surface is where the camera states what the platform
+/// supports.
+pub const SETTINGS_TEXT_MAX: usize =
+    SETTINGS_PLATE_W - SETTINGS_TEXT_INSET - SETTINGS_TEXT_MARGIN;
 
 // ---------------------------------------------------------------------------
 // The viewfinder and the chips that float over it.
@@ -497,6 +541,33 @@ pub fn centred_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usiz
     let w = std::design::outline_text::drawn_advance(text, scale, Some(available))
         .unwrap_or_else(|| std::design::font::measure(text, scale));
     x0 + available.saturating_sub(w) / 2
+}
+
+/// The byte offset a notice's reason splits at, so neither half loses a word.
+///
+/// WHY the split is at a word boundary and not at the column edge: the reason
+/// is the platform's own answer to a call this app was refused, and a notice
+/// that states a refusal with the refusal's own word cut off says the opposite
+/// of what it means. The return value is where the first line ends, which is
+/// the space between the two words; the second line starts after it, so the
+/// space belongs to neither line. A reason that fits whole returns its own
+/// length and there is no second line. A reason whose first word alone is
+/// wider than the column has no boundary to break at and is returned whole --
+/// the gate over the verdicts is what keeps that case from being reachable.
+pub fn notice_break(text: &[u8], column: usize, scale: usize) -> usize {
+    if std::design::font::measure(text, scale) <= column {
+        return text.len();
+    }
+    let mut split = 0usize;
+    for (index, byte) in text.iter().enumerate() {
+        if *byte == b' ' && std::design::font::measure(&text[..index], scale) <= column {
+            split = index;
+        }
+    }
+    if split == 0 {
+        return text.len();
+    }
+    split
 }
 
 /// Works out a frame's format from the geometry the platform reported and the
@@ -875,14 +946,14 @@ pub struct CameraApp {
     pub head: [u8; 48],
     /// How many bytes of the headline are used.
     pub head_len: usize,
-    /// Where the headline starts.
-    pub head_x: usize,
-    /// The line under the headline: why the camera is in this state.
+    /// The first line of the reason the camera is in this state.
     pub sub: [u8; 96],
-    /// How many bytes of the reason are used.
+    /// How many bytes of the reason's first line are used.
     pub sub_len: usize,
-    /// Where the reason starts.
-    pub sub_x: usize,
+    /// The second line of the reason, when the reason needs two.
+    pub sub2: [u8; 96],
+    /// How many bytes of the reason's second line are used.
+    pub sub2_len: usize,
     /// The values of the settings rows, pre-rendered.
     ///
     /// WHY they are pre-rendered: the renderer runs once per pixel of the
@@ -930,10 +1001,10 @@ impl CameraApp {
             screen: CameraScreen::Viewfinder,
             head: [0; 48],
             head_len: 0,
-            head_x: 0,
             sub: [0; 96],
             sub_len: 0,
-            sub_x: 0,
+            sub2: [0; 96],
+            sub2_len: 0,
             settings_values: [[0; 64]; SETTINGS_ROWS],
             settings_value_lens: [0; SETTINGS_ROWS],
             clock: [b' '; 5],
@@ -1029,21 +1100,12 @@ impl CameraApp {
     /// when that happens and only read afterwards.
     pub fn refresh_status_text(&mut self) {
         self.head_len = copy_bytes(&mut self.head, self.status.headline());
-        self.head_x = centred_x(
-            &self.head[..self.head_len],
-            2,
-            VIEWFINDER_TEXT_X0,
-            VIEWFINDER_TEXT_W,
-        );
         let mut reason = [0u8; 96];
         let reason_len = self.status_reason(&mut reason);
-        self.sub_len = copy_bytes(&mut self.sub, &reason[..reason_len]);
-        self.sub_x = centred_x(
-            &self.sub[..self.sub_len],
-            1,
-            VIEWFINDER_TEXT_X0,
-            VIEWFINDER_TEXT_W,
-        );
+        let split = notice_break(&reason[..reason_len], STATUS_TEXT_W, STATUS_REASON_RUNG);
+        self.sub_len = copy_bytes(&mut self.sub, &reason[..split]);
+        let rest = if split < reason_len { split + 1 } else { split };
+        self.sub2_len = copy_bytes(&mut self.sub2, &reason[rest..reason_len]);
     }
 
     /// Rebuilds the shots readout after the counter moves.
@@ -1834,28 +1896,131 @@ mod tests {
 
     #[test]
     fn every_line_the_camera_draws_fits_the_column_it_is_drawn_in() {
-        // The viewfinder's headline is drawn at scale 2 and its reason at
-        // scale 1; both have to fit the column or the renderer declines to
-        // draw them and the screen says nothing.
+        // The card draws its headline at the body rung and its reason at the
+        // caption rung, both inside the card's own column, and the renderer
+        // clips a run at the column's right edge rather than wrapping it. WHY
+        // the column and not the viewfinder: a run measured against anything
+        // wider than what it is painted into is a run that loses its own tail
+        // on the screen, which is exactly how a refusal notice came to read
+        // "the camera capabilit".
+        let mut app = CameraApp::new();
         for status in [
             CameraStatus::AuthorityRefused,
             CameraStatus::NoSensor,
             CameraStatus::AuthorityHeld,
             CameraStatus::Failed,
         ] {
+            app.status = status;
+            app.last_error = -12345;
             let head = status.headline();
             assert!(
-                std::design::font::measure(head, 2) <= VIEWFINDER_TEXT_W,
-                "the headline {:?} does not fit the viewfinder column",
-                core::str::from_utf8(head).unwrap()
+                std::design::font::measure(head, STATUS_HEAD_RUNG) <= STATUS_TEXT_W,
+                "the headline {:?} needs {} px and the card's column is {} px",
+                core::str::from_utf8(head).unwrap(),
+                std::design::font::measure(head, STATUS_HEAD_RUNG),
+                STATUS_TEXT_W
             );
-            let reason = status.reason();
+            let mut reason = [0u8; 96];
+            let len = app.status_reason(&mut reason);
+            let split = notice_break(&reason[..len], STATUS_TEXT_W, STATUS_REASON_RUNG);
+            let rest = if split < len { split + 1 } else { split };
+            let (first, second) = (&reason[..split], &reason[rest..len]);
             assert!(
-                std::design::font::measure(reason, 1) <= VIEWFINDER_TEXT_W,
-                "the reason {:?} does not fit the viewfinder column",
-                core::str::from_utf8(reason).unwrap()
+                std::design::font::measure(first, STATUS_REASON_RUNG) <= STATUS_TEXT_W,
+                "the reason's first line {:?} needs {} px and the card's column is {} px",
+                core::str::from_utf8(first).unwrap(),
+                std::design::font::measure(first, STATUS_REASON_RUNG),
+                STATUS_TEXT_W
+            );
+            assert!(
+                std::design::font::measure(second, STATUS_REASON_RUNG) <= STATUS_TEXT_W,
+                "the reason's second line {:?} needs {} px, so the card needs a third line",
+                core::str::from_utf8(second).unwrap(),
+                std::design::font::measure(second, STATUS_REASON_RUNG)
             );
         }
+    }
+
+    #[test]
+    fn the_status_notice_splits_at_words_and_keeps_them() {
+        // WHY this is its own gate: the card reserves two lines for the reason,
+        // and a reason that needs a third is only safe if every one of its
+        // words fits the column on its own -- otherwise the split has nowhere
+        // to go and the notice loses a word.
+        let mut app = CameraApp::new();
+        for status in [
+            CameraStatus::AuthorityRefused,
+            CameraStatus::NoSensor,
+            CameraStatus::AuthorityHeld,
+            CameraStatus::Failed,
+        ] {
+            app.status = status;
+            app.last_error = -12345;
+            let mut reason = [0u8; 96];
+            let len = app.status_reason(&mut reason);
+            let mut start = 0usize;
+            while start < len {
+                let end = match reason[start..len].iter().position(|b| *b == b' ') {
+                    Some(offset) => start + offset,
+                    None => len,
+                };
+                assert!(
+                    std::design::font::measure(&reason[start..end], STATUS_REASON_RUNG)
+                        <= STATUS_TEXT_W,
+                    "the word {:?} alone needs {} px and the card's column is {} px",
+                    core::str::from_utf8(&reason[start..end]).unwrap(),
+                    std::design::font::measure(&reason[start..end], STATUS_REASON_RUNG),
+                    STATUS_TEXT_W
+                );
+                start = end + 1;
+            }
+            let split = notice_break(&reason[..len], STATUS_TEXT_W, STATUS_REASON_RUNG);
+            let rest = if split < len { split + 1 } else { split };
+            let (first, second) = (&reason[..split], &reason[rest..len]);
+            assert_eq!(
+                first.len() + second.len() + usize::from(!second.is_empty()),
+                len,
+                "the split dropped a byte of the reason"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_notice_keeps_its_own_words_on_the_card_that_states_it() {
+        // The regression this pins: the platform's refusal read "The platform
+        // denied this app the camera capabilit" on the screen, because the
+        // column clipped it and the only gate measured the run against a
+        // region wider than the card. WHY the longest verdict is the one to
+        // ask about: it is the one the card cannot hold on a single line.
+        let mut app = CameraApp::new();
+        app.status = CameraStatus::AuthorityRefused;
+        app.last_error = 0;
+        app.refresh_status_text();
+        let first = &app.sub[..app.sub_len];
+        let second = &app.sub2[..app.sub2_len];
+        assert!(
+            std::design::font::measure(first, STATUS_REASON_RUNG) <= STATUS_TEXT_W,
+            "the refusal's first line needs {} px and the card's column is {} px",
+            std::design::font::measure(first, STATUS_REASON_RUNG),
+            STATUS_TEXT_W
+        );
+        assert!(
+            std::design::font::measure(second, STATUS_REASON_RUNG) <= STATUS_TEXT_W,
+            "the refusal's second line needs {} px and the card's column is {} px",
+            std::design::font::measure(second, STATUS_REASON_RUNG),
+            STATUS_TEXT_W
+        );
+        assert!(!second.is_empty(), "the refusal fits one line again, so the card reserves a second line for nothing");
+        assert_eq!(
+            first.len() + second.len() + 1,
+            app.status.reason().len(),
+            "the two lines are not the whole sentence: {first:?} + {second:?}"
+        );
+        assert_eq!(
+            second,
+            b"capability",
+            "the word that was clipped off the card is the one the notice is about"
+        );
     }
 
     #[test]

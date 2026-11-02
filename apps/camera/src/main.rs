@@ -209,8 +209,25 @@ const _: () = assert!(FLASH_ICON_CX + 10 < FLASH_TEXT_X);
 const _: () = assert!(FLASH_TEXT_X + FLASH_TEXT_W <= FLASH_RECT.x + FLASH_RECT.w);
 
 /// The status card that carries the platform's own verdict on the camera.
-const STATUS_CARD_W: usize = 520;
-const STATUS_CARD_H: usize = 124;
+///
+/// WHY its width and column come from the model: the model chooses the words
+/// and measures them against the column they are drawn in, and the only thing
+/// that keeps a refusal notice from losing its own tail is the two of them
+/// agreeing on one number.
+const STATUS_CARD_W: usize = camera::STATUS_CARD_W;
+/// The card's height: the stack it reserves, plus the air above and below it.
+///
+/// WHY derived and not pinned: the stack is the headline's line box and the
+/// reason's, one box per line the model may split a reason across. Pin the
+/// height and the ladder's next raise overflows the card it should be sizing.
+const STATUS_STACK_GAP: usize = spacing::GRID_8;
+const STATUS_HEAD_BOX: usize = std::design::font::line_height(camera::STATUS_HEAD_RUNG);
+const STATUS_SUB_BOX: usize = std::design::font::line_height(camera::STATUS_REASON_RUNG);
+const STATUS_STACK_H: usize = STATUS_HEAD_BOX
+    + STATUS_STACK_GAP
+    + camera::STATUS_REASON_LINES * STATUS_SUB_BOX;
+const STATUS_CARD_V_PAD: usize = spacing::GRID_20;
+const STATUS_CARD_H: usize = STATUS_STACK_H + 2 * STATUS_CARD_V_PAD;
 /// The card, centred on the active frame's centre row inside the well.
 const STATUS_CARD: Rect = Rect::new(
     VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
@@ -219,49 +236,43 @@ const STATUS_CARD: Rect = Rect::new(
     STATUS_CARD_H,
 );
 /// The gutter the card's status dot lives in.
-const STATUS_ICON_GUTTER: usize = 64;
-/// The margin the card keeps on its right.
-const STATUS_TEXT_MARGIN: usize = 24;
-/// The card's text column: the card's width, less the gutter and the margin.
-const STATUS_TEXT_W: usize = STATUS_CARD_W - STATUS_ICON_GUTTER - STATUS_TEXT_MARGIN;
-/// Where the card's two runs start.
+const STATUS_ICON_GUTTER: usize = camera::STATUS_ICON_GUTTER;
+/// Where the card's runs start.
 const STATUS_TEXT_X: usize = STATUS_CARD.x + STATUS_ICON_GUTTER;
+/// The column the card's runs are measured and clipped against.
+const STATUS_TEXT_W: usize = camera::STATUS_TEXT_W;
 
-/// The card's headline, as the line box of the face it is drawn with.
-const STATUS_HEAD_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
-/// The line under it, likewise.
-const STATUS_SUB_BOX: usize = std::design::font::line_height(typography::CAPTION_SCALE);
-/// Air between the two runs, kept as one knob.
-const STATUS_STACK_GAP: usize = 8;
-/// The two runs as one block, so the block -- not either line -- is centred.
-const STATUS_STACK_H: usize = STATUS_HEAD_BOX + STATUS_STACK_GAP + STATUS_SUB_BOX;
 /// The air above the block, which is the air below it.
-const STATUS_STACK_PAD: usize = (STATUS_CARD_H - STATUS_STACK_H) / 2;
+const STATUS_STACK_PAD: usize = STATUS_CARD_V_PAD;
 /// The headline's line box top.
 const STATUS_HEAD_Y: usize = STATUS_CARD.y + STATUS_STACK_PAD;
-/// The second run's box top: below the whole box of the run above it.
+/// The reason's first box: below the whole box of the run above it.
 const STATUS_SUB_Y: usize = STATUS_HEAD_Y + STATUS_HEAD_BOX + STATUS_STACK_GAP;
+/// The reason's second box, when the reason needed a split.
+const STATUS_SUB2_Y: usize = STATUS_SUB_Y + STATUS_SUB_BOX;
 
 /// The status dot, on the headline's cap centre inside the icon gutter.
 const STATUS_DOT_CX: usize = STATUS_CARD.x + 30;
 const STATUS_DOT_CY: usize = STATUS_HEAD_Y
-    + std::design::font::ascent_for_scale(typography::BODY_SCALE)
-    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize / 2;
+    + std::design::font::ascent_for_scale(camera::STATUS_HEAD_RUNG)
+    - std::design::font::cap_for_scale(camera::STATUS_HEAD_RUNG) as usize / 2;
 /// The dot's core and the halo around it.
 const STATUS_DOT_R: usize = 6;
 const STATUS_DOT_HALO_R: usize = 11;
 
 /// WHY checked at compile time: the card is dropped on the tightest letterbox
 /// the aspect chip can select, so the first gate is the one a taller stack or a
-/// shorter 1:1 cut breaks; the second is what a widened gutter, a deeper right
-/// margin or a longer name would break, and the third keeps the halo from
-/// reaching the card's own hairline.
+/// shorter 1:1 cut breaks; the second is what a widened gutter or a deeper
+/// right margin would break, and the third keeps the halo from reaching the
+/// card's own hairline. The fourth is the one that fires if the model splits a
+/// reason across more lines than the card reserves.
 const _: () = assert!(STATUS_STACK_PAD * 2 + STATUS_STACK_H <= STATUS_CARD_H);
-const _: () = assert!(STATUS_SUB_Y + STATUS_SUB_BOX <= STATUS_CARD.y + STATUS_CARD_H);
+const _: () = assert!(STATUS_SUB2_Y + STATUS_SUB_BOX <= STATUS_CARD.y + STATUS_CARD_H);
 const _: () = assert!(STATUS_CARD.y >= FRAME_1_1_Y);
 const _: () = assert!(STATUS_CARD.y + STATUS_CARD_H <= FRAME_1_1_Y + FRAME_1_1_H);
 const _: () = assert!(STATUS_TEXT_X + STATUS_TEXT_W <= STATUS_CARD.x + STATUS_CARD_W);
 const _: () = assert!(STATUS_DOT_CX - STATUS_DOT_HALO_R >= STATUS_CARD.x);
+const _: () = assert!(camera::STATUS_REASON_LINES * STATUS_SUB_BOX <= STATUS_STACK_H);
 
 /// The self-timer ring's outer and inner radius; the digit lives inside the
 /// inner one.
@@ -402,10 +413,10 @@ const SHEET_PAGE_ROWS: usize = SHEET_SLOTS - 1;
 const SHEET_PAGES: usize = (camera::SETTINGS_ROWS + SHEET_PAGE_ROWS - 1) / SHEET_PAGE_ROWS;
 /// Where the sheet ends: the last slot's pitch, so the frame is the page.
 const SHEET_BOTTOM: usize = SHEET_ROW_Y0 + SHEET_SLOTS * SHEET_ROW_H;
-const SHEET_RECT: Rect = Rect::new(24, 140, 672, SHEET_BOTTOM - 140);
-const SHEET_ROW_X0: usize = 36;
-const SHEET_ROW_W: usize = 648;
-const SHEET_TEXT_X: usize = 48;
+const SHEET_RECT: Rect = Rect::new(VIEWFINDER_X0, 140, W - 2 * VIEWFINDER_X0, SHEET_BOTTOM - 140);
+const SHEET_ROW_X0: usize = camera::SETTINGS_PLATE_X;
+const SHEET_ROW_W: usize = camera::SETTINGS_PLATE_W;
+const SHEET_TEXT_X: usize = SHEET_ROW_X0 + camera::SETTINGS_TEXT_INSET;
 const SHEET_TEXT_W: usize = camera::SETTINGS_TEXT_MAX;
 
 /// The row's runs, as the line boxes of the faces they are drawn with.
@@ -1126,7 +1137,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                             return chrome::tint(ink, 26);
                         }
 
-                        // WHY the bands are the two line boxes: the card used
+                        // WHY the bands are the line boxes: the card used
                         // to split itself at rows counted off its own middle
                         // (`abs_mid + 15`, `abs_mid + 20`), which were neither
                         // the runs' boxes nor a gap of their own -- the
@@ -1134,14 +1145,17 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                         // five rows belonged to neither run, and the pair sat
                         // with 27 rows of air above it and 18 below. Each band
                         // is now the box its run is drawn into, and the air
-                        // between them is STATUS_STACK_GAP.
+                        // between them is STATUS_STACK_GAP. The reason owns
+                        // two boxes because the model splits it at a word when
+                        // one column cannot hold it; an unsplit reason leaves
+                        // the second box empty.
                         if y >= STATUS_HEAD_Y && y < STATUS_HEAD_Y + STATUS_HEAD_BOX {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
                                 STATUS_TEXT_X,
                                 STATUS_HEAD_Y,
-                                typography::BODY_SCALE,
+                                camera::STATUS_HEAD_RUNG,
                                 &camera.head[..camera.head_len],
                                 STATUS_TEXT_W,
                                 chrome::TEXT,
@@ -1155,8 +1169,22 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                                 y,
                                 STATUS_TEXT_X,
                                 STATUS_SUB_Y,
-                                typography::CAPTION_SCALE,
+                                camera::STATUS_REASON_RUNG,
                                 &camera.sub[..camera.sub_len],
+                                STATUS_TEXT_W,
+                                chrome::TEXT_MUTED,
+                                chrome::SURFACE,
+                            ) {
+                                return tc;
+                            }
+                        } else if y >= STATUS_SUB2_Y && y < STATUS_SUB2_Y + STATUS_SUB_BOX {
+                            if let Some(tc) = test_text(
+                                x,
+                                y,
+                                STATUS_TEXT_X,
+                                STATUS_SUB2_Y,
+                                camera::STATUS_REASON_RUNG,
+                                &camera.sub2[..camera.sub2_len],
                                 STATUS_TEXT_W,
                                 chrome::TEXT_MUTED,
                                 chrome::SURFACE,
