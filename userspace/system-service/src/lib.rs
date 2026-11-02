@@ -2454,6 +2454,75 @@ mod tests {
         );
     }
 
+    /// The sentence this host's own model file is answered with.
+    ///
+    /// WHY this exists next to the widest-fixture guard: that guard sizes the window
+    /// against what the reader *can* report, and nothing in it proves the identity
+    /// clause quotes a file that really exists. A real Gemma leaves its vocabulary
+    /// partway through the metadata, so the walk stops with some fields read and some
+    /// not -- and only the file itself says which sentence the device actually sends.
+    ///
+    /// WHY it is gated on an environment variable: the file is 333 MB and is not in
+    /// the repository, so its host path arrives in `INTEROS_REAL_GGUF_PATH`. Without
+    /// that variable the test prints what it did not check, which is the honest
+    /// alternative to a green test that opened nothing.
+    #[test]
+    fn test_the_notice_for_the_file_this_host_holds_quotes_that_file() {
+        extern crate std as real_file;
+        use real_file::io::Read;
+
+        let Some(path) = real_file::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            real_file::println!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
+                 the identity clause has only ever quoted a hand-written fixture."
+            );
+            return;
+        };
+        // The same window the engine's own real-file test reads: enough for every key
+        // before the vocabulary, and the walk stops there by design.
+        const WINDOW: usize = 64 * 1024;
+        let mut bytes = real_file::vec![0u8; WINDOW];
+        let mut file = real_file::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+        let mut filled = 0usize;
+        while filled < WINDOW {
+            match file.read(&mut bytes[filled..]) {
+                Ok(0) => break,
+                Ok(got) => filled += got,
+                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+            }
+        }
+        let head = &bytes[..filled];
+
+        let mut stream = gguf::GgufStream::from_slice(head);
+        let info = gguf::read_model_info_stream(&mut stream)
+            .unwrap_or_else(|error| panic!("the real file at {path} did not parse: {error:?}"));
+        let prompt = b"Summarize my notifications";
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+        let notice = model_gap_notice(&info, ModelGap::Configured, prompt, None, &mut out);
+        let text = core::str::from_utf8(notice).unwrap_or("<not utf-8>");
+        real_file::println!("REAL FILE {path} answered without the tokenizer walk:");
+        real_file::println!("  {} bytes: {text}", notice.len());
+
+        assert!(
+            notice.len() <= NOTICE_WINDOW_BYTES,
+            "the real file's sentence is {} bytes, over the window it is written into",
+            notice.len()
+        );
+        assert!(
+            text.ends_with("bytes were not answered."),
+            "the real file's sentence was cut before its ending: {text}"
+        );
+        assert!(
+            text.contains(" declares gemma-embedding"),
+            "the real file's own architecture is not quoted: {text}"
+        );
+        assert!(
+            !text.contains("names no model"),
+            "the real file states a name, and the notice said it declared none: {text}"
+        );
+    }
+
     #[test]
     fn test_install_notice_calls_only_a_whole_file_installed() {
         let mut out = [0u8; 256];
