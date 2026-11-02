@@ -45,15 +45,18 @@ use file_manager::{
     validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap, FileAction,
     IndexedDocument, LayoutMode, MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
     SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
-    ACTION_LABELS, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_Y, CATEGORY_COUNT,
-    CATEGORY_Y0, CATEGORY_Y1, DETAILS_CARD, DETAILS_CLOSE, DETAILS_LINE_H, DETAILS_LINE_Y0,
-    DETAILS_OPEN, DETAILS_TITLE_Y, ENTRIES_CARD, GRID_CELL_H, GRID_CELL_W, HEADER_H,
-    HOME_BROWSE_BTN, HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y,
-    HOME_RECENTS_TITLE_Y, HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE, HOME_RECENT_ROW_H,
-    HOME_RECENT_TIME_DY, HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
+    ACTION_LABELS, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_ROWS, BREADCRUMB_SCALE,
+    BREADCRUMB_Y, CATEGORY_COUNT, CATEGORY_Y0, CATEGORY_Y1, DETAILS_CARD, DETAILS_CLOSE,
+    DETAILS_LINE_H, DETAILS_LINE_Y0, DETAILS_OPEN, DETAILS_TITLE_Y, ENTRIES_CARD, GRID_CELL_H,
+    GRID_CELL_W, HEADER_BOTTOM_AIR, HEADER_H, HEADER_READOUT_LINE1_Y, HEADER_READOUT_LINE2_Y,
+    HEADER_READOUT_MAX_W, HEADER_READOUT_ROWS, HEADER_READOUT_SCALE, HEADER_TITLE_MAX_W,
+    HEADER_TITLE_ROWS, HEADER_TITLE_SCALE, HEADER_TITLE_Y, HOME_BROWSE_BTN,
+    HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y, HOME_RECENTS_TITLE_Y,
+    HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE, HOME_RECENT_ROW_H, HOME_RECENT_TIME_DY,
+    HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
     HOME_STORAGE_CARD, LINE_LEN, LIST_PILL, GRID_PILL, SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W,
-    SCOPE_THIS_PILL, SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H, SHEET_NAME_Y,
-    SORT_PILL, STATUS_Y, TOOLBAR_Y,
+    SCOPE_THIS_PILL, SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SHEET, SHEET_NAME_H,
+    SHEET_NAME_Y, SORT_PILL, STATUS_Y, TOOLBAR_Y,
 };
 
 /// The platform's list-row treatment, at the two states the file list uses.
@@ -116,6 +119,12 @@ const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 
 // -----------------------------------------------------------------------------
 // Header geometry - single source of truth for drawing and hit-testing
+//
+// WHY the band's rows live in the library: the header's height comes off the
+// type ladder, and the browse stack, the home card and the tap handler all start
+// on its foot. A band derived in one place and re-typed in another is a band
+// that clips the day a rung moves. What stays here is only what this file's
+// pixel function owns: the title's lane and the readout's lane.
 // -----------------------------------------------------------------------------
 /// Screen margin (8pt grid value): the right inset the storage readout is
 /// aligned to.
@@ -126,79 +135,24 @@ const HANDLER_REFUSED_NOTICE: &[u8] = b"the app for this file could not launch";
 /// [`std::design::back_button`] and answers for itself.
 const HEADER_MARGIN: usize = spacing::GRID_24;
 
-/// The header's title rung.
-const TITLE_SCALE: usize = 3;
-
-/// The row the header's title and the back control are centred on: the middle
-/// of the control's own band.
-const HEADER_ROW: usize = std::design::back_button::Y + std::design::back_button::SIZE / 2;
-
-/// The later of two layout edges.
-///
-/// WHY a local helper rather than `Ord::max`: `max` is not callable in a `const`
-/// context on this toolchain, and every edge of this header has to be a
-/// compile-time constant, because the pixel function compares against it once
-/// per pixel. Messages records the same workaround
-/// (`apps/messages/src/main.rs`, `later`).
-const fn later(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
-
-/// The row the title's line box stands on: the run's cap height centred on the
-/// control's row, which is the placement the dialer, messages and vault use for
-/// a title standing beside this control.
-///
-/// WHY derived from the control and not written out: the title and the control
-/// are one row, and a row has one owner. Authored by hand as `64`, the title
-/// started eight rows below the band the control stands on, and the control was
-/// then pushed onto the row under the title's line box to escape it -- which is
-/// how this app came to paint its back control under its name while every other
-/// app paints it in the corner.
-///
-/// WHY clamped to `viewport::HEADER_TOP` rather than centred outright: the band
-/// the control stands in is 48 rows and this rung's box is 49, so the box no
-/// longer fits inside the band and exact centring lifts its top to row 54 -- two
-/// rows above the row the platform's chrome starts on. The clamp keeps the box
-/// off those two rows and spends its surplus under the control instead, so the
-/// gate below stays true as it was written rather than being relaxed to admit
-/// the band's own rows.
-const TITLE_Y: usize = later(
-    std::design::viewport::HEADER_TOP,
-    HEADER_ROW
-        - font::ascent_for_scale(TITLE_SCALE)
-        + font::cap_for_scale(TITLE_SCALE) as usize / 2,
-);
-
 /// The x the title starts on: the control's right edge plus the platform's
 /// 16px gap, the same expression every app that puts a title beside this
 /// control uses.
 const TITLE_X: usize =
     std::design::back_button::X + std::design::back_button::SIZE + spacing::GRID_16;
 
-/// The widest the header's title run may get before it reaches the readout's
-/// lane. `font::measure` is not a `const fn`, so this is the bound the gate
-/// below checks against rather than a measured width; "Files" at this rung
-/// measures well inside it.
-const TITLE_MAX_W: usize = 160;
+// The title's lane width is [`HEADER_TITLE_MAX_W`] in the library: this branch
+// clips a run only at its left edge and the panel's right edge, so that number
+// is the only thing between a long title and the readout's lane, and the host
+// test beside it is what measures `b"Files"` at [`HEADER_TITLE_SCALE`] against
+// it. `font::measure` is not a `const fn`, so the width cannot be checked here.
 
-/// WHY checked at compile time: the status band owns `0..STATUS_BAR_HEIGHT` and
-/// the header branch owns every row below `HEADER_H`, so the control and the
-/// title standing beside it must both fit inside the header, must not claim the
-/// same pixel as each other, and must leave the readout's lane clear of the
-/// title's reserved box. These are the whole claim of this header's layout.
-const _: () = assert!(TITLE_Y >= std::design::viewport::HEADER_TOP);
-const _: () = assert!(
-    std::design::back_button::Y + std::design::back_button::SIZE <= HEADER_H,
-    "the back control must stand entirely inside the rows the header answers"
-);
-const _: () = assert!(
-    TITLE_Y + font::line_height(TITLE_SCALE) <= HEADER_H,
-    "the title's line box must stand entirely inside the rows the header answers"
-);
+/// WHY checked at compile time: the title and the back control are one row, and
+/// the row has two owners -- this gate is the claim that they never claim the
+/// same pixel, which is the whole reason the title's lane can then be measured
+/// against the readout's lane beside it. The rows the band itself answers are
+/// checked in the library, because the browse stack and the home card start on
+/// its foot and only the model sees both.
 const _: () = assert!(
     TITLE_X >= std::design::back_button::X + std::design::back_button::SIZE,
     "the title must start clear of the back control's right edge"
@@ -210,33 +164,43 @@ const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
 
 /// Right edge the header readout is aligned to (the 24px right margin).
 const READOUT_X1: usize = W - HEADER_MARGIN;
-/// Widest a header readout run may be: `font::ellipsize` trims to this instead
-/// of letting a long path run under the title, and the gate below is what keeps
-/// "instead of" honest -- the run's left edge stays right of the title's
-/// reserved box, so the path line and the item-count line clear both the back
-/// control and the title at whatever position the SDK gives them.
-const READOUT_MAX_W: usize = 400;
-const READOUT_LINE1_Y0: usize = 68;
-const READOUT_LINE2_Y0: usize = READOUT_LINE1_Y0 + font::line_height(1) + 8;
 
-/// WHY also checked: the title's box is now taller than the band it is centred
-/// on, so the header's claim on the rows it answers is the lowest of its three
-/// occupants rather than the control alone. The readout's second line is that
-/// lowest occupant, and `HEADER_H` is the row the browse stack starts on, so a
-/// line that reached past it would lose its descent to the search field.
+/// WHY also checked here: the readout's two lines are painted by this file's
+/// pixel function and the branch that answers them stops at `HEADER_H`, so the
+/// lowest row this branch reaches must be a row the band answers. The band is
+/// built from the same union boxes beside [`HEADER_H`]; this gate is the copy
+/// that fails here, at the draw site, if the two ever disagree.
 const _: () = assert!(
-    later(
-        later(
-            TITLE_Y + font::line_height(TITLE_SCALE),
-            std::design::back_button::Y + std::design::back_button::SIZE,
-        ),
-        READOUT_LINE2_Y0 + font::line_height(1),
-    ) <= HEADER_H,
-    "the header must answer every row the lowest thing standing in it occupies"
+    HEADER_READOUT_LINE2_Y + HEADER_READOUT_ROWS <= HEADER_H,
+    "the header branch must answer every row the readout's second line reserves"
 );
 
+/// WHY also checked: the title's row and the band's own air are the two figures
+/// a rung move changes first. Both come off the same rungs the band is built
+/// from, so a rung that outgrew this header fails here, at the draw site, rather
+/// than painting over the browse stack that starts on `HEADER_H`.
 const _: () = assert!(
-    READOUT_X1 - READOUT_MAX_W >= TITLE_X + TITLE_MAX_W,
+    HEADER_TITLE_Y + HEADER_TITLE_ROWS <= HEADER_H,
+    "the title's union box must stand entirely inside the rows the header answers"
+);
+/// WHY this one repeats the band's arithmetic instead of trusting it: the branch
+/// that paints the readout stops at `HEADER_H`, so the last row it may ink plus
+/// the air under it has to be inside the band by this file's own numbers too.
+const _: () = assert!(
+    HEADER_H >= HEADER_READOUT_LINE2_Y + HEADER_READOUT_ROWS + HEADER_BOTTOM_AIR,
+    "the header must keep its full air below the last row its readout reserves"
+);
+
+/// The readout's lane width is [`HEADER_READOUT_MAX_W`] in the library, and the
+/// title's is [`HEADER_TITLE_MAX_W`]: `font::ellipsize` trims to the first here
+/// while the host test measures the trimmed run against it there, and two copies
+/// of one lane is how a header comes to reserve room at one rung and measure its
+/// runs at another. This gate is what keeps the trim honest about *why* it
+/// trims -- the run's left edge stays right of the title's reserved box, so the
+/// path line and the item-count line clear both the back control and the title at
+/// whatever position the SDK gives them.
+const _: () = assert!(
+    READOUT_X1 - HEADER_READOUT_MAX_W >= TITLE_X + HEADER_TITLE_MAX_W,
     "the header readout's lane must start right of the title's reserved box"
 );
 
@@ -256,6 +220,14 @@ const DISABLED: u32 = THEME.border;
 /// WHY the outline face comes first: the title is drawn at scale 3 and section
 /// headings at scale 2, so on the bitmap face both are a 16x24 cell magnified
 /// by an integer -- a soft ramp where an edge belongs.
+///
+/// WHY the band comes from `row_band` and not from `line_height`: `row_band` is
+/// the SDK's own answer for the rows a run at `scale` can ink -- the union of the
+/// outline line box and the bitmap cell -- and it is the function the header's
+/// boxes beside [`HEADER_H`] are sized from. Asking the pixel test for the same
+/// one is what keeps a reserved box and a rejected pixel from disagreeing; today
+/// the two are the same number at every rung this file draws, so this re-points
+/// the draw site without moving a pixel.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -267,7 +239,8 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if x < x0 || x >= W || y < y0 || y >= y0 + std::design::font::line_height(scale) {
+    let band_bottom = outline_text::row_band(y0, scale).1;
+    if x < x0 || x >= W || y < y0 || y >= band_bottom {
         return None;
     }
     if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
@@ -1846,17 +1819,18 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // Title: "Files" on the control's row, starting clear of its right edge.
     //
-    // WHY the coordinates are constants rather than written out: `TITLE_X` and
-    // `TITLE_Y` are derived from the control's own rect, so the row cannot be
-    // re-invented here, and the gates beside them are where the header's claim
-    // -- that the control and the title both fit the rows this branch answers
-    // and never claim one another's pixel -- is checked at compile time.
+    // WHY the coordinates are constants rather than written out: `TITLE_X` is
+    // derived from the control's own rect and `HEADER_TITLE_Y` from the rung the
+    // title draws at, so the row cannot be re-invented here, and the gates beside
+    // them are where the header's claim -- that the control and the title both fit
+    // the rows this branch answers and never claim one another's pixel -- is
+    // checked at compile time.
     if let Some(color) = test_text(
         x,
         y,
         TITLE_X,
-        TITLE_Y,
-        TITLE_SCALE,
+        HEADER_TITLE_Y,
+        HEADER_TITLE_SCALE,
         b"Files",
         THEME.on_surface,
         THEME.surface,
@@ -1869,15 +1843,15 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // a refusal.
     let path = &app.current_path[..app.current_path_len];
     let mut path_buf = [0u8; MAX_PATH_LEN];
-    let path_len = font::ellipsize(path, 1, READOUT_MAX_W, &mut path_buf);
-    let path_w = font::measure(&path_buf[..path_len], 1);
-    if path_w <= READOUT_MAX_W {
+    let path_len = font::ellipsize(path, HEADER_READOUT_SCALE, HEADER_READOUT_MAX_W, &mut path_buf);
+    let path_w = font::measure(&path_buf[..path_len], HEADER_READOUT_SCALE);
+    if path_w <= HEADER_READOUT_MAX_W {
         if let Some(color) = test_text(
             x,
             y,
             READOUT_X1 - path_w,
-            READOUT_LINE1_Y0,
-            1,
+            HEADER_READOUT_LINE1_Y,
+            HEADER_READOUT_SCALE,
             &path_buf[..path_len],
             THEME.on_surface_variant,
             THEME.surface,
@@ -1889,18 +1863,18 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     let mut label_buf = [0u8; 40];
     let label_len = font::ellipsize(
         &app.probe_label[..app.probe_label_len],
-        1,
-        READOUT_MAX_W,
+        HEADER_READOUT_SCALE,
+        HEADER_READOUT_MAX_W,
         &mut label_buf,
     );
-    let label_w = font::measure(&label_buf[..label_len], 1);
-    if label_w <= READOUT_MAX_W {
+    let label_w = font::measure(&label_buf[..label_len], HEADER_READOUT_SCALE);
+    if label_w <= HEADER_READOUT_MAX_W {
         if let Some(color) = test_text(
             x,
             y,
             READOUT_X1 - label_w,
-            READOUT_LINE2_Y0,
-            1,
+            HEADER_READOUT_LINE2_Y,
+            HEADER_READOUT_SCALE,
             &label_buf[..label_len],
             THEME.warning,
             THEME.surface,
@@ -1929,15 +1903,23 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         ) else {
             return THEME.surface;
         };
-        if let Some(color) = test_text(x, y, 60, 172, 2, b"Storage", THEME.on_surface, style.fill)
-        {
+        if let Some(color) = test_text(
+            x,
+            y,
+            60,
+            HOME_STORAGE_CARD.y + 20,
+            2,
+            b"Storage",
+            THEME.on_surface,
+            style.fill,
+        ) {
             return color;
         }
         if let Some(color) = test_text(
             x,
             y,
             60,
-            228,
+            HOME_STORAGE_CARD.y + 76,
             1,
             &app.storage_line[..app.storage_line_len],
             THEME.on_surface_variant,
@@ -1949,7 +1931,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             60,
-            256,
+            HOME_STORAGE_CARD.y + 104,
             1,
             app.storage_status(),
             THEME.warning,
@@ -2317,10 +2299,10 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return color;
     }
 
-    // 3. The breadcrumbs.
-    if (BREADCRUMB_Y..BREADCRUMB_Y + font::line_height(1)).contains(&y)
-        && (36..684).contains(&x)
-    {
+    // 3. The breadcrumbs. The painted rows are the whole union box the rungs
+    // reserve, centred inside the touch strip beside them, so a crumb is
+    // answered wherever its ink reaches.
+    if (BREADCRUMB_Y..BREADCRUMB_Y + BREADCRUMB_ROWS).contains(&y) && (36..684).contains(&x) {
         let mut cursor = 36usize;
         for index in 0..app.crumb_count {
             let crumb = app.crumbs[index];
@@ -2330,26 +2312,33 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             } else {
                 THEME.primary
             };
-            if let Some(color) =
-                test_text(x, y, cursor, BREADCRUMB_Y, 1, label, ink, THEME.surface)
-            {
+            if let Some(color) = test_text(
+                x,
+                y,
+                cursor,
+                BREADCRUMB_Y,
+                BREADCRUMB_SCALE,
+                label,
+                ink,
+                THEME.surface,
+            ) {
                 return color;
             }
-            cursor += font::measure(label, 1) + 6;
+            cursor += font::measure(label, BREADCRUMB_SCALE) + 6;
             if index + 1 < app.crumb_count {
                 if let Some(color) = test_text(
                     x,
                     y,
                     cursor,
                     BREADCRUMB_Y,
-                    1,
+                    BREADCRUMB_SCALE,
                     b">",
                     THEME.on_surface_variant,
                     THEME.surface,
                 ) {
                     return color;
                 }
-                cursor += font::measure(b">", 1) + 6;
+                cursor += font::measure(b">", BREADCRUMB_SCALE) + 6;
             }
         }
         return THEME.surface;
@@ -3629,13 +3618,17 @@ fn crumb_at(app: &FileManagerApp, x: usize) -> Option<usize> {
     for index in 0..app.crumb_count {
         let crumb = app.crumbs[index];
         let label = &app.current_path[crumb.label_start..crumb.label_start + crumb.label_len];
-        let width = font::measure(label, 1);
+        // WHY the model's rung and not a written `1`: the painter lays this row
+        // out at [`BREADCRUMB_SCALE`], and a hit test that re-types the rung is a
+        // hit test that lands on the wrong letters the day the ladder moves while
+        // the drawn row keeps moving with it.
+        let width = font::measure(label, BREADCRUMB_SCALE);
         if x >= cursor && x < cursor + width {
             return Some(index);
         }
         cursor += width + 6;
         if index + 1 < app.crumb_count {
-            cursor += font::measure(b">", 1) + 6;
+            cursor += font::measure(b">", BREADCRUMB_SCALE) + 6;
         }
     }
     None
@@ -3782,8 +3775,9 @@ fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32)
         return Tap::Redraw(Dirty::All);
     }
 
-    // The breadcrumbs. The band stops at the toolbar so the two never share
-    // a row of pixels.
+    // The breadcrumbs. The strip is derived as the gap between the scope row's
+    // foot and the toolbar's top, so it ends on `TOOLBAR_Y` by construction; the
+    // clamp stays because a strip and a toolbar must never answer one row.
     if y >= BREADCRUMB_HIT_Y0 && y < BREADCRUMB_HIT_Y1.min(TOOLBAR_Y) {
         if let Some(index) = crumb_at(app, x) {
             let prefix_len = app.crumbs[index].prefix_len;

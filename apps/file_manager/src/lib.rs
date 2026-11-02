@@ -3,8 +3,13 @@
 
 extern crate interos_std;
 
+use interos_std::design::back_button;
+use interos_std::design::font;
+use interos_std::design::outline_text;
 use interos_std::design::primitives::Rect;
 use interos_std::design::scroll::ScrollState;
+use interos_std::design::spacing;
+use interos_std::design::viewport;
 
 /// The app's view of the platform's design system.
 pub mod theme;
@@ -636,14 +641,195 @@ pub fn action_for_mime(mime: &str) -> &'static [u8] {
 // bottom of this file check that they do.
 // -----------------------------------------------------------------------------
 
-/// The header band.
+/// The later of two layout edges.
 ///
-/// WHY this tall: the header's row is the platform's back control band, rows
-/// `back_button::Y..Y + SIZE`, with the title centred on it, and the readout's
-/// second line runs a few rows below the pair. A header that stopped short of
-/// the lowest of those would hand its last rows to the screen below, which is
-/// the same loss the status band inflicts from above.
-pub const HEADER_H: usize = 152;
+/// WHY a helper rather than `Ord::max`: `max` is not callable in a `const`
+/// context on this toolchain, and every edge of this band has to be a
+/// compile-time constant, because the pixel function compares against it once
+/// per pixel.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The rung the header's title draws at: the platform's section rung, named
+/// rather than written as a multiplier so a ladder move cannot silently lower
+/// it here.
+///
+/// WHY the model owns the rung and not the painter: the header band reserves this
+/// rung's whole box, so a draw site that hard-codes a different multiplier is
+/// exactly how a run and its container came to disagree. The host test
+/// `every_header_run_fits_the_lane_the_painter_hands_it` measures the title at
+/// this number, and the painter reads it back from here.
+pub const HEADER_TITLE_SCALE: usize = theme::type_scale::SECTION;
+
+/// The rows the header's title row must reserve.
+///
+/// WHY the union band and not the outline box alone: the run is drawn with
+/// whichever face fits it, so the space the band answers is the wider of the
+/// outline line box and the bitmap cell -- [`outline_text::row_band`]'s answer
+/// at the rung, which is what a container has to reserve for a run at `scale`.
+pub const HEADER_TITLE_ROWS: usize = outline_text::row_band(0, HEADER_TITLE_SCALE).1;
+
+/// The row the title and the platform's back control share: the middle of the
+/// control's own band.
+pub const HEADER_ROW: usize = back_button::Y + back_button::SIZE / 2;
+
+/// The row the title's whole box stands on: the box centred on [`HEADER_ROW`],
+/// clamped to the first row the app's chrome may claim.
+///
+/// WHY the clamp: centring lands the box's top on `viewport::HEADER_TOP` exactly
+/// today -- this rung's 49-row box is one row taller than the 48-row control band
+/// it is centred in, and integer centring spends that row under the control. Raise
+/// the rung again and the box overruns the centring's slack outright, so the clamp
+/// is what keeps its top off the rows the platform's band paints over, and the
+/// gate below is where the band is checked to answer the whole box that leaves.
+pub const HEADER_TITLE_Y: usize = later(
+    viewport::HEADER_TOP,
+    HEADER_ROW.saturating_sub(HEADER_TITLE_ROWS / 2),
+);
+
+/// The rung the header's two readout lines draw at: the caption rung.
+///
+/// WHY named in the model: the painter used to pass a bare `1` at both draw
+/// sites, so nothing said which rung the band was sized for and nothing could
+/// measure the drawn run against the lane it is handed.
+pub const HEADER_READOUT_SCALE: usize = theme::type_scale::CAPTION;
+
+/// The rows one readout line reserves at that rung.
+pub const HEADER_READOUT_ROWS: usize = outline_text::row_band(0, HEADER_READOUT_SCALE).1;
+
+/// Air between the header's two readout lines.
+///
+/// WHY eight rows: it is the gap the pair has always kept, named now so the next
+/// move changes the boxes (`HEADER_READOUT_ROWS`) and leaves this alone, rather
+/// than a reader having to work out which of the two an `+ 8` meant.
+pub const HEADER_READOUT_GAP: usize = spacing::GRID_8;
+
+/// Air the header keeps below the lowest row it answers.
+///
+/// WHY sixteen rows: it is the same `spacing::GRID_16` this header spends
+/// between the back control and its title, so the air under the band matches the
+/// air inside it. The remembered 152 kept none: it was authored while the back
+/// control stood on the title's foot row and ended on the control's own last row.
+pub const HEADER_BOTTOM_AIR: usize = spacing::GRID_16;
+
+/// The row the readout's first line stands on: the row the title's caps start
+/// on, so the two runs share an optical top instead of a remembered offset.
+///
+/// WHY derived from the title's rung: row 68 was written as a bare literal with
+/// no expression tying it to the title it stands under, so the day the section
+/// rung moved the caption stayed where the number remembered instead of where the
+/// caps now start.
+pub const HEADER_READOUT_LINE1_Y: usize = HEADER_TITLE_Y
+    + font::ascent_for_scale(HEADER_TITLE_SCALE)
+    - font::cap_for_scale(HEADER_TITLE_SCALE) as usize;
+
+/// The row the readout's second line stands on: one whole line box plus the gap
+/// under the first, so a first line with a descender cannot paint into it.
+pub const HEADER_READOUT_LINE2_Y: usize =
+    HEADER_READOUT_LINE1_Y + HEADER_READOUT_ROWS + HEADER_READOUT_GAP;
+
+/// The foot of the readout's two-line stack.
+pub const HEADER_READOUT_Y1: usize = HEADER_READOUT_LINE2_Y + HEADER_READOUT_ROWS;
+
+/// The header's title lane: the widest the title run may stand.
+///
+/// WHY the bound lives in the model: the pixel test clips a run at its left edge
+/// and at the panel's right edge only, so nothing at the draw site stops a long
+/// title reaching the readout's lane. This number is the only thing that does,
+/// and the host test that measures `b"Files"` at [`HEADER_TITLE_SCALE`] against
+/// it is what makes the painter's claim that the title fits a measured one rather
+/// than a remembered one.
+pub const HEADER_TITLE_MAX_W: usize = 160;
+
+/// The widest a header readout run may be: `font::ellipsize` is handed this at
+/// both readout draw sites instead of letting a long path run under the title.
+///
+/// WHY the bound lives in the model: the lane is what the fit test measures
+/// against, and a width authored only in the painter is a width no host test can
+/// see -- which is how a header can come to measure its runs at one rung and
+/// reserve room for another.
+pub const HEADER_READOUT_MAX_W: usize = 400;
+
+/// The header band: the lowest row any of its occupants occupies, plus its air.
+///
+/// WHY derived from the ladder and not written out: the 152 this replaces was
+/// authored while the back control stood on the title's foot row, so the band
+/// ended on the control's own last row -- 44 rows of title box plus a 44px
+/// control, and no air of its own. The control has since moved into the
+/// platform's chip band and the ladder has grown both rungs, so the figure that
+/// decides this band is now the readout's two-line stack. Every row the band
+/// answers comes off the rungs and the control, so raising one grows this band
+/// and the browse stack that starts on it (`BROWSE_STACK_Y`) instead of clipping
+/// the run that moved.
+pub const HEADER_H: usize = later(
+    later(
+        HEADER_READOUT_Y1,
+        HEADER_TITLE_Y + HEADER_TITLE_ROWS,
+    ),
+    back_button::Y + back_button::SIZE,
+) + HEADER_BOTTOM_AIR;
+
+/// Truth gates: the band answers every row each of its own runs occupies, no run
+/// starts inside the rows the platform's status band owns, and the band's air is
+/// paid for out of the band itself rather than borrowed from the surface under
+/// it. These are the checks that fire if the band and the runs inside it ever
+/// disagree -- e.g. a title rung raised past the point where the readout stack is
+/// still the header's lowest occupant.
+const _: () = assert!(
+    HEADER_TITLE_Y >= viewport::HEADER_TOP,
+    "the header's title box must start below the rows the platform's status band owns"
+);
+const _: () = assert!(
+    HEADER_READOUT_LINE1_Y >= viewport::HEADER_TOP,
+    "the header's readout must start below the rows the platform's status band owns"
+);
+const _: () = assert!(
+    HEADER_TITLE_Y + HEADER_TITLE_ROWS <= HEADER_H,
+    "the header must answer the whole box its title run reserves"
+);
+const _: () = assert!(
+    back_button::Y + back_button::SIZE <= HEADER_H,
+    "the back control must stand entirely inside the rows the header answers"
+);
+const _: () = assert!(
+    HEADER_READOUT_Y1 <= HEADER_H,
+    "the header must answer the whole stack of its readout lines"
+);
+const _: () = assert!(
+    HEADER_READOUT_LINE1_Y >= HEADER_TITLE_Y
+        && HEADER_READOUT_LINE1_Y <= HEADER_TITLE_Y + HEADER_TITLE_ROWS,
+    "the readout's first line must start inside the title row it stands beside"
+);
+/// WHY the air is checked against the row the next band claims rather than
+/// against `HEADER_H`: `HEADER_H` *is* `BROWSE_STACK_Y`, so a band that ate its
+/// own air would still pass a test written against itself. Checked against the
+/// surface below, the last inked row of either occupant plus the band's air has
+/// to land on or before the row the search field starts on -- which is the whole
+/// claim that the header crowds nothing.
+const _: () = assert!(
+    later(
+        HEADER_TITLE_Y + HEADER_TITLE_ROWS,
+        HEADER_READOUT_Y1,
+    ) + HEADER_BOTTOM_AIR
+        <= BROWSE_STACK_Y,
+    "the header's ink and its air must clear the first row the browse stack claims"
+);
+/// WHY also against the home screen's first card: the header band is the foot of
+/// both screens, and a card authored from a remembered row loses its top rows to
+/// the header the moment a rung grows the band above it.
+const _: () = assert!(
+    later(
+        HEADER_TITLE_Y + HEADER_TITLE_ROWS,
+        HEADER_READOUT_Y1,
+    ) + HEADER_BOTTOM_AIR
+        <= HOME_STORAGE_CARD.y,
+    "the header's ink and its air must clear the home screen's first card"
+);
 
 // -----------------------------------------------------------------------------
 // The home screen
@@ -651,7 +837,11 @@ pub const HEADER_H: usize = 152;
 
 /// The storage insight card: capacity and index counts, and nothing the
 /// platform did not answer.
-pub const HOME_STORAGE_CARD: Rect = Rect::new(36, 152, 648, 148);
+///
+/// WHY it starts on the header's foot row: the card is the first thing the home
+/// screen draws, and a card authored from a remembered row loses its top rows to
+/// the header the moment a rung grows the band above it.
+pub const HOME_STORAGE_CARD: Rect = Rect::new(36, HEADER_H, 648, 148);
 /// The recents section's heading and caption.
 pub const HOME_RECENTS_TITLE_Y: usize = 316;
 pub const HOME_RECENTS_CAPTION_Y: usize = 364;
@@ -764,18 +954,56 @@ pub const SCOPE_ALL_PILL: Rect = Rect::new(560, BROWSE_STACK_Y + 58, 124, 48);
 /// The widest the scope caption may run before it meets the first pill.
 pub const SCOPE_CAPTION_MAX_W: usize = 380;
 
-/// The breadcrumb band. The crumbs are text at scale 1, so the band is one
-/// 24-row line box with a touch strip around it.
-pub const BREADCRUMB_Y: usize = BROWSE_STACK_Y + 116;
-pub const BREADCRUMB_HIT_Y0: usize = BROWSE_STACK_Y + 110;
-pub const BREADCRUMB_HIT_Y1: usize = BROWSE_STACK_Y + 158;
-
 /// The sort and layout toolbar.
 pub const TOOLBAR_Y: usize = BROWSE_STACK_Y + 154;
 pub const TOOLBAR_H: usize = 48;
 pub const SORT_PILL: Rect = Rect::new(36, TOOLBAR_Y, 160, TOOLBAR_H);
 pub const LIST_PILL: Rect = Rect::new(512, TOOLBAR_Y, 84, TOOLBAR_H);
 pub const GRID_PILL: Rect = Rect::new(600, TOOLBAR_Y, 84, TOOLBAR_H);
+
+/// The foot of the scope row: the two pills stand taller than the caption
+/// beside them, so the pills answer the row's last row.
+pub const SCOPE_ROW_Y1: usize = SCOPE_THIS_PILL.y + SCOPE_THIS_PILL.h;
+
+/// The rung the crumbs draw at: the caption rung, named in the model so the
+/// plate below reserves the box the painter actually inks.
+pub const BREADCRUMB_SCALE: usize = theme::type_scale::CAPTION;
+/// The rows one crumb run reserves at that rung.
+pub const BREADCRUMB_ROWS: usize = outline_text::row_band(0, BREADCRUMB_SCALE).1;
+
+/// The breadcrumb's touch strip: the whole gap between the scope row's foot and
+/// the toolbar's top, and nothing more.
+///
+/// WHY derived from the two rows either side and not authored: the strip ran from
+/// `BROWSE_STACK_Y + 110` to `+ 158` while the toolbar's rows start at `+ 154`,
+/// so the crumb strip and the toolbar both claimed the same four rows and the tap
+/// handler had to clamp one against the other to keep the pair honest. The gap the
+/// two bands leave between them is 48 rows -- the height every other control band
+/// in this stack holds, and four rows more than the platform's minimum target --
+/// so the strip is that whole gap: no dead row above it, no borrowed row below it.
+pub const BREADCRUMB_HIT_Y0: usize = SCOPE_ROW_Y1;
+pub const BREADCRUMB_HIT_Y1: usize = TOOLBAR_Y;
+
+/// The row the crumbs' boxes stand on: the whole band centred in the strip that
+/// answers it, so the painted run and the hit strip agree at any rung.
+pub const BREADCRUMB_Y: usize = BREADCRUMB_HIT_Y0
+    + (BREADCRUMB_HIT_Y1 - BREADCRUMB_HIT_Y0 - BREADCRUMB_ROWS) / 2;
+
+/// Truth gates: the crumb strip is a touch target, it answers its own run, and
+/// it never claims a row the bands on either side of it own.
+const _: () = assert!(
+    SCOPE_Y + BREADCRUMB_ROWS <= BREADCRUMB_HIT_Y0,
+    "the scope caption's box must end before the crumb strip's rows start"
+);
+const _: () = assert!(
+    BREADCRUMB_HIT_Y1 - BREADCRUMB_HIT_Y0 >= theme::MIN_TOUCH_TARGET,
+    "the breadcrumb strip must stay a minimum touch target tall"
+);
+const _: () = assert!(
+    BREADCRUMB_Y >= BREADCRUMB_HIT_Y0
+        && BREADCRUMB_Y + BREADCRUMB_ROWS <= BREADCRUMB_HIT_Y1,
+    "the crumbs must stand entirely inside the strip that answers them"
+);
 
 /// The entries card.
 ///
@@ -2417,6 +2645,137 @@ mod tests {
         assert!(SEARCH_CLEAR.w >= 48);
         assert!(SEARCH_CLEAR.h >= 48);
         assert!(SHEET_DEST_H >= 48);
+    }
+
+    /// The header band and the browse stack under it are the ladder's answer.
+    ///
+    /// WHY a test beside the `const` gates: the gates prove the band fits the
+    /// rungs it was built on today; this says *what it is built on* -- the band
+    /// is the lowest of its occupants' union boxes plus its air, each occupant
+    /// reserves the box `row_band` names at its own rung, and the first thing
+    /// below the header starts on its foot. Raising a rung moves every one of
+    /// these together, and a layout that stopped following the ladder fails here
+    /// with the two numbers that disagreed.
+    #[test]
+    fn the_header_band_follows_the_ladder_it_was_built_on() {
+        assert_eq!(
+            HEADER_TITLE_ROWS,
+            outline_text::row_band(0, theme::type_scale::SECTION).1,
+            "the title row must reserve the section rung's whole union box"
+        );
+        assert_eq!(
+            HEADER_READOUT_ROWS,
+            outline_text::row_band(0, theme::type_scale::CAPTION).1,
+            "a readout line must reserve the caption rung's whole union box"
+        );
+        assert_eq!(HEADER_TITLE_SCALE, theme::type_scale::SECTION);
+        assert_eq!(HEADER_READOUT_SCALE, theme::type_scale::CAPTION);
+
+        let title_foot = HEADER_TITLE_Y + HEADER_TITLE_ROWS;
+        let control_foot = back_button::Y + back_button::SIZE;
+        let lowest = title_foot.max(control_foot).max(HEADER_READOUT_Y1);
+        assert_eq!(
+            HEADER_H,
+            lowest + HEADER_BOTTOM_AIR,
+            "the header band is the lowest row it answers plus its air"
+        );
+
+        // Nothing may be clipped by the platform's status band, and nothing may
+        // crowd the surface under the header: the band's ink starts at or below
+        // the first row the app's chrome may claim and ends, with its whole air,
+        // on or before the first row the next band claims.
+        assert!(HEADER_TITLE_Y >= viewport::HEADER_TOP);
+        assert!(HEADER_READOUT_LINE1_Y >= viewport::HEADER_TOP);
+        assert!(lowest + HEADER_BOTTOM_AIR <= BROWSE_STACK_Y);
+        assert!(lowest + HEADER_BOTTOM_AIR <= HOME_STORAGE_CARD.y);
+
+        assert!(HEADER_READOUT_LINE1_Y >= HEADER_TITLE_Y);
+        assert!(
+            HEADER_READOUT_LINE2_Y
+                == HEADER_READOUT_LINE1_Y + HEADER_READOUT_ROWS + HEADER_READOUT_GAP
+        );
+        assert!(HOME_STORAGE_CARD.y == HEADER_H);
+        assert!(BROWSE_STACK_Y == HEADER_H);
+
+        assert_eq!(
+            BREADCRUMB_ROWS,
+            outline_text::row_band(0, theme::type_scale::CAPTION).1,
+            "the crumbs must reserve their rung's whole union box"
+        );
+        assert_eq!(
+            BREADCRUMB_HIT_Y1, TOOLBAR_Y,
+            "the crumb strip must stop where the toolbar's rows start"
+        );
+        assert!(BREADCRUMB_HIT_Y1 - BREADCRUMB_HIT_Y0 >= theme::MIN_TOUCH_TARGET);
+        assert!(BREADCRUMB_Y >= BREADCRUMB_HIT_Y0);
+        assert!(BREADCRUMB_Y + BREADCRUMB_ROWS <= BREADCRUMB_HIT_Y1);
+        assert!(
+            SEARCH_FIELD.h >= BREADCRUMB_ROWS + spacing::GRID_8,
+            "the search field must close over the caption it holds"
+        );
+    }
+
+    /// Every run the header draws is measured at the rung the header sets it to,
+    /// against the lane the painter actually hands it.
+    ///
+    /// WHY this test exists at all: the header's title is clipped only at its own
+    /// left edge and the panel's right edge, so the single thing standing between
+    /// a long title and the readout's lane is [`HEADER_TITLE_MAX_W`] -- a bound
+    /// `font::measure` cannot check at compile time. The readout's two lines are
+    /// trimmed to [`HEADER_READOUT_MAX_W`] by `font::ellipsize`, and the painter
+    /// then asks whether the trimmed run fits before drawing it at all, so an
+    /// ellipsize that overshot its bound would not overflow the lane, it would
+    /// blank the line. Both claims are measurements, and a rung move that breaks
+    /// either one has to fail here rather than quietly shrink or drop a run.
+    #[test]
+    fn every_header_run_fits_the_lane_the_painter_hands_it() {
+        // The title, at the rung `header_color` passes to the pixel test.
+        assert!(
+            font::measure(b"Files", HEADER_TITLE_SCALE) <= HEADER_TITLE_MAX_W,
+            "the header's title no longer fits its lane at the section rung"
+        );
+
+        // The path line. These are the directories the app opens and offers, at
+        // the rung `HEADER_READOUT_SCALE` names -- not the caption rung the painter
+        // used to pass and no test could see.
+        let paths: [&[u8]; 5] = [
+            b"/storage",
+            b"/storage/photos",
+            b"/storage/pictures",
+            b"/storage/videos",
+            b"/storage/downloads",
+        ];
+        for path in paths {
+            assert!(
+                font::measure(path, HEADER_READOUT_SCALE) <= HEADER_READOUT_MAX_W,
+                "a directory the app opens had to be shortened to fit the readout lane"
+            );
+        }
+
+        // Both readout lines go through `font::ellipsize` at the lane's own width,
+        // so no run the painter can be handed -- here the widest each source field
+        // can hold, 128 bytes for `current_path` and 40 for `probe_label` -- may
+        // come back wider than the lane, or come back empty.
+        let widest_path = [b'w'; 128];
+        let widest_label = [b'W'; 40];
+        let fixtures: [&[u8]; 4] = [
+            b"/storage/pictures/vacation-2026/IMG_0442.heic",
+            b"the app for this file could not launch",
+            &widest_path,
+            &widest_label,
+        ];
+        for run in fixtures {
+            let mut buf = [0u8; MAX_PATH_LEN];
+            let len = font::ellipsize(run, HEADER_READOUT_SCALE, HEADER_READOUT_MAX_W, &mut buf);
+            assert!(
+                len > 0,
+                "ellipsize returned nothing for a run the readout lane is meant to hold"
+            );
+            assert!(
+                font::measure(&buf[..len], HEADER_READOUT_SCALE) <= HEADER_READOUT_MAX_W,
+                "a run trimmed to the readout lane still overflowed it"
+            );
+        }
     }
 
     #[test]
