@@ -1615,6 +1615,17 @@ mod tests {
         let ffn_gate_w = [0u8; 128 * 64 * 4];
         let ffn_down_w = [0u8; 64 * 128 * 4];
         let head_w = [0u8; 290 * 64 * 4];
+        // A real embedding table, because the engine reads a token's row out of
+        // it and refuses when the row is not there. Fabricating the row from the
+        // token id would have this test certify an answer computed from nothing.
+        let mut embd = [0u8; 290 * 64 * 4];
+        for token in 0..290usize {
+            for dim in 0..64usize {
+                let value = (((token * 7 + dim * 13) % 17) as f32 - 8.0) / 16.0;
+                let at = (token * 64 + dim) * 4;
+                embd[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
         let layer = inference::LayerWeights {
             attn_norm: &ones,
             attn_q: &id_w,
@@ -1630,7 +1641,7 @@ mod tests {
             weight_type: 0,
         };
         let model = inference::ModelWeights {
-            token_embd: &[],
+            token_embd: &embd,
             token_embd_type: 0,
             layers: [Some(layer), None],
             final_norm: &ones,

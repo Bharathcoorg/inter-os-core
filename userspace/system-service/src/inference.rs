@@ -1,15 +1,21 @@
 //! Real neural inference engine and model lifecycle for InterOS AI service (`aid`).
 //!
-//! Strictly `#![no_std]` and zero heap allocation in all execution paths.
+//! Strictly `#![no_std]` and zero heap allocation in all execution paths: every
+//! activation below is a fixed-size array on the caller's stack.
 //! Implements real tensor operations:
 //! - Dequantization (F32, F16, Q4_0, Q8_0, Q4_K to F32); any other type id is refused by number
 //! - Matrix-vector multiplication (GEMV) with on-the-fly row dequantization
 //! - RMSNorm (Root Mean Square Layer Normalization)
 //! - RoPE (Rotary Positional Embeddings)
 //! - SwiGLU non-linear activation
-//! - Multi-Head Attention dot-product & softmax
+//! - Multi-Head Attention dot-product & softmax over the one key/value head
 //! - Autoregressive token generation loop with timeout / cancellation checks
-//! - Neural vector embedding extraction (EmbeddingGemma 2)
+//! - Neural vector embedding extraction (EmbeddingGemma 2): mean pool, then L2
+//!
+//! Nothing in the forward path falls back. A declaration wider than a buffer, a
+//! quantisation the engine has no layout for, or an embedding row the file does
+//! not hold is reported as the refusal it is. An invented stand-in would let an
+//! answer computed from nothing be reported as the installed model's answer.
 
 pub const MAX_HIDDEN_DIM: usize = 256;
 pub const MAX_INTERMEDIATE_DIM: usize = 512;
@@ -591,7 +597,7 @@ impl ModelConfig {
             intermediate_dim: 128,
             num_layers: 1,
             num_heads: 2,
-            num_kv_heads: 2,
+            num_kv_heads: 1,
             head_dim: 32,
             vocab_size: 290,
             rms_norm_eps: 1e-6,
@@ -659,6 +665,23 @@ impl ModelConfig {
             }
             _ => num_heads,
         };
+
+        // The cache holds one K row and one V row per (layer, position), which is
+        // exactly what a model with a single key/value head needs. A file that
+        // declares more asks for rows this shape cannot address, so the refusal
+        // names the count rather than letting every head read head zero's cached
+        // keys. A file that states no count is the format's own multi-head case:
+        // one KV head per query head.
+        if num_kv_heads > 1 {
+            let declared = info
+                .num_kv_heads
+                .or_else(|| u32::try_from(num_kv_heads).ok());
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                declared,
+                1,
+            ));
+        }
 
         Ok(Self {
             hidden_dim,
@@ -733,6 +756,7 @@ pub fn forward_step(
     config: &ModelConfig,
     kv_cache: &mut KvCache,
     out_logits: &mut [f32],
+    out_hidden: &mut [f32],
 ) -> Result<(), InferenceError> {
     if pos >= MAX_SEQ_LEN {
         return Err(InferenceError::ContextLengthExceeded);
@@ -741,28 +765,57 @@ pub fn forward_step(
     if h_dim > MAX_HIDDEN_DIM {
         return Err(InferenceError::BufferTooSmall);
     }
+    // A declaration wider than a buffer is refused, never truncated to fit. The
+    // cache row is `MAX_HEAD_DIM` and the FFN buffers are
+    // `MAX_INTERMEDIATE_DIM`, so clipping either would let an answer computed at
+    // 32 wide be reported as the answer of a model that declared 256.
+    if config.head_dim > MAX_HEAD_DIM || config.num_kv_heads > 1 {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    if config.intermediate_dim > MAX_INTERMEDIATE_DIM {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    // The head loop indexes `num_heads x head_dim` of a stream that is `h_dim`
+    // long, so heads that do not tile it would read past the projection that
+    // produced them. `from_gguf` refuses this pairing already; a hand-built
+    // config is checked here for the same reason.
+    let heads_span = config
+        .num_heads
+        .checked_mul(config.head_dim)
+        .unwrap_or(usize::MAX);
+    if heads_span > h_dim {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    // Checked before any work, so a call this engine will not complete leaves
+    // the cache holding what it held when it arrived.
+    if !out_hidden.is_empty() && out_hidden.len() < h_dim {
+        return Err(InferenceError::BufferTooSmall);
+    }
 
-    // 1. Embedding lookup
+    // 1. Embedding lookup. The row is read as floats because that is the only
+    // layout this path can address; a quantised embedding belongs to a loader
+    // that dequantises it, and reading its blocks as floats would be noise.
+    if model.token_embd_type != 0 {
+        return Err(InferenceError::UnsupportedQuantization(model.token_embd_type));
+    }
     let mut x = [0.0f32; MAX_HIDDEN_DIM];
     let embd_idx = (token_id as usize) % config.vocab_size;
     let embd_stride = h_dim * 4;
     let embd_offset = embd_idx * embd_stride;
-    if model.token_embd.len() >= embd_offset + embd_stride {
-        for j in 0..h_dim {
-            let b_idx = embd_offset + j * 4;
-            x[j] = f32::from_le_bytes([
-                model.token_embd[b_idx],
-                model.token_embd[b_idx + 1],
-                model.token_embd[b_idx + 2],
-                model.token_embd[b_idx + 3],
-            ]);
-        }
-    } else {
-        // Fallback normalized initial representation for test fixture
-        let seed = (token_id as f32) + 1.0f32;
-        for j in 0..h_dim {
-            x[j] = f32_sin(seed * (j as f32 + 1.0f32));
-        }
+    if model.token_embd.len() < embd_offset + embd_stride {
+        // The row the file does not hold is not invented here. A stand-in built
+        // from the token id would let an answer be reported as the installed
+        // model's while nothing of the model had been read.
+        return Err(InferenceError::CorruptedWeights);
+    }
+    for j in 0..h_dim {
+        let b_idx = embd_offset + j * 4;
+        x[j] = f32::from_le_bytes([
+            model.token_embd[b_idx],
+            model.token_embd[b_idx + 1],
+            model.token_embd[b_idx + 2],
+            model.token_embd[b_idx + 3],
+        ]);
     }
 
     // Scale embedding by sqrt(hidden_dim) (Gemma standard)
@@ -811,21 +864,30 @@ pub fn forward_step(
             apply_rope(&mut k[head_start..head_end], pos, config.head_dim, config.rope_theta);
         }
 
-        // Cache K and V
-        let head_dim_copy = config.head_dim.min(32);
-        kv_cache.k[l][pos][..head_dim_copy].copy_from_slice(&k[..head_dim_copy]);
-        kv_cache.v[l][pos][..head_dim_copy].copy_from_slice(&v_vec[..head_dim_copy]);
+        // Cache K and V. The row is the whole declared head: `config.head_dim`
+        // was checked against `MAX_HEAD_DIM` above, so nothing is dropped here.
+        let hd = config.head_dim;
+        kv_cache.k[l][pos][..hd].copy_from_slice(&k[..hd]);
+        kv_cache.v[l][pos][..hd].copy_from_slice(&v_vec[..hd]);
 
         // Attention dot product & Softmax
         let scale_att = 1.0f32 / f32_sqrt(config.head_dim as f32);
         let mut scores = [0.0f32; MAX_SEQ_LEN];
         let seq_len_cur = pos + 1;
 
+        // One key/value head, so every query head attends to the same cached
+        // row; a file that declares more is refused above rather than read as
+        // this one. The destination is cleared first: heads span at most
+        // `num_heads x head_dim` of the residual stream, and whatever lies past
+        // that belongs to this layer, not the last one.
+        for v in attn_out[..h_dim].iter_mut() {
+            *v = 0.0f32;
+        }
         for h in 0..config.num_heads {
             let h_base = h * config.head_dim;
             for t in 0..seq_len_cur {
                 let mut dot = 0.0f32;
-                for d in 0..head_dim_copy {
+                for d in 0..hd {
                     dot += q[h_base + d] * kv_cache.k[l][t][d];
                 }
                 scores[t] = dot * scale_att;
@@ -833,7 +895,7 @@ pub fn forward_step(
             softmax(&mut scores[..seq_len_cur]);
 
             // Weighted sum of V
-            for d in 0..head_dim_copy {
+            for d in 0..hd {
                 let mut v_sum = 0.0f32;
                 for t in 0..seq_len_cur {
                     v_sum += scores[t] * kv_cache.v[l][t][d];
@@ -857,7 +919,7 @@ pub fn forward_step(
         rms_norm(&mut x_norm[..h_dim], lw.ffn_norm, config.rms_norm_eps);
 
         // FFN: Gate and Up projections
-        let inter_dim = config.intermediate_dim.min(MAX_INTERMEDIATE_DIM);
+        let inter_dim = config.intermediate_dim;
         gemv(lw.ffn_gate, lw.weight_type, &x_norm[..h_dim], &mut gate[..inter_dim], inter_dim, h_dim)?;
         gemv(lw.ffn_up, lw.weight_type, &x_norm[..h_dim], &mut up[..inter_dim], inter_dim, h_dim)?;
 
@@ -876,6 +938,13 @@ pub fn forward_step(
 
     // 3. Final RMSNorm
     rms_norm(&mut x[..h_dim], model.final_norm, config.rms_norm_eps);
+
+    // The normalised residual stream is what a pooling head consumes, so it
+    // leaves through `out_hidden` rather than being re-derived from the logits
+    // below. An empty slice means the caller only wanted the next token.
+    if !out_hidden.is_empty() {
+        out_hidden[..h_dim].copy_from_slice(&x[..h_dim]);
+    }
 
     // 4. Output projection to compute logits
     let v_size = config.vocab_size.min(out_logits.len());
@@ -924,6 +993,7 @@ pub fn generate(
             config,
             &mut kv_cache,
             &mut logits[..config.vocab_size],
+            &mut [],
         )?;
     }
 
@@ -954,6 +1024,7 @@ pub fn generate(
             config,
             &mut kv_cache,
             &mut logits[..config.vocab_size],
+            &mut [],
         )?;
 
         cur_pos += 1;
@@ -980,6 +1051,14 @@ pub fn extract_embedding(
     let mut logits = [0.0f32; MAX_VOCAB_SIZE];
     let count = tokens.len().min(MAX_SEQ_LEN);
 
+    // Mean pooling over the positions, which is what an embedding file declares
+    // when it states `pooling_type` 1. Each step's normalised residual stream is
+    // summed as it is produced, so the vector is the model's own hidden
+    // representation rather than a slice of the cache or a re-use of the logits.
+    let dim = config.hidden_dim.min(out_embedding.len());
+    let mut pooled = [0.0f32; MAX_HIDDEN_DIM];
+    let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+
     for pos in 0..count {
         forward_step(
             tokens[pos],
@@ -988,17 +1067,16 @@ pub fn extract_embedding(
             config,
             &mut kv_cache,
             &mut logits[..config.vocab_size],
+            &mut hidden,
         )?;
+        for i in 0..dim {
+            pooled[i] += hidden[i];
+        }
     }
 
-    // Extract last hidden layer state / logits representation
-    let dim = config.hidden_dim.min(out_embedding.len());
-    let head_copy = config.head_dim.min(32).min(dim);
-    for i in 0..head_copy {
-        out_embedding[i] = kv_cache.k[0][count - 1][i];
-    }
-    for i in head_copy..dim {
-        out_embedding[i] = logits[i % config.vocab_size];
+    let inv_count = 1.0f32 / (count as f32);
+    for i in 0..dim {
+        out_embedding[i] = pooled[i] * inv_count;
     }
 
     // L2-normalize vector
@@ -1188,58 +1266,84 @@ pub mod tests {
         assert!(out[1] > 0.0);
     }
 
+    /// The deterministic little model the forward tests run against: identity
+    /// projections, unit norms, and a real 290 x 64 embedding table the engine can
+    /// read a row out of. An empty table would only ever exercise the refusal, and
+    /// a stand-in row built from the token id would have these tests certify an
+    /// answer computed from nothing.
+    struct LittleModel {
+        ones: [f32; MAX_HIDDEN_DIM],
+        id_w: [u8; 64 * 64 * 4],
+        ffn_gate_w: [u8; 128 * 64 * 4],
+        ffn_down_w: [u8; 64 * 128 * 4],
+        head_w: [u8; 290 * 64 * 4],
+        embd: [u8; 290 * 64 * 4],
+    }
+
+    impl LittleModel {
+        fn new() -> Self {
+            let mut model = Self {
+                ones: [1.0f32; MAX_HIDDEN_DIM],
+                id_w: [0u8; 64 * 64 * 4],
+                ffn_gate_w: [0u8; 128 * 64 * 4],
+                ffn_down_w: [0u8; 64 * 128 * 4],
+                head_w: [0u8; 290 * 64 * 4],
+                embd: [0u8; 290 * 64 * 4],
+            };
+            for i in 0..64 {
+                let at = (i * 64 + i) * 4;
+                model.id_w[at..at + 4].copy_from_slice(&1.0f32.to_le_bytes());
+                model.head_w[at..at + 4].copy_from_slice(&1.0f32.to_le_bytes());
+                let gate = (i * 64 + i) * 4;
+                model.ffn_gate_w[gate..gate + 4].copy_from_slice(&1.0f32.to_le_bytes());
+                let down = (i * 128 + i) * 4;
+                model.ffn_down_w[down..down + 4].copy_from_slice(&1.0f32.to_le_bytes());
+            }
+            for token in 0..290usize {
+                for dim in 0..64usize {
+                    let value = (((token * 7 + dim * 13) % 17) as f32 - 8.0) / 16.0;
+                    let at = (token * 64 + dim) * 4;
+                    model.embd[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            model
+        }
+
+        fn config() -> ModelConfig {
+            ModelConfig::default_test_config()
+        }
+
+        fn weights(&self) -> ModelWeights<'_> {
+            let layer = LayerWeights {
+                attn_norm: &self.ones[..64],
+                attn_q: &self.id_w,
+                attn_k: &self.id_w,
+                attn_v: &self.id_w,
+                attn_o: &self.id_w,
+                post_attn_norm: &self.ones[..64],
+                ffn_norm: &self.ones[..64],
+                ffn_gate: &self.ffn_gate_w,
+                ffn_up: &self.ffn_gate_w,
+                ffn_down: &self.ffn_down_w,
+                post_ffn_norm: &self.ones[..64],
+                weight_type: 0, // F32
+            };
+            ModelWeights {
+                token_embd: &self.embd,
+                token_embd_type: 0,
+                layers: [Some(layer), None],
+                final_norm: &self.ones[..64],
+                output_weight: &self.head_w,
+                output_weight_type: 0,
+            }
+        }
+    }
+
     #[test]
     fn test_forward_step_and_generate_on_real_fixture() {
-        let config = ModelConfig::default_test_config();
-        let ones_norm = [1.0f32; MAX_HIDDEN_DIM];
-
-        // 64x64 identity matrix for projections (F32 = 0)
-        let mut id_w = [0u8; 64 * 64 * 4];
-        for i in 0..64 {
-            let offset = (i * 64 + i) * 4;
-            id_w[offset..offset + 4].copy_from_slice(&1.0f32.to_le_bytes());
-        }
-
-        // FFN weights: 128x64 gate/up, 64x128 down
-        let mut ffn_gate_w = [0u8; 128 * 64 * 4];
-        let mut ffn_down_w = [0u8; 64 * 128 * 4];
-        for i in 0..64 {
-            let off1 = (i * 64 + i) * 4;
-            ffn_gate_w[off1..off1 + 4].copy_from_slice(&1.0f32.to_le_bytes());
-            let off2 = (i * 128 + i) * 4;
-            ffn_down_w[off2..off2 + 4].copy_from_slice(&1.0f32.to_le_bytes());
-        }
-
-        // Output head: 290x64
-        let mut head_w = [0u8; 290 * 64 * 4];
-        for i in 0..64 {
-            let off = (i * 64 + i) * 4;
-            head_w[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
-        }
-
-        let layer = LayerWeights {
-            attn_norm: &ones_norm[..64],
-            attn_q: &id_w,
-            attn_k: &id_w,
-            attn_v: &id_w,
-            attn_o: &id_w,
-            post_attn_norm: &ones_norm[..64],
-            ffn_norm: &ones_norm[..64],
-            ffn_gate: &ffn_gate_w,
-            ffn_up: &ffn_gate_w,
-            ffn_down: &ffn_down_w,
-            post_ffn_norm: &ones_norm[..64],
-            weight_type: 0, // F32
-        };
-
-        let model = ModelWeights {
-            token_embd: &[],
-            token_embd_type: 0,
-            layers: [Some(layer), None],
-            final_norm: &ones_norm[..64],
-            output_weight: &head_w,
-            output_weight_type: 0,
-        };
+        let fixture = LittleModel::new();
+        let config = LittleModel::config();
+        let model = fixture.weights();
 
         let prompt = [crate::tokenizer::TOKEN_BOS, 261]; // BOS, " the"
         let mut generated_tokens = [0u32; 4];
@@ -1268,6 +1372,307 @@ pub mod tests {
         for &tok in &generated_tokens[..num_gen] {
             assert!(tok < config.vocab_size as u32);
         }
+    }
+
+    /// The embedding service consumes the forward pass's normalised residual
+    /// stream, so it leaves through `out_hidden` instead of being re-derived from
+    /// somewhere else. A destination too small for the stream the file declares is
+    /// refused: a vector truncated to 8 dims is not that model's embedding.
+    #[test]
+    fn test_forward_step_hands_back_the_normalised_residual_stream() {
+        let fixture = LittleModel::new();
+        let config = LittleModel::config();
+        let model = fixture.weights();
+        let mut kv_cache = KvCache::empty();
+        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
+        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+
+        forward_step(
+            crate::tokenizer::TOKEN_BOS,
+            0,
+            &model,
+            &config,
+            &mut kv_cache,
+            &mut logits[..config.vocab_size],
+            &mut hidden,
+        )
+        .expect("the fixture holds the row this token asks for");
+
+        assert!(
+            hidden[..config.hidden_dim].iter().any(|&v| v != 0.0),
+            "the residual stream left the step empty"
+        );
+        // This fixture's output head is the identity, so the logits are the stream
+        // read straight through. Matching them dimension by dimension says the
+        // vector handed back is the one the model's own head was fed, which is the
+        // property a pooling head depends on.
+        for i in 0..config.hidden_dim {
+            assert!(
+                (hidden[i] - logits[i]).abs() < 1e-6,
+                "dim {} handed back {} while the output head was fed {}",
+                i,
+                hidden[i],
+                logits[i]
+            );
+        }
+        assert_eq!(kv_cache.len, 1);
+
+        let mut too_narrow = [0.0f32; 8];
+        assert_eq!(
+            forward_step(
+                crate::tokenizer::TOKEN_BOS,
+                1,
+                &model,
+                &config,
+                &mut kv_cache,
+                &mut logits[..config.vocab_size],
+                &mut too_narrow,
+            ),
+            Err(InferenceError::BufferTooSmall)
+        );
+        // Refused before the graph ran, so the cache is still what it was.
+        assert_eq!(kv_cache.len, 1);
+    }
+
+    /// A declaration wider than a buffer is refused, never clipped to fit. An
+    /// answer computed at 32 dims wide and reported as the answer of a model that
+    /// declared 256 would be the engine describing a model it never ran.
+    #[test]
+    fn test_forward_step_refuses_a_shape_wider_than_its_buffers() {
+        let empty = ModelWeights {
+            token_embd: &[],
+            token_embd_type: 0,
+            layers: [None, None],
+            final_norm: &[],
+            output_weight: &[],
+            output_weight_type: 0,
+        };
+        let base = LittleModel::config();
+        let mut kv_cache = KvCache::empty();
+        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
+        let no_out: &mut [f32] = &mut [];
+
+        let wider_head = ModelConfig {
+            head_dim: MAX_HEAD_DIM + 8,
+            ..base
+        };
+        assert_eq!(
+            forward_step(
+                1,
+                0,
+                &empty,
+                &wider_head,
+                &mut kv_cache,
+                &mut logits,
+                no_out
+            ),
+            Err(InferenceError::BufferTooSmall)
+        );
+
+        let wider_ffn = ModelConfig {
+            intermediate_dim: MAX_INTERMEDIATE_DIM + 1,
+            ..base
+        };
+        assert_eq!(
+            forward_step(1, 0, &empty, &wider_ffn, &mut kv_cache, &mut logits, no_out),
+            Err(InferenceError::BufferTooSmall)
+        );
+
+        let shared_kv = ModelConfig {
+            num_kv_heads: 2,
+            ..base
+        };
+        assert_eq!(
+            forward_step(1, 0, &empty, &shared_kv, &mut kv_cache, &mut logits, no_out),
+            Err(InferenceError::BufferTooSmall)
+        );
+
+        let wider_stream = ModelConfig {
+            hidden_dim: MAX_HIDDEN_DIM + 1,
+            ..base
+        };
+        assert_eq!(
+            forward_step(
+                1,
+                0,
+                &empty,
+                &wider_stream,
+                &mut kv_cache,
+                &mut logits,
+                no_out
+            ),
+            Err(InferenceError::BufferTooSmall)
+        );
+
+        // Four heads of 32 do not tile a 64-wide stream, so the fourth would read
+        // past the projection that filled it.
+        let overhanging = ModelConfig {
+            num_heads: 4,
+            ..base
+        };
+        assert_eq!(
+            forward_step(1, 0, &empty, &overhanging, &mut kv_cache, &mut logits, no_out),
+            Err(InferenceError::BufferTooSmall)
+        );
+    }
+
+    /// The row a token asks for either is in the file or is not. Building one
+    /// from the token id made every number downstream of it a description of
+    /// nothing, while reading a Q8_0 tensor as floats would read block headers
+    /// as activations.
+    #[test]
+    fn test_forward_step_refuses_an_embedding_the_file_does_not_hold() {
+        let fixture = LittleModel::new();
+        let config = LittleModel::config();
+        let mut no_rows = fixture.weights();
+        no_rows.token_embd = &[];
+        let mut kv_cache = KvCache::empty();
+        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
+        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+
+        assert_eq!(
+            forward_step(
+                261,
+                0,
+                &no_rows,
+                &config,
+                &mut kv_cache,
+                &mut logits[..config.vocab_size],
+                &mut hidden,
+            ),
+            Err(InferenceError::CorruptedWeights)
+        );
+
+        // A table that stops inside the last row is the same lie as no table at
+        // all: the row is read as far as it exists and the rest would be invented.
+        let mut truncated = fixture.weights();
+        let one_row_short = fixture.embd.len() - 4;
+        truncated.token_embd = &fixture.embd[..one_row_short];
+        assert_eq!(
+            forward_step(
+                289,
+                0,
+                &truncated,
+                &config,
+                &mut kv_cache,
+                &mut logits[..config.vocab_size],
+                &mut hidden,
+            ),
+            Err(InferenceError::CorruptedWeights)
+        );
+
+        let mut quantised = fixture.weights();
+        quantised.token_embd_type = 8; // Q8_0: 34 bytes per 32 values, not floats
+        assert_eq!(
+            forward_step(
+                261,
+                0,
+                &quantised,
+                &config,
+                &mut kv_cache,
+                &mut logits[..config.vocab_size],
+                &mut hidden,
+            ),
+            Err(InferenceError::UnsupportedQuantization(8))
+        );
+    }
+
+    /// What the search index stores is the mean of the positions the model ran,
+    /// L2-normalised. Neither the last row of the KV cache nor a slice of the
+    /// logits is a sentence embedding, so this checks the pooled vector against
+    /// the same positions run one at a time.
+    #[test]
+    fn test_extract_embedding_mean_pools_the_positions_and_normalises_them() {
+        let fixture = LittleModel::new();
+        let config = LittleModel::config();
+        let model = fixture.weights();
+        let tokens = [crate::tokenizer::TOKEN_BOS, 261, 4];
+        let mut embedding = [0.0f32; MAX_HIDDEN_DIM];
+
+        let dim = extract_embedding(&tokens, &model, &config, &mut embedding)
+            .expect("the fixture is a runnable model");
+        assert_eq!(dim, config.hidden_dim);
+
+        let mut kv_cache = KvCache::empty();
+        let mut logits = [0.0f32; MAX_VOCAB_SIZE];
+        let mut hidden = [0.0f32; MAX_HIDDEN_DIM];
+        let mut summed = [0.0f32; MAX_HIDDEN_DIM];
+        for (pos, &token) in tokens.iter().enumerate() {
+            forward_step(
+                token,
+                pos,
+                &model,
+                &config,
+                &mut kv_cache,
+                &mut logits[..config.vocab_size],
+                &mut hidden,
+            )
+            .expect("the same tokens run the same graph");
+            for i in 0..dim {
+                summed[i] += hidden[i];
+            }
+        }
+        let mut sum_sq = 0.0f32;
+        for i in 0..dim {
+            summed[i] /= tokens.len() as f32;
+            sum_sq += summed[i] * summed[i];
+        }
+        let inv_norm = 1.0f32 / f32_sqrt(sum_sq);
+        for i in 0..dim {
+            let want = summed[i] * inv_norm;
+            assert!(
+                (embedding[i] - want).abs() < 1e-6,
+                "dim {} holds {} where the mean of the positions is {}",
+                i,
+                embedding[i],
+                want
+            );
+        }
+
+        // Unit length is what ranking stored vectors by cosine assumes.
+        let mut got_sq = 0.0f32;
+        for &v in embedding[..dim].iter() {
+            got_sq += v * v;
+        }
+        assert!(
+            (got_sq - 1.0).abs() < 1e-4,
+            "the pooled vector has squared length {}",
+            got_sq
+        );
+    }
+
+    #[test]
+    fn test_model_config_refuses_more_than_one_key_value_head() {
+        let mut shared = declared(64, 128, 1, 2, 32, 290);
+        shared.num_kv_heads = Some(2);
+        assert_eq!(
+            ModelConfig::from_gguf(&shared),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(2),
+                1
+            ))
+        );
+
+        // A file that states no count is the format's multi-head case, and the
+        // refusal reports the count that follows rather than nothing at all.
+        let unstated = declared(64, 128, 1, 2, 32, 290);
+        assert_eq!(
+            ModelConfig::from_gguf(&unstated),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(2),
+                1
+            ))
+        );
+
+        // One shared head is what the cache is shaped for.
+        let mut single = declared(64, 128, 1, 2, 32, 290);
+        single.num_kv_heads = Some(1);
+        assert_eq!(
+            ModelConfig::from_gguf(&single).map(|c| c.num_kv_heads),
+            Ok(1)
+        );
     }
 
     /// A model file that states every dimension the engine asks it for.
