@@ -30,6 +30,7 @@ pub mod gguf;
 pub mod inference;
 pub mod rag;
 pub mod tokenizer;
+pub mod weights;
 
 pub use embedding::{
     compute_embedding_768, compute_text_embedding_dim_f32, compute_text_embedding_f32,
@@ -705,7 +706,15 @@ impl<'a> Notice<'a> {
 }
 /// Why the generative path reached the model file and still ran nothing.
 enum ModelGap {
-    /// The file configured the engine; its tensors are not what the engine reads.
+    /// The file configured the engine, and this reply read no tensor of it.
+    ///
+    /// WHY the sentence is about the reply and not about the engine: `weights` now
+    /// reads an installed file's tensors block by block and runs the graph over them
+    /// -- measured against the 333 MB file by
+    /// `weights::tests::test_the_installed_file_is_read_block_by_block_and_run` --
+    /// so "the engine does not read its tensors" stopped being true. This reply still
+    /// reads none of them, which is the fact the screen has to carry, and is the
+    /// narrower claim a reader can check from this call site.
     Configured,
     /// The file parsed and declares no tensor at all -- metadata and nothing else,
     /// which is what a placeholder install leaves on the disk.
@@ -956,10 +965,18 @@ fn model_gap_notice<'a>(
             // WHY two endings for one shape: a file whose tensors the engine cannot
             // read and a file that holds no tensors at all call for different next
             // moves, and only one of them is a placeholder install.
+            //
+            // WHY the first of them names the reply and not the engine: while no
+            // loader existed, "the engine does not read its tensors" was the honest
+            // reason this arm answers nothing. `weights` now reads an installed
+            // file's tensors block by block and runs the graph over what it read, so
+            // that sentence is a false claim about capability. What this call site
+            // can still attest is that this reply reads none of them, and saying less
+            // than that would be deleting the lie so a gate could pass.
             if matches!(gap, ModelGap::NoTensors) {
                 notice.word(b", and holds no tensors");
             } else {
-                notice.word(b", whose tensors the engine does not read");
+                notice.word(b", none of whose tensors this reply reads");
             }
         }
         ModelGap::Declaration(key, Some(stated), limit) => {
@@ -1812,6 +1829,8 @@ mod tests {
         }
         let layer = inference::LayerWeights {
             attn_norm: &ones,
+            attn_q_norm: &[],
+            attn_k_norm: &[],
             attn_q: &id_w,
             attn_k: &id_w,
             attn_v: &id_w,
@@ -1830,11 +1849,14 @@ mod tests {
         // `generate` never reaches is dropped rather than carried.
         let layers = [Some(layer)];
         let model = inference::ModelWeights {
-            token_embd: &embd,
-            token_embd_type: 0,
+            token_embd: inference::TokenEmbedding::Table {
+                bytes: &embd,
+                rows: 290,
+                dtype: 0,
+            },
             layers: &layers,
             final_norm: &ones,
-            output_weight: &head_w,
+            output_weight: Some(&head_w),
             output_weight_type: 0,
         };
 
@@ -2123,7 +2145,58 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file named EmbeddingGemma 2, declares gemma2, tokenizer model gpt2, quantisation type 7, 196 tensors, embedding length 64, over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
+            b"Model file named EmbeddingGemma 2, declares gemma2, tokenizer model gpt2, quantisation type 7, 196 tensors, embedding length 64, over 2 blocks, vocabulary 290 tokens, none of whose tensors this reply reads; the prompt's 26 bytes were not answered."
+        );
+    }
+
+    /// WHY the sentence names the reply and not the engine.
+    ///
+    /// The older wording claimed the engine reads no tensor of the file. That was a
+    /// statement about capability, and it stopped being true when `weights` began
+    /// reading an installed file's tensors block by block and running `inference`'s
+    /// graph over the bytes it read -- measured, against the 333 MB file, by
+    /// `weights::tests::test_the_installed_file_is_read_block_by_block_and_run`,
+    /// which prints its own byte counts and says NOT VERIFIED when the file is not in
+    /// front of it. `test_the_notice_for_the_file_this_host_holds_quotes_that_file`
+    /// keeps the two in touch: it hands the same path to both the notice and the
+    /// loader. A notice that lost the claim without gaining the reply's own fact would
+    /// be the lie deleted so a gate could pass, so both halves are pinned here.
+    #[test]
+    fn test_the_gap_notice_says_what_the_reply_skipped_not_what_the_engine_cannot() {
+        let info = declared(b"gemma2", 64, 2, 290);
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+        let notice = model_gap_notice(&info, ModelGap::Configured, b"hi", None, &mut out);
+        let text = core::str::from_utf8(notice).unwrap_or("<unprintable>");
+        assert!(
+            text.contains("none of whose tensors this reply reads"),
+            "the refusal no longer says what this reply skipped: {text}"
+        );
+        for capability_claim in [
+            "the engine does not read",
+            "the engine cannot read",
+            "the engine has no way to read",
+        ] {
+            assert!(
+                !text.contains(capability_claim),
+                "the notice claims {capability_claim:?}, which the loader's measurement \
+                 against the installed file contradicts"
+            );
+        }
+        // The other arm of the same shape still distinguishes a file that holds no
+        // tensor at all, which is a different fact and a different next move.
+        let mut empty = [0u8; NOTICE_WINDOW_BYTES];
+        let text = core::str::from_utf8(model_gap_notice(
+            &info,
+            ModelGap::NoTensors,
+            b"hi",
+            None,
+            &mut empty,
+        ))
+        .unwrap_or("<unprintable>");
+        assert!(text.contains(", and holds no tensors"), "{text}");
+        assert!(
+            !text.contains("this reply reads"),
+            "the empty-file arm borrowed the token arm's sentence: {text}"
         );
     }
 
@@ -2143,7 +2216,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 290 tokens, whose tensors the engine does not read; the prompt's 26 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 290 tokens, none of whose tensors this reply reads; the prompt's 26 bytes were not answered."
         );
     }
 
@@ -2264,7 +2337,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 28 bytes from file, bos 2 eos 1 pad 0, add-bos 1, pre gemma; the prompt's 5 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, none of whose tensors this reply reads, vocabulary counted not loaded, template 28 bytes from file, bos 2 eos 1 pad 0, add-bos 1, pre gemma; the prompt's 5 bytes were not answered."
         );
     }
 
@@ -2308,7 +2381,7 @@ mod tests {
         );
         assert_eq!(
             notice,
-            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, whose tensors the engine does not read, vocabulary counted not loaded, template 4096 bytes refused, no token ids; the prompt's 0 bytes were not answered."
+            b"Model file names no model, declares gemma2, tokenizer model undeclared, quantisation type undeclared, tensors uncounted, embedding length 64, over 2 blocks, vocabulary 256000 tokens, none of whose tensors this reply reads, vocabulary counted not loaded, template 4096 bytes refused, no token ids; the prompt's 0 bytes were not answered."
         );
         // A refused template is not an empty one: the engine runs the default, and
         // the walk keeps the length the file gave.
@@ -2474,7 +2547,8 @@ mod tests {
         let Some(path) = real_file::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
             real_file::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 the identity clause has only ever quoted a hand-written fixture."
+                 the identity clause has only ever quoted a hand-written fixture and the \
+                 loader has only ever been handed one."
             );
             return;
         };
@@ -2520,6 +2594,47 @@ mod tests {
         assert!(
             !text.contains("names no model"),
             "the real file states a name, and the notice said it declared none: {text}"
+        );
+        assert!(
+            text.contains("none of whose tensors this reply reads"),
+            "the sentence this file triggers no longer says what the reply skipped: \
+             {text}"
+        );
+
+        // WHY the loader runs on this path too: the clause above was narrowed from a
+        // claim about the engine ("whose tensors the engine does not read") to a claim
+        // about the reply, and the only thing that licenses that narrowing is this
+        // file's own bytes going into the graph. So the file that triggers the sentence
+        // is handed to the loader here, and one block of it is read -- the long
+        // measurement, over all 24 blocks and two prompts, is
+        // `weights::tests::test_the_installed_file_is_read_block_by_block_and_run`.
+        let (table, _head, _walked) = weights::tests::walk_the_installed_table(&path)
+            .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked: {why}"));
+        let mut reader = weights::WeightReader::new(
+            table,
+            weights::tests::HostFileSource {
+                file: real_file::fs::File::open(&path)
+                    .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}")),
+            },
+        );
+        let block = reader
+            .load_block(0)
+            .unwrap_or_else(|error| panic!("block 0 of {path} did not load: {error:?}"));
+        real_file::println!(
+            "  the same file, loaded: {} tensors and {} bytes of block 0 are in the \
+             graph's shapes, so the sentence above may not claim the engine reads none \
+             of them (it claims only that this reply does)",
+            block.tensors_read,
+            block.bytes_read,
+        );
+        assert_eq!(
+            block.tensors_read, 13,
+            "the notice's file did not hand the loader a whole block"
+        );
+        assert!(
+            block.bytes_read > 0,
+            "the loader read a block of {} bytes from the file the notice names",
+            block.bytes_read
         );
     }
 

@@ -1213,6 +1213,199 @@ def test_the_tensor_position_contract_can_fail():
     assert _tensor_position_defects(gguf, honest_caller) == []
 
 
+# The loader's own rules, checked over `weights.rs`.
+#
+# WHY a detector set for a module that did not exist when this file was written:
+# the whole reason the service could price a model and answer nothing from it was
+# that no code turned the installed file's tensors into the graph's shapes, and the
+# two ways to close that hop badly are both invisible to the compiler -- holding the
+# file (a 213,909,504-byte embedding table does not fit a run that is allowed
+# 125,829,120 bytes) and answering a dtype the engine has no layout for with a
+# neighbour's arithmetic. A green unit test proves neither of those away; these
+# strings do.
+def _loader_defects(weights: str) -> list[str]:
+    code = without_comments(weights)
+    defects = []
+
+    if "read_to_end" in code:
+        defects.append("the loader pulls a whole tensor into one buffer")
+    if "fs_read(" in code.replace("fs_read_at(", ""):
+        defects.append("a tensor is read through a cursor the loader would have to move")
+
+    seam = function_body(weights, "impl PositionRead for ModelFileDescriptor")
+    if "fs_read_at(self.fd, position" not in seam:
+        defects.append("the device's read is not positioned where the descriptor says")
+    if "got == 0" not in seam:
+        defects.append("a read that returns nothing is retried forever instead of refused")
+
+    block = function_body(weights, "pub fn load_block(&mut self, index: usize)")
+    if "self.slot.release()" not in block:
+        defects.append("a block's tensors stay held while the next block is read")
+    if "quantised_row_bytes(handle.dtype" not in block:
+        defects.append("a block is dequantised with a type its descriptors did not declare")
+    if "UnsupportedDtype" not in block:
+        defects.append("a dtype the engine has no layout for is read as another one")
+    if "MixedBlockDtype" not in block:
+        defects.append("a block split across two quantisations is answered with one of them")
+    if "weight_type" not in code:
+        defects.append("the dtype the block declared never reaches the graph")
+
+    row = function_body(weights, "pub fn load_embedding_row(")
+    if "quantised_row_bytes(entry.dtype" not in row:
+        defects.append("an embedding row is cut to a width the file's dtype does not give")
+    if ">= entry.rows" not in row:
+        defects.append("a token id past the table wraps instead of being refused")
+
+    run = function_body(weights, "pub fn run_streamed_embedding<")
+    if "config.check_scratch_budget()" not in run:
+        defects.append("the streamed run skips the budget every other run is priced by")
+    if "reader.load_block(block)" not in run:
+        defects.append("the streamed run does not read the block it runs")
+    if "embedding_row_into(" not in run:
+        defects.append("the row read for a token is never dequantised into the stream")
+    if "kv_cache.len = pos + 1" not in run:
+        defects.append("a position's key/value writes are left visible to the next one")
+    return defects
+
+
+def test_the_loader_reads_the_installed_file_one_block_at_a_time():
+    """The hop from a descriptor to a forward pass, bounded and dtype-honest."""
+    weights = read("weights.rs")
+    defects = _loader_defects(weights)
+    assert defects == [], "; ".join(defects)
+    # The slot is emptied between blocks, so 24 never coexist: the release is the
+    # first statement of the load, not a courtesy call after the reads.
+    block = function_body(weights, "pub fn load_block(&mut self, index: usize)")
+    assert block.index("self.slot.release()") < block.index(
+        "for suffix in BLOCK_NORMS"
+    ), "the block refills its slot before emptying it"
+
+
+def test_the_loader_contract_can_fail():
+    """Each loader detector is tripped by the fault it exists for.
+
+    The sources below are the live loader with one rule reversed: the slot left
+    standing while the next block is read, a tensor pulled to the end of the file
+    instead of read at its position, a block dequantised with a type no descriptor
+    declared, a token id past the embedding table read as a row of the file's, and a
+    streamed run that never prices itself against the byte budget.
+    """
+    weights = read("weights.rs")
+    assert _loader_defects(weights) == []
+
+    held = weights.replace("        self.slot.release();\n", "", 1)
+    assert held != weights, "the release is no longer where the load starts"
+    assert any("next block is read" in defect for defect in _loader_defects(held)), (
+        "a loader that keeps 24 blocks alive passed the contract"
+    )
+
+    slurped = weights.replace(
+        "        self.source.read_at(entry.position, &mut buffer)?;",
+        "        self.source.read_at(entry.position, &mut buffer)?;\n"
+        "        let _ = file.read_to_end(&mut buffer);",
+        1,
+    )
+    assert slurped != weights, "the payload read the whole-tensor rule watches is gone"
+    assert any("whole tensor" in defect for defect in _loader_defects(slurped)), (
+        "a loader that read a tensor to the end of the file passed the contract"
+    )
+
+    guessed_dtype = weights.replace(
+        "            if quantised_row_bytes(handle.dtype, handle.cols as usize).is_none() {",
+        "            if false {",
+        1,
+    )
+    assert guessed_dtype != weights, "the dtype check the contract watches is gone"
+    assert any(
+        "descriptors did not declare" in defect for defect in _loader_defects(guessed_dtype)
+    ), "a block dequantised with an assumed type passed the contract"
+
+    no_range = weights.replace(
+        "        if (token as u64) >= entry.rows {", "        if false {", 1
+    )
+    assert no_range != weights, "the row-range refusal the contract watches is gone"
+    assert any("wraps instead" in defect for defect in _loader_defects(no_range)), (
+        "a token id past the table was read as a row of the file's"
+    )
+
+    unbudgeted = weights.replace("    config.check_scratch_budget()?", "    let _ = 0;", 1)
+    assert unbudgeted != weights, "the budget call the run is priced by is gone"
+    assert any("budget every other run" in defect for defect in _loader_defects(unbudgeted)), (
+        "a streamed run that skipped the byte budget passed the contract"
+    )
+
+
+def test_the_loader_runs_the_installed_file_or_says_it_did_not():
+    """The one case that runs the graph over the 333 MB file has to say when it did not.
+
+    Every other case prices a hand-written description of the file, so a loader wrong
+    about the real bytes still passes them. The gate is the same one the engine's own
+    real-file case uses, and it has to carry the numbers a reader can check: bytes
+    read, the peak the run held, the dot product of two different prompts' vectors.
+    """
+    weights = read("weights.rs")
+    body = function_body(
+        weights, "fn test_the_installed_file_is_read_block_by_block_and_run"
+    )
+    assert "INTEROS_REAL_GGUF_PATH" in body, "the real file is no longer opt-in, or is silent"
+    assert "NOT VERIFIED" in body, (
+        "a run with no file in front of it would pass without saying it read nothing"
+    )
+    for shipping in (
+        "walk_the_installed_table",
+        "locate_tensor",
+        "ModelConfig::from_gguf",
+        "load_block",
+        "load_embedding_row",
+        "embedding_row_into",
+        "run_streamed_embedding",
+        "Scratch::new",
+        "KvCache::new",
+    ):
+        assert shipping in body, f"the real-file case no longer runs {shipping!r}"
+    # The prefix walker it hands the path to is the shipping walk, not a second
+    # parser written for the test.
+    assert "TensorTable::walk(&mut stream)" in function_body(
+        weights, "pub(crate) fn walk_the_installed_table"
+    ), "the real-file case resolves its table with something other than the loader's walk"
+    for measurement in ("bytes read", "peak slot", "dot("):
+        assert measurement in body, f"the run no longer reports its {measurement!r}"
+    assert "HOST-BACKED" in body, (
+        "a host running the engine is about to be read as the device doing it"
+    )
+
+
+def test_the_notice_narrows_its_refusal_instead_of_losing_it():
+    """The screen may say what a reply skipped, not what the engine cannot do.
+
+    WHY this is a contract and not a comment: the clause used to read "whose tensors
+    the engine does not read", which was true only while no loader existed. Once the
+    loader reads an installed file's tensors, keeping that sentence is a false claim
+    about capability and deleting it is a gate passing because the lie was removed --
+    so the narrowed wording is pinned here, and the gated case that licenses it (the
+    same file handed to both the notice and the loader) has to stay in `lib.rs`.
+    """
+    lib = without_comments(read("lib.rs"))
+    assert "whose tensors the engine does not read" not in lib, (
+        "the notice claims the engine reads no tensor of the file, which the loader's "
+        "measurement against the installed file contradicts"
+    )
+    assert "none of whose tensors this reply reads" in lib, (
+        "the refusal stopped saying what this reply did not read"
+    )
+    assert ", and holds no tensors" in lib, (
+        "an empty file and a file whose tensors went unread are now one sentence"
+    )
+    gated = function_body(
+        read("lib.rs"), "fn test_the_notice_for_the_file_this_host_holds_quotes_that_file"
+    )
+    assert "walk_the_installed_table" in gated and "load_block" in gated, (
+        "the sentence about the real file is no longer checked against the loader "
+        "reading that same file"
+    )
+    assert "NOT VERIFIED" in gated, "the real-file notice case can pass having opened nothing"
+
+
 def test_the_contract_can_fail():
     """A contract that cannot fail is a comment.
 

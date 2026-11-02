@@ -1210,10 +1210,23 @@ impl Scratch {
     }
 }
 
-/// References to layer weights (supports zero-copy referencing from memory or test fixture).
+/// One transformer block's tensors, borrowed from whatever holds them.
+///
+/// The slices are borrows and not owned buffers because the loader that fills this
+/// slot reads one block at a time from the model file: a 24-block Q8_0 model is
+/// ~4.3 MiB of raw bytes per block, and holding all of them alongside the 96 MiB
+/// key/value cache the same file declares is not something the device has room for.
+/// The slot is refilled per block, so the peak is one block.
 #[derive(Clone, Copy)]
 pub struct LayerWeights<'a> {
     pub attn_norm: &'a [f32],
+    /// Per-head RMSNorm applied to Q after the projection, before RoPE. Gemma 3 and
+    /// the published `gemma-embedding` file ship `blk.N.attn_q_norm.weight`, one
+    /// vector `head_dim` wide; a file that declares none leaves this empty and the
+    /// step skips it. Empty is the file's silence, not an invented identity.
+    pub attn_q_norm: &'a [f32],
+    /// `blk.N.attn_k_norm.weight`, per key head, same rule as `attn_q_norm`.
+    pub attn_k_norm: &'a [f32],
     pub attn_q: &'a [u8],
     pub attn_k: &'a [u8],
     pub attn_v: &'a [u8],
@@ -1224,6 +1237,9 @@ pub struct LayerWeights<'a> {
     pub ffn_up: &'a [u8],
     pub ffn_down: &'a [u8],
     pub post_ffn_norm: &'a [f32],
+    /// The GGML type every quantised tensor in this block declares. The loader
+    /// reads it from the file's own tensor descriptors and refuses a block whose
+    /// matrices disagree with it, so this is never a number the engine picked.
     pub weight_type: u32,
 }
 
@@ -1246,6 +1262,65 @@ impl<'a> LayerWeights<'a> {
         .iter()
         .all(|w| w.len() >= hidden_dim)
     }
+
+    /// Whether the two per-head norms, when the file declares them, are exactly one
+    /// head wide.
+    ///
+    /// WHY `head_dim` exactly and not `>=`: a QK norm wider than the head it scales
+    /// would be applied to a slice of itself and the tail would go unused, which is
+    /// the same half-normalised-stream defect `norms_hold` refuses.
+    fn head_norms_hold(&self, head_dim: usize) -> bool {
+        (self.attn_q_norm.is_empty() || self.attn_q_norm.len() == head_dim)
+            && (self.attn_k_norm.is_empty() || self.attn_k_norm.len() == head_dim)
+    }
+
+    /// Whether the block's Q, K and V matrices hold at least the rows the declared
+    /// head geometry needs, counted in the quantisation this block states.
+    ///
+    /// WHY counted per quantisation and not per element: a Q8_0 row of 768 weights
+    /// is 816 bytes, not 768, and a width check written against the element count
+    /// would let `gemv` read a neighbour's blocks as this tensor's tail.
+    fn projections_hold(&self, kv_dim: usize, hidden_dim: usize) -> bool {
+        // Every one of these four matrices consumes the normalised stream, so a row
+        // of each is `hidden_dim` weights wide; what differs is how many rows the
+        // head geometry asks for, which is `kv_dim` for K and V and the whole stream
+        // for Q and O.
+        let Some(row_bytes) = quantised_row_bytes(self.weight_type, hidden_dim) else {
+            return false;
+        };
+        let holds = |bytes: &[u8], rows: usize| bytes.len() >= rows.saturating_mul(row_bytes);
+        holds(self.attn_q, hidden_dim)
+            && holds(self.attn_k, kv_dim)
+            && holds(self.attn_v, kv_dim)
+            && holds(self.attn_o, hidden_dim)
+    }
+}
+
+/// The token embedding tensor, as the file holds it.
+///
+/// WHY two shapes and not one: `ModelWeights` used to carry a single byte slice
+/// indexed by `token_id * hidden_dim * 4`, which is only addressable for an
+/// unquantised table -- and the published Q8_0 file's table is 213,909,504 bytes,
+/// more than the device's whole scratch budget for the run. The loader that reads
+/// that file takes one row per token (816 bytes at 768 wide) and says which token
+/// it took, so a step cannot be handed one token's row and asked for another's.
+#[derive(Clone, Copy)]
+pub enum TokenEmbedding<'a> {
+    /// Every row the file declares, addressed by token id.
+    Table {
+        bytes: &'a [u8],
+        /// Rows the table holds, as the file's own dimensions state them.
+        rows: usize,
+        dtype: u32,
+    },
+    /// One row, read by the loader for the token named in `token`.
+    Row {
+        bytes: &'a [u8],
+        dtype: u32,
+        /// The token this row belongs to, taken from the id the loader looked the
+        /// row up under. A step asking for a different token is refused.
+        token: u32,
+    },
 }
 
 /// References to model weights.
@@ -1254,11 +1329,18 @@ impl<'a> LayerWeights<'a> {
 /// file's: a two-entry array could only ever describe a two-block model, which is
 /// one of the ceilings this module no longer has.
 pub struct ModelWeights<'a> {
-    pub token_embd: &'a [u8],
-    pub token_embd_type: u32,
+    pub token_embd: TokenEmbedding<'a>,
     pub layers: &'a [Option<LayerWeights<'a>>],
     pub final_norm: &'a [f32],
-    pub output_weight: &'a [u8],
+    /// The output head, when the file has one.
+    ///
+    /// WHY an `Option` instead of an empty slice: an embedding model is not a
+    /// generative model missing a tensor. `embeddinggemma-300M-Q8_0.gguf` carries
+    /// 316 descriptors and none of them is `output.weight` -- it answers with a
+    /// pooled vector, never with a next-token distribution. A `None` here says the
+    /// file declared no head, which `generate` refuses on and `extract_embedding`
+    /// does not need; an empty slice would have `gemv` report it as corrupt bytes.
+    pub output_weight: Option<&'a [u8]>,
     pub output_weight_type: u32,
 }
 
@@ -1393,6 +1475,288 @@ fn zeros(count: usize) -> Result<Vec<f32>, InferenceError> {
 // Neural Forward Pass & Generation
 // -----------------------------------------------------------------------------
 
+/// Rows of `head_dim` the key/value side of a run holds.
+///
+/// WHY this is a function of the config and not of the residual width: the
+/// published `embeddinggemma-300M-Q8_0.gguf` declares 3 query heads and **1**
+/// key/value head of 256, so its `blk.N.attn_k.weight` is `[768, 256]` -- 256 rows,
+/// not the 768 the residual stream is wide. A step that projected K and V as though
+/// they were stream-wide would read 512 rows past the end of that tensor, which is
+/// `gemv`'s `CorruptedWeights` refusal, and the fix is to ask it for the rows the
+/// file declared rather than to widen the tensor.
+pub fn kv_projection_width(config: &ModelConfig) -> usize {
+    config.num_kv_heads.saturating_mul(config.head_dim)
+}
+
+/// Bytes one `width`-element row occupies in the quantisation the file declares.
+///
+/// WHY this is not `width * 4`: the published file's `token_embd.weight` is Q8_0,
+/// so a 768-wide row is 816 bytes of blocks and not 3072 bytes of floats, and a
+/// reader that sized a row by the float width would hand `gemv` the next token's
+/// scale bytes as this token's tail. `None` is the refusal the caller reports --
+/// a type the engine has no layout for, named by its number, not read as another.
+pub fn quantised_row_bytes(dtype: u32, width: usize) -> Option<usize> {
+    let blocks = |weight_divisor: usize, block_bytes: usize| -> Option<usize> {
+        if width % weight_divisor != 0 {
+            // A width that is not a whole number of blocks has no row: the format
+            // does not let a block straddle two rows, so a number derived by
+            // integer division here would be a row the file does not hold.
+            return None;
+        }
+        (width / weight_divisor).checked_mul(block_bytes)
+    };
+    match dtype {
+        0 => width.checked_mul(FLOAT_BYTES),
+        1 => width.checked_mul(2),
+        2 => blocks(32, 18),
+        8 => blocks(32, 34),
+        12 => blocks(Q4_K_WEIGHTS, Q4_K_BLOCK_BYTES),
+        _ => None,
+    }
+}
+
+/// Writes one embedding row, in the quantisation the file declares for it, into the
+/// residual stream scaled by `scale`.
+///
+/// WHY the dtype is an argument and not a constant: `token_embd.weight` is F32 in
+/// the fixtures this engine was written against and Q8_0 in the file that is
+/// actually installed, and a lookup that read the Q8_0 blocks as floats would
+/// produce noise the model never held. An id the loader has no layout for is
+/// refused by number.
+pub fn embedding_row_into(
+    raw: &[u8],
+    dtype: u32,
+    scale: f32,
+    out: &mut [f32],
+) -> Result<(), InferenceError> {
+    match dtype {
+        // GGML_TYPE_F32: the row is already the values, so the copy is the scale.
+        0 => {
+            let count = out.len();
+            if raw.len() < count.saturating_mul(FLOAT_BYTES) {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            for (j, slot) in out.iter_mut().enumerate() {
+                let at = j * FLOAT_BYTES;
+                *slot =
+                    f32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]) * scale;
+            }
+            Ok(())
+        }
+        // GGML_TYPE_F16
+        1 => {
+            let count = out.len();
+            if raw.len() < count.saturating_mul(2) {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            for (j, slot) in out.iter_mut().enumerate() {
+                let at = j * 2;
+                *slot = f16_to_f32(u16::from_le_bytes([raw[at], raw[at + 1]])) * scale;
+            }
+            Ok(())
+        }
+        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K: dequantise the whole row, then scale it. The
+        // three helpers write exactly `raw.len() / block_bytes * block_weights`
+        // floats, which is the row's declared width when the loader sized the buffer.
+        2 | 8 | 12 => {
+            let produced = match dtype {
+                2 => dequantize_q4_0(raw, out)?,
+                8 => dequantize_q8_0(raw, out)?,
+                _ => dequantize_q4_k(raw, out)?,
+            };
+            if produced != out.len() {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            for slot in out.iter_mut() {
+                *slot *= scale;
+            }
+            Ok(())
+        }
+        _ => Err(InferenceError::UnsupportedQuantization(dtype)),
+    }
+}
+
+/// Mean-pools `count` accumulated positions and L2-normalises the result.
+///
+/// Shared by `extract_embedding` and the streaming loader so the pooling rule an
+/// in-memory run applies and the one a file-read run applies cannot drift apart --
+/// two vectors from two different poolings compared by the search index would be a
+/// similarity the model never had.
+pub fn pooled_normalised(pooled: &[f32], count: usize, out: &mut [f32]) {
+    if count == 0 {
+        return;
+    }
+    let inv_count = 1.0f32 / (count as f32);
+    for (slot, &value) in out.iter_mut().zip(pooled) {
+        *slot = value * inv_count;
+    }
+    let mut sum_sq = 0.0f32;
+    for &v in out.iter() {
+        sum_sq += v * v;
+    }
+    let norm = f32_sqrt(sum_sq);
+    if norm > 1e-12 {
+        let inv_norm = 1.0f32 / norm;
+        for v in out.iter_mut() {
+            *v *= inv_norm;
+        }
+    }
+}
+
+/// Runs one transformer block over the residual stream in `scratch`.
+///
+/// This is the body of the block loop `forward_step` walks, split out so the loader
+/// that cannot hold all 24 blocks at once can run one, release its slot, and read
+/// the next. Everything the block touches is checked on entry, and the streams are
+/// the caller's: a block that fails leaves `scratch` holding what it held before it
+/// ran, exactly as a failed step does.
+pub fn run_block(
+    block: usize,
+    lw: &LayerWeights<'_>,
+    pos: usize,
+    config: &ModelConfig,
+    kv_cache: &mut KvCache,
+    scratch: &mut Scratch,
+) -> Result<(), InferenceError> {
+    let h_dim = config.hidden_dim;
+    let inter_dim = config.intermediate_dim;
+    let kv_dim = kv_projection_width(config);
+    let hd = config.head_dim;
+
+    if pos >= kv_cache.seq_len {
+        return Err(InferenceError::ContextLengthExceeded);
+    }
+    // The scratch is `hidden_dim` wide everywhere, which bounds the key/value side
+    // only while `num_kv_heads x head_dim` does not exceed the stream. It cannot:
+    // `check_attention_shape` refuses kv heads beyond the query heads and heads
+    // that do not tile the stream, and `from_gguf` refuses kv > query. Checked here
+    // too because a hand-built config reaches this function as well.
+    config.check_attention_shape()?;
+    if kv_dim > h_dim || kv_dim > scratch.k.len() || kv_dim > scratch.v_vec.len() {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    if !lw.norms_hold(h_dim) || !lw.head_norms_hold(hd) {
+        return Err(InferenceError::CorruptedWeights);
+    }
+    if !lw.projections_hold(kv_dim, h_dim) {
+        return Err(InferenceError::CorruptedWeights);
+    }
+
+    // Destructured so the block holds disjoint borrows of the buffers it writes in
+    // one pass -- the attention pass reads `q` while it writes `attn_out`, and the
+    // residual add reads `residual` while it writes `x`.
+    let Scratch {
+        x,
+        residual,
+        x_norm,
+        q,
+        k,
+        v_vec,
+        attn_out,
+        attn_proj,
+        gate,
+        up,
+        ffn_hidden,
+        ffn_out,
+        scores,
+        ..
+    } = scratch;
+
+    // 1. Pre-attention RMSNorm.
+    residual[..h_dim].copy_from_slice(&x[..h_dim]);
+    x_norm[..h_dim].copy_from_slice(&x[..h_dim]);
+    rms_norm(&mut x_norm[..h_dim], lw.attn_norm, config.rms_norm_eps);
+
+    // 2. Q, K, V projections. Q spans the whole stream (every query head laid end
+    // to end); K and V span only the rows the declared key/value heads take.
+    gemv(lw.attn_q, lw.weight_type, &x_norm[..h_dim], &mut q[..h_dim], h_dim, h_dim)?;
+    gemv(lw.attn_k, lw.weight_type, &x_norm[..h_dim], &mut k[..kv_dim], kv_dim, h_dim)?;
+    gemv(lw.attn_v, lw.weight_type, &x_norm[..h_dim], &mut v_vec[..kv_dim], kv_dim, h_dim)?;
+
+    // 3. Per-head QK norm, when the file declares one. Gemma 3 and the published
+    // embedding file each ship `attn_q_norm` / `attn_k_norm` one head wide; a file
+    // that states neither leaves the head unnormalised, which is that file's graph.
+    if !lw.attn_q_norm.is_empty() {
+        for head in 0..config.num_heads {
+            let at = head * hd;
+            rms_norm(&mut q[at..at + hd], lw.attn_q_norm, config.rms_norm_eps);
+        }
+    }
+    if !lw.attn_k_norm.is_empty() {
+        for head in 0..config.num_kv_heads {
+            let at = head * hd;
+            rms_norm(&mut k[at..at + hd], lw.attn_k_norm, config.rms_norm_eps);
+        }
+    }
+
+    // 4. RoPE, per query head and per key head. The two counts differ exactly when
+    // the file declares grouped-query attention.
+    for head in 0..config.num_heads {
+        let at = head * hd;
+        apply_rope(&mut q[at..at + hd], pos, hd, config.rope_theta);
+    }
+    for head in 0..config.num_kv_heads {
+        let at = head * hd;
+        apply_rope(&mut k[at..at + hd], pos, hd, config.rope_theta);
+    }
+
+    // 5. Cache the one key/value head this build's kernel walks. `KvCache::write`
+    // refuses a slice that is not exactly `head_dim` long, so the row is the whole
+    // declared head: nothing is dropped and nothing is zero-padded to reach it.
+    kv_cache.write(block, pos, 0, &k[..hd], &v_vec[..hd])?;
+
+    // 6. Attention scores and softmax, then the weighted sum of values.
+    let scale_att = 1.0f32 / f32_sqrt(hd as f32);
+    let seq_len_cur = pos + 1;
+    for value in attn_out[..h_dim].iter_mut() {
+        *value = 0.0f32;
+    }
+    for head in 0..config.num_heads {
+        let h_base = head * hd;
+        for t in 0..seq_len_cur {
+            let key_row = kv_cache
+                .k_row(block, t, 0)
+                .ok_or(InferenceError::ContextLengthExceeded)?;
+            let mut dot = 0.0f32;
+            for d in 0..hd {
+                dot += q[h_base + d] * key_row[d];
+            }
+            scores[t] = dot * scale_att;
+        }
+        softmax(&mut scores[..seq_len_cur]);
+        for t in 0..seq_len_cur {
+            let value_row = kv_cache
+                .v_row(block, t, 0)
+                .ok_or(InferenceError::ContextLengthExceeded)?;
+            let weight = scores[t];
+            for d in 0..hd {
+                attn_out[h_base + d] += weight * value_row[d];
+            }
+        }
+    }
+
+    // 7. Output projection, post-attention norm, residual add.
+    gemv(lw.attn_o, lw.weight_type, &attn_out[..h_dim], &mut attn_proj[..h_dim], h_dim, h_dim)?;
+    rms_norm(&mut attn_proj[..h_dim], lw.post_attn_norm, config.rms_norm_eps);
+    for i in 0..h_dim {
+        x[i] = residual[i] + attn_proj[i];
+    }
+
+    // 8. Feed-forward: gate and up projections, SwiGLU, down projection.
+    residual[..h_dim].copy_from_slice(&x[..h_dim]);
+    x_norm[..h_dim].copy_from_slice(&x[..h_dim]);
+    rms_norm(&mut x_norm[..h_dim], lw.ffn_norm, config.rms_norm_eps);
+    gemv(lw.ffn_gate, lw.weight_type, &x_norm[..h_dim], &mut gate[..inter_dim], inter_dim, h_dim)?;
+    gemv(lw.ffn_up, lw.weight_type, &x_norm[..h_dim], &mut up[..inter_dim], inter_dim, h_dim)?;
+    swiglu(&gate[..inter_dim], &up[..inter_dim], &mut ffn_hidden[..inter_dim]);
+    gemv(lw.ffn_down, lw.weight_type, &ffn_hidden[..inter_dim], &mut ffn_out[..h_dim], h_dim, inter_dim)?;
+    rms_norm(&mut ffn_out[..h_dim], lw.post_ffn_norm, config.rms_norm_eps);
+    for i in 0..h_dim {
+        x[i] = residual[i] + ffn_out[i];
+    }
+    Ok(())
+}
+
 /// Executes a single forward step of the neural network for one token at `pos`.
 ///
 /// The step's streams, scores and logits arrive through `scratch` and the cached
@@ -1408,7 +1772,6 @@ pub fn forward_step(
     scratch: &mut Scratch,
 ) -> Result<(), InferenceError> {
     let h_dim = config.hidden_dim;
-    let inter_dim = config.intermediate_dim;
 
     // Everything the step indexes with is checked before any work runs, so a call
     // this engine will not complete leaves the cache holding what it held when it
@@ -1437,8 +1800,7 @@ pub fn forward_step(
     }
     // The file declares `num_layers` blocks; fewer than that handed over means the
     // run would skip transformer blocks and still be reported as this model's
-    // answer. There is no weight loader yet, so this is the check that keeps an
-    // unloaded model from answering at all.
+    // answer.
     if model.layers.len() < config.num_layers {
         return Err(InferenceError::CorruptedWeights);
     }
@@ -1449,202 +1811,89 @@ pub fn forward_step(
         return Err(InferenceError::CorruptedWeights);
     }
 
-    // Destructured so the step holds disjoint borrows of the buffers it writes in
-    // one block -- the attention pass reads `q` while it writes `attn_out`, and
-    // the residual add reads `residual` while it writes `x`.
+    // 1. Embedding lookup, in whatever quantisation the file's own descriptor
+    // declares for `token_embd.weight`.
     //
-    // `pooled` is left out because a step does not pool: the accumulator belongs
-    // to `extract_embedding`, which sums one position's `hidden` at a time.
-    let Scratch {
-        x,
-        residual,
-        x_norm,
-        q,
-        k,
-        v_vec,
-        attn_out,
-        attn_proj,
-        gate,
-        up,
-        ffn_hidden,
-        ffn_out,
-        scores,
-        logits,
-        hidden,
-        ..
-    } = scratch;
-
-    // 1. Embedding lookup. The row is read as floats because that is the only
-    // layout this path can address; a quantised embedding belongs to a loader
-    // that dequantises it, and reading its blocks as floats would be noise.
-    if model.token_embd_type != 0 {
-        return Err(InferenceError::UnsupportedQuantization(model.token_embd_type));
-    }
-    let embd_idx = (token_id as usize) % config.vocab_size;
-    let embd_stride = h_dim
-        .checked_mul(FLOAT_BYTES)
-        .ok_or(InferenceError::CorruptedWeights)?;
-    let embd_offset = embd_idx
-        .checked_mul(embd_stride)
-        .ok_or(InferenceError::CorruptedWeights)?;
-    if model.token_embd.len() < embd_offset + embd_stride {
-        // The row the file does not hold is not invented here. A stand-in built
-        // from the token id would let an answer be reported as the installed
-        // model's while nothing of the model had been read.
-        return Err(InferenceError::CorruptedWeights);
-    }
-    for j in 0..h_dim {
-        let b_idx = embd_offset + j * FLOAT_BYTES;
-        x[j] = f32::from_le_bytes([
-            model.token_embd[b_idx],
-            model.token_embd[b_idx + 1],
-            model.token_embd[b_idx + 2],
-            model.token_embd[b_idx + 3],
-        ]);
-    }
-
-    // Scale embedding by sqrt(hidden_dim) (Gemma standard)
+    // The table form indexes the row by token id; the row form is the loader's --
+    // one row read from the file, tagged with the token it was read for. A step
+    // given a row for a different token is refused rather than answered with it,
+    // because the answer would then be one token's embedding reported as another's.
     let embd_scale = f32_sqrt(h_dim as f32);
-    for v in x[..h_dim].iter_mut() {
-        *v *= embd_scale;
+    match model.token_embd {
+        TokenEmbedding::Row { bytes, dtype, token } => {
+            if token != token_id {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            embedding_row_into(bytes, dtype, embd_scale, &mut scratch.x[..h_dim])?;
+        }
+        TokenEmbedding::Table { bytes, rows, dtype } => {
+            let embd_idx = (token_id as usize) % config.vocab_size;
+            if embd_idx >= rows {
+                // The row the file does not hold is not invented here. A stand-in
+                // built from the token id would let an answer be reported as the
+                // installed model's while nothing of the model had been read.
+                return Err(InferenceError::CorruptedWeights);
+            }
+            let row_bytes = quantised_row_bytes(dtype, h_dim)
+                .ok_or(InferenceError::UnsupportedQuantization(dtype))?;
+            let embd_offset = embd_idx
+                .checked_mul(row_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if bytes.len() < embd_offset + row_bytes {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            embedding_row_into(
+                &bytes[embd_offset..embd_offset + row_bytes],
+                dtype,
+                embd_scale,
+                &mut scratch.x[..h_dim],
+            )?;
+        }
     }
 
-    // 2. Transformer layers
-    for l in 0..config.num_layers {
-        let lw = match &model.layers[l] {
+    // 2. Transformer blocks, each over the weights the file is held with.
+    for block in 0..config.num_layers {
+        let lw = match &model.layers[block] {
             Some(w) => *w,
             // A block the file declares and nobody loaded is a missing weight,
             // not a block to walk around: skipping it silently would report a
             // shallower network as this model's answer.
             None => return Err(InferenceError::CorruptedWeights),
         };
-        // `rms_norm` walks the shorter of the two slices it is handed, so a norm
-        // vector narrower than the stream would leave its tail unscaled and the
-        // answer would still arrive described as this model's.
-        if !lw.norms_hold(h_dim) {
-            return Err(InferenceError::CorruptedWeights);
-        }
-
-        // Pre-Attention RMSNorm
-        residual[..h_dim].copy_from_slice(&x[..h_dim]);
-        x_norm[..h_dim].copy_from_slice(&x[..h_dim]);
-        rms_norm(&mut x_norm[..h_dim], lw.attn_norm, config.rms_norm_eps);
-
-        // Attention Q, K, V projections via GEMV
-        gemv(lw.attn_q, lw.weight_type, &x_norm[..h_dim], &mut q[..h_dim], h_dim, h_dim)?;
-        gemv(lw.attn_k, lw.weight_type, &x_norm[..h_dim], &mut k[..h_dim], h_dim, h_dim)?;
-        gemv(lw.attn_v, lw.weight_type, &x_norm[..h_dim], &mut v_vec[..h_dim], h_dim, h_dim)?;
-
-        // Apply RoPE
-        for h in 0..config.num_heads {
-            let head_start = h * config.head_dim;
-            let head_end = head_start + config.head_dim;
-            apply_rope(&mut q[head_start..head_end], pos, config.head_dim, config.rope_theta);
-            apply_rope(&mut k[head_start..head_end], pos, config.head_dim, config.rope_theta);
-        }
-
-        // Cache K and V. `KvCache::write` refuses a slice that is not exactly
-        // `head_dim` long, so the row is the whole declared head: nothing is
-        // dropped and nothing is zero-padded to reach it.
-        let hd = config.head_dim;
-        kv_cache.write(l, pos, 0, &k[..hd], &v_vec[..hd])?;
-
-        // Attention dot product & Softmax
-        let scale_att = 1.0f32 / f32_sqrt(config.head_dim as f32);
-        let seq_len_cur = pos + 1;
-
-        // One key/value head, so every query head attends to the same cached
-        // row; a file that declares more is refused by `check_attention_shape`
-        // rather than read as this one. The destination is cleared first: heads
-        // span at most `num_heads x head_dim` of the residual stream, and whatever
-        // lies past that belongs to this layer, not the last one.
-        for v in attn_out[..h_dim].iter_mut() {
-            *v = 0.0f32;
-        }
-        for h in 0..config.num_heads {
-            let h_base = h * config.head_dim;
-            for t in 0..seq_len_cur {
-                // A row the cache does not address is a position past the
-                // sequence the file declared, and it is reported as that. Reading
-                // zero instead would score a token that never existed as if it had
-                // no key rather than no presence at all.
-                let key_row = kv_cache
-                    .k_row(l, t, 0)
-                    .ok_or(InferenceError::ContextLengthExceeded)?;
-                let mut dot = 0.0f32;
-                for d in 0..hd {
-                    dot += q[h_base + d] * key_row[d];
-                }
-                scores[t] = dot * scale_att;
-            }
-            softmax(&mut scores[..seq_len_cur]);
-
-            // Weighted sum of V, accumulated position by position into the head's
-            // own slice of the stream.
-            for t in 0..seq_len_cur {
-                let value_row = kv_cache
-                    .v_row(l, t, 0)
-                    .ok_or(InferenceError::ContextLengthExceeded)?;
-                let weight = scores[t];
-                for d in 0..hd {
-                    attn_out[h_base + d] += weight * value_row[d];
-                }
-            }
-        }
-
-        // Attention output projection
-        gemv(lw.attn_o, lw.weight_type, &attn_out[..h_dim], &mut attn_proj[..h_dim], h_dim, h_dim)?;
-        rms_norm(&mut attn_proj[..h_dim], lw.post_attn_norm, config.rms_norm_eps);
-
-        // Residual addition
-        for i in 0..h_dim {
-            x[i] = residual[i] + attn_proj[i];
-        }
-
-        // Pre-FFN RMSNorm
-        residual[..h_dim].copy_from_slice(&x[..h_dim]);
-        x_norm[..h_dim].copy_from_slice(&x[..h_dim]);
-        rms_norm(&mut x_norm[..h_dim], lw.ffn_norm, config.rms_norm_eps);
-
-        // FFN: Gate and Up projections
-        gemv(lw.ffn_gate, lw.weight_type, &x_norm[..h_dim], &mut gate[..inter_dim], inter_dim, h_dim)?;
-        gemv(lw.ffn_up, lw.weight_type, &x_norm[..h_dim], &mut up[..inter_dim], inter_dim, h_dim)?;
-
-        // SwiGLU activation
-        swiglu(&gate[..inter_dim], &up[..inter_dim], &mut ffn_hidden[..inter_dim]);
-
-        // Down projection
-        gemv(lw.ffn_down, lw.weight_type, &ffn_hidden[..inter_dim], &mut ffn_out[..h_dim], h_dim, inter_dim)?;
-        rms_norm(&mut ffn_out[..h_dim], lw.post_ffn_norm, config.rms_norm_eps);
-
-        // Residual addition
-        for i in 0..h_dim {
-            x[i] = residual[i] + ffn_out[i];
-        }
+        run_block(block, &lw, pos, config, kv_cache, scratch)?;
     }
 
     // 3. Final RMSNorm
-    rms_norm(&mut x[..h_dim], model.final_norm, config.rms_norm_eps);
+    rms_norm(&mut scratch.x[..h_dim], model.final_norm, config.rms_norm_eps);
 
     // The normalised residual stream is what a pooling head consumes, so it leaves
     // in `scratch.hidden` rather than being re-derived from the logits below.
-    hidden[..h_dim].copy_from_slice(&x[..h_dim]);
+    scratch.hidden[..h_dim].copy_from_slice(&scratch.x[..h_dim]);
 
-    // 4. Output projection to compute logits.
+    // 4. Output projection to compute logits -- only when the file has a head to
+    // project with.
+    //
+    // WHY the head can be absent: `embeddinggemma-300M-Q8_0.gguf` names 316
+    // tensors and none of them is an output head; it is a pooling model. Leaving
+    // `scratch.logits` holding what it held is honest for that file, and `generate`
+    // refuses to sample from it. An embedding run never reads the logits, so the
+    // stream it pools is unaffected by the head it does not have.
     //
     // WHY the whole declared vocabulary and not a length taken from the caller's
     // buffer: `Scratch::fits` has already guaranteed the buffer holds
     // `config.vocab_size`, and a distribution truncated to whatever the caller
     // happened to hand over would still be sampled as though it were complete --
     // reporting a token chosen from half the model's vocabulary.
-    gemv(
-        model.output_weight,
-        model.output_weight_type,
-        &x[..h_dim],
-        &mut logits[..config.vocab_size],
-        config.vocab_size,
-        h_dim,
-    )?;
+    if let Some(head) = model.output_weight {
+        gemv(
+            head,
+            model.output_weight_type,
+            &scratch.x[..h_dim],
+            &mut scratch.logits[..config.vocab_size],
+            config.vocab_size,
+            h_dim,
+        )?;
+    }
 
     kv_cache.len = pos + 1;
     Ok(())
@@ -1665,6 +1914,17 @@ pub fn generate(
 ) -> Result<usize, InferenceError> {
     if prompt_tokens.is_empty() {
         return Ok(0);
+    }
+    // A file with no output head cannot answer with a next token.
+    //
+    // WHY this refuses before the budget is paid rather than after: sampling from
+    // logits the model never wrote would report a token chosen from an untouched
+    // buffer as the installed model's answer, and the installed
+    // `embeddinggemma-300M-Q8_0.gguf` is exactly that file -- 316 tensors, none of
+    // them a projection back to the vocabulary. The pooling path it does have is
+    // `extract_embedding`.
+    if model.output_weight.is_none() {
+        return Err(InferenceError::ModelDeclaration("output.weight", None, 0));
     }
     // The budget is the first thing the run pays for: a model that does not fit
     // is refused before a single byte is asked for, and the refusal names both
@@ -1760,9 +2020,10 @@ pub fn extract_embedding(
     let dim = config.hidden_dim;
 
     // Mean pooling over the positions, which is what an embedding file declares
-    // when it states `pooling_type` 1. Each step's normalised residual stream is
-    // summed as it is produced, so the vector is the model's own hidden
-    // representation rather than a slice of the cache or a re-use of the logits.
+    // when it states `pooling_type` 1 -- the published file states exactly that
+    // number. Each step's normalised residual stream is summed as it is produced,
+    // so the vector is the model's own hidden representation rather than a slice
+    // of the cache or a re-use of the logits.
     for pos in 0..count {
         forward_step(
             tokens[pos],
@@ -1777,23 +2038,15 @@ pub fn extract_embedding(
         }
     }
 
-    let inv_count = 1.0f32 / (count as f32);
-    for i in 0..dim {
-        out_embedding[i] = scratch.pooled[i] * inv_count;
-    }
-
-    // L2-normalize vector
-    let mut sum_sq = 0.0f32;
-    for &v in out_embedding[..dim].iter() {
-        sum_sq += v * v;
-    }
-    let norm = f32_sqrt(sum_sq);
-    if norm > 1e-12 {
-        let inv_norm = 1.0f32 / norm;
-        for v in out_embedding[..dim].iter_mut() {
-            *v *= inv_norm;
-        }
-    }
+    // The same two lines the streaming loader runs, so an in-memory vector and a
+    // file-read vector cannot be pooled by two different rules.
+    //
+    // WHAT THIS DOES NOT DO: the published file also carries `dense_2.weight`
+    // (768 -> 3072) and `dense_3.weight` (3072 -> 768) after the pool, and their
+    // dimensions are declared as `dense_2_feat_in/out` and `dense_3_feat_in/out`.
+    // This engine has never applied that head, so what comes back from either path
+    // is the pooled pre-head stream, not the published model's final embedding.
+    pooled_normalised(&scratch.pooled[..dim], count, &mut out_embedding[..dim]);
 
     Ok(dim)
 }
@@ -2036,9 +2289,15 @@ pub mod tests {
         }
 
         /// The one block the fixture declares, loaded.
+        ///
+        /// The two per-head norms are empty because this fixture declares no QK
+        /// norm, which is Gemma 2's graph; the published `gemma-embedding` file
+        /// ships both, and `weights.rs`'s loader fills them from its bytes.
         fn layer(&self) -> LayerWeights<'_> {
             LayerWeights {
                 attn_norm: &self.ones[..64],
+                attn_q_norm: &[],
+                attn_k_norm: &[],
                 attn_q: &self.id_w,
                 attn_k: &self.id_w,
                 attn_v: &self.id_w,
@@ -2061,11 +2320,14 @@ pub mod tests {
         /// kind of limit as the ceilings this module no longer has.
         fn weights<'b>(&'b self, blocks: &'b [Option<LayerWeights<'b>>]) -> ModelWeights<'b> {
             ModelWeights {
-                token_embd: &self.embd,
-                token_embd_type: 0,
+                token_embd: TokenEmbedding::Table {
+                    bytes: &self.embd,
+                    rows: 290,
+                    dtype: 0,
+                },
                 layers: blocks,
                 final_norm: &self.ones[..64],
-                output_weight: &self.head_w,
+                output_weight: Some(&self.head_w),
                 output_weight_type: 0,
             }
         }
@@ -2307,15 +2569,19 @@ pub mod tests {
 
     /// The row a token asks for either is in the file or is not. Building one
     /// from the token id made every number downstream of it a description of
-    /// nothing, while reading a Q8_0 tensor as floats would read block headers
-    /// as activations.
+    /// nothing, while reading a quantised table with the wrong row width would
+    /// read a neighbour's block headers as activations.
     #[test]
     fn test_forward_step_refuses_an_embedding_the_file_does_not_hold() {
         let fixture = LittleModel::new();
         let config = LittleModel::config();
         let blocks = [Some(fixture.layer())];
         let mut no_rows = fixture.weights(&blocks);
-        no_rows.token_embd = &[];
+        no_rows.token_embd = TokenEmbedding::Table {
+            bytes: &[],
+            rows: 0,
+            dtype: 0,
+        };
         let (mut scratch, mut kv_cache) = fit(&config);
 
         assert_eq!(
@@ -2334,7 +2600,11 @@ pub mod tests {
         // all: the row is read as far as it exists and the rest would be invented.
         let mut truncated = fixture.weights(&blocks);
         let one_row_short = fixture.embd.len() - 4;
-        truncated.token_embd = &fixture.embd[..one_row_short];
+        truncated.token_embd = TokenEmbedding::Table {
+            bytes: &fixture.embd[..one_row_short],
+            rows: 290,
+            dtype: 0,
+        };
         assert_eq!(
             forward_step(
                 289,
@@ -2347,18 +2617,48 @@ pub mod tests {
             Err(InferenceError::CorruptedWeights)
         );
 
-        let mut quantised = fixture.weights(&blocks);
-        quantised.token_embd_type = 8; // Q8_0: 34 bytes per 32 values, not floats
+        // A dtype the engine has no row layout for is refused by its number, not
+        // read as a type it does know. Q4_1 (3) is the one the published files use
+        // that this engine has no dequantiser for.
+        let mut unsupported = fixture.weights(&blocks);
+        unsupported.token_embd = TokenEmbedding::Table {
+            bytes: &fixture.embd,
+            rows: 290,
+            dtype: 3,
+        };
         assert_eq!(
             forward_step(
                 261,
                 0,
-                &quantised,
+                &unsupported,
                 &config,
                 &mut kv_cache,
                 &mut scratch,
             ),
-            Err(InferenceError::UnsupportedQuantization(8))
+            Err(InferenceError::UnsupportedQuantization(3))
+        );
+
+        // A row tagged with the token it was read for answers only that token: the
+        // loader that reads one row out of a 213 MB table cannot be handed the row
+        // for token 5 and asked to answer token 6.
+        let row_for_five = [0u8; 64 * FLOAT_BYTES];
+        let mislabelled = fixture.weights(&blocks);
+        let mut mislabelled = mislabelled;
+        mislabelled.token_embd = TokenEmbedding::Row {
+            bytes: &row_for_five,
+            dtype: 0,
+            token: 5,
+        };
+        assert_eq!(
+            forward_step(
+                6,
+                0,
+                &mislabelled,
+                &config,
+                &mut kv_cache,
+                &mut scratch,
+            ),
+            Err(InferenceError::CorruptedWeights)
         );
         // None of the three wrote a position into the cache.
         assert_eq!(kv_cache.len, 0);

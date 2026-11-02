@@ -1775,7 +1775,11 @@ pub struct TensorLocation {
 
 /// Rounds a position up to the next multiple of an alignment the caller has
 /// already checked is a power of two and no wider than `MAX_TENSOR_ALIGNMENT`.
-fn align_up(position: u64, alignment: u64) -> Result<u64, GgufError> {
+///
+/// Public for the same reason as `read_alignment_stream`: the loader resolves every
+/// tensor's position in one pass and must land on the same data-section start the
+/// single-name resolver does.
+pub fn align_up(position: u64, alignment: u64) -> Result<u64, GgufError> {
     let remainder = position % alignment;
     if remainder == 0 {
         return Ok(position);
@@ -1791,7 +1795,12 @@ fn align_up(position: u64, alignment: u64) -> Result<u64, GgufError> {
 /// where every tensor in the file is, and a walk that passed the key by without
 /// consulting it would place all of them at the default -- silently, and wrong for
 /// any file that declared otherwise.
-fn read_alignment_stream(stream: &mut GgufStream, kv_count: u64) -> Result<u64, GgufError> {
+///
+/// WHY it is public: the weight loader walks the descriptor table in one pass and
+/// has to resolve the same `data_start` `locate_tensor_stream` resolves for a single
+/// name, and a second rounding rule in the loader is how two readers start
+/// disagreeing about where a tensor's bytes are.
+pub fn read_alignment_stream(stream: &mut GgufStream, kv_count: u64) -> Result<u64, GgufError> {
     let mut alignment = DEFAULT_ALIGNMENT;
     let mut declared = false;
 
