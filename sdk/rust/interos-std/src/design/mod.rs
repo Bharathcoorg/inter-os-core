@@ -1442,13 +1442,26 @@ pub mod back_button {
 /// The bottom edge that answers "go home", and the pill that says so.
 ///
 /// WHY one module owns it: every application wrote its own. Measured off the
-/// tree, the same gesture was answered by four different boxes -- the calendar
-/// took `y >= 1418`, the vault and the file manager took 241 columns by 40 rows
-/// at `y >= 1400`, the camera took 260..=460 by 1418..1440, and the video player
-/// took all 720 columns by 1410..1440 -- while the mark that tells a person where
-/// to press was a different shape in each. A gesture that works on one screen and
-/// not on the next is what a reviewer meets in the first minute, because they meet
-/// it on the screen that did not answer and the device looks hung.
+/// tree, the mark that tells a person where to press was one shape and the box
+/// that answered was another, in six different ways. The camera, the gallery,
+/// Messages, the video player and the file manager tested the press against
+/// `HOME_PILL` itself -- two hundred columns by SIX rows, so a thumb landing
+/// one row above the ink did nothing at all -- while the vault, the calendar,
+/// Music and Settings answered a hand-written 241 by 40 at row 1400, the
+/// browser answered the thirty rows under its own toolbar, and the calculator,
+/// the dialer and the notes had already arrived at a strip of their own. A
+/// person presses where they can see, and the visible mark is six rows: the
+/// screen is not hung, but it is indistinguishable from hung.
+///
+/// WHAT THE ANSWERING BOX IS NOT: the whole band. An application paints its own
+/// content down here -- a list scrolled to its last row, a composer, a tab bar
+/// -- and a gesture that claims every column of those rows takes the taps that
+/// content was waiting for. The band is the shell's; the box an application
+/// answers is the pill's neighbourhood, grown to the touch floor and reaching
+/// the panel's last row, which is the house geometry the calculator, the dialer
+/// and the notes had already chosen. A swipe up from the bottom edge is a
+/// different gesture, and the kernel already routes it from whatever screen is
+/// in front.
 ///
 /// WHAT IT DOES NOT DECIDE: which applications leave on the gesture and which
 /// close a panel first. That is the app's own stack, and the shell's back control
@@ -1456,14 +1469,8 @@ pub mod back_button {
 pub mod home_band {
     use super::primitives::{draw_pill, Rect};
 
-    /// The rows the gesture answers: the shell's own navigation band, edge to
-    /// edge.
-    ///
-    /// WHY the whole band rather than the pill's neighbourhood: nothing inside an
-    /// application is painted in these rows except the pill itself, so every pixel
-    /// of the band is the gesture's to answer and none of them is a second
-    /// control's. A box that stops short of the edges is a box a thumb lands
-    /// beside and reads as a freeze.
+    /// The shell's own navigation band, edge to edge: the rows a home swipe is
+    /// drawn across, and the outer limit of what an application may answer.
     pub const BAND: Rect = Rect::new(
         0,
         super::viewport::LOGICAL_HEIGHT - super::viewport::NAV_BAR_HEIGHT,
@@ -1484,10 +1491,44 @@ pub mod home_band {
         PILL_H,
     );
 
+    /// The columns an answering box takes: the pill's own width, twenty rows of
+    /// panel either side.
+    const HIT_W: usize = 240;
+
+    /// The rows an answering box takes: the platform's preferred target.
+    const HIT_H: usize = super::touch::PREFERRED_TARGET;
+
+    /// The box a tap on the home gesture is answered in: the pill's neighbourhood
+    /// at the touch floor, centred, reaching the panel's last row.
+    ///
+    /// WHY this and not the pill: the pill is the ink and six rows tall, and six
+    /// rows is under a seventh of the floor a thumb is guaranteed. Why not wider:
+    /// the columns beside the pill belong to whatever the app painted there.
+    pub const HIT: Rect = Rect::new(
+        (super::viewport::LOGICAL_WIDTH - HIT_W) / 2,
+        super::viewport::LOGICAL_HEIGHT - HIT_H,
+        HIT_W,
+        HIT_H,
+    );
+
+    /// The same box, beginning at a row the application chooses: an app whose own
+    /// control holds the bottom of the screen -- an open keyboard, a toolbar --
+    /// starts the box where that control stops, so it still reaches the last row
+    /// and still covers the pill.
+    #[inline]
+    pub const fn hit_from(top: usize) -> Rect {
+        Rect::new(
+            (super::viewport::LOGICAL_WIDTH - HIT_W) / 2,
+            top,
+            HIT_W,
+            super::viewport::LOGICAL_HEIGHT - top,
+        )
+    }
+
     /// Whether this contact belongs to the home gesture.
     #[inline]
     pub fn contains(x: usize, y: usize) -> bool {
-        BAND.contains(x, y)
+        HIT.contains(x, y)
     }
 
     /// The pill's ink, or `None` on a pixel the band leaves empty.
@@ -1515,6 +1556,38 @@ pub mod home_band {
     const _: () = assert!(
         PILL.x + PILL_W < super::viewport::LOGICAL_WIDTH,
         "the pill must not run off the panel",
+    );
+    const _: () = assert!(
+        HIT.x <= PILL.x && HIT.x + HIT_W >= PILL.x + PILL_W,
+        "the answering box must cover the pill it is drawn for, column for column",
+    );
+    const _: () = assert!(
+        HIT.y <= PILL.y && HIT.y + HIT_H >= PILL.y + PILL_H,
+        "the answering box must cover the pill it is drawn for, row for row",
+    );
+    const _: () = assert!(
+        HIT.h >= super::touch::MIN_TARGET,
+        "a home box shorter than the touch floor is the six-row pill again",
+    );
+    const _: () = assert!(
+        HIT.w >= super::touch::MIN_TARGET,
+        "a home box narrower than the touch floor is not a box a thumb can aim at",
+    );
+    const _: () = assert!(
+        HIT.y + HIT.h == super::viewport::LOGICAL_HEIGHT,
+        "the answering box must reach the panel's last row",
+    );
+    const _: () = assert!(
+        HIT.y >= BAND.y,
+        "the answering box must stay inside the band the shell owns",
+    );
+    const _: () = assert!(
+        HIT.x + HIT_W == super::viewport::LOGICAL_WIDTH - HIT.x,
+        "the answering box must be centred like the pill it covers",
+    );
+    const _: () = assert!(
+        super::viewport::LOGICAL_HEIGHT - HIT_H >= BAND.y,
+        "a box of the touch floor's height must still fit inside the band",
     );
 }
 
@@ -1993,26 +2066,71 @@ mod tests {
         }
     }
 
-    /// The home gesture answers the band it is painted in, edge to edge, and the
-    /// pill every application draws is inside the rows that answer it.
+    /// The home gesture answers a box that covers the pill it paints, is on the
+    /// touch floor, and stops short of the columns the application owns.
     ///
-    /// WHY measured off the panel's corners: the defect this replaces was four
-    /// apps answering four different boxes, so a thumb that worked on the calendar
-    /// did nothing in the file manager. The corners are where a person aims when
-    /// they are in a hurry and where a hand-written box used to stop short.
+    /// WHY measured this way: the defect was not four boxes but six presses that
+    /// tested the ink -- camera, gallery, Messages, video player and file manager
+    /// all answered the pill's own six rows, so a thumb on row 1410 landed on a
+    /// screen that reported nothing. The corners of the answering box are where
+    /// that thumb lands; the column beside the box is where an app's own list row
+    /// is, and the gesture must not take it.
     #[test]
-    fn the_home_band_answers_the_rows_it_paints_at_every_edge() {
+    fn the_home_band_answers_a_touch_floor_box_around_the_pill_it_paints() {
         use super::home_band;
+        use super::touch::{MIN_TARGET, PREFERRED_TARGET};
         use super::viewport::{LOGICAL_HEIGHT, LOGICAL_WIDTH};
 
-        assert!(home_band::contains(0, LOGICAL_HEIGHT - 1));
-        assert!(home_band::contains(LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1));
-        assert!(home_band::contains(
-            LOGICAL_WIDTH / 2,
-            home_band::BAND.y
+        // Every corner of the box answers, and the pill's own centre with it.
+        for (x, y) in [
+            (home_band::HIT.x, home_band::HIT.y),
+            (home_band::HIT.x + home_band::HIT.w - 1, home_band::HIT.y),
+            (home_band::HIT.x, LOGICAL_HEIGHT - 1),
+            (home_band::HIT.x + home_band::HIT.w - 1, LOGICAL_HEIGHT - 1),
+            (LOGICAL_WIDTH / 2, home_band::PILL.y + home_band::PILL_H / 2),
+        ] {
+            assert!(
+                home_band::contains(x, y),
+                "the home box does not answer its own pixel at ({x}, {y})"
+            );
+        }
+
+        // The box is a target, not the ink: the pill is six rows and the floor is
+        // forty-four, and the six-row press is what the apps were doing.
+        assert_eq!(home_band::PILL_H, 6);
+        assert!(
+            home_band::HIT.h >= MIN_TARGET,
+            "the home box is {} rows, under the {} row floor",
+            home_band::HIT.h,
+            MIN_TARGET
+        );
+        assert!(home_band::HIT.h >= PREFERRED_TARGET);
+        assert!(
+            home_band::HIT.h > home_band::PILL_H,
+            "the answering box is no taller than the ink, so the press is the ink"
+        );
+        assert!(
+            home_band::HIT.w > home_band::PILL_W,
+            "the answering box is no wider than the ink, so a thumb beside the mark misses"
+        );
+
+        // Rows above the box belong to the application, and so do the columns
+        // beside it -- a list scrolled to its last row is still tappable.
+        assert!(!home_band::contains(LOGICAL_WIDTH / 2, home_band::HIT.y - 1));
+        assert!(!home_band::contains(home_band::HIT.x - 1, LOGICAL_HEIGHT - 1));
+        assert!(!home_band::contains(
+            home_band::HIT.x + home_band::HIT.w,
+            LOGICAL_HEIGHT - 1
         ));
-        // One row above the band is the application's own surface, not the gesture.
-        assert!(!home_band::contains(LOGICAL_WIDTH / 2, home_band::BAND.y - 1));
+
+        // An app that holds the bottom of the screen with its own control starts
+        // the same box where that control stops, and the pill stays inside it.
+        let toolbar_top = home_band::BAND.y + 8;
+        let lowered = home_band::hit_from(toolbar_top);
+        assert_eq!(lowered.x, home_band::HIT.x);
+        assert_eq!(lowered.w, home_band::HIT.w);
+        assert_eq!(lowered.y + lowered.h, LOGICAL_HEIGHT);
+        assert!(lowered.y >= toolbar_top);
 
         // The pill paints, and nothing outside the pill's box does.
         let ink = 0xFF80_8080;
