@@ -1439,6 +1439,85 @@ pub mod back_button {
     }
 }
 
+/// The bottom edge that answers "go home", and the pill that says so.
+///
+/// WHY one module owns it: every application wrote its own. Measured off the
+/// tree, the same gesture was answered by four different boxes -- the calendar
+/// took `y >= 1418`, the vault and the file manager took 241 columns by 40 rows
+/// at `y >= 1400`, the camera took 260..=460 by 1418..1440, and the video player
+/// took all 720 columns by 1410..1440 -- while the mark that tells a person where
+/// to press was a different shape in each. A gesture that works on one screen and
+/// not on the next is what a reviewer meets in the first minute, because they meet
+/// it on the screen that did not answer and the device looks hung.
+///
+/// WHAT IT DOES NOT DECIDE: which applications leave on the gesture and which
+/// close a panel first. That is the app's own stack, and the shell's back control
+/// keeps answering it.
+pub mod home_band {
+    use super::primitives::{draw_pill, Rect};
+
+    /// The rows the gesture answers: the shell's own navigation band, edge to
+    /// edge.
+    ///
+    /// WHY the whole band rather than the pill's neighbourhood: nothing inside an
+    /// application is painted in these rows except the pill itself, so every pixel
+    /// of the band is the gesture's to answer and none of them is a second
+    /// control's. A box that stops short of the edges is a box a thumb lands
+    /// beside and reads as a freeze.
+    pub const BAND: Rect = Rect::new(
+        0,
+        super::viewport::LOGICAL_HEIGHT - super::viewport::NAV_BAR_HEIGHT,
+        super::viewport::LOGICAL_WIDTH,
+        super::viewport::NAV_BAR_HEIGHT,
+    );
+
+    /// The pill's own width and height: the mark the shell draws on the home
+    /// screen, so an application paints the thing the person has already learned.
+    pub const PILL_W: usize = 200;
+    pub const PILL_H: usize = 6;
+
+    /// The pill, centred on the panel's last rows.
+    pub const PILL: Rect = Rect::new(
+        (super::viewport::LOGICAL_WIDTH - PILL_W) / 2,
+        super::viewport::LOGICAL_HEIGHT - 22,
+        PILL_W,
+        PILL_H,
+    );
+
+    /// Whether this contact belongs to the home gesture.
+    #[inline]
+    pub fn contains(x: usize, y: usize) -> bool {
+        BAND.contains(x, y)
+    }
+
+    /// The pill's ink, or `None` on a pixel the band leaves empty.
+    #[inline]
+    pub fn pixel(x: usize, y: usize, ink: u32) -> Option<u32> {
+        draw_pill(x, y, PILL, ink, None)
+    }
+
+    const _: () = assert!(
+        BAND.h >= super::touch::MIN_TARGET,
+        "a home band shorter than the touch floor is not a band a thumb can find",
+    );
+    const _: () = assert!(
+        BAND.y + BAND.h == super::viewport::LOGICAL_HEIGHT,
+        "the band must reach the panel's last row, or the gesture stops short of the edge",
+    );
+    const _: () = assert!(
+        PILL.y >= BAND.y && PILL.y + PILL_H <= BAND.y + BAND.h,
+        "the pill must be painted inside the rows that answer it",
+    );
+    const _: () = assert!(
+        PILL.x + PILL_W == super::viewport::LOGICAL_WIDTH - PILL.x,
+        "the pill must be centred on the panel it is drawn on",
+    );
+    const _: () = assert!(
+        PILL.x + PILL_W < super::viewport::LOGICAL_WIDTH,
+        "the pill must not run off the panel",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::viewport::{
@@ -1912,6 +1991,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The home gesture answers the band it is painted in, edge to edge, and the
+    /// pill every application draws is inside the rows that answer it.
+    ///
+    /// WHY measured off the panel's corners: the defect this replaces was four
+    /// apps answering four different boxes, so a thumb that worked on the calendar
+    /// did nothing in the file manager. The corners are where a person aims when
+    /// they are in a hurry and where a hand-written box used to stop short.
+    #[test]
+    fn the_home_band_answers_the_rows_it_paints_at_every_edge() {
+        use super::home_band;
+        use super::viewport::{LOGICAL_HEIGHT, LOGICAL_WIDTH};
+
+        assert!(home_band::contains(0, LOGICAL_HEIGHT - 1));
+        assert!(home_band::contains(LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1));
+        assert!(home_band::contains(
+            LOGICAL_WIDTH / 2,
+            home_band::BAND.y
+        ));
+        // One row above the band is the application's own surface, not the gesture.
+        assert!(!home_band::contains(LOGICAL_WIDTH / 2, home_band::BAND.y - 1));
+
+        // The pill paints, and nothing outside the pill's box does.
+        let ink = 0xFF80_8080;
+        let mut painted = 0usize;
+        for y in home_band::PILL.y..home_band::PILL.y + home_band::PILL_H {
+            for x in home_band::PILL.x..home_band::PILL.x + home_band::PILL_W {
+                if home_band::pixel(x, y, ink) == Some(ink) {
+                    painted += 1;
+                }
+            }
+        }
+        assert!(
+            painted >= home_band::PILL_W * home_band::PILL_H / 2,
+            "the pill inks {} of its {} rows x columns, which is not a mark",
+            painted,
+            home_band::PILL_W
+        );
+        assert_eq!(
+            home_band::pixel(home_band::PILL.x - 1, home_band::PILL.y, ink),
+            None,
+            "the pill painted outside its own box"
+        );
     }
 
     #[test]
