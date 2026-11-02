@@ -472,8 +472,47 @@ const DELETE_CANCEL_BTN: Rect = Rect::new(
     (W - 2 * MARGIN - 72) / 2,
     48,
 );
+/// Rows of air the caption scrim keeps above its first run and below its last.
+const VIEWER_CAPTION_PAD: usize = 12;
+/// The air between the title's line box and the position line's.
+const VIEWER_CAPTION_LINE_GAP: usize = 4;
+/// The rows each of the scrim's two runs reserves, read off the ladder.
+const VIEWER_CAPTION_TITLE_BOX: usize = outline_text::row_band(0, 2).1;
+const VIEWER_CAPTION_POSITION_BOX: usize = outline_text::row_band(0, 1).1;
+/// The scrim's height: its two runs' boxes, the air between them, and its own
+/// air above and below.
+///
+/// WHY derived and not remembered: the plate was a written 78 rows from when the
+/// caption rung's box was 24, and the ladder has since grown that box to 30 --
+/// the two boxes now end at `VIEWER_CAPTION.y + 85`, seven rows past the plate's
+/// own foot. Those rows are not clipped, they are answered by the picture branch
+/// under the scrim, so the position line's descenders were painted over the
+/// photograph the plate was drawn to keep them off.
+const VIEWER_CAPTION_H: usize = VIEWER_CAPTION_PAD
+    + VIEWER_CAPTION_TITLE_BOX
+    + VIEWER_CAPTION_LINE_GAP
+    + VIEWER_CAPTION_POSITION_BOX
+    + VIEWER_CAPTION_PAD;
 /// The viewer's caption scrim, above the home strip.
-const VIEWER_CAPTION: Rect = Rect::new(0, H - 174, W, 78);
+const VIEWER_CAPTION: Rect = Rect::new(0, H - 174, W, VIEWER_CAPTION_H);
+/// The two runs' line-box tops, authored from the plate's own top edge.
+const VIEWER_CAPTION_TITLE_Y: usize = VIEWER_CAPTION.y + VIEWER_CAPTION_PAD;
+const VIEWER_CAPTION_POSITION_Y: usize =
+    VIEWER_CAPTION_TITLE_Y + VIEWER_CAPTION_TITLE_BOX + VIEWER_CAPTION_LINE_GAP;
+/// WHY checked at compile time: the plate owns a pixel only while it contains
+/// both of the boxes it was built from -- the title's and the position line's --
+/// and a rung that grows again has to fail here rather than push a run's last
+/// rows onto the picture under the scrim.
+const _: () = assert!(
+    outline_text::row_band(VIEWER_CAPTION_TITLE_Y, 2).1 <= VIEWER_CAPTION_POSITION_Y
+        && outline_text::row_band(VIEWER_CAPTION_POSITION_Y, 1).1
+            <= VIEWER_CAPTION.y + VIEWER_CAPTION_H - VIEWER_CAPTION_PAD,
+    "the caption scrim must contain both of its runs' boxes, with its air",
+);
+/// WHY also here: the scrim is bottom-anchored above the system's home strip, so
+/// a plate grown by the ladder may not walk into it -- that band belongs to the
+/// platform and this app paints nothing there.
+const _: () = assert!(VIEWER_CAPTION.y + VIEWER_CAPTION_H <= HOME_HIT.y);
 /// The media information sheet's rectangle.
 const fn info_sheet_rect() -> Rect {
     Rect::new(MARGIN, H - 490, W - 2 * MARGIN, 370)
@@ -3857,13 +3896,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
         // without covering the picture it describes.
         if VIEWER_CAPTION.contains(x, y) {
             let scrim = 0xCC000000;
-            let inset = 12;
-            let cap_y = VIEWER_CAPTION.y + inset;
             if app.viewer_caption_len > 0 {
                 let mut cap_buf = [0u8; 48];
                 let cap_w = W - 2 * MARGIN;
                 let n = font::ellipsize(&app.viewer_caption[..app.viewer_caption_len], 2, cap_w, &mut cap_buf);
-                if let Some(c) = text(x, y, MARGIN, cap_y, 2, &cap_buf[..n], 0xFFFFFFFF, scrim) {
+                if let Some(c) = text(x, y, MARGIN, VIEWER_CAPTION_TITLE_Y, 2, &cap_buf[..n], 0xFFFFFFFF, scrim) {
                     return c;
                 }
             }
@@ -3874,7 +3911,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     x,
                     y,
                     W - MARGIN - pw,
-                    cap_y + font::line_height(2) + 4,
+                    VIEWER_CAPTION_POSITION_Y,
                     1,
                     pos,
                     0xD0FFFFFF,
