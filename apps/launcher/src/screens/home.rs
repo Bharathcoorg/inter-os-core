@@ -1471,19 +1471,35 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 }
             }
             _ => {
-                // Tasks: checkbox for the pinned Today toggle
-                let cbx = x as i32 - 78;
-                let cby = y as i32 - icon_cy;
-                if cbx.abs() <= 12 && cby.abs() <= 12 {
-                    if cbx.abs() == 12 || cby.abs() == 12 {
-                        return Some(theme.on_surface_variant);
+                // Tasks: a checklist glyph — three rules, each with its own mark.
+                //
+                // WHY not the plate this row used to draw: a single 24 px outline
+                // in the muted ink was the only icon on the card neither drawn in
+                // the accent nor filled, so the row read as a glyph the font had
+                // refused rather than as the task list it names. The pending state
+                // keeps hollow marks and the completed state fills them, so the
+                // toggle still shows on the face and not only in the words.
+                const MARK_X0: i32 = -8;
+                const MARK_X1: i32 = -4;
+                const MARK_HALF: i32 = 2;
+                const RULE_X0: i32 = -1;
+                const RULE_X1: i32 = 8;
+                const RULES: [i32; 3] = [-6, 0, 6];
+                for rule_y in RULES {
+                    if idy == rule_y && (RULE_X0..=RULE_X1).contains(&idx) {
+                        return Some(theme.primary);
                     }
-                    if row.done {
-                        let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
-                            || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
-                        return Some(if tick { card_fill } else { theme.primary });
+                    if (MARK_X0..=MARK_X1).contains(&idx)
+                        && (idy - rule_y).abs() <= MARK_HALF
+                    {
+                        let edge = idx == MARK_X0
+                            || idx == MARK_X1
+                            || idy == rule_y - MARK_HALF
+                            || idy == rule_y + MARK_HALF;
+                        if row.done || edge {
+                            return Some(theme.primary);
+                        }
                     }
-                    return Some(card_fill);
                 }
             }
         }
