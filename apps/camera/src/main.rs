@@ -1396,8 +1396,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
             // under the block at all and let the note's descenders ink the
             // plate's own bottom hairline.
             if y < row_y + SHEET_VALUE_OFF {
-                let title_scale =
-                    if std::design::font::measure(title, 2) <= SHEET_TEXT_W { 2 } else { 1 };
+                let title_scale = camera::SETTINGS_TITLE_RUNG;
                 if let Some(tc) = test_text(
                     x,
                     y,
@@ -1414,8 +1413,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
             } else if y < row_y + SHEET_NOTE_OFF {
                 let len = camera.settings_value_lens[row_index];
                 let value = &camera.settings_values[row_index][..len];
-                let val_scale =
-                    if std::design::font::measure(value, 2) <= SHEET_TEXT_W { 2 } else { 1 };
+                let val_scale = camera::SETTINGS_VALUE_RUNG;
                 if let Some(tc) = test_text(
                     x,
                     y,

@@ -391,6 +391,22 @@ pub const SETTINGS_TEXT_MARGIN: usize = theme::spacing::GRID_24;
 pub const SETTINGS_TEXT_MAX: usize =
     SETTINGS_PLATE_W - SETTINGS_TEXT_INSET - SETTINGS_TEXT_MARGIN;
 
+/// The rung a plate's title is set in.
+///
+/// WHY the model names it: the painter used to measure the title against the
+/// column and, when it did not fit, repaint it one rung down -- so a row whose
+/// label happened to be a few pixels wide stood in smaller type than the row
+/// above it, and the sheet read as a page of inconsistent sizes. The plate's
+/// stack reserves the body rung's line box either way, so the downgrade drew a
+/// caption inside a body's box.
+pub const SETTINGS_TITLE_RUNG: usize = theme::typography::BODY_SCALE;
+
+/// The rung a plate's value is set in.
+pub const SETTINGS_VALUE_RUNG: usize = theme::typography::BODY_SCALE;
+
+/// The rung a plate's note is set in.
+pub const SETTINGS_NOTE_RUNG: usize = theme::typography::CAPTION_SCALE;
+
 // ---------------------------------------------------------------------------
 // The viewfinder and the chips that float over it.
 // ---------------------------------------------------------------------------
@@ -2024,26 +2040,30 @@ mod tests {
     }
 
     #[test]
-    fn every_settings_line_fits_its_column() {
+    fn every_settings_line_fits_the_rung_it_is_set_in() {
+        // The gate used to measure every run at the caption rung, which is the
+        // rung the painter falls back to -- so it proved the fallback and never
+        // the type the sheet actually intends, and the only thing that kept the
+        // rows legible was a runtime downgrade nobody could see.
         let app = CameraApp::new();
         let mut value = [0u8; 64];
         for row in SETTINGS_ROW_ORDER.iter() {
             let title = app.settings_row_title(*row);
             assert!(
-                std::design::font::measure(title, 1) <= SETTINGS_TEXT_MAX,
-                "the settings title {:?} does not fit its column",
+                std::design::font::measure(title, SETTINGS_TITLE_RUNG) <= SETTINGS_TEXT_MAX,
+                "the settings title {:?} does not fit its column at the body rung",
                 core::str::from_utf8(title).unwrap()
             );
             let note = app.settings_row_note(*row);
             assert!(
-                std::design::font::measure(note, 1) <= SETTINGS_TEXT_MAX,
-                "the settings note {:?} does not fit its column",
+                std::design::font::measure(note, SETTINGS_NOTE_RUNG) <= SETTINGS_TEXT_MAX,
+                "the settings note {:?} does not fit its column at the caption rung",
                 core::str::from_utf8(note).unwrap()
             );
             let n = app.settings_row_value(*row, &mut value);
             assert!(
-                std::design::font::measure(&value[..n], 1) <= SETTINGS_TEXT_MAX,
-                "the settings value {:?} does not fit its column",
+                std::design::font::measure(&value[..n], SETTINGS_VALUE_RUNG) <= SETTINGS_TEXT_MAX,
+                "the settings value {:?} does not fit its column at the body rung",
                 core::str::from_utf8(&value[..n]).unwrap()
             );
         }
