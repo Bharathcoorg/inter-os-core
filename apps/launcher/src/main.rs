@@ -3104,7 +3104,18 @@ pub extern "C" fn _start() -> ! {
                             input.kind, input.x, input.y, input.dx, input.dy, state.current_view);
                     }
                     std::log(log_line.as_str()).ok();
-                    if input.kind == 7 {
+                    // WHY the keyboard Home joins the gesture arm: the platform
+                    // encodes one intent twice — a swipe up arrives as kind 7 and
+                    // a Home key press as kind 11 carrying the Home keycode — and
+                    // the kernel answers both by bringing the shell forward. A
+                    // shell that only ran the gesture arm would keep its own view,
+                    // its running child and its recents describing the app the key
+                    // had just dismissed, so the next tap painted over a desk the
+                    // person had already left.
+                    let home_key = input
+                        .key_event()
+                        .map_or(false, |k| k.pressed && k.code == std::input_key_code::HOME);
+                    if input.kind == 7 || home_key {
                         // WHY the child is dismissed here and not in the
                         // Home/Back arm further down: this branch consumes every
                         // Home event first, so that arm never sees one. Without

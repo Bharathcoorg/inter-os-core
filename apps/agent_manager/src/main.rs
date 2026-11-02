@@ -2515,6 +2515,10 @@ impl AgentManagerApp {
 /// keys that move a list everywhere else on the platform moved nothing
 /// here. The step is a quarter of the body, so a key press moves the list
 /// a visible amount without running off the end of it.
+///
+/// WHY the Home key is not one of them: the platform answers Home with the
+/// home screen before the app is ever consulted, so a list here could not
+/// claim the key. Page up is the jump that reaches the app.
 fn handle_scroll_key(app: &mut AgentManagerApp, code: u32) -> bool {
     use std::input_key_code;
     let step = (app.body_h() / 4).max(1);
@@ -2532,9 +2536,6 @@ fn handle_scroll_key(app: &mut AgentManagerApp, code: u32) -> bool {
         }
         input_key_code::PAGE_UP => {
             app.scroll.offset = app.scroll.offset.saturating_sub(app.body_h());
-        }
-        input_key_code::HOME => {
-            app.scroll.offset = 0;
         }
         input_key_code::END => {
             app.scroll.offset = app.scroll.max_offset();

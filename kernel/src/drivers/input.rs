@@ -25,6 +25,13 @@ pub enum InputEventKind {
     Key = 11,
 }
 
+/// The Home key's keycode, exactly as `from_key` writes it into `InputEvent::x`.
+///
+/// WHY named instead of inline: the same number is what the encoder produces
+/// and what the dispatcher tests for a home request, so a change to one that
+/// misses the other leaves the key silently doing nothing.
+const KEY_HOME: u32 = 0x10008;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputEvent {
     pub kind: InputEventKind,
@@ -47,7 +54,7 @@ impl InputEvent {
             crate::input::KeyCode::ArrowDown => 0x10005,
             crate::input::KeyCode::ArrowLeft => 0x10006,
             crate::input::KeyCode::ArrowRight => 0x10007,
-            crate::input::KeyCode::Home => 0x10008,
+            crate::input::KeyCode::Home => KEY_HOME,
             crate::input::KeyCode::End => 0x10009,
             crate::input::KeyCode::PageUp => 0x1000A,
             crate::input::KeyCode::PageDown => 0x1000B,
@@ -224,12 +231,27 @@ fn shell_owns_the_screen() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether an event asks for the home screen, in either of its two encodings.
+///
+/// WHY both are tested here: a swipe up from the bottom arrives as the Home
+/// gesture kind, and the same intent from a keyboard Home key arrives as a Key
+/// event whose x holds the keycode. This branch only knew the gesture kind, so
+/// the key fell through to whatever app was in front -- measured on the guest
+/// inside File Manager the dispatch named that app and the screen never moved,
+/// which is the side control the person is holding not answering. Only a press
+/// is a request: a keyboard also reports the release, and home is one action
+/// per press rather than two.
+fn is_home_request(event: &InputEvent) -> bool {
+    event.kind == InputEventKind::Home
+        || (event.kind == InputEventKind::Key && event.x == KEY_HOME && event.y == 1)
+}
+
 pub fn dispatch_to_focused_window(event: InputEvent) {
     // WHY the home, back and recents gestures are taken here: this is the one point where the
     // platform knows both what was recognised and who is in front. An
     // application in front that does not implement the gesture would
     // otherwise swallow it, and the person would be stuck in the app.
-    if (event.kind == InputEventKind::Home || event.kind == InputEventKind::Back || event.kind == InputEventKind::Recents) && !shell_owns_the_screen() {
+    if (is_home_request(&event) || event.kind == InputEventKind::Back || event.kind == InputEventKind::Recents) && !shell_owns_the_screen() {
         go_home();
     }
     let owner = {
@@ -408,6 +430,59 @@ mod tests {    #[test]
         let app_visible = kms.surfaces.iter().find(|s| s.id == app).map(|s| s.visible);
         assert_eq!(shell_visible, Some(true), "the shell has to come back");
         assert_eq!(app_visible, Some(false), "the application has to go behind");
+    }
+
+    #[test]
+    fn both_home_encodings_ask_for_the_home_screen() {
+        let gesture = InputEvent {
+            kind: InputEventKind::Home,
+            x: 360,
+            y: 1200,
+            ..InputEvent::EMPTY
+        };
+        assert!(super::is_home_request(&gesture), "the swipe is the reference encoding");
+
+        let press = InputEvent {
+            kind: InputEventKind::Key,
+            x: super::KEY_HOME,
+            y: 1,
+            ..InputEvent::EMPTY
+        };
+        assert!(
+            super::is_home_request(&press),
+            "the Home key is the same request as the swipe"
+        );
+
+        // WHY the release is not a request: a keyboard reports the key coming
+        // back up as a second event, and home is one action per press.
+        let release = InputEvent { y: 0, ..press };
+        assert!(!super::is_home_request(&release));
+
+        // WHY the other navigation keys are excluded here: an app with a
+        // scrollable list has to receive them, and the down arrow was once
+        // captured as a lock key, which left the list unscrollable.
+        for code in [0x10004u32, 0x10005, 0x10006, 0x10007, 0x10009, 0x1000A, 0x1000B] {
+            let nav = InputEvent { kind: InputEventKind::Key, x: code, y: 1, ..InputEvent::EMPTY };
+            assert!(!super::is_home_request(&nav), "navigation keys belong to the app in front");
+        }
+    }
+
+    #[test]
+    fn the_home_key_the_encoder_produces_is_the_home_the_dispatcher_asks_for() {
+        let event = InputEvent::from_key(crate::input::KeyEvent {
+            source: crate::input::InputSource::Keyboard,
+            action: crate::input::KeyAction::Down,
+            code: crate::input::KeyCode::Home,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        assert_eq!(event.kind, InputEventKind::Key);
+        assert!(
+            super::is_home_request(&event),
+            "the encoder and the dispatcher have to agree on one number"
+        );
     }
 
     #[test]
