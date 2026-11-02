@@ -241,15 +241,37 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         // with the keyboard at all, and the key was spent on a surface
         // nobody was looking at.
         let is_system_power_lock = event.kind == InputEventKind::Key && event.x == 0x1000F;
+        // WHY the shell answers a system key rather than a surface: the surface
+        // at z-order 0 is the shell's only while the shell still holds one, and
+        // the scan below reads every surface, hidden ones included. Measured on
+        // the guest with the home screen showing, that scan named task 29 --
+        // a backgrounded app -- so the power key was spent on a surface nobody
+        // was looking at, the shell never ran its lock branch, and the screen
+        // stayed on the home grid while the serial log reported it locked. The
+        // system owns the screen lock, so the key belongs to the shell whatever
+        // the surface list happens to hold.
+        let system_owner = if is_system_power_lock {
+            crate::syscall::shell_task_id()
+        } else {
+            None
+        };
         let top_kms_owner = {
             let mut target_owner = None;
             for _ in 0..1000 {
                 if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
                     if is_system_power_lock {
-                        target_owner = kms.surfaces.iter()
-                            .find(|s| s.z_order == 0)
-                            .or_else(|| kms.surfaces.iter().min_by_key(|s| s.z_order))
-                            .map(|s| s.owner_task);
+                        target_owner = system_owner.or_else(|| {
+                            kms.surfaces.iter()
+                                .filter(|s| s.visible && s.input_enabled)
+                                .find(|s| s.z_order == 0)
+                                .or_else(|| {
+                                    kms.surfaces
+                                        .iter()
+                                        .filter(|s| s.visible && s.input_enabled)
+                                        .min_by_key(|s| s.z_order)
+                                })
+                                .map(|s| s.owner_task)
+                        });
                     } else {
                         target_owner = kms.surfaces.iter()
                             .filter(|s| s.visible && s.input_enabled)

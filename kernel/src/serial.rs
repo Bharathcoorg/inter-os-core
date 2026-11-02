@@ -1556,7 +1556,7 @@ fn handle_serial_command(cmd: &[u8]) {
             alt: false,
             meta: false,
         });
-        crate::serial_println!("[LOCK] locked source=device_studio");
+        crate::serial_println!("[LOCK] power key posted source=device_studio");
         return;
     }
 
