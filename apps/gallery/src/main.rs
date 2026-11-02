@@ -313,18 +313,25 @@ const _: () = assert!(VIEWER_ZOOM.x + VIEWER_ZOOM.w <= W);
 const CHIP_Y: usize = 144;
 const CHIP_H: usize = 48;
 /// The gap between two filter chips.
-const CHIP_GAP: usize = 10;
+const CHIP_GAP: usize = gallery::chip_row::GAP;
 /// The padding inside a chip, around its label.
-const CHIP_PAD: usize = spacing::GRID_16;
+const CHIP_PAD: usize = gallery::chip_row::PAD;
 /// The narrowest a chip may be.
-const CHIP_MIN_W: usize = 64;
+const CHIP_MIN_W: usize = gallery::chip_row::MIN_W;
+
+// The painter and the lib's filter-chip gate now read the same numbers; these
+// ties fail the build if the row's margin or surface ever drifts from the
+// geometry `chip_row` publishes, so a gate can no longer pass a row the screen
+// does not actually paint.
+const _: () = assert!(MARGIN == gallery::chip_row::START_X);
+const _: () = assert!(W == gallery::chip_row::SURFACE_W);
 
 /// The labels of the filter chips, in the order the filter enum holds them.
 ///
 /// WHY the filter and not the tabs: a chip is a filter over one grid, and the
 /// tabs are destinations. The old chip row carried the tab labels, which
 /// made it a second, undrawn copy of the tab bar.
-const CHIP_LABELS: [&[u8]; 4] = [b"All", b"Wallpapers", b"Photos", b"Videos"];
+const CHIP_LABELS: [&[u8]; 4] = gallery::chip_row::BARE_LABELS;
 
 const GRID_TOP: usize = 264;
 const ROW_STRIDE: usize = CELL + GUTTER;
@@ -2695,9 +2702,9 @@ fn chip_label(app: &GalleryApp, index: usize) -> &[u8] {
 /// would clip the last digit or leave a gap the pill does not fill.
 fn chip_rect(index: usize, app: &GalleryApp) -> Rect {
     let mut x = MARGIN;
-    for i in 0..4 {
+    for i in 0..gallery::chip_row::COUNT {
         let label = chip_label(app, i);
-        let w = (font::measure(label, 2) + CHIP_PAD * 2).max(CHIP_MIN_W);
+        let w = gallery::chip_row::chip_width(label);
         let rect = Rect::new(x, CHIP_Y, w, CHIP_H);
         if i == index {
             return rect;

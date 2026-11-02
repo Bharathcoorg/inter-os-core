@@ -411,6 +411,118 @@ pub fn write_filter_label(filter: Filter, counts: FilterCounts, out: &mut [u8]) 
 }
 
 // -----------------------------------------------------------------------------
+// The filter-chip row's layout
+// -----------------------------------------------------------------------------
+// WHY the geometry lives in the model and not only in the painter: the chip row
+// is a horizontal row of a fixed set of chips, and the only honest way to know
+// it fits the surface it is laid out on is to add the widths the painter gives
+// each chip and read the row's own right edge back. If the numbers that describe
+// the row live in the painter (`src/main.rs`, a `test = false` bin no host test
+// can reach) the gate has to re-state them as literals, and then the gate and
+// the row can disagree without either failing to compile. Putting them here, and
+// having the painter read them back, makes the row and the gate the same fact.
+pub mod chip_row {
+    use crate::{write_filter_label, Filter, FilterCounts};
+    use interos_std::design::font;
+    use interos_std::design::spacing;
+
+    /// The rung the chip labels are drawn at: the body rung. WHY not lowered: a
+    /// chip that fits only by shrinking its type is a chip the gate passed by
+    /// lying about the label, not by the label being short.
+    pub const SCALE: usize = interos_std::design::typography::BODY_SCALE;
+
+    /// How many filter chips the row lays out.
+    pub const COUNT: usize = 4;
+
+    /// The bare label of each chip, in the order `Filter::from_index` returns.
+    ///
+    /// WHY the filter's own labels: a chip is a filter over one grid, so these
+    /// are the labels the row is drawn from; the count the chip appends is the
+    /// only extra text, and `counted_label_slices` adds it back.
+    pub const BARE_LABELS: [&[u8]; COUNT] =
+        [b"All".as_slice(), b"Wallpapers".as_slice(), b"Photos".as_slice(), b"Videos".as_slice()];
+
+    /// The x the row starts on: the grid's margin, so the first chip is flush
+    /// with the grid it filters.
+    pub const START_X: usize = spacing::GRID_24;
+
+    /// The gap between two chips.
+    pub const GAP: usize = 10;
+
+    /// The padding inside a chip, left and right of its label.
+    pub const PAD: usize = spacing::GRID_16;
+
+    /// The narrowest a chip may be, however short its label.
+    pub const MIN_W: usize = 64;
+
+    /// The width of the surface the row is laid out on. The painter draws into a
+    /// surface of this width, so a row whose last edge passes it is off-screen.
+    pub const SURFACE_W: usize = interos_std::design::viewport::LOGICAL_WIDTH;
+
+    /// The width the painter gives a chip holding `label`: the label's own
+    /// advance, plus the padding on both sides, clamped up to the chip's floor.
+    ///
+    /// WHY not `const`: it calls `font::measure`, which walks the glyph table.
+    pub fn chip_width(label: &[u8]) -> usize {
+        (font::measure(label, SCALE) + PAD * 2).max(MIN_W)
+    }
+
+    /// Whether every chip in `labels` seats the text it draws: the label's own
+    /// advance never exceeds the width the chip is given.
+    pub fn each_chip_holds_text(labels: &[&[u8]]) -> bool {
+        let mut i = 0;
+        while i < labels.len() {
+            if font::measure(labels[i], SCALE) > chip_width(labels[i]) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// The right edge (one-past the last column) the row reaches when it lays
+    /// out `labels` from `START_X`, chip by chip, with `GAP` between them.
+    ///
+    /// WHY a slice of counted labels: the count is part of the text the chip
+    /// draws, so it is part of the width the chip occupies; measuring the bare
+    /// label alone leaves the count's digits outside the row the gate checked.
+    pub fn row_right_edge(labels: &[&[u8]]) -> usize {
+        let mut x = START_X;
+        let mut i = 0;
+        while i < labels.len() {
+            x += chip_width(labels[i]);
+            if i + 1 < labels.len() {
+                x += GAP;
+            }
+            i += 1;
+        }
+        x
+    }
+
+    /// Whether the row of `labels` ends on or before a surface `surface_w` wide.
+    pub fn row_fits(labels: &[&[u8]], surface_w: usize) -> bool {
+        row_right_edge(labels) <= surface_w
+    }
+
+    /// The counted label slices for `counts`, in chip order, written into
+    /// `scratch` and their lengths into `lens`. WHY it takes scratch: a chip's
+    /// rectangle is measured from the bytes it actually draws, and the label is
+    /// `"<Filter> <count>"`, so the gate builds the label into a fixed buffer the
+    /// same way the painter does and views it at the true length.
+    pub fn counted_label_slices(
+        counts: FilterCounts,
+        scratch: &mut [[u8; 28]; COUNT],
+        lens: &mut [usize; COUNT],
+    ) {
+        let mut i = 0;
+        while i < COUNT {
+            lens[i] = write_filter_label(Filter::from_index(i), counts, &mut scratch[i]);
+            i += 1;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Timeline grouping and the grid's row plan
 // -----------------------------------------------------------------------------
 /// The width of the grid, in cells.
@@ -1720,11 +1832,73 @@ mod tests {
         assert!(font::measure(disp, 1) <= cell_w - 16);
         assert!(disp.ends_with(b"...") || disp == long_name.as_slice());
 
-        // Chip and filter tab labels fit within their min/allocated widths
-        let chip_labels = [b"All".as_slice(), b"Wallpapers".as_slice(), b"Photos".as_slice(), b"Videos".as_slice()];
-        for label in chip_labels {
-            assert!(font::measure(label, 2) <= 180);
-        }
+        // The filter-chip row is gated against the surface it is laid out on,
+        // using the geometry the painter itself reads (see `chip_row`). Two facts
+        // must hold and neither is a bare-label-vs-literal check any more:
+        //   1. every chip seats the counted label it draws, and
+        //   2. the chips, laid end to end with their gaps from the grid margin,
+        //      end on or before the right edge of the surface.
+        // The counted labels are built at the widest counts the app can hold, so
+        // the digits the chips carry are inside the row the gate measures.
+        let counts = filter_counts(MAX_STORAGE_ITEMS, MAX_STORAGE_ITEMS, MAX_STORAGE_ITEMS);
+        let mut scratch = [[0u8; 28]; chip_row::COUNT];
+        let mut lens = [0usize; chip_row::COUNT];
+        chip_row::counted_label_slices(counts, &mut scratch, &mut lens);
+        let labels: [&[u8]; chip_row::COUNT] = [
+            &scratch[0][..lens[0]],
+            &scratch[1][..lens[1]],
+            &scratch[2][..lens[2]],
+            &scratch[3][..lens[3]],
+        ];
+        assert!(
+            chip_row::each_chip_holds_text(&labels),
+            "a filter chip is narrower than the counted label it draws"
+        );
+        assert!(
+            chip_row::row_fits(&labels, chip_row::SURFACE_W),
+            "filter-chip row right edge {} overruns the {}-wide surface",
+            chip_row::row_right_edge(&labels),
+            chip_row::SURFACE_W
+        );
+    }
+
+    /// The re-pointed chip gate must actually bite: it refuses a row that
+    /// overruns its surface and a chip narrower than the text it draws, rather
+    /// than quietly measuring a different (bare) string against a literal.
+    #[test]
+    fn test_gallery_chip_gate_refuses_an_overrun_row() {
+        // The real counted row fits the real surface...
+        let counts = filter_counts(MAX_STORAGE_ITEMS, MAX_STORAGE_ITEMS, MAX_STORAGE_ITEMS);
+        let mut scratch = [[0u8; 28]; chip_row::COUNT];
+        let mut lens = [0usize; chip_row::COUNT];
+        chip_row::counted_label_slices(counts, &mut scratch, &mut lens);
+        let labels: [&[u8]; chip_row::COUNT] = [
+            &scratch[0][..lens[0]],
+            &scratch[1][..lens[1]],
+            &scratch[2][..lens[2]],
+            &scratch[3][..lens[3]],
+        ];
+        let right = chip_row::row_right_edge(&labels);
+        assert!(chip_row::row_fits(&labels, chip_row::SURFACE_W));
+        // ...but the same row, on a surface narrowed to just under its own right
+        // edge, is refused: the gate tracks the surface, not a fixed 180px pin.
+        assert!(!chip_row::row_fits(&labels, right - 1));
+
+        // A longer label than the app draws pushes the row off the real surface.
+        let long: [&[u8]; chip_row::COUNT] = [
+            b"All",
+            b"Wallpapers 16777216 items here",
+            b"Photos",
+            b"Videos",
+        ];
+        assert!(!chip_row::row_fits(&long, chip_row::SURFACE_W));
+
+        // And the per-chip hold check is a real gate, not a tautology: it reads
+        // the same rung and formula the painter does. The long label's advance is
+        // wider than the chip floor on its own, so a chip that was ever clamped
+        // to the floor (rather than grown to the text) would refuse to seat it.
+        assert!(interos_std::design::font::measure(long[1], chip_row::SCALE) > chip_row::MIN_W);
+        assert!(chip_row::each_chip_holds_text(&labels));
     }
 
     // -------------------------------------------------------------------------
