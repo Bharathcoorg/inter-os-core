@@ -661,7 +661,21 @@ const _: () = assert!(
 /// literal, and the two copies only stayed in step while nobody moved the header.
 /// Naming the gaps is what makes the next move a one-line change in one place.
 const AUTH_CARD_Y: usize = CONTENT_TOP;
-const AUTH_CARD_H: usize = 120;
+/// The session card's caption row, its one metric row's top, and the height the
+/// two of them add up to.
+///
+/// WHY derived: the card remembered 120 rows from when a metric row reserved 64
+/// -- provenance and label boxes overlapping by five. With the row's two boxes
+/// stacked the way the ladder counts them it reserves 71, and a card that stops
+/// short of its own content does not clip it, it paints the surplus over whatever
+/// band answers next.
+const CRED_CAPTION_Y: usize = 18;
+const CRED_SESSION_ROW_Y: usize = 50;
+const AUTH_CARD_H: usize = CRED_SESSION_ROW_Y + METRIC_ROW_H + CARD_ROW_FOOT_AIR;
+const _: () = assert!(
+    CRED_CAPTION_Y + CARD_CAPTION_ROWS <= CRED_SESSION_ROW_Y
+        && CRED_SESSION_ROW_Y + METRIC_ROW_H <= AUTH_CARD_H
+);
 /// The air between two bands of the credential screen's stack.
 const CRED_CARD_GAP: usize = 12;
 const SECRETS_CARD_Y: usize = AUTH_CARD_Y + AUTH_CARD_H + CRED_CARD_GAP;
@@ -931,7 +945,7 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
     // header block; the "RETURN TO STORAGE" pill's rectangle is read from there
     // by the tap path as well as from here by the painter.
     if let Some(fill) = card_pixel(x, y, MARGIN, AUTH_CARD_Y, CARD_W, AUTH_CARD_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + 18, b"VAULT SESSION", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, AUTH_CARD_Y + CRED_CAPTION_Y, b"VAULT SESSION", INNER_W) {
             return c;
         }
         // WHY the row reports the session and not the hardware: it used to
@@ -947,7 +961,7 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            AUTH_CARD_Y + 50,
+            AUTH_CARD_Y + CRED_SESSION_ROW_Y,
             CARD_W,
             b"Access State",
             session,
@@ -1105,9 +1119,20 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
 /// Rows the status line owns: one scale-2 run at `STATUS_Y`.
 const STATUS_H: usize = std::design::font::line_height(2);
+/// The home-gesture band's own height, measured up from the foot of the surface.
+///
+/// WHY named: the strip is the platform's and it is bottom-anchored, so the row
+/// this app's stack stops owning is a property of the canvas, not a number to
+/// remember -- a taller surface or a taller band has to move the boundary with
+/// it rather than leave the stack painted into the system's indicator.
+const GESTURE_BAND_H: usize = 40;
 /// The system's home-gesture strip: the indicator below it is the platform's,
 /// bottom-anchored, and this app's stack grows toward it rather than over it.
-const GESTURE_Y0: usize = 1400;
+const GESTURE_Y0: usize = H - GESTURE_BAND_H;
+/// WHY checked at compile time: the band is the last `GESTURE_BAND_H` rows of the
+/// surface and nothing else may live in it -- the mark inside it, the stack above
+/// it, both have to agree with the boundary the same derivation gives.
+const _: () = assert!(GESTURE_Y0 + GESTURE_BAND_H == H);
 
 /// The indicator this app draws for that strip, and the rows its own tap
 /// gesture owns from.
@@ -1133,6 +1158,48 @@ const GESTURE_MARK_Y1: usize = GESTURE_MARK_Y + GESTURE_MARK_H;
 const _: () = assert!(GESTURE_Y0 <= GESTURE_MARK_Y);
 const _: () = assert!(GESTURE_MARK_Y1 <= H);
 
+/// The rung a metric row's label and verdict are set in, and the rung its
+/// provenance line is set in.
+const METRIC_LABEL_RUNG: usize = 2;
+const METRIC_PROVENANCE_RUNG: usize = 1;
+/// The rows each of a metric row's two runs reserves, read off the ladder.
+const METRIC_LABEL_BOX: usize = outline_text::row_band(0, METRIC_LABEL_RUNG).1;
+const METRIC_PROVENANCE_BOX: usize = outline_text::row_band(0, METRIC_PROVENANCE_RUNG).1;
+/// The air the row keeps between its label's box and its provenance's box.
+const METRIC_ROW_STACK_GAP: usize = 2;
+/// Where a metric row's provenance run starts, inside the row, below the whole
+/// of the label's box.
+///
+/// WHY derived: the offset was a remembered 34, fitted when the body rung's box
+/// was shorter than the 39 rows it reserves now. The provenance run started five
+/// rows inside the label's own box, and `font::ink` answers for every pixel of
+/// the box it is handed -- the label's branch is tried first, so the provenance's
+/// first rows did not overlap the label, they were painted as the label's
+/// background, five rows of a sentence nobody could read.
+const METRIC_PROVENANCE_Y: usize = METRIC_LABEL_BOX + METRIC_ROW_STACK_GAP;
+/// The rows one metric row reserves: both boxes and the air between them.
+const METRIC_ROW_H: usize = METRIC_LABEL_BOX + METRIC_ROW_STACK_GAP + METRIC_PROVENANCE_BOX;
+/// The step from one metric row's top to the next, and the air that step keeps
+/// beyond the row's own boxes.
+const METRIC_ROW_AIR: usize = 3;
+const METRIC_ROW_PITCH: usize = METRIC_ROW_H + METRIC_ROW_AIR;
+/// The air a card of metric rows keeps under its last row's box.
+const CARD_ROW_FOOT_AIR: usize = 9;
+/// The rows a card's caption band reserves from the card's top edge, and the air
+/// under it before the card's first metric row.
+const CARD_CAPTION_BAND_H: usize = CARD_CAPTION_Y + CARD_CAPTION_ROWS;
+const CARD_ROW_HEAD_GAP: usize = spacing::GRID_12;
+/// The row a card's first metric line stands on, below the whole caption band.
+const CARD_FIRST_METRIC_Y: usize = CARD_CAPTION_BAND_H + CARD_ROW_HEAD_GAP;
+
+/// WHY checked at compile time: the provenance run must start where the label's
+/// box ends, never inside it, and the next row must start where this row's box
+/// ends. Lower a rung's reservation, or write either offset by hand again, and
+/// the pair fails rather than lose a sentence's first rows to the branch above.
+const _: () = assert!(
+    METRIC_PROVENANCE_Y >= METRIC_LABEL_BOX && METRIC_ROW_PITCH >= METRIC_ROW_H
+);
+
 /// Card A: hardware keystore probes.
 ///
 /// WHY the whole storage stack hangs off `CONTENT_TOP`: these were five literals
@@ -1141,7 +1208,20 @@ const _: () = assert!(GESTURE_MARK_Y1 <= H);
 /// used to bound it, and a stack of literals would have had to be found and
 /// nudged by hand -- which is exactly how a band ends up painted under a rule.
 const CARD_A_Y: usize = CONTENT_TOP;
-const CARD_A_H: usize = 296;
+/// The keystore card's rows, and its height read off them: the first row's top,
+/// the pitch between rows, the last row's own box and the foot the card keeps.
+///
+/// WHY derived and not remembered: the card held a literal 296 while the three
+/// rows standing in it come from the type ladder -- the same defect that put card
+/// B's last plate past its foot, one card higher.
+const CARD_A_ROWS: usize = 3;
+const CARD_A_H: usize = CARD_FIRST_METRIC_Y
+    + (CARD_A_ROWS - 1) * METRIC_ROW_PITCH
+    + METRIC_ROW_H
+    + CARD_ROW_FOOT_AIR;
+const _: () = assert!(
+    CARD_CAPTION_BAND_H <= CARD_FIRST_METRIC_Y && CARD_FIRST_METRIC_Y + METRIC_ROW_H <= CARD_A_H
+);
 
 /// The air between two cards of the storage stack.
 const CARD_GAP: usize = 12;
@@ -1153,11 +1233,22 @@ const TILE_W: usize = 304;
 /// WHY derived: the tile was a remembered 114 while its name and hint boxes
 /// come from the type ladder, and the ladder's caption rung grew the stack past
 /// the frame -- the hint's box ending three rows under the tile's own bottom.
-const TILE_STACK_H: usize =
-    font::line_height(2) + TILE_STACK_GAP + TILE_BADGE_H + TILE_STACK_GAP + font::line_height(1);
+const TILE_STACK_H: usize = font::line_height(2)
+    + TILE_STACK_GAP
+    + BADGE_PLATE_H
+    + TILE_STACK_GAP
+    + font::line_height(1);
 const TILE_PAD_BOTTOM: usize = 6;
 const TILE_H: usize = TILE_TITLE_Y + TILE_STACK_H + TILE_PAD_BOTTOM;
-const TILE_COL_X: [usize; 2] = [48, 368];
+/// The grid's columns of tiles, and the tile count the model's rows imply.
+///
+/// WHY derived and not written: the painter and the tap path each looped `0..6`
+/// while the grid's geometry answers to `TILE_ROWS`, so a fourth row would have
+/// drawn three plates and hit-tested six -- the tiles that exist and the tiles a
+/// press can reach would no longer be the same set.
+const TILE_COLS: usize = 2;
+const TILE_COUNT: usize = TILE_COLS * TILE_ROWS;
+const TILE_COL_X: [usize; TILE_COLS] = [48, 368];
 /// The grid's rows of tiles.
 ///
 /// WHY named: the card's foot below is read from it, so a fourth row moves the
@@ -1225,11 +1316,35 @@ const CARD_B_H: usize =
 const TILE_PAD: usize = 16;
 const TILE_INNER_W: usize = TILE_W - 2 * TILE_PAD;
 const TILE_TITLE_Y: usize = 14;
-const TILE_BADGE_H: usize = 36;
+/// The rung a verdict pill's label is set in, on a tile and in a metric row.
+const BADGE_RUNG: usize = 1;
+/// The border row a verdict pill carries on each side of its run.
+const BADGE_BORDER: usize = 1;
+/// A verdict pill's height: the whole band of the run it carries, plus the two
+/// border rows around it.
+///
+/// WHY derived from the ladder and not remembered: the plate was a written 36
+/// rows, which was this rung's box plus six rows of air at the size the caption
+/// rung used to be. The ladder grew that rung's box and the remembered height
+/// stayed, so the pill was a plate whose size said one thing about the run inside
+/// it while the run reserved another -- and the same literal stood in
+/// `metric_row`, where nothing at all tied it to the verdict it carries.
+const BADGE_PLATE_H: usize = outline_text::row_band(0, BADGE_RUNG).1 + 2 * BADGE_BORDER;
 /// Air between two stacked boxes of the tile, kept as one knob.
 const TILE_STACK_GAP: usize = 2;
 const TILE_BADGE_Y: usize = TILE_TITLE_Y + font::line_height(2) + TILE_STACK_GAP;
-const TILE_HINT_Y: usize = TILE_BADGE_Y + TILE_BADGE_H + TILE_STACK_GAP;
+const TILE_HINT_Y: usize = TILE_BADGE_Y + BADGE_PLATE_H + TILE_STACK_GAP;
+
+/// WHY checked at compile time: the plate is only legal while its run's box ends
+/// a border row above the plate's own foot, and while the ink is centred it has
+/// to start below the top border. Change the rung or the border and this fails
+/// instead of the pill clipping the verdict it holds.
+const _: () = assert!(
+    (BADGE_PLATE_H - outline_text::row_band(0, BADGE_RUNG).1) / 2
+        + outline_text::row_band(0, BADGE_RUNG).1
+        + BADGE_BORDER
+        <= BADGE_PLATE_H
+);
 
 /// WHY checked at compile time: the stack is only legal while the hint's line
 /// box still ends inside the tile. Raising a rung, the pill or the gap pushes
@@ -1252,7 +1367,14 @@ const _: () = assert!(TILE_ROW_Y[TILE_ROWS - 1] + TILE_H + CARD_GAP <= CARD_C_Y)
 
 /// Card C: backup export and entropy.
 const CARD_C_Y: usize = CARD_B_Y + CARD_B_H + CARD_GAP;
-const CARD_C_H: usize = 348;
+/// The entropy card's rows and the height they add up to -- the same derivation
+/// card A is given, at four rows instead of three.
+const CARD_C_ROWS: usize = 4;
+const CARD_C_H: usize = CARD_FIRST_METRIC_Y
+    + (CARD_C_ROWS - 1) * METRIC_ROW_PITCH
+    + METRIC_ROW_H
+    + CARD_ROW_FOOT_AIR;
+const _: () = assert!(CARD_FIRST_METRIC_Y + METRIC_ROW_H <= CARD_C_H);
 
 /// Action row: two 328px buttons on the 2-column grid (2*328 + 16 + 2*24 = 720).
 const BTN_Y: usize = CARD_C_Y + CARD_C_H + CARD_GAP;
@@ -1293,6 +1415,15 @@ fn sector_tile(index: usize) -> &'static [u8] {
         _ => b"Audio tracks",
     }
 }
+
+/// WHY checked at compile time: the grid paints and hit-tests
+/// `TILE_COLS * TILE_ROWS` plates, and every one of them is a record of
+/// `MANAGED_SECTORS` -- the model's own count. Add a row of tiles without adding
+/// a sector, and this fails: the painter would otherwise draw a plate over a
+/// record that does not exist, and `tile_origin` would walk past the grid it was
+/// built from.
+const _: () = assert!(TILE_COUNT == MANAGED_SECTORS.len());
+const _: () = assert!(TILE_ROW_Y.len() == TILE_ROWS && TILE_COL_X.len() == TILE_COLS);
 
 /// Kernel status code names, as the kernel spells them.
 #[allow(dead_code)]
@@ -1425,13 +1556,24 @@ fn metric_row(
 ) -> Option<u32> {
     let ix = x0 + PAD;
     let half = w / 2 - PAD - 16;
-    if let Some(c) = font::ink(x, y, ix, y0, 2, label, half, THEME.on_surface, THEME.surface_container, true) {
+    if let Some(c) = font::ink(
+        x,
+        y,
+        ix,
+        y0,
+        METRIC_LABEL_RUNG,
+        label,
+        half,
+        THEME.on_surface,
+        THEME.surface_container,
+        true,
+    ) {
         return Some(c);
     }
     // Cryptographic status badge on the right - Scale 1 (Caption) bold truth badge
     let v_w = font::width(value, 1, true);
     let badge_w = (v_w + 34).min(half + 24);
-    let badge_h = 36;
+    let badge_h = BADGE_PLATE_H;
     let bx0 = x0 + w - PAD - badge_w;
     let by0 = y0.saturating_sub(4);
     if in_round(x, y, bx0, by0, badge_w, badge_h, badge_h / 2) {
@@ -1451,7 +1593,18 @@ fn metric_row(
         }
         return Some(THEME.surface_container_low);
     }
-    if let Some(c) = font::ink(x, y, ix, y0 + 34, 1, source, w - PAD * 2, THEME.on_surface_variant, THEME.surface_container, true) {
+    if let Some(c) = font::ink(
+        x,
+        y,
+        ix,
+        y0 + METRIC_PROVENANCE_Y,
+        METRIC_PROVENANCE_RUNG,
+        source,
+        w - PAD * 2,
+        THEME.on_surface_variant,
+        THEME.surface_container,
+        true,
+    ) {
         return Some(c);
     }
     None
@@ -1482,7 +1635,7 @@ fn tile_pixel(
     // Cryptographic status badge: pill container with indicator dot and status verdict
     let badge_x = tx + TILE_PAD;
     let badge_y = ty + TILE_BADGE_Y;
-    let badge_h = TILE_BADGE_H;
+    let badge_h = BADGE_PLATE_H;
     let v_w = font::width(verdict, 1, true);
     let badge_w = (v_w + 34).min(iw);
     if in_round(x, y, badge_x, badge_y, badge_w, badge_h, badge_h / 2) {
@@ -1623,7 +1776,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card A: hardware keystore ----------------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + 20, b"HARDWARE KEYSTORE", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + CARD_CAPTION_Y, b"HARDWARE KEYSTORE", INNER_W) {
             return c;
         }
         // The verdict carries the kernel's own status code, so the row never
@@ -1635,7 +1788,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 62,
+            CARD_A_Y + CARD_FIRST_METRIC_Y,
             CARD_W,
             b"Root key, slot 0",
             slot0,
@@ -1648,7 +1801,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 138,
+            CARD_A_Y + CARD_FIRST_METRIC_Y + METRIC_ROW_PITCH,
             CARD_W,
             b"Storage key, slot 1",
             slot1,
@@ -1662,7 +1815,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_A_Y + 214,
+            CARD_A_Y + CARD_FIRST_METRIC_Y + 2 * METRIC_ROW_PITCH,
             CARD_W,
             b"Device identity",
             identity_word,
@@ -1679,7 +1832,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + CARD_CAPTION_Y, b"MANAGED SECTORS", INNER_W) {
             return c;
         }
-        for index in 0..6 {
+        for index in 0..TILE_COUNT {
             let (tx, ty) = tile_origin(index);
             let name = sector_tile(index);
             let (hint_buf, hint_len) = vault::sector_tile_hint(index);
@@ -1706,7 +1859,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card C: the status frame and entropy ------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_C_Y, CARD_W, CARD_C_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 20, b"STATUS FRAME & ENTROPY", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + CARD_CAPTION_Y, b"STATUS FRAME & ENTROPY", INNER_W) {
             return c;
         }
         let (backup_verdict, backup_ink) = match vault.backup {
@@ -1721,7 +1874,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 58,
+            CARD_C_Y + CARD_FIRST_METRIC_Y,
             CARD_W,
             b"Status frame",
             backup_verdict,
@@ -1739,7 +1892,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 128,
+            CARD_C_Y + CARD_FIRST_METRIC_Y + METRIC_ROW_PITCH,
             CARD_W,
             b"Encryptions / decryptions",
             counters,
@@ -1753,7 +1906,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 198,
+            CARD_C_Y + CARD_FIRST_METRIC_Y + 2 * METRIC_ROW_PITCH,
             CARD_W,
             b"Entropy source",
             entropy_word,
@@ -1777,7 +1930,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             x,
             y,
             MARGIN,
-            CARD_C_Y + 268,
+            CARD_C_Y + CARD_FIRST_METRIC_Y + 3 * METRIC_ROW_PITCH,
             CARD_W,
             b"Key material on screen",
             key_value.as_bytes(),
@@ -2277,7 +2430,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     }
 
     // Sector tiles: re-run that sector's round-trip test at its drawn rect.
-    for index in 0..6 {
+    for index in 0..TILE_COUNT {
         let (tx, ty) = tile_origin(index);
         if in_round(x, y, tx, ty, TILE_W, TILE_H, 14) {
             let ok = vault.verify_sector(index);
@@ -2518,3 +2671,4 @@ fn panic(_info: &PanicInfo) -> ! {
     release_surface();
     std::exit_with_code(1);
 }
+
