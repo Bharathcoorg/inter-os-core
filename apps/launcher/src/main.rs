@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 #![no_std]
 #![no_main]
 
@@ -2545,6 +2548,27 @@ pub enum Dirty {
     DrawerChips,
     /// AppDrawer: the page grid and the pagination dots beneath it.
     DrawerPages,
+    /// AppDrawer: the query field and everything the query filters -- the chip
+    /// row, the grid and the dots.
+    DrawerQuery,
+    /// AppDrawer: the active category chip and the grid and dots it re-filters.
+    ///
+    /// WHY this is not `DrawerChips`: a chip tap changes which packages the page
+    /// holds and how many pages there are, so the pill row and the pages below it
+    /// move together, while the field above them cannot.
+    DrawerFilter,
+    /// Search: the query field, the result count headline, the result rows and
+    /// the per-source verdict card -- everything a keystroke re-ranks.
+    SearchQuery,
+    /// The home surface's bottom navigation band: the three marks and the rows
+    /// that answer them.
+    ///
+    /// WHY this is the narrowest band here: the bar is 60 of the panel's 1,440
+    /// rows, and a tap on it is the single most repeated gesture on the device.
+    /// The three controls live entirely inside `nav::band()`, which is both the
+    /// rectangle the home painter fills and the rectangle `nav::target_at`
+    /// answers, so nothing outside it can move.
+    NavBar,
     /// LockScreen: the PIN pad's prompt, sub-prompt and entry dots.
     LockPinPad,
     /// LockScreen: the PIN pad's entry dots alone. WHY this is separate from
@@ -2602,6 +2626,10 @@ impl Dirty {
             Dirty::ActivityCards => Some(screens::activity::recents_band()),
             Dirty::DrawerChips => Some(screens::app_drawer::chips_band()),
             Dirty::DrawerPages => Some(screens::app_drawer::pages_band()),
+            Dirty::DrawerQuery => Some(screens::app_drawer::query_band()),
+            Dirty::DrawerFilter => Some(screens::app_drawer::filter_band()),
+            Dirty::SearchQuery => Some(screens::search::query_band()),
+            Dirty::NavBar => Some((nav::BAND_TOP, nav::BAND_BOTTOM)),
             Dirty::LockPinPad => Some(screens::lock::pin_pad_entry_band()),
             Dirty::LockPinDots => Some(screens::lock::pin_pad_dot_band()),
             Dirty::PinEntry => Some(screens::pin::entry_band()),
@@ -2650,7 +2678,11 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     if dirty == Dirty::ActivityCards {
         screens::activity::invalidate_activity_frame();
     }
-    if dirty == Dirty::DrawerChips || dirty == Dirty::DrawerPages {
+    if dirty == Dirty::DrawerChips
+        || dirty == Dirty::DrawerPages
+        || dirty == Dirty::DrawerQuery
+        || dirty == Dirty::DrawerFilter
+    {
         screens::app_drawer::invalidate_app_drawer_frame();
     }
     if dirty == Dirty::HomeCard || dirty == Dirty::HomeDeck {
@@ -2658,6 +2690,14 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
     }
     if dirty == Dirty::ShadeLevel {
         screens::quick_controls::invalidate_frame_cache();
+    }
+    if dirty == Dirty::EventsFilter {
+        // WHY here and not at the call sites: the feed frame is a per-frame cache
+        // that `get_notifications_color` only rebuilds when it is handed `(0, 0)`,
+        // which a band never is. Both inputs that present this band -- picking a
+        // filter pill and dismissing a card -- change the frame, so the clear
+        // belongs to the band, the same way the drawer's and the shade's do.
+        screens::notifications::invalidate_events_frame();
     }
     if dirty == Dirty::WidgetsReadings {
         screens::live_widgets::invalidate_widgets_cache();
@@ -3129,8 +3169,13 @@ pub extern "C" fn _start() -> ! {
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
                             ViewMode::HomeScreen => {
-                                render_view(surface, &state);
-                                surface_flip_display();
+                                // WHY the bar's band and not the surface: the Home gesture on
+                                // the grid that is already up changes no state at all -- the
+                                // child app, if there was one, was dismissed by the arm above,
+                                // and every reading on this surface is refreshed by the timer,
+                                // not by a gesture. What a person sees when they press Home
+                                // here is the bar, so the bar is what gets re-presented.
+                                present_dirty(surface, &state, Dirty::NavBar);
                             }
                             ViewMode::LockScreen => {
                                 if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(shell_uid(), b"").is_ok() {
@@ -4318,21 +4363,29 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::AppDrawer => {
                             // 0. Keyboard event handling for interactive search input
+                            //
+                            // WHY the keystroke arms below present `Dirty::DrawerQuery` rather
+                            // than the surface: a key edits the field AND re-filters the grid,
+                            // and an empty result set swaps the whole grid for the "No matching
+                            // apps" panel -- so the rows that move are the field, the chips, the
+                            // grid and the dots, which `app_drawer::query_band()` reads back from
+                            // the same `frame()` the painter and `app_drawer_chip_at` use. The
+                            // status bar above the field and the dismiss mark below the dots are
+                            // the same bytes for every query, and re-rasterising them per
+                            // keystroke is what made typing feel broken.
                             if let Some(key) = input.key_event() {
                                 if key.pressed {
                                     if key.code == std::input_key_code::BACKSPACE || key.code == 8 {
                                         if state.search_query_len > 0 {
                                             state.search_query_len -= 1;
                                             state.app_drawer_page = 0;
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            present_dirty(surface, &state, Dirty::DrawerQuery);
                                         }
                                     } else if key.code == std::input_key_code::ESCAPE {
                                         if state.search_query_len > 0 {
                                             state.search_query_len = 0;
                                             state.app_drawer_page = 0;
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            present_dirty(surface, &state, Dirty::DrawerQuery);
                                         } else {
                                             state.current_view = ViewMode::HomeScreen;
                                             render_view(surface, &state);
@@ -4361,8 +4414,7 @@ pub extern "C" fn _start() -> ! {
                                             state.search_query[state.search_query_len] = key.code as u8;
                                             state.search_query_len += 1;
                                             state.app_drawer_page = 0;
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            present_dirty(surface, &state, Dirty::DrawerQuery);
                                         }
                                     }
                                 }
@@ -4380,9 +4432,14 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dx >= 60 {
                                 if state.app_drawer_page > 0 {
                                     state.app_drawer_page -= 1;
-                                    screens::app_drawer::invalidate_app_drawer_frame();
-                                    render_view(surface, &state);
-                                    surface_flip_display();
+                                    // WHY the pages band and not the surface: a page turn moves
+                                    // the twelve tiles and the current-page dot, and nothing
+                                    // above the grid -- `app_drawer::pages_band()` reads both
+                                    // from the `frame()` the painter and `app_drawer_dot_at`
+                                    // already share. The cache clear `present_dirty` does for
+                                    // this region is the one the line that used to sit here did
+                                    // by hand.
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                 } else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
@@ -4395,9 +4452,7 @@ pub extern "C" fn _start() -> ! {
                                 let pages = (state.app_count + 11) / 12;
                                 if state.app_drawer_page + 1 < pages {
                                     state.app_drawer_page += 1;
-                                    screens::app_drawer::invalidate_app_drawer_frame();
-                                    render_view(surface, &state);
-                                    surface_flip_display();
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                 }
                                 break;
                             }
@@ -4434,9 +4489,13 @@ pub extern "C" fn _start() -> ! {
                                 if let Some(tab) = screens::app_drawer::app_drawer_chip_at(input.x as usize, input.y as usize) {
                                     state.app_drawer_tab = tab;
                                     state.app_drawer_page = 0;
-                                    screens::app_drawer::invalidate_app_drawer_frame();
-                                    render_view(surface, &state);
-                                    surface_flip_display();
+                                    // WHY the chip AND the pages: the pill row is what the finger
+                                    // landed on, but `filtered_indices` takes the tab, so the tile
+                                    // grid and the dot row below it change with it. Presenting the
+                                    // pills alone would light the new category over the old one's
+                                    // apps. The query field above is not in this band because a
+                                    // tab tap cannot edit it.
+                                    present_dirty(surface, &state, Dirty::DrawerFilter);
                                     std::log("[LAUNCHER] App drawer category tab switched.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -4451,9 +4510,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 if let Some(page) = screens::app_drawer::app_drawer_dot_at(&state, input.x as usize, input.y as usize) {
                                     state.app_drawer_page = page;
-                                    screens::app_drawer::invalidate_app_drawer_frame();
-                                    render_view(surface, &state);
-                                    surface_flip_display();
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -4554,8 +4611,14 @@ pub extern "C" fn _start() -> ! {
                                 {
                                     let _ = std::notification_cancel("", notif_id);
                                     refresh_notifications(&mut state);
-                                    render_view(surface, &state);
-                                    surface_flip_display();
+                                    // WHY the feed band and not the surface: dismissing a card
+                                    // re-flows the rows below the pills, re-inks the pills
+                                    // themselves (they carry the real per-source counts) and can
+                                    // bring up the empty state -- all of them inside
+                                    // `notifications::filter_band()`. The header, the status bar
+                                    // and the mark under the feed say the same thing whatever the
+                                    // feed holds.
+                                    present_dirty(surface, &state, Dirty::EventsFilter);
                                     std::log("[LAUNCHER] Notification dismissed.").ok();
                                     break;
                                 }
@@ -4566,11 +4629,18 @@ pub extern "C" fn _start() -> ! {
                                     refresh_notifications(&mut state);
                                     if !pkg.is_empty() {
                                         let _ = std::app_launch(pkg);
+                                        // WHY the feed band rather than the surface: this branch
+                                        // never left the notifications view, and what it did
+                                        // change -- the opened card and the pills' counts -- is
+                                        // inside `notifications::filter_band()`. The picture the
+                                        // launched app puts up is the compositor's, and the shell
+                                        // re-renders in full when that app exits.
+                                        present_dirty(surface, &state, Dirty::EventsFilter);
                                     } else {
                                         state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        surface_flip_display();
                                     }
-                                    render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Notification action activated.").ok();
                                     break;
                                 }
@@ -4745,21 +4815,28 @@ pub extern "C" fn _start() -> ! {
                             // screen of its own: the search runs over the whole
                             // platform, so the words a person types have to
                             // reach the one index that holds all of it.
+                            //
+                            // WHY every arm below presents `Dirty::SearchQuery`
+                            // rather than the surface: a key re-ranks, and what a
+                            // re-rank re-inks is the field's text, the headline
+                            // counting the results, the six result rows and the
+                            // per-source verdict card -- one run of rows this
+                            // screen owns as `search::query_band()`. The status
+                            // bar above it prints the clock, which a keystroke
+                            // cannot move, and the hint below it is a literal.
                             if let Some(key) = input.key_event() {
                                 if key.pressed {
                                     if key.code == std::input_key_code::BACKSPACE || key.code == 8 {
                                         if state.search_query_len > 0 {
                                             state.search_query_len -= 1;
                                             rank_search_results(&mut state);
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            present_dirty(surface, &state, Dirty::SearchQuery);
                                         }
                                     } else if key.code == std::input_key_code::ESCAPE {
                                         if state.search_query_len > 0 {
                                             state.search_query_len = 0;
                                             rank_search_results(&mut state);
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            present_dirty(surface, &state, Dirty::SearchQuery);
                                         } else {
                                             state.current_view = ViewMode::HomeScreen;
                                             render_view(surface, &state);
@@ -4771,8 +4848,7 @@ pub extern "C" fn _start() -> ! {
                                         state.search_query[state.search_query_len] = key.code as u8;
                                         state.search_query_len += 1;
                                         rank_search_results(&mut state);
-                                        render_view(surface, &state);
-                                        surface_flip_display();
+                                        present_dirty(surface, &state, Dirty::SearchQuery);
                                     }
                                 }
                                 break;
@@ -5279,8 +5355,18 @@ pub extern "C" fn _start() -> ! {
                                         }
                                         NavTarget::Home => {
                                             state.current_view = ViewMode::HomeScreen;
-                                            render_view(surface, &state);
-                                            surface_flip_display();
+                                            // WHY the bar's own band rather than the surface:
+                                            // this arm is only reachable with the home grid
+                                            // already up -- a child app is answered by the
+                                            // dismiss above, every other view is answered by
+                                            // the match it sits in, and the deck, the dock and
+                                            // the card all `break` before reaching here -- so
+                                            // the tap moves the 60 rows of the bar and nothing
+                                            // else. `nav::band()` is the rectangle the home
+                                            // painter fills AND the rectangle `nav::target_at`
+                                            // just answered, so the band presented here cannot
+                                            // disagree with either.
+                                            present_dirty(surface, &state, Dirty::NavBar);
                                             std::log("[LAUNCHER] Home surface presented via home button.").ok();
                                         }
                                         NavTarget::Back => {
@@ -5530,9 +5616,21 @@ pub extern "C" fn _start() -> ! {
                 {
                     present_dirty(surface, &state, Dirty::WidgetsReadings);
                 }
-                if matches!(state.current_view, ViewMode::HomeScreen | ViewMode::LiveWidgets)
-                    && state.clock_time != old_clock
+                if matches!(
+                    state.current_view,
+                    ViewMode::HomeScreen
+                        | ViewMode::LiveWidgets
+                        | ViewMode::AppDrawer
+                        | ViewMode::Search
+                ) && state.clock_time != old_clock
                 {
+                    // WHY the drawer and the search view joined this list: both paint
+                    // the live clock in the status bar, and until now a keystroke on
+                    // either one re-rasterised the whole surface, which happened to
+                    // carry the minute along. Their interactions present only the rows
+                    // a key moved, so the bar needs the same once-a-minute visit the
+                    // home grid already gets -- otherwise the clock on those two
+                    // screens freezes for as long as a person is typing.
                     render_band(surface, &state, 0, 48);
                     surface_flip_display();
                 }

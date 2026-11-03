@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! App Drawer: the catalogue grid, derived from what is actually installed.
 //!
 //! WHY `pub`: `render_view` in the crate root dispatches here by view mode, and
@@ -196,6 +199,38 @@ pub fn chips_band() -> (usize, usize) {
 pub fn pages_band() -> (usize, usize) {
     let f = frame();
     (f.grid.y, f.dots.y + f.dots.h)
+}
+
+/// Rows the query field, the chips, the grid and the dots occupy together.
+///
+/// WHY the field drags the grid with it: a keystroke edits the text in the field
+/// AND re-filters the grid below it, and `filtered_count == 0` swaps the whole
+/// grid for the "No matching apps" panel, which is painted from `f.grid` too.
+/// Naming only the field would leave the previous result set standing under a
+/// shorter query.
+///
+/// WHY the chips are inside this band without being moved by it: they sit in the
+/// one run of rows between the field and the grid, and `pages_band` already
+/// argues that rewriting a few rows of constant background is cheaper than a
+/// second surface write.
+pub fn query_band() -> (usize, usize) {
+    let f = frame();
+    (f.search.y, f.dots.y + f.dots.h)
+}
+
+/// Rows the active category chip, the grid and the dots occupy together.
+///
+/// WHY the grid and the dots come with the chips: `filtered_indices` takes the
+/// tab, so a chip tap re-filters the page and can change the page count, which
+/// moves every tile and the dot row. Leaving them out would show the new active
+/// pill over the old category's apps.
+///
+/// WHY the query field is NOT in this band: a tab tap cannot edit the query, so
+/// the field's rows are the same bytes either way. See [`query_band`] for the
+/// interaction that does move them.
+pub fn filter_band() -> (usize, usize) {
+    let f = frame();
+    (f.chips.y, f.dots.y + f.dots.h)
 }
 
 /// Columns the drawer lays out: strictly 3 columns (3x4 grid) matching Screen 3.

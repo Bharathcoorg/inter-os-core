@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Notifications & Events Shade: production-grade sovereign notification center.
 //!
 //! Visual hierarchy:
@@ -1256,8 +1259,30 @@ fn render_icon_glyph(cx: usize, cy: usize, kind: usize, x: usize, y: usize) -> b
 
 static mut FRAME_CACHE: Option<EventsFrame> = None;
 
+/// Drops the cached feed frame so the next pixel rebuilds it from the state.
+///
+/// WHY the shell has to be able to call this: `get_notifications_color` rebuilds
+/// the frame when it is handed `(0, 0)` or when the slot is empty, and a banded
+/// repaint -- the pill row and the feed that a filter change or a dismissal
+/// moves -- never passes through `(0, 0)`. Left to itself the band would be
+/// re-inked from the frame built for the feed as it was before, so the tapped
+/// pill would stay unlit and the dismissed card would stay on the screen: a
+/// control that answers with nothing.
+pub fn invalidate_events_frame() {
+    unsafe {
+        let slot: *mut Option<EventsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
+        *slot = None;
+    }
+}
+
 #[inline(never)]
 pub fn filter_band() -> (usize, usize) {
+    // WHY the band runs to `FEED_BOTTOM` rather than to the last drawn row: the
+    // pills carry the real per-source counts, so a dismissal re-inks them, and the
+    // feed below them re-flows; when the last card goes, the "No new
+    // notifications" heading (row 420) and its bell (rows 340..400) appear in the
+    // same run of rows. Naming only the pills would leave the dismissed card
+    // standing.
     (
         PILLS_Y,
         PILLS_Y.saturating_add(PILL_H).max(FEED_BOTTOM),

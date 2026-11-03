@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The global search surface: one list, three sources, honest verdicts.
 //!
 //! WHY this surface exists: the home surface has a search field that says it
@@ -449,6 +452,21 @@ pub fn result_at(x: usize, y: usize, count: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Rows a keystroke in the query field can move.
+///
+/// WHY an accessor here and not a band typed in the shell: the field's text, the
+/// headline counting the results, the result rows and the per-source verdict
+/// card are the four things `build` resolves from the query, and all four are
+/// rectangles in this file. Reading them back is what keeps the band the shell
+/// repaints equal to the band the painter inked.
+///
+/// WHY the status bar and the hint line are outside it: the clock in the bar is
+/// a reading this surface did not change, and the hint is a literal. Both are
+/// the same bytes for every query, so a keystroke may not re-rasterise them.
+pub fn query_band() -> (usize, usize) {
+    (FIELD_Y, STATUS_Y + STATUS_H)
 }
 
 /// The colour of (`x`, `y`) on the search surface.
