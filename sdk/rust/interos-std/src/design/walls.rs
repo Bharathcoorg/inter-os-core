@@ -412,6 +412,28 @@ pub struct SceneRef<'a> {
     /// two skylines are traced independently and can cross. Resolving it once
     /// into a table is what lets the pixel path drop the branch.
     pub near: [u16; SCENE_REF_W],
+    /// The sky band's ramp fraction, 0..=256, for every reference row.
+    ///
+    /// WHY a row table instead of a divide: `rel * 256 / horizon_y` divides by a
+    /// field read out of a `&'static Scene`, so no constant folding can reach it
+    /// and the guest pays a hardware divide for every pixel of the sky. `rel`
+    /// only ever runs 0..`SCENE_REF_H`, so the whole function of it fits in 427
+    /// entries built once per frame.
+    sky_ramp: [u16; SCENE_REF_H],
+    /// The ridge band's ramp fraction, 0..=256, for every reference row.
+    mtn_ramp: [u16; SCENE_REF_H],
+    /// The foreground's ramp fraction, 0..=256, for every reference row.
+    ///
+    /// WHY one table for the two ramps the foreground switches between: below
+    /// `rock_y` the tone runs `mist -> bottom`, and past it it runs
+    /// `bottom -> deep`. Both are clamped ramp fractions of `rel` alone, so the
+    /// fraction lives in one table and the choice of the two endpoint pairs is a
+    /// compare the pixel path still makes -- it decides the endpoints, not the
+    /// divide.
+    rock_ramp: [u16; SCENE_REF_H],
+    /// `blend(bottom, black, 112)`, the tone the foreground reaches at the panel's
+    /// bottom edge. A blend of two scene constants, so it belongs beside them.
+    deep: u32,
 }
 
 impl<'a> SceneRef<'a> {
@@ -419,12 +441,20 @@ impl<'a> SceneRef<'a> {
     ///
     /// WHY a caller should hold one of these across a whole frame: this is the
     /// per-frame half of the work. A frame is one of these, and then
-    /// [`scene_pixel_ref`] is a handful of compares and one blend.
+    /// [`scene_pixel_ref`] is two table loads, one fold and one or two blends.
     ///
-    /// WHY the array and not a per-pixel clamp: `SCENE_REF_W` is small (the
+    /// WHY the arrays and not a per-pixel clamp: `SCENE_REF_W` is small (the
     /// traced skyline is stored at reference width) and this runs once per frame,
     /// so 64 entries on the stack cost nothing next to the million pixel calls
-    /// they replace.
+    /// they replace. The three row tables cost the same argument at
+    /// `SCENE_REF_H`: 1,281 divides built once per repaint against roughly a
+    /// million asked per repaint.
+    ///
+    /// WHY the row spans use `.max(1)`: the shipped scenes never have a zero or
+    /// inverted span, and the `every_scene_has_a_full_skyline` test is what says
+    /// so, but a scene that did would divide by zero once per frame here rather
+    /// than once per pixel on the way to a shell that cannot draw a wallpaper at
+    /// all.
     pub fn new(scene: &'a Scene) -> Self {
         let mut near = [0u16; SCENE_REF_W];
         for i in 0..SCENE_REF_W {
@@ -436,12 +466,74 @@ impl<'a> SceneRef<'a> {
             // inverting.
             near[i] = if n < far + 3 { far + 3 } else { n };
         }
+
+        let horizon_y = scene.horizon_y as u32;
+        let mist_y = scene.mist_y as u32;
+        let rock_y = scene.rock_y as u32;
+        let mut sky_ramp = [0u16; SCENE_REF_H];
+        let mut mtn_ramp = [0u16; SCENE_REF_H];
+        let mut rock_ramp = [0u16; SCENE_REF_H];
+        for rel in 0..SCENE_REF_H {
+            let r = rel as u32;
+            sky_ramp[rel] = (r * 256 / horizon_y.max(1)).min(256) as u16;
+            mtn_ramp[rel] = (r.saturating_sub(horizon_y) * 256 / (mist_y - horizon_y).max(1))
+                .min(256) as u16;
+            rock_ramp[rel] = if (rel as u32) < rock_y {
+                (r.saturating_sub(mist_y) * 256 / (rock_y - mist_y).max(1)).min(256)
+            } else {
+                ((r - rock_y) * 256 / (SCENE_REF_H as u32 - rock_y).max(1)).min(256)
+            } as u16;
+        }
+
         SceneRef {
             scene,
             horizon: scene.horizon(),
             shadow: scene.shadow(),
             mist: scene.mist(),
             near,
+            sky_ramp,
+            mtn_ramp,
+            rock_ramp,
+            deep: blend(scene.bottom, 0xFF00_0000, 112),
+        }
+    }
+
+    /// The sky's tone at one reference row, with the sun's lift folded in.
+    #[inline(always)]
+    fn sky_at(&self, rel: usize, across: u32) -> u32 {
+        blend(
+            self.scene.top,
+            self.horizon,
+            band(self.sky_ramp.get(rel).copied().unwrap_or(256) as u32, across),
+        )
+    }
+
+    /// The ridge's tone at one reference row, with the sun's lift folded in.
+    #[inline(always)]
+    fn mtn_at(&self, rel: usize, across: u32) -> u32 {
+        blend(
+            self.shadow,
+            self.mist,
+            band(self.mtn_ramp.get(rel).copied().unwrap_or(256) as u32, across),
+        )
+    }
+
+    /// The foreground's tone at one reference row, with the sun's lift folded in.
+    ///
+    /// WHY the foreground below the rock line continues the near ridge's own
+    /// vertical gradient instead of starting a horizontal one: the old code
+    /// blended the bottom colour with the mist colour *across* the screen, so the
+    /// rock line was a hard horizontal edge and the lower half of the panel was
+    /// one flat block of one colour. The reference wallpaper's foreground runs
+    /// into the mountains and darkens towards the bottom of the panel, and it is
+    /// the mountains that stop, not a seam drawn across the picture.
+    #[inline(always)]
+    fn rock_at(&self, rel: usize, across: u32) -> u32 {
+        let v = band(self.rock_ramp.get(rel).copied().unwrap_or(256) as u32, across);
+        if rel < self.scene.rock_y as usize {
+            blend(self.mist, self.scene.bottom, v)
+        } else {
+            blend(self.scene.bottom, self.deep, v)
         }
     }
 }
@@ -451,6 +543,16 @@ impl<'a> SceneRef<'a> {
 /// Semantically identical to [`scene_pixel`] for every input. It exists so a
 /// caller resolving a whole frame can hoist the scene's constants; the result is
 /// byte-for-byte the same colour.
+///
+/// WHAT IS LEFT ON THE PER-PIXEL PATH: the two column divides and the row divide
+/// are by `w` and `h`, which every full-frame caller passes as a constant --
+/// `#[inline(always)]` then turns them into a multiply and a shift. The `alpha`
+/// divides are by `scale_y`, which is a function of `h` alone and folds with it.
+/// Nothing left divides by a value the scene carries.
+///
+/// WHY the bands are resolved lazily instead of all up front: a pixel is drawn
+/// from one band and at most one blend of two, and the shipped path computed the
+/// sky, the ridge and the foreground for every pixel and threw two of them away.
 #[inline(always)]
 pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize) -> u32 {
     if w <= 1 || h <= 1 {
@@ -470,58 +572,34 @@ pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize)
     let n1 = s.near[col + 1] as u32;
     let near_ref_256 = n0 * (256 - frac_x) + n1 * frac_x;
 
-    let horizon_y = s.scene.horizon_y;
-    let mist_y = s.scene.mist_y;
-    let rock_y = s.scene.rock_y;
-
     let across = ((x * 256) / (w - 1)).min(256) as u32 * ACROSS_PERCENT / 256;
 
     let y_ref_256 = (y as u32 * SCENE_REF_H as u32 * 256) / h as u32;
-    let rel = (y_ref_256 >> 8) as u16;
-
-    let vert_sky = (rel as u32 * 256 / horizon_y as u32).min(256);
-    let sky_col = blend(s.scene.top, s.horizon, band(vert_sky, across));
-
-    let vert_mtn = (rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32).min(256);
-    let mtn_col = blend(s.shadow, s.mist, band(vert_mtn, across));
-
-    let rock_col = if (rel as usize) < rock_y as usize {
-        let vert_rock = (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
-        blend(s.mist, s.scene.bottom, band(vert_rock, across))
-    } else {
-        // WHY the foreground below the rock line continues the near ridge's
-        // own vertical gradient instead of starting a horizontal one: the
-        // old code blended the bottom colour with the mist colour *across*
-        // the screen, so the rock line was a hard horizontal edge and the
-        // lower half of the panel was one flat block of one colour. The
-        // reference wallpaper's foreground runs into the mountains and
-        // darkens towards the bottom of the panel, and it is the mountains
-        // that stop, not a seam drawn across the picture.
-        let below = (rel.saturating_sub(rock_y) as u32 * 256
-            / (SCENE_REF_H as u32 - rock_y as u32).max(1))
-            .min(256);
-        let deep = blend(s.scene.bottom, 0xFF00_0000, 112);
-        blend(s.scene.bottom, deep, band(below, across))
-    };
+    let rel = (y_ref_256 >> 8) as usize;
 
     let scale_y = ((SCENE_REF_H as u32 * 256) / h as u32).max(1);
-    let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
-    let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
     let half_scale = (scale_y as i32) / 2;
 
+    let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
     if diff_far < -half_scale {
-        sky_col
-    } else if diff_far <= half_scale {
-        let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
-        blend(sky_col, mtn_col, alpha)
-    } else if diff_near < -half_scale {
-        mtn_col
-    } else if diff_near <= half_scale {
-        let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
-        blend(mtn_col, rock_col, alpha)
-    } else {
-        rock_col
+        return s.sky_at(rel, across);
     }
+    let sky_col = s.sky_at(rel, across);
+    if diff_far <= half_scale {
+        let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        return blend(sky_col, s.mtn_at(rel, across), alpha);
+    }
+
+    let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
+    if diff_near < -half_scale {
+        return s.mtn_at(rel, across);
+    }
+    let mtn_col = s.mtn_at(rel, across);
+    if diff_near <= half_scale {
+        let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        return blend(mtn_col, s.rock_at(rel, across), alpha);
+    }
+    s.rock_at(rel, across)
 }
 
 /// The wallpaper at pixel `(x, y)` of a `w` x `h` surface.
@@ -534,9 +612,89 @@ pub fn scene_pixel_ref(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize)
 /// a caller that draws a handful of pixels -- a picker thumbnail, a preview
 /// strip. A surface drawing a whole frame should build a [`SceneRef`] once and
 /// call [`scene_pixel_ref`], which is what the home surface does.
+///
+/// WHY it no longer builds a [`SceneRef`] on the way: the reference resolves 173
+/// skyline clamps and 1,281 row divides, which is the right trade for a frame and
+/// the wrong one for a single pixel. This path answers straight from the scene,
+/// with the same three bands and the same lazy blend the reference path uses, and
+/// `the_convenience_entry_agrees_with_the_reference_path` checks it against the
+/// table path over every pixel of a surface.
 pub fn scene_pixel(scene: &Scene, x: usize, y: usize, w: usize, h: usize) -> u32 {
-    let s = SceneRef::new(scene);
-    scene_pixel_ref(&s, x, y, w, h)
+    if w <= 1 || h <= 1 {
+        return scene.bottom;
+    }
+
+    let x_fixed = (x * (SCENE_REF_W - 1) * 256) / (w - 1);
+    let col = (x_fixed >> 8).min(SCENE_REF_W - 2);
+    let frac_x = (x_fixed & 0xFF) as u32;
+
+    let f0 = scene.far[col] as u32;
+    let f1 = scene.far[col + 1] as u32;
+    let far_ref_256 = f0 * (256 - frac_x) + f1 * frac_x;
+
+    let horizon_y = scene.horizon_y;
+    let mist_y = scene.mist_y;
+    let rock_y = scene.rock_y;
+
+    // The same clamp SceneRef::new bakes into its `near` table, asked of the two
+    // columns this pixel interpolates between.
+    let far = scene.far[col];
+    let raw0 = scene.near[col];
+    let raw1 = scene.near[col + 1];
+    let n0 = if raw0 < far + 3 { far + 3 } else { raw0 } as u32;
+    let n1 = {
+        let far1 = scene.far[col + 1];
+        if raw1 < far1 + 3 { far1 + 3 } else { raw1 }
+    } as u32;
+    let near_ref_256 = n0 * (256 - frac_x) + n1 * frac_x;
+
+    let across = ((x * 256) / (w - 1)).min(256) as u32 * ACROSS_PERCENT / 256;
+    let y_ref_256 = (y as u32 * SCENE_REF_H as u32 * 256) / h as u32;
+    let rel = (y_ref_256 >> 8) as usize;
+
+    let sky = || {
+        let v = (rel as u32 * 256 / horizon_y.max(1) as u32).min(256);
+        blend(scene.top, scene.horizon(), band(v, across))
+    };
+    let mtn = || {
+        let v = ((rel as u16).saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32).min(256);
+        blend(scene.shadow(), scene.mist(), band(v, across))
+    };
+    let rock = || {
+        if rel < rock_y as usize {
+            let v = ((rel as u16).saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
+            blend(scene.mist(), scene.bottom, band(v, across))
+        } else {
+            let v = ((rel as u16).saturating_sub(rock_y) as u32 * 256
+                / (SCENE_REF_H as u32 - rock_y as u32).max(1))
+                .min(256);
+            blend(scene.bottom, blend(scene.bottom, 0xFF00_0000, 112), band(v, across))
+        }
+    };
+
+    let scale_y = ((SCENE_REF_H as u32 * 256) / h as u32).max(1);
+    let half_scale = (scale_y as i32) / 2;
+
+    let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
+    if diff_far < -half_scale {
+        return sky();
+    }
+    let sky_col = sky();
+    if diff_far <= half_scale {
+        let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        return blend(sky_col, mtn(), alpha);
+    }
+
+    let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
+    if diff_near < -half_scale {
+        return mtn();
+    }
+    let mtn_col = mtn();
+    if diff_near <= half_scale {
+        let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+        return blend(mtn_col, rock(), alpha);
+    }
+    rock()
 }
 
 /// Reads a single 32-bit ARGB pixel from a raw image byte slice without heap allocation.
@@ -597,6 +755,240 @@ pub fn raw_wallpaper_pixel_scaled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wallpaper expression exactly as it was shipped before the surface
+    /// tables were added, kept verbatim as the oracle for the tests below.
+    ///
+    /// WHY a copy rather than a call into the live path: "the table answers what
+    /// the divides answered" can only be asserted against a version of the divides
+    /// that the table's own rewrites cannot touch. It is compiled only for `cargo
+    /// test`, so it costs the image nothing.
+    fn legacy_scene_pixel(s: &SceneRef<'_>, x: usize, y: usize, w: usize, h: usize) -> u32 {
+        if w <= 1 || h <= 1 {
+            return s.scene.bottom;
+        }
+
+        let x_fixed = (x * (SCENE_REF_W - 1) * 256) / (w - 1);
+        let col = (x_fixed >> 8).min(SCENE_REF_W - 2);
+        let frac_x = (x_fixed & 0xFF) as u32;
+
+        let f0 = s.scene.far[col] as u32;
+        let f1 = s.scene.far[col + 1] as u32;
+        let far_ref_256 = f0 * (256 - frac_x) + f1 * frac_x;
+
+        let n0 = s.near[col] as u32;
+        let n1 = s.near[col + 1] as u32;
+        let near_ref_256 = n0 * (256 - frac_x) + n1 * frac_x;
+
+        let horizon_y = s.scene.horizon_y;
+        let mist_y = s.scene.mist_y;
+        let rock_y = s.scene.rock_y;
+
+        let across = ((x * 256) / (w - 1)).min(256) as u32 * ACROSS_PERCENT / 256;
+
+        let y_ref_256 = (y as u32 * SCENE_REF_H as u32 * 256) / h as u32;
+        let rel = (y_ref_256 >> 8) as u16;
+
+        let vert_sky = (rel as u32 * 256 / horizon_y as u32).min(256);
+        let sky_col = blend(s.scene.top, s.horizon, band(vert_sky, across));
+
+        let vert_mtn =
+            (rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32)
+                .min(256);
+        let mtn_col = blend(s.shadow, s.mist, band(vert_mtn, across));
+
+        let rock_col = if (rel as usize) < rock_y as usize {
+            let vert_rock =
+                (rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32).min(256);
+            blend(s.mist, s.scene.bottom, band(vert_rock, across))
+        } else {
+            let below = (rel.saturating_sub(rock_y) as u32 * 256
+                / (SCENE_REF_H as u32 - rock_y as u32).max(1))
+                .min(256);
+            let deep = blend(s.scene.bottom, 0xFF00_0000, 112);
+            blend(s.scene.bottom, deep, band(below, across))
+        };
+
+        let scale_y = ((SCENE_REF_H as u32 * 256) / h as u32).max(1);
+        let diff_far = y_ref_256 as i32 - far_ref_256 as i32;
+        let diff_near = y_ref_256 as i32 - near_ref_256 as i32;
+        let half_scale = (scale_y as i32) / 2;
+
+        if diff_far < -half_scale {
+            sky_col
+        } else if diff_far <= half_scale {
+            let alpha = (((diff_far + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+            blend(sky_col, mtn_col, alpha)
+        } else if diff_near < -half_scale {
+            mtn_col
+        } else if diff_near <= half_scale {
+            let alpha = (((diff_near + half_scale) * 256) / scale_y.max(1) as i32).clamp(0, 256) as u32;
+            blend(mtn_col, rock_col, alpha)
+        } else {
+            rock_col
+        }
+    }
+
+    /// µs per pixel for one whole 720x1440 surface, timed on the host.
+    ///
+    /// WHAT THIS IS: a benchmark, not an assertion. It says nothing about the
+    /// device -- the guest runs under TCG, where every integer divide is a
+    /// handful of interpreted instructions and the same walk costs several times
+    /// more per pixel -- so read it as a ratio between the two paths, never as a
+    /// frame time. The numbers are printed, because a bench that asserts a
+    /// wall-clock threshold is a bench that fails on a busy CI box.
+    ///
+    /// WHY `scene_pixel_ref` is called through a black box over a whole grid: the
+    /// per-pixel cost is the thing under measurement, so the loop has to look like
+    /// the shell's raster-order walk and the result has to be consumed, or the
+    /// optimiser deletes the work.
+    #[test]
+    #[ignore = "host benchmark: cargo test --manifest-path sdk/rust/interos-std/Cargo.toml -- --ignored"]
+    fn wallpaper_pixel_cost_bench() {
+        use std::format;
+        use std::println;
+        use std::string::String;
+        use std::time::Instant;
+
+        const W: usize = 720;
+        const H: usize = 1440;
+        const PIXELS: u64 = (W as u64) * (H as u64);
+
+        /// Best of three timed passes over one whole surface, in microseconds.
+        ///
+        /// WHY the closure is generic and not a `fn` pointer: a pointer call is an
+        /// indirect call per pixel, which measures the dispatch rather than the
+        /// wallpaper. Monomorphised, the path inlines exactly the way the shell's
+        /// inlined `backdrop_ref` does on the device.
+        fn timed(s: &SceneRef<'_>, path: impl Fn(&SceneRef<'_>, usize, usize) -> u32) -> u128 {
+            let mut sink = 0u64;
+            // One untimed pass, so a cold cache is not what gets printed.
+            for y in 0..H {
+                for x in 0..W {
+                    sink = sink.wrapping_add(path(s, x, y) as u64);
+                }
+            }
+            let mut best = u128::MAX;
+            for _ in 0..3 {
+                let started = Instant::now();
+                for y in 0..H {
+                    for x in 0..W {
+                        sink = sink.wrapping_add(
+                            path(s, std::hint::black_box(x), std::hint::black_box(y)) as u64,
+                        );
+                    }
+                }
+                let micros = started.elapsed().as_micros();
+                if micros < best {
+                    best = micros;
+                }
+            }
+            // The sum is the sink: every pixel has to be produced for it to change.
+            std::hint::black_box(sink);
+            best
+        }
+
+        let mut report = String::new();
+        for scene in SCENES.iter() {
+            let s = SceneRef::new(scene);
+            let tables = timed(&s, |s, x, y| scene_pixel_ref(s, x, y, W, H));
+            let divides = timed(&s, |s, x, y| legacy_scene_pixel(s, x, y, W, H));
+            report.push_str(&format!(
+                "  {:>8}  tables {:.3} us/px, divides {:.3} us/px ({:.1}x) over {} px\n",
+                std::str::from_utf8(scene.key).unwrap_or("?"),
+                tables as f64 / PIXELS as f64,
+                divides as f64 / PIXELS as f64,
+                divides as f64 / tables as f64,
+                PIXELS
+            ));
+        }
+        println!("{report}");
+    }
+
+    /// Every pixel of a 720x1440 surface, both ways, for every shipped scene.
+    ///
+    /// WHY the whole grid and not a lattice: this is the only proof that matters
+    /// for a change that is meant to be invisible. A sampled lattice can miss a
+    /// row whose span crosses `horizon_y`, `mist_y` or `rock_y` exactly where the
+    /// table's clamp bites, and the failure it would miss is a wallpaper that
+    /// looks the same in a screenshot and is wrong in one scanline.
+    ///
+    /// WHY the assertion is against the shipped expression: a pixel that differs
+    /// means the table is wrong, and the table is what changes -- never the
+    /// expectation.
+    #[test]
+    fn the_table_path_reproduces_the_shipped_expression_pixel_for_pixel() {
+        for scene in SCENES.iter() {
+            let s = SceneRef::new(scene);
+            for y in 0..1440usize {
+                for x in 0..720usize {
+                    let shipped = legacy_scene_pixel(&s, x, y, 720, 1440);
+                    let tables = scene_pixel_ref(&s, x, y, 720, 1440);
+                    assert_eq!(
+                        tables, shipped,
+                        "{:?}: table path answered {:08X} and the shipped expression {:08X} at ({}, {})",
+                        scene.key, tables, shipped, x, y
+                    );
+                }
+            }
+        }
+    }
+
+    /// The convenience entry and the frame path are the same colour everywhere.
+    ///
+    /// WHY this needs saying now: `scene_pixel` used to be literally
+    /// `SceneRef::new` plus `scene_pixel_ref`, so agreement was structural. It now
+    /// answers from the scene directly -- resolving none of the tables, because a
+    /// caller that asks for one pixel should not pay for 1,281 -- and two
+    /// implementations that agree must be shown to agree.
+    #[test]
+    fn the_convenience_entry_agrees_with_the_reference_path() {
+        for scene in SCENES.iter() {
+            let s = SceneRef::new(scene);
+            for y in 0..1440usize {
+                for x in 0..720usize {
+                    assert_eq!(
+                        scene_pixel(scene, x, y, 720, 1440),
+                        scene_pixel_ref(&s, x, y, 720, 1440),
+                        "{:?}: the two entries disagree at ({}, {})",
+                        scene.key,
+                        x,
+                        y
+                    );
+                }
+            }
+        }
+    }
+
+    /// A surface narrower than the reference grid still lands on the same rows.
+    ///
+    /// WHY a second size: both full-frame callers pass 720x1440, so every test
+    /// above walks a `rel` that advances by one reference row every 3.375 surface
+    /// rows. A picker preview at 64x128 advances differently, and the row tables
+    /// are indexed by `rel` -- the one thing in the new path that a different
+    /// height can move off the end of.
+    #[test]
+    fn the_table_path_holds_at_other_surface_sizes() {
+        for scene in SCENES.iter() {
+            let s = SceneRef::new(scene);
+            for (w, h) in [(64usize, 128usize), (173, 427), (1, 1), (2, 3), (720, 427)] {
+                for y in 0..h {
+                    for x in 0..w {
+                        assert_eq!(
+                            scene_pixel_ref(&s, x, y, w, h),
+                            legacy_scene_pixel(&s, x, y, w, h),
+                            "{:?}: table path disagrees at ({}, {}) on a {}x{} surface",
+                            scene.key,
+                            x,
+                            y,
+                            w,
+                            h
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_scene_has_a_full_skyline() {

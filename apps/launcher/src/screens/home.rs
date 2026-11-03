@@ -303,7 +303,7 @@ pub fn deck_band() -> (usize, usize) {
 /// is the one that draws a full-bleed wallpaper, and it draws the *same* one the
 /// user chose for it, from the same catalogue the lock screen and the Settings
 /// picker read. Every piece of ink drawn on it is chosen from the pixel behind
-/// it rather than assumed, so the surface reads for any scene.
+/// it rather than assumed, and the surface reads for any scene.
 ///
 /// WHY the document comes first: the wallpaper slot may name a document the
 /// user chose, and the document is what the user chose. A scene is the fallback
@@ -317,10 +317,83 @@ pub fn deck_band() -> (usize, usize) {
 /// two answers are byte-for-byte the same colour; only the cost differs.
 #[inline(always)]
 fn backdrop_ref(p: &Paint, x: usize, y: usize) -> u32 {
-    if let Some(document) = p.wallpaper_document {
+    backdrop_from(&p.scene_ref, p.wallpaper_document, x, y)
+}
+
+/// [`backdrop_ref`] with the two pieces of the plan it reads taken directly.
+///
+/// WHY it is split out: `build` has not got a `Paint` yet -- it is on its way to
+/// making one -- and the navigation marks' inks are frame data resolved from the
+/// scene the plan is about to hold. Same inputs, same answer.
+#[inline(always)]
+fn backdrop_from(
+    scene_ref: &interos_std::design::walls::SceneRef<'static>,
+    document: Option<interos_std::image::Bitmap<'static>>,
+    x: usize,
+    y: usize,
+) -> u32 {
+    if let Some(document) = document {
         return document.pixel(x, y, SCREEN_WIDTH, SCREEN_HEIGHT);
     }
-    interos_std::design::walls::scene_pixel_ref(&p.scene_ref, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
+    interos_std::design::walls::scene_pixel_ref(scene_ref, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
+}
+
+/// One pixel's wallpaper, read at most once.
+///
+/// WHY this exists instead of a plain value computed at the top of
+/// [`get_home_color`]: the painters behind it do not all need the backdrop, and
+/// they did not all ask for the same one. A deck tile paints its own fill and used
+/// to read nothing; the greeting's band and the status bar read the pixel twice --
+/// once for the ink, once again in the caller's fall-through to the wallpaper. So
+/// the pixel gets one resolution, on the first question, and every later question
+/// is a load. Reading eagerly would have made the ~214k tile pixels ask for a
+/// colour they never show.
+///
+/// WHY it is a stack value and not a static: it is one pixel's answer, its life is
+/// the call that made it, and a per-pixel cache in a static is a second thing that
+/// can disagree with the plan it came from.
+struct Backdrop<'a> {
+    p: &'a Paint,
+    x: usize,
+    y: usize,
+    resolved: Option<u32>,
+}
+
+impl<'a> Backdrop<'a> {
+    #[inline(always)]
+    fn new(p: &'a Paint, x: usize, y: usize) -> Backdrop<'a> {
+        Backdrop {
+            p,
+            x,
+            y,
+            resolved: None,
+        }
+    }
+
+    /// The plan this pixel's backdrop came from.
+    #[inline(always)]
+    fn plan(&self) -> &'a Paint {
+        self.p
+    }
+
+    /// The wallpaper colour under this pixel.
+    #[inline(always)]
+    fn bg(&mut self) -> u32 {
+        match self.resolved {
+            Some(bg) => bg,
+            None => {
+                let bg = backdrop_ref(self.p, self.x, self.y);
+                self.resolved = Some(bg);
+                bg
+            }
+        }
+    }
+
+    /// The ink that reads against this pixel's wallpaper.
+    #[inline(always)]
+    fn ink(&mut self, theme: &Theme) -> u32 {
+        layout::ink_on(theme, self.bg())
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -604,6 +677,13 @@ struct DeckTilePlan {
     label: Run,
     /// Vibrant pastel container fill for the tile pill squircle.
     fill: u32,
+    /// The tile's squircle, with its outer and inset edges resolved once.
+    ///
+    /// WHY in the plan: every pixel of all six tiles asked `rounded_contains` for
+    /// the tile's left/right/top/bottom and then asked again, twice, for the
+    /// inset ring. Those are eight numbers derived from a rect the grid fixed
+    /// before the first pixel was drawn.
+    shape: Rounded,
 }
 
 impl DeckTilePlan {
@@ -617,6 +697,7 @@ impl DeckTilePlan {
         badge: Run::EMPTY,
         label: Run::EMPTY,
         fill: 0,
+        shape: Rounded::EMPTY,
     };
 }
 
@@ -624,10 +705,10 @@ impl DeckTilePlan {
 #[allow(dead_code)]
 struct DeckPlan {
     cells: [DeckTilePlan; MAX_DECK_TILES],
-    /// Grid slots the grid actually has. `layout::grid` derives its own column count
-    /// from the bounds it is handed, which is not always the count
-    /// [`deck_columns`] reported, so the grid -- not [`deck_columns`] -- is what this
-    /// records.
+    /// Grid slots the grid actually has. `layout::grid` derives its own column
+    /// count from the bounds it is handed, which is not always the count
+    /// [`deck_columns`] reported, so the grid -- not [`deck_columns`] -- is what
+    /// this records.
     slots: usize,
     columns: usize,
     rows: usize,
@@ -638,9 +719,64 @@ struct DeckPlan {
     app_count: usize,
     /// The message drawn instead of a grid when the registry is empty.
     empty: Option<Run>,
+    /// Which deck column each surface column falls in, or [`NO_SLOT`].
+    ///
+    /// WHY a table and not the divide: `(x - origin_x) / pitch_x` divides by a
+    /// plan field, so it is a hardware divide the guest pays for every pixel of
+    /// the deck band -- 274k of them a frame -- for an answer that is the same
+    /// down a whole column. `row` is the same answer sideways, constant along a
+    /// scanline. Two loads replace both.
+    ///
+    /// WHY `u8`: a slot index the painter can actually draw is bounded by
+    /// `MAX_DECK_TILES`, since `slot_at` answers `None` for any index at or past
+    /// `slots` and `slots` cannot exceed the cell array. Anything outside that
+    /// range is stored as [`NO_SLOT`], which is what the divide path returned for
+    /// it anyway. One byte per column, 720 of them.
+    slot_col: [u8; SCREEN_WIDTH],
+    /// Which deck row each surface row falls in, or [`NO_SLOT`].
+    slot_row: [u8; SCREEN_HEIGHT],
 }
 
+/// The value a deck slot table holds for a coordinate that is in no column/row.
+const NO_SLOT: u8 = u8::MAX;
+
+/// WHY the slot tables are `u8`: the largest slot index a painter can be handed
+/// is one below the cell array, and a coordinate that divides out past it is a
+/// coordinate `slot_at` rejects. The sentinel has to sit above every real value.
+const _: () = assert!(MAX_DECK_TILES <= NO_SLOT as usize);
+
 impl DeckPlan {
+    /// The column `x` falls in, as the plan's table holds it.
+    ///
+    /// WHY the arithmetic is spelled out here as well: building the table asks the
+    /// same question the pixel used to ask, once per column instead of once per
+    /// pixel, and it has to be the same question. `MAX_DECK_TILES` is the ceiling
+    /// on a drawable slot index, so anything at or past it is the same answer the
+    /// caller would have rejected.
+    fn indexed(index: usize, count: usize, origin: usize, pitch: usize) -> u8 {
+        if count == 0 || index < origin {
+            return NO_SLOT;
+        }
+        let slot = (index - origin) / pitch.max(1);
+        if slot >= count || slot >= MAX_DECK_TILES {
+            return NO_SLOT;
+        }
+        slot as u8
+    }
+
+    /// Resolves both slot tables for this grid. Called whenever the grid fields
+    /// move, so the tables cannot lag the pitch they are derived from.
+    fn index_slots(&mut self) {
+        for x in 0..SCREEN_WIDTH {
+            self.slot_col[x] =
+                DeckPlan::indexed(x, self.columns, self.origin_x, self.pitch_x);
+        }
+        for y in 0..SCREEN_HEIGHT {
+            self.slot_row[y] =
+                DeckPlan::indexed(y, self.rows, self.origin_y, self.pitch_y);
+        }
+    }
+
     /// Which grid slot a point falls in.
     ///
     /// WHY this is arithmetic and not the linear search in `layout::grid_hit`: the
@@ -648,16 +784,22 @@ impl DeckPlan {
     /// at most one, and the division finds it. The `contains` check then rejects the
     /// gutters, which is what the loop's "no cell contains it" answer meant. The
     /// search loop ran once per pixel and rebuilt a rectangle on every step.
+    ///
+    /// WHY the two divides are now two loads: `columns == 0 || rows == 0` and the
+    /// two bounds the divides used to compare against are all folded into the
+    /// tables at plan time, so a coordinate that is in no column or no row reads
+    /// [`NO_SLOT`] and the rest of the answer is the same `index` arithmetic that
+    /// was always here.
     fn slot_at(&self, x: usize, y: usize) -> Option<usize> {
-        if self.columns == 0 || self.rows == 0 || x < self.origin_x || y < self.origin_y {
+        // A coordinate off the surface is in no column and answers `None`; the
+        // divide path could have found a pitch step out there, but no painter
+        // asks, and the surface is the only thing this grid is drawn on.
+        let col = *self.slot_col.get(x)?;
+        let row = *self.slot_row.get(y)?;
+        if col == NO_SLOT || row == NO_SLOT {
             return None;
         }
-        let col = (x - self.origin_x) / self.pitch_x.max(1);
-        let row = (y - self.origin_y) / self.pitch_y.max(1);
-        if col >= self.columns || row >= self.rows {
-            return None;
-        }
-        let index = row * self.columns + col;
+        let index = row as usize * self.columns + col as usize;
         if index >= self.slots || !self.cells[index].cell.contains(x, y) {
             return None;
         }
@@ -704,6 +846,20 @@ struct Paint {
     deck: DeckPlan,
     search_magnifier: (usize, usize, i32),
     search: Run,
+    /// The ink each navigation mark draws in, in [`launcher::nav::NavTarget`]
+    /// order.
+    ///
+    /// WHY it is in the plan: the mark's ink is deliberately sampled from the
+    /// wallpaper at the mark's own centre, so that one graded band cannot put two
+    /// colours on one control -- which makes the answer a property of the frame,
+    /// not of the pixel. `nav_pixel` used to resolve that centre read for every
+    /// pixel of every mark.
+    nav_ink: [u32; 3],
+    /// The date widget, the system card and the search field, with the edges their
+    /// inside-and-ring tests derive resolved once.
+    date_shape: Rounded,
+    card_shape: Rounded,
+    search_shape: Rounded,
 }
 
 /// Deck slots this surface will hold in one frame.
@@ -919,11 +1075,17 @@ fn build(state: &LauncherState) -> Paint {
         Run::whole(0, 0, LABEL_SCALE, b"", 0)
     };
 
-    // WHY the plan holds nothing for the navigation bar: its three marks are pure
-    // arithmetic on `launcher::nav::MARK`, so a `Run` per mark would have been a
-    // box built every frame for a shape the painter can answer in four adds. The
-    // plan used to carry exactly that -- a `<` glyph and a `[]` glyph, both built
-    // and neither ever read by `nav_pixel`, which drew only a five-row pill.
+    // WHY the plan holds nothing for the navigation bar's shapes: their three
+    // marks are pure arithmetic on `launcher::nav::MARK`, so a `Run` per mark
+    // would have been a box built every frame for a shape the painter can answer
+    // in four adds. The plan used to carry exactly that -- a `<` glyph and a `[]`
+    // glyph, both built and neither ever read by `nav_pixel`, which drew only a
+    // five-row pill. What it does carry is the ink, because that one answer needs
+    // the wallpaper and is the same for every pixel of a mark.
+    let scene_ref = interos_std::design::walls::SceneRef::new(state.home_wallpaper);
+    let wallpaper_document = state.home_wallpaper_document;
+    let nav_ink = nav_inks(&theme, &scene_ref, wallpaper_document);
+
     Paint {
         frame: f,
         clock,
@@ -938,9 +1100,47 @@ fn build(state: &LauncherState) -> Paint {
         deck,
         search_magnifier,
         search,
-        scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
-        wallpaper_document: state.home_wallpaper_document,
+        date_shape: Rounded::new(f.date_widget, DATE_WIDGET_RADIUS),
+        card_shape: Rounded::new(f.card, CARD_RADIUS),
+        search_shape: Rounded::new(f.search, SEARCH_RADIUS),
+        scene_ref,
+        wallpaper_document,
+        nav_ink,
     }
+}
+
+/// The radius each of the surface's three fixed shapes is masked at.
+///
+/// WHY named: the painter and the plan's [`Rounded`] must use one number, and a
+/// radius typed twice is a ring that can drift off the shape it outlines.
+const DATE_WIDGET_RADIUS: usize = 24;
+const CARD_RADIUS: usize = 28;
+const SEARCH_RADIUS: usize = 28;
+
+/// The ink of each navigation mark, read from the wallpaper at the mark's centre.
+///
+/// WHY once per repaint: `nav_pixel` answers the whole of one mark in one ink --
+/// that is the point of sampling the mark's centre instead of the pixel -- so the
+/// answer is three values per frame, not one per pixel of the bottom band.
+fn nav_inks(
+    theme: &Theme,
+    scene_ref: &interos_std::design::walls::SceneRef<'static>,
+    document: Option<interos_std::image::Bitmap<'static>>,
+) -> [u32; 3] {
+    const TARGETS: [launcher::nav::NavTarget; 3] = [
+        launcher::nav::NavTarget::Back,
+        launcher::nav::NavTarget::Home,
+        launcher::nav::NavTarget::Recents,
+    ];
+    let mut inks = [0u32; 3];
+    for (slot, target) in TARGETS.iter().enumerate() {
+        let plate = target.mark_box();
+        inks[slot] = layout::ink_on(
+            theme,
+            backdrop_from(scene_ref, document, plate.center_x(), plate.center_y()),
+        );
+    }
+    inks
 }
 
 /// Resolves the deck for this frame.
@@ -1015,6 +1215,8 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         pitch_y: 215,
         app_count: 6,
         empty: None,
+        slot_col: [NO_SLOT; SCREEN_WIDTH],
+        slot_row: [NO_SLOT; SCREEN_HEIGHT],
     };
 
     let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8]); 6] = [
@@ -1083,9 +1285,16 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
                 label_ink,
             ),
             fill,
+            shape: Rounded::new(cell, TILE_RADIUS),
         };
     }
 
+    // WHY after the cells: the tables answer "which column of the grid is this
+    // surface column", which is a question about the pitch and nothing else, and
+    // building them here means a grid that changed its pitch cannot leave a stale
+    // table behind it. 2,160 divisions per repaint, against the 548k the deck band
+    // used to ask for.
+    plan.index_slots();
     plan
 }
 
@@ -1208,38 +1417,203 @@ pub fn app_badge(state: &LauncherState, index: usize) -> &[u8] {
 // Rounded rectangles
 // -----------------------------------------------------------------------------
 
+/// Every number one rounded rectangle's inside test needs, resolved once.
+///
+/// WHY a type: the surface asked `rounded_contains` for the same pixel up to three
+/// times -- the painter's own test, then twice more inside `rounded_outline`, the
+/// whole rect and the rect one step in -- and each call re-derived the same four
+/// edges from the rect. The edges are functions of the rect and its radius alone,
+/// which is frame data, so they belong in the plan and the pixel belongs here.
+///
+/// WHY `u16`: the plan holds one of these for the card, the date widget, the
+/// search field and all six tiles, and it is copied with the plan on every
+/// repaint. Every edge on a 720x1440 surface fits, which the gate below says out
+/// loud rather than assuming.
+#[derive(Clone, Copy)]
+struct ShapeEdges {
+    /// First column the rect owns, and one past its last.
+    x0: u16,
+    x1: u16,
+    /// First row the rect owns, and one past its last.
+    y0: u16,
+    y1: u16,
+    /// Columns between these two are straight-sided at the top and bottom.
+    left: u16,
+    right: u16,
+    /// Rows between these two are straight-sided at the left and right.
+    top: u16,
+    bottom: u16,
+    /// Corner radius after the rect's own `w / 2` / `h / 2` clamp.
+    rad: u16,
+}
+
+/// A point's coordinate is never wider than the surface it is drawn on, so an
+/// edge stored as `u16` cannot truncate one a pixel is actually compared with.
+const _: () = assert!(
+    SCREEN_WIDTH < u16::MAX as usize && SCREEN_HEIGHT < u16::MAX as usize,
+    "a shape's edges are stored as u16 and a surface wider than that would truncate them",
+);
+
+/// Saturates a surface coordinate into the `u16` an edge is stored in.
+///
+/// WHY clamping instead of casting: a rect the painter never clips against -- a
+/// band typed wider than the panel -- would otherwise wrap, and a wrapped edge
+/// reads as a shape with a hole in it. Clamped high, an edge past `u16::MAX` stays
+/// past every coordinate a pixel can carry, so the test it feeds cannot change.
+#[inline]
+fn edge(v: usize) -> u16 {
+    v.min(u16::MAX as usize) as u16
+}
+
+impl ShapeEdges {
+    /// The edges of `r` rounded to `rad`, exactly as [`rounded_contains`] derives
+    /// them per call.
+    fn of(r: Rect, rad: usize) -> ShapeEdges {
+        let rad = rad.min(r.w / 2).min(r.h / 2);
+        ShapeEdges {
+            x0: edge(r.x),
+            x1: edge(r.x + r.w),
+            y0: edge(r.y),
+            y1: edge(r.y + r.h),
+            left: edge(r.x + rad),
+            right: edge((r.x + r.w).saturating_sub(rad + 1)),
+            top: edge(r.y + rad),
+            bottom: edge((r.y + r.h).saturating_sub(rad + 1)),
+            rad: edge(rad),
+        }
+    }
+
+    /// Whether (`x`, `y`) is inside this rect, corners and all.
+    #[inline(always)]
+    fn contains(&self, x: usize, y: usize) -> bool {
+        if x < self.x0 as usize
+            || x >= self.x1 as usize
+            || y < self.y0 as usize
+            || y >= self.y1 as usize
+        {
+            return false;
+        }
+        let rad = self.rad as usize;
+        if rad == 0 {
+            return true;
+        }
+        let (left, right, top, bottom) = (
+            self.left as usize,
+            self.right as usize,
+            self.top as usize,
+            self.bottom as usize,
+        );
+        if (x >= left && x <= right) || (y >= top && y <= bottom) {
+            return true;
+        }
+        let cx = if x < left { left } else { right };
+        let cy = if y < top { top } else { bottom };
+        let dx = (x as i64) - (cx as i64);
+        let dy = (y as i64) - (cy as i64);
+        let r2 = (rad as i64) * (rad as i64);
+        let dx2 = dx * dx;
+        let dy2 = dy * dy;
+        // Continuous n=4 Lamé superellipse (flagship continuous squircle curvature)
+        (dx2 * dx2) + (dy2 * dy2) <= r2 * r2
+    }
+}
+
+/// One rounded rect and the same rect one step in, with both sets of edges
+/// resolved at plan time.
+///
+/// WHY the pair is one type: an outline is exactly "inside the shape, not inside
+/// the shape one pixel in", and the two tests share a pixel. Holding both edge
+/// sets together is what lets a painter ask the outer test once, use its answer
+/// for the fill *and* the ring, and never derive an edge again.
+#[derive(Clone, Copy)]
+struct Rounded {
+    outer: ShapeEdges,
+    inner: ShapeEdges,
+}
+
+impl Rounded {
+    /// The shape a plan slot holds before a grid has filled it.
+    ///
+    /// WHY it is empty rather than absent: a zero rect owns no pixel, so an
+    /// `Option<Rounded>` in the tile plan would have bought nothing over the
+    /// shape that already answers false for every coordinate.
+    const EMPTY: Rounded = Rounded {
+        outer: ShapeEdges {
+            x0: 0,
+            x1: 0,
+            y0: 0,
+            y1: 0,
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            rad: 0,
+        },
+        inner: ShapeEdges {
+            x0: 0,
+            x1: 0,
+            y0: 0,
+            y1: 0,
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            rad: 0,
+        },
+    };
+
+    /// The plan for `r` at radius `rad`.
+    ///
+    /// WHY the inner radius is `rad.saturating_sub(1)` before the inset's own
+    /// clamp: that is the arithmetic [`rounded_outline`] runs, and the ring has to
+    /// land on the same pixels it landed on before this struct existed.
+    fn new(r: Rect, rad: usize) -> Rounded {
+        Rounded {
+            outer: ShapeEdges::of(r, rad),
+            inner: ShapeEdges::of(r.inset(1), rad.saturating_sub(1)),
+        }
+    }
+
+    /// Whether (`x`, `y`) is inside the shape.
+    #[inline(always)]
+    fn fills(&self, x: usize, y: usize) -> bool {
+        self.outer.contains(x, y)
+    }
+
+    /// Whether (`x`, `y`) is on the shape's one-pixel ring.
+    ///
+    /// WHY the caller has to establish [`Rounded::fills`] first: that is what
+    /// [`rounded_outline`] means, and the ring is the outer shape minus the inner
+    /// one -- asking this of a pixel outside the shape would answer "yes" for the
+    /// whole surface behind it.
+    #[inline(always)]
+    fn outlines(&self, x: usize, y: usize) -> bool {
+        !self.inner.contains(x, y)
+    }
+}
+
 /// Whether a point is inside a rectangle whose corners are rounded to `rad`.
 ///
 /// WHY the shell needs this at all: `radius` is part of the theme, and a theme
 /// token that no drawing code consults is documentation. Every card, control and
 /// tile below is masked through here.
+///
+/// WHY it now defers to [`ShapeEdges`]: the per-pixel painters use the plan's
+/// [`Rounded`], and a second copy of the inside test is a second chance for the
+/// two to disagree. Answering from the same `contains` keeps the reference form
+/// honest about what the precomputed edges mean.
+#[allow(dead_code)]
 fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
-    if !r.contains(x, y) {
-        return false;
-    }
-    let rad = rad.min(r.w / 2).min(r.h / 2);
-    if rad == 0 {
-        return true;
-    }
-    let left = r.x + rad;
-    let right = r.x + r.w - 1 - rad;
-    let top = r.y + rad;
-    let bottom = r.y + r.h - 1 - rad;
-    if (x >= left && x <= right) || (y >= top && y <= bottom) {
-        return true;
-    }
-    let cx = if x < left { left } else { right };
-    let cy = if y < top { top } else { bottom };
-    let dx = (x as i64) - (cx as i64);
-    let dy = (y as i64) - (cy as i64);
-    let r2 = (rad as i64) * (rad as i64);
-    let dx2 = dx * dx;
-    let dy2 = dy * dy;
-    // Continuous n=4 Lamé superellipse (flagship continuous squircle curvature)
-    (dx2 * dx2) + (dy2 * dy2) <= r2 * r2
+    ShapeEdges::of(r, rad).contains(x, y)
 }
 
 /// The one-pixel outline of a rounded rectangle.
+///
+/// WHY it keeps its own derivation: this is the shape of the test, spelled out --
+/// outer minus inner -- and [`Rounded`] is its precomputed form. A painter that
+/// has a `Rounded` in hand uses both halves of that expression without calling
+/// this.
+#[allow(dead_code)]
 fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     rounded_contains(r, x, y, rad)
         && !rounded_contains(r.inset(1), x, y, rad.saturating_sub(1))
@@ -1249,14 +1623,15 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 // Status bar
 // -----------------------------------------------------------------------------
 
-fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32> {
+fn status_bar_pixel(x: usize, y: usize, theme: &Theme, bd: &mut Backdrop) -> Option<u32> {
     if y >= STATUS_BAR_HEIGHT {
         return None;
     }
     // The wallpaper under this pixel is one value; the ink that contrasts with
     // it and the composite behind each run both read that same value.
-    let bg = backdrop_ref(p, x, y);
-    let ink = layout::ink_on(theme, bg);
+    let p = bd.plan();
+    let bg = bd.bg();
+    let ink = bd.ink(theme);
 
     // WHY gated on the source rather than drawn from the buffer: with no RTC
     // authority granted to this shell the read can be refused, and a clock is the
@@ -1282,16 +1657,23 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
 /// "Welcome" with no reading. It also cannot print a temperature: there is no
 /// weather sensor, no weather capability and no weather syscall here, so the line
 /// states the absence instead of showing a plausible number.
-fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn greeting_pixel(
+    x: usize,
+    y: usize,
+    f: &Frame,
+    p: &Paint,
+    theme: &Theme,
+    bd: &mut Backdrop,
+) -> Option<u32> {
     // Check right date widget first
     if f.date_widget.contains(x, y) {
-        if !rounded_contains(f.date_widget, x, y, 24) {
+        if !p.date_shape.fills(x, y) {
             return None;
         }
-        if rounded_outline(f.date_widget, x, y, 24) {
+        if p.date_shape.outlines(x, y) {
             return Some(theme.outline_variant);
         }
-        let bg = backdrop_ref(p, x, y);
+        let bg = bd.bg();
         let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
         if let Some(c) = p.date_weekday.pixel_aa(x, y, p.date_weekday.ink, card_fill) {
             return Some(c);
@@ -1313,7 +1695,7 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     // Ink is taken per row against the wallpaper ramp. The wallpaper under this
     // pixel is one value, and the four runs asked for below all composite over
     // that same value.
-    let bg = backdrop_ref(p, x, y);
+    let bg = bd.bg();
     let ink = layout::ink_on(theme, bg);
     for run in p.greeting.iter() {
         if let Some(c) = run.pixel_inked_aa(x, y, ink, bg) {
@@ -1416,17 +1798,27 @@ fn card_row_name(row: usize) -> &'static [u8] {
     }
 }
 
-fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn card_pixel(
+    x: usize,
+    y: usize,
+    f: &Frame,
+    p: &Paint,
+    theme: &Theme,
+    bd: &mut Backdrop,
+) -> Option<u32> {
     if !f.card.contains(x, y) {
         return None;
     }
-    if !rounded_contains(f.card, x, y, 28) {
+    if !p.card_shape.fills(x, y) {
         return None;
     }
-    if rounded_outline(f.card, x, y, 28) {
+    if p.card_shape.outlines(x, y) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(p, x, y);
+    // WHY after the ring: the ring is a flat colour and the divider rows are two
+    // compares, and the composite behind the card is a four-channel blend. A pixel
+    // that answers either of the first two never needed the blend.
+    let bg = bd.bg();
     let card_fill = interos_std::font::blend(theme.surface_frosted, bg, 245);
 
     // Dividers between rows
@@ -1550,13 +1942,20 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Option<u32> {
+fn deck_pixel(
+    x: usize,
+    y: usize,
+    f: &Frame,
+    p: &Paint,
+    theme: &Theme,
+    bd: &mut Backdrop,
+) -> Option<u32> {
     let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
     }
     if let Some(empty) = deck.empty.as_ref() {
-        return empty.pixel_inked(x, y, empty.ink, backdrop_ref(p, x, y));
+        return empty.pixel_inked(x, y, empty.ink, bd.bg());
     }
 
     let index = deck.slot_at(x, y)?;
@@ -1565,11 +1964,11 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
     }
     let tile = &deck.cells[index];
 
-    if !rounded_contains(tile.cell, x, y, TILE_RADIUS) {
+    if !tile.shape.fills(x, y) {
         return None;
     }
-    if rounded_outline(tile.cell, x, y, TILE_RADIUS) {
-        return Some(_theme.outline_variant);
+    if tile.shape.outlines(x, y) {
+        return Some(theme.outline_variant);
     }
     let tile_fill = tile.fill;
 
@@ -1604,17 +2003,24 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
 /// WHY it is on this surface at all: the reference home panel has no search bar
 /// -- that lives on the App View panel -- but the shell opens the search from a
 /// tap here, so removing it would take a working control with it.
-fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+fn search_pixel(
+    x: usize,
+    y: usize,
+    f: &Frame,
+    p: &Paint,
+    theme: &Theme,
+    bd: &mut Backdrop,
+) -> Option<u32> {
     if !f.search.contains(x, y) {
         return None;
     }
-    if !rounded_contains(f.search, x, y, 28) {
+    if !p.search_shape.fills(x, y) {
         return None;
     }
-    if rounded_outline(f.search, x, y, 28) {
+    if p.search_shape.outlines(x, y) {
         return Some(theme.outline_variant);
     }
-    let bg = backdrop_ref(p, x, y);
+    let bg = bd.bg();
     let search_fill = interos_std::font::blend(theme.surface_frosted, bg, 240);
     let ink = theme.on_surface_variant;
 
@@ -1652,16 +2058,17 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
 /// at a luminance crossover, and a graded wallpaper crosses it inside a 33-row
 /// chevron. Sampling the mark's own centre means the whole of one control is
 /// drawn in one ink, and the reads are still integer-only and heap-free.
-fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+///
+/// WHY the ink is read from the plan and not from the backdrop here: that
+/// centre-point answer is the same for every pixel of the mark, so it is frame
+/// data, and `build` resolves it three times a repaint instead of this painter
+/// asking for a wallpaper read at a constant point once per pixel of the band.
+fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint) -> Option<u32> {
     if !f.nav.contains(x, y) {
         return None;
     }
     let target = launcher::nav::mark_at(x, y)?;
-    let plate = target.mark_box();
-    Some(layout::ink_on(
-        theme,
-        backdrop_ref(p, plate.center_x(), plate.center_y()),
-    ))
+    Some(p.nav_ink[target.index()])
 }
 
 // -----------------------------------------------------------------------------
@@ -1671,32 +2078,37 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
 pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let p = paint(x, y, state);
     let theme = active_theme();
+    // The pixel's one wallpaper read. Every layer below asks this for the colour
+    // behind it and for the ink that reads against it, so no pixel resolves the
+    // scene twice and none resolves it for a colour it then paints over.
+    let mut bd = Backdrop::new(p, x, y);
+    let f = &p.frame;
     if y < STATUS_BAR_HEIGHT {
-        if let Some(c) = status_bar_pixel(x, y, &theme, p) {
+        if let Some(c) = status_bar_pixel(x, y, &theme, &mut bd) {
             return c;
         }
     } else if y < 210 {
-        if let Some(c) = greeting_pixel(x, y, &p.frame, p, &theme) {
+        if let Some(c) = greeting_pixel(x, y, f, p, &theme, &mut bd) {
             return c;
         }
     } else if y < 655 {
-        if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
+        if let Some(c) = card_pixel(x, y, f, p, &theme, &mut bd) {
             return c;
         }
     } else if y >= 665 && y < 755 {
-        if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
+        if let Some(c) = search_pixel(x, y, f, p, &theme, &mut bd) {
             return c;
         }
     } else if y >= 795 && y < 1225 {
-        if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
+        if let Some(c) = deck_pixel(x, y, f, p, &theme, &mut bd) {
             return c;
         }
     } else if y >= launcher::nav::BAND_TOP {
-        if let Some(c) = nav_pixel(x, y, &p.frame, p, &theme) {
+        if let Some(c) = nav_pixel(x, y, f, p) {
             return c;
         }
     }
-    backdrop_ref(p, x, y)
+    bd.bg()
 }
 
 // -----------------------------------------------------------------------------
@@ -1853,18 +2265,26 @@ mod tests {
         let py = cell.y + 18;
         assert!(rounded_contains(cell, px, py, TILE_RADIUS));
         assert!(!rounded_outline(cell, px, py, TILE_RADIUS));
+        // The plan's precomputed shape is the same test the reference form is.
+        assert!(p.deck.cells[0].shape.fills(px, py));
+        assert!(!p.deck.cells[0].shape.outlines(px, py));
 
-        let color = deck_pixel(px, py, &p.frame, &p, &theme);
+        let mut bd = Backdrop::new(&p, px, py);
+        let color = deck_pixel(px, py, &p.frame, &p, &theme, &mut bd);
         assert_eq!(color, Some(theme.vibrant_container_bytes(b"dialer")), "Squircle must render vibrant pastel container fill");
 
         // Test outline pixel: must return outline_variant
         let ox = cell.x;
         let oy = cell.y + cell.h / 2;
-        let border_color = deck_pixel(ox, oy, &p.frame, &p, &theme);
+        assert!(rounded_outline(cell, ox, oy, TILE_RADIUS));
+        assert!(p.deck.cells[0].shape.fills(ox, oy) && p.deck.cells[0].shape.outlines(ox, oy));
+        let mut bd = Backdrop::new(&p, ox, oy);
+        let border_color = deck_pixel(ox, oy, &p.frame, &p, &theme, &mut bd);
         assert_eq!(border_color, Some(theme.outline_variant), "Border pixel must render outline_variant");
 
         // Test pixel outside deck: must return None
-        let outside = deck_pixel(0, 0, &p.frame, &p, &theme);
+        let mut bd = Backdrop::new(&p, 0, 0);
+        let outside = deck_pixel(0, 0, &p.frame, &p, &theme, &mut bd);
         assert_eq!(outside, None);
     }
 
