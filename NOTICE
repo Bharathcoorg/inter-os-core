@@ -1,0 +1,54 @@
+InterOS Core
+Copyright 2026 Bharath B R <https://github.com/Bharathcoorg>
+
+Licensed under the GNU Affero General Public License version 3 only
+(`LICENSE`, `LICENSES/AGPL-3.0-only.txt`). Each source file that can carry a
+comment does, and every other file is declared in `REUSE.toml`, so the licence
+travels with a file copied out of this tree rather than only with the repository.
+
+This notice records the parts that are not ours, and the parts of ours that were
+made from somebody else's work, so that attribution survives the same copy.
+
+Roboto Condensed
+----------------
+    Copyright 2015 Google Inc.
+    Apache License 2.0 -- `tools/fonts/Apache-2.0.txt`, `LICENSES/Apache-2.0.txt`
+    https://github.com/googlefonts/roboto-condensed
+
+Vendored unmodified at `tools/fonts/RobotoCondensed-Regular.ttf`.
+
+The guest type rasteriser does not read that file at run time; it is a build-host
+input. `tools/gen_typeface.py` walks its `cmap`, `glyf`, `loca` and `hmtx` tables
+and emits the outline coordinates as a static table, which the bare-metal guest can
+afford to pay for byte by byte. The generated table is therefore a work derived from
+Google's font, and it says so in its own header:
+
+    sdk/rust/interos-std/src/design/face.rs
+
+Nothing else in this repository comes from a third-party work.
+
+Fetched at run time, not distributed
+------------------------------------
+Device Studio loads two front-end libraries that are not part of this source tree
+and are not licensed to you by us:
+
+    noVNC              MPL-2.0   npm `@novnc/novnc` ^1.7.0
+    Lucide icon set    ISC       npm `lucide` ^1.47.0
+
+They are resolved from `emulator/node_modules` when installed locally, and Lucide
+falls back to a CDN copy in the browser (`emulator/index.html`). Obtain them from
+their own projects under their own licences.
+
+Formats, not code
+-----------------
+The decoders in `sdk/rust/interos-std` implement published specifications (PNG, GIF,
+baseline JPEG, WebP, WAV, X.509, TLS, GGUF) written from scratch with no reference
+implementation vendored. Fixtures under `sdk/rust/interos-std/tests/fixtures/` are
+generated here; those that model a hostile or malformed input are named for the
+property they test.
+
+Model weights
+-------------
+No model weights are distributed with this source. A GGUF file, if provisioned, is
+obtained separately and stays under the licence its distributor states; the repository
+carries the reader, not the weights.

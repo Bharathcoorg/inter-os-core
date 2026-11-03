@@ -1,0 +1,85 @@
+# REUSE.toml -- the licence of every file whose syntax cannot carry a notice.
+#
+# `tools/license_headers.py` stamps the SPDX notice into source it can comment in.
+# The rest -- manifests, documents, fixtures, baked media, device nodes -- is
+# declared here, which is what the REUSE specification prescribes for them. A file
+# absent from both is unlicensed as far as a scanner is concerned, so
+# `python tools/license_headers.py --coverage` fails when one is added.
+#
+# Every pattern below is `**/`-prefixed or directory-rooted, and `**` matches zero
+# directories as well as many, so a top-level file is covered by the same line as a
+# deeply nested one.
+
+version = 1
+
+# Read by a tool rather than a compiler: package manifests, cargo and rustup
+# configuration, lockfiles, the app `.rapp` manifests, tsconfig and devcontainer.
+# Cargo has a `license` field for the packages and the manifests now carry it; what
+# is declared here is the file itself, which cannot hold a comment anything would read.
+[[annotations]]
+path = ["**/*.toml", "**/*.json", "**/*.lock", "**/*.mod"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bharath B R <https://github.com/Bharathcoorg>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Documentation. Markdown can carry an HTML comment, but a notice above the title
+# is read by every renderer as text and the docs are the one part of this tree a
+# person reads before deciding whether they want the licence.
+[[annotations]]
+path = ["**/*.md"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bharath B R <https://github.com/Bharathcoorg>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Test fixtures and the sample media the decoders are proven against, including
+# the X.509 and TLS chain material in `sdk/rust/interos-std/tests/fixtures/`. These
+# are generated or transcribed here; none is a third-party work, and `NOTICE` says
+# what any of them that models an external format actually is.
+[[annotations]]
+path = [
+  "**/*.der",
+  "**/*.sig",
+  "**/*.png",
+  "**/*.webp",
+  "**/*.gif",
+  "**/*.ico",
+  "**/*.svg",
+  "**/*.flac",
+  "**/*.mp3",
+  "**/*.wav",
+  "**/*.avi",
+  "**/*.rgba",
+  "**/*.theme",
+  "**/*.txt",
+  "emulator/data/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bharath B R <https://github.com/Bharathcoorg>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Not source the compiler sees: `*.ld` selects sections and could carry a comment,
+# but it is a file whose layout a linker is picky about, so the notice goes here
+# rather than in it. `*.bat`/`*.cmd` open with `@echo off`, which a comment would
+# have to precede to stay inert.
+#
+# `LICENSE` and `LICENSES/` are deliberately absent: that text is the FSF's, not a
+# work this project authored, and the REUSE specification exempts the licence texts
+# a project ships by name.
+[[annotations]]
+path = ["**/*.ld", "**/*.bat", "**/*.cmd", "**/.gitignore", "**/.gitkeep", "NOTICE", "interos"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bharath B R <https://github.com/Bharathcoorg>"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# The one material this project does not own. The face is Google's, and re-declaring
+# it AGPL would be a false attribution rather than a licence; the text it ships under
+# is in `tools/fonts/Apache-2.0.txt` and `LICENSES/Apache-2.0.txt`.
+#
+# WHY `override`: `**/*.txt` and `**/*.ttf`-shaped patterns above would otherwise
+# aggregate a claim of ours onto Google's files, and an aggregate never outranks the
+# specific declaration.
+[[annotations]]
+path = ["tools/fonts/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright 2015 Google Inc. (Roboto Condensed, https://github.com/googlefonts/roboto-condensed)"
+SPDX-License-Identifier = "Apache-2.0"
