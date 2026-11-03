@@ -265,13 +265,31 @@ def test_what_is_painted_is_what_answers_the_press():
     # for the rungs the ladder no longer draws, so it went stale the moment the
     # rungs moved while the layout stayed correct. What is pinned here is the
     # derivation, which moves with the ladder and cannot be silently retuned.
+    #
+    # WHY the derivation is now written over a text-size level rather than over
+    # `font::line_height` alone: the two runs inside this scrim are drawn at the
+    # rung the person chose, so the scrim that answers their rows is the same sum
+    # at that rung. A `const` height built from the ladder could not see the
+    # setting, which is the defect `land_bar_h_at` and the gate beside it exist to
+    # hold shut: the bar is still the pair plus its air, and now it is that at
+    # every level the setting can hold, not only at one hundred per cent.
     flat = " ".join(main.split())
     assert (
-        "const LAND_BAR: Rect = Rect::new( 24, HEADER_TOP, 672, "
-        "LAND_BAR_AIR + font::line_height(2) + font::line_height(1) + LAND_BAR_AIR, );"
+        "const fn land_bar_h_at(level: u8) -> usize { LAND_BAR_AIR + line_at(2, level) "
+        "+ line_at(1, level) + LAND_BAR_AIR }"
     ) in flat, (
         "the landscape bar is no longer the two rungs it holds plus its air; its "
         "height is a remembered number again"
+    )
+    assert (
+        "const LAND_BAR: Rect = Rect::new(24, HEADER_TOP, 672, land_bar_h_at(PLATFORM_LEVEL));"
+    ) in flat, (
+        "the bar's compile-time rect must still be the platform rung of the same "
+        "derivation, or the gates below read a number the layout does not use"
+    )
+    assert "fn land_bar() -> Rect" in flat, (
+        "nothing reads the scrim at the published rung, so the scaled runs still "
+        "paint inside a box that cannot move"
     )
     assert "const LAND_BAR_AIR: usize =" in flat, (
         "the bar's air has to be one named constant, or the height and the runs "
@@ -280,26 +298,30 @@ def test_what_is_painted_is_what_answers_the_press():
     # The two runs stand on that same air and on each other's line boxes, and the
     # bar's foot is gated against the lower of them, so neither run's tail is
     # answered by the video the scrim stops asking for.
-    assert "const LAND_TITLE_Y: usize = LAND_BAR.y + LAND_BAR_AIR;" in flat
-    assert "const LAND_BADGE_Y: usize = LAND_TITLE_Y + font::line_height(2);" in flat
+    assert "const fn land_title_y_at(_level: u8) -> usize { LAND_BAR.y + LAND_BAR_AIR }" in flat
     assert (
-        "const _: () = assert!(LAND_BADGE_Y + font::line_height(1) "
-        "<= LAND_BAR.y + LAND_BAR.h);"
-    ) in flat, "the bar no longer holds the caption run it paints"
-    assert (
-        "const _: () = assert!(LAND_BACK_BTN.y + LAND_BACK_BTN.h <= LAND_BAR.y + LAND_BAR.h);"
-    ) in flat, "the landscape back control is no longer gated inside the bar"
+        "const fn land_badge_y_at(level: u8) -> usize { land_title_y_at(level) "
+        "+ line_at(2, level) }"
+    ) in flat
+    assert "const _: () = assert!(landscape_bar_holds_at_every_level());" in flat, (
+        "the bar no longer holds both runs, the chip and the lower scrim's bound "
+        "at every level the text-size setting can hold"
+    )
+    assert "const _: () = assert!(land_back_centred_at_every_level());" in flat, (
+        "the landscape back control is no longer gated inside the bar at every "
+        "selectable level"
+    )
     # The bar grows downward into the strip it shares with the transport panel,
     # so the panel is a named bound and both the bar and the painter read it.
     assert "const LAND_PANEL: Rect = Rect::new" in flat
-    assert "const _: () = assert!(LAND_BAR.y + LAND_BAR.h <= LAND_PANEL.y);" in flat, (
+    assert "if LAND_BAR.y + h > LAND_PANEL.y {" in flat, (
         "the landscape bar is no longer gated against the lower scrim it can grow into"
     )
     assert "let bot_panel = LAND_PANEL;" in painter
     assert "assert!(LAND_BAR.y >= std::design::viewport::STATUS_BAR_HEIGHT);" in main
-    assert "let top_bar = LAND_BAR;" in painter
-    assert "let back_hit = LAND_BACK_BTN;" in painter
-    assert "if LAND_BACK_BTN.contains(x, y)" in touch
+    assert "let top_bar = land_bar();" in painter
+    assert "let back_hit = land_back_btn();" in painter
+    assert "if land_back_btn().contains(x, y)" in touch
     for orphan in (
         "Rect::new(24, 24, 672, 80)",
         "Rect::new(36, 36, 52, 52)",

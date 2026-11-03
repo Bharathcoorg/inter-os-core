@@ -56,6 +56,50 @@ pub const BANDS_H: usize = RECIPIENT_BAND_H + COMPOSE_BAND_H;
 /// Where the two bands sit when the keyboard is down.
 pub const BANDS_TOP_IDLE: usize = 1284;
 
+/// The row the two bands end on when the keyboard is down.
+///
+/// WHY this is the edge that is fixed and not the top: the composer's ink stops
+/// here and the home gesture claims every row from here down (`hit_from` in the
+/// application). A band that grew its field therefore buys its rows from the top
+/// -- out of the scrolling list -- and never from the gesture.
+pub const BANDS_BOTTOM_IDLE: usize = BANDS_TOP_IDLE + BANDS_H;
+
+/// The rows the recipient band is given beyond its anchor, for the text size the
+/// application is drawing at.
+///
+/// WHY a cell and not an argument threaded through every layout number: the
+/// application publishes the person's rung once, before the surface exists, and
+/// sets this in the same call. Every band edge below then reads one integer
+/// instead of asking the settings store, which is what keeps a settings query out
+/// of the paint loop. Zero at the ladder, so the dock and both band places stay
+/// exactly where the platform's own keyboard reference box puts them.
+static BAND_EXTRA_ROWS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Records the rows the recipient band has to give its field at the published
+/// level. Called once, by the application, beside `DynamicType::publish`.
+pub fn set_band_extra_rows(rows: usize) {
+    BAND_EXTRA_ROWS.store(rows, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The rows the recipient band is carrying beyond its anchor.
+#[inline(always)]
+pub fn band_extra_rows() -> usize {
+    BAND_EXTRA_ROWS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The recipient band's height at the level the application is drawing at.
+#[inline(always)]
+pub fn recipient_band_h() -> usize {
+    RECIPIENT_BAND_H + band_extra_rows()
+}
+
+/// The height of both bands together at the published level.
+#[inline(always)]
+pub fn bands_h() -> usize {
+    BANDS_H + band_extra_rows()
+}
+
 /// Where the two bands sit when the keyboard is up: directly above it.
 ///
 /// WHY the bands sit on the keyboard's edge and not a row above it: a band
@@ -69,12 +113,16 @@ pub const BANDS_TOP_KEYBOARD: usize = KB_Y0 - BANDS_H;
 /// and a compose control the keyboard covers is a control the user cannot
 /// reach. The bands sit directly above the keyboard while it is up, and
 /// return to the bottom of the screen when it is dismissed.
+///
+/// WHY the height is asked and the anchor subtracted from the edges: the bands
+/// keep their bottom edge at every text size (see [`BANDS_BOTTOM_IDLE`]), so a
+/// taller field lifts their top by exactly the rows it needed.
 #[inline(always)]
 pub fn bands_top(keyboard: &Keyboard) -> usize {
     if keyboard.is_visible() {
-        BANDS_TOP_KEYBOARD
+        KB_Y0 - bands_h()
     } else {
-        BANDS_TOP_IDLE
+        BANDS_BOTTOM_IDLE - bands_h()
     }
 }
 
@@ -86,13 +134,17 @@ pub fn bands_top(keyboard: &Keyboard) -> usize {
 /// leave the pixels of the other position on the screen.
 pub fn dirty_region(keyboard: &Keyboard) -> (usize, usize) {
     let here = bands_top(keyboard);
-    let other = if keyboard.is_visible() {
-        BANDS_TOP_IDLE
-    } else {
-        BANDS_TOP_KEYBOARD
-    };
+    // The two places the bands can be, each lifted by the rows the published
+    // level has given the field.
+    let idle = BANDS_TOP_IDLE - band_extra_rows();
+    let raised = BANDS_TOP_KEYBOARD - band_extra_rows();
+    let other = if keyboard.is_visible() { idle } else { raised };
     let top = here.min(other);
-    let bottom = (here + BANDS_H).max(other + BANDS_H).max(KB_Y1);
+    let bottom = (here + bands_h())
+        .max(other + bands_h())
+        .max(idle + bands_h())
+        .max(raised + bands_h())
+        .max(KB_Y1);
     (top, bottom)
 }
 

@@ -10,6 +10,8 @@ apps/*/bin/
 .idea/
 .vscode/
 Thumbs.db
+# Agent scratch worktrees (multi-GB; never a repository input)
+.qoder/
 
 # Node dependencies
 node_modules/

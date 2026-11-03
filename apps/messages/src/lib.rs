@@ -1235,5 +1235,56 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn zz_probe_geometry() {
+        use interos_std::design::{font, typography};
+        let later = |a: usize, b: usize| if a > b { a } else { b };
+        let line = |rung: usize, lvl: u8| font::line_height_for_user_scale(rung, lvl);
+        let asc = |rung: usize, lvl: u8| font::ascent_for_user_scale(rung, lvl);
+        let cap = |rung: usize, lvl: u8| font::cap_for_user_scale(rung, lvl) as usize;
+        let capn = typography::CAPTION_SCALE;
+        let body = typography::BODY_SCALE;
+        let title = typography::TITLE_SCALE;
+        let ht = interos_std::design::viewport::HEADER_TOP;
+        let bs = interos_std::design::back_button::SIZE;
+        let hr = ht + bs / 2;
+        let mt = interos_std::design::touch::MIN_TARGET;
+        std::println!(
+            "RUNGS cap={capn} body={body} title={title} HDR_TOP={ht} BACK={bs} MIN_TOUCH={mt} BANDS_TOP_IDLE=1284 BANDS_H=130 KB_Y0=980"
+        );
+        for lvl in 0..4u8 {
+            let pill_h = later(40, line(capn, lvl) + 8);
+            let pill_bot = hr - pill_h / 2 + pill_h;
+            let ty = hr - asc(title, lvl) + cap(title, lvl) / 2;
+            let hdr_y1 = later(later(ty + line(title, lvl), ht + bs), pill_bot) + 2 + 2;
+            let sf_h = later(48, line(body, lvl) + 8);
+            let band = later(52, sf_h + 4);
+            let search_y1 = hdr_y1 + 8 + band;
+            let content_top = search_y1 + 16;
+            let extra = later(mt, line(body, lvl) + 8).saturating_sub(mt);
+            let viewport_idle = (1284usize.saturating_sub(extra)).saturating_sub(content_top);
+            let pitch = 12 + line(capn, lvl) + 4 + line(body, lvl) + 12 + 8;
+            let rows = viewport_idle / pitch;
+            let bubble = later(76, line(body, lvl) + 4 + line(capn, lvl) + 16);
+            let card_body = later(104, line(body, lvl) + 4 + line(capn, lvl) + 24);
+            let shift = asc(body, lvl) - asc(capn, lvl);
+            std::println!(
+                "LVL {lvl}: line(cap)={} line(body)={} line(title)={} asc(body)={} asc(cap)={} pill_h={pill_h} hdr_y1={hdr_y1} sf_h={sf_h} band={band} search_y1={search_y1} content_top={content_top} band_extra={extra} bands_top_idle={} viewport_idle={viewport_idle} pitch={pitch} rows={rows} bubble={bubble} card_body={card_body} shift={shift} shift+line(cap)={} compose_field_h={}",
+                line(capn, lvl), line(body, lvl), line(title, lvl), asc(body, lvl), asc(capn, lvl),
+                1284 - extra, shift + line(capn, lvl), later(mt, line(body,lvl)+8)
+            );
+            // empty card: foot is the keyboard-up band top
+            let bands_top_kb = 980usize.saturating_sub(130).saturating_sub(extra);
+            let card_h = bands_top_kb.saturating_sub(8).saturating_sub(560);
+            std::println!(
+                "   empty_card top=560 h={card_h} bottom={} 832<bottom?={}  810+line(cap)={} convo_top_holds_bubble?={}",
+                560 + card_h,
+                832 < 560 + card_h,
+                810 + line(capn, lvl),
+                content_top >= bubble
+            );
+        }
+    }
 }
 

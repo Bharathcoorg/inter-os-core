@@ -37,6 +37,23 @@ pub const TAPE_LINE_H: usize = interos_std::design::typography::CAPTION_LINE_PX;
 /// The most lines an expression wraps into.
 pub const TAPE_MAX_LINES: usize = 10;
 
+/// The height of one keypad row, in pixels.
+///
+/// WHY named here and not only in the binary: the row is the plate a key label
+/// is drawn on, and the plate a thumb lands on, and the chrome's run-time clamp
+/// for a scaled label has to name it. A binary is built without a test harness,
+/// so the number the guard is checked against lives with the engine.
+pub const KEYPAD_ROW_H: usize = 140;
+
+/// The most history rows the drawer paints at once.
+///
+/// WHY a ceiling and not just the rows the person has: the drawer is an overlay
+/// over the keypad, and a ledger that keeps growing walks off the sheet. The
+/// ceiling is the ladder's own answer -- how many rows stand inside the sheet at
+/// one hundred per cent -- and a larger text size shows fewer of them, never
+/// more.
+pub const HISTORY_MAX_ROWS: usize = 8;
+
 /// The cap height of the result on the display: the title rung.
 ///
 /// WHY a cap height and not a scale: the platform's ladder names the size a
@@ -1115,7 +1132,20 @@ impl CalculatorState {
         let expr = self.tape_expression();
         let mut lines = [[0u8; 128]; TAPE_MAX_LINES];
         let mut lens = [0usize; TAPE_MAX_LINES];
-        let count = wrap_expression(expr, TAPE_WRAP_CAP_PX, TAPE_COLUMN_W, &mut lines, &mut lens);
+        // WHY the wrap cap follows the published text size: the tape is wrapped
+        // to this cap and painted at `chrome::cap_user` of the rung beside it,
+        // so a lane judged at the ladder and drawn at a raised rung is a line
+        // that spills past the card's right edge. The same ratio scales both,
+        // so the cut happens where the ink actually ends. At the default level
+        // `cap_user` answers the ladder's own number, and the wrap is the
+        // shipped one.
+        let count = wrap_expression(
+            expr,
+            chrome::cap_user(TAPE_WRAP_CAP_PX),
+            TAPE_COLUMN_W,
+            &mut lines,
+            &mut lens,
+        );
         self.tape_lines = lines;
         self.tape_lens = lens;
         self.tape_count = count;

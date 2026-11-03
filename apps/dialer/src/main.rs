@@ -82,6 +82,7 @@
 #![no_std]
 #![no_main]
 
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::components;
 use interos_std::design::outline_text;
 use interos_std::design::scroll::ScrollState;
@@ -93,8 +94,8 @@ use dialer::chrome;
 use interos_std::design::color;
 use dialer::ModemCallState;
 use dialer::{
-    contacts_scroll_extents, dtmf_enabled, parse_audio_documents, put_decimal,
-    recents_scroll_extents, set_dtmf_enabled, RingtoneChoice, SettingsRow,
+    dtmf_enabled, parse_audio_documents, put_decimal, recents_scroll_extents, set_dtmf_enabled,
+    RingtoneChoice, SettingsRow,
     CONTACT_ROW_H as LIB_CONTACT_ROW_H, CONTACTS_LIST_Y0 as LIB_CONTACTS_LIST_Y0,
     CONTACTS_VIEWPORT_Y1 as LIB_CONTACTS_VIEWPORT_Y1, RECENTS_ROW_H as LIB_RECENTS_ROW_H,
     RECENTS_VIEWPORT_Y1 as LIB_RECENTS_VIEWPORT_Y1, RECENTS_Y0 as LIB_RECENTS_Y0,
@@ -1561,8 +1562,18 @@ impl DialerApp {
         let recents = recents_scroll_extents(self.recents_len);
         self.recents_scroll = recents.state();
         let rows = self.contacts_visible_rows();
-        let contacts = contacts_scroll_extents(rows);
-        self.contacts_scroll = contacts.state();
+        // WHY the contact list's extents are built here rather than asked of the
+        // library: a row's height and the window it scrolls in are both functions
+        // of the text-size level the person chose -- the row grows so a scaled run
+        // is not clipped by its own plate, and the notice band under the list takes
+        // its rows from the list, not from the action discs. `contacts_scroll_extents`
+        // states the same pair at the platform rung, which is what these two
+        // numbers are at one hundred per cent.
+        self.contacts_scroll = ScrollState::new(
+            rows * contact_row_h(),
+            contacts_viewport_y1().saturating_sub(LIST_Y0),
+            0,
+        );
     }
 
     /// How many contact rows the list shows, after the favourites filter.
@@ -1651,7 +1662,7 @@ impl DialerApp {
             }
             DialerSection::Contacts => {
                 // The editor is a text entry, so a drag there is not a scroll.
-                if self.contact_edit.is_none() && y >= LIST_Y0 && y < LIST_VIEWPORT_Y1 {
+                if self.contact_edit.is_none() && y >= LIST_Y0 && y < contacts_viewport_y1() {
                     self.contacts_scroll.apply_drag(dy);
                     return true;
                 }
@@ -1680,6 +1691,15 @@ impl DialerApp {
 
     /// Rebuilds the settings surface's values.
     pub fn refresh_settings_values(&mut self) {
+        // WHY the text-size rung is published from here: this is the call the
+        // launcher makes before the first frame is rendered and again whenever the
+        // settings section is opened, so the store is already being read on the
+        // path that needs the answer. Half of honouring "Text size" is publishing
+        // what the store says once, before anything is drawn; the other half is
+        // this file's `run_rows`, `fit_run` and `run_ink`, which draw at the rung
+        // that publish handed the renderer. Reading the store per glyph instead
+        // would put a syscall inside the per-pixel paint loop.
+        publish_text_scale();
         let mut scratch = [0u8; 48];
         for (index, row) in SettingsRow::ORDER.iter().enumerate() {
             let len = self.settings_row_value(*row, &mut scratch);
@@ -2267,19 +2287,92 @@ impl DialerApp {
 // Canonical InterOS Typography
 // -----------------------------------------------------------------------------
 
-/// Anti-aliased run draw, clipped to the run's own line box.
+/// Anti-aliased run draw, at the text-size level this app published.
 ///
-/// `bg` is the local fill the text actually sits on â€” a tab capsule, the SOS
-/// disc, the keypad disc, the dock plate â€” not the page background. Blending
+/// `bg` is the local fill the text actually sits on — a tab capsule, the SOS
+/// disc, the keypad disc, the dock plate — not the page background. Blending
 /// every glyph edge toward one hardcoded colour tinted the AA fringe of any run
 /// drawn on a darker local fill.
 ///
 /// `max_w` is the width of the column the run is drawn in. WHY it is a
 /// parameter: the outline face advances by the designer's table and the bitmap
-/// face by the cell, so a run that was ellipsized against the bitmap measure
-/// can be wider in the outline face than the column it was given. The platform's
-/// own placement refuses a run that does not fit the column it was told about,
-/// and the bitmap face - which respects the ellipsize - draws it instead.
+/// face by the cell, so a run that was fitted against one measure can be wider
+/// than the column it was given in the other. The platform's own placement
+/// refuses a run that does not fit the column it was told about, and the bitmap
+/// face — which respects the fit — draws it instead.
+///
+/// The run is fitted to `max_w` with [`fit_run`] before it is placed, and placed
+/// at the cap [`cap_at`] gives for its rung at the published level, inside the
+/// line box [`run_rows`] reserves for the same rung. All three move together:
+/// a run cut with the platform's advances but drawn at a scaled em puts its
+/// ellipsis outside the plate, and a scaled cap inside the platform's box is
+/// clipped text -- the two halves of the defect this app's "Text size" row used
+/// to have, where the setting resized Settings alone.
+///
+/// At [`PLATFORM_LEVEL`] -- one hundred per cent, what an app that never read the
+/// setting draws -- every number below is the ladder's own, so the placement, the
+/// band and the fallback answer exactly what this function answered before the
+/// setting reached it, and no pixel of the shipped screens moves.
+#[inline(always)]
+fn run_ink(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let lvl = level();
+    if lvl == PLATFORM_LEVEL {
+        // The ladder's own path, unchanged.
+        if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), bold) {
+            let (rx, rtop, rw, rh) = run.bounds();
+            if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+                return run.pixel(x, y, color, bg);
+            }
+            return None;
+        }
+        if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + run_rows(scale) {
+            return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold);
+        }
+        return None;
+    }
+    // The fitted run, at the published rung. WHY the buffer is this wide: the
+    // longest run any screen in this app draws is the recents empty-state body,
+    // and a cut only ever removes bytes, so a run that starts shorter than this
+    // can never be widened past it by fitting.
+    let mut buf = [0u8; 128];
+    let n = fit_run(text, scale, max_w, &mut buf);
+    if n == 0 {
+        return None;
+    }
+    let run_text = &buf[..n];
+    let cap = cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, run_text, Some(max_w), bold) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. WHY the band grows with the
+    // level: the cell this face draws is `16 * scale` rows, and a run fitted to a
+    // scaled em walks taller than the unscaled grid, so the platform's band would
+    // cut the descenders of the very run it enlarged.
+    let rows = run_rows(scale);
+    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + rows {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, run_text, color, bg, bold);
+    }
+    None
+}
+
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -2292,22 +2385,7 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale == 0 || text.is_empty() {
-        return None;
-    }
-    // The outline face, chosen ONCE for the run rather than once per pixel.
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
-        let (rx, rtop, rw, rh) = run.bounds();
-        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
-            return run.pixel(x, y, color, bg);
-        }
-        return None;
-    }
-    // Bitmap fallback box
-    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + run_rows(scale) {
-        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
-    }
-    None
+    run_ink(x, y, x0, y0, scale, text, max_w, color, bg, false)
 }
 
 #[inline(always)]
@@ -2322,20 +2400,7 @@ fn test_text_bold(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale == 0 || text.is_empty() {
-        return None;
-    }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), true) {
-        let (rx, rtop, rw, rh) = run.bounds();
-        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
-            return run.pixel(x, y, color, bg);
-        }
-        return None;
-    }
-    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + run_rows(scale) {
-        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true);
-    }
-    None
+    run_ink(x, y, x0, y0, scale, text, max_w, color, bg, true)
 }
 
 /// The backdrop colour of a contact's initial disc.
@@ -2348,13 +2413,355 @@ fn contact_avatar_color(_name: &[u8]) -> u32 {
     THEME.on_surface // Slate
 }
 
-/// Rows a run at `scale` reserves: the platform's own line box for that rung,
-/// which is the outline face's ascent plus descent rather than the bitmap cell.
-/// WHY a local `const fn`: every run box below is derived from a compile-time
-/// constant, and this names the rung's box once for all of them.
-const fn run_rows(scale: usize) -> usize {
-    std::design::font::line_height(scale)
+// -----------------------------------------------------------------------------
+// The person's text size, and the geometry that follows it
+// -----------------------------------------------------------------------------
+
+/// The ladder's own level: one hundred per cent, what a surface that never read
+/// `display.text_scale` draws and what every constant in this file was authored
+/// against. At this level every helper below answers the ladder's number
+/// exactly, so publishing nothing cannot move a pixel.
+const PLATFORM_LEVEL: u8 = std::design::font::TEXT_SCALE_NORMAL;
+
+/// The largest level the setting can hold. Compile-time gates below are measured
+/// at every level from [`PLATFORM_LEVEL`] to this one, because a row that only
+/// fits at one hundred per cent does not fit the setting at all.
+const EXTRA_LARGE_LEVEL: u8 = std::design::font::TEXT_SCALE_EXTRA_LARGE;
+
+/// The rung this app will not shrink a run below, whatever plate it has to fit.
+///
+/// WHY a floor at all: the alternative to clamping a run inside a fixed plate is
+/// to let its ink leave the plate, and clipped text is the defect this app is not
+/// allowed to have. The floor is the platform's own caption rung, whose cap at
+/// extra large is larger than the ladder's section heading asks for -- so a
+/// clamped run is still a run the person's setting grew, only not as large as the
+/// plate cannot hold.
+const MIN_RUNG: usize = 1;
+
+/// The level this app draws at: the rung `publish_text_scale` handed the renderer
+/// from `display.text_scale`, or [`PLATFORM_LEVEL`] before that.
+///
+/// WHY a cell and not a settings query: the query is a syscall, and this answer is
+/// read once per run whose geometry is derived -- inside a per-pixel paint loop,
+/// where a syscall per glyph would cost the frame.
+#[inline]
+fn level() -> u8 {
+    std::design::font::user_text_scale()
 }
+
+/// The line box rung `scale` reserves at `level`.
+const fn line_at(scale: usize, lvl: u8) -> usize {
+    std::design::font::line_height_for_user_scale(scale, lvl)
+}
+
+/// The cap height a run at `scale` is inked at on `level`.
+const fn cap_at(scale: usize, lvl: u8) -> u32 {
+    std::design::font::cap_for_user_scale(scale, lvl)
+}
+
+/// The em a run at `scale` is rasterised at on `level`.
+const fn em_at(scale: usize, lvl: u8) -> u32 {
+    std::design::font::em_for_user_scale(scale, lvl)
+}
+
+/// The ascent a run at `scale` reserves on `level`.
+const fn ascent_at(scale: usize, lvl: u8) -> usize {
+    std::design::font::ascent_for_user_scale(scale, lvl)
+}
+
+/// Rows a run at `scale` reserves: the platform's own line box for that rung,
+/// asked at the text-size level the person chose.
+///
+/// WHY a run-time function and not the `const fn` this replaced: a `const fn`
+/// ladder is evaluated when the binary is built, so a box derived from one can
+/// never see the setting -- which is precisely how "Text size" came to resize
+/// Settings and nothing else. Every box in this file that stacks or centres a
+/// run asks this, and the compile-time gates beside each of them are re-written
+/// as loops over the four levels, so the bound is still checked at build time
+/// rather than moved to run time and trusted.
+#[inline]
+fn run_rows(scale: usize) -> usize {
+    line_at(scale, level())
+}
+
+/// The advance a run takes at `scale`, at the level `lvl` names.
+fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if lvl == PLATFORM_LEVEL {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        interos_std::design::font::measure_user_scale(text, scale, lvl)
+    }
+}
+
+/// The advance a run takes at `scale`, at the level this app draws at.
+#[inline]
+fn run_w(text: &[u8], scale: usize) -> usize {
+    run_w_at(text, scale, level())
+}
+
+/// The x a run at `scale` starts on to sit centred inside `available` rows of
+/// width, at the level this app draws at.
+#[inline]
+fn center_x(text: &[u8], scale: usize, available: usize) -> usize {
+    available.saturating_sub(run_w(text, scale)) / 2
+}
+
+/// The advance of a byte the outline face has no glyph for, at `lvl`.
+///
+/// WHY the grid is scaled with the rung: the bitmap cell is a fixed 16px grid
+/// times the scale, and a run drawn at a scaled em walks wider than that grid.
+/// At [`PLATFORM_LEVEL`] the ratio is one, so nothing moves.
+#[inline]
+fn cell_advance(c: u8, scale: usize, lvl: u8) -> usize {
+    let cell = std::design::font::advance_of(c, false) * scale;
+    if lvl == PLATFORM_LEVEL {
+        return cell;
+    }
+    let em = em_at(scale, lvl) as usize;
+    let base = em_at(scale, PLATFORM_LEVEL) as usize;
+    if base == 0 {
+        cell
+    } else {
+        cell.saturating_mul(em) / base
+    }
+}
+
+/// Copies `text` into `out`, appending `...` when it does not fit `max_w` at
+/// `scale` on the level this app draws at, and returns the bytes written (0 when
+/// even the ellipsis cannot fit, so the caller draws nothing rather than a
+/// sliced word).
+///
+/// WHY the cut follows the rung: `max_w` is the width of the box the layout
+/// reserved, and the advances are compared against it one glyph at a time.
+/// Cutting a run that is being drawn at a scaled em with the platform's
+/// advances keeps glyphs that no longer fit, which puts the ellipsis past the
+/// plate's edge -- the overflow the fitting pass exists to prevent. This is the
+/// same convention `font::ellipsize` states, at the rung the person chose.
+fn fit_run(text: &[u8], scale: usize, max_w: usize, out: &mut [u8]) -> usize {
+    let lvl = level();
+    if run_w_at(text, scale, lvl) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots_w = run_w_at(DOTS, scale, lvl);
+    if dots_w > max_w || out.len() < 3 {
+        return 0;
+    }
+    let budget = max_w - dots_w;
+    let em = em_at(scale, lvl);
+    let mut used = 0usize;
+    let mut fit = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let mut adv = std::design::typeface::advance_px(c, em) as usize;
+        if adv == 0 {
+            adv = cell_advance(c, scale, lvl);
+        }
+        if used + adv > budget || fit + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        fit = i + 1;
+    }
+    out[..fit].copy_from_slice(&text[..fit]);
+    out[fit..fit + 3].copy_from_slice(DOTS);
+    fit + 3
+}
+
+/// The largest rung at or below `want` whose line box fits `available` rows at
+/// the level this app draws at, and never below [`MIN_RUNG`].
+///
+/// WHY a run-time clamp instead of a compile-time `assert!`: the plate this bounds
+/// (the header band, a keypad disc, a pill) is fixed chrome, and a fixed plate
+/// cannot hold a run at every selectable level. The bound stays checked at build
+/// time -- the gates beside each caller below loop the four levels and assert the
+/// clamped rung fits -- so what moved from compile time to run time is the
+/// *choice* of rung, never the guarantee that the ink stays inside its plate.
+fn fit_rung(want: usize, available: usize) -> usize {
+    let mut rung = want;
+    while rung > MIN_RUNG && run_rows(rung) > available {
+        rung -= 1;
+    }
+    rung.max(MIN_RUNG)
+}
+
+/// The largest rung at or below `want` whose widest label in `labels` fits
+/// `max_w` at the level this app draws at.
+///
+/// WHY the whole row is measured together: four segments drawn at four different
+/// rungs do not read as one control, so the row takes the largest rung every one
+/// of its labels fits.
+fn fit_rung_labels(want: usize, max_w: usize, labels: &[&[u8]]) -> usize {
+    let mut rung = want;
+    loop {
+        if rung == MIN_RUNG {
+            return rung;
+        }
+        let mut widest = 0usize;
+        for l in labels {
+            let w = run_w(l, rung);
+            if w > widest {
+                widest = w;
+            }
+        }
+        if widest <= max_w {
+            return rung;
+        }
+        rung -= 1;
+    }
+}
+
+/// The rows a keypad disc keeps free around its stacked digit and sublabel.
+const KEY_STACK_PAD: usize = 8;
+
+/// The rungs a keypad cell draws its digit and its sublabel at, at level `lvl`:
+/// the cell's own rungs while the disc holds both line boxes, and the largest
+/// pair below them that it does hold.
+///
+/// WHY the pair steps together and the digit gives way first: a keypad reads by
+/// hierarchy -- the digit above the letters -- so the rung with the larger claim on
+/// the disc is the one trimmed, and the sublabel only steps down once the digit has
+/// reached it. The pair never goes below [`MIN_RUNG`], and the gate beside
+/// `KEY_RADIUS` proves the stack the clamp answers fits the disc at every
+/// selectable level.
+const fn key_rungs_at(lvl: u8) -> (usize, usize) {
+    let avail = 2 * KEY_RADIUS - KEY_STACK_PAD;
+    let mut digit = KEY_DIGIT_SCALE;
+    let mut sub = KEY_SUB_SCALE;
+    while sub > MIN_RUNG && line_at(digit, lvl) + line_at(sub, lvl) > avail {
+        sub -= 1;
+    }
+    while digit > sub && line_at(digit, lvl) + line_at(sub, lvl) > avail {
+        digit -= 1;
+    }
+    // Both walks stop at or above `MIN_RUNG`: the sublabel starts there and the
+    // digit gives way only while it still stands above the sublabel. WHY no
+    // `Ord::max` here: `const fn` may not call it -- `Ord` is not a const trait.
+    (digit, sub)
+}
+
+/// The rungs the keypad draws at, at the level this app draws at.
+fn key_rungs() -> (usize, usize) {
+    key_rungs_at(level())
+}
+
+/// The row the bottom dock's label starts on: its authored row, raised when the
+/// rung's own box would run past the dock plate.
+///
+/// WHY the label moves up rather than down: `DOCK_Y1` is the plate's last row and
+/// below it is the shell's home band, which this app does not own and must not
+/// resize. At one hundred per cent the box already ends inside the plate, so the
+/// authored row stands.
+fn dock_label_y0() -> usize {
+    let rows = run_rows(DOCK_LABEL_SCALE);
+    let last = DOCK_Y1.saturating_sub(rows);
+    if DOCK_LABEL_Y0 < last {
+        DOCK_LABEL_Y0
+    } else {
+        last.max(DOCK_Y0)
+    }
+}
+
+/// The text-size level this app draws at, read from the setting the person chose
+/// and handed to the renderer.
+///
+/// WHY here and not per frame: half of adopting the setting is publishing it, and
+/// half is drawing through the helpers that read it. A surface that publishes and
+/// still measures with the `const` ladder shows the person nothing; one that
+/// measures at a published level it never set is stuck at one hundred per cent.
+/// Both halves are this app's own -- see `run_rows`, `fit_run` and `test_text`.
+///
+/// WHY the value the store cannot name leaves the rung alone: an unreadable value
+/// is not a level the person chose, and publishing a rung the store never named
+/// would resize the screen on a guess. The default is [`PLATFORM_LEVEL`], which
+/// is the ladder.
+fn publish_text_scale() -> UserTextScale {
+    let mut buf = [0u8; 32];
+    let mut scale = UserTextScale::from_u8(level());
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        if let Some(read) = UserTextScale::from_settings_value(&buf[..n]) {
+            scale = read;
+        }
+    }
+    DynamicType::new(scale).publish()
+}
+
+/// Whether the rung's inked box clears both the status band that paints over the
+/// header's top and the rule that paints on its bottom row, at level `lvl`.
+///
+/// WHY both bounds: the status band owns `0..STATUS_BAR_HEIGHT` and answers the
+/// pixel function before the header's content is reached, and `y >= HEADER_H`
+/// answers the hairline rule. A run whose cap reaches above the band or whose
+/// descender reaches below the rule is clipped by chrome this app does not own,
+/// so the rung is clamped instead of the ink.
+const fn header_title_fits(r: usize, lvl: u8) -> bool {
+    let cap = cap_at(r, lvl) as usize;
+    let descent = line_at(r, lvl) - ascent_at(r, lvl);
+    let baseline = HEADER_ROW + cap / 2;
+    baseline >= HEADER_TOP + cap && baseline + descent <= HEADER_H
+}
+
+/// The rung the header's title is drawn at: `TITLE_SCALE` where the band holds
+/// it, and the largest rung below that which the band does hold at the level this
+/// app draws at.
+///
+/// WHY a run-time choice: the header is fixed chrome of `HEADER_H` rows, and at
+/// extra large the title rung's own box overruns it. The bound stays a
+/// compile-time fact -- `the_header_title_fits_every_selectable_level` below
+/// checks the rung this function can answer, for every level -- so what moved to
+/// run time is which rung is picked, never whether the ink fits its band.
+fn header_title_rung() -> usize {
+    let lvl = level();
+    header_title_rung_at(lvl)
+}
+
+/// The rung the header's title takes at level `lvl` -- the same walk
+/// [`header_title_rung`] takes, in a form the compile-time gate below can run.
+const fn header_title_rung_at(lvl: u8) -> usize {
+    let mut rung = TITLE_SCALE;
+    while rung > MIN_RUNG && !header_title_fits(rung, lvl) {
+        rung -= 1;
+    }
+    rung
+}
+
+/// The row the header's title's line box starts on, at rung `r` and level `lvl`.
+const fn header_title_y0_at(r: usize, lvl: u8) -> usize {
+    HEADER_ROW.saturating_sub(ascent_at(r, lvl)) + cap_at(r, lvl) as usize / 2
+}
+
+/// The row the header's title's line box starts on, at this app's level.
+fn header_title_y0() -> usize {
+    let lvl = level();
+    header_title_y0_at(header_title_rung_at(lvl), lvl)
+}
+
+/// The rows the header's title reserves at its rung and level.
+fn header_title_rows() -> usize {
+    line_at(header_title_rung_at(level()), level())
+}
+
+/// WHY these are compile-time gates: the header band is fixed chrome of
+/// `HEADER_H` rows with the status band owning its top, so a title whose inked
+/// box leaves the band is clipped by chrome this app does not own. The clamp in
+/// [`header_title_rung`] is the run-time half, and these are the build-time half:
+/// the rung the clamp can answer is checked at every selectable level, and the
+/// platform rung is tied back to the `TITLE_Y0` every shipped screen was authored
+/// against -- so a rung that escapes its band fails the build rather than the
+/// render, and adopting the published helpers is proven to have moved no pixel at
+/// one hundred per cent.
+const _: () = {
+    assert!(header_title_y0_at(TITLE_SCALE, PLATFORM_LEVEL) == TITLE_Y0);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        let rung = header_title_rung_at(lvl);
+        assert!(header_title_fits(rung, lvl));
+        assert!(rung >= MIN_RUNG);
+        lvl += 1;
+    }
+};
+
 
 /// The row the app's own chrome starts at. WHY not the top of the panel: the
 /// status band owns `0..STATUS_BAR_HEIGHT` and answers the pixel function before
@@ -2432,6 +2839,42 @@ const _: () = assert!(W == dialer::tab_row::SURFACE_W);
 const _: () = assert!(TAB4_X1 == dialer::tab_row::row_right_edge());
 const _: () = assert!(dialer::tab_row::rung_band_h() <= TAB_BAND_H);
 
+/// The rung the four tab labels are drawn at, at level `lvl`: `TAB_SCALE` while
+/// every label fits a column and the band holds the box, and the largest rung
+/// below it that does both.
+///
+/// WHY one rung for all four: four segments lettered at four different sizes do
+/// not read as one control, so the row takes the largest rung its widest label
+/// fits. WHY a clamp instead of an ellipsis: `Dial`, `Recents`, `Contacts` and
+/// `Settings` are the names of the four sections, and a tab that reads
+/// "Contac..." has stopped naming the thing it opens.
+/// WHY this is a run-time guard where the authored tie was a `const` one: the
+/// column bound is a width, and the SDK's advance tables are not `const fn`, so
+/// no build-time proof can see the person's rung at all. The clamp is the half
+/// that can act; the gate below keeps the ties a build can actually prove -- the
+/// platform rung's own box, and that the clamp's floor fits the band at every
+/// level the setting holds. Neither weakens `rung_band_h() <= TAB_BAND_H`, which
+/// still checks the rung the shipped row was authored against.
+fn tab_rung() -> usize {
+    let in_band = fit_rung(TAB_SCALE, TAB_BAND_H);
+    fit_rung_labels(in_band, TAB_W, &TAB_LABELS)
+}
+
+/// WHY these stay `const`: they are the two facts the run-time clamp depends on
+/// and cannot check itself -- that at one hundred per cent the row's own rung
+/// still fits the band it has always fitted, so the shipped pixels do not move,
+/// and that the rung the clamp is allowed to fall back to is one the band holds
+/// at every selectable level. A clamp whose floor did not fit would be a silent
+/// clip wearing a guard.
+const _: () = {
+    assert!(line_at(TAB_SCALE, PLATFORM_LEVEL) <= TAB_BAND_H);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        assert!(line_at(MIN_RUNG, lvl) <= TAB_BAND_H);
+        lvl += 1;
+    }
+};
+
 // Dialed-number display card. The card's own edges are declared once, in
 // `chrome`, because the controls drawn on it are declared against them.
 const DISPLAY_X0: usize = chrome::DISPLAY_X0;
@@ -2453,20 +2896,112 @@ const PLUS_CY: usize = chrome::PLUS_CY;
 const PLUS_R: i32 = chrome::DISC_R;
 const PLACEHOLDER_SCALE: usize = type_scale::BODY;
 const PLACEHOLDER_Y0: usize = 250;
-/// Real call-outcome caption under the dialed number. A scale-1 run owns
-/// run_rows(1) = 27 rows, so 350..377 clears the 63-row scale-4 digit box at
-/// 215..278 and stays inside the card's 380-row bottom edge.
+/// Real call-outcome caption under the dialed number. The rung-1 box the number
+/// leaves behind ends above the pill plate and the plate ends above this row, so
+/// the caption clears both at every level the setting holds -- see the gate under
+/// `DIGITS_PLATE_Y1`, which states the tie instead of this comment restating it.
 const OUTCOME_Y0: usize = 350;
+
+/// The row the dialed number starts on, and the first row the plate below it
+/// owns. The number is the one run on the card a person reads at arm's length
+/// while they dial, so its rung is the largest the plate between them holds.
+///
+/// WHY the plate stops at the pills and not at the card's bottom edge: the two
+/// action pills are the platform's minimum touch target and are answered where
+/// they are drawn, so a number that grew past row 295 would ink a control.
+const DIGITS_Y0: usize = 215;
+const DIGITS_PLATE_Y1: usize = chrome::ACTION_PILLS[0].y;
+/// The rung the entry asks for while the number is short, and the one it drops
+/// to once there are too many digits to stand at it.
+const DIGITS_SCALE: usize = type_scale::TITLE;
+const DIGITS_LONG_SCALE: usize = type_scale::SECTION;
+/// The matched contact's own rung and row, which the number's ink has to start
+/// below -- a digit standing on a name's descender is unreadable, at any level.
+const MATCH_NAME_SCALE: usize = 1;
+const MATCH_NAME_Y0: usize = 190;
+
+/// The largest rung at or below `want` whose line box the number's plate holds
+/// at `lvl`. Mirrors [`fit_rung`] in `const` form so the gate below can prove
+/// what the clamp is able to answer.
+const fn digits_rung_at(want: usize, lvl: u8) -> usize {
+    let avail = DIGITS_PLATE_Y1 - DIGITS_Y0;
+    let mut rung = want;
+    while rung > MIN_RUNG && line_at(rung, lvl) > avail {
+        rung -= 1;
+    }
+    if rung < MIN_RUNG {
+        MIN_RUNG
+    } else {
+        rung
+    }
+}
+
+/// The rung the dialed number draws at, at the level this app published.
+#[inline]
+fn digits_rung(want: usize) -> usize {
+    digits_rung_at(want, level())
+}
+
+const _: () = {
+    // At one hundred per cent the clamp answers the authored pair, so the
+    // shipped card -- 215..278 at the title rung -- does not move a row.
+    assert!(digits_rung_at(DIGITS_SCALE, PLATFORM_LEVEL) == DIGITS_SCALE);
+    assert!(digits_rung_at(DIGITS_LONG_SCALE, PLATFORM_LEVEL) == DIGITS_LONG_SCALE);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        let short = digits_rung_at(DIGITS_SCALE, lvl);
+        let long = digits_rung_at(DIGITS_LONG_SCALE, lvl);
+        // The box stays inside the plate: no selectable level lets the number
+        // reach the pill row, and a number that no longer stands at the title
+        // rung is drawn a rung lower rather than clipped.
+        assert!(DIGITS_Y0 + line_at(short, lvl) <= DIGITS_PLATE_Y1);
+        assert!(DIGITS_Y0 + line_at(long, lvl) <= DIGITS_PLATE_Y1);
+        // The number's ink starts at or below the matched name's line box, so
+        // the two runs never stand on one another at any level.
+        assert!(
+            DIGITS_Y0 + ascent_at(short, lvl) - cap_at(short, lvl) as usize
+                >= MATCH_NAME_Y0 + line_at(MATCH_NAME_SCALE, lvl)
+        );
+        assert!(
+            DIGITS_Y0 + ascent_at(long, lvl) - cap_at(long, lvl) as usize
+                >= MATCH_NAME_Y0 + line_at(MATCH_NAME_SCALE, lvl)
+        );
+        // The clamp never answers a rung the app has no face for.
+        assert!(short >= MIN_RUNG && long >= MIN_RUNG && short <= DIGITS_SCALE);
+        lvl += 1;
+    }
+};
 
 // Backspace control in the action row (to the right of Call button, active when active_len > 0).
 const BACKSPACE_CX: usize = 582;
 const BACKSPACE_CY: usize = 1065;
 const BACKSPACE_R: i32 = 42;
 
-// Keypad layout metrics: scale 2 digit, scale 1 sublabel, 48px radius circular discs.
+// Keypad layout metrics: the digit and sublabel rungs, inside 48px radius discs.
 const KEY_DIGIT_SCALE: usize = type_scale::SECTION;
 const KEY_SUB_SCALE: usize = type_scale::CAPTION;
 const KEY_RADIUS: usize = 48;
+
+/// WHY this gate is a loop over the four levels: the discs are fixed plates and
+/// the person's rung is not, so the pair of rungs the keypad draws at has to be
+/// proven to stay inside the disc at every level the setting holds -- and to be
+/// the authored pair, unchanged, at one hundred per cent. `key_rungs_at` is the
+/// run-time clamp and this is the build-time bound on what it can answer; neither
+/// is weaker than the single `assert!` it replaces, because the platform level is
+/// checked against the same sum the constant used to state.
+const _: () = {
+    let authored = key_rungs_at(PLATFORM_LEVEL);
+    assert!(authored.0 == KEY_DIGIT_SCALE);
+    assert!(authored.1 == KEY_SUB_SCALE);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        let (digit, sub) = key_rungs_at(lvl);
+        assert!(digit >= MIN_RUNG && sub >= MIN_RUNG);
+        assert!(digit <= KEY_DIGIT_SCALE && sub <= KEY_SUB_SCALE);
+        assert!(line_at(digit, lvl) + line_at(sub, lvl) <= 2 * KEY_RADIUS - KEY_STACK_PAD);
+        lvl += 1;
+    }
+};
 
 // SOS emergency disc (radius 42px with scale 1 bold vector text comfortably centered inside).
 const SOS_CX: usize = 138;
@@ -2553,34 +3088,173 @@ const CARD_Y1: usize = 380;
 /// list is taller than its window and has to scroll.
 const LIST_Y0: usize = LIB_CONTACTS_LIST_Y0;
 const CONTACT_ROW_H: usize = LIB_CONTACT_ROW_H;
+/// The row a contact's name starts on inside its plate, and the row its number
+/// starts on -- both at the platform rung, which is what `LIB_CONTACT_ROW_H`
+/// reserves its rows for.
+const CONTACT_LINE1_DY: usize = 8;
+const CONTACT_LINE2_DY: usize = 36;
+
+/// The row a contact's number is drawn on, at the level this app draws at.
+///
+/// WHY derived from the name's box and not pinned: the two runs are stacked one
+/// under the other, and the gap between them at one hundred per cent is the name's
+/// line box less the two rows the plate's own rounding spent. Ask the same sum at
+/// the person's rung and the number keeps its place under the name at every level.
+fn contact_line2_dy() -> usize {
+    CONTACT_LINE1_DY + notice_line_rows().saturating_sub(2)
+}
+
+/// One contact row's height: the library's floor, grown when it has to be so both
+/// of the row's runs fit inside the plate at the level this app draws at.
+///
+/// WHY the row grows instead of the type: a row that clips a contact's number at
+/// extra large is the defect this setting exists to fix, and the list is a
+/// scrolled window whose extents are rebuilt from this number -- so a taller row
+/// costs the user scroll distance, never content. At one hundred per cent and at
+/// compact the floor already holds both boxes and the row is the library's own.
+fn contact_row_h() -> usize {
+    let needed = contact_line2_dy() + notice_line_rows();
+    CONTACT_ROW_H.max(needed)
+}
+
+/// WHY this is a compile-time gate over every selectable level: the row's plate,
+/// its divider and its star all answer `contact_row_h`, and the painter and the
+/// tap handler read the same function -- but the floor the library publishes is a
+/// build-time fact. The loop asserts that the clamped row never needs fewer rows
+/// than the plate it is drawn in and never leaves a run outside it, for every
+/// level the setting holds; it does not weaken the bound the constant stated, it
+/// states the same bound at four rungs instead of one.
+const _: () = {
+    // At the platform rung the derived gap is the authored one, so a contact's
+    // number keeps the very row it has always kept for a person who never
+    // touched the setting.
+    assert!(CONTACT_LINE1_DY + line_at(NOTICE_SCALE, PLATFORM_LEVEL) - 2 == CONTACT_LINE2_DY);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        let line = notice_line_rows_at(lvl);
+        let line2 = CONTACT_LINE1_DY + line.saturating_sub(2);
+        let row = if line2 + line > CONTACT_ROW_H { line2 + line } else { CONTACT_ROW_H };
+        // Both runs' boxes are inside the plate, and the plate keeps a row for
+        // its divider.
+        assert!(line2 + line <= row);
+        assert!(row >= CONTACT_ROW_H);
+        lvl += 1;
+    }
+};
+
 /// The bottom of the contact list's window.
 const LIST_VIEWPORT_Y1: usize = LIB_CONTACTS_VIEWPORT_Y1;
-/// Footer band: the honest capacity/durability notice.
+/// Footer band: the honest capacity/durability notice, at the platform rung.
 const NOTICE_Y0: usize = 938;
+/// The last row the notice band may reach: the topmost row the contacts action
+/// discs ink. The band grows upwards into the list's window rather than downwards
+/// over a control.
+const NOTICE_BOTTOM: usize = C_ACTION_Y - CALL_R as usize;
 /// The rung both notice lines are drawn at, named once so the band's height and
 /// the two painters cannot disagree about it.
 const NOTICE_SCALE: usize = type_scale::CAPTION;
 /// The band's own top pad: the rows between its edge and the first line's box.
 const NOTICE_TOP_PAD: usize = 4;
-/// Rows one notice line reserves -- the rung's own line box, asked of the ladder
-/// rather than written down, so a change to the face moves the layout with it.
-const NOTICE_LINE_ROWS: usize = run_rows(NOTICE_SCALE);
-const NOTICE_LINE1_Y: usize = NOTICE_Y0 + NOTICE_TOP_PAD;
-/// The second line sits one whole box below the first, so the two never share a
-/// row however the ladder is scaled.
-const NOTICE_LINE2_Y: usize = NOTICE_LINE1_Y + NOTICE_LINE_ROWS;
+
+/// The rows one notice line reserves at level `lvl`.
+const fn notice_line_rows_at(lvl: u8) -> usize {
+    line_at(NOTICE_SCALE, lvl)
+}
+
+/// The notice band's height at level `lvl`: its pad and two whole line boxes.
+const fn notice_band_h_at(lvl: u8) -> usize {
+    NOTICE_TOP_PAD + 2 * notice_line_rows_at(lvl)
+}
+
+/// The row the band starts on at `lvl`.
+///
+/// WHY it can move: the band is two lines of the rung the person asked for, and
+/// its bottom is pinned by the action discs, which are chrome. At one hundred per
+/// cent the answer is exactly `NOTICE_Y0`, so nothing on the shipped screen moves;
+/// at extra large the band takes seven more rows from the top, and the list above
+/// it gives them up. The list is a scrolled window -- its extents are rebuilt from
+/// `notice_y0` -- so a row the notice took is a row the list scrolls to, not a row
+/// that stops existing.
+const fn notice_y0_at(lvl: u8) -> usize {
+    let band = notice_band_h_at(lvl);
+    let top = NOTICE_BOTTOM.saturating_sub(band);
+    if top < NOTICE_Y0 {
+        top
+    } else {
+        NOTICE_Y0
+    }
+}
+
+/// The rows one notice line reserves, at the level this app draws at.
+fn notice_line_rows() -> usize {
+    run_rows(NOTICE_SCALE)
+}
+
+/// The row the notice band starts on, at the level this app draws at.
+fn notice_y0() -> usize {
+    notice_y0_at(level())
+}
+
+/// The bottom of the contact list's window: the row the notice band starts on.
+fn contacts_viewport_y1() -> usize {
+    notice_y0()
+}
+
+const fn notice_line1_y_at(lvl: u8) -> usize {
+    notice_y0_at(lvl) + NOTICE_TOP_PAD
+}
+
+const fn notice_line2_y_at(lvl: u8) -> usize {
+    notice_line1_y_at(lvl) + notice_line_rows_at(lvl)
+}
+
+const fn notice_y1_at(lvl: u8) -> usize {
+    notice_y0_at(lvl) + notice_band_h_at(lvl)
+}
+
+/// The row the notice's first line starts on.
+fn notice_line1_y() -> usize {
+    notice_line1_y_at(level())
+}
+
+/// The notice's second line sits one whole box below the first, so the two never
+/// share a row however the rung is scaled.
+fn notice_line2_y() -> usize {
+    notice_line2_y_at(level())
+}
+
 /// The band's end: every row both boxes ink, and nothing else.
-const NOTICE_Y1: usize = NOTICE_Y0 + NOTICE_TOP_PAD + 2 * NOTICE_LINE_ROWS;
-/// WHY these are compile-time gates: the band was once 52 hand-written rows under
-/// a ladder whose caption box had grown to 27, so the second line ran past its
-/// end and the `NOTICE_Y0..NOTICE_Y1` gate stopped answering its baseline rows.
-/// Deriving the band from the rung makes that impossible to author again, and
-/// these two make it fail to build rather than fail to render if the band is ever
-/// pinned by hand. The second is the one the action row cares about: the notice
-/// may widen downwards, but not until it covers a row the discs paint -- their
-/// topmost inked row is `C_ACTION_Y - CALL_R`.
-const _: () = assert!(NOTICE_Y1 >= NOTICE_LINE2_Y + NOTICE_LINE_ROWS);
-const _: () = assert!(NOTICE_Y1 <= C_ACTION_Y - CALL_R as usize);
+fn notice_y1() -> usize {
+    notice_y1_at(level())
+}
+
+/// WHY these are still compile-time gates, and why they now loop: the band was
+/// once 52 hand-written rows under a ladder whose caption box had grown to 27, so
+/// the second line ran past its end and the band's own gate stopped answering its
+/// baseline rows. Deriving the band from the rung makes that impossible to author
+/// again. A `const _: () = assert!(NOTICE_Y1 <= ...)` over the old constants could
+/// only ever see one hundred per cent, which is not a gate on the setting the
+/// person actually has -- so each line is checked at every selectable level, which
+/// is what the band's derivation promises for all of them.
+const _: () = {
+    // The band's authored row is the window bottom the library publishes, and at
+    // one hundred per cent the clamp answers exactly that row -- so the list's
+    // window, the notice's plate and `dialer::CONTACTS_VIEWPORT_Y1` are still one
+    // number on the shipped screen, and only a raised rung moves them together.
+    assert!(notice_y0_at(PLATFORM_LEVEL) == LIST_VIEWPORT_Y1);
+    let mut lvl = 0u8;
+    while lvl <= EXTRA_LARGE_LEVEL {
+        // Every line's box sits inside the band.
+        assert!(notice_y1_at(lvl) >= notice_line2_y_at(lvl) + notice_line_rows_at(lvl));
+        // The band never covers a row the action discs ink.
+        assert!(notice_y1_at(lvl) <= NOTICE_BOTTOM);
+        // The band's top stays inside the list's window: the window has to keep
+        // at least one row of its own above the notice.
+        assert!(notice_y0_at(lvl) >= LIST_Y0 + CONTACT_ROW_H);
+        lvl += 1;
+    }
+};
+
 /// Star hit circle on the right edge of every contact row.
 ///
 /// WHY the radius is the chrome's disc radius: the row inked a forty-row plate
@@ -2824,13 +3498,17 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return c;
     }
 
-    // Header Title: "Phone". The run is on the title rung, so it needs
-    // run_rows(TITLE_SCALE) = 63 rows, and its caps are centred on the row the
-    // back control stands in rather than the box -- a title centred from 0
-    // would sit with half its box inside the band that paints over it.
-    let title_rows = run_rows(TITLE_SCALE);
-    if y >= TITLE_Y0 && y < TITLE_Y0 + title_rows {
-        if let Some(c) = test_text(x, y, HEADER_TITLE_X0, TITLE_Y0, TITLE_SCALE, b"Phone", HEADER_TITLE_MAX_W, THEME.on_surface, THEME.surface_container) {
+    // Header Title: "Phone". The run is on the title rung, so it needs the
+    // title rung's own line box at the level this app draws at, and its caps are
+    // centred on the row the back control stands in rather than the box -- a title
+    // centred from 0 would sit with half its box inside the band that paints over
+    // it. The rung is clamped to the header band by `header_title_rung`, which is
+    // `TITLE_SCALE` at every selectable level except extra large.
+    let title_rung = header_title_rung();
+    let title_y0 = header_title_y0();
+    let title_rows = header_title_rows();
+    if y >= title_y0 && y < title_y0 + title_rows {
+        if let Some(c) = test_text(x, y, HEADER_TITLE_X0, title_y0, title_rung, b"Phone", HEADER_TITLE_MAX_W, THEME.on_surface, THEME.surface_container) {
             return c;
         }
     }
@@ -2849,9 +3527,9 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if dialer.ringtone_len > 0 {
         let label = &dialer.ringtone[..dialer.ringtone_len];
         let mut rbuf = [0u8; 64];
-        let n = std::design::font::ellipsize(label, 1, RINGTONE_MAX_W, &mut rbuf);
+        let n = fit_run(label, 1, RINGTONE_MAX_W, &mut rbuf);
         let disp = if n > 0 { &rbuf[..n] } else { label };
-        let width = std::design::font::measure(disp, 1);
+        let width = run_w(disp, 1);
         if let Some(c) = test_text(
             x,
             y,
@@ -2925,7 +3603,8 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         return THEME.surface;
     }
-    let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(TAB_SCALE))) / 2;
+    let tab_scale = tab_rung();
+    let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(tab_scale))) / 2;
     let ranges = [
         (TAB1_X0, TAB1_X1),
         (TAB2_X0, TAB2_X1),
@@ -2958,11 +3637,11 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if std::design::primitives::draw_pill(x, y, pill, fill, border).is_none() {
             continue;
         }
-        let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
+        let label_x0 = *x0 + center_x(TAB_LABELS[i], tab_scale, w);
         let label_px = if active {
-            test_text_bold(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i],TAB_W,  ink, fill)
+            test_text_bold(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i],TAB_W,  ink, fill)
         } else {
-            test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i],TAB_W,  ink, fill)
+            test_text(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i],TAB_W,  ink, fill)
         };
         if let Some(c) = label_px {
             return c;
@@ -3023,25 +3702,28 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         {
             if let Some(rec) = dialer.contacts.record(index) {
                 let mut buf = [0u8; CONTACT_NAME_MAX];
-                let n = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 48, &mut buf);
+                let n = fit_run(rec.name_bytes(), MATCH_NAME_SCALE, DISPLAY_W - 48, &mut buf);
                 if n > 0 {
-                    let w = std::design::font::measure(&buf[..n], 1);
+                    let w = run_w(&buf[..n], MATCH_NAME_SCALE);
                     let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n],DISPLAY_W - 48,  THEME.primary, THEME.surface_container) {
+                    if let Some(c) = test_text(x, y, cx, MATCH_NAME_Y0, MATCH_NAME_SCALE, &buf[..n],DISPLAY_W - 48,  THEME.primary, THEME.surface_container) {
                         return c;
                     }
                 }
             }
         }
 
-        let scale = if dialer.active_len <= 10 { 4 } else { 3 };
-        let y0 = 215;
+        let scale = digits_rung(if dialer.active_len <= 10 {
+            DIGITS_SCALE
+        } else {
+            DIGITS_LONG_SCALE
+        });
         let digits = &dialer.active_number[..dialer.active_len];
         let mut buf = [0u8; 32];
-        let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 48, &mut buf);
-        let total_w = std::design::font::measure(&buf[..n], scale);
+        let n = fit_run(digits, scale, DISPLAY_W - 48, &mut buf);
+        let total_w = run_w(&buf[..n], scale);
         let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
-        if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n],DISPLAY_W - 48,  THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = test_text(x, y, x0, DIGITS_Y0, scale, &buf[..n],DISPLAY_W - 48,  THEME.on_surface, THEME.surface_container) {
             return c;
         }
 
@@ -3073,7 +3755,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let duration_note = dialer.outcome.duration_note();
         if !duration_note.is_empty() {
             if y >= 305 && y < 305 + run_rows(1) {
-                let w = std::design::font::measure(duration_note, 1);
+                let w = run_w(duration_note, 1);
                 let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
                 if let Some(c) = test_text(
                     x,
@@ -3094,6 +3776,12 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // and a band another.
         const PILL_LABELS: [&[u8]; 2] = [b"+ Add Contact", b"Send Message"];
         const PILL_INKS: [u32; 2] = [THEME.primary, THEME.success];
+        // WHY the rung is clamped to the plate: the pills are the platform's
+        // minimum touch target tall and the card's own geometry does not move for
+        // them, so the label takes the largest rung the plate holds. At extra large
+        // that is the caption rung, whose box is still a third taller than the
+        // ladder's -- the setting is honoured, and the ink stays inside the pill.
+        let pill_rung = fit_rung(2, chrome::ACTION_PILLS[0].h);
         for (i, pill) in chrome::ACTION_PILLS.iter().enumerate() {
             if !pill.contains(x, y) {
                 continue;
@@ -3106,10 +3794,10 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 Some(THEME.border),
             ) {
                 let label = PILL_LABELS[i];
-                let lw = std::design::font::measure(label, 2);
+                let lw = run_w(label, pill_rung);
                 let lx = pill.x + (pill.w.saturating_sub(lw)) / 2;
-                let ly = pill.y + (pill.h.saturating_sub(run_rows(2))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, 2, label, pill.w, PILL_INKS[i], fill) {
+                let ly = pill.y + (pill.h.saturating_sub(run_rows(pill_rung))) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, pill_rung, label, pill.w, PILL_INKS[i], fill) {
                     return c;
                 }
                 return fill;
@@ -3118,7 +3806,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
         let x0 = DISPLAY_X0
-            + std::design::font::center_x(
+            + center_x(
                 b"Enter a phone number",
                 PLACEHOLDER_SCALE,
                 DISPLAY_W,
@@ -3141,9 +3829,9 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     let caption = dialer.outcome.caption();
     if !caption.is_empty() {
         let mut buf = [0u8; 48];
-        let n = std::design::font::ellipsize(caption, 1, DISPLAY_W - 32, &mut buf);
+        let n = fit_run(caption, 1, DISPLAY_W - 32, &mut buf);
         if n > 0 {
-            let w = std::design::font::measure(&buf[..n], 1);
+            let w = run_w(&buf[..n], 1);
             let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
             let ink = match dialer.outcome {
                 CallOutcome::Refused | CallOutcome::EmergencyRefused => THEME.error,
@@ -3195,8 +3883,14 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                         Some(d) if d.contact_edit.is_some_and(|e| e.field == ContactField::Name)
                     );
 
-                    let digit_rows = run_rows(KEY_DIGIT_SCALE);
-                    let sub_rows = run_rows(KEY_SUB_SCALE);
+                    let (key_digit_scale, key_sub_scale) = key_rungs();
+                    let digit_rows = run_rows(key_digit_scale);
+                    let sub_rows = run_rows(key_sub_scale);
+                    // The widest a run inside the disc may be: the disc's own
+                    // diameter less the border ring and a hair of air, so a
+                    // sublabel at a scaled rung loses its tail to the ellipsis
+                    // rather than its place to the page outside the button.
+                    let key_text_w = 2 * KEY_RADIUS - KEY_STACK_PAD;
 
                     let digit_buf: [u8; 1] = if editing_name {
                         let cycle = DialerApp::t9_cycle(row, col);
@@ -3240,15 +3934,15 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                     // Digit text
                     if !digit_bytes.is_empty() {
                         let digit_x0 = (cx as usize).saturating_sub(
-                            std::design::font::measure(digit_bytes, KEY_DIGIT_SCALE) / 2,
+                            run_w(digit_bytes, key_digit_scale) / 2,
                         );
                         if let Some(c) = test_text(
                             x,
                             y,
                             digit_x0,
                             digit_y0,
-                            KEY_DIGIT_SCALE,
-                            digit_bytes,120, 
+                            key_digit_scale,
+                            digit_bytes,key_text_w, 
                             THEME.on_surface,
                             disc_fill,
                         ) {
@@ -3258,15 +3952,15 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
 
                     // Sublabel text
                     if has_sub {
-                        let sub_w = std::design::font::measure(sub_buf, KEY_SUB_SCALE);
+                        let sub_w = run_w(sub_buf, key_sub_scale);
                         let sub_x = (cx as usize).saturating_sub(sub_w / 2);
                         if let Some(c) = test_text(
                             x,
                             y,
                             sub_x,
                             sub_y0,
-                            KEY_SUB_SCALE,
-                            sub_buf,120, 
+                            key_sub_scale,
+                            sub_buf,key_text_w, 
                             THEME.on_surface_variant,
                             disc_fill,
                         ) {
@@ -3301,16 +3995,16 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if dialer.recents_len == 0 {
         // Headline: a scale-1 run owns 27 rows (620..647).
         let head: &[u8] = b"No calls yet";
-        let head_x = DISPLAY_X0 + std::design::font::center_x(head, 1, DISPLAY_W);
+        let head_x = DISPLAY_X0 + center_x(head, 1, DISPLAY_W);
         if let Some(c) = test_text_bold(x, y, head_x, 620, 1, head,DISPLAY_W,  THEME.on_surface, THEME.surface) {
             return c;
         }
         // Body: a scale-1 run owns 27 rows (680..707).
         let body: &[u8] = b"Every dial attempt and its real outcome is listed here";
         let mut buf = [0u8; 64];
-        let n = std::design::font::ellipsize(body, 1, DISPLAY_W, &mut buf);
+        let n = fit_run(body, 1, DISPLAY_W, &mut buf);
         if n > 0 {
-            let w = std::design::font::measure(&buf[..n], 1);
+            let w = run_w(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
             if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n],DISPLAY_W,  THEME.on_surface_variant, THEME.surface) {
                 return c;
@@ -3346,7 +4040,7 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         };
         // Number, scale 1: run_rows(1) = 27 rows at row_y + 8.
         let mut nbuf = [0u8; 32];
-        let nn = std::design::font::ellipsize(&rec.number[..rec.len], 1, DISPLAY_W - 96, &mut nbuf);
+        let nn = fit_run(&rec.number[..rec.len], 1, DISPLAY_W - 96, &mut nbuf);
         let nx = DISPLAY_X0 + 24;
         if let Some(c) = test_text_bold(
             x,
@@ -3469,9 +4163,9 @@ fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let len = dialer.settings_value_lens[index];
         let value = &dialer.settings_values[index][..len];
         let mut vbuf = [0u8; 64];
-        let vn = std::design::font::ellipsize(value, 1, SETTINGS_VALUE_MAX_W, &mut vbuf);
+        let vn = fit_run(value, 1, SETTINGS_VALUE_MAX_W, &mut vbuf);
         let vdisp = if vn > 0 { &vbuf[..vn] } else { value };
-        let value_w = std::design::font::measure(vdisp, 1);
+        let value_w = run_w(vdisp, 1);
         let value_x = DISPLAY_X1.saturating_sub(style.pad + value_w);
         if let Some(c) = test_text(
             x,
@@ -3511,7 +4205,7 @@ fn settings_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 .saturating_sub(value_w)
                 .saturating_sub(12);
             let mut nbuf = [0u8; 64];
-            let n = std::design::font::ellipsize(row.note(), 1, note_w, &mut nbuf);
+            let n = fit_run(row.note(), 1, note_w, &mut nbuf);
             if n > 0 {
                 if let Some(c) = test_text(
                     x,
@@ -3612,7 +4306,7 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         let choice = &dialer.ringtone_choices[i];
         let name = &choice.name[..choice.name_len];
         let mut nbuf = [0u8; 64];
-        let nn = std::design::font::ellipsize(name, 1, RINGTONE_TEXT_MAX_W, &mut nbuf);
+        let nn = fit_run(name, 1, RINGTONE_TEXT_MAX_W, &mut nbuf);
         let ndisp = if nn > 0 { &nbuf[..nn] } else { name };
         if let Some(c) = test_text(
             x,
@@ -3629,7 +4323,7 @@ fn ringtone_picker_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         let path = &choice.path[..choice.path_len];
         let mut pbuf = [0u8; 64];
-        let n = std::design::font::ellipsize(path, 1, RINGTONE_TEXT_MAX_W, &mut pbuf);
+        let n = fit_run(path, 1, RINGTONE_TEXT_MAX_W, &mut pbuf);
         if n > 0 {
             if let Some(c) = test_text(
                 x,
@@ -3748,7 +4442,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 return THEME.surface;
             };
             let mut lbuf = [0u8; 16];
-            let ln = std::design::font::ellipsize(label, 1, DISPLAY_W - 48, &mut lbuf);
+            let ln = fit_run(label, 1, DISPLAY_W - 48, &mut lbuf);
             if ln > 0 {
                 if let Some(c) = test_text(
                     x,
@@ -3764,7 +4458,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             let mut vbuf = [0u8; 64];
-            let vn = std::design::font::ellipsize(&buf[..len], 2, FIELD_VALUE_MAX_W, &mut vbuf);
+            let vn = fit_run(&buf[..len], 2, FIELD_VALUE_MAX_W, &mut vbuf);
             let vy = fy + 36;
             if vn > 0 {
                 if let Some(c) = test_text(
@@ -3782,7 +4476,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             if focused {
-                let cx = FIELD_TEXT_X0 + std::design::font::measure(&vbuf[..vn], 2);
+                let cx = FIELD_TEXT_X0 + run_w(&vbuf[..vn], 2);
                 if x >= cx && x < cx + 2 && (vy..vy + run_rows(2)).contains(&y) {
                     return THEME.primary;
                 }
@@ -3837,7 +4531,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // Browse: the selected contact, or the honest empty state.
     let Some(sel) = dialer.contact_sel else {
         let head: &[u8] = b"No contact selected";
-        let hx = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
+        let hx = DISPLAY_X0 + center_x(head, 2, DISPLAY_W);
         if let Some(c) = test_text(x, y, hx, 206, 2, head,DISPLAY_W - 48,  THEME.on_surface, THEME.surface) {
             return c;
         }
@@ -3845,9 +4539,9 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // names the control that fills it.
         let body: &[u8] = b"Press ADD to create one, or tap a row to select it";
         let mut buf = [0u8; 64];
-        let n = std::design::font::ellipsize(body, 1, DISPLAY_W - 48, &mut buf);
+        let n = fit_run(body, 1, DISPLAY_W - 48, &mut buf);
         if n > 0 {
-            let w = std::design::font::measure(&buf[..n], 1);
+            let w = run_w(&buf[..n], 1);
             let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
             if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n],DISPLAY_W - 48,  THEME.on_surface_variant, THEME.surface) {
                 return c;
@@ -3890,7 +4584,7 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             THEME.surface_container,
             Some(THEME.border),
         ) {
-            let lw = std::design::font::measure(star_label, 1);
+            let lw = run_w(star_label, 1);
             let lx = star_rect.x + (star_rect.w.saturating_sub(lw)) / 2;
             let ly = star_rect.y + (star_rect.h.saturating_sub(run_rows(1))) / 2;
             if let Some(c) = test_text(x, y, lx, ly, 1, star_label, star_rect.w, star_color, fill) {
@@ -3901,16 +4595,16 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     let mut nbuf = [0u8; CONTACT_NAME_MAX];
-    let nn = std::design::font::ellipsize(rec.name_bytes(), 2, DISPLAY_W - 48, &mut nbuf);
-    let nw = std::design::font::measure(&nbuf[..nn], 2);
+    let nn = fit_run(rec.name_bytes(), 2, DISPLAY_W - 48, &mut nbuf);
+    let nw = run_w(&nbuf[..nn], 2);
     let nx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(nw)) / 2;
     if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn],DISPLAY_W - 48,  THEME.on_surface, THEME.surface) {
         return c;
     }
 
     let mut ubuf = [0u8; CONTACT_NUM_MAX];
-    let un = std::design::font::ellipsize(rec.number_bytes(), 2, DISPLAY_W - 48, &mut ubuf);
-    let uw = std::design::font::measure(&ubuf[..un], 2);
+    let un = fit_run(rec.number_bytes(), 2, DISPLAY_W - 48, &mut ubuf);
+    let uw = run_w(&ubuf[..un], 2);
     let ux = DISPLAY_X0 + (DISPLAY_W.saturating_sub(uw)) / 2;
     if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un],DISPLAY_W - 48,  THEME.on_surface_variant, THEME.surface) {
         return c;
@@ -3940,9 +4634,9 @@ fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             None,
         ) {
             let mut lbuf = [0u8; 16];
-            let ln = std::design::font::ellipsize(label, 2, chip_w - 16, &mut lbuf);
+            let ln = fit_run(label, 2, chip_w - 16, &mut lbuf);
             if ln > 0 {
-                let lw = std::design::font::measure(&lbuf[..ln], 2);
+                let lw = run_w(&lbuf[..ln], 2);
                 let lx = cx0 + (chip_w.saturating_sub(lw)) / 2;
                 let ly = chip_y + (56 - run_rows(2)) / 2;
                 if let Some(c) = test_text(x, y, lx, ly, 2, &lbuf[..ln], chip_w, *ink, *fill) {
@@ -3972,6 +4666,8 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // list is the one the user asked the device to keep.
     let total_rows = dialer.contacts.len() + dialer.contacts.unsaved_len();
     let offset = dialer.contacts_scroll.offset;
+    let row_h = contact_row_h();
+    let line_h = notice_line_rows();
     let mut row = 0usize;
     let mut cursor = LIST_Y0;
     while row < total_rows {
@@ -4000,8 +4696,8 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
         // The row's place on screen, once the list is scrolled.
         let scrolled_y = cursor.saturating_sub(offset);
-        if !(scrolled_y..scrolled_y + CONTACT_ROW_H).contains(&y) {
-            cursor += CONTACT_ROW_H;
+        if !(scrolled_y..scrolled_y + row_h).contains(&y) {
+            cursor += row_h;
             row += 1;
             continue;
         }
@@ -4013,7 +4709,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if std::design::primitives::draw_rounded_rect(
             x,
             y,
-            std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, CONTACT_ROW_H),
+            std::design::primitives::Rect::new(DISPLAY_X0, scrolled_y, DISPLAY_W, row_h),
             style.radius,
             style.fill,
             None,
@@ -4024,12 +4720,12 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             return THEME.surface;
         }
         // The divider, in the platform's divider ink.
-        if y == scrolled_y + CONTACT_ROW_H - 1 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+        if y == scrolled_y + row_h - 1 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
             return style.divider;
         }
         // Vibrant avatar disc with the contact's initial.
         let av_cx = DISPLAY_X0 + 30;
-        let av_cy = scrolled_y + CONTACT_ROW_H / 2;
+        let av_cy = scrolled_y + row_h / 2;
         let dx = x as i32 - av_cx as i32;
         let dy = y as i32 - av_cy as i32;
         let d2 = dx * dx + dy * dy;
@@ -4039,9 +4735,9 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 return std::design::font::blend(av_bg, THEME.ink_on_dark, 48);
             }
             let initial = [rec.initial()];
-            let iw = std::design::font::measure(&initial, 1);
+            let iw = run_w(&initial, 1);
             let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
-            let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
+            let iy = (av_cy as i32 - line_h as i32 / 2).max(0) as usize;
             if let Some(t) = test_text_bold(x, y, ix, iy, 1, &initial,24,  THEME.ink_on_dark, av_bg) {
                 return t;
             }
@@ -4049,22 +4745,22 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
             let tx = DISPLAY_X0 + 68;
             let mut nbuf = [0u8; CONTACT_NAME_MAX];
-            let nn = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
+            let nn = fit_run(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
             if nn > 0 {
                 if let Some(t) =
-                    test_text(x, y, tx, scrolled_y + 8, 1, &nbuf[..nn],DISPLAY_W - 150,  THEME.on_surface, style.fill)
+                    test_text(x, y, tx, scrolled_y + CONTACT_LINE1_DY, 1, &nbuf[..nn],DISPLAY_W - 150,  THEME.on_surface, style.fill)
                 {
                     return t;
                 }
             }
             let mut ubuf = [0u8; CONTACT_NUM_MAX];
-            let un = std::design::font::ellipsize(rec.number_bytes(), 1, DISPLAY_W - 150, &mut ubuf);
+            let un = fit_run(rec.number_bytes(), 1, DISPLAY_W - 150, &mut ubuf);
             if un > 0 {
                 if let Some(t) = test_text(
                     x,
                     y,
                     tx,
-                    scrolled_y + 36,
+                    scrolled_y + contact_line2_dy(),
                     1,
                     &ubuf[..un],DISPLAY_W - 150, 
                     THEME.on_surface_variant,
@@ -4077,7 +4773,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             // an unsaved contact cannot be starred in storage, and drawing it
             // filled would claim otherwise.
             let sdx = x as i32 - STAR_CX as i32;
-            let sdy = y as i32 - (scrolled_y + CONTACT_ROW_H / 2) as i32;
+            let sdy = y as i32 - (scrolled_y + row_h / 2) as i32;
             if sdx * sdx + sdy * sdy <= STAR_R * STAR_R {
                 // WHY a star and not a disc: this control toggles a favourite,
                 // and an unstarred contact used to be a plain grey circle that
@@ -4102,17 +4798,20 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 
 
     // Notice band under the list.
-    if (NOTICE_Y0..NOTICE_Y1).contains(&y) {
+    if (notice_y0()..notice_y1()).contains(&y) {
         return contacts_notice_pixel(x, y, dialer);
     }
 
-    // The scroll indicator, drawn beside the list it belongs to.
+    // The scroll indicator, drawn beside the list it belongs to. Its window is
+    // the list down to the row the notice band starts on, which is the row the
+    // notice needs at the level this app draws at -- so a taller notice costs the
+    // list scroll distance, and never a row the user cannot reach.
     if let Some(c) = scroll_indicator(
         x,
         y,
         &dialer.contacts_scroll,
         LIST_Y0,
-        LIST_VIEWPORT_Y1 - LIST_Y0,
+        contacts_viewport_y1().saturating_sub(LIST_Y0),
     ) {
         return c;
     }
@@ -4125,7 +4824,7 @@ fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// whether it is what storage holds, whether the store is full, or whether every
 /// row in it is session-only. All three have to be visible without a log reader.
 fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    if !(NOTICE_Y0..NOTICE_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
+    if !(notice_y0()..notice_y1()).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
         return THEME.surface;
     }
     let used = dialer.contacts.len();
@@ -4143,7 +4842,7 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         x,
         y,
         DISPLAY_X0 + 24,
-        NOTICE_LINE1_Y,
+        notice_line1_y(),
         NOTICE_SCALE,
         state.as_str().as_bytes(),DISPLAY_W - 48, 
         ink,
@@ -4205,13 +4904,13 @@ fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         n += tail.len();
     }
     let mut buf = [0u8; 96];
-    let tn = std::design::font::ellipsize(&line[..n], NOTICE_SCALE, DISPLAY_W - 48, &mut buf);
+    let tn = fit_run(&line[..n], NOTICE_SCALE, DISPLAY_W - 48, &mut buf);
     if tn > 0 {
         if let Some(c) = test_text(
             x,
             y,
             DISPLAY_X0 + 24,
-            NOTICE_LINE2_Y,
+            notice_line2_y(),
             NOTICE_SCALE,
             &buf[..tn],DISPLAY_W - 48, 
             THEME.on_surface_variant,
@@ -4242,7 +4941,7 @@ fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
     }
     // "SOS" is scale 1 bold vector outline, comfortably centered in the disc with clean margins.
     let sos_rows = run_rows(SOS_SCALE);
-    let sos_w = std::design::font::measure(b"SOS", SOS_SCALE);
+    let sos_w = run_w(b"SOS", SOS_SCALE);
     let sos_x0 = SOS_CX.saturating_sub(sos_w / 2);
     let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
     if y >= sos_y0 && y < sos_y0 + sos_rows {
@@ -4307,9 +5006,9 @@ fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             return THEME.border;
         }
         let mut lbuf = [0u8; 16];
-        let ln = std::design::font::ellipsize(label, 1, 2 * r as usize - 12, &mut lbuf);
+        let ln = fit_run(label, 1, 2 * r as usize - 12, &mut lbuf);
         if ln > 0 {
-            let lw = std::design::font::measure(&lbuf[..ln], 1);
+            let lw = run_w(&lbuf[..ln], 1);
             let lx = (cx as i32 - lw as i32 / 2).max(0) as usize;
             let ly = C_ACTION_Y - run_rows(1) / 2;
             // WHY the success disc takes dark ink: the theme's green is light
@@ -4518,17 +5217,21 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     }
 
-    // Label band
+    // Label band. The dock's four names are one rung apart from the plate's
+    // bottom edge, and the plate does not move, so the row the label starts on
+    // rises when the rung's box grows -- see `dock_label_y0`.
+    let dock_label_rung = fit_rung(DOCK_LABEL_SCALE, DOCK_Y1 - dock_label_y0());
+    let dock_label_row = dock_label_y0();
     let label_x = DOCK_ITEM_X0[slot]
-        + std::design::font::center_x(DOCK_LABELS[slot], DOCK_LABEL_SCALE, DOCK_ITEM_W);
-    if y >= DOCK_LABEL_Y0 && y < DOCK_LABEL_Y0 + run_rows(DOCK_LABEL_SCALE) {
+        + center_x(DOCK_LABELS[slot], dock_label_rung, DOCK_ITEM_W);
+    if y >= dock_label_row && y < dock_label_row + run_rows(dock_label_rung) {
         if let Some(c) = test_text(
             x,
             y,
             label_x,
-            DOCK_LABEL_Y0,
-            DOCK_LABEL_SCALE,
-            DOCK_LABELS[slot],DOCK_ITEM_W, 
+            dock_label_row,
+            dock_label_rung,
+            DOCK_LABELS[slot],DOCK_ITEM_W,
             ink,
             plate,
         ) {
@@ -4639,7 +5342,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     }
                     return contacts_action_pixel(x, y, dialer);
                 }
-                if (LIST_Y0..NOTICE_Y1).contains(&y) {
+                if (LIST_Y0..contacts_viewport_y1()).contains(&y) {
                     return contacts_list_pixel(x, y, dialer);
                 }
                 contacts_action_pixel(x, y, dialer)
@@ -4658,7 +5361,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         && (CONTENT_Y1..DOCK_Y0).contains(&y)
     {
         let msg = b"A contact needs a name and a number";
-        let w = std::design::font::measure(msg, 1);
+        let w = run_w(msg, 1);
         let x0 = (W.saturating_sub(w)) / 2;
         if let Some(c) = test_text(x, y, x0, 1180, 1, msg, W, THEME.error, THEME.surface) {
             return c;
@@ -5307,7 +6010,7 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
     }
 
     // List rows: the star toggles, the body selects.
-    if (LIST_Y0..NOTICE_Y0).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+    if (LIST_Y0..contacts_viewport_y1()).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         let total = dialer.contacts.len() + dialer.contacts.unsaved_len();
         // The list scrolls, so the row under the tap is the one at the scrolled
         // position, and the star moves with it.
@@ -5581,6 +6284,13 @@ pub extern "C" fn _start() -> ! {
             .ok();
         }
     }
+
+    // WHY the text-size level is published first: the scroll extents below are
+    // built from the row heights the level implies, and the frame after them is
+    // painted at that level too. A rung published after the first paint would hand
+    // the renderer the person's setting one frame late -- and a list whose extents
+    // were measured at the ladder would scroll its last row under the notice band.
+    publish_text_scale();
 
     // WHY the scroll extents and the settings values are computed before the
     // first frame: the first frame the user sees has to show the real state of

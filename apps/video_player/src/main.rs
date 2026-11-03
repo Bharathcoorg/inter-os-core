@@ -25,6 +25,7 @@ use std::design::back_button;
 use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_rounded_rect, Rect};
+use std::design::accessibility::{DynamicType, UserTextScale};
 
 use video_player::avi::{self, AviChunk, AviError, AviInfo, AviStream};
 use video_player::theme::{
@@ -40,6 +41,170 @@ use video_player::{
 };
 
 // -----------------------------------------------------------------------------
+// The type ladder, asked at the text-size level the person chose
+// -----------------------------------------------------------------------------
+//
+// WHY THIS BLOCK EXISTS AT ALL. `font::cap_for_scale` and `font::line_height`
+// are `const fn`s, so a `const HEADER_LINE_Y: usize = .. + font::line_height(2)`
+// is frozen at the value the ladder had when the binary was compiled: it can
+// never see the setting. The runtime faces of that same arithmetic
+// (`font::line_height_user`, `cap_for_scale_user`, `measure_user`) read the one
+// process-wide cell the person's setting is published into, and they are what a
+// surface that re-derives its geometry at draw time has to call. Below, every
+// sum this screen lays text into is written once as a `const fn` over a level --
+// so the compile-time gates can still see all four rungs -- and read at draw
+// time through the published level.
+//
+// WHY the platform level keeps every pixel it kept before: `*_at(level)` is the
+// ladder's own arithmetic at that level, so at `PLATFORM_LEVEL` each derivation
+// below returns exactly the constant it replaced. The gates beside each one pin
+// that, and pinning it is what stops "adopted the published helpers" from
+// silently resizing a screen that never asked for a text size.
+//
+// WHY a clamp instead of an assert where the plate cannot grow: the media
+// properties card and the portrait header band are bounded by something other
+// than their own text -- the card by the system home band, the header by the
+// canvas below it -- so there the row step is the smaller of "the rung's box
+// plus the air it wants" and "what the plate can actually hold". The bound is
+// checked at every selectable level, so a rung can tighten the leading but can
+// never make one row's ink ride over the next row's.
+
+/// The ladder's own level: one hundred per cent, and what a person who never
+/// touched Text size draws at.
+const PLATFORM_LEVEL: u8 = font::TEXT_SCALE_NORMAL;
+/// The largest level the setting can hold -- the rung every gate below is
+/// measured at as well as the platform's, because a row that only fits at one
+/// hundred per cent does not fit the setting at all.
+const EXTRA_LARGE_LEVEL: u8 = font::TEXT_SCALE_EXTRA_LARGE;
+
+/// The line box rung `scale` reserves at `level`.
+const fn line_at(scale: usize, level: u8) -> usize {
+    font::line_height_for_user_scale(scale, level)
+}
+
+/// The cap height rung `scale` is inked at on `level`.
+const fn cap_at(scale: usize, level: u8) -> u32 {
+    font::cap_for_user_scale(scale, level)
+}
+
+/// The em rung `scale` is rasterised at on `level`.
+const fn em_at(scale: usize, level: u8) -> u32 {
+    font::em_for_user_scale(scale, level)
+}
+
+/// The ascent rung `scale` reserves on `level` -- the rows a run's ink actually
+/// takes above its baseline, which is what decides whether two stacked runs
+/// share a pixel.
+const fn ascent_at(scale: usize, level: u8) -> usize {
+    font::ascent_for_user_scale(scale, level)
+}
+
+/// The level this process draws at: what `display.text_scale` published at
+/// startup, and `PLATFORM_LEVEL` for a process that published nothing.
+#[inline]
+fn level() -> u8 {
+    font::user_text_scale()
+}
+
+/// The line box a rung reserves at the published level.
+#[inline]
+fn line_u(scale: usize) -> usize {
+    line_at(scale, level())
+}
+
+/// The advance a run takes at `level`, in the weight it is drawn in.
+const _: () = assert!(line_at(2, PLATFORM_LEVEL) == font::line_height(2));
+/// WHY both rungs and not just the body one: the landscape scrim and the
+/// header's rule are each the pair of line boxes plus their air, and the
+/// platform-equality of the second rung is what says a scrim that never asked
+/// for a text size is exactly as tall as the one drawn before the setting
+/// could be read at all.
+const _: () = assert!(line_at(1, PLATFORM_LEVEL) == font::line_height(1));
+
+#[inline]
+fn run_w_at(text: &[u8], scale: usize, bold: bool, level: u8) -> usize {
+    if bold {
+        font::measure_bold_user_scale(text, scale, level)
+    } else {
+        font::measure_user_scale(text, scale, level)
+    }
+}
+
+/// The advance a run takes at the published level, in the weight it is drawn in.
+#[inline]
+fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
+    run_w_at(text, scale, bold, level())
+}
+
+/// The run, trimmed to `max_w` at the published level, in `out`.
+///
+/// WHY an app-local fit and not `font::ellipsize`: `ellipsize` measures with the
+/// ladder's advance, so a run it declared short enough is a run that walks past
+/// its column the moment the person raises the text size. The elision
+/// convention is the fleet's own -- keep the head, drop the tail, mark it with
+/// `...` -- and only the measurement moves.
+///
+/// WHY the run is never silently clipped: what does not fit comes back with the
+/// marker on it, and a `max_w` that cannot hold even the marker answers zero
+/// length, which the caller's paint gate reads as "nothing here" rather than
+/// "half a word there".
+fn fit_run(text: &[u8], scale: usize, bold: bool, max_w: usize, out: &mut [u8]) -> usize {
+    if run_w(text, scale, bold) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots_w = run_w(DOTS, scale, bold);
+    if dots_w > max_w || out.len() < 3 {
+        return 0;
+    }
+    let budget = max_w - dots_w;
+    let em = em_at(scale, level());
+    let mut used = 0usize;
+    let mut fit = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let mut adv = std::design::typeface::advance_px(c, em) as usize;
+        if adv == 0 {
+            // A byte the face has no glyph for still walks the bitmap cell's
+            // advance, or the cursor never reaches the end of the budget.
+            adv = 8 * scale;
+        }
+        if used + adv > budget || fit + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        fit = i + 1;
+    }
+    out[..fit].copy_from_slice(&text[..fit]);
+    out[fit..fit + 3].copy_from_slice(DOTS);
+    fit + 3
+}
+
+/// Reads `display.text_scale` and hands the rung to the renderer.
+///
+/// WHY before the first frame is written: the helpers above read one published
+/// cell, so a surface that published nothing draws the platform's ladder forever
+/// -- which is precisely the defect this screen used to have.
+///
+/// WHY `if let` and not `unwrap_or(Normal)`: a value this app cannot read is not
+/// a level the person chose, and the rung the process already holds -- Normal,
+/// the ladder -- stands rather than a guess being published.
+///
+/// WHY once at launch and once per re-show, and never per frame: the store is
+/// a syscall, and putting it inside the paint budget is what the published
+/// cell exists to avoid; a re-show is the one moment the held rung can be
+/// stale, because Settings answers no notification when it writes.
+fn publish_text_scale() {
+    let mut buf = [0u8; 32];
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        if let Some(scale) = UserTextScale::from_settings_value(&buf[..n]) {
+            DynamicType::new(scale).publish();
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Surface & Screen Geometry
 // -----------------------------------------------------------------------------
 
@@ -53,7 +218,19 @@ const BAND0_Y0: usize = 0;
 /// WHY derived and not a remembered 120: the band's two runs come from the type
 /// ladder, and when the ladder's rungs grew the pair ended past the boundary --
 /// the rule was then authored in band 1, whose repaint never draws it.
-const BAND0_Y1: usize = HEADER_RULE_Y + 4;
+/// WHY a function and not a constant: the pair's boxes follow the person's
+/// text-size level, so the row this band stops answering has to move with them;
+/// a constant here is the reason a scaled header used to be answered by the
+/// canvas band beneath it. `band0_y1_at` is the same sum written over a level,
+/// which is what the gates beside it can read.
+const fn band0_y1_at(level: u8) -> usize {
+    header_rule_y_at(level) + 4
+}
+
+#[inline]
+fn band0_y1() -> usize {
+    band0_y1_at(level())
+}
 
 /// The first row this app's own chrome may author from.
 ///
@@ -72,8 +249,36 @@ const HEADER_TOP: usize = std::design::viewport::HEADER_TOP;
 /// is the taller of the two. Two literal rows for one run is how a value came to
 /// read four rows high on the sheet below.
 const HEADER_TITLE_Y: usize = HEADER_TOP;
-const HEADER_LINE_Y: usize = HEADER_TITLE_Y + font::line_height(2);
-const HEADER_RULE_Y: usize = HEADER_LINE_Y + font::line_height(1) + 2;
+/// The second run's top, the rule under both, and the sums written over a level.
+const fn header_line_y_at(level: u8) -> usize {
+    HEADER_TITLE_Y + line_at(2, level)
+}
+
+const fn header_rule_y_at(level: u8) -> usize {
+    header_line_y_at(level) + line_at(1, level) + 2
+}
+
+#[inline]
+fn header_line_y() -> usize {
+    header_line_y_at(level())
+}
+
+#[inline]
+fn header_rule_y() -> usize {
+    header_rule_y_at(level())
+}
+
+/// WHY these numbers are the same at the platform level as the constants they
+/// replace: the published helpers are the ladder's arithmetic at a level, and a
+/// screen that never asked for a text size must not be resized by the code that
+/// reads one.
+const _: () = assert!(line_at(2, PLATFORM_LEVEL) == font::line_height(2));
+const _: () = assert!(header_rule_y_at(PLATFORM_LEVEL) == HEADER_RULE_Y_PLATFORM);
+/// The platform's own sums, kept as the number the header drew before the
+/// setting could be read at all -- what the equality gate above is measured
+/// against, and what the gates below clear the taller rung against.
+const HEADER_LINE_Y_PLATFORM: usize = HEADER_TITLE_Y + font::line_height(2);
+const HEADER_RULE_Y_PLATFORM: usize = HEADER_LINE_Y_PLATFORM + font::line_height(1) + 2;
 /// The widest the centred portrait title may be.
 ///
 /// WHY it is derived from the control that stands to its right: the run is
@@ -86,16 +291,52 @@ const HEADER_TITLE_MAX_W: usize = 2 * (ORIENT_BTN.x - W / 2);
 /// `BAND0_Y1`, so a rule that reached past it loses the band it belongs to, and a
 /// run whose box reached the rule is a run sharing pixels with a hairline.
 const _: () = assert!(HEADER_TITLE_Y >= std::design::viewport::STATUS_BAR_HEIGHT);
-const _: () = assert!(HEADER_LINE_Y + font::line_height(1) < HEADER_RULE_Y);
-const _: () = assert!(HEADER_RULE_Y + 4 <= BAND0_Y1);
+/// WHAT THIS GATES: at every level the setting can hold, the header's two runs
+/// keep their own boxes and the band keeps its rule, and the canvas the band
+/// hands its rows to still fits band 1 at the rung the band reached.
+///
+/// WHY a loop over the four levels and not one assert at the platform rung: the
+/// asserts these replaced could only ever see one hundred per cent, and a raised
+/// text size is exactly the case where the header's pair outgrows the band that
+/// paints it -- the defect the scaled ink would otherwise land on.
+const fn header_bands_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        // The caption run starts only once the title's whole box is behind it,
+        // and the rule only once the caption's whole box is behind it.
+        if header_line_y_at(level) < HEADER_TITLE_Y + line_at(2, level) {
+            return false;
+        }
+        if header_rule_y_at(level) < header_line_y_at(level) + line_at(1, level) {
+            return false;
+        }
+        if header_rule_y_at(level) + 4 > band0_y1_at(level) {
+            return false;
+        }
+        // The band's foot and the canvas's top are one number, so the canvas has
+        // to still stand inside the band that repaints it at the largest rung.
+        if canvas_y0_at(level) + CANVAS_H > BAND1_Y1 {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(header_bands_clear_at_every_level());
 
-// Band 1: Centered 16:9 Video Canvas (680x382)
-const BAND1_Y0: usize = BAND0_Y1;
+// Band 1: Centered 16:9 Video Canvas (680x382). Its top is `band0_y1()` at draw
+// time -- the same sum as the header's rule, at the rung the header's two runs
+// are drawn at -- so the band that answers those rows always ends where they do.
 const BAND1_Y1: usize = 560;
 
 // Band 2: Scrubber Seek Bar (Elapsed, Seek Bar, Remaining)
 const BAND2_Y0: usize = 560;
 const BAND2_Y1: usize = 670;
+/// WHY checked at compile time: the two running-time numbers this band paints are
+/// the body rung, and the band's own rows are not derived from it -- so the gate
+/// is what says a raised text size still reserves the whole box of both runs
+/// inside the band that answers them, at the largest level the setting holds.
+const _: () = assert!(606 + line_at(2, EXTRA_LARGE_LEVEL) <= BAND2_Y1);
 
 // Band 3: Transport Controls (Prev, 88px Play/Pause, Next)
 const BAND3_Y0: usize = 670;
@@ -137,7 +378,10 @@ const KEBAB_BTN: Rect = Rect::new(644, HEADER_TOP, 52, 52);
 // answers all of band 0 (rows 0..120), so the hairline under the title is the
 // last thing the chip can genuinely collide with. Its foot lands at row 104,
 // where the square it replaced reached 108.
-const _: () = assert!(back_button::Y + back_button::SIZE < HEADER_RULE_Y);
+// WHY the platform rung is the case that has to hold: raising the text size only
+// ever moves the rule *down*, so a chip that clears it at one hundred per cent
+// clears it at every selectable level -- and the gate still binds.
+const _: () = assert!(back_button::Y + back_button::SIZE < header_rule_y_at(PLATFORM_LEVEL));
 /// WHY checked at compile time: these two are the only presses on the header
 /// row the app itself authors, and both now wear a plate the eye can find -- the
 /// gates hold the plate inside the band that repaints it, clear of each other,
@@ -146,7 +390,7 @@ const _: () = assert!(ORIENT_BTN.w >= MIN_TOUCH_TARGET && ORIENT_BTN.h >= MIN_TO
 const _: () = assert!(KEBAB_BTN.w >= MIN_TOUCH_TARGET && KEBAB_BTN.h >= MIN_TOUCH_TARGET);
 const _: () = assert!(ORIENT_BTN.x + ORIENT_BTN.w <= KEBAB_BTN.x);
 const _: () = assert!(KEBAB_BTN.x + KEBAB_BTN.w <= W - 24);
-const _: () = assert!(ORIENT_BTN.y + ORIENT_BTN.h <= HEADER_RULE_Y);
+const _: () = assert!(ORIENT_BTN.y + ORIENT_BTN.h <= header_rule_y_at(PLATFORM_LEVEL));
 
 /// The air the landscape HUD's top bar keeps around its two runs.
 ///
@@ -172,12 +416,55 @@ const LAND_BAR_AIR: usize = 12;
 /// scrim stops asking for those pixels, so the tail is drawn over a frame the
 /// painter already returned. The pair's boxes come from the type ladder, so the
 /// wall that has to hold them is the ladder's sum plus the air on either side.
-const LAND_BAR: Rect = Rect::new(
-    24,
-    HEADER_TOP,
-    672,
-    LAND_BAR_AIR + font::line_height(2) + font::line_height(1) + LAND_BAR_AIR,
-);
+/// The scrim's height at `level`: the two runs' line boxes and the air on either
+/// side. WHY the pair and not one of them: the bar answers every row between its
+/// edges, so a badge whose box reaches the bar's foot is a badge whose tail is
+/// painted by the video the scrim stopped asking for.
+const fn land_bar_h_at(level: u8) -> usize {
+    LAND_BAR_AIR + line_at(2, level) + line_at(1, level) + LAND_BAR_AIR
+}
+
+/// The bar at the platform's rung -- the rect the gates below read. The painter
+/// and the press take [`land_bar`], which is the same sum at the published rung,
+/// so a raised text size moves the scrim with the two runs it holds rather than
+/// clipping the second of them.
+const LAND_BAR: Rect = Rect::new(24, HEADER_TOP, 672, land_bar_h_at(PLATFORM_LEVEL));
+
+/// WHAT THIS GATES: at every selectable level the bar holds both runs, the chip
+/// stands inside the bar, and the bar's foot stops above the lower scrim.
+///
+/// WHY a loop and not the three asserts this replaced: those could only ever see
+/// one hundred per cent, and the landscape HUD is the one surface here whose
+/// scrim is exactly as tall as its two runs.
+const fn landscape_bar_holds_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let h = land_bar_h_at(level);
+        // Both runs, end to end, inside the scrim.
+        if LAND_BAR_AIR + line_at(2, level) + line_at(1, level) > h {
+            return false;
+        }
+        // The chip is centred by halving the difference between the bar's rows
+        // and the plate's, so the bar has to be at least as tall as the plate.
+        if h < back_button::SIZE {
+            return false;
+        }
+        // The bar grows downward into the strip it shares with the transport
+        // panel; that panel's rows are blended from the frame on their own terms.
+        if LAND_BAR.y + h > LAND_PANEL.y {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(landscape_bar_holds_at_every_level());
+
+/// The landscape scrim at the rung this frame draws at.
+#[inline]
+fn land_bar() -> Rect {
+    Rect::new(LAND_BAR.x, LAND_BAR.y, LAND_BAR.w, land_bar_h_at(level()))
+}
 /// The landscape HUD's lower scrim: the transport, scrubber and volume panel the
 /// same `hud_visible` branch paints.
 ///
@@ -218,15 +505,44 @@ const _: () = assert!(LAND_BAR.h >= back_button::SIZE);
 const LAND_BACK_X: usize = LAND_BAR.x + LAND_BAR_AIR;
 const LAND_BACK_BTN: Rect = Rect::new(
     LAND_BACK_X,
-    LAND_BAR.y + (LAND_BAR.h - back_button::SIZE) / 2,
+    LAND_BAR.y + (land_bar_h_at(PLATFORM_LEVEL) - back_button::SIZE) / 2,
     back_button::SIZE,
     back_button::SIZE,
 );
-// Painted == hit, by construction: the painter hands `back_button::pixel` the
-// point shifted by `LAND_BACK_BTN.x - back_button::X` and `.y - back_button::Y`,
-// so the ink it can produce is exactly the plate the rect covers -- never a
-// wider rect, which is what the 52x52 square used to be.
-//
+
+/// The plate at the rung this frame's scrim reaches: the same 48x48 the chip
+/// paints, centred in the bar's rows, so a taller scrim centres the control
+/// rather than leaving it pinned to the platform's rows.
+#[inline]
+fn land_back_btn() -> Rect {
+    Rect::new(
+        LAND_BACK_X,
+        LAND_BAR.y + (land_bar_h_at(level()) - back_button::SIZE) / 2,
+        back_button::SIZE,
+        back_button::SIZE,
+    )
+}
+
+/// WHY the centring is gated at every level and not assumed: both the bar's rows
+/// and the plate's are `usize`, and the difference is halved -- a bar ever made
+/// shorter than the plate would subtract past zero at run time instead of
+/// drawing a button, which is the case the const gate above could only ever see
+/// at one hundred per cent.
+const fn land_back_centred_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let y = LAND_BAR.y + (land_bar_h_at(level) - back_button::SIZE) / 2;
+        if y < back_button::Y {
+            return false;
+        }
+        if y + back_button::SIZE > LAND_BAR.y + land_bar_h_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(land_back_centred_at_every_level());
 // WHY the shift is gated rather than assumed: both differences are `usize`, so
 // a rect ever stood left of or above the chip's own origin the painter would
 // subtract past zero instead of drawing a button.
@@ -236,17 +552,33 @@ const _: () = assert!(LAND_BACK_X >= back_button::X && LAND_BACK_BTN.y >= back_b
 /// WHY the badge stands on the title's own box: the two runs are one column of
 /// text, and the row the second one starts on is where the first one's descent
 /// ends. A gap between them is a gap the bar then has to hold twice.
-const LAND_TITLE_Y: usize = LAND_BAR.y + LAND_BAR_AIR;
-const LAND_BADGE_Y: usize = LAND_TITLE_Y + font::line_height(2);
+const fn land_title_y_at(_level: u8) -> usize {
+    LAND_BAR.y + LAND_BAR_AIR
+}
+
+const fn land_badge_y_at(level: u8) -> usize {
+    land_title_y_at(level) + line_at(2, level)
+}
+
+#[inline]
+fn land_title_y() -> usize {
+    land_title_y_at(level())
+}
+
+#[inline]
+fn land_badge_y() -> usize {
+    land_badge_y_at(level())
+}
+
 const _: () = assert!(LAND_BAR.y >= std::design::viewport::STATUS_BAR_HEIGHT);
 const _: () = assert!(LAND_BACK_BTN.y + LAND_BACK_BTN.h <= LAND_BAR.y + LAND_BAR.h);
-const _: () = assert!(LAND_BADGE_Y + font::line_height(1) <= LAND_BAR.y + LAND_BAR.h);
-// WHY the bar's foot is gated against the lower scrim and not against the
-// surface: the bar is a translucent plate over live video, so growing it costs
-// nothing it does not already own -- until it reaches the transport panel, whose
-// rows that branch blends from the frame on its own terms. Two scrims that meet
-// read as one panel, and the strip the user reads as the picture is gone.
-const _: () = assert!(LAND_BAR.y + LAND_BAR.h <= LAND_PANEL.y);
+const _: () = assert!(land_badge_y_at(PLATFORM_LEVEL) + line_at(1, PLATFORM_LEVEL)
+    <= LAND_BAR.y + land_bar_h_at(PLATFORM_LEVEL));
+// Painted == hit, by construction: the painter hands `back_button::pixel` the
+// point shifted by the plate's origin and `back_button`'s own, so the ink it can
+// produce is exactly the rect the press covers -- never a wider rect, which is
+// what the 52x52 square used to be.
+//
 // WHY this is pinned: the HUD painter moves a point by the difference between
 // this rect's origin and `back_button`'s own, and that shift is only a faithful
 // copy of the chip while the two rects are the same size. Were this rect larger,
@@ -386,7 +718,37 @@ const _: () = assert!(
 
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
+/// The plate at the platform's rung, kept for the gates that name it; the painter
+/// takes [`canvas_rect`], which is the same rect at the rung the header band reached.
 const CANVAS_RECT: Rect = Rect::new(CANVAS_X0, CANVAS_Y0, CANVAS_W, CANVAS_H);
+const _: () = assert!(CANVAS_RECT.y + CANVAS_RECT.h <= BAND1_Y1);
+/// The canvas's top row at `level`.
+///
+/// WHY it follows the header band: band 0 answers rows up to its own rule, and
+/// the rule sits under two runs whose boxes the person's text size sets. A
+/// canvas that stayed at row 148 while the header reached 165 would have its
+/// first seventeen rows answered by the header branch instead of by itself.
+///
+/// WHY the second clamp: the canvas is the one plate here whose height is the
+/// media's, not the type's -- `CANVAS_H` is the decoded frame -- so the run-time
+/// guard holds it inside the band that repaints it at every selectable level,
+/// which the gate beside [`header_bands_clear_at_every_level`] proves cannot
+/// bite at any of them.
+const fn canvas_y0_at(level: u8) -> usize {
+    let mut y = CANVAS_Y0;
+    if band0_y1_at(level) > y {
+        y = band0_y1_at(level);
+    }
+    if y > BAND1_Y1 - CANVAS_H {
+        y = BAND1_Y1 - CANVAS_H;
+    }
+    y
+}
+
+#[inline]
+fn canvas_rect() -> Rect {
+    Rect::new(CANVAS_X0, canvas_y0_at(level()), CANVAS_W, CANVAS_H)
+}
 
 // Scrubber
 const SEEK_X: usize = 124;
@@ -514,26 +876,89 @@ const SHEET_VALUE_MAX_W: usize = SHEET_RECT.x + SHEET_RECT.w - 24 - SHEET_VALUE_
 /// the body rung, so the row step is that line box and the air under it, and the
 /// five rows the sheet carries are that step from the first.
 const SHEET_HEADER_Y: usize = SHEET_RECT.y + 20;
-const SHEET_ROW_FORMAT_Y: usize = SHEET_RECT.y + 60;
-const SHEET_ROW_STEP: usize = font::line_height(2) + 4;
-const SHEET_ROW_CANVAS_Y: usize = SHEET_ROW_FORMAT_Y + SHEET_ROW_STEP;
-const SHEET_ROW_DECODER_Y: usize = SHEET_ROW_FORMAT_Y + 2 * SHEET_ROW_STEP;
-const SHEET_ROW_LOCATION_Y: usize = SHEET_ROW_FORMAT_Y + 3 * SHEET_ROW_STEP;
-const SHEET_ROW_AUDIO_Y: usize = SHEET_ROW_FORMAT_Y + 4 * SHEET_ROW_STEP;
+/// The first row's offset inside the card, and the air a row wants under it.
+const SHEET_ROW0_DY: usize = 60;
+const SHEET_ROW_AIR: usize = 4;
+/// The row step at `level`: the body rung's line box and the air under it --
+/// or, when the card cannot hold five of those, the largest step that keeps the
+/// last row's whole box inside the plate.
+///
+/// WHY a clamp and not an assert: the card's foot is bounded by the system home
+/// band, not by its own text (`SHEET_RECT.y + SHEET_RECT.h <= HOME_HIT.y` below),
+/// so at the largest setting the plate cannot simply grow. Tightening the
+/// leading is the only move left that keeps every row's *ink* whole, and
+/// [`sheet_rows_clear_at_every_level`] is the gate that proves the tightened
+/// step still leaves more rows between two labels than a label's own ascent
+/// takes -- so a rung costs this sheet air, never legibility, and never a
+/// clipped value.
+const fn sheet_row_step_at(level: u8) -> usize {
+    let wanted = line_at(2, level) + SHEET_ROW_AIR;
+    let room = (SHEET_RECT.h - SHEET_ROW0_DY - line_at(2, level)) / 4;
+    if wanted <= room {
+        wanted
+    } else {
+        room
+    }
+}
+
+#[inline]
+fn sheet_row_step() -> usize {
+    sheet_row_step_at(level())
+}
+
+/// The row `i` (zero at the card's first row) starts at the published level.
+#[inline]
+fn sheet_row_y(i: usize) -> usize {
+    SHEET_RECT.y + SHEET_ROW0_DY + i * sheet_row_step()
+}
+
+const _: () = assert!(sheet_row_step_at(PLATFORM_LEVEL) == font::line_height(2) + 4);
+
 /// The offset a caption-rung value needs to stand on its body-rung label's
 /// baseline.
 ///
 /// WHY not a literal two or four: the two rungs' ascents differ by exactly this,
 /// and a value authored at the label's box top rather than at the shared baseline
 /// reads several rows high next to the word it answers.
-const SHEET_SMALL_DY: usize = font::ascent_for_scale(2) - font::ascent_for_scale(1);
+const fn sheet_small_dy_at(level: u8) -> usize {
+    ascent_at(2, level) - ascent_at(1, level)
+}
+
+#[inline]
+fn sheet_small_dy() -> usize {
+    sheet_small_dy_at(level())
+}
+
+const _: () = assert!(sheet_small_dy_at(PLATFORM_LEVEL) == 7);
+
+/// WHAT THIS GATES: at every level the setting can hold, the sheet's five rows
+/// keep their whole boxes inside the card, and two consecutive labels keep their
+/// ink apart -- which is the pair of facts the clamp above trades in.
+const fn sheet_rows_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let step = sheet_row_step_at(level);
+        // The last row reserves its whole box inside the plate.
+        if SHEET_ROW0_DY + 4 * step + line_at(2, level) > SHEET_RECT.h {
+            return false;
+        }
+        // A label's ascent, its caption riding that same baseline, and the step
+        // to the next row: the step has to exceed the ascent the row is drawn at,
+        // or a row's ink would land on the row under it.
+        if step <= ascent_at(2, level) + SHEET_ROW_AIR {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(sheet_rows_clear_at_every_level());
 
 /// WHY checked at compile time: the columns are the sheet's whole claim about
 /// itself, and a label column that reached its value column, or a last row whose
 /// box reached past the card, is the defect these rows replace.
 const _: () = assert!(SHEET_LABEL_X + SHEET_LABEL_COL_W < SHEET_VALUE_X);
 const _: () = assert!(SHEET_VALUE_X + SHEET_VALUE_MAX_W == SHEET_RECT.x + SHEET_RECT.w - 24);
-const _: () = assert!(SHEET_ROW_AUDIO_Y + font::line_height(2) < SHEET_RECT.y + SHEET_RECT.h);
 /// The system home indicator, and the strip that answers a press on it.
 ///
 /// Both come from `std::design::home_band` now. They used to be authored here as
@@ -558,8 +983,72 @@ const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HO
 /// WHY under the header's rule: the drawer's title and its line are painted by
 /// the same band the list is tested against, so the list has to start below the
 /// hairline that closes the band rather than under the title's line box.
-const LIB_LIST_Y0: usize = HEADER_RULE_Y + 4;
-const LIB_ROW_H: usize = 68;
+/// The drawer's list viewport, and the row it starts on.
+///
+/// WHY under the header's rule: the drawer's title and its line are painted by
+/// the same band the list is tested against, so the list has to start below the
+/// hairline that closes the band rather than under the title's line box -- and
+/// WHY a function: that hairline sits under two runs whose boxes follow the
+/// person's text size, so a list authored at a constant row starts inside the
+/// header it is supposed to sit below.
+const fn lib_list_y0_at(level: u8) -> usize {
+    header_rule_y_at(level) + 4
+}
+
+#[inline]
+fn lib_list_y0() -> usize {
+    lib_list_y0_at(level())
+}
+
+/// One playlist row, at `level`.
+///
+/// WHY the sum is written in ascents and not in the remembered 68: the row stacks
+/// its title's ink, then its meta line's ink, and the meta run rides three rows
+/// below the title's baseline -- the same riding the properties sheet's caption
+/// uses. At the platform's rung that sum is `10 + 31 + 3 + 24`, which is the 68
+/// this screen drew before the setting could be read, and the gate below pins it;
+/// at a raised rung each part grows with the type, which is what keeps a scaled
+/// row's meta line off the title of the row under it.
+const LIB_ROW_TITLE_DY: usize = 10;
+const LIB_ROW_META_RIDE: usize = 3;
+
+const fn lib_meta_dy_at(level: u8) -> usize {
+    LIB_ROW_TITLE_DY + ascent_at(2, level) + LIB_ROW_META_RIDE
+}
+
+const fn lib_row_h_at(level: u8) -> usize {
+    lib_meta_dy_at(level) + ascent_at(1, level)
+}
+
+#[inline]
+fn lib_meta_dy() -> usize {
+    lib_meta_dy_at(level())
+}
+
+#[inline]
+fn lib_row_h() -> usize {
+    lib_row_h_at(level())
+}
+
+const LIB_ROW_H: usize = lib_row_h_at(PLATFORM_LEVEL);
+const _: () = assert!(lib_meta_dy_at(PLATFORM_LEVEL) == 44);
+const _: () = assert!(LIB_ROW_H == 68);
+/// WHAT THIS GATES: a row reserves the whole of both its runs at every level, and
+/// the first row still stands inside the viewport that answers a press on it.
+const fn library_rows_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        if lib_row_h_at(level) < lib_meta_dy_at(level) + ascent_at(1, level) {
+            return false;
+        }
+        if lib_list_y0_at(level) + lib_row_h_at(level) > LIB_VIEW_Y1 {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(library_rows_clear_at_every_level());
 /// The bottom of the library list's viewport.
 const LIB_VIEW_Y1: usize = 1390;
 
@@ -1487,6 +1976,73 @@ fn duration_label(known: bool, seconds: u32, negative: bool, out: &mut [u8; 12])
 // Pixel Shaders & Typography
 // -----------------------------------------------------------------------------
 
+/// One run's ink, at the level `level` names.
+///
+/// WHY the box, the placement and the fallback all move together: the box is the
+/// line box the layout reserved, the placement is the cap the run is rasterised
+/// at, and the fallback is the size the bitmap face draws when the outline face
+/// refuses the run. Moving one and not the others is the clipped-text class of
+/// defect -- a scaled cap inside the platform's box loses its descenders, and a
+/// platform cap inside a scaled box leaves a gap where the line used to be. At
+/// [`PLATFORM_LEVEL`] all three answer exactly what this function answered before
+/// the setting could be read: the run box, `line_height` and `measure` are the
+/// ladder's own numbers there, which the gate beside [`line_at`] pins.
+///
+/// WHY the width band is wider at a scaled level: `16 * scale` is the bitmap
+/// cell's widest byte, and a run at a scaled em walks past it, so the band would
+/// otherwise reject pixels of the very run it enlarged. Every caller fits its run
+/// to its own column with [`fit_run`] before asking, so widening the band here
+/// cannot let ink reach past a column -- it only stops the cell grid from cutting
+/// a run the outline face draws wider than the grid.
+#[inline(always)]
+fn draw_text_at(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+    level: u8,
+) -> Option<u32> {
+    if scale == 0 || s.is_empty() {
+        return None;
+    }
+    if level == PLATFORM_LEVEL {
+        let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
+        let bitmap_h = line_at(scale, PLATFORM_LEVEL);
+        let bitmap_w = if bold {
+            font::measure_bold(s, scale)
+        } else {
+            font::measure(s, scale)
+        };
+        let top = bt.min(y0);
+        let height = bh.max(bitmap_h);
+        let width = bw.max(bitmap_w) + usize::from(bold);
+        if x < bx || x - bx >= width || y < top || y - top >= height {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run(x0, y0, scale, s, None, bold) {
+            return run.pixel(x, y, color, bg);
+        }
+        return font::test_text_aa(x, y, x0, y0, scale, s, color, bg, bold);
+    }
+    let h = line_at(scale, level);
+    let width = (run_w_at(s, scale, bold, level) + 2)
+        .min(s.len().saturating_mul(em_at(scale, level) as usize + 4) + 2);
+    if x < x0 || x - x0 >= width || y < y0 || y - y0 >= h {
+        return None;
+    }
+    let cap = cap_at(scale, level);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, s, None, bold) {
+        return run.pixel(x, y, color, bg);
+    }
+    std::design::monochrome::text_px(x, y, x0, y0, cap, s, color, bg, bold)
+}
+
+/// [`draw_text_at`] at the published level.
 #[inline(always)]
 fn draw_text(
     x: usize,
@@ -1498,24 +2054,10 @@ fn draw_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale == 0 || s.is_empty() {
-        return None;
-    }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
-    let bitmap_h = font::line_height(scale);
-    let bitmap_w = font::measure(s, scale);
-    let top = bt.min(y0);
-    let height = bh.max(bitmap_h);
-    let width = bw.max(bitmap_w);
-    if x < bx || x - bx >= width || y < top || y - top >= height {
-        return None;
-    }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, s, None, false) {
-        return run.pixel(x, y, color, bg);
-    }
-    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, false)
+    draw_text_at(x, y, x0, y0, scale, s, color, bg, false, level())
 }
 
+/// [`draw_text_at`] at the published level, in the bold weight.
 #[inline(always)]
 fn draw_text_bold(
     x: usize,
@@ -1527,22 +2069,7 @@ fn draw_text_bold(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale == 0 || s.is_empty() {
-        return None;
-    }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, s);
-    let bitmap_h = font::line_height(scale);
-    let bitmap_w = font::measure_bold(s, scale);
-    let top = bt.min(y0);
-    let height = bh.max(bitmap_h);
-    let width = bw.max(bitmap_w) + 1;
-    if x < bx || x - bx >= width || y < top || y - top >= height {
-        return None;
-    }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, s, None, true) {
-        return run.pixel(x, y, color, bg);
-    }
-    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
+    draw_text_at(x, y, x0, y0, scale, s, color, bg, true, level())
 }
 
 /// The properties sheet's label column: a body-rung run, trimmed to its column
@@ -1554,7 +2081,7 @@ fn draw_text_bold(
 #[inline(always)]
 fn sheet_label(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
     let mut buf = [0u8; 24];
-    let n = font::ellipsize(s, 2, SHEET_LABEL_COL_W, &mut buf);
+    let n = fit_run(s, 2, false, SHEET_LABEL_COL_W, &mut buf);
     draw_text(
         x,
         y,
@@ -1571,7 +2098,7 @@ fn sheet_label(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
 #[inline(always)]
 fn sheet_value_bold(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
     let mut buf = [0u8; 32];
-    let n = font::ellipsize(s, 2, SHEET_VALUE_MAX_W, &mut buf);
+    let n = fit_run(s, 2, true, SHEET_VALUE_MAX_W, &mut buf);
     draw_text_bold(
         x,
         y,
@@ -1589,12 +2116,12 @@ fn sheet_value_bold(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
 #[inline(always)]
 fn sheet_value_caption(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32> {
     let mut buf = [0u8; 48];
-    let n = font::ellipsize(s, 1, SHEET_VALUE_MAX_W, &mut buf);
+    let n = fit_run(s, 1, false, SHEET_VALUE_MAX_W, &mut buf);
     draw_text(
         x,
         y,
         SHEET_VALUE_X,
-        row_y + SHEET_SMALL_DY,
+        row_y + sheet_small_dy(),
         1,
         &buf[..n],
         COLOR_TEXT_PRIMARY,
@@ -1619,7 +2146,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     if app.orientation == Orientation::Landscape {
         // Base: Fullscreen video rendering
         let video_pixel: u32 = if let DecoderStatus::HardwareUnavailable(msg) = app.status {
-            let mw = font::measure(msg.as_bytes(), 1);
+            let mw = run_w(msg.as_bytes(), 1, true);
             let mx = (W.saturating_sub(mw)) / 2;
             if let Some(col) = draw_text_bold(
                 x,
@@ -1635,7 +2162,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
             COLOR_SURFACE_SUNKEN
         } else if let DecoderStatus::Error(msg) = app.status {
-            let mw = font::measure(msg.as_bytes(), 1);
+            let mw = run_w(msg.as_bytes(), 1, true);
             let mx = (W.saturating_sub(mw)) / 2;
             if let Some(col) = draw_text_bold(
                 x,
@@ -1664,7 +2191,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         } else {
             // Idle state in landscape
             let msg = b"NO MEDIA OPEN";
-            let mw = font::measure_bold(msg, 2);
+            let mw = run_w(msg, 2, true);
             let mx = (W.saturating_sub(mw)) / 2;
             if let Some(col) = draw_text_bold(x, y, mx, H / 2 - 20, 2, msg, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return col;
@@ -1675,7 +2202,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Translucent HUD Overlays
         if app.hud_visible {
             // Top Translucent Bar
-            let top_bar = LAND_BAR;
+            let top_bar = land_bar();
             if top_bar.contains(x, y) {
                 let bg_hud = blend_argb(video_pixel, COLOR_SURFACE_SUNKEN, 210);
 
@@ -1694,7 +2221,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 // corner cut-outs of the rounded rect, and this falls through to
                 // `bg_hud` there, which is what a rounded plate over a live frame
                 // should look like.
-                let back_hit = LAND_BACK_BTN;
+                let back_hit = land_back_btn();
                 if back_hit.contains(x, y) {
                     let (ink, ring, fill) = back_button::colors_for_theme(&THEME);
                     let lx = x - back_hit.x + back_button::X;
@@ -1708,8 +2235,8 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 // Title (Scale 2 Body Bold)
                 let title = app.current_title().as_bytes();
                 let mut tbuf = [0u8; 48];
-                let tn = font::ellipsize(title, 2, 420, &mut tbuf);
-                if let Some(col) = draw_text_bold(x, y, 104, LAND_TITLE_Y, 2, &tbuf[..tn], COLOR_TEXT_PRIMARY, bg_hud) {
+                let tn = fit_run(title, 2, true, 420, &mut tbuf);
+                if let Some(col) = draw_text_bold(x, y, 104, land_title_y(), 2, &tbuf[..tn], COLOR_TEXT_PRIMARY, bg_hud) {
                     return col;
                 }
 
@@ -1724,7 +2251,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 bl += 3;
                 badge_buf[bl..bl + s_label.len()].copy_from_slice(s_label);
                 bl += s_label.len();
-                if let Some(col) = draw_text(x, y, 104, LAND_BADGE_Y, 1, &badge_buf[..bl], COLOR_TEXT_MUTED, bg_hud) {
+                if let Some(col) = draw_text(x, y, 104, land_badge_y(), 1, &badge_buf[..bl], COLOR_TEXT_MUTED, bg_hud) {
                     return col;
                 }
 
@@ -1890,7 +2417,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // =========================================================================
     if app.library_open || (app.pip_mode && !PIP_RECT.contains(x, y)) {
         // Drawer Top Bar (y: 0..LIB_LIST_Y0)
-        if y < LIB_LIST_Y0 {
+        if y < lib_list_y0() {
             // The back control, asked first because it is the one occupant of
             // this row the app does not own: its rect, radius, ring and chevron
             // all come from `back_button`, and pressing it closes the drawer --
@@ -1952,7 +2479,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 x,
                 y,
                 96,
-                HEADER_LINE_Y,
+                header_line_y(),
                 1,
                 &sub_buf[..sn],
                 COLOR_TEXT_MUTED,
@@ -1962,7 +2489,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
 
             // Hairline separator
-            if y == HEADER_RULE_Y {
+            if y == header_rule_y() {
                 return COLOR_BORDER;
             }
             return COLOR_BG;
@@ -1973,14 +2500,14 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // WHY the offset is in pixels: a drag delivers a few pixels per event,
         // and a row-quantised offset discarded every drag shorter than a row,
         // so a list longer than the screen could not be scrolled at all.
-        let content_y = (y - LIB_LIST_Y0) + app.library_scroll;
-        let row_idx = content_y / LIB_ROW_H;
+        let content_y = (y - lib_list_y0()) + app.library_scroll;
+        let row_idx = content_y / lib_row_h();
 
         // WHY the band is closed at `LIB_VIEW_Y1`: the press path only selects a
         // row above that line, so a row painted below it was a visible track the
         // user could tap and nothing answered.
         if row_idx < app.playlist.count && y < LIB_VIEW_Y1 {
-            let row_y0 = LIB_LIST_Y0 + row_idx * LIB_ROW_H - app.library_scroll;
+            let row_y0 = lib_list_y0() + row_idx * lib_row_h() - app.library_scroll;
             let is_current = row_idx == app.playlist.current;
             let row_bg = if is_current { COLOR_SURFACE } else { COLOR_BG };
 
@@ -1990,7 +2517,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
 
             // Row separator hairline
-            if y == row_y0 + LIB_ROW_H - 1 {
+            if y == row_y0 + lib_row_h() - 1 {
                 return COLOR_BORDER;
             }
 
@@ -2019,9 +2546,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             // Line 1: Title in Scale 2 Body
             let title_bytes = item.title_str().as_bytes();
             let mut tbuf = [0u8; 48];
-            let tn = font::ellipsize(title_bytes, 2, 600, &mut tbuf);
+            let tn = fit_run(title_bytes, 2, true, 600, &mut tbuf);
             let title_col = if is_current { COLOR_TEXT_PRIMARY } else { 0xFFE0E0E0 };
-            if let Some(col) = draw_text_bold(x, y, 64, row_y0 + 10, 2, &tbuf[..tn], title_col, row_bg) {
+            if let Some(col) = draw_text_bold(x, y, 64, row_y0 + LIB_ROW_TITLE_DY, 2, &tbuf[..tn], title_col, row_bg) {
                 return col;
             }
 
@@ -2066,7 +2593,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             meta_buf[ml..ml + dn].copy_from_slice(&d_buf[..dn]);
             ml += dn;
 
-            if let Some(col) = draw_text(x, y, 64, row_y0 + 44, 1, &meta_buf[..ml], COLOR_TEXT_MUTED, row_bg) {
+            if let Some(col) = draw_text(x, y, 64, row_y0 + lib_meta_dy(), 1, &meta_buf[..ml], COLOR_TEXT_MUTED, row_bg) {
                 return col;
             }
 
@@ -2112,7 +2639,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // -------------------------------------------------------------------------
     // Band 0: Top Bar (Back, Title, Orientation, Kebab)
     // -------------------------------------------------------------------------
-    if y < BAND0_Y1 {
+    if y < band0_y1() {
         // The platform Back chip -- the same plate, ring and chevron every other
         // screen in this device puts in the top-left corner, painted by
         // `back_button::pixel_for_theme` with this app's own `THEME` (the dark
@@ -2166,8 +2693,8 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Title in Scale 2 Body Bold
         let title_bytes = app.current_title().as_bytes();
         let mut tbuf = [0u8; 48];
-        let tn = font::ellipsize(title_bytes, 2, HEADER_TITLE_MAX_W, &mut tbuf);
-        let tw = font::measure_bold(&tbuf[..tn], 2);
+        let tn = fit_run(title_bytes, 2, true, HEADER_TITLE_MAX_W, &mut tbuf);
+        let tw = run_w(&tbuf[..tn], 2, true);
         let tx = (W.saturating_sub(tw)) / 2;
         if let Some(col) = draw_text_bold(
             x,
@@ -2194,13 +2721,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         sub_buf[sl..sl + speed_label.len()].copy_from_slice(speed_label);
         sl += speed_label.len();
 
-        let sw = font::measure(&sub_buf[..sl], 1);
+        let sw = run_w(&sub_buf[..sl], 1, false);
         let sx = (W.saturating_sub(sw)) / 2;
         if let Some(col) = draw_text(
             x,
             y,
             sx,
-            HEADER_LINE_Y,
+            header_line_y(),
             1,
             &sub_buf[..sl],
             COLOR_TEXT_MUTED,
@@ -2210,7 +2737,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         }
 
         // Hairline divider
-        if y == HEADER_RULE_Y {
+        if y == header_rule_y() {
             return COLOR_BORDER;
         }
 
@@ -2220,25 +2747,31 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // -------------------------------------------------------------------------
     // Band 1: 16:9 Video Canvas (680x382, r=16)
     // -------------------------------------------------------------------------
-    if y >= BAND1_Y0 && y < BAND1_Y1 {
-        if CANVAS_RECT.contains(x, y) {
+    if y >= band0_y1() && y < BAND1_Y1 {
+        // The canvas plate at the rung this frame's header band reached. It is a
+        // local, standing in for the platform-level constant of the same name,
+        // so every row this branch places -- the mask, the border, the notices
+        // and the decoded frame -- is placed by the geometry the band above it
+        // actually answered, and not by a rung that has already moved.
+        let canvas = canvas_rect();
+        if canvas.contains(x, y) {
             // Apply 16px corner radius mask
             let r = 16i32;
-            let in_left = x < CANVAS_RECT.x + 16;
-            let in_right = x >= CANVAS_RECT.x + CANVAS_RECT.w - 16;
-            let in_top = y < CANVAS_RECT.y + 16;
-            let in_bottom = y >= CANVAS_RECT.y + CANVAS_RECT.h - 16;
+            let in_left = x < canvas.x + 16;
+            let in_right = x >= canvas.x + canvas.w - 16;
+            let in_top = y < canvas.y + 16;
+            let in_bottom = y >= canvas.y + canvas.h - 16;
 
             if (in_left || in_right) && (in_top || in_bottom) {
                 let cx = if in_left {
-                    CANVAS_RECT.x + 16
+                    canvas.x + 16
                 } else {
-                    CANVAS_RECT.x + CANVAS_RECT.w - 16 - 1
+                    canvas.x + canvas.w - 16 - 1
                 } as i32;
                 let cy = if in_top {
-                    CANVAS_RECT.y + 16
+                    canvas.y + 16
                 } else {
-                    CANVAS_RECT.y + CANVAS_RECT.h - 16 - 1
+                    canvas.y + canvas.h - 16 - 1
                 } as i32;
                 let dx = (x as i32) - cx;
                 let dy = (y as i32) - cy;
@@ -2248,23 +2781,23 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             }
 
             // 1px Border
-            if x == CANVAS_RECT.x
-                || x == CANVAS_RECT.x + CANVAS_RECT.w - 1
-                || y == CANVAS_RECT.y
-                || y == CANVAS_RECT.y + CANVAS_RECT.h - 1
+            if x == canvas.x
+                || x == canvas.x + canvas.w - 1
+                || y == canvas.y
+                || y == canvas.y + canvas.h - 1
             {
                 return COLOR_BORDER;
             }
 
             // Platform Truth Contract: Report missing hardware decoder
             if let DecoderStatus::HardwareUnavailable(msg) = app.status {
-                let mw = font::measure(msg.as_bytes(), 1);
+                let mw = run_w(msg.as_bytes(), 1, true);
                 let mx = (W.saturating_sub(mw)) / 2;
                 if let Some(col) = draw_text_bold(
                     x,
                     y,
                     mx,
-                    CANVAS_Y0 + 176,
+                    canvas.y + 176,
                     1,
                     msg.as_bytes(),
                     0xFFE05A68,
@@ -2278,13 +2811,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             // A typed container/decode refusal is shown verbatim; the canvas
             // never falls back to black while claiming to play.
             if let DecoderStatus::Error(msg) = app.status {
-                let mw = font::measure(msg.as_bytes(), 1);
+                let mw = run_w(msg.as_bytes(), 1, true);
                 let mx = (W.saturating_sub(mw)) / 2;
                 if let Some(col) = draw_text_bold(
                     x,
                     y,
                     mx,
-                    CANVAS_Y0 + 176,
+                    canvas.y + 176,
                     1,
                     msg.as_bytes(),
                     0xFFE05A68,
@@ -2300,16 +2833,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if app.avi_audio_unavailable() {
                 let notice = b"Audio stream: unavailable";
                 let nx = CANVAS_X0 + 12;
-                let ny = CANVAS_Y0 + CANVAS_H - 28;
+                let ny = canvas.y + CANVAS_H - 28;
                 // WHY the gate is the run's real box: `draw_text` answers inside
                 // the caption rung's line box, and a gate shorter than that box
                 // hands the run's last rows back to the surface behind it -- the
                 // string reads whole only for as long as nobody writes a
                 // descender into it.
                 if x >= nx
-                    && x < nx + font::measure(notice, 1)
+                    && x < nx + run_w(notice, 1, false)
                     && y >= ny
-                    && y < ny + font::line_height(1)
+                    && y < ny + line_u(1)
                 {
                     if let Some(col) = draw_text(
                         x,
@@ -2330,7 +2863,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             // Real Decoded Video Frame
             if app.has_frame {
                 let cx = x - CANVAS_X0;
-                let cy = y - CANVAS_Y0;
+                let cy = y - canvas.y;
                 let pixel_idx = cy * CANVAS_W + cx;
                 unsafe {
                     return (*core::ptr::addr_of!(CANVAS_PIXELS))[pixel_idx];
@@ -2339,16 +2872,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
             // Idle Placeholder
             let msg1 = b"NO MEDIA OPEN";
-            let mw1 = font::measure_bold(msg1, 2);
+            let mw1 = run_w(msg1, 2, true);
             let mx1 = (W.saturating_sub(mw1)) / 2;
-            if let Some(col) = draw_text_bold(x, y, mx1, CANVAS_Y0 + 150, 2, msg1, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(col) = draw_text_bold(x, y, mx1, canvas.y + 150, 2, msg1, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return col;
             }
 
             let msg2 = b"Supported: AVI (MJPEG), PPM P6, RAW RGB24";
-            let mw2 = font::measure(msg2, 1);
+            let mw2 = run_w(msg2, 1, false);
             let mx2 = (W.saturating_sub(mw2)) / 2;
-            if let Some(col) = draw_text(x, y, mx2, CANVAS_Y0 + 190, 1, msg2, COLOR_TEXT_MUTED, COLOR_SURFACE) {
+            if let Some(col) = draw_text(x, y, mx2, canvas.y + 190, 1, msg2, COLOR_TEXT_MUTED, COLOR_SURFACE) {
                 return col;
             }
 
@@ -2550,7 +3083,17 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 vn += 1;
             }
         }
-        if let Some(col) = draw_text(x, y, 610, 836, 2, &vbuf[..vn], COLOR_TEXT_PRIMARY, COLOR_BG) {
+        // The volume read-out, stood on its own HUD row.
+        //
+        // WHY the smaller of the two numbers: band 4 answers rows up to
+        // `BAND4_Y1` and nothing below it, so a body-rung box taller than the
+        // band's remaining rows -- which is what the largest setting makes --
+        // would have its last rows painted by band 5 instead. Moving the run up
+        // to the highest row that still reserves its whole box inside band 4 keeps
+        // the ink whole at every selectable level and leaves the platform's rung
+        // exactly where it was (836 against 851 at one hundred per cent).
+        let vol_y = 836usize.min(BAND4_Y1 - line_u(2));
+        if let Some(col) = draw_text(x, y, 610, vol_y, 2, &vbuf[..vn], COLOR_TEXT_PRIMARY, COLOR_BG) {
             return col;
         }
 
@@ -2564,9 +3107,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Speed Button (Scale 2 Body)
         if let Some(col) = draw_rounded_rect(x, y, SPEED_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
             let label = app.speed.label().as_bytes();
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = SPEED_BTN.x + (SPEED_BTN.w.saturating_sub(lw)) / 2;
-            let ly = SPEED_BTN.y + (SPEED_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = SPEED_BTN.y + (SPEED_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -2576,9 +3119,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Aspect Ratio Button (Scale 2 Body)
         if let Some(col) = draw_rounded_rect(x, y, ASPECT_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
             let label = app.aspect.label().as_bytes();
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
-            let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -2588,9 +3131,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Loop Mode Button (Scale 2 Body)
         if let Some(col) = draw_rounded_rect(x, y, LOOP_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
             let label = app.loop_mode.label().as_bytes();
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = LOOP_BTN.x + (LOOP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LOOP_BTN.y + (LOOP_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = LOOP_BTN.y + (LOOP_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -2602,9 +3145,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         let pip_ink = if app.pip_mode { COLOR_PLAY_GLYPH } else { COLOR_TEXT_PRIMARY };
         if let Some(col) = draw_rounded_rect(x, y, PIP_BTN, 12, pip_fill, Some(COLOR_BORDER), 1) {
             let label = b"PIP";
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = PIP_BTN.x + (PIP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PIP_BTN.y + (PIP_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = PIP_BTN.y + (PIP_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, pip_ink, pip_fill) {
                 return t_col;
             }
@@ -2614,9 +3157,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         // Library Drawer Button (Scale 2 Body)
         if let Some(col) = draw_rounded_rect(x, y, LIB_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
             let label = b"LIBRARY";
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = LIB_BTN.x + (LIB_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LIB_BTN.y + (LIB_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = LIB_BTN.y + (LIB_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -2627,9 +3170,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
         let info_fill = if app.info_open { COLOR_BORDER } else { COLOR_SURFACE };
         if let Some(col) = draw_rounded_rect(x, y, INFO_BTN, 12, info_fill, Some(COLOR_BORDER), 1) {
             let label = b"MEDIA INFO";
-            let lw = font::measure_bold(label, 2);
+            let lw = run_w(label, 2, true);
             let lx = INFO_BTN.x + (INFO_BTN.w.saturating_sub(lw)) / 2;
-            let ly = INFO_BTN.y + (INFO_BTN.h.saturating_sub(font::line_height(2))) / 2;
+            let ly = INFO_BTN.y + (INFO_BTN.h.saturating_sub(line_u(2))) / 2;
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, info_fill) {
                 return t_col;
             }
@@ -2656,15 +3199,15 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
                 // Format
                 let c_text = app.current_codec().label().as_bytes();
-                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_FORMAT_Y, b"Format:") {
+                if let Some(t_col) = sheet_label(x, y, sheet_row_y(0), b"Format:") {
                     return t_col;
                 }
-                if let Some(t_col) = sheet_value_bold(x, y, SHEET_ROW_FORMAT_Y, c_text) {
+                if let Some(t_col) = sheet_value_bold(x, y, sheet_row_y(0), c_text) {
                     return t_col;
                 }
 
                 // Resolution
-                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_CANVAS_Y, b"Canvas:") {
+                if let Some(t_col) = sheet_label(x, y, sheet_row_y(1), b"Canvas:") {
                     return t_col;
                 }
                 // The frame size comes from the selected file's own header;
@@ -2677,13 +3220,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 let mut res_buf = [0u8; 24];
                 let res_len = format_resolution(src_w, src_h, &mut res_buf);
                 if let Some(t_col) =
-                    sheet_value_bold(x, y, SHEET_ROW_CANVAS_Y, &res_buf[..res_len])
+                    sheet_value_bold(x, y, sheet_row_y(1), &res_buf[..res_len])
                 {
                     return t_col;
                 }
 
                 // Decoder Pipeline
-                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_DECODER_Y, b"Decoder:") {
+                if let Some(t_col) = sheet_label(x, y, sheet_row_y(2), b"Decoder:") {
                     return t_col;
                 }
                 // Only the formats this app genuinely decodes claim a
@@ -2703,13 +3246,13 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                         _ => b"No decoder bound",
                     }
                 };
-                if let Some(t_col) = sheet_value_bold(x, y, SHEET_ROW_DECODER_Y, dec_label) {
+                if let Some(t_col) = sheet_value_bold(x, y, sheet_row_y(2), dec_label) {
                     return t_col;
                 }
 
                 // Audio: an AVI's audio stream is named but not claimed as
                 // playable; the player has no audio decoder for it.
-                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_AUDIO_Y, b"Audio:") {
+                if let Some(t_col) = sheet_label(x, y, sheet_row_y(4), b"Audio:") {
                     return t_col;
                 }
                 let audio_label: &[u8] = if app.current_codec() == VideoCodec::Avi {
@@ -2723,16 +3266,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 } else {
                     b"Unavailable (no decoder)"
                 };
-                if let Some(t_col) = sheet_value_caption(x, y, SHEET_ROW_AUDIO_Y, audio_label) {
+                if let Some(t_col) = sheet_value_caption(x, y, sheet_row_y(4), audio_label) {
                     return t_col;
                 }
 
                 // Location / Path
-                if let Some(t_col) = sheet_label(x, y, SHEET_ROW_LOCATION_Y, b"Location:") {
+                if let Some(t_col) = sheet_label(x, y, sheet_row_y(3), b"Location:") {
                     return t_col;
                 }
                 let path_bytes = app.current_path().as_bytes();
-                if let Some(t_col) = sheet_value_caption(x, y, SHEET_ROW_LOCATION_Y, path_bytes) {
+                if let Some(t_col) = sheet_value_caption(x, y, sheet_row_y(3), path_bytes) {
                     return t_col;
                 }
 
@@ -2835,8 +3378,8 @@ fn repaint(surface: u32, app: &VideoApp, dirty: Dirty) {
     }
     match dirty {
         Dirty::None => {}
-        Dirty::TopBar => render_video_band(surface, app, BAND0_Y0, BAND0_Y1),
-        Dirty::Canvas => render_video_band(surface, app, BAND1_Y0, BAND1_Y1),
+        Dirty::TopBar => render_video_band(surface, app, BAND0_Y0, band0_y1()),
+        Dirty::Canvas => render_video_band(surface, app, band0_y1(), BAND1_Y1),
         Dirty::Scrubber => render_video_band(surface, app, BAND2_Y0, BAND2_Y1),
         Dirty::Transport => render_video_band(surface, app, BAND3_Y0, BAND3_Y1),
         Dirty::Volume => render_video_band(surface, app, BAND4_Y0, BAND4_Y1),
@@ -2870,7 +3413,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     if app.orientation == Orientation::Landscape {
         if app.hud_visible {
             // Orientation button in top bar -> Return to Portrait
-            if LAND_BACK_BTN.contains(x, y) {
+            if land_back_btn().contains(x, y) {
                 app.orientation = Orientation::Portrait;
                 app.aspect = AspectRatio::Fit;
                 let _ = std::audio_haptic_click();
@@ -2983,8 +3526,8 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
         }
 
         // Video row selection
-        if y >= LIB_LIST_Y0 && y < LIB_VIEW_Y1 {
-            let row_idx = ((y - LIB_LIST_Y0) + app.library_scroll) / LIB_ROW_H;
+        if y >= lib_list_y0() && y < LIB_VIEW_Y1 {
+            let row_idx = ((y - lib_list_y0()) + app.library_scroll) / lib_row_h();
             if row_idx < app.playlist.count {
                 app.playlist.select(row_idx);
                 app.load_current_track();
@@ -3181,6 +3724,14 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 pub extern "C" fn _start() -> ! {
     std::log("[VIDEO PLAYER] InterOS Video Player starting (Ring-3 user mode)...").ok();
 
+    // The person's text size, published before a single pixel is written.
+    //
+    // WHY here and not in the paint loop: the whole screen lays its rows out from
+    // the published rung, so a frame that drew before this call would be a frame
+    // that drew at the ladder and then resized -- and a settings query per glyph
+    // is a syscall inside the frame budget.
+    publish_text_scale();
+
     let mut app = VideoApp::new();
 
     // Query system volume. A failed query leaves the level unknown rather
@@ -3322,11 +3873,11 @@ pub extern "C" fn _start() -> ! {
                             // gesture; only a drag anywhere else is the system
                             // navigation gesture.
                             let over_library = app.library_open
-                                && (input.y as usize) >= LIB_LIST_Y0
+                                && (input.y as usize) >= lib_list_y0()
                                 && (input.y as usize) < LIB_VIEW_Y1;
                             if (input.kind == 4 || input.kind == 10) && over_library {
-                                let content_h = app.playlist.count * LIB_ROW_H;
-                                let viewport_h = LIB_VIEW_Y1 - LIB_LIST_Y0;
+                                let content_h = app.playlist.count * lib_row_h();
+                                let viewport_h = LIB_VIEW_Y1 - lib_list_y0();
                                 let max = content_h.saturating_sub(viewport_h);
                                 if input.dy < 0 {
                                     app.library_scroll = app
@@ -3381,6 +3932,14 @@ pub extern "C" fn _start() -> ! {
                     // A dispatch may reach this app while it is already
                     // running, so the slot is polled rather than pushed.
                     if app.handle_pending_intent() && surface > 0 {
+                        // WHY the level is re-adopted here: a dispatch that
+                        // finds this process alive is how the app is re-shown
+                        // without a launch, and Settings writes the store and
+                        // tells no one -- so the frame drawn straight after a
+                        // re-show would otherwise stand at the rung the person
+                        // left before the app was hidden. One settings query
+                        // per re-show, and never inside the paint loop.
+                        publish_text_scale();
                         repaint(surface, &app, Dirty::All);
                         let _ = std::surface_flip();
                     }

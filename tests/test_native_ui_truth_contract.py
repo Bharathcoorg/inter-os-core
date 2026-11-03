@@ -1220,8 +1220,15 @@ def test_the_back_affordance_paints_the_box_a_person_can_tap():
     video = read("apps/video_player/src/main.rs")
     assert "const LAND_BACK_X: usize = LAND_BAR.x + LAND_BAR_AIR;" in video
     assert "Rect::new( 36, LAND_BAR.y" not in " ".join(video.split())
-    assert "let back_hit = LAND_BACK_BTN;" in video
-    assert "if LAND_BACK_BTN.contains(x, y)" in video
+    # The plate moved from a const to `land_back_btn()` because the landscape
+    # scrim is now the two runs' line boxes at the published rung, and a chip
+    # centred in the platform's rows drifts off the middle of a bar that grew
+    # under it. What is NOT relaxed: both branches name the one accessor --
+    # painted == hit stays structural -- and the platform-rung const the gates
+    # read is still the same 48x48 stood on the bar's own air.
+    assert "let back_hit = land_back_btn();" in video
+    assert "if back_hit.contains(x, y)" in video
+    assert "if land_back_btn().contains(x, y)" in video
     assert (
         "const _: () = assert!(LAND_BACK_X >= back_button::X && "
         "LAND_BACK_BTN.y >= back_button::Y);"

@@ -20,12 +20,14 @@ use interos_std::design::components;
 use interos_std::design::outline_text;
 use interos_std::design::monochrome;
 use interos_std::design::primitives;
+use interos_std::design::typeface;
 use interos_std::design::scroll::ScrollState;
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 
 use messages::gsm;
 use messages::keyboard::{
     Editor, Editors, Field, KeyAction, Keyboard, BANDS_H, BANDS_TOP_IDLE, BANDS_TOP_KEYBOARD,
-    KB_Y0, KB_Y1, RECIPIENT_BAND_H,
+    KB_Y0, KB_Y1,
 };
 use messages::layout;
 use messages::privacy;
@@ -261,8 +263,8 @@ impl MessagesApp {
             keyboard: Keyboard::new(),
             handoff: [0; RECIP_CAP],
             handoff_len: 0,
-            list_scroll: ScrollState::new(0, LIST_VIEWPORT_H, 0),
-            convo_scroll: ScrollState::new(0, CONVO_VIEWPORT_H, 0),
+            list_scroll: ScrollState::new(0, INITIAL_VIEWPORT_H, 0),
+            convo_scroll: ScrollState::new(0, INITIAL_VIEWPORT_H, 0),
             published_path: [0; publish::PATH_CAP],
             published_path_len: 0,
             notice: [0; NOTICE_CAP],
@@ -309,7 +311,7 @@ impl MessagesApp {
         // shorter then, and a scroll extent built for the tall band would
         // let the list scroll under the keyboard.
         self.list_scroll = ScrollState::new(
-            rows.saturating_mul(CARD_H),
+            rows.saturating_mul(card_h()),
             list_viewport_h(self),
             self.list_scroll.offset,
         );
@@ -327,7 +329,7 @@ impl MessagesApp {
             None => 0,
         };
         self.convo_scroll = ScrollState::new(
-            count.saturating_mul(BUBBLE_STEP),
+            count.saturating_mul(bubble_step()),
             convo_viewport_h(self),
             self.convo_scroll.offset,
         );
@@ -599,6 +601,212 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+// -----------------------------------------------------------------------------
+// The person's text size, from the platform's store to this screen
+//
+// WHY this block exists beside the text faces rather than inside them:
+// `font::cap_for_scale` is a `const fn` ladder, and a box written as
+// `const X: usize = font::line_height(rung)` is folded at compile time and can
+// therefore never see what the person chose. That is the whole of the defect
+// this block closes -- a raised text size resized Settings and left every other
+// application tiny. The fix has two halves and both are here: the rung is read
+// once, before the first pixel is painted, and published into the renderer's
+// own cell (`DynamicType::publish`); and every box this app lays out is
+// re-derived through the `*_user` helpers beside the ladder, so the space a run
+// reserves moves with the ink it draws.
+//
+// WHY the helpers answer the ladder's own number at the default rung: level one
+// multiplies every cap by one hundred per cent, so an application that never
+// published a rung -- and a person who never changed the setting -- draws and
+// lays out exactly what this file drew before this block existed. Nothing here
+// moves a pixel until the store names a different rung.
+// -----------------------------------------------------------------------------
+
+/// The settings key the platform's Settings app writes the text size to.
+const TEXT_SCALE_KEY: &str = "display.text_scale";
+
+/// Reads the person's text size and hands it to the renderer.
+///
+/// WHY it is called before `surface_create` and once only: the boxes below are
+/// derived from the published rung every time the painter asks for one, so a
+/// rung that arrived mid-frame would move a row out from under a finger that is
+/// already inside it. Publishing once at startup is also the only place a
+/// settings query belongs -- asking the store per glyph would put a syscall
+/// inside the paint loop.
+///
+/// WHY `if let` and not a default: a value this app cannot read is not a level
+/// the person chose, and publishing a rung the store never named would resize
+/// the screen on a guess. The renderer's own default -- the ladder, at one
+/// hundred per cent -- stands.
+fn publish_user_text_scale() {
+    let mut buf = [0u8; 32];
+    if let Ok(n) = std::settings_get(TEXT_SCALE_KEY, &mut buf) {
+        if let Some(level) = UserTextScale::from_settings_value(&buf[..n]) {
+            let _ = DynamicType::new(level).publish();
+        }
+    }
+}
+
+/// Whether the published rung is the ladder's own hundred per cent.
+#[inline(always)]
+fn draws_at_ladder() -> bool {
+    std::design::font::user_text_scale() == std::design::font::TEXT_SCALE_NORMAL
+}
+
+/// The line box a rung reserves at the published level.
+///
+/// WHY every box below asks this instead of `font::line_height(rung)`: a run
+/// drawn at a scaled cap inside an unscaled box is clipped text, which is the
+/// class of defect the platform keeps being asked to fix. This is the box half
+/// of the pair, and it is the ladder's own number at the default rung.
+#[inline(always)]
+fn line_h(scale: usize) -> usize {
+    std::design::font::line_height_user(scale)
+}
+
+/// The rows from a run's box top to its baseline, at the published level.
+#[inline(always)]
+fn ascent_h(scale: usize) -> usize {
+    std::design::font::ascent_for_scale_user(scale)
+}
+
+/// The cap height a rung draws at, at the published level.
+#[inline(always)]
+fn cap_h(scale: usize) -> u32 {
+    std::design::font::cap_for_scale_user(scale)
+}
+
+/// The advance a run takes at the published level.
+#[inline(always)]
+fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
+    if bold {
+        std::design::font::measure_bold_user(text, scale)
+    } else {
+        std::design::font::measure_user(text, scale)
+    }
+}
+
+/// The rows a rung's line box has gained over the ladder's default rung.
+///
+/// WHY a growth and not the box: the offsets inside a thread row, a bubble and
+/// the unread pill are the designer's numbers -- 22, 56, 52, 34 -- and several of
+/// them are not `pad + box + gap`, so rewriting them as a derived chain would
+/// move ink on the default level. That is the one level every screenshot in the
+/// review queue and every contract test's expected row was made against. This
+/// answers nought there, and exactly the rows the raised rung adds everywhere
+/// else, so the relationship between two runs of ink survives the person
+/// choosing a bigger text size.
+#[inline(always)]
+fn line_growth(scale: usize) -> usize {
+    line_h(scale).saturating_sub(std::design::font::line_height(scale))
+}
+
+/// The columns a run has gained over the ladder's default rung.
+///
+/// WHY it exists beside [`line_growth`]: the same rule in the other axis -- an
+/// ink mark that is centred on a run's width keeps its shipped offset at the
+/// default level and follows the published level from there.
+#[inline(always)]
+fn run_growth(text: &[u8], scale: usize, bold: bool) -> usize {
+    let here = run_w(text, scale, bold);
+    let ladder = if bold {
+        std::design::font::measure_bold(text, scale)
+    } else {
+        std::design::font::measure(text, scale)
+    };
+    here.saturating_sub(ladder)
+}
+
+/// The widest `text` can be drawn inside `max_w` at the published level, with
+/// `...` where it was cut. Writes the shown run into `out`.
+///
+/// WHY an application-side fit rather than `font::fit`: `font::fit` compares the
+/// run against the lane at the *ladder's* advance, so at a raised rung a run it
+/// judged to fit is in fact wider than the lane and paints over the mark or the
+/// card edge the lane was measured against. The cut then happens where the ink
+/// actually ends, and the run is marked rather than silently clipped.
+///
+/// WHY the ladder still hands the work to `font::ellipsize`: the shipped trims
+/// are that function's arithmetic -- a budget spent in the outline face's
+/// advances -- and re-deriving it here would move a cut on the default rung,
+/// which is the one rung every contract test and every screenshot in the review
+/// queue were made against. The scaled branch below is the same algorithm with
+/// the em read from the published level.
+fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) -> usize {
+    if text.is_empty() || out.is_empty() || scale == 0 {
+        return 0;
+    }
+    if draws_at_ladder() {
+        return std::design::font::ellipsize(text, scale, max_w, out);
+    }
+    if run_w(text, scale, bold) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots = run_w(DOTS, scale, bold);
+    if dots > max_w || out.len() < 3 {
+        return 0;
+    }
+    // `measure_bold` folds the renderer's one-column dilation into the width it
+    // returns, so the dots already carry it and the budget below needs no weight
+    // term: the finished run is `sum + dots`, which the bound keeps inside `max_w`.
+    let em = std::design::font::em_for_scale_user(scale);
+    let budget = max_w - dots;
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let adv = typeface::advance_px(c, em) as usize;
+        if current_w + adv > budget || fit_len + 3 > out.len() {
+            break;
+        }
+        current_w += adv;
+        fit_len = i + 1;
+    }
+    out[..fit_len].copy_from_slice(&text[..fit_len]);
+    out[fit_len..fit_len + 3].copy_from_slice(DOTS);
+    fit_len + 3
+}
+
+/// The advance of the run `fit_run` would actually draw.
+fn fitted_run_w(text: &[u8], scale: usize, max_w: usize, bold: bool) -> usize {
+    let mut buf = [0u8; 96];
+    let n = fit_run(text, scale, max_w, bold, &mut buf);
+    run_w(&buf[..n], scale, bold)
+}
+
+/// A run of the outline face at the published level.
+///
+/// WHY a second face and not a change to [`test_text`]: the ladder face asks the
+/// SDK's memoised `run_box` and `place_run`, both keyed on the rung and not on
+/// the published level, so it answers the ladder's numbers whatever the person
+/// chose. This face asks the same arithmetic the memo would have cached -- the
+/// line box, the advance and the baseline at the published rung -- from the
+/// `*_user` helpers beside the ladder.
+fn user_ink(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    let h = line_h(scale);
+    if y < y0 || y - y0 >= h || x < x0 || x >= W || x - x0 >= run_w(text, scale, bold) + 1 {
+        return None;
+    }
+    let baseline = y0 + ascent_h(scale);
+    let em = std::design::font::em_for_scale_user(scale);
+    if let Some(run) = outline_text::OutlineRun::place_styled(x0, baseline, em, text, bold) {
+        return run.pixel(x, y, color, bg);
+    }
+    std::design::font::test_text_aa_user(x, y, x0, y0, scale, text, color, bg, bold)
+}
+
 /// Draws a run of text with the sharp outline face, falling back to the
 /// bitmap face when the outline face refuses the run.
 ///
@@ -627,19 +835,27 @@ fn test_text(
     if scale == 0 || text.is_empty() {
         return None;
     }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
-    let bitmap_h = std::design::font::line_height(scale);
-    let bitmap_w = std::design::font::measure(text, scale);
-    let top = bt.min(y0);
-    let height = bh.max(bitmap_h);
-    let width = bw.max(bitmap_w);
-    if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
-        return None;
+    // WHY the ladder path is kept and asked first: at the default rung the two
+    // faces answer the same numbers, and only the ladder one runs through the
+    // SDK's memoised box, which is what keeps a frame of this app's rows off a
+    // per-pixel walk of the run. A raised rung takes [`user_ink`], whose
+    // measurement follows the published level.
+    if draws_at_ladder() {
+        let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+        let bitmap_h = std::design::font::line_height(scale);
+        let bitmap_w = std::design::font::measure(text, scale);
+        let top = bt.min(y0);
+        let height = bh.max(bitmap_h);
+        let width = bw.max(bitmap_w);
+        if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
+            return run.pixel(x, y, color, bg);
+        }
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
-        return run.pixel(x, y, color, bg);
-    }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+    user_ink(x, y, x0, y0, scale, text, color, bg, false)
 }
 
 /// Anti-aliased bold run draw clipped to run's line box.
@@ -657,21 +873,25 @@ fn test_text_bold(
     if scale == 0 || text.is_empty() {
         return None;
     }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
-    let bitmap_h = std::design::font::line_height(scale);
-    let bitmap_w = std::design::font::measure_bold(text, scale);
-    let top = bt.min(y0);
-    let height = bh.max(bitmap_h);
-    // A bold outline run is one pixel wider than the run the box was measured
-    // from, so the box has to carry that pixel or the last glyph is cut.
-    let width = bw.max(bitmap_w) + 1;
-    if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
-        return None;
+    // Kept for the default rung for the reason given in [`test_text`].
+    if draws_at_ladder() {
+        let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+        let bitmap_h = std::design::font::line_height(scale);
+        let bitmap_w = std::design::font::measure_bold(text, scale);
+        let top = bt.min(y0);
+        let height = bh.max(bitmap_h);
+        // A bold outline run is one pixel wider than the run the box was measured
+        // from, so the box has to carry that pixel or the last glyph is cut.
+        let width = bw.max(bitmap_w) + 1;
+        if x < bx || x >= W || x - bx >= width || y < top || y - top >= height {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, true) {
+            return run.pixel(x, y, color, bg);
+        }
+        return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true);
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, true) {
-        return run.pixel(x, y, color, bg);
-    }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, true)
+    user_ink(x, y, x0, y0, scale, text, color, bg, true)
 }
 
 // -----------------------------------------------------------------------------
@@ -708,34 +928,60 @@ const TITLE_X: usize = layout::HEADER_TITLE_X;
 const TITLE_SCALE: usize = type_scale::TITLE;
 
 /// The rows the title's line box reserves: ascent + descent + leading.
-const TITLE_BOX_H: usize = std::design::font::line_height(TITLE_SCALE);
+///
+/// WHY a function and not the constant this was: `const title_box_h() =
+/// line_height(TITLE_SCALE)` is folded at compile time, so it was the one number
+/// on this screen that could not see the person's text size -- the half of the
+/// defect that left the ink growing inside an unchanged box (see
+/// [`line_h`]).
+#[inline(always)]
+fn title_box_h() -> usize {
+    line_h(TITLE_SCALE)
+}
 
 /// The title's line-box top.
 ///
 /// WHY the cap height is centred on the control row instead of the box being
 /// dropped at the top of the control band: `TITLE_SCALE` is rung 4, whose line
-/// box -- `line_height(4)`, ascent plus descent at the em the rung's cap
-/// implies -- is taller than the 48-row back control beside it. The box used to
-/// start at `HEADER_TOP + 4` and therefore ran past the header's hairline and
-/// under the search field, which begins below it. That is the cut-off tail of
-/// the "g" in "Messages". Centring the caps on the control row keeps the whole
-/// box inside the band, and is the placement the dialer already documents and
-/// uses (`apps/dialer/src/main.rs`, `TITLE_Y0`).
-const TITLE_Y: usize = HEADER_ROW
-    - std::design::font::ascent_for_scale(TITLE_SCALE)
-    + std::design::font::cap_for_scale(TITLE_SCALE) as usize / 2;
+/// box -- ascent plus descent at the em the rung's cap implies -- is taller than
+/// the 48-row back control beside it. The box used to start at `HEADER_TOP + 4`
+/// and therefore ran past the header's hairline and under the search field,
+/// which begins below it. That is the cut-off tail of the "g" in "Messages".
+/// Centring the caps on the control row keeps the whole box inside the band, and
+/// is the placement the dialer already documents and uses
+/// (`apps/dialer/src/main.rs`, `TITLE_Y0`).
+#[inline(always)]
+fn title_y() -> usize {
+    HEADER_ROW - ascent_h(TITLE_SCALE) + cap_h(TITLE_SCALE) as usize / 2
+}
 
 /// The air between the last row anything in the header may ink and its hairline.
 const HEADER_PAD_BOTTOM: usize = 2;
 /// The header's hairline, drawn on the band's last rows.
 const HEADER_RULE_H: usize = 2;
 
-/// The status pill's height, on the same row as the 48-tall back control.
-const PILL_H: usize = 40;
+/// The status pill's height: its own rung's line box, and never less than the
+/// 40 rows it was designed with.
+#[inline(always)]
+fn pill_h() -> usize {
+    later(PILL_H_ANCHOR, line_h(PILL_RUNG) + PILL_PAD_Y * 2)
+}
+
+const PILL_H_ANCHOR: usize = 40;
+/// The rung the pill's label is inked at.
+const PILL_RUNG: usize = type_scale::CAPTION;
+/// The air the label keeps from the pill's own top and bottom edges.
+const PILL_PAD_Y: usize = 4;
 
 const PILL_RIGHT: usize = W - 24;
-const PILL_TOP: usize = HEADER_ROW - PILL_H / 2;
-const PILL_BOTTOM: usize = PILL_TOP + PILL_H;
+#[inline(always)]
+fn pill_top() -> usize {
+    HEADER_ROW - pill_h() / 2
+}
+#[inline(always)]
+fn pill_bottom() -> usize {
+    pill_top() + pill_h()
+}
 const PILL_PAD_X: usize = spacing::GRID_20;
 
 /// Header band bottom, derived from the tallest thing standing in the band.
@@ -745,27 +991,44 @@ const PILL_PAD_X: usize = spacing::GRID_20;
 /// literal held 112 after the title moved to rung 4 and grew past it, and
 /// nothing complained -- the surface under the header simply painted over the
 /// run's descent.
-const HEADER_CONTENT_BOTTOM: usize = later(
+///
+/// WHY a function and not the constant this was: every term of the sum is a
+/// line box at the published rung, so a band folded at compile time is exactly
+/// how a scaled title came to ink over the search field under it.
+#[inline(always)]
+fn header_content_bottom() -> usize {
     later(
-        TITLE_Y + TITLE_BOX_H,
-        HEADER_TOP + std::design::back_button::SIZE,
-    ),
-    PILL_BOTTOM,
-);
-const HEADER_Y1: usize = HEADER_CONTENT_BOTTOM + HEADER_PAD_BOTTOM + HEADER_RULE_H;
+        later(
+            title_y() + title_box_h(),
+            HEADER_TOP + std::design::back_button::SIZE,
+        ),
+        pill_bottom(),
+    )
+}
+
+#[inline(always)]
+fn header_y1() -> usize {
+    header_content_bottom() + HEADER_PAD_BOTTOM + HEADER_RULE_H
+}
 
 #[inline]
 fn pill_text(app: &MessagesApp) -> &'static [u8] {
     app.header_status.label()
 }
 
+/// The rung the pill's label is inked at.
+///
+/// WHY it asks the published level: the room beside the title is what the pill
+/// has, and at a raised rung the title has taken more of it -- the loop that
+/// used to live here started at rung one and tested `while scale > 1`, so it
+/// never ran and the pill kept its rung whatever the room said.
 #[inline]
 fn pill_text_scale(label: &[u8]) -> usize {
-    let title_end = TITLE_X + std::design::font::measure_bold(TITLE_TEXT, TITLE_SCALE);
+    let title_end = TITLE_X + run_w(TITLE_TEXT, TITLE_SCALE, true);
     let avail = PILL_RIGHT.saturating_sub(title_end + 24);
-    let mut scale = 1usize;
+    let mut scale = PILL_RUNG;
     while scale > 1 {
-        let need = std::design::font::measure(label, scale) + 2 * PILL_PAD_X;
+        let need = run_w(label, scale, false) + 2 * PILL_PAD_X;
         if need <= avail {
             break;
         }
@@ -776,7 +1039,7 @@ fn pill_text_scale(label: &[u8]) -> usize {
 
 #[inline]
 fn pill_left_for(label: &[u8], scale: usize) -> usize {
-    let w = std::design::font::measure(label, scale) + 2 * PILL_PAD_X;
+    let w = run_w(label, scale, false) + 2 * PILL_PAD_X;
     PILL_RIGHT.saturating_sub(w)
 }
 
@@ -789,23 +1052,67 @@ fn pill_left_for(label: &[u8], scale: usize) -> usize {
 /// the first band under it (`TAB_BAND_Y0 = 120` against `HEADER_H = 112`).
 const SECTION_GAP: usize = spacing::GRID_8;
 
-/// Search / status band geometry (`SEARCH_Y0..SEARCH_Y1`).
+/// Search / status band geometry (`search_y0()..search_y1()`).
 ///
 /// WHY the band is named at all: the conversation view reuses this exact strip
 /// for its threat banner, so the two share one edge instead of one of them
 /// drifting.
-const SEARCH_BAND_H: usize = 52;
-const SEARCH_Y0: usize = HEADER_Y1 + SECTION_GAP;
-const SEARCH_Y1: usize = SEARCH_Y0 + SEARCH_BAND_H;
+///
+/// WHY these are functions: the band carries a field, the field carries a run
+/// at [`SEARCH_TEXT_SCALE`], and a plate that stays folded at the ladder while
+/// its run grows is the clipped-text defect. The literals stay as anchors -- a
+/// plate is never smaller than the box it was designed with -- and grows by the
+/// rows the published rung needs.
+const SEARCH_BAND_H_ANCHOR: usize = 52;
+const SEARCH_FIELD_H_ANCHOR: usize = 48;
+
 /// The field's margin inside its band: the platform's smallest grid step split
 /// between the two sides, so the field's hairline is not the band's edge.
 const SEARCH_FIELD_DY: usize = spacing::GRID_4 / 2;
-const SEARCH_FIELD: (usize, usize, usize, usize) = (
-    layout::SEARCH_FIELD_X,
-    SEARCH_Y0 + SEARCH_FIELD_DY,
-    layout::SEARCH_FIELD_W,
-    48,
-);
+
+/// The air a field's run keeps from its own top and bottom edges.
+const FIELD_TEXT_PAD_Y: usize = 4;
+
+/// A field's height at the published level: the rung it inks, plus its air,
+/// never less than the anchor it shipped with.
+#[inline(always)]
+fn field_h(anchor: usize, rung: usize) -> usize {
+    later(anchor, line_h(rung) + FIELD_TEXT_PAD_Y * 2)
+}
+
+#[inline(always)]
+fn search_field_h() -> usize {
+    field_h(SEARCH_FIELD_H_ANCHOR, SEARCH_TEXT_SCALE)
+}
+
+#[inline(always)]
+fn search_band_h() -> usize {
+    later(
+        SEARCH_BAND_H_ANCHOR,
+        search_field_h() + 2 * SEARCH_FIELD_DY,
+    )
+}
+
+#[inline(always)]
+fn search_y0() -> usize {
+    header_y1() + SECTION_GAP
+}
+
+#[inline(always)]
+fn search_y1() -> usize {
+    search_y0() + search_band_h()
+}
+
+/// The field's edge: the band's top, the plate's inset and its height.
+#[inline(always)]
+fn search_field() -> (usize, usize, usize, usize) {
+    (
+        layout::SEARCH_FIELD_X,
+        search_y0() + SEARCH_FIELD_DY,
+        layout::SEARCH_FIELD_W,
+        search_field_h(),
+    )
+}
 /// The centre of the band's leading glyph lane -- the search view's magnifier
 /// and the conversation view's threat mark share it.
 ///
@@ -813,7 +1120,11 @@ const SEARCH_FIELD: (usize, usize, usize, usize) = (
 /// above the middle of the field it sits in, so the mark read as mis-hung
 /// against the text beside it.
 const SEARCH_ICON_CX: usize = 56;
-const SEARCH_ICON_CY: usize = SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2;
+#[inline(always)]
+fn search_icon_cy() -> usize {
+    let f = search_field();
+    f.1 + f.3 / 2
+}
 /// The clear control's hit half-height; the mark itself is nine rows tall.
 const SEARCH_CLEAR_HALF_H: usize = 14;
 /// The centre of the clear mark that ends the search field.
@@ -840,22 +1151,48 @@ const SEARCH_TEXT_SCALE: usize = layout::FIELD_TEXT_RUNG;
 /// same baseline as a body rung's box laid out at the same box top.
 ///
 /// WHY a baseline and not a shared box top: a run laid out at box top `y0` sits
-/// its `ascent_for_scale(rung)` rows lower, so two runs that start at the same
-/// box top end on lines eight rows apart. The composer's character count and
-/// the "To:" label are both rung 1 and both drawn at the box top of the rung-2
-/// text beside them, so each hung above the words it belongs to.
+/// its ascent rows lower, so two runs that start at the same box top end on
+/// lines eight rows apart. The composer's character count and the "To:" label
+/// are both rung 1 and both drawn at the box top of the rung-2 text beside them,
+/// so each hung above the words it belongs to.
+#[inline(always)]
+fn shared_baseline_shift() -> usize {
+    ascent_h(type_scale::BODY) - ascent_h(type_scale::CAPTION)
+}
+
+// WHY these guards run at startup instead of folding at compile time, as the
+// `const _: () = assert!` pair here used to: the shifted caption's box and the
+// two fields' heights are all properties of the published rung now, so the
+// bound can only be checked against the rung the screen is about to draw with.
+// The check is not weakened -- it is the same inequality, and it now answers for
+// every level a person can select rather than for the one the ladder happened to
+// ship with. `the_bands_hold_their_own_ink` in this file's library is where the
+// same inequality is asserted for all four levels.
+#[inline(always)]
+fn fields_hold_shifted_caption() -> bool {
+    let shift = shared_baseline_shift();
+    shift + line_h(type_scale::CAPTION) <= recipient_field_h()
+        && shift + line_h(type_scale::CAPTION) <= compose_field_h()
+}
+
+/// The rows a caption box is pushed down to sit on the body run's baseline.
 ///
-/// WHY checked against both fields: the shifted caption's own line box has to
-/// stay inside the control it labels.
-const SHARED_BASELINE_SHIFT: usize = std::design::font::ascent_for_scale(type_scale::BODY)
-    - std::design::font::ascent_for_scale(type_scale::CAPTION);
-const _: () = assert!(
-    SHARED_BASELINE_SHIFT + std::design::font::line_height(type_scale::CAPTION)
-        <= RECIPIENT_FIELD_H
-);
-const _: () = assert!(
-    SHARED_BASELINE_SHIFT + std::design::font::line_height(type_scale::CAPTION) <= COMPOSE_FIELD_H
-);
+/// WHY the guard decides it and the shift is not simply added: the shift exists
+/// to bring the caption's caps onto the baseline of the body run beside it, and
+/// it is only a whole box's worth of rows while the plate it lands in still
+/// holds the shifted box. `fields_hold_shifted_caption` is that bound asked at
+/// the rung the screen is about to paint with; where it fails, the caption stays
+/// at the body run's own box top -- the two then read at the same top instead of
+/// the same baseline, which is the older layout, rather than the caption's box
+/// running out of the field it belongs to.
+#[inline(always)]
+fn caption_shift() -> usize {
+    if fields_hold_shifted_caption() {
+        shared_baseline_shift()
+    } else {
+        0
+    }
+}
 
 // Recipient ("To:") editor
 //
@@ -868,7 +1205,25 @@ const _: () = assert!(
 // rows the field gained; the thread list above ends at the band, so the list
 // gives up those four rows rather than the field overlapping the compose
 // band below.
-const RECIPIENT_FIELD_H: usize = MIN_TOUCH_TARGET;
+const RECIPIENT_FIELD_H_ANCHOR: usize = MIN_TOUCH_TARGET;
+
+/// The recipient field's height at the published level.
+///
+/// WHY the band grows upward with it: the two bands keep their shared bottom
+/// edge -- that edge is the row the composer's ink stops at and the row the home
+/// gesture claims from (`HOME_HIT`) -- so a taller field buys its rows from the
+/// thread list above, which scrolls, and never from the gesture below.
+#[inline(always)]
+fn recipient_field_h() -> usize {
+    field_h(RECIPIENT_FIELD_H_ANCHOR, RECIPIENT_TEXT_SCALE)
+}
+
+/// The rows the recipient band has to give the field beyond the anchor it
+/// shipped with. Zero at the ladder, so the bands sit where the suite pins them.
+#[inline(always)]
+fn band_extra_rows() -> usize {
+    recipient_field_h().saturating_sub(RECIPIENT_FIELD_H_ANCHOR)
+}
 const RECIPIENT_FIELD_W: usize = layout::RECIPIENT_FIELD_W;
 const RECIPIENT_TEXT_X: usize = layout::RECIPIENT_TEXT_X;
 /// The lane the typed recipient address owns.
@@ -884,7 +1239,17 @@ const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
 const RECIPIENT_TEXT_SCALE: usize = layout::FIELD_TEXT_RUNG;
 
 // Compose field geometry
-const COMPOSE_FIELD_H: usize = 60;
+const COMPOSE_FIELD_H_ANCHOR: usize = 60;
+
+/// The compose field's height at the published level.
+///
+/// WHY it keeps its 60-row anchor at every rung up to extra large: the field's
+/// own rung reserves 59 rows there, so the plate it shipped with already holds
+/// it -- the anchor is a floor, not a ceiling.
+#[inline(always)]
+fn compose_field_h() -> usize {
+    field_h(COMPOSE_FIELD_H_ANCHOR, COMPOSE_TEXT_SCALE)
+}
 const COMPOSE_FIELD_W: usize = layout::COMPOSE_FIELD_W;
 const COMPOSE_TEXT_X: usize = layout::COMPOSE_TEXT_X;
 // WHY the text stops before the field's right edge: the last ~60 px of the
@@ -927,7 +1292,11 @@ const SEND_LANE_X1: usize = 694;
 /// WHY checked at compile time: the disc has to sit inside the lane it is hit
 /// as, and the lane inside the card column. The diameter against the field's
 /// height is the fact that fails first if either control grows.
-const _: () = assert!(SEND_R * 2 <= COMPOSE_FIELD_H);
+///
+/// WHY the anchor and not the published height: `compose_field_h()` is the
+/// anchor as a floor and only ever grows with the rung, so a disc that fits the
+/// anchor fits the field at every level a person can select.
+const _: () = assert!(SEND_R * 2 <= COMPOSE_FIELD_H_ANCHOR);
 const _: () = assert!(SEND_LANE_X0 + SEND_R <= SEND_CX);
 const _: () = assert!(SEND_CX + SEND_R <= SEND_LANE_X1);
 const _: () = assert!(SEND_LANE_X1 <= CARD_X1);
@@ -950,19 +1319,19 @@ fn recipient_band_y0(app: &MessagesApp) -> usize {
 /// The bottom of the recipient band.
 #[inline(always)]
 fn recipient_band_y1(app: &MessagesApp) -> usize {
-    bands_top(app) + RECIPIENT_BAND_H
+    bands_top(app) + messages::keyboard::recipient_band_h()
 }
 
 /// The top of the compose band.
 #[inline(always)]
 fn compose_band_y0(app: &MessagesApp) -> usize {
-    bands_top(app) + RECIPIENT_BAND_H
+    bands_top(app) + messages::keyboard::recipient_band_h()
 }
 
 /// The bottom of the compose band.
 #[inline(always)]
 fn compose_band_y1(app: &MessagesApp) -> usize {
-    bands_top(app) + BANDS_H
+    bands_top(app) + messages::keyboard::bands_h()
 }
 
 /// The recipient field's rectangle.
@@ -972,7 +1341,7 @@ fn recipient_field(app: &MessagesApp) -> (usize, usize, usize, usize) {
         24,
         recipient_band_y0(app),
         RECIPIENT_FIELD_W,
-        RECIPIENT_FIELD_H,
+        recipient_field_h(),
     )
 }
 
@@ -983,7 +1352,7 @@ fn compose_field(app: &MessagesApp) -> (usize, usize, usize, usize) {
         24,
         compose_band_y0(app) + COMPOSE_FIELD_DY,
         COMPOSE_FIELD_W,
-        COMPOSE_FIELD_H,
+        compose_field_h(),
     )
 }
 
@@ -1045,13 +1414,13 @@ fn send_cy(app: &MessagesApp) -> usize {
 /// The height of the thread list's visible band.
 #[inline(always)]
 fn list_viewport_h(app: &MessagesApp) -> usize {
-    bands_top(app) - CARD_Y0
+    bands_top(app) - card_y0()
 }
 
 /// The height of the conversation's visible band.
 #[inline(always)]
 fn convo_viewport_h(app: &MessagesApp) -> usize {
-    bands_top(app) - CONVO_TOP
+    bands_top(app) - convo_top()
 }
 
 /// The home indicator this app draws, and the box that answers a press on it.
@@ -1067,8 +1436,19 @@ fn convo_viewport_h(app: &MessagesApp) -> usize {
 /// platform's centred 240 columns, from the composer's foot to the canvas -- and
 /// the floor-sized escape on this screen is the header's back chip, which the
 /// same press answers.
+///
+/// WHY the box does not move with the person's text size: the bands grow
+/// upward from `BANDS_BOTTOM_IDLE`, because the row they buy from a raised rung
+/// comes out of the scrolling list and not out of the gesture. The composer's
+/// ink therefore ends on the same row at every level, and the answering box that
+/// is measured from that row is level-independent -- which is what the pair of
+/// gates below still proves at the default rung and what
+/// `the_bands_stop_where_the_gesture_starts` in the library proves for all four.
 const HOME_PILL: primitives::Rect = std::design::home_band::PILL;
-const HOME_HIT: primitives::Rect = std::design::home_band::hit_from(BANDS_TOP_IDLE + BANDS_H);
+const HOME_HIT: primitives::Rect = std::design::home_band::hit_from(BANDS_BOTTOM_IDLE);
+
+/// The row the two editor bands end on, whatever rung the app is drawing at.
+const BANDS_BOTTOM_IDLE: usize = BANDS_TOP_IDLE + BANDS_H;
 
 /// WHY checked at compile time: the gesture may only own rows no band of this
 /// app paints, and both positions of the compose bands and the keyboard dock sit
@@ -1089,8 +1469,14 @@ const _: () = assert!(
 /// bubbles were laid out from 180 inside a band the painter opened at 168, and
 /// the list sat eight rows lower than the screen it scrolls past. `GRID_16` is
 /// the step the notes app puts between its search band and the content under it
-/// (`CHIP_Y0 = SEARCH_Y1 + 16`).
-const CONTENT_TOP: usize = SEARCH_Y1 + spacing::GRID_16;
+/// (`CHIP_Y0 = search_y1() + 16`).
+///
+/// WHY a function: it stands on the search band, and the search band stands on
+/// the header, and both of those now hold a run at the published rung.
+#[inline(always)]
+fn content_top() -> usize {
+    search_y1() + spacing::GRID_16
+}
 
 // Thread card geometry
 //
@@ -1099,10 +1485,75 @@ const CONTENT_TOP: usize = SEARCH_Y1 + spacing::GRID_16;
 // this box, and a fit gate can only reach a container the library exports.
 const CARD_X0: usize = layout::LIST_CARD_X;
 const CARD_X1: usize = layout::LIST_CARD_RIGHT;
-const CARD_Y0: usize = CONTENT_TOP;
-const CARD_H: usize = 120;
-/// The card's own body; the remainder of `CARD_H` is the gap to the next card.
-const CARD_BODY_H: usize = 104;
+
+/// The card a thread row owns at the published level.
+///
+/// WHY it is derived rather than the literal 104 it was: a row carries its
+/// peer's name at the body rung and its snippet at the caption rung, one above
+/// the other, and 104 rows is the box the ladder's two line boxes fitted. At a
+/// raised rung the two boxes are taller, so the row grows by the rows they need
+/// -- the alternative was the ink running past the card into the next row.
+#[inline(always)]
+fn card_body_h() -> usize {
+    later(
+        CARD_BODY_H_ANCHOR,
+        line_h(layout::PEER_NAME_RUNG)
+            + ROW_INK_GAP
+            + line_h(layout::SNIPPET_RUNG)
+            + CARD_TEXT_PAD_Y * 2,
+    )
+}
+
+/// The anchor the row was designed with: the box the ladder's two runs fit.
+const CARD_BODY_H_ANCHOR: usize = 104;
+/// The air a row's two runs keep from the card's own top and bottom edges.
+const CARD_TEXT_PAD_Y: usize = 12;
+
+/// The pitch from one thread card's top to the next one's.
+///
+/// WHY the gap is kept out of the body: the body is what a press answers and
+/// what the avatar, the pill and the delete mark are laid out inside.
+const CARD_GAP: usize = 16;
+
+#[inline(always)]
+fn card_h() -> usize {
+    card_body_h() + CARD_GAP
+}
+
+#[inline(always)]
+fn card_y0() -> usize {
+    content_top()
+}
+
+/// The rows the avatar initial's box sits left of and above the disc's centre.
+///
+/// WHY split from the growth terms: the initial is centred on the disc, so the
+/// mark follows the run's own width and line box outward from these shipped
+/// offsets -- `7` and `12` are what the ladder draws, and a raised rung adds
+/// half of what the run gained to each.
+const AVATAR_GLYPH_DX: usize = 7;
+const AVATAR_GLYPH_DY: usize = 12;
+
+/// The rows from a thread card's top to the peer name's box.
+///
+/// The name is the card's first run, so nothing above it changes height and the
+/// offset is the designer's number at every published level.
+#[inline(always)]
+fn row_name_dy() -> usize {
+    THREAD_NAME_DY_ANCHOR
+}
+
+/// The rows from a thread card's top to the snippet's box.
+///
+/// WHY it carries the name rung's growth: the two runs stack, so the rows the
+/// name's box gains at a raised rung are the rows the snippet has to step down.
+#[inline(always)]
+fn row_snippet_dy() -> usize {
+    THREAD_SNIPPET_DY_ANCHOR + line_growth(layout::PEER_NAME_RUNG)
+}
+
+const THREAD_NAME_DY_ANCHOR: usize = 22;
+const THREAD_SNIPPET_DY_ANCHOR: usize = 56;
 
 /// The width a thread row's bold peer name may use.
 ///
@@ -1119,16 +1570,45 @@ const PEER_NAME_MAX_W: usize = layout::PEER_NAME_LANE;
 /// WHY it is derived from the band's edges and not typed in: the band is
 /// bounded by the card row above it and the recipient field below it, and a
 /// typed-in height drifts away from both the first time either moves.
-const LIST_VIEWPORT_H: usize = BANDS_TOP_IDLE - CARD_Y0;
+#[inline(always)]
+fn list_viewport_h_idle() -> usize {
+    bands_top_idle() - card_y0()
+}
+
+/// The row the two editor bands sit at when the keyboard is down, at the
+/// published level: the bands keep their bottom edge and buy their extra rows
+/// from the top.
+#[inline(always)]
+fn bands_top_idle() -> usize {
+    BANDS_BOTTOM_IDLE - messages::keyboard::bands_h()
+}
 
 /// The top of the conversation's visible band.
-const CONVO_TOP: usize = CONTENT_TOP;
+#[inline(always)]
+fn convo_top() -> usize {
+    content_top()
+}
 
-/// The height of the conversation's visible band when the keyboard is down.
-const CONVO_VIEWPORT_H: usize = BANDS_TOP_IDLE - CONVO_TOP;
+/// The height of a chat bubble at the published level.
+///
+/// WHY it is derived rather than the literal 76: a bubble carries its body line
+/// at the body rung and its delivery state under it at the caption rung, and 76
+/// is the box the ladder's two line boxes fitted. Same rule as the thread row:
+/// the plate grows with the ink it holds, or the ink leaves the plate.
+#[inline(always)]
+fn bubble_h() -> usize {
+    later(
+        BUBBLE_H_ANCHOR,
+        line_h(layout::BUBBLE_BODY_RUNG)
+            + ROW_INK_GAP
+            + line_h(layout::BUBBLE_STATUS_RUNG)
+            + BUBBLE_PAD_Y * 2,
+    )
+}
 
-/// The height of a chat bubble.
-const BUBBLE_H: usize = 76;
+/// The box the bubble shipped with, and the air its two runs keep from its edges.
+const BUBBLE_H_ANCHOR: usize = 76;
+const BUBBLE_PAD_Y: usize = 8;
 
 /// The narrowest a bubble may be drawn, so a one-word message still reads as
 /// a bubble and not as a floating chip.
@@ -1151,50 +1631,78 @@ const BUBBLE_MAX_W: usize = layout::BUBBLE_MAX_W;
 const BUBBLE_GAP: usize = spacing::GRID_16;
 
 /// The distance from one bubble's top to the next one's top.
-const BUBBLE_STEP: usize = BUBBLE_H + BUBBLE_GAP;
+#[inline(always)]
+fn bubble_step() -> usize {
+    bubble_h() + BUBBLE_GAP
+}
 
-/// WHY checked at compile time: the conversation clamps a scrolled-out bubble
-/// to row zero (see the layout in `messages_pixel`), and that clamp is exact
-/// only while a bubble that has lost its top to the clamp also loses its whole
-/// body to it -- one bubble height above the canvas is still above the band's
-/// first row. Bring `CONTENT_TOP` under `BUBBLE_H` and the oldest bubble of a
-/// scrolled thread starts painting inside the search band.
-const _: () = assert!(CONVO_TOP >= BUBBLE_H);
+/// WHY the gate runs at draw time and is not the compile-time `assert!` it was:
+/// both terms are now properties of the published rung, and the conversation
+/// clamps a scrolled-out bubble to row zero -- so the bound has to hold at the
+/// rung the screen is about to paint with, not at the one the ladder shipped
+/// with. `the_clamped_bubble_never_enters_the_search_band` in the library checks
+/// it for all four levels; the layout below clamps a thread's oldest bubble to
+/// `convo_top()`, which is never above the search band's foot at any level.
+#[inline(always)]
+fn convo_top_holds_a_bubble() -> bool {
+    convo_top() >= bubble_h()
+}
 
 /// The longest line of notice text the app shows.
 const NOTICE_CAP: usize = 96;
 
 // Details and recipient-picker geometry
 //
-// WHY both screens start at `CONTENT_TOP`: they are the same section as the
+// WHY both screens start at `content_top()`: they are the same section as the
 // thread list -- the scrollable body under the search/status band -- and a
 // screen that started eight rows above the list printed its first row over the
 // band's hairline while its siblings did not.
-const DETAILS_TOP: usize = CONTENT_TOP;
+#[inline(always)]
+fn details_top() -> usize {
+    content_top()
+}
 
 // The report row both the details screen and the recipient picker lay out: a
 // caption box over a body box, on a card, with the platform's grid between two
 // cards.
 //
 // WHY every number here is derived: the pitch was the literal 96 and the card
-// under it 88, and twelve of them from `DETAILS_TOP` run to row 1340 --
+// under it 88, and twelve of them from `details_top()` run to row 1340 --
 // fifty-six rows past the band the screen paints inside, because the band ends
 // where the recipient band begins. The last row of the details report was
 // therefore cut on every visit: its label showed and the sentence under it
 // ("Unavailable: no transport is bound") never did, so the screen printed a
 // question with no answer.
 const ROW_TOP_PAD: usize = 12;
-const ROW_CAPTION_BOX: usize = std::design::font::line_height(type_scale::CAPTION);
 const ROW_INK_GAP: usize = 4;
-const ROW_BODY_BOX: usize = std::design::font::line_height(type_scale::BODY);
 const ROW_BOTTOM_PAD: usize = 12;
+
+/// The caption rung's box at the published level.
+#[inline(always)]
+fn row_caption_box() -> usize {
+    line_h(type_scale::CAPTION)
+}
+
+/// The body rung's box at the published level.
+#[inline(always)]
+fn row_body_box() -> usize {
+    line_h(type_scale::BODY)
+}
+
 /// The card a report row owns.
-const ROW_CARD_H: usize =
-    ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX + ROW_BOTTOM_PAD;
+#[inline(always)]
+fn row_card_h() -> usize {
+    ROW_TOP_PAD + row_caption_box() + ROW_INK_GAP + row_body_box() + ROW_BOTTOM_PAD
+}
+
 /// The gap between two report cards.
 const ROW_GAP: usize = spacing::GRID_8;
+
 /// The distance from one report row's top to the next one's top.
-const ROW_PITCH: usize = ROW_CARD_H + ROW_GAP;
+#[inline(always)]
+fn row_pitch() -> usize {
+    row_card_h() + ROW_GAP
+}
 
 /// The row's side padding, and the two boxes' tops inside the card.
 ///
@@ -1203,27 +1711,203 @@ const ROW_PITCH: usize = ROW_CARD_H + ROW_GAP;
 /// width less this padding twice. Named in one place, the painter and the fit gate
 /// cannot disagree about it.
 const ROW_PAD_X: usize = layout::CARD_PAD_X;
-const ROW_CAPTION_Y: usize = ROW_TOP_PAD;
-const ROW_BODY_Y: usize = ROW_TOP_PAD + ROW_CAPTION_BOX + ROW_INK_GAP;
+#[inline(always)]
+fn row_caption_y() -> usize {
+    ROW_TOP_PAD
+}
+#[inline(always)]
+fn row_body_y() -> usize {
+    ROW_TOP_PAD + row_caption_box() + ROW_INK_GAP
+}
 
-const DETAIL_ROW_H: usize = ROW_PITCH;
+#[inline(always)]
+fn detail_row_h() -> usize {
+    row_pitch()
+}
+
 /// HOW MANY rows the detail band can show: the viewport divided by the stride.
+///
 /// WHY derived and not the twelve the arrays were typed at: the row grew when
 /// the type ladder's caption and body rungs were re-measured, and a twelfth
 /// row's card began below the band's bottom edge -- painted, and answered by
 /// the recipient field drawn over it. The builders cap themselves at the array
 /// length, so the capacity the band can actually hold is the capacity.
-const DETAIL_ROWS: usize = LIST_VIEWPORT_H / ROW_PITCH;
-const RECIP_ROW_TOP: usize = CONTENT_TOP;
-const RECIP_ROW_H: usize = ROW_PITCH;
-const RECIP_ROWS: usize = LIST_VIEWPORT_H / ROW_PITCH;
+#[inline(always)]
+fn detail_rows() -> usize {
+    list_viewport_h_idle() / row_pitch()
+}
+
+#[inline(always)]
+fn recip_row_top() -> usize {
+    content_top()
+}
+
+#[inline(always)]
+fn recip_row_h() -> usize {
+    row_pitch()
+}
+
+#[inline(always)]
+fn recip_rows() -> usize {
+    list_viewport_h_idle() / row_pitch()
+}
+
+// --- The same layout, folded at compile time for every selectable level ------
+//
+// WHY this block exists beside the functions above: two things in this file have
+// to be array lengths, and an array length cannot be asked at draw time. Rather
+// than pin them to the ladder's rung -- which is the defect -- they are derived
+// for all four levels a person can select and bounded by the widest answer, so
+// no selectable level can make the builders write past a buffer. The arithmetic
+// is the functions above with the level named as an argument instead of read from
+// the published cell, and the library's gate asserts the two agree at every
+// level.
+const fn line_at(rung: usize, level: u8) -> usize {
+    std::design::font::line_height_for_user_scale(rung, level)
+}
+
+const fn ascent_at(rung: usize, level: u8) -> usize {
+    std::design::font::ascent_for_user_scale(rung, level)
+}
+
+const fn cap_at(rung: usize, level: u8) -> usize {
+    std::design::font::cap_for_user_scale(rung, level) as usize
+}
+
+const fn pill_h_at(level: u8) -> usize {
+    later(PILL_H_ANCHOR, line_at(PILL_RUNG, level) + PILL_PAD_Y * 2)
+}
+
+const fn pill_bottom_at(level: u8) -> usize {
+    HEADER_ROW - pill_h_at(level) / 2 + pill_h_at(level)
+}
+
+const fn title_y_at(level: u8) -> usize {
+    HEADER_ROW - ascent_at(TITLE_SCALE, level) + cap_at(TITLE_SCALE, level) / 2
+}
+
+const fn header_y1_at(level: u8) -> usize {
+    later(
+        later(
+            title_y_at(level) + line_at(TITLE_SCALE, level),
+            HEADER_TOP + std::design::back_button::SIZE,
+        ),
+        pill_bottom_at(level),
+    ) + HEADER_PAD_BOTTOM
+        + HEADER_RULE_H
+}
+
+const fn field_h_at(anchor: usize, rung: usize, level: u8) -> usize {
+    later(anchor, line_at(rung, level) + FIELD_TEXT_PAD_Y * 2)
+}
+
+const fn search_y1_at(level: u8) -> usize {
+    let band = later(
+        SEARCH_BAND_H_ANCHOR,
+        field_h_at(SEARCH_FIELD_H_ANCHOR, SEARCH_TEXT_SCALE_ANCHOR, level) + 2 * SEARCH_FIELD_DY,
+    );
+    header_y1_at(level) + SECTION_GAP + band
+}
+
+/// SEARCH_TEXT_SCALE is named after the rung the fields ink at; the const chain
+/// needs the same number as a literal the compiler can fold.
+const SEARCH_TEXT_SCALE_ANCHOR: usize = layout::FIELD_TEXT_RUNG;
+
+const fn content_top_at(level: u8) -> usize {
+    search_y1_at(level) + spacing::GRID_16
+}
+
+const fn band_extra_at(level: u8) -> usize {
+    let grown = field_h_at(RECIPIENT_FIELD_H_ANCHOR, RECIPIENT_TEXT_SCALE_ANCHOR, level);
+    grown.saturating_sub(RECIPIENT_FIELD_H_ANCHOR)
+}
+
+const RECIPIENT_TEXT_SCALE_ANCHOR: usize = layout::FIELD_TEXT_RUNG;
+
+const fn list_viewport_at(level: u8) -> usize {
+    (BANDS_TOP_IDLE - band_extra_at(level)).saturating_sub(content_top_at(level))
+}
+
+/// The smallest scroll band any selectable text level can produce.
+///
+/// WHY a `const` at all: `MessagesApp::new()` is a `const fn`, so it cannot call
+/// `list_viewport_h(self)` -- and the person's level is not even published at
+/// that point. The seed therefore takes the narrowest band the four levels can
+/// yield, which is the conservative direction: a viewport that is too small only
+/// clamps the scroll offset harder, it can never let content scroll out of view.
+/// Every path that changes the row or bubble count calls `sync_list_extent` or
+/// `sync_convo_extent`, and both rebuild the viewport from the published level
+/// before the screen is drawn, so the seed never survives to a paint.
+const fn narrowest_viewport() -> usize {
+    let mut best = list_viewport_at(0);
+    let mut level = 1u8;
+    while level <= 3 {
+        let candidate = list_viewport_at(level);
+        if candidate < best {
+            best = candidate;
+        }
+        level += 1;
+    }
+    best
+}
+
+const INITIAL_VIEWPORT_H: usize = narrowest_viewport();
+const _: () = assert!(INITIAL_VIEWPORT_H > 0);
+
+const fn row_pitch_at(level: u8) -> usize {
+    ROW_TOP_PAD
+        + line_at(type_scale::CAPTION, level)
+        + ROW_INK_GAP
+        + line_at(type_scale::BODY, level)
+        + ROW_BOTTOM_PAD
+        + ROW_GAP
+}
+
+const fn rows_at(level: u8) -> usize {
+    list_viewport_at(level) / row_pitch_at(level)
+}
+
+/// The widest the report arrays ever have to be: the row count of the level that
+/// fits the most of them.
+const fn widest_rows() -> usize {
+    let mut best = rows_at(0);
+    let mut level = 1u8;
+    while level <= 3 {
+        let candidate = rows_at(level);
+        if candidate > best {
+            best = candidate;
+        }
+        level += 1;
+    }
+    best
+}
+
+const DETAIL_ROWS: usize = widest_rows();
+const RECIP_ROWS: usize = widest_rows();
 
 /// WHY checked at compile time: a card has to outlast the ink it carries, and
 /// the band has to hold a whole row rather than the top of one. Each of these
 /// is the cut-off row coming back.
-const _: () = assert!(ROW_CAPTION_Y + ROW_CAPTION_BOX + ROW_INK_GAP + ROW_BODY_BOX < ROW_CARD_H);
-const _: () = assert!(DETAIL_ROWS >= 1 && DETAIL_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
-const _: () = assert!(RECIP_ROWS >= 1 && RECIP_ROWS * ROW_PITCH <= LIST_VIEWPORT_H);
+///
+/// WHY the check now runs over the four levels instead of the ladder's one box:
+/// the two boxes and the pitch are properties of the published rung, so the
+/// bound is only honest if it holds for every rung a person can select. The
+/// inequality is the same one the removed `assert!` pair asked -- it is not
+/// weakened, it is asked four times.
+const fn rows_hold_their_ink(level: u8) -> bool {
+    let caption = line_at(type_scale::CAPTION, level);
+    let body = line_at(type_scale::BODY, level);
+    let card = ROW_TOP_PAD + caption + ROW_INK_GAP + body + ROW_BOTTOM_PAD;
+    ROW_TOP_PAD + caption + ROW_INK_GAP + body < card && rows_at(level) >= 1
+}
+
+const _: () = assert!(
+    rows_hold_their_ink(0)
+        && rows_hold_their_ink(1)
+        && rows_hold_their_ink(2)
+        && rows_hold_their_ink(3),
+    "a report row's card has to outlast its two runs, and the band has to hold a whole row",
+);
 const PICK_LABEL: &[u8] = layout::PICK_LABEL;
 const INFO_LABEL: &[u8] = layout::INFO_LABEL;
 
@@ -1236,16 +1920,36 @@ const INFO_LABEL: &[u8] = layout::INFO_LABEL;
 // list with nothing in it, and it happened on the screen that appears only when
 // there is nothing else to look at.
 const EMPTY_CARD_TOP: usize = 560;
-const EMPTY_CARD: (usize, usize, usize, usize) = (
-    layout::EMPTY_CARD_X,
-    EMPTY_CARD_TOP,
-    layout::EMPTY_CARD_W,
-    BANDS_TOP_KEYBOARD - spacing::GRID_8 - EMPTY_CARD_TOP,
-);
-const _: () = assert!(
-    832 <= EMPTY_CARD.1 + EMPTY_CARD.3,
-    "the empty state's last line has to sit inside the card that holds it",
-);
+
+/// The row the bands sit at when the keyboard is up, at the published level.
+///
+/// WHY it moves with the level: the bands keep their own height above the dock,
+/// so a taller recipient field lifts them -- and the empty card, whose foot is
+/// the band's top, has to be told or it paints under the recipient field.
+#[inline(always)]
+fn bands_top_keyboard() -> usize {
+    BANDS_TOP_KEYBOARD - messages::keyboard::band_extra_rows()
+}
+
+#[inline(always)]
+fn empty_card() -> (usize, usize, usize, usize) {
+    (
+        layout::EMPTY_CARD_X,
+        EMPTY_CARD_TOP,
+        layout::EMPTY_CARD_W,
+        bands_top_keyboard() - spacing::GRID_8 - EMPTY_CARD_TOP,
+    )
+}
+
+/// WHY the gate is asked at draw time: the card's foot is the band's top, which
+/// is now a property of the published rung. `the_empty_card_holds_its_last_line`
+/// in the library checks the same inequality the removed literal asserted, for
+/// every level a person can select, and the painter refuses a line the card
+/// cannot show rather than letting it run past the border.
+#[inline(always)]
+fn empty_card_holds_last_line() -> bool {
+    832 < empty_card().1 + empty_card().3
+}
 
 #[inline(always)]
 fn in_rect(r: (usize, usize, usize, usize), x: usize, y: usize) -> bool {
@@ -1274,8 +1978,8 @@ fn build_pill(app: &MessagesApp) -> PillFrame {
     let label = pill_text(app);
     let scale = pill_text_scale(label);
     let left = pill_left_for(label, scale);
-    let lh = std::design::font::line_height(scale);
-    let cy = (PILL_TOP + PILL_BOTTOM) / 2;
+    let lh = line_h(scale);
+    let cy = (pill_top() + pill_bottom()) / 2;
     PillFrame {
         label,
         scale,
@@ -1318,12 +2022,12 @@ fn build_editor(
         color: THEME.on_surface_variant,
     };
     if raw_len == 0 {
-        f.len = std::design::font::ellipsize(placeholder, scale, max_w, &mut f.buf);
+        f.len = fit_run(placeholder, scale, max_w, false, &mut f.buf);
     } else {
         f.color = THEME.on_surface;
-        f.len = std::design::font::ellipsize(&raw[..raw_len], scale, max_w, &mut f.buf);
+        f.len = fit_run(&raw[..raw_len], scale, max_w, false, &mut f.buf);
     }
-    let w = std::design::font::measure(&f.buf[..f.len], scale);
+    let w = run_w(&f.buf[..f.len], scale, false);
     f.caret_x = x + w;
     f.select_w = if focused && select_all { w } else { 0 };
     f
@@ -1337,7 +2041,7 @@ fn editor_pixel(
     focused: bool,
     fill: u32,
 ) -> Option<u32> {
-    let lh = std::design::font::line_height(f.scale);
+    let lh = line_h(f.scale);
     if y < f.y || y >= f.y + lh {
         return None;
     }
@@ -1576,7 +2280,13 @@ fn build_detail_lines(app: &MessagesApp, out: &mut [DetailLine; DETAIL_ROWS]) ->
         b"Unavailable: no transport is bound",
         DetailAction::None,
     );
-    n
+    // WHY the band's own capacity and not the array's length: the array is
+    // sized for the level that fits the most rows, so at any other level the
+    // array can outlast the band. A row whose card begins below the band's foot
+    // is painted nowhere and answered by no press, and a row that begins inside
+    // it and ends below it is a label with no sentence under it -- the cut-off
+    // row this file's own comment records. The band shows whole rows or none.
+    n.min(detail_rows())
 }
 
 /// Builds the rows of the recipient picker.
@@ -1628,7 +2338,12 @@ fn build_picker_lines(app: &MessagesApp, out: &mut [PickerLine; RECIP_ROWS]) -> 
             false,
         );
     }
-    n
+    // WHY the band's own capacity: the same reason as the details report -- the
+    // array is sized for the level that fits the most rows, so a row can begin
+    // inside the picker's band and end below it, and the address the user means
+    // to choose would then be offered as a label with nothing under it. The
+    // picker answers only rows it can show whole.
+    n.min(recip_rows())
 }
 
 /// The pixel of the recipient picker's control.
@@ -1647,10 +2362,14 @@ fn pick_control_pixel(
         return None;
     }
     let rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
-    let label_w = std::design::font::measure(label, layout::CONTROL_LABEL_RUNG);
+    // WHY the published advance and box: the label is centred in the control on
+    // both axes, and a centring that measures at the ladder while the ink draws
+    // at the person's rung puts the word off its own pill -- closer to one border
+    // than the other, and higher than the plate's middle. At the default level
+    // both numbers are the ladder's, which is where `PICK` and `INFO` sit today.
+    let label_w = run_w(label, layout::CONTROL_LABEL_RUNG, false);
     let label_x = rect.x + (rect.w.saturating_sub(label_w)) / 2;
-    let label_y = rect.y
-        + (rect.h.saturating_sub(std::design::font::line_height(layout::CONTROL_LABEL_RUNG))) / 2;
+    let label_y = rect.y + (rect.h.saturating_sub(line_h(layout::CONTROL_LABEL_RUNG))) / 2;
     if let Some(c) = test_text(
         x,
         y,
@@ -1699,15 +2418,21 @@ fn card_row_pixel(
         CARD.border,
     ) {
         let max_w = layout::card_row_lane(rect.2);
+        // WHY the app's own fit and not `font::ellipsize`: the lane is measured
+        // at the ladder, so at a raised rung a run `ellipsize` judged to fit is
+        // wider than the card it was cut for and inks over the hairline. The cut
+        // now happens where the ink ends; at the default rung this hands the work
+        // to `font::ellipsize` itself, which is the trim every report row and
+        // every picker row was screenshot with.
         let mut lbl_buf = [0u8; 64];
         let lbl_len =
-            std::design::font::ellipsize(label, layout::ROW_CAPTION_RUNG, max_w, &mut lbl_buf);
+            fit_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);
         let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };
         if let Some(t) = test_text(
             x,
             y,
             fx + ROW_PAD_X,
-            fy + ROW_CAPTION_Y,
+            fy + row_caption_y(),
             layout::ROW_CAPTION_RUNG,
             lbl_disp,
             THEME.on_surface_variant,
@@ -1716,13 +2441,13 @@ fn card_row_pixel(
             return Some(t);
         }
         let mut val_buf = [0u8; 96];
-        let val_len = std::design::font::ellipsize(value, layout::ROW_BODY_RUNG, max_w, &mut val_buf);
+        let val_len = fit_run(value, layout::ROW_BODY_RUNG, max_w, false, &mut val_buf);
         let val_disp = if val_len > 0 { &val_buf[..val_len] } else { value };
         if let Some(t) = test_text(
             x,
             y,
             fx + ROW_PAD_X,
-            fy + ROW_BODY_Y,
+            fy + row_body_y(),
             layout::ROW_BODY_RUNG,
             val_disp,
             THEME.on_surface,
@@ -1820,14 +2545,19 @@ fn build_frame(messages: &MessagesApp) -> Frame {
         clock = now.clock_text();
         clock_ok = true;
     }
-    let search_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2)
-        .saturating_sub(std::design::font::line_height(SEARCH_TEXT_SCALE) / 2);
+    // WHY the published line box for all three: each field's own height already
+    // grows with the level (`later(MIN_TOUCH_TARGET, line_h(rung) + pad)`), so a
+    // run centred on the ladder's box drifts towards the top of a plate that has
+    // grown below it. At the default level these are the boxes the fields were
+    // screenshot with.
+    let search_y =
+        (search_field().1 + search_field().3 / 2).saturating_sub(line_h(SEARCH_TEXT_SCALE) / 2);
     let recipient_rect = recipient_field(messages);
     let compose_rect = compose_field(messages);
     let recipient_y = (recipient_rect.1 + recipient_rect.3 / 2)
-        .saturating_sub(std::design::font::line_height(RECIPIENT_TEXT_SCALE) / 2);
-    let compose_y = (compose_rect.1 + compose_rect.3 / 2)
-        .saturating_sub(std::design::font::line_height(COMPOSE_TEXT_SCALE) / 2);
+        .saturating_sub(line_h(RECIPIENT_TEXT_SCALE) / 2);
+    let compose_y =
+        (compose_rect.1 + compose_rect.3 / 2).saturating_sub(line_h(COMPOSE_TEXT_SCALE) / 2);
     let filtered = if messages.search_len > 0 && messages.match_count() == 0 {
         None
     } else {
@@ -1855,10 +2585,11 @@ fn build_frame(messages: &MessagesApp) -> Frame {
     let contacts_count = messages::contacts::load_saved_contacts(&mut contacts);
     let pill = build_pill(messages);
     let mut title = [0u8; TITLE_CAP];
-    let title_len = std::design::font::ellipsize(
+    let title_len = fit_run(
         header_title(messages, &contacts, contacts_count),
         TITLE_SCALE,
         layout::header_title_lane(pill.left),
+        false,
         &mut title,
     );
     Frame {
@@ -1970,9 +2701,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Header (y 0..HEADER_Y1)
-    if y < HEADER_Y1 {
-        if y >= HEADER_Y1 - HEADER_RULE_H {
+    // 1. Header (y 0..header_y1())
+    if y < header_y1() {
+        if y >= header_y1() - HEADER_RULE_H {
             return THEME.border;
         }
 
@@ -1991,15 +2722,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // Header Title: already cut to the space left of the status pill.
         //
-        // WHY the gate is the box (`TITLE_BOX_H`) and not the run's caps: the
+        // WHY the gate is the box (`title_box_h()`) and not the run's caps: the
         // rasteriser answers for the whole line box, descent included, and the
         // band above now reserves exactly that many rows.
-        if y >= TITLE_Y && y < TITLE_Y + TITLE_BOX_H {
+        if y >= title_y() && y < title_y() + title_box_h() {
             if let Some(c) = test_text(
                 x,
                 y,
                 TITLE_X,
-                TITLE_Y,
+                title_y(),
                 TITLE_SCALE,
                 &f.title[..f.title_len],
                 THEME.on_surface,
@@ -2010,8 +2741,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         // Status pill, top-right: truthful NO TRANSPORT / outcome
-        if x >= f.pill.left && x < PILL_RIGHT && y >= PILL_TOP && y < PILL_BOTTOM {
-            let rect = primitives::Rect::new(f.pill.left, PILL_TOP, PILL_RIGHT - f.pill.left, PILL_BOTTOM - PILL_TOP);
+        if x >= f.pill.left && x < PILL_RIGHT && y >= pill_top() && y < pill_bottom() {
+            let rect = primitives::Rect::new(f.pill.left, pill_top(), PILL_RIGHT - f.pill.left, pill_bottom() - pill_top());
             if let Some(c) = test_text_bold(
                 x,
                 y,
@@ -2037,14 +2768,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
     // ViewMode 1: ThreadListView
     // -------------------------------------------------------------------------
     if messages.view_mode == ViewMode::ThreadList {
-        // 2. Search & Filter Bar (y SEARCH_Y0..SEARCH_Y1)
-        if y >= SEARCH_Y0 && y < SEARCH_Y1 {
-            if in_rect(SEARCH_FIELD, x, y) {
-                let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
+        // 2. Search & Filter Bar (y search_y0()..search_y1())
+        if y >= search_y0() && y < search_y1() {
+            if in_rect(search_field(), x, y) {
+                let rect = primitives::Rect::new(search_field().0, search_field().1, search_field().2, search_field().3);
 
                 // Vector magnifying glass, centred on the field's leading lane.
                 let cx = SEARCH_ICON_CX;
-                let cy = SEARCH_ICON_CY;
+                let cy = search_icon_cy();
                 let dx = (x as isize - cx as isize).abs();
                 let dy = (y as isize - cy as isize).abs();
                 let d_sq = dx * dx + dy * dy;
@@ -2060,11 +2791,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if messages.search_len > 0
                     && x >= SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W
                     && x < SEARCH_CLEAR_CX + SEARCH_CLEAR_HALF_W
-                    && y >= SEARCH_ICON_CY - SEARCH_CLEAR_HALF_H
-                    && y < SEARCH_ICON_CY + SEARCH_CLEAR_HALF_H
+                    && y >= search_icon_cy() - SEARCH_CLEAR_HALF_H
+                    && y < search_icon_cy() + SEARCH_CLEAR_HALF_H
                 {
                     let ccx = SEARCH_CLEAR_CX as isize;
-                    let cy = SEARCH_ICON_CY as isize;
+                    let cy = search_icon_cy() as isize;
                     let dx = (x as isize - ccx).abs();
                     let dy = (y as isize - cy).abs();
                     if dx <= 4 && dy <= 4 && dx == dy {
@@ -2082,16 +2813,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return THEME.surface;
         }
 
-        // 3. Thread List / Empty State (y CONTENT_TOP..the recipient band)
+        // 3. Thread List / Empty State (y content_top()..the recipient band)
         //
-        // WHY the list band starts at the first card and not at `SEARCH_Y1`: the
-        // row math below subtracts CARD_Y0, so a pixel in the gap above the
+        // WHY the list band starts at the first card and not at `search_y1()`: the
+        // row math below subtracts card_y0(), so a pixel in the gap above the
         // first card underflowed and killed the task on the first paint of a
         // list that had a thread in it.
-        if y >= CARD_Y0 && y < recipient_band_y0(messages) {
+        if y >= card_y0() && y < recipient_band_y0(messages) {
             // Filter matched nothing
             if f.filtered.is_none() {
-                if in_rect(EMPTY_CARD, x, y) {
+                if in_rect(empty_card(), x, y) {
                     // WHY the platform's card: this app drew the empty state's own
                     // outline -- a corner cut that ate the hairline, and a rule drawn
                     // as "the nearest edge is within two pixels". A rule drawn that
@@ -2111,10 +2842,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     // constant naming the card it came from, so the day the card
                     // moved, the trim would have stayed and the query would have run
                     // past the card's own edge.
-                    let n = std::design::font::ellipsize(
+                    let n = fit_run(
                         sub,
                         layout::EMPTY_QUERY_RUNG,
                         layout::EMPTY_CARD_LANE,
+                        false,
                         &mut buf,
                     );
                     let sub_line: &[u8] = if n == 0 {
@@ -2122,12 +2854,20 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     } else {
                         &buf[..n]
                     };
-                    let line_w = std::design::font::measure_bold(line, layout::EMPTY_HEADLINE_RUNG);
-                    let sub_w = std::design::font::measure(sub_line, layout::EMPTY_QUERY_RUNG);
+                    // WHY the published advance for both centring widths: each
+                    // line is centred on the width it is inked with, and a rung
+                    // that inks the line wider than the ladder measured it left
+                    // the line standing off-centre inside its own card -- the
+                    // centring number and the ink number have to be the same
+                    // number, whatever rung the person chose. At the default
+                    // level `run_w` answers the ladder's advance, so both lines
+                    // hold the columns they shipped in.
+                    let line_w = run_w(line, layout::EMPTY_HEADLINE_RUNG, true);
+                    let sub_w = run_w(sub_line, layout::EMPTY_QUERY_RUNG, false);
                     if let Some(c) = test_text_bold(
                         x,
                         y,
-                        EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(line_w)) / 2,
+                        empty_card().0 + (empty_card().2.saturating_sub(line_w)) / 2,
                         676,
                         layout::EMPTY_HEADLINE_RUNG,
                         line,
@@ -2139,7 +2879,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     if let Some(c) = test_text(
                         x,
                         y,
-                        EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(sub_w)) / 2,
+                        empty_card().0 + (empty_card().2.saturating_sub(sub_w)) / 2,
                         716,
                         layout::EMPTY_QUERY_RUNG,
                         sub_line,
@@ -2152,10 +2892,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         x,
                         y,
                         primitives::Rect::new(
-                            EMPTY_CARD.0,
-                            EMPTY_CARD.1,
-                            EMPTY_CARD.2,
-                            EMPTY_CARD.3,
+                            empty_card().0,
+                            empty_card().1,
+                            empty_card().2,
+                            empty_card().3,
                         ),
                         CARD.fill,
                         CARD.border,
@@ -2167,7 +2907,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
             // Zero conversation threads: Honest Empty State Card
             if messages.ledger.thread_count == 0 {
-                if in_rect(EMPTY_CARD, x, y) {
+                if in_rect(empty_card(), x, y) {
                     // WHY the platform's card: this app drew the empty state's own
                     // outline -- a corner cut that ate the hairline, and a rule drawn
                     // as "the nearest edge is within two pixels". A rule drawn that
@@ -2226,18 +2966,31 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     // Strict contract coordinates: 740 and 810
                     //
                     // WHY the rungs are named: both lines are centred inside the
-                    // empty card with no trim at all, so the card's own fit gate
-                    // (see `messages::layout`) has to measure them at the rung this
+                    // empty card, so the card's own fit gate (see
+                    // `messages::layout`) has to measure them at the rung this
                     // branch inks them at.
+                    //
+                    // WHY the fitted advance and not `font::center_x`: this line
+                    // is centred on the width its run takes, and `center_x`
+                    // measures it at the ladder. A rung that inks the title
+                    // wider than the card's lane made `center_x` answer zero for
+                    // a reserve it had to divide, which put the title's first
+                    // glyph on the card's own hairline. The fitted width is the
+                    // advance of the run the lane can show -- the whole title at
+                    // every selectable level, which
+                    // `the_empty_card_holds_its_centred_lines` in the library
+                    // checks at the default level, the one the contract's 740 and
+                    // 810 were drawn against.
+                    let title_w = fitted_run_w(
+                        layout::EMPTY_THREADS_TITLE,
+                        layout::EMPTY_TITLE_RUNG,
+                        layout::EMPTY_CARD_LANE,
+                        false,
+                    );
                     if let Some(c) = test_text(
                         x,
                         y,
-                        EMPTY_CARD.0
-                            + std::design::font::center_x(
-                                layout::EMPTY_THREADS_TITLE,
-                                layout::EMPTY_TITLE_RUNG,
-                                EMPTY_CARD.2,
-                            ),
+                        empty_card().0 + (empty_card().2.saturating_sub(title_w)) / 2,
                         740,
                         layout::EMPTY_TITLE_RUNG,
                         layout::EMPTY_THREADS_TITLE,
@@ -2265,32 +3018,56 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         ),
                         _ => (layout::EMPTY_TRANSPORT_SUBLINE, THEME.on_surface_variant),
                     };
-                    if let Some(c) = test_text(
-                        x,
-                        y,
-                        EMPTY_CARD.0
-                            + std::design::font::center_x(
-                                subline,
-                                layout::EMPTY_SUBLINE_RUNG,
-                                EMPTY_CARD.2,
-                            ),
-                        810,
-                        layout::EMPTY_SUBLINE_RUNG,
+                    // WHY the subline is cut to the card before it is centred:
+                    // the four states the store can answer with have four
+                    // different lengths, and the longest of them is inked at the
+                    // caption rung, whose box the published level multiplies. Cut
+                    // to the card's own lane the line stays a line the card holds;
+                    // centred on the run that is actually inked, it keeps the
+                    // columns it shipped with at the default level, where every
+                    // one of the four fits the lane whole.
+                    let mut sub_buf = [0u8; 72];
+                    let sn = fit_run(
                         subline,
-                        subline_color,
-                        THEME.surface_container,
-                    ) {
-                        return c;
+                        layout::EMPTY_SUBLINE_RUNG,
+                        layout::EMPTY_CARD_LANE,
+                        false,
+                        &mut sub_buf,
+                    );
+                    let sub_disp: &[u8] = if sn == 0 { subline } else { &sub_buf[..sn] };
+                    let sub_w = run_w(sub_disp, layout::EMPTY_SUBLINE_RUNG, false);
+                    // WHY the guard stands in front of this draw: the card's foot
+                    // is the band's top, which is a property of the published
+                    // rung, and this line's box ends at row 832 -- the row the
+                    // guard's own bound names. A rung that lifts the bands past
+                    // 832 leaves the card no room for the line at all, and the
+                    // painter then refuses it rather than inking it over the
+                    // card's bottom border and under the recipient field. At the
+                    // compact and the default levels the card does hold the line,
+                    // which is every pixel the review queue has a screenshot of.
+                    if empty_card_holds_last_line() {
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            empty_card().0 + (empty_card().2.saturating_sub(sub_w)) / 2,
+                            810,
+                            layout::EMPTY_SUBLINE_RUNG,
+                            sub_disp,
+                            subline_color,
+                            THEME.surface_container,
+                        ) {
+                            return c;
+                        }
                     }
 
                     return monochrome::card_px(
                         x,
                         y,
                         primitives::Rect::new(
-                            EMPTY_CARD.0,
-                            EMPTY_CARD.1,
-                            EMPTY_CARD.2,
-                            EMPTY_CARD.3,
+                            empty_card().0,
+                            empty_card().1,
+                            empty_card().2,
+                            empty_card().3,
                         ),
                         THEME.surface_container,
                         Some(THEME.border),
@@ -2304,17 +3081,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // scrolled position, so the row under the finger is the one
                 // whose scrolled band contains it.
                 let scroll = messages.list_scroll.offset;
-                let rel = (y - CARD_Y0) + scroll;
-                let idx = rel / CARD_H;
-                let card_top = CARD_Y0 + idx * CARD_H - scroll;
-                let card_offset_y = rel % CARD_H;
-                if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
-                    let card_rect = primitives::Rect::new(CARD_X0, card_top, CARD_X1 - CARD_X0, CARD_BODY_H);
+                let rel = (y - card_y0()) + scroll;
+                let idx = rel / card_h();
+                let card_top = card_y0() + idx * card_h() - scroll;
+                let card_offset_y = rel % card_h();
+                if card_offset_y < card_body_h() && x >= CARD_X0 && x < CARD_X1 {
+                    let card_rect = primitives::Rect::new(CARD_X0, card_top, CARD_X1 - CARD_X0, card_body_h());
                     if let Some(ledger_idx) = messages.filtered_index(idx) {
                         if let Some(tr) = messages.ledger.get_thread_by_idx(ledger_idx) {
                             // 1. Avatar glyph with colored backdrop
                             let acx = layout::AVATAR_CX;
-                            let acy = card_top + 52;
+                            let acy = card_top + card_body_h() / 2;
                             let adx = x as isize - acx as isize;
                             let ady = y as isize - acy as isize;
                             if adx * adx + ady * ady <= (layout::AVATAR_R * layout::AVATAR_R) as isize {
@@ -2323,8 +3100,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 if let Some(c) = test_text_bold(
                                     x,
                                     y,
-                                    acx.saturating_sub(7),
-                                    acy.saturating_sub(12),
+                                    acx.saturating_sub(
+                                        AVATAR_GLYPH_DX + run_growth(&glyph, layout::SNIPPET_RUNG, true) / 2
+                                    ),
+                                    acy.saturating_sub(
+                                        AVATAR_GLYPH_DY + line_growth(layout::SNIPPET_RUNG) / 2
+                                    ),
                                     layout::SNIPPET_RUNG,
                                     &glyph,
                                     THEME.ink_on_dark,
@@ -2339,17 +3120,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             // to the lane the unread pill leaves it.
                             let display_peer = f.resolve_contact_name(tr.peer());
                             let mut peer_name = [0u8; PEER_NAME_CAP];
-                            let peer_len = std::design::font::ellipsize(
+                            let peer_len = fit_run(
                                 display_peer,
                                 layout::PEER_NAME_RUNG,
                                 PEER_NAME_MAX_W,
+                                true,
                                 &mut peer_name,
                             );
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 layout::ROW_TEXT_X,
-                                card_top + 22,
+                                card_top + row_name_dy(),
                                 layout::PEER_NAME_RUNG,
                                 &peer_name[..peer_len],
                                 THEME.on_surface,
@@ -2376,10 +3158,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             let slen = if messages.hidden_previews[ledger_idx] {
                                 copy_ascii(HIDDEN_PREVIEW_LABEL, &mut snippet)
                             } else if let Some(last_msg) = messages.ledger.latest_message(tr.id) {
-                                std::design::font::ellipsize(
+                                fit_run(
                                     last_msg.text(),
                                     layout::SNIPPET_RUNG,
                                     layout::SNIPPET_LANE,
+                                    true,
                                     &mut snippet,
                                 )
                             } else {
@@ -2391,7 +3174,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 x,
                                 y,
                                 layout::ROW_TEXT_X,
-                                card_top + 56,
+                                card_top + row_snippet_dy(),
                                 layout::SNIPPET_RUNG,
                                 &snippet[..slen],
                                 THEME.on_surface_variant,
@@ -2478,7 +3261,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     layout::RECIPIENT_PREFIX_X,
-                    f.recipient.y + SHARED_BASELINE_SHIFT,
+                    f.recipient.y + caption_shift(),
                     layout::FIELD_PREFIX_RUNG,
                     layout::RECIPIENT_PREFIX_LABEL,
                     THEME.on_surface_variant,
@@ -2543,13 +3326,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if messages.compose_len > 0 {
                     let mut count_buf = [0u8; 8];
                     let cn = format_char_count(messages.compose_len, &mut count_buf);
-                    let cw =
-                        std::design::font::measure(&count_buf[..cn], layout::COUNTER_RUNG);
+                    // WHY the published advance: the counter is right-aligned on
+                    // this very width, so at a raised rung a ladder measurement
+                    // slid the digits left into the text the field is typing over.
+                    // At the default level it is `font::measure`'s own number.
+                    let cw = run_w(&count_buf[..cn], layout::COUNTER_RUNG, false);
                     if let Some(c) = test_text(
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
-                        f.compose.y + SHARED_BASELINE_SHIFT,
+                        f.compose.y + caption_shift(),
                         layout::COUNTER_RUNG,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
@@ -2585,8 +3371,8 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // ViewMode 2: ConversationView
         // ---------------------------------------------------------------------
 
-        // Threat Warning Banner or clean header info bar (y SEARCH_Y0..SEARCH_Y1)
-        if y >= SEARCH_Y0 && y < SEARCH_Y1 {
+        // Threat Warning Banner or clean header info bar (y search_y0()..search_y1())
+        if y >= search_y0() && y < search_y1() {
             let active_id = messages.active_thread_id.unwrap_or(0);
             let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
             let count = messages.ledger.get_thread_messages(active_id, &mut msgs);
@@ -2635,13 +3421,13 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 (THEME.surface_container, THEME.border, b"Local thread - not delivered" as &[u8])
             };
 
-            if in_rect(SEARCH_FIELD, x, y) {
-                let rect = primitives::Rect::new(SEARCH_FIELD.0, SEARCH_FIELD.1, SEARCH_FIELD.2, SEARCH_FIELD.3);
+            if in_rect(search_field(), x, y) {
+                let rect = primitives::Rect::new(search_field().0, search_field().1, search_field().2, search_field().3);
 
                 if show_threat {
                     // Warning icon, in the band's leading glyph lane.
                     let cx = SEARCH_ICON_CX;
-                    let cy = SEARCH_ICON_CY;
+                    let cy = search_icon_cy();
                     let dx = (x as isize - cx as isize).abs();
                     let dy = (y as isize - cy as isize).abs();
                     if dx <= 2 && dy <= 8 {
@@ -2654,10 +3440,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                 let text_x = if show_threat { 76 } else { 40 };
                 // WHY the line box and not a literal: the run is drawn at scale
-                // 1, so it centres on `line_height(1)` rows -- the same rule the
-                // search field's own text follows in `build_frame`.
-                let text_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2)
-                    .saturating_sub(std::design::font::line_height(1) / 2);
+                // 1, so it centres on that rung's line box -- the same rule the
+                // search field's own text follows in `build_frame`. The box is
+                // asked at the published level, or a raised rung centres the banner
+                // on a box shorter than the ink it stands in.
+                let text_y =
+                    (search_field().1 + search_field().3 / 2).saturating_sub(line_h(1) / 2);
                 if let Some(c) = test_text(
                     x,
                     y,
@@ -2680,11 +3468,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
         // Chat Message Bubbles Area (from below the info bar to the bands)
         //
-        // WHY the gate is `CONTENT_TOP` and not the literal 168 it was: the
-        // bubbles are laid out from `CONVO_TOP`, and a gate eight rows above
+        // WHY the gate is `content_top()` and not the literal 168 it was: the
+        // bubbles are laid out from `convo_top()`, and a gate eight rows above
         // that painted a dead strip of surface between the band's hairline and
         // the first bubble.
-        if y >= CONTENT_TOP && y < recipient_band_y0(messages) {
+        if y >= content_top() && y < recipient_band_y0(messages) {
             let active_id = messages.active_thread_id.unwrap_or(0);
             let mut msgs = [MessageRecord::EMPTY; messages::MAX_MESSAGES_PER_THREAD];
             let count = messages.ledger.get_thread_messages(active_id, &mut msgs);
@@ -2693,8 +3481,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // Empty conversation info banner
                 let line1 = b"No messages in this chat yet";
                 let line2 = b"Type a draft below to compose";
-                let l1_w = std::design::font::measure_bold(line1, 1);
-                let l2_w = std::design::font::measure(line2, 1);
+                // WHY the published advance and not `font::measure_bold`: both
+                // lines are centred on the whole canvas with no lane to trim
+                // them to, so the only arithmetic that has to follow the rung is
+                // the width the ink actually takes. Measuring at the ladder
+                // centred a run that is wider than the number it was centred
+                // with, which is a few columns off to the left at a raised rung.
+                let l1_w = run_w(line1, 1, true);
+                let l2_w = run_w(line2, 1, false);
                 if let Some(c) = test_text_bold(x, y, (W.saturating_sub(l1_w)) / 2, 676, 1, line1, THEME.on_surface, THEME.surface) {
                     return c;
                 }
@@ -2715,15 +3509,26 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     // WHY the subtraction saturates: a thread holds sixteen
                     // bubbles and the band shows twelve, so the scroll extent
                     // runs to 16 * 92 - 1096 = 376 rows -- further than
-                    // `CONVO_TOP` itself. The top of the oldest bubble is then
+                    // `convo_top()` itself. The top of the oldest bubble is then
                     // above row zero, and `usize` has no such number: in the
                     // checked build it aborted the task as soon as the user
                     // scrolled a long thread, and unchecked it wrapped to a
                     // top no pixel could reach, so the bubble silently stopped
                     // existing. Clamping is exact here because of the gate on
-                    // `CONVO_TOP >= BUBBLE_H` above.
-                    let b_top = (CONVO_TOP + i * BUBBLE_STEP).saturating_sub(scroll);
-                    let b_bot = b_top + BUBBLE_H;
+                    // `convo_top() >= bubble_h()` above.
+                    let b_top = (convo_top() + i * bubble_step()).saturating_sub(scroll);
+                    // WHY the guard is asked per bubble and not folded away:
+                    // the clamp hides a scrolled-out bubble entire only while the
+                    // band's top stands below one bubble's whole height -- the
+                    // clamped bubble then ends above the band and the band's own
+                    // gate paints none of it. At a rung whose bubble is taller
+                    // than that, the clamped bubble would show its foot inside
+                    // the band and its head nowhere, so it leaves the screen
+                    // instead of arriving cut.
+                    if b_top < convo_top() && !convo_top_holds_a_bubble() {
+                        continue;
+                    }
+                    let b_bot = b_top + bubble_h();
                     if y >= b_top && y < b_bot {
                         let is_incoming = msgs[i].direction == MessageDirection::Incoming;
                         let (fill_color, border_color, ink_color) = if is_incoming {
@@ -2759,14 +3564,20 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         // the body run is trimmed to `bubble - 2 * BUBBLE_PAD_X`
                         // and the bubble is grown by the same room, so a message
                         // that fits the bubble is a message that fits its lane.
-                        let mut bubble_w = std::design::font::measure_bold(
-                            msgs[i].text(),
-                            layout::BUBBLE_BODY_RUNG,
-                        ) + layout::BUBBLE_HUG_PAD;
-                        let status_w = std::design::font::measure_bold(
-                            status_label,
-                            layout::BUBBLE_STATUS_RUNG,
-                        ) + layout::BUBBLE_HUG_PAD;
+                        //
+                        // WHY both advances come from the published level: the hug
+                        // is the only thing that decides which column the bubble
+                        // ends at, and the lane the body is cut to is derived from
+                        // it -- a ladder measurement at a raised rung built a plate
+                        // narrower than its own ink, so the message ran out of the
+                        // bubble and the trim cut a run the plate had no room for
+                        // anyway. At the default level `run_w` is `measure_bold`,
+                        // so every bubble keeps the columns it shipped with.
+                        let mut bubble_w =
+                            run_w(msgs[i].text(), layout::BUBBLE_BODY_RUNG, true)
+                                + layout::BUBBLE_HUG_PAD;
+                        let status_w = run_w(status_label, layout::BUBBLE_STATUS_RUNG, true)
+                            + layout::BUBBLE_HUG_PAD;
                         if status_w > bubble_w {
                             bubble_w = status_w;
                         }
@@ -2779,15 +3590,21 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                         if x >= bx0 && x < bx1 {
                             let bubble_rect =
-                                primitives::Rect::new(bx0, b_top, bx1 - bx0, BUBBLE_H);
+                                primitives::Rect::new(bx0, b_top, bx1 - bx0, bubble_h());
 
                             // Message body text, cut to the lane the bubble itself
-                            // leaves it.
+                            // leaves it. WHY the app's fit and not `font::ellipsize`:
+                            // the lane is a published-level box, and a run the ladder
+                            // judged to fit it is wider than it at a raised rung -- it
+                            // would then ink past the bubble's own edge. At the
+                            // default level this hands the work to `ellipsize`, so the
+                            // cut lands exactly where the shipped threads were cut.
                             let mut buf = [0u8; 96];
-                            let n = std::design::font::ellipsize(
+                            let n = fit_run(
                                 msgs[i].text(),
                                 layout::BUBBLE_BODY_RUNG,
                                 layout::bubble_text_lane(bx1 - bx0),
+                                true,
                                 &mut buf,
                             );
                             if let Some(c) = test_text_bold(
@@ -2803,11 +3620,17 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 return c;
                             }
 
+                            // WHY the body's growth is added to the shipped offset:
+                            // the status line sits a fixed 34 rows under the body's
+                            // box top, and the bubble plate grows by both boxes. A
+                            // rung that lifts the body's box without lifting the
+                            // status with it puts the delivery state under the
+                            // message's own descenders.
                             if let Some(c) = test_text_bold(
                                 x,
                                 y,
                                 bx0 + layout::BUBBLE_PAD_X,
-                                b_top + 44,
+                                b_top + 44 + line_growth(layout::BUBBLE_BODY_RUNG),
                                 layout::BUBBLE_STATUS_RUNG,
                                 status_label,
                                 status_color,
@@ -2844,7 +3667,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     layout::RECIPIENT_PREFIX_X,
-                    f.recipient.y + SHARED_BASELINE_SHIFT,
+                    f.recipient.y + caption_shift(),
                     layout::FIELD_PREFIX_RUNG,
                     layout::RECIPIENT_PREFIX_LABEL,
                     THEME.on_surface_variant,
@@ -2906,13 +3729,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 if messages.compose_len > 0 {
                     let mut count_buf = [0u8; 8];
                     let cn = format_char_count(messages.compose_len, &mut count_buf);
-                    let cw =
-                        std::design::font::measure(&count_buf[..cn], layout::COUNTER_RUNG);
+                    // WHY the published advance: the counter is right-aligned on
+                    // this very width, so at a raised rung a ladder measurement
+                    // slid the digits left into the text the field is typing over.
+                    // At the default level it is `font::measure`'s own number.
+                    let cw = run_w(&count_buf[..cn], layout::COUNTER_RUNG, false);
                     if let Some(c) = test_text(
                         x,
                         y,
                         COMPOSE_COUNT_RIGHT.saturating_sub(cw),
-                        f.compose.y + SHARED_BASELINE_SHIFT,
+                        f.compose.y + caption_shift(),
                         layout::COUNTER_RUNG,
                         &count_buf[..cn],
                         THEME.on_surface_variant,
@@ -2951,12 +3777,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // what the app knows about the thread, and the platform's card
         // treatment is what a report is drawn on.
         // ---------------------------------------------------------------------
-        if y >= DETAILS_TOP && y < recipient_band_y0(messages) {
+        if y >= details_top() && y < recipient_band_y0(messages) {
             for row in 0..f.detail_count {
-                let top = DETAILS_TOP + row * DETAIL_ROW_H;
-                if y >= top && y < top + DETAIL_ROW_H {
+                let top = details_top() + row * detail_row_h();
+                if y >= top && y < top + detail_row_h() {
                     let line = &f.detail[row];
-                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, ROW_CARD_H);
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, row_card_h());
                     if let Some(c) = card_row_pixel(
                         x,
                         y,
@@ -2977,17 +3803,19 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let card_rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
                 let mut buf = [0u8; 96];
                 let n = if messages.notice_len > 0 {
-                    std::design::font::ellipsize(
+                    fit_run(
                         &messages.notice[..messages.notice_len],
                         layout::NOTICE_RUNG,
                         layout::card_row_lane(rect.2),
+                        false,
                         &mut buf,
                     )
                 } else {
-                    std::design::font::ellipsize(
+                    fit_run(
                         b"Nothing has been published or shared yet.",
                         layout::NOTICE_RUNG,
                         layout::card_row_lane(rect.2),
+                        false,
                         &mut buf,
                     )
                 };
@@ -3023,12 +3851,12 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // hand-off and the peers of the conversations this device holds, and
         // says that no other source exists.
         // ---------------------------------------------------------------------
-        if y >= RECIP_ROW_TOP && y < recipient_band_y0(messages) {
+        if y >= recip_row_top() && y < recipient_band_y0(messages) {
             for row in 0..f.picker_count {
-                let top = RECIP_ROW_TOP + row * RECIP_ROW_H;
-                if y >= top && y < top + RECIP_ROW_H {
+                let top = recip_row_top() + row * recip_row_h();
+                if y >= top && y < top + recip_row_h() {
                     let line = &f.picker[row];
-                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, ROW_CARD_H);
+                    let rect = (CARD_X0, top, CARD_X1 - CARD_X0, row_card_h());
                     if let Some(c) = card_row_pixel(
                         x,
                         y,
@@ -3050,10 +3878,11 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 let card_rect = primitives::Rect::new(rect.0, rect.1, rect.2, rect.3);
                 let mut buf = [0u8; 64];
                 let n = if messages.recip_len > 0 {
-                    std::design::font::ellipsize(
+                    fit_run(
                         &messages.recip[..messages.recip_len],
                         layout::NOTICE_RUNG,
                         layout::card_row_lane(rect.2),
+                        false,
                         &mut buf,
                     )
                 } else {
@@ -3653,7 +4482,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     if app.view_mode == ViewMode::Details
         && x >= CARD_X0
         && x < CARD_X1
-        && y >= DETAILS_TOP
+        && y >= details_top()
         && y < recipient_band_y0(app)
     {
         let mut detail = [DetailLine {
@@ -3663,7 +4492,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
             action: DetailAction::None,
         }; DETAIL_ROWS];
         let count = build_detail_lines(app, &mut detail);
-        let row = (y - DETAILS_TOP) / DETAIL_ROW_H;
+        let row = (y - details_top()) / detail_row_h();
         if row < count {
             match detail[row].action {
                 DetailAction::None => {
@@ -3720,12 +4549,12 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     if app.view_mode == ViewMode::Recipients
         && x >= CARD_X0
         && x < CARD_X1
-        && y >= RECIP_ROW_TOP
+        && y >= recip_row_top()
         && y < recipient_band_y0(app)
     {
         let mut picker = [PickerLine::EMPTY; RECIP_ROWS];
         let count = build_picker_lines(app, &mut picker);
-        let row = (y - RECIP_ROW_TOP) / RECIP_ROW_H;
+        let row = (y - recip_row_top()) / recip_row_h();
         if row < count && picker[row].selectable {
             let n = picker[row].value_len.min(RECIP_CAP);
             app.recip[..n].copy_from_slice(&picker[row].value[..n]);
@@ -3827,7 +4656,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     // ThreadListView specific touches
     if app.view_mode == ViewMode::ThreadList {
         // Search field
-        if in_rect(SEARCH_FIELD, x, y) {
+        if in_rect(search_field(), x, y) {
             if app.search_len > 0
                 && x >= SEARCH_CLEAR_CX - SEARCH_CLEAR_HALF_W
                 && x < SEARCH_CLEAR_CX + SEARCH_CLEAR_HALF_W
@@ -3856,12 +4685,12 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         // compose bands -- rows the list does not fill -- was fed to it as if
         // it were a row. The drag handler above already bounded the list to
         // `recipient_band_y0`; the tap was the one place that did not.
-        if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 && y < recipient_band_y0(app) {
+        if x >= CARD_X0 && x < CARD_X1 && y >= card_y0() && y < recipient_band_y0(app) {
             let scroll = app.list_scroll.offset;
-            let rel = (y - CARD_Y0) + scroll;
-            let idx = rel / CARD_H;
-            let coff = rel % CARD_H;
-            if coff < CARD_BODY_H {
+            let rel = (y - card_y0()) + scroll;
+            let idx = rel / card_h();
+            let coff = rel % card_h();
+            if coff < card_body_h() {
                 if let Some(ledger_idx) = app.filtered_index(idx) {
                     if let Some(tr) = app.ledger.get_thread_by_idx(ledger_idx) {
                         // Delete affordance tap on card's right edge
@@ -4044,6 +4873,21 @@ pub extern "C" fn _start() -> ! {
     )
     .ok();
 
+    // 0. The person's own text size, before a single pixel is placed.
+    //
+    // WHY here and not inside `MessagesApp::new`: `new` is a `const fn`, so it
+    // cannot ask the store, and every box this file lays out reads the cell the
+    // publish below writes. Handing the keyboard module the rows the recipient
+    // band has to give its field is the same fact in the second place it is
+    // needed -- the bands' edges are the keyboard module's own constants, and a
+    // dock and a field that disagree about the band's height overlap.
+    //
+    // WHY the order: `band_extra_rows()` measures the field at the published
+    // rung, so it has to be read after the publish and before the first
+    // `bands_top` is asked.
+    publish_user_text_scale();
+    messages::keyboard::set_band_extra_rows(band_extra_rows());
+
     let mut messages = MessagesApp::new();
 
     // Load persisted threads and synchronize to ThreadLedger
@@ -4187,10 +5031,10 @@ pub extern "C" fn _start() -> ! {
                             // twelve, so the oldest four were drawn off the
                             // top of the screen with no way to reach them.
                             let over_conversation = messages.view_mode == ViewMode::Conversation
-                                && input.y >= CONVO_TOP as u32
+                                && input.y >= convo_top() as u32
                                 && (input.y as usize) < recipient_band_y0(&messages);
                             let over_list = messages.view_mode == ViewMode::ThreadList
-                                && input.y >= CARD_Y0 as u32
+                                && input.y >= card_y0() as u32
                                 && (input.y as usize) < recipient_band_y0(&messages);
                             // WHY the dock swallows the gesture: a pan that
                             // starts on the keys is a pan on a control that
@@ -4259,7 +5103,7 @@ pub extern "C" fn _start() -> ! {
                         match dirty {
                             Dirty::None => {}
                             Dirty::Search => {
-                                render_messages_band(surface, &messages, SEARCH_Y0, SEARCH_Y1);
+                                render_messages_band(surface, &messages, search_y0(), search_y1());
                             }
                             Dirty::Recipient => {
                                 render_messages_band(
