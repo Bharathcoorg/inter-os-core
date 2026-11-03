@@ -2610,16 +2610,23 @@ const BUTTON_HALF: usize = (CONTENT_W - CARD_GAP) / 2;
 /// Inner padding of an action button's label.
 const BUTTON_PAD: usize = ROW_PAD;
 
-/// The home indicator: the reference `GestureBar` component (96x4 dash, pill
-/// radius) centred on the bottom edge. WHY the drawn mark is smaller than the
-/// touch region it sits in: the handler's exit region is unchanged, so making the
-/// mark match the component must not shrink the target.
-const GESTURE_W: usize = 96;
-const GESTURE_H: usize = 4;
-const GESTURE_X: usize = (W - GESTURE_W) / 2;
-/// WHY 22 above the bottom edge: that is where the previous 200x6 bar was drawn,
-/// so the chrome does not move while its shape changes.
-const GESTURE_Y: usize = H - 22;
+/// The home indicator: the pill the shell paints, and the box that answers a
+/// press on it.
+///
+/// Both used to be authored here. The mark was a 96x4 dash of the app's own
+/// invention centred on `H - 22`, and the press answered `x >= 240 && x <= 480`
+/// from row 1400 -- 241 columns, asymmetric about the panel's centre, four rows
+/// shallower than the touch floor and wider than anything this app drew. The SDK
+/// names both, so the ink and the answer are one declaration read twice.
+const HOME_PILL: std::design::primitives::Rect = std::design::home_band::PILL;
+const HOME_HIT: std::design::primitives::Rect = std::design::home_band::HIT;
+/// WHY checked here: the panel pages stop their content at `CONTENT_BOTTOM`, and
+/// the strip the press answers starts above it, so the rows in between belong to
+/// the gesture even though the page paints a background through them.
+const _: () = assert!(HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(HOME_HIT.y <= HOME_PILL.y);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x);
+const _: () = assert!(HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
 
 // -----------------------------------------------------------------------------
 // Typography: measure -> fit -> draw. Nothing is ever clipped by its box.
@@ -7178,12 +7185,8 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             .pixel(x, y, clock, &instruments, &THEME)
             .unwrap_or(THEME.surface);
     }
-    // Home gesture pill (matches the touch handler's exit region).
-    if y >= GESTURE_Y
-        && y < GESTURE_Y + GESTURE_H
-        && x >= GESTURE_X
-        && x < GESTURE_X + GESTURE_W
-    {
+    // Home gesture pill: the shell's own mark, in the shell's own rows.
+    if HOME_PILL.contains(x, y) {
         return THEME.on_surface_variant;
     }
     // Shared 48x48 back control: rendered on landing grid and sub-pages for uniform OS navigation
@@ -7318,7 +7321,7 @@ fn handle_tap(
             }
             std::exit_with_code(0);
         }
-    } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
+    } else if HOME_HIT.contains(input.x as usize, input.y as usize) {
         std::log("[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
         )
         .ok();

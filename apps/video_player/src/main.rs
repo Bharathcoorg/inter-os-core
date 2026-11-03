@@ -107,10 +107,12 @@ const BAND4_Y1: usize = 890;
 
 // Band 5: Secondary Controls & Navigation
 const BAND5_Y0: usize = 890;
-const BAND5_Y1: usize = 1400;
+/// WHY read off the band rather than authored as 1400: the rows the platform's
+/// home box answers are not this app's to repaint as its own content.
+const BAND5_Y1: usize = HOME_HIT.y;
 
 // Band 6: Home Gesture Bar
-const BAND6_Y0: usize = 1400;
+const BAND6_Y0: usize = HOME_HIT.y;
 const _BAND6_Y1: usize = 1440;
 
 // -----------------------------------------------------------------------------
@@ -532,7 +534,23 @@ const SHEET_SMALL_DY: usize = font::ascent_for_scale(2) - font::ascent_for_scale
 const _: () = assert!(SHEET_LABEL_X + SHEET_LABEL_COL_W < SHEET_VALUE_X);
 const _: () = assert!(SHEET_VALUE_X + SHEET_VALUE_MAX_W == SHEET_RECT.x + SHEET_RECT.w - 24);
 const _: () = assert!(SHEET_ROW_AUDIO_Y + font::line_height(2) < SHEET_RECT.y + SHEET_RECT.h);
-const HOME_RECT: Rect = Rect::new(260, 1418, 200, 6);
+/// The system home indicator, and the strip that answers a press on it.
+///
+/// Both come from `std::design::home_band` now. They used to be authored here as
+/// three numbers: the painter inked a 200x6 `HOME_RECT` while the press answered
+/// every column from row 1410 and the swipe answered every column from 1400, so
+/// the mark and the box that quits were three different claims about one control.
+const HOME_HIT: Rect = std::design::home_band::HIT;
+const HOME_PILL: Rect = std::design::home_band::PILL;
+
+/// WHY checked at compile time: the answering box is the platform's floor-sized
+/// one only because nothing this app paints reaches into it -- the drawer's last
+/// row and the info sheet's foot both end above its first.
+const _: () = assert!(LIB_VIEW_Y1 <= HOME_HIT.y);
+const _: () = assert!(SHEET_RECT.y + SHEET_RECT.h <= HOME_HIT.y);
+const _: () = assert!(LAND_PANEL.y + LAND_PANEL.h <= HOME_HIT.y);
+const _: () = assert!(HOME_PILL.y >= HOME_HIT.y && HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
 
 // Video Library Drawer / Sheet Layout
 /// The drawer's list viewport, and the row it starts on.
@@ -1589,6 +1607,12 @@ fn sheet_value_caption(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32
 // -----------------------------------------------------------------------------
 
 fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
+    // WHY ahead of every mode below: the fullscreen video and the open drawer
+    // both answer a press in this box, so both have to wear its mark.
+    if let Some(ink) = std::design::home_band::pixel(x, y, COLOR_TEXT_MUTED) {
+        return ink;
+    }
+
     // =========================================================================
     // 1. LANDSCAPE MODE (Fullscreen 720x1440 with Translucent On-Screen HUD)
     // =========================================================================
@@ -2723,11 +2747,6 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // Band 6: Home Gesture Bar
     // -------------------------------------------------------------------------
     if y >= BAND6_Y0 {
-        if HOME_RECT.contains(x, y) {
-            if let Some(col) = draw_rounded_rect(x, y, HOME_RECT, 3, COLOR_TEXT_MUTED, None, 0) {
-                return col;
-            }
-        }
         return COLOR_BG;
     }
 
@@ -2841,7 +2860,7 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     let y = py as usize;
 
     // Home gesture: Exit to launcher
-    if y >= 1410 {
+    if HOME_HIT.contains(x, y) {
         return EventAction::Exit("[VIDEO PLAYER] Home gesture recognized. Exiting.");
     }
 
@@ -3321,7 +3340,7 @@ pub extern "C" fn _start() -> ! {
                                 dirty = merge_dirty(dirty, Dirty::All);
                                 continue;
                             }
-                            if input.y >= 1400 {
+                            if HOME_HIT.contains(input.x as usize, input.y as usize) {
                                 app.close_avi();
                                 if surface > 0 {
                                     let _ = std::surface_destroy(surface);

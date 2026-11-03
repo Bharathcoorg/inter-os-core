@@ -95,23 +95,23 @@ pub const SEARCH_CLEAR: Rect = Rect::new(618, SEARCH_PILL.y, 68, SEARCH_PILL.h);
 
 /// The home indicator's ink, and the strip that answers it.
 ///
-/// WHY the strip starts at the keyboard's own bottom edge: the soft keyboard
-/// owns `keyboard::KB_Y0..keyboard::KB_Y1`, and the home band used to begin at
-/// row 1400 inside it -- a finger that pressed a key in the keyboard's last
-/// row, between x=240 and x=480, quit the app instead of typing. The strip is
-/// now declared against the keyboard's bottom, so the two cannot overlap
-/// again, and it begins where the keyboard's own hit test stops.
+/// The ink and the answering box used to be authored here -- `260, 1418, 200, 6`
+/// over a strip this file built by hand from the keyboard's own bottom edge.
+/// `home_band` names both now: the pill is the shell's, and `hit_from` is the
+/// SDK's answer to an app whose own control holds the bottom of the screen.
 ///
-/// WHY the pill is drawn at all: the app answered that strip on a page it had
-/// never inked, so the one way out of the app that a person could see was
-/// nothing at all.
-pub const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
-pub const HOME_HIT: Rect = Rect::new(
-    240,
-    crate::keyboard::KB_Y1,
-    240,
-    1440 - crate::keyboard::KB_Y1,
-);
+/// WHY the box starts at the keyboard's bottom rather than at the band's: the
+/// soft keyboard owns `keyboard::KB_Y0..keyboard::KB_Y1`, and the home band used
+/// to begin at row 1400 inside it -- a finger that pressed a key in the
+/// keyboard's last row, between x=240 and x=480, quit the app instead of typing.
+/// The box begins where the keyboard's own hit test stops, still reaches the
+/// panel's last row, and still covers the pill it is drawn for.
+///
+/// WHY the pill is drawn at all: the app answered a strip on a page it had never
+/// inked, so the one way out of the app that a person could see was nothing at
+/// all.
+pub const HOME_PILL: Rect = interos_std::design::home_band::PILL;
+pub const HOME_HIT: Rect = interos_std::design::home_band::hit_from(crate::keyboard::KB_Y1);
 
 /// Whether the press is on the home strip.
 #[inline]

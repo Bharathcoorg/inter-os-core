@@ -1273,7 +1273,12 @@ const TRANSPORT_Y1: usize = TRANSPORT_CY + PLAY_R;
 
 const LIST_LABEL_Y: usize = 1036;
 const LIST_DIVIDER_Y: usize = 1114;
-const LIST_HIT_Y1: usize = 1400;
+/// The bottom of the track list's band: the first row of the home box.
+///
+/// WHY it is read off the band rather than authored as 1400: the list claimed the
+/// eight rows the platform's box answers, so a press there was both a row and a
+/// quit, and only one of them could be the answer.
+const LIST_HIT_Y1: usize = HOME_HIT.y;
 /// The top of the visible track-list band.
 const LIST_TOP: usize = 1124;
 /// The height of the visible track-list band.
@@ -1299,10 +1304,21 @@ const ADD_TITLE_CAP: usize = 40;
 /// Duration digits the add editor holds (whole seconds, up to 5 digits).
 const ADD_DUR_DIGITS: usize = 5;
 
-const HOME_X0: usize = 240;
-const HOME_X1: usize = 480;
-const HOME_Y0: usize = 1418;
-const HOME_Y1: usize = 1424;
+/// The system home indicator, and the strip that answers a press on it.
+///
+/// Both come from `std::design::home_band` now. They used to be authored here as
+/// four numbers that had already disagreed: the painter inked a literal
+/// `260..460 / 1418..1424` while the press answered `HOME_X0..HOME_X1` from row
+/// 1400, so the mark was two hundred columns and the box that quit was two
+/// hundred and forty, eight rows deeper than the ink it stood for.
+const HOME_HIT: Rect = std::design::home_band::HIT;
+const HOME_PILL: Rect = std::design::home_band::PILL;
+
+/// WHY checked at compile time: the box this app answers is the platform's
+/// floor-sized one only because the list band ends at its first row.
+const _: () = assert!(HOME_PILL.y >= LIST_HIT_Y1);
+const _: () = assert!(HOME_PILL.y >= HOME_HIT.y && HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
 
 // -----------------------------------------------------------------------------
 // Text helpers - the gate is the glyph line box, so ink is never clipped.
@@ -1853,9 +1869,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             .pixel(x, y, clock, &interos_std::design::components::Instruments::unmeasured(), &THEME)
             .unwrap_or(THEME.surface);
     }
-    // 0. Home Gesture Pill (x: 260..460, y: 1418..1424).
-    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
-        return THEME.on_surface_variant;
+    // 0. The platform's home mark, asked before any band of this app's own.
+    if let Some(ink) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return ink;
     }
 
     // 1. Top bar: dismiss control + screen label.
@@ -2434,7 +2450,9 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             continue;
         };
         let t = app.store.get(store_idx).unwrap();
-        if y >= row_y && y < row_y + 84 {
+        // WHY clipped: a row that inked past the band's foot promises a press the gesture answers.
+        let row_bottom = (row_y + 84).min(LIST_HIT_Y1);
+        if y >= row_y && y < row_bottom {
             let selected = store_idx == app.current_track_idx;
             // The platform's list-row treatment: the fill of the row the tap
             // lands on and the fill of the row it does not, the platform's
@@ -2444,7 +2462,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             // block: a row that invents its own fill, its own radius and its
             // own padding is a row a third-party app cannot match.
             let row_fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
-            let row_rect = Rect::new(MARGIN, row_y, CONTENT_W, 84);
+            let row_rect = Rect::new(MARGIN, row_y, CONTENT_W, row_bottom - row_y);
             if let Some(c) = draw_rounded_rect(x, y, row_rect, ROW.radius, row_fill, None, 0) {
                 if c != row_fill {
                     return c;
@@ -2503,7 +2521,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             }
         }
         // Row-gap divider at +88 (see the gate note above the text runs).
-        if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
+        if y == row_y + 88 && y < LIST_HIT_Y1 && x >= MARGIN && x < MARGIN + CONTENT_W {
             return ROW.divider;
         }
     }
@@ -2778,7 +2796,10 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     let y = py as usize;
 
     // Dismiss control in the top bar, or the home gesture band.
-    if std::design::back_button::contains(x, y) || BACK.contains(x, y) || (x >= HOME_X0 && x < HOME_X1 && y >= 1400) {
+    if std::design::back_button::contains(x, y)
+        || BACK.contains(x, y)
+        || HOME_HIT.contains(x, y)
+    {
         return Tap::Leave("[MUSIC APP] Dismiss control or home gesture pressed. Exiting to launcher.");
     }
 

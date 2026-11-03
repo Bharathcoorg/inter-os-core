@@ -4,6 +4,7 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::back_button;
+use std::design::home_band;
 use std::design::monochrome;
 use std::design::viewport;
 use std::webview::InterWebView;
@@ -42,8 +43,14 @@ const PAGE_BG: u32 = 0xFF121212;
 const _: () = assert!(W > 0 && H > W);
 
 /// One pixel of the demo's surface: the platform's back control where it stands,
-/// then the document's own pixel where the controller claims the position, and
-/// the page background everywhere else.
+/// then the home pill the band answers, then the document's own pixel where the
+/// controller claims the position, and the page background everywhere else.
+///
+/// WHY the pill is the SDK's ink and not a shape here: the demo painted nothing at
+/// the foot of the panel, so the only way off the document was a gesture the
+/// screen never advertised. The mark and the box that answers it are now one
+/// declaration, and the rows they cover are the app's own background -- the
+/// controller's band stops at row 1340, well above the pill.
 ///
 /// WHY the app has to answer the rows the controller does not: the kernel only
 /// publishes a surface whose pixels have all been written, and
@@ -57,6 +64,9 @@ const _: () = assert!(W > 0 && H > W);
 /// document. A control that a page can paint over is a control that isn't there.
 fn demo_pixel(x: usize, y: usize, page: &InterWebView) -> u32 {
     if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
+        return c;
+    }
+    if let Some(c) = home_band::pixel(x, y, THEME.on_surface_variant) {
         return c;
     }
 
@@ -145,6 +155,14 @@ pub extern "C" fn _start() -> ! {
                         std::surface_flip().ok();
                     }
                     continue;
+                }
+
+                if input.kind == 1 && home_band::contains(input.x as usize, input.y as usize) {
+                    // The pill painted at the foot of the panel: go home, rather
+                    // than unwind the document the way the back control does.
+                    std::log("[WEBVIEW_DEMO] Home gesture pressed. Exiting to launcher.").ok();
+                    std::surface_destroy(surface).ok();
+                    std::exit_with_code(0);
                 }
 
                 if input.kind == 4 || input.kind == 10 {

@@ -113,14 +113,15 @@ pub const HIST_ROW_H: usize =
 
 /// The home indicator, in the platform's own geometry.
 ///
-/// WHY these numbers and not the app's own: the shell draws the home
-/// indicator on every screen, and the app drew a second one -- a grey line,
-/// two hundred pixels wide, in a different row, while its press answered a
-/// strip from x=240 to x=480 that the pill never covered. The pill and the
-/// strip are now the same declaration: the pill is the ink, the strip is
-/// the gesture, and the strip is the width the launcher's own tests tap.
-pub const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
-pub const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
+/// The ink and the answering strip used to be authored here, as `260, 1418,
+/// 200, 6` over a strip of `240, 1392, 240, 48` -- numbers that had already
+/// arrived at the SDK's geometry, so what changes is who owns them. The shell
+/// draws the indicator on every screen and this app drew a second one once, a
+/// grey line in a different row while its press answered a strip the pill never
+/// covered; reading both from `home_band` is what keeps that from happening
+/// again.
+pub const HOME_PILL: Rect = interos_std::design::home_band::PILL;
+pub const HOME_HIT: Rect = interos_std::design::home_band::HIT;
 
 /// The header's history toggle: the pill beside the back chip that opens the
 /// drawer. Declared once because the header row draws it and the press asks
@@ -168,7 +169,7 @@ pub fn back_claims(x: usize, y: usize) -> bool {
 /// Whether the press is on the home strip.
 #[inline]
 pub fn home_claims(x: usize, y: usize) -> bool {
-    HOME_HIT.contains(x, y)
+    interos_std::design::home_band::contains(x, y)
 }
 
 /// Whether the press is on the header's history toggle.

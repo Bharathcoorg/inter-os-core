@@ -815,14 +815,15 @@ fn render_pixel(x: usize, y: usize, state: &AppState) -> u32 {
             .unwrap_or(THEME.surface);
     }
 
-    // 1. Android / InterOS Bottom Home Gesture Bar (y: 1416..1440)
+    // 1. The platform's home band: the pill's row down to the panel's last row
+    //    is the shell's, and this app paints nothing into it.
     //
     // WHY the indicator is ink and not a translucent white: the bar is drawn
     // on the theme's page, and a white pill on a near-white page is a pill
     // nobody can see. The ink role is the strong mark a home indicator is.
-    if y >= chrome::HOME_PILL.y && y <= 1440 {
-        if chrome::HOME_PILL.contains(x, y) {
-            return THEME.on_surface;
+    if y >= chrome::HOME_PILL.y {
+        if let Some(c) = interos_std::design::home_band::pixel(x, y, THEME.on_surface) {
+            return c;
         }
         return THEME.surface;
     }

@@ -98,18 +98,18 @@ pub const FIELD_DISC_R: i32 = DISC_R;
 
 /// The home indicator's ink, and the strip that answers it.
 ///
-/// WHY the strip is declared beside the pill: the pill is two hundred rows
-/// wide from x=260 and starts at row 1418, and the press answered x=240..480
-/// from row 1400 -- two hundred rows of page that had been inked as nothing.
-/// The strip keeps the gesture's own generous width, and the pill is the ink
-/// inside it, so what a person sees and what answers are one declaration.
-pub const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
-pub const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
+/// Both used to be authored here, as `260, 1418, 200, 6` over a strip of
+/// `240, 1392, 240, 48`, and the strip had grown to agree with the ink -- the
+/// press used to answer x=240..480 from row 1400, two hundred rows of page that
+/// had been inked as nothing. `home_band` owns that pair now, so the mark this
+/// app paints and the box it answers are the shell's, and cannot drift again.
+pub const HOME_PILL: Rect = interos_std::design::home_band::PILL;
+pub const HOME_HIT: Rect = interos_std::design::home_band::HIT;
 
 /// Whether the press is on the home strip.
 #[inline]
 pub fn home_claims(x: usize, y: usize) -> bool {
-    HOME_HIT.contains(x, y)
+    interos_std::design::home_band::contains(x, y)
 }
 
 /// Whether the press is on the back chip's own plate.

@@ -27,6 +27,7 @@ use browser::theme::{MIN_TOUCH_TARGET, THEME, radius, spacing, type_scale};
 use interos_std::design::back_button;
 use interos_std::design::components;
 use interos_std::design::font;
+use interos_std::design::home_band;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
@@ -1444,9 +1445,24 @@ const _: () = assert!(FWD_BTN.y == NAV_ROW_Y && HOME_TAB_BTN.y == NAV_ROW_Y
 const _: () = assert!(NAV_ROW_Y >= NAV_BAR_Y0 && NAV_ROW_Y + NAV_BTN_H <= NAV_BAR_Y1);
 const _: () = assert!(TABS_BTN.x + TABS_BTN.w <= W);
 
-/// System Gesture Home Indicator (y 1410..1440)
-const GESTURE_PILL: Rect = Rect::new(260, 1422, 200, 6);
-const HOME_Y0: usize = 1410;
+/// The platform's home band: the pill the shell inks and the box that answers it.
+///
+/// Both used to be authored here, and they had already drifted: a 200x6 mark at
+/// row 1422, answered by every column of the panel from row 1410 -- twelve rows
+/// of blank chassis above the ink and 480 columns beside it.
+///
+/// WHY the answering box is `hit_from(NAV_BAR_Y1)` and not the SDK default: the
+/// navigation row owns 1350..1410 and its plates stand to row 1404, so the
+/// default box at 1392 would answer the bar's own last rows with an exit. The
+/// box therefore claims every row the bar does not, still centred on the pill.
+const HOME_PILL: Rect = home_band::PILL;
+const HOME_HIT: Rect = home_band::hit_from(NAV_BAR_Y1);
+const _: () = assert!(HOME_PILL.y >= NAV_BAR_Y1 && HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(HOME_HIT.y <= HOME_PILL.y && HOME_HIT.y + HOME_HIT.h == H);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
+/// The keyboard, the accessory strip and the navigation row all stop above this
+/// row, so nothing that lives in the answering box competes with a control.
+const _: () = assert!(KB_Y1 <= NAV_BAR_Y1 && NAV_ROW_Y + NAV_BTN_H <= HOME_HIT.y);
 
 /// The top of the band the reader draws the document in.
 const READER_TOP_Y: usize = 126;
@@ -10094,8 +10110,8 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
         return bottom_bar_pixel(x, y, app);
     }
     if y >= NAV_BAR_Y1 {
-        if GESTURE_PILL.contains(x, y) {
-            return THEME.border;
+        if let Some(c) = home_band::pixel(x, y, THEME.border) {
+            return c;
         }
         return THEME.surface;
     }
@@ -10333,8 +10349,9 @@ enum Tap<'a> {
 fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     let (x, y) = (px as usize, py as usize);
 
-    // Gesture Home Bar (y >= 1410): Exit to Launcher
-    if y >= HOME_Y0 {
+    // The platform's home box, tested ahead of every control: it claims only the
+    // rows the navigation bar leaves, so nothing above it loses a press.
+    if HOME_HIT.contains(x, y) {
         return Tap::Leave("[BROWSER APP] Home gesture pressed. Exiting to launcher.");
     }
 

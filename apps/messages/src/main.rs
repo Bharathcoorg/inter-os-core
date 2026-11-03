@@ -1054,38 +1054,33 @@ fn convo_viewport_h(app: &MessagesApp) -> usize {
     bands_top(app) - CONVO_TOP
 }
 
-/// The home indicator this app draws for itself.
+/// The home indicator this app draws, and the box that answers a press on it.
 ///
-/// WHY the mark is named rather than left as the literal `1418..1424` the
-/// painter used: the paint and the gesture are the same control, and the
-/// gesture had its own number -- see `HOME_GESTURE_Y0`.
-const HOME_PILL_H: usize = 6;
-const HOME_PILL_Y0: usize = H - 22;
-const HOME_PILL_Y1: usize = HOME_PILL_Y0 + HOME_PILL_H;
-const HOME_X0: usize = 240;
-const HOME_X1: usize = 480;
-
-/// The first row the leave-the-app gesture owns.
+/// Both come from `std::design::home_band` now. They used to be authored here as
+/// five numbers that had already drifted: the painter inked a mark 240 columns
+/// wide while the shell draws 200, and the press answered the painter's own rows
+/// from their top.
 ///
-/// WHY it starts at the painted mark and not above it: the gesture used to
-/// start at the literal 1400, eighteen rows above the row it actually draws,
-/// and the compose band paints down to 1414. So the last five rows of the
-/// visible composer field -- and the eight rows of band below it -- were not
-/// composer pixels but a quit: a tap in the middle of the drawn field's bottom
-/// edge threw the user out of the app instead of placing the caret.
-///
-/// WHY the rows under the mark are left to it: from the mark down to the bottom
-/// of the canvas this app paints nothing of its own, so the gesture can keep a
-/// thumb-height of target without claiming a control.
-const HOME_GESTURE_Y0: usize = HOME_PILL_Y0;
+/// WHY the answering box is `hit_from` and not the SDK's default: the composer
+/// paints down to row 1414 and the default box begins at 1392, inside it. The
+/// box therefore claims every row the bands and the keyboard leave -- the
+/// platform's centred 240 columns, from the composer's foot to the canvas -- and
+/// the floor-sized escape on this screen is the header's back chip, which the
+/// same press answers.
+const HOME_PILL: primitives::Rect = std::design::home_band::PILL;
+const HOME_HIT: primitives::Rect = std::design::home_band::hit_from(BANDS_TOP_IDLE + BANDS_H);
 
 /// WHY checked at compile time: the gesture may only own rows no band of this
-/// app paints. Both positions of the compose bands and the keyboard dock are
-/// above the mark, and the first of those three facts is what a taller band or
-/// a taller dock would break.
-const _: () = assert!(HOME_PILL_Y0 >= BANDS_TOP_IDLE + BANDS_H);
-const _: () = assert!(HOME_PILL_Y0 >= KB_Y1);
-const _: () = assert!(HOME_PILL_Y1 <= H);
+/// app paints, and both positions of the compose bands and the keyboard dock sit
+/// above the mark.
+const _: () = assert!(HOME_PILL.y >= BANDS_TOP_IDLE + BANDS_H);
+const _: () = assert!(HOME_HIT.y >= KB_Y1);
+const _: () = assert!(HOME_HIT.y <= HOME_PILL.y);
+const _: () = assert!(HOME_HIT.y + HOME_HIT.h == H);
+const _: () = assert!(HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(
+    HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w
+);
 
 /// The row every scrollable section of the app starts at, below the search band.
 ///
@@ -3089,9 +3084,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
     }
 
-    // 5. Home Gesture Pill (x: HOME_X0..HOME_X1, y: HOME_PILL_Y0..HOME_PILL_Y1)
-    if y >= HOME_PILL_Y0 && y < HOME_PILL_Y1 && x >= HOME_X0 && x < HOME_X1 {
-        return THEME.on_surface_variant;
+    // 5. The platform's home mark, on the rows no band of this app paints.
+    if let Some(ink) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return ink;
     }
 
     THEME.surface
@@ -3597,7 +3592,7 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
     let (x, y) = (px as usize, py as usize);
 
     // System home gesture: leave to launcher
-    if x >= HOME_X0 && x < HOME_X1 && y >= HOME_GESTURE_Y0 {
+    if HOME_HIT.contains(x, y) {
         return Tap::Leave("[MESSAGES APP] Home gesture pressed. Exiting to launcher.");
     }
 

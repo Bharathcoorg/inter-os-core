@@ -172,9 +172,28 @@ const BUTTON_H: usize = 52;
 const BUTTON_GAP: usize = 8;
 const RESULT_Y: usize = 1364;
 
-/// The home indicator.
-const GESTURE_Y: usize = 1420;
-const GESTURE_W: usize = 160;
+/// The home indicator: the mark the shell paints, and the box that answers a
+/// press on it.
+///
+/// Both used to be authored here: a 160x5 pill at row 1420, answered by every
+/// column from 200 to 520 and by a row condition -- `y >= GESTURE_Y - 20 ||
+/// y >= 1395` -- whose first term could never be the binding one, so the press
+/// claimed 321 columns and stopped 25 rows above the ink it stood for.
+const HOME_PILL: std::design::primitives::Rect = std::design::home_band::PILL;
+/// WHY `hit_from` and not the SDK's default box: the last action's result line
+/// paints down to `RESULT_Y + LINE_CAPTION + 4`, two rows past the default
+/// box's first, so the box begins where this app's own ink stops.
+const HOME_HIT: std::design::primitives::Rect =
+    std::design::home_band::hit_from(RESULT_Y + LINE_CAPTION + 4);
+
+/// WHY checked here: the answering box still clears the platform's touch floor,
+/// the mark stands inside the box it is drawn for, and nothing above the box is
+/// both this app's ink and a way out of the app.
+const _: () = assert!(HOME_HIT.y >= RESULT_Y + LINE_CAPTION + 4);
+const _: () = assert!(HOME_HIT.y + HOME_HIT.h == H);
+const _: () = assert!(HOME_HIT.h >= 40);
+const _: () = assert!(HOME_PILL.y >= HOME_HIT.y && HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
 
 // WHY the action bar starts where the body ends: the two bands share an
 // edge, and a gap between them would be a strip of page that belongs to
@@ -3624,11 +3643,9 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
         }
     }
 
-    // The home indicator.
-    let gesture = Rect::new((W - GESTURE_W) / 2, GESTURE_Y, GESTURE_W, 5);
-    if gesture.contains(x, y) {
-        colour = std::design::primitives::draw_pill(x, y, gesture, THEME.overlay_border, None)
-            .unwrap_or(THEME.overlay_border);
+    // The home indicator: the shell's own mark, in the shell's own rows.
+    if let Some(ink) = std::design::home_band::pixel(x, y, THEME.overlay_border) {
+        return ink;
     }
 
     colour
@@ -3708,8 +3725,9 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         return Tap::Leave("[AGENT_MGR] Back button tapped. Returning to the launcher.");
     }
 
-    // The home indicator.
-    if (uy >= GESTURE_Y - 20 || uy >= 1395) && (200..=520).contains(&ux) {
+    // The home indicator: the box the mark stands in, answered ahead of every
+    // band of this app's own that reaches below the result line.
+    if HOME_HIT.contains(ux, uy) {
         return Tap::Leave("[AGENT_MGR] Home indicator tapped. Returning to the launcher.");
     }
 
