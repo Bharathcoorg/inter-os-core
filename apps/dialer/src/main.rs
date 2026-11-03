@@ -3651,9 +3651,282 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     THEME.surface
 }
 
+/// The labels of the two action pills on the dialed-number card, and the ink
+/// each is cut in.
+const PILL_LABELS: [&[u8]; 2] = [b"+ Add Contact", b"Send Message"];
+const PILL_INKS: [u32; 2] = [THEME.primary, THEME.success];
+
+/// One run of the card, placed once for a whole repaint.
+///
+/// WHY the run itself is the plan entry: the painter used to ask the outline face
+/// for this run once per pixel of the band, and every one of those questions
+/// walked the string twice -- once to find the run in the pool and once to confirm
+/// the slot still holds it. The answer is the same for all of them, and an
+/// [`outline_text::OutlineRun`] is a plain value that carries its own ink box, so
+/// the plan can hold the answer and the pixel path can ask the box two questions.
+#[derive(Clone, Copy)]
+struct PlannedInk {
+    x: usize,
+    y: usize,
+    scale: usize,
+    len: usize,
+    buf: [u8; INK_RUN_MAX],
+    max_w: usize,
+    ink: u32,
+    run: Option<outline_text::OutlineRun>,
+}
+
+/// The longest run the dialed-number card inks. The widest of them is the
+/// longest outcome caption, at forty-seven bytes.
+const INK_RUN_MAX: usize = 48;
+
+impl PlannedInk {
+    /// A run with no bytes in it, which inks nothing anywhere.
+    const fn blank() -> PlannedInk {
+        PlannedInk {
+            x: 0,
+            y: 0,
+            scale: 0,
+            len: 0,
+            buf: [0; INK_RUN_MAX],
+            max_w: 0,
+            ink: 0,
+            run: None,
+        }
+    }
+
+    /// The colour of (`px`,`py`) if this run inks it, over the fill it sits on.
+    ///
+    /// WHY the fallback is still here: a run the outline face refuses is drawn by
+    /// the bitmap face, and that answer cannot be carried in the plan. What the
+    /// plan saves is the question, not the ink -- the pixels that fall back to the
+    /// bitmap face are painted exactly as they were.
+    #[inline(always)]
+    fn paint(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+        if let Some(run) = self.run {
+            return run.pixel(px, py, self.ink, bg);
+        }
+        if self.len == 0 {
+            return None;
+        }
+        test_text(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.buf[..self.len],
+            self.max_w,
+            self.ink,
+            bg,
+        )
+    }
+}
+
+/// The outline run the painter would place for these bytes, resolved once.
+///
+/// WHY this mirrors [`run_ink`] instead of calling the face directly: which face a
+/// run lands on depends on the text-size level the person published, and only the
+/// run the painter itself would use can stand in for its answer. Where no outline
+/// run resolves, the plan keeps the bytes and [`PlannedInk::paint`] takes the
+/// original path.
+fn place_ink_run(
+    x: usize,
+    y: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+) -> Option<outline_text::OutlineRun> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let lvl = level();
+    if lvl == PLATFORM_LEVEL {
+        return outline_text::place_run(x, y, scale, text, Some(max_w), false);
+    }
+    let mut buf = [0u8; 128];
+    let n = fit_run(text, scale, max_w, &mut buf);
+    if n == 0 {
+        return None;
+    }
+    outline_text::place_run_cap(x, y, cap_at(scale, lvl), &buf[..n], Some(max_w), false)
+}
+
+/// The run as the card will draw it: `text` is what the painter was given before,
+/// cut to the card where the painter cut it, and `ink` the colour it carries.
+fn planned_ink(
+    x: usize,
+    y: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    ink: u32,
+) -> PlannedInk {
+    let mut run = PlannedInk {
+        x,
+        y,
+        scale,
+        len: 0,
+        buf: [0; INK_RUN_MAX],
+        max_w,
+        ink,
+        run: None,
+    };
+    let n = text.len().min(INK_RUN_MAX);
+    run.buf[..n].copy_from_slice(&text[..n]);
+    run.len = n;
+    run.run = place_ink_run(x, y, scale, &run.buf[..n], max_w);
+    run
+}
+
+/// What the dialed-number card settles before it paints a single pixel.
+///
+/// WHY a plan at all: the card is one band of the surface and the app asks its
+/// pixel function for every pixel of that band, which is a little over a hundred
+/// and fifty thousand calls per repaint. The number it shows, the contact that
+/// matches it, the two pill labels, the hint and the outcome caption are one
+/// answer for all of those pixels, and each of them used to be looked up, cut to
+/// the card, measured and placed again where it is drawn -- a contact scan, three
+/// fitting passes and five walk-the-string placement questions per pixel. The
+/// plan answers them once per repaint from the same state the painter is handed,
+/// so the card's words are laid out once and only their ink is walked per pixel.
+#[derive(Clone, Copy)]
+struct DisplayPlan {
+    name: PlannedInk,
+    digits: PlannedInk,
+    note: PlannedInk,
+    pills: [PlannedInk; 2],
+    placeholder: PlannedInk,
+    caption: PlannedInk,
+    /// The rows the note and the hint claim, which the card gates its pixels on
+    /// before it asks either run for ink.
+    note_rows: usize,
+    placeholder_rows: usize,
+}
+
+/// The answers in [`DisplayPlan`], from the state the repaint is about to draw.
+///
+/// WHY every number here is the one the painter used to take from: each line is
+/// the derivation lifted out of the pixel path unchanged, including the widths
+/// the runs are fitted against -- the caption is cut to `DISPLAY_W - 32` and
+/// inked inside `DISPLAY_W - 48`, which is the card as it was drawn, not a
+/// rounding to be tidied.
+fn build_display_plan(dialer: &DialerApp) -> DisplayPlan {
+    let mut plan = DisplayPlan {
+        name: PlannedInk::blank(),
+        digits: PlannedInk::blank(),
+        note: PlannedInk::blank(),
+        pills: [PlannedInk::blank(), PlannedInk::blank()],
+        placeholder: PlannedInk::blank(),
+        caption: PlannedInk::blank(),
+        note_rows: run_rows(1),
+        placeholder_rows: run_rows(PLACEHOLDER_SCALE),
+    };
+
+    // The pill plate keeps its own geometry: the labels are centred inside the
+    // rects the press answers, at the largest rung the plate holds. WHY the rung
+    // is clamped to the plate: the pills are the platform's minimum touch target
+    // tall and the card's own geometry does not move for them, so the label takes
+    // the largest rung the plate holds. At extra large that is the caption rung,
+    // whose box is still a third taller than the ladder's -- the setting is
+    // honoured, and the ink stays inside the pill.
+    let pill_rung = fit_rung(2, chrome::ACTION_PILLS[0].h);
+    let pill_rows = run_rows(pill_rung);
+    for (i, pill) in chrome::ACTION_PILLS.iter().enumerate() {
+        let lw = run_w(PILL_LABELS[i], pill_rung);
+        let lx = pill.x + (pill.w.saturating_sub(lw)) / 2;
+        let ly = pill.y + (pill.h.saturating_sub(pill_rows)) / 2;
+        plan.pills[i] = planned_ink(lx, ly, pill_rung, PILL_LABELS[i], pill.w, PILL_INKS[i]);
+    }
+
+    plan.placeholder = {
+        let x = DISPLAY_X0 + center_x(b"Enter a phone number", PLACEHOLDER_SCALE, DISPLAY_W);
+        planned_ink(
+            x,
+            PLACEHOLDER_Y0,
+            PLACEHOLDER_SCALE,
+            b"Enter a phone number",
+            DISPLAY_W - 48,
+            THEME.on_surface_variant,
+        )
+    };
+
+    if dialer.active_len > 0 {
+        if let Some(index) = dialer
+            .contacts
+            .match_by_number_prefix(&dialer.active_number[..dialer.active_len])
+        {
+            if let Some(rec) = dialer.contacts.record(index) {
+                let mut buf = [0u8; CONTACT_NAME_MAX];
+                let n = fit_run(rec.name_bytes(), MATCH_NAME_SCALE, DISPLAY_W - 48, &mut buf);
+                if n > 0 {
+                    let w = run_w(&buf[..n], MATCH_NAME_SCALE);
+                    let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+                    plan.name = planned_ink(
+                        cx,
+                        MATCH_NAME_Y0,
+                        MATCH_NAME_SCALE,
+                        &buf[..n],
+                        DISPLAY_W - 48,
+                        THEME.primary,
+                    );
+                }
+            }
+        }
+
+        let scale = digits_rung(if dialer.active_len <= 10 {
+            DIGITS_SCALE
+        } else {
+            DIGITS_LONG_SCALE
+        });
+        let digits = &dialer.active_number[..dialer.active_len];
+        let mut buf = [0u8; 32];
+        let n = fit_run(digits, scale, DISPLAY_W - 48, &mut buf);
+        let total_w = run_w(&buf[..n], scale);
+        let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
+        plan.digits = planned_ink(
+            x0,
+            DIGITS_Y0,
+            scale,
+            &buf[..n],
+            DISPLAY_W - 48,
+            THEME.on_surface,
+        );
+
+        let duration_note = dialer.outcome.duration_note();
+        if !duration_note.is_empty() {
+            let x = DISPLAY_X0 + (DISPLAY_W.saturating_sub(run_w(duration_note, 1))) / 2;
+            plan.note = planned_ink(
+                x,
+                305,
+                1,
+                duration_note,
+                DISPLAY_W - 48,
+                THEME.on_surface_variant,
+            );
+        }
+    }
+
+    let caption = dialer.outcome.caption();
+    if !caption.is_empty() {
+        let mut buf = [0u8; 48];
+        let n = fit_run(caption, 1, DISPLAY_W - 32, &mut buf);
+        if n > 0 {
+            let w = run_w(&buf[..n], 1);
+            let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+            let ink = match dialer.outcome {
+                CallOutcome::Refused | CallOutcome::EmergencyRefused => THEME.error,
+                _ => THEME.on_surface_variant,
+            };
+            plan.caption = planned_ink(cx, OUTCOME_Y0, 1, &buf[..n], DISPLAY_W - 48, ink);
+        }
+    }
+    plan
+}
+
 /// Dialed-number card: the number, the placeholder, the backspace disc and the
 /// real outcome caption.
-fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+fn display_pixel(x: usize, y: usize, dialer: &DialerApp, plan: &DisplayPlan) -> u32 {
     if !(DISPLAY_Y0..DISPLAY_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
         return THEME.surface;
     }
@@ -3696,34 +3969,11 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 
     if dialer.active_len > 0 {
         // Matched contact name
-        if let Some(index) = dialer
-            .contacts
-            .match_by_number_prefix(&dialer.active_number[..dialer.active_len])
-        {
-            if let Some(rec) = dialer.contacts.record(index) {
-                let mut buf = [0u8; CONTACT_NAME_MAX];
-                let n = fit_run(rec.name_bytes(), MATCH_NAME_SCALE, DISPLAY_W - 48, &mut buf);
-                if n > 0 {
-                    let w = run_w(&buf[..n], MATCH_NAME_SCALE);
-                    let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                    if let Some(c) = test_text(x, y, cx, MATCH_NAME_Y0, MATCH_NAME_SCALE, &buf[..n],DISPLAY_W - 48,  THEME.primary, THEME.surface_container) {
-                        return c;
-                    }
-                }
-            }
+        if let Some(c) = plan.name.paint(x, y, THEME.surface_container) {
+            return c;
         }
 
-        let scale = digits_rung(if dialer.active_len <= 10 {
-            DIGITS_SCALE
-        } else {
-            DIGITS_LONG_SCALE
-        });
-        let digits = &dialer.active_number[..dialer.active_len];
-        let mut buf = [0u8; 32];
-        let n = fit_run(digits, scale, DISPLAY_W - 48, &mut buf);
-        let total_w = run_w(&buf[..n], scale);
-        let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
-        if let Some(c) = test_text(x, y, x0, DIGITS_Y0, scale, &buf[..n],DISPLAY_W - 48,  THEME.on_surface, THEME.surface_container) {
+        if let Some(c) = plan.digits.paint(x, y, THEME.surface_container) {
             return c;
         }
 
@@ -3752,21 +4002,9 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // on the card, and the platform's answer is that its telemetry carries
         // no call duration. The app used to keep a counter of its own and
         // show it, which was the app's ticks rather than a fact about the call.
-        let duration_note = dialer.outcome.duration_note();
-        if !duration_note.is_empty() {
-            if y >= 305 && y < 305 + run_rows(1) {
-                let w = run_w(duration_note, 1);
-                let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    x0,
-                    305,
-                    1,
-                    duration_note,DISPLAY_W - 48, 
-                    THEME.on_surface_variant,
-                    THEME.surface_container,
-                ) {
+        if plan.note.len > 0 {
+            if y >= 305 && y < 305 + plan.note_rows {
+                if let Some(c) = plan.note.paint(x, y, THEME.surface_container) {
                     return c;
                 }
             }
@@ -3774,14 +4012,6 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         // The two action pills are drawn from `chrome::ACTION_PILLS`, the same
         // rects the press answers, so a pill can no longer be a plate one size
         // and a band another.
-        const PILL_LABELS: [&[u8]; 2] = [b"+ Add Contact", b"Send Message"];
-        const PILL_INKS: [u32; 2] = [THEME.primary, THEME.success];
-        // WHY the rung is clamped to the plate: the pills are the platform's
-        // minimum touch target tall and the card's own geometry does not move for
-        // them, so the label takes the largest rung the plate holds. At extra large
-        // that is the caption rung, whose box is still a third taller than the
-        // ladder's -- the setting is honoured, and the ink stays inside the pill.
-        let pill_rung = fit_rung(2, chrome::ACTION_PILLS[0].h);
         for (i, pill) in chrome::ACTION_PILLS.iter().enumerate() {
             if !pill.contains(x, y) {
                 continue;
@@ -3793,54 +4023,22 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 THEME.surface_container,
                 Some(THEME.border),
             ) {
-                let label = PILL_LABELS[i];
-                let lw = run_w(label, pill_rung);
-                let lx = pill.x + (pill.w.saturating_sub(lw)) / 2;
-                let ly = pill.y + (pill.h.saturating_sub(run_rows(pill_rung))) / 2;
-                if let Some(c) = test_text(x, y, lx, ly, pill_rung, label, pill.w, PILL_INKS[i], fill) {
+                if let Some(c) = plan.pills[i].paint(x, y, fill) {
                     return c;
                 }
                 return fill;
             }
         }
         }
-    } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
-        let x0 = DISPLAY_X0
-            + center_x(
-                b"Enter a phone number",
-                PLACEHOLDER_SCALE,
-                DISPLAY_W,
-            );
-        if let Some(c) = test_text(
-            x,
-            y,
-            x0,
-            PLACEHOLDER_Y0,
-            PLACEHOLDER_SCALE,
-            b"Enter a phone number",DISPLAY_W - 48, 
-            THEME.on_surface_variant,
-            THEME.surface_container,
-        ) {
+    } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + plan.placeholder_rows {
+        if let Some(c) = plan.placeholder.paint(x, y, THEME.surface_container) {
             return c;
         }
     }
 
     // Real outcome of the last call attempt.
-    let caption = dialer.outcome.caption();
-    if !caption.is_empty() {
-        let mut buf = [0u8; 48];
-        let n = fit_run(caption, 1, DISPLAY_W - 32, &mut buf);
-        if n > 0 {
-            let w = run_w(&buf[..n], 1);
-            let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            let ink = match dialer.outcome {
-                CallOutcome::Refused | CallOutcome::EmergencyRefused => THEME.error,
-                _ => THEME.on_surface_variant,
-            };
-            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n],DISPLAY_W - 48,  ink, THEME.surface_container) {
-                return c;
-            }
-        }
+    if let Some(c) = plan.caption.paint(x, y, THEME.surface_container) {
+        return c;
     }
 
     card_fill
@@ -5289,7 +5487,7 @@ fn section_band_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     THEME.surface
 }
 
-fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp, display: &DisplayPlan) -> u32 {
     // 1. Status bar & header (y: 0..HEADER_H, the rule on the last row)
     if y < HEADER_H + 1 {
         return header_pixel(x, y, dialer);
@@ -5310,8 +5508,8 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if (DISPLAY_Y0..DISPLAY_Y1).contains(&y) {
         return match dialer.section {
             DialerSection::Contacts => contacts_card_pixel(x, y, dialer),
-            DialerSection::Keypad => display_pixel(x, y, dialer),
-            _ if dialer.state != CallState::Idle => display_pixel(x, y, dialer),
+            DialerSection::Keypad => display_pixel(x, y, dialer, display),
+            _ if dialer.state != CallState::Idle => display_pixel(x, y, dialer, display),
             _ => section_band_pixel(x, y, dialer),
         };
     }
@@ -5400,6 +5598,10 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
 /// - between 170 and 380 of the 1440 rows - and the keypad discs beside it are
 /// identical before and after, so they are left exactly as drawn.
 fn render_dialer_band(surface: u32, dialer: &DialerApp, y0: usize, y1: usize) {
+    // WHY the plan is built here and not where it is read: this is the only walk
+    // of `get_dialer_pixel` the app has, so the plan is as fresh as the state the
+    // band is painted from and the pixels that follow cannot disagree with it.
+    let display = build_display_plan(dialer);
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -5408,7 +5610,7 @@ fn render_dialer_band(surface: u32, dialer: &DialerApp, y0: usize, y1: usize) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_dialer_pixel(x, y, dialer);
+            chunk[i] = get_dialer_pixel(x, y, dialer, &display);
             x += 1;
             if x == W {
                 x = 0;
