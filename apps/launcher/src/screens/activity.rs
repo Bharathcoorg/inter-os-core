@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The task switcher: recent activity, one app at a time.
 //!
 //! WHY one large card and a selector rail: an app's screen is 720x1440, so a

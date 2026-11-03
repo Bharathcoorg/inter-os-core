@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Memory-Mapped I/O (MMIO) I2C Host Controller Driver
 //!
 //! Provides bare-metal register-level communication with mobile SoC I2C host controllers

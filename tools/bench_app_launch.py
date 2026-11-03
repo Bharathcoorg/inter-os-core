@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Measures native application launch latency in the real x86_64 QEMU guest.
 
 WHY this is separate from `tools/bench_boot.py`: boot timing needs a serial

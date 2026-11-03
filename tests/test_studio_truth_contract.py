@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Device Studio truth contract: the UI and API must reflect real capability.
 
 Device Studio previously displayed fabricated telemetry (a fake 144 Hz badge,

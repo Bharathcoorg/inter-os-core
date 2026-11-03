@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS — AArch64 Sovereign Mobile Camera / Hardware ISP Frame Capture Driver
 //!
 //! Non-Negotiable Principle #1: User owns the machine.

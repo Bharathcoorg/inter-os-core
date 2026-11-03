@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! IPv4 (Internet Protocol Version 4) Packet Parsing & Checksum Engine
 //!
 //! Complies with RFC 791. Implements Internet Checksum calculation and verification.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Network Interface Controller (NIC) Device Abstraction & Loopback Controller
 //!
 //! Provides a unified interface for hardware Ethernet adapters and the internal loopback device.

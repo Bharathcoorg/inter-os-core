@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Display/window system display/window-system contracts.
 
 Static contracts validate the ownership and input-routing boundary without

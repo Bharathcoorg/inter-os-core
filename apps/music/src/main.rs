@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Core Native Music Player (Ring-3)
 //!
 //! Bare-metal user-mode media player on the canonical dark media surface:

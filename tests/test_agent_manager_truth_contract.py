@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """The agent manager's truth contract.
 
 WHAT THIS FILE IS FOR: the agent manager is a supervisor. A supervisor that

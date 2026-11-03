@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 use interos_std::image::{decode_webp, decode_webp_header};
 
 /// Every fixture is a lossless WebP produced by libwebp's encoder plus the

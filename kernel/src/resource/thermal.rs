@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Dynamic Multi-Zone Thermal Governor & Hardware Throttle Engine
 //!
 //! Continuously tracks thermal sensors across mobile SoC domains (CPU, GPU, Battery,

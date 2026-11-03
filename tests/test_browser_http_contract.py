@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Truth contracts for the browser's HTTP protocol layer at the gateway.
 
 The guest owns redirects, cookies, conditional requests, decompression and

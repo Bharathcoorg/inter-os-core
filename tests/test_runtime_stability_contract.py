@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Runtime stability runtime-stability contracts.
 
 These checks lock the cold-boot/runtime lifecycle invariants without claiming

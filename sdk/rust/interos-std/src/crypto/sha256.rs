@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` Implementation of Standard SHA-256 (FIPS PUB 180-4)
 //!
 //! Provides deterministic cryptographic hashing for TLS 1.3 transcript hashes,

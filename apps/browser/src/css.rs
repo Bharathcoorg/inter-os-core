@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! A bounded CSS subset for the native reader.
 //!
 //! WHY this is not a CSS engine: the reader lays a page out as a linear

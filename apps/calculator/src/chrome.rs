@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The rectangles the calculator draws its chrome in and answers taps in.
 //!
 //! WHY one module holds both: the painter and the tap handler are two

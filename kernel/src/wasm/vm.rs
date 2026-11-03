@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! WebAssembly Stack Machine Interpreter & Runtime Isolation Subsystem
 //!
 //! Provides a pure `no_std` execution loop for WASM bytecode with:

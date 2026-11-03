@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Streaming MPEG-1 Audio Layer III (MP3) decoder.
 //!
 //! The decoder is written for the music player in InterOS: the caller reads the

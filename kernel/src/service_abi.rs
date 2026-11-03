@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Trusted userspace service ABI.
 //!
 //! Narrow wire contract between PID1/service-manager and future Ring-3

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 s=(root/'kernel/src/package/registry.rs').read_text(encoding='utf-8')

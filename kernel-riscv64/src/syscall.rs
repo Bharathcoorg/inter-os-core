@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! RISC-V 64 System Call Dispatcher & Pointer Validation
 //!
 //! Provides zero-trust system call execution in S-mode on behalf of U-mode applications.

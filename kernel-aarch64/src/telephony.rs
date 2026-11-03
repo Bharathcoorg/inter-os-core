@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Streaming Serial RIL (Radio Interface Layer) Engine (AArch64)
 //!
 //! Provides bare-metal character-stream processing for cellular baseband modems

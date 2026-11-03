@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Sovereign Vault & Multi-Sector Storage Manager
 //!
 //! Ring 3 storage manager. Everything this app displays is the result of

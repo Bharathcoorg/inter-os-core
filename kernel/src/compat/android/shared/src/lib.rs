@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Unified Android Untrusted Compatibility Runtime & Sandbox (ACR Shared)
 //!
 //! Provides bare-metal `#![no_std]` shared Android filesystem virtualization,

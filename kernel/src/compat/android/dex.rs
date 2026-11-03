@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Dalvik Executable (DEX) Binary Parser & Capability Verifier
 //!
 //! Provides bare-metal `no_std` parsing, Adler-32 integrity verification,

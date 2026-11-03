@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS userspace-style system service registry and lifecycle bootstrap.
 //!
 //! The service registry establishes explicit service ownership and capability boundaries.

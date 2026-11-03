@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign eSIM & Decentralized Subscriber Identity Subsystem
 //!
 //! Replaces legacy physical SIM cards and telco carrier tracking with

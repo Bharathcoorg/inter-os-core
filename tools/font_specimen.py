@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Draws a specimen sheet for the generated face so it can actually be looked at.
 
 WHY this exists: a generated face is wrong the first time. Numbers in a table

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Bounded, allocation-free DEFLATE, zlib and gzip decoders.
 //!
 //! WHY this exists: the gateway may hand the browser a body that the origin

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Unified Dynamic Resource Manager
 //!
 //! Enforces system-wide hardware resource budgets across CPU, RAM, Storage,

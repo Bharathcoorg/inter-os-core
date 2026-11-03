@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The search index: one list of everything the platform can be asked about, and
 //! the ranking that decides what a query returns.
 //!

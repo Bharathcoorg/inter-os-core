@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Cross-Application Share Sheet & Intent Capability Exchange Bus
 //!
 //! Enables secure, capability-attested data sharing between independent Ring 3 apps:

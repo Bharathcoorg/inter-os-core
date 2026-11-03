@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Platform Truth Contract: who may install and read a TLS trust anchor.
 
 A certificate chain verifies only against an anchor, and this repository shipped

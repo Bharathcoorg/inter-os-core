@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Splits the launcher's per-pixel screen renderers into one file per screen.
 
 WHY: every screen is a function in one 3,749-line file, so two agents editing

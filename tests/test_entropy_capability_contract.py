@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Platform Truth Contract: who may read the hardware TRNG.
 
 Sealing a record needs a fresh initialisation vector and a TLS handshake needs

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The InterOS Agent Manager: a native portrait phone app.
 //!
 //! WHAT THIS IS: a Ring-3 supervisor app whose whole job is to report what

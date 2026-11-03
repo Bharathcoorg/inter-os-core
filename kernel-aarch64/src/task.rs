@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Multitasking Scheduler & Callee-Saved Register Context Switching
 //!
 //! Implements cooperative & preemptive multi-tasking across ARM Cortex-A CPU cores.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterWebView Embeddable Web Component for InterOS
 //!
 //! #![no_std] zero-heap embeddable webview supporting local HTML rendering,

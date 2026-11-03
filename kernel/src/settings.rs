@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Persistent system settings service & hardware capability inventory.
 //!
 //! Settings are authoritative kernel state mirrored to a crash-consistent ATA

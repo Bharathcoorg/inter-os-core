@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Prove a sealed vault block survives a reboot.
 
 The vault previously kept only an in-memory record of the tags it issued, so a

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Guest-owned startup presentation rendered into the native portrait surface.
 //!
 //! The presentation is one vertical stack -- emblem, wordmark, tagline,

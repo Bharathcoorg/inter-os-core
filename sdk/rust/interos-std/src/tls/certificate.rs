@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` X.509 DER Certificate Parser and Validator (RFC 5280)
 //!
 //! Provides zero-allocation ASN.1 DER decoding, SubjectPublicKeyInfo extraction,

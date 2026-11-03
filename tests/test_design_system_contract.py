@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Contract tests for the InterOS design system.
 
 WHY this exists: the SDK carried design tokens and no app used them. Every app

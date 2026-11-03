@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Kernel Crash Dump & State Rollback Engine
 //!
 //! Captures hardware processor fault registers (RIP, RSP, CR2, RFLAGS), faulting

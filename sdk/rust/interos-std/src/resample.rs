@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCM Audio Resampler targeting the platform's fixed 48 kHz stereo AC'97 audio stream.
 //!
 //! WHAT this is: an allocation-free, streaming audio resampler that converts 16-bit

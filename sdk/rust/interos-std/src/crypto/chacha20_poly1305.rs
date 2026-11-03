@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` RFC 8439 ChaCha20 Stream Cipher, Poly1305 Authenticator,
 //! and ChaCha20-Poly1305 AEAD Construction.
 //!

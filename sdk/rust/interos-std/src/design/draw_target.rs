@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! A `DrawTarget` for the guest's own ARGB8888 surfaces.
 //!
 //! WHY this exists: an app that wants a rounded rectangle writes a per-pixel

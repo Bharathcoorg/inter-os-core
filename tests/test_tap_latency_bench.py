@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Pins the correlation rules that make the tap-to-post-flip number trustworthy.
 
 WHY these are unit tests and not QEMU runs: every rule below is about refusing to

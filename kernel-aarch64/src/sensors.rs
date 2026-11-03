@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Sensor Fusion Subsystem & Hardware IMU/Barometer/Proximity/Light HAL (AArch64)
 //!
 //! This module is an **orientation classifier, gesture engine, and capability boundary, not a sensor

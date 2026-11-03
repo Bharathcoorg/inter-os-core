@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Durable boot recovery policy for InterOS.
 use spin::Mutex;
 use crate::storage::persistent;

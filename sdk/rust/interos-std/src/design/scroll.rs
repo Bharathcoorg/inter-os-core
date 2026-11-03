@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Shared scrolling model, boundary clamping, and thumb geometry.
 //!
 //! Provides an allocation-free scroll state manager used across browser reader,

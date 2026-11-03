@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use crate::package::dependency::{PackagePolicy, PackageVersion};

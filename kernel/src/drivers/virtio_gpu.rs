@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! VirtIO-GPU PCI/MMIO Modern 2D/3D Display Controller Driver
 //!
 //! Implements the VirtIO 1.0 GPU device specification (Device ID 0x1050 / 0x1010)

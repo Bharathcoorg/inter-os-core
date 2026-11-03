@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Pins the kernel-test failure diagnostics added to `tools/interos.py`.
 
 WHY this exists. A prior benchmark run recorded `288 passed; 1 failed` and the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Proximity and Ambient Light Sensors (ALS)
 //!
 //! Provides distance detection for display blanking during phone calls and

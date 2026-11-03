@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Host-side tests for the launcher's geometry, theme and text metrics.
 //!
 //! WHY these assert behaviour rather than golden images: an off-by-one in grid

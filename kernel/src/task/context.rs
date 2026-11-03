@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! x86_64 Long Mode Task Context & Context Switching
 //!
 //! Provides the low-level hardware register state saving and restoring

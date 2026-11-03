@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Host-side test harness for the shipped AArch64 FDT parser.
 #![allow(dead_code, unused_imports)]
 //!

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Drawing primitives the launcher's screens share.
 //!
 //! WHY this module exists: the helpers below were living in the System Space

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Multi-Architecture Mobile SoC Hardware Abstraction Layer (HAL)
 //!
 //! Provides portable abstractions across x86_64 QEMU/PC and ARM64 Mobile SoCs.

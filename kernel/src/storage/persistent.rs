@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Crash-consistent persistent metadata journal for InterOS.
 //!
 //! Redundant slots are partitioned into two-slot record kinds so

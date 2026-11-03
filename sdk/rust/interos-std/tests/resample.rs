@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Integration tests for the native PCM audio resampler.
 
 use interos_std::resample::{ResampleError, Resampler, TARGET_CHANNELS};

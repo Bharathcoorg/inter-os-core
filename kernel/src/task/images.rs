@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Built-in userspace image registry.
 //!
 //! The ELF loader is generic; this module is the only kernel-facing boundary

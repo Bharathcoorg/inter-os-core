@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` SHA-384 (FIPS PUB 180-4, Section 5.3.5).
 //!
 //! SHA-384 is SHA-512 run with a different initial state and read to 48 bytes

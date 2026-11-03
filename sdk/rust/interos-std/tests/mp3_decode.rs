@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! End-to-end checks for the MPEG-1 Layer III decoder.
 //!
 //! The fixtures are real libmp3lame streams generated once with FFmpeg and

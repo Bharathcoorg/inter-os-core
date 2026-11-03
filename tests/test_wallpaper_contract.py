@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """
 InterOS Core — Wallpaper Customisation Contract Test
 Validates that the wallpaper feature is real end to end and not a visual stub:

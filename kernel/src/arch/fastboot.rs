@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Fastboot Android Boot Image Specification (Header v2 / v3)
 //!
 //! Provides bare-metal parsing, cryptographic verification, and synthesis

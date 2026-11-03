@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Encrypted Storage Vault Subsystem
 //!
 //! Provides hardware-keystore anchored authenticated encrypted block storage.

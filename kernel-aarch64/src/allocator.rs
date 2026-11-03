@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Kernel Heap Allocator
 //!
 //! Provides bare-metal dynamic allocation (`Box`, `Vec`, `String`)

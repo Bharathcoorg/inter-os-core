@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! RISC-V 64 Sv39 Virtual Memory Management & Page Tables
 //!
 //! Provides bare-metal Sv39 3-level page table setup with strict W^X enforcement,

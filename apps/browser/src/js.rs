@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Bounded Native JavaScript AST Lexer, Parser, and Interpreter.
 //!
 //! Provides a safe, deterministic, `#![no_std]` zero-heap JavaScript subset

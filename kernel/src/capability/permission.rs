@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile Application Permission Manager & Interactive Consent Gating Subsystem
 //!
 //! Enforces zero ambient authority for sensitive mobile capabilities:

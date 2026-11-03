@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The per-thread privacy setting.
 //!
 //! WHY this lives in the platform's settings store: the setting is a

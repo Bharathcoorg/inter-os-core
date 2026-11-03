@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Scalable outline table for the guest type rasteriser.
 //!
 //! GENERATED FILE - do not edit by hand. Produced by

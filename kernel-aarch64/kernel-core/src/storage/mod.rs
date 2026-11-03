@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Crash-consistent persistent metadata storage, extracted from x86.
 //!
 //! Module-for-module this is `kernel/src/storage/`, and the three files here are

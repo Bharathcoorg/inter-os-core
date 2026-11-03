@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Static contract tests for the PID1-owned InterOS service lifecycle.
 
 These checks complement QEMU/build validation by preventing accidental drift

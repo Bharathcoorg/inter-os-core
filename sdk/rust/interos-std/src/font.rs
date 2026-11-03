@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Core Typography Engine & Proportional Typeface.
 //!
 //! Provides the canonical 16x24 condensed sans-serif face for all native applications:

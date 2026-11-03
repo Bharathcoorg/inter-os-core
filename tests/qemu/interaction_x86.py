@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Real QEMU interaction test for the x86_64 InterOS guest.
 
 This drives the actual guest through a smartphone interaction sequence using the

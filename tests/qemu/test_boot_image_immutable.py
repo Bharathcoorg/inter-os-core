@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Regression guard: the guest must never write to its own boot image.
 
 The x86_64 kernel treats the Primary Master as the read-only boot image and the

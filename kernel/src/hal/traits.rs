@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile SoC Hardware Abstraction Layer (HAL) Traits
 //!
 //! Provides hardware-neutral interfaces for multi-architecture mobile operating systems.

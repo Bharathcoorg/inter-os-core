@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Encrypted storage boundary for mutable filesystem payloads.
 //!
 //! Keeps filesystem structure usable by the kernel while encrypting mutable

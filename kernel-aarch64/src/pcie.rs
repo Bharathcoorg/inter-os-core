@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCIe Configuration Space Access via ECAM (Enhanced Configuration Access Mechanism)
 //!
 //! QEMU's `virt` machine has no legacy 0xCF8/0xCFC ports, so a display device

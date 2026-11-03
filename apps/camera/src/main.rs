@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS camera application, executing in Ring 3 (User Mode).
 //!
 //! - A capture engine that takes a still photograph and writes it into the

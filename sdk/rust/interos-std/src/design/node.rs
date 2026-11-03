@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS UI Node Tree & Semantic Accessibility Primitives.
 //!
 //! Provides `#![no_std]`, zero-heap-allocation UI nodes and retained tree data

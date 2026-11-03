@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Native Video Player Engine (Ring-3)
 //!
 //! Provides the core media state machine, frame decoders (RAW, PPM P6, MJPEG),

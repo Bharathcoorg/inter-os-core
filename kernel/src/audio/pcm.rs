@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCM Audio Buffer & Hardware DMA Descriptor Architecture
 //!
 //! Provides structured 16-bit linear PCM audio buffers, fixed-point waveform

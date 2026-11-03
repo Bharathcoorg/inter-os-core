@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Signature checks over certificates nobody wrote for this test.
 //!
 //! WHY live chains rather than generated ones: these are the links a browser

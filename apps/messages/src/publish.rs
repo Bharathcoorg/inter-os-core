@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Publishing a sealed thread as a document the rest of the device can see.
 //!
 //! WHY this exists: the sealed copy of a thread lives in a vault sector, and

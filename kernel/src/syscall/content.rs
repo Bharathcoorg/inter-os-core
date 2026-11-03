@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The content layer's system call surface.
 //!
 //! WHY these calls take the caller's authority and not a slot: a slot is a

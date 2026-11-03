@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! ARM PrimeCell PL011 UART MMIO Driver & Thread-Safe Logging
 //!
 //! Provides bare-metal serial console on ARM Cortex-A mobile platforms

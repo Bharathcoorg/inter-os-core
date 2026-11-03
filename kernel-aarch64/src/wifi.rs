@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Wi-Fi 6 (802.11ax / WPA3-SAE) & Ad-Hoc Direct Mesh Station HAL (AArch64)
 //!
 //! This module is an **802.11 protocol codec and capability boundary, not a chipset driver**.

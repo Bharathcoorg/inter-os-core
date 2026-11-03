@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 set -euo pipefail
 
 grep -q 'first_party_package_by_process_name' kernel/src/package/mod.rs

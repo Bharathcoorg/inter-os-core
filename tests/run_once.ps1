@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 $log = "$PSScriptRoot\..\target\test_run.log"
 if (Test-Path $log) { Remove-Item $log -Force }
 $rootDir = (Resolve-Path "$PSScriptRoot\..").Path

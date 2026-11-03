@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Proves the framebuffer check actually looks at pixels.
 
 WHY this exists. `tests/verify_x86_boot.py` claimed to verify an "authentic

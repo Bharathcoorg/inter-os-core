@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 from pathlib import Path
 ROOT=Path(__file__).parents[1]
 b=(ROOT/"kernel/src/resource/battery.rs").read_text(encoding="utf-8"); t=(ROOT/"kernel/src/resource/thermal.rs").read_text(encoding="utf-8"); s=(ROOT/"kernel/src/syscall/mod.rs").read_text(encoding="utf-8")

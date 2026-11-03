@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! 16550 UART Serial Port Driver (COM1)
 //!
 //! Provides synchronized serial console output for early boot logging,

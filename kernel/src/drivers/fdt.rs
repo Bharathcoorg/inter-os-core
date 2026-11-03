@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Flattened Device Tree (FDT / DTB) Hardware Discovery Parser
 //!
 //! Provides bare-metal device tree parsing for ARM64 and RISC-V 64 platforms:

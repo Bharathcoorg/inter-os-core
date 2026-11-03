@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Real playback of imported audio (WAV, FLAC, and MP3) over the platform's AC'97 stream.
 //!
 //! WHAT this is: the player reads the file the track was imported from, turns

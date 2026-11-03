@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Home surface: status bar, greeting, system card, the app deck, search and nav.
 //!
 //! WHY `pub`: `render_view` in the crate root dispatches here by view mode, and

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Bounded DNS wire-format codec used by the userspace network service.
 
 use crate::net::ipv4::Ipv4Address;

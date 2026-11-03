@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 /**
  * Example: Assembling and signing a verified Blinkit 10-Minute Groceries Package (.rapp).
  */

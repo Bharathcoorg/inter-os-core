@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 // Copyright 2026 The InterOS Authors.
 //
 // VP8 (lossy WebP) keyframe decoder adhering to RFC 6386 and libwebp.

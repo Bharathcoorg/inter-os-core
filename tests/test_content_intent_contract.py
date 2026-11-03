@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Contract: the content layer -- one shared document index, one intent registry.
 
 WHY this contract exists: the device used to have no shared description of the

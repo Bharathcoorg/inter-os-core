@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! QEMU/PC PS/2 mouse input for the canonical x86_64 smartphone target.
 //!
 //! This driver converts real emulated PS/2 packets into the same logical-portrait

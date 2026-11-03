@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The platform's image policy: the numbers every picture decoder is held to.
 //!
 //! WHY the policy is its own file: the numbers have to be the *same* numbers

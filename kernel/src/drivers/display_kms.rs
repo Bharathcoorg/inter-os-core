@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! DRM/KMS Multi-Surface Compositor & Display Controller
 //!
 //! Provides a hardware-decoupled, double-buffered Direct Rendering Manager (DRM)

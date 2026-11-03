@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Pins the heap-reading rules in `tools/bench_heap.py`.
 
 WHY these matter: the whole point of the tool is to report a number that came

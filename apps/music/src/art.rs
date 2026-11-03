@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Zero-heap bounded album art parser for MP3 ID3v2 APIC and FLAC METADATA_BLOCK_PICTURE.
 //!
 //! Extracts embedded JPEG or PNG cover art up to 32 KiB into a caller-provided buffer.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Native Sovereign Encrypted Messaging & P2P Wire Client
 //!
 //! Native smartphone messaging client executing in Ring 3 (User Mode):

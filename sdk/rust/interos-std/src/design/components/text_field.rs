@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Native Text Field widget primitive with cursor, selection, placeholder, and touch hit-testing.
 //!
 //! # Platform Truth

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Architectural Exception Vector Table & Hardware Trap Handling
 //!
 //! Installs the standard 2048-byte aligned vector table into `VBAR_EL1`.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! ARM Generic Architectural Timer Driver (AArch64)
 //!
 //! Controls CNTFRQ_EL0, CNTV_CTL_EL0, CNTV_TVAL_EL0, and CNTVCT_EL0

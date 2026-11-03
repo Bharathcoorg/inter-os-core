@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Android Boot Image Packaging Utility (`mkbootimg`)
 //!
 //! Packages compiled microkernel ELF/binaries, initramfs ramdisk, and DTB

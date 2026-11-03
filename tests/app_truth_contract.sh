@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 set -euo pipefail
 
 grep -q 'THREADS: \[ConversationThread; 0\] = \[\]' apps/messages/src/main.rs

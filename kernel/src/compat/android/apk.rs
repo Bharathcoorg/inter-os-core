@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Android APK Container Package Parser & Binary Manifest Decoder
 //!
 //! Provides bare-metal `no_std` PKZip container extraction, Android Binary XML

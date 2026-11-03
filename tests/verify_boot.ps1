@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 $logFile = "target\boot_run.log"
 if (Test-Path $logFile) { Remove-Item $logFile -Force }
 

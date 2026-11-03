@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Canonical input routing above raw hardware events.
 //!
 //! The router is deliberately UI-agnostic: it converts declared coordinate

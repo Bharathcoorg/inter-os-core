@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Device TLS trust, made reproducible: four dials on one boot.
 
 Everything this suite claims, it claims from bytes the guest itself printed and

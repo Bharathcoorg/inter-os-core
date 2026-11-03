@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! One module per screen, so screens can be edited in parallel.
 //!
 //! WHY this exists: every renderer was a function inside `main.rs`, which meant two

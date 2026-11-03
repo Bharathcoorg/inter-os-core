@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Core Open-Source Reference App: Interactive Touch Calculator
 //!
 //! Full production Ring-3 graphical application executing in User Mode:

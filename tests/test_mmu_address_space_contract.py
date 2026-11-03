@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """MMU/address-space MMU, ELF, W^X, and address-space resource contracts.
 
 Static validation only; this test does not claim QEMU, CI, or physical-device

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Truthful platform capability and verification contract.
 //!
 //! This module makes one rule explicit in the kernel: a feature may only be

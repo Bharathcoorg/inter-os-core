@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! x86_64 Fast System Call Entry & MSR Configuration
 //!
 //! Configures CPU Model-Specific Registers (MSRs) for hardware `syscall` / `sysretq`

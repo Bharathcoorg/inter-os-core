@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Block and inline layout for the browser view.
 //!
 //! The engine turns a styled DOM into a display list: filled and outlined

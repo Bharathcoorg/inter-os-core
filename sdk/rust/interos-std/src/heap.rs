@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign userspace heap allocator for InterOS.
 //!
 //! Provides an opt-in `#![no_std]` `GlobalAlloc` implementation backed by

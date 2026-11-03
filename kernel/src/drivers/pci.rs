@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCI Bus Enumeration & Configuration Space Driver
 //!
 //! Scans PCI configuration space (Ports 0xCF8 / 0xCFC) to detect

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The platform's image policy, exercised through the public API.
 //!
 //! These are the three rules the platform holds every picture to: a size

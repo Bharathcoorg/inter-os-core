@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 # InterOS Build Environment — Structured Artifact Verification & Build Helpers
 # Resolves and validates compiler output via Cargo structured messages.
 

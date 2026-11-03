@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! ARM Power State Coordination Interface (PSCI v1.1)
 //!
 //! Provides bare-metal CPU power management and multi-core SMP bring-up for mobile ARM SoCs

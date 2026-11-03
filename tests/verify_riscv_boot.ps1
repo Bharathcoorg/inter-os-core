@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 $rootDir = Split-Path -Parent $PSScriptRoot
 Push-Location (Join-Path $rootDir "kernel-riscv64")
 cargo build --target riscv64gc-unknown-none-elf

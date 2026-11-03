@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Bare-Metal PC Speaker & PIT Channel 2 Hardware Tone Generator
 //!
 //! Directly drives x86 Programmable Interval Timer (PIT) Channel 2 (I/O Ports 0x42, 0x43)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Android Compatibility Runtime & Zone 4 Isolation
 //!
 //! Provides APK parsing, security auditing, intent/Binder mediation, sandbox metadata,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! A bounded DOM for the browser's layout engine.
 //!
 //! WHY this exists: the reader flattens a page into lines before it is

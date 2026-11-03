@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 $log = "$PSScriptRoot\..\target\riscv64_boot.log"
 if (Test-Path $log) { Remove-Item -Force $log }
 $k1 = "$PSScriptRoot\..\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"

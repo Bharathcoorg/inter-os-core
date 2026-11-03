@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Multi-Core SMP Bring-Up, Inter-Processor Interrupts (IPI) & big.LITTLE Energy Scheduler (AArch64)
 //!
 //! Provides bare-metal SMP multi-core management for mobile ARM SoCs

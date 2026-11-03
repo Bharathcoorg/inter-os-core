@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Intel E1000-compatible MMIO Ethernet controller.
 //!
 //! The driver owns descriptor-ring programming and packet movement behind the

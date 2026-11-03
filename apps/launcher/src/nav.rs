@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The shell's bottom navigation bar: three controls, one geometry.
 //!
 //! WHY this module exists: the bar's three tap bands were written in the shell

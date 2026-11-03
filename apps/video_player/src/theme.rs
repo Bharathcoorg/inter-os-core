@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Video player design tokens, built strictly on InterOS Theme::DARK.
 
 pub use interos_std::design::radius;

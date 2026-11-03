@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Unit tests for the boot benchmark harness's pure logic.
 
 WHY these exist separately from the benchmark itself: the benchmark needs QEMU

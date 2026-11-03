@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The layout engine's computed style.
 //!
 //! The reader's CSS subset ([`crate::css`]) answers five questions about a

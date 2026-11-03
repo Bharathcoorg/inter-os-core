@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 <#
 .SYNOPSIS
     InterOS Core — Turnkey One-Click Setup & Device Studio Launcher

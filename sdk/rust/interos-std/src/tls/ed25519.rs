@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `#![no_std]` Ed25519 RFC 8032 Signature Verification
 //!
 //! Provides sovereign on-device Ed25519 signature verification:

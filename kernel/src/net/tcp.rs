@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Minimal no_std TCP wire/state boundary for InterOS.
 //! This module intentionally keeps transport state separate from the NIC and
 //! IPv4 layers. It provides bounded parsing/serialization and the core

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 # Build and strip all Ring-3 userspace and app binaries with static relocation
 # Architecture: x86_64-unknown-none
 # Entry base: 0x00400000

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The gallery's view of the platform's design system.
 //!
 //! WHY this module exists: the app used to carry its own palette, its own

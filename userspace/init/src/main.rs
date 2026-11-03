@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS userspace PID 1 / service-manager bootstrap.
 //!
 //! PID 1 deliberately contains no hardware-policy demos or application logic.

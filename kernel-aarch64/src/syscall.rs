@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Unified System Call Interface (Syscall ABI)
 //!
 //! Conforms to standard AArch64 `svc #0` conventions:

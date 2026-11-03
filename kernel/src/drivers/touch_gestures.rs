@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile Multi-Touch Contact Tracking & Gesture Recognition Engine
 //!
 //! Provides a hardware-decoupled multi-touch event processing pipeline:

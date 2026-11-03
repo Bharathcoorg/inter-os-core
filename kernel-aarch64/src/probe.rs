@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Unified AArch64 Device Tree Driver Probing Subsystem
 //!
 //! Automatically discovers physical mobile smartphone peripherals by querying

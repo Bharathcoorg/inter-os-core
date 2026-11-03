@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Multi-Architecture Kernel Foundation
 //!
 //! Provides low-level boot-time abstractions: self-relocation for a higher-half

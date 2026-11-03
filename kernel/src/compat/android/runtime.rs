@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Android Compatibility Runtime (ACR) Dalvik Virtual Machine Engine
 //!
 //! Provides a bounded interpreter for a deliberately limited subset of Dalvik bytecode.

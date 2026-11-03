@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Capability-Guarded Inter-Process Communication (IPC)
 //!
 //! Provides synchronous and asynchronous zero-copy message passing between tasks.

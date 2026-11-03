@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Glyph metrics, and the rasterisation helper that agrees with them.
 //!
 //! WHY metrics live next to the rasteriser: the previous dock centred its labels

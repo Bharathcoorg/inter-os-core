@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Sovereign Native Notes Application — Google Keep-Grade Mobile UX (2026 Edition)
 //!
 //! Production Ring-3 graphical application executing in User Mode:

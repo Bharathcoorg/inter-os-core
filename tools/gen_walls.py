@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Generate the InterOS wallpaper catalogue from the reference artwork.
 
 The guest has no image decoder and no framebuffer budget for photographic

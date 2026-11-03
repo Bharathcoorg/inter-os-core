@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Embedded SIM / eSIM & Dual-SIM Smartcard HAL (AArch64)
 //!
 //! Provides bare-metal driver support for mobile SIM / UICC / eUICC smartcard controllers

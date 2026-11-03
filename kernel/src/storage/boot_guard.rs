@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Refusal of destructive writes to the device this kernel booted from.
 //!
 //! WHY this module exists: `InterFs::format_region` and the persistent journal

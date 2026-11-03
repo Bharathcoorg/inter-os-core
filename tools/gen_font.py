@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Generates the InterOS 16x24 bitmap face by rasterising Roboto Condensed.
 
 WHY this file exists: the typeface is the single biggest legibility lever in

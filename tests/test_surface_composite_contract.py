@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Contracts for the compositing rule that keeps a client's own pixels on screen.
 
 WHY this file exists: a solid black rectangle used to appear in the top-left

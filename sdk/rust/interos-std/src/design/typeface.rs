@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Scalable outline rasteriser: the path that replaces magnifying a bitmap face.
 //!
 //! WHY this exists: the bitmap face is a fixed 16x24 cell drawn at an integer

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! First-party vector icon engine for the InterOS launcher.
 //!
 //! Provides geometric vector pictograms for first-party system apps, matching

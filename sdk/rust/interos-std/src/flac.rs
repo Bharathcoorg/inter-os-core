@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Native FLAC decoding into interleaved signed 16-bit PCM.
 //!
 //! WHAT this is: a bounded, streaming decoder for native (`fLaC`) FLAC

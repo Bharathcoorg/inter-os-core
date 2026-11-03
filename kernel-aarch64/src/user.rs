@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Ring 3 / EL0 Userspace Execution & Privilege Separation
 //!
 //! Provides the real hardware privilege drop from EL1 (Kernel) to EL0 (User),

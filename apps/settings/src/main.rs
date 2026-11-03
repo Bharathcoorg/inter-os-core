@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Core "System Space" — Sovereign Settings & Telemetry App
 //!
 //! Ring 3 (User Mode) presentation of the design system's screen 6,

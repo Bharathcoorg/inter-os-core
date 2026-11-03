@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile Capacitive Multi-Touch Digitizer Driver (Goodix GT911 / I2C Protocol)
 //!
 //! Standard mobile smartphone touch controller protocol over I2C bus.

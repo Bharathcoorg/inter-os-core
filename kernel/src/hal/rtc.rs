@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Real-Time Clock (RTC / CMOS) Hardware Driver & Civil Calendar Subsystem
 //!
 //! Directly interrogates MC146818-compatible CMOS RTC hardware registers via

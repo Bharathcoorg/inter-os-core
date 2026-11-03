@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Userspace representation of the trusted InterOS service ABI.
 //!
 //! The wire format is intentionally fixed-width so Ring-3 services can be

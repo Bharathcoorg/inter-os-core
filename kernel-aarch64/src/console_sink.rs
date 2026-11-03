@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PL011 console as the shared core's serial console seam.
 //!
 //! The architecture-neutral core cannot print anything: the x86 kernel's console

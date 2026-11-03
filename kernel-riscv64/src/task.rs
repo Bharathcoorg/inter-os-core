@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! RISC-V 64 Task Scheduler & Hardware Context Switching
 //!
 //! Enforces per-task Sv39 address spaces (SATP), per-thread kernel stacks,

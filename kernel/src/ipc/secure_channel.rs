@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Cryptographic Secure IPC Channel & Mutual Task Attestation
 //!
 //! Provides authenticated, anti-replay, zero-trust IPC messaging between tasks.

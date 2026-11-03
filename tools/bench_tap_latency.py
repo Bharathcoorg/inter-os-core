@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Measures calculator tap-to-post-flip latency in the real x86_64 QEMU guest.
 
 Metric: `tap_to_post_surface_flip_ms`.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! HMAC-SHA256 Message Authentication Code (RFC 2104 / RFC 4231)
 //!
 //! Provides cryptographic authentication and key derivation for TLS 1.3

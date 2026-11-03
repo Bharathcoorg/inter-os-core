@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! 3GPP Cellular Modem Driver & Hayes AT Command Parser
 //!
 //! Controls cellular baseband radio, SIM verification, 5G/LTE registration,

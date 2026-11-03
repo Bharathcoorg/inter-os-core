@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Pins the app-launch benchmark's measurement and classification rules.
 
 WHY these are unit tests and not QEMU runs: the rules being pinned are the ones

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Zero-Trust Capability Security Subsystem
 //!
 //! Enforces the fundamental security invariant: "No ambient authority; security

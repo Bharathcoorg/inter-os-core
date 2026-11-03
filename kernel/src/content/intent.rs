@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The system-wide intent registry.
 //!
 //! WHY this lives in the kernel and not in an app: "who handles this file?"

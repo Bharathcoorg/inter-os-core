@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 function Resolve-QemuPath {
     param([string]$BinaryName = "qemu-system-x86_64.exe")
     if ($env:QEMU_PATH -and (Test-Path (Join-Path $env:QEMU_PATH $BinaryName))) { return Join-Path $env:QEMU_PATH $BinaryName }

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """
 InterOS Core — Web-to-RAPP & Polyfill Engine Contract Test (tests/test_web_porting_contract.py)
 

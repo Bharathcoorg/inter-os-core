@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Credential entry surface for unlocking the active user.
 //!
 //! The lock screen never transitions directly to Home. Unlocking is an

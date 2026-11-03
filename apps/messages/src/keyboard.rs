@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The compose keyboard: the dock's geometry, the field it types into, and
 //! what a key press does to that field.
 //!

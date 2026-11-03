@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Deterministic 3GPP TS 23.038 GSM 7-bit Default Alphabet PDU packer
 //! and on-device privacy/phishing heuristic analyzer for InterOS Messages.
 

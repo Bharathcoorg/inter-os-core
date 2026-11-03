@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Zero-Trust Capability Security Subsystem
 //!
 //! Enforces zero ambient authority: all privileged operations (UART logging,

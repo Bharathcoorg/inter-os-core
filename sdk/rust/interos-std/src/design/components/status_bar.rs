@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The band the platform keeps at the top of every screen.
 //!
 //! WHY this lives in the SDK and not in each app: the height is already a

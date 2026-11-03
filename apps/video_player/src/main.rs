@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Native Video Player (Ring-3 User Process)
 //!
 //! Production-grade VLC-class media player for InterOS:

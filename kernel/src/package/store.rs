@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Persistent package payload store.
 //! Payloads are kept separate from registry metadata and addressed by package ID.
 use alloc::string::{String, ToString};

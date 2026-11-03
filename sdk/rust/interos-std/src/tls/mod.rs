@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` On-Device TLS 1.3 Client (RFC 8446)
 //!
 //! Provides sovereign userspace TLS 1.3 encryption and authentication:

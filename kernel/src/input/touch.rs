@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Capacitive Multi-Touch Digitizer & Mobile Gesture Engine
 //!
 //! Designed natively for smartphone and tablet touch screens.

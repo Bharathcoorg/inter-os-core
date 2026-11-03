@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` RFC 7748 X25519 Montgomery Curve Key Exchange
 //!
 //! Implements Montgomery curve25519 scalar multiplication:

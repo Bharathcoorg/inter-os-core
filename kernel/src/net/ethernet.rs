@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! IEEE 802.3 Ethernet II Frame Framing & MAC Layer
 //!
 //! Pure no_std Ethernet frame parser, serializer, and MAC address representations.

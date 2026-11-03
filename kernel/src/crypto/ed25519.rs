@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Ed25519 package-signature verification and publisher trust root.
 
 use ed25519_dalek::{Signature, VerifyingKey};

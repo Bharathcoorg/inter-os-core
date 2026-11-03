@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! DHCP lease state for network interfaces.
 //!
 //! Packet transport remains below this layer; this module only models bounded

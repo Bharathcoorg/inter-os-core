@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The platform's image decoding.
 //!
 //! WHY this lives in the platform and not in the gallery: decoding an image is a

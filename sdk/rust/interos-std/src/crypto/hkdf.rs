@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! HKDF (HMAC-based Extract-and-Expand Key Derivation Function, RFC 5869)
 //! and TLS 1.3 Key Schedule primitives (RFC 8446 Section 7.1).
 //!

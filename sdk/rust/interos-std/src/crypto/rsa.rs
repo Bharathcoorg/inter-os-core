@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` RSA signature verification (RFC 8017) over a bounded modulus.
 //!
 //! Provides the two paddings a public HTTPS chain actually presents: PKCS#1

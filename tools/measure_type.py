@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Measure the height of the text on the device's screens.
 
 The type scale is a set of cap heights, so the only honest way to ask

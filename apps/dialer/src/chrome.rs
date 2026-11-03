@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The rectangles the dialer draws its controls in and answers taps in.
 //!
 //! WHY one module holds both: the renderer and the press are two functions

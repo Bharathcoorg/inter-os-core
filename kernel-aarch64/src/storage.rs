@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile eMMC 5.1 & SDHCI Storage Host Controller Driver (AArch64)
 //!
 //! Conforms to SD Host Controller Standard Specification (v3.00 / v4.20)

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Persistent, bounded message-thread store for the Sovereign Messages app.
 //!
 //! WHY the settings store (syscalls 82/83) and not the VFS or app-private storage:

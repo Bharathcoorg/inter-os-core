@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Process lifecycle and resource accounting for the InterOS runtime.
 //!
 //! The scheduler owns execution; this module owns the process-level contract.

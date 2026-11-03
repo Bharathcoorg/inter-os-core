@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Multi-User & Account Management Subsystem
 //!
 //! Provides first-boot provisioning, device owner management, stable user IDs,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Address Resolution Protocol (ARP) & In-Kernel ARP Cache
 //!
 //! Complies with RFC 826. Translates IPv4 addresses to physical MAC hardware addresses.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Biometric Authentication & Hardware Fingerprint Enclave HAL (AArch64)
 //!
 //! Provides bare-metal driver support for physical smartphone biometric fingerprint sensors

@@ -1,4 +1,7 @@
-﻿//! The platform's type ladder, and the measurements that fix it.
+﻿// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
+//! The platform's type ladder, and the measurements that fix it.
 //!
 //! WHY this module exists: the design document writes its type scale in the
 //! sizes a reader sees, and there were two readings of those numbers -- as

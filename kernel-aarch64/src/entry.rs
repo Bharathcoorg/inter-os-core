@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Primordial Assembly Entry Point for AArch64 Microkernel
 //!
 //! Handles CPU execution level negotiation (EL2 -> EL1 drop),

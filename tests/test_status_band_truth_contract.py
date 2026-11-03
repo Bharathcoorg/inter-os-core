@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Platform Truth Contract: Status Band Adoption and Service State Backing.
 
 Every top-of-screen status band rendered by an application must:

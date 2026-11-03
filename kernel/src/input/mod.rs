@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile Touch & Hardware Input Subsystem
 //!
 //! Native capacitive multi-touch digitizer, mobile gesture engine, and input event queue.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Outline type for the shell's largest text, over the shared rasteriser.
 //!
 //! WHY this exists alongside the bitmap face: `font` is a 16x24 cell rendered at

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Global Descriptor Table (GDT) & Task State Segment (TSS)
 //!
 //! Configures CPU segmentation registers and sets up the Interrupt Stack Table (IST)

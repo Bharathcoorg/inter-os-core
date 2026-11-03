@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Zero-Copy DMA Shared Memory Ring Buffers & High-Throughput IPC Message Pipes
 //!
 //! Provides ultra-low-latency, zero-copy communication channels between tasks

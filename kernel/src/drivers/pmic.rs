@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Power Management, PMIC Battery Fuel Gauge & Interactive DVFS Governor
 //!
 //! Provides bare-metal power architecture for mobile application processors:

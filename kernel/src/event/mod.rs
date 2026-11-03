@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Asynchronous Event Notification Subsystem & Sovereign epoll / kqueue Event Reactor
 //!
 //! Provides non-busy, capability-attested event demultiplexing across diverse hardware and

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Bluetooth Low Energy (BLE 5.2 / HCI UART) Subsystem (AArch64)
 //!
 //! This module is an **HCI packet codec and capability boundary, not a controller driver**.

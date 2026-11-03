@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Shared Contact Store Reader & Interlink for Sovereign Messages.
 //! Reads `dialer.contacts.v1` directly from the settings store with zero heap allocation.
 

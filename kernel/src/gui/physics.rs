@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Fluid Inertial Physics Touch Scroller & Elastic Spring Engine
 //!
 //! Provides bare-metal 60 Hz smartphone momentum scrolling and spring-loaded

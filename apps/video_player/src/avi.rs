@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Bounded RIFF/AVI reader for Motion JPEG video.
 //!
 //! WHAT this reads: the `hdrl` header of a RIFF `AVI ` file, then the `movi`

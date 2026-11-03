@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Secure Keystore Subsystem
 //!
 //! Provides cryptographic Key Derivation (KDF) using RFC 4231 HMAC-SHA256 and TRNG entropy,

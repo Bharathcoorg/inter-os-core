@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The notes' documents in the shared storage area.
 //!
 //! WHY this exists: the note store lived in the app's own sandbox at

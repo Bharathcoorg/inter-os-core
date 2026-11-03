@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Flattened Device Tree (FDT / DTB v0.4) Binary Parser
 //!
 //! Provides zero-allocation, bare-metal hardware discovery for mobile ARM64 SoCs

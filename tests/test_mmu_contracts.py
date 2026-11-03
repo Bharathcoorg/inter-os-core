@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Static contracts for the x86_64 userspace MMU/ELF boundary."""
 from pathlib import Path
 

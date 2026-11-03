@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 use interos_std::wav::{parse_wav, PcmConverter, WavError, WavInfo};
 
 fn riff(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {

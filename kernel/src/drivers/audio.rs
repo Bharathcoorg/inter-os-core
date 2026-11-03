@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCI Audio Hardware Controller Driver
 //!
 //! Enumerates PCI audio controllers (Intel HDA, AC'97, Ensoniq) and implements a

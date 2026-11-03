@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Core 24x36 Proportional Typography Reference Face.
 //!
 //! Provides a 24x36 condensed sans-serif face sized for a 1080x2160 reference

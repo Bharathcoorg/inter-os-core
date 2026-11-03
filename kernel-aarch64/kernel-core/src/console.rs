@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Serial console seam for the architecture-neutral core.
 //!
 //! WHY this exists rather than a `serial_println!` macro call: the x86 kernel's

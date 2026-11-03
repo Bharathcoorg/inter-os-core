@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! End-to-end tests for the native FLAC decoder.
 //!
 //! Fixtures live in `tests/fixtures/flac/` and were produced with ffmpeg

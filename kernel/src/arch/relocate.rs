@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Microkernel Early Self-Relocation Engine
 //!
 //! Applies `R_X86_64_RELATIVE` dynamic relocations when the position-independent

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Memory Management Unit (MMU) & Virtual Memory Architecture
 //!
 //! Configures ARMv8-A 4-level translation tables with 4KB page granule:

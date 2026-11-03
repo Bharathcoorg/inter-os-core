@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCIe discovery, driven entirely by the device tree.
 //!
 //! The bus is only walked when the platform actually declares it. When no ECAM

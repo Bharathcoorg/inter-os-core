@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Canonical RAPP v2 binary package parser and verifier.
 //!
 //! RAPP v2 is the kernel execution format. ZIP/JSON bundles are tooling-only.

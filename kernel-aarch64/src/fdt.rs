@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Zero-Allocation Flattened Device Tree (FDT / DTB) Parser
 //!
 //! Conforms to Devicetree Specification v0.4 with zero heap allocation (`no_std`).

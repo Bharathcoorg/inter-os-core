@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """InterOS service lifecycle and boot evidence gate.
 
 Versioned trusted-service ABI, PID1-owned service lifecycle/recovery, and canonical x86_64 QEMU boot/lifecycle validation.

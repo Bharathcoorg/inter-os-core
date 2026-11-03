@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Sovereign Mobile Camera Sensor HAL & Hardware ISP Pipeline
 //!
 //! Provides bare-metal MIPI-CSI2 camera sensor driver and image signal processing (ISP):

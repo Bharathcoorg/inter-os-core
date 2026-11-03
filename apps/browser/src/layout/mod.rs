@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The browser's bounded document layout engine.
 //!
 //! The reader path flattens a page into styled lines. This module keeps the

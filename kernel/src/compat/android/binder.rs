@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Android Binder IPC Transaction Mediator (Zone 4 Isolation)
 //!
 //! Mediates Android Binder RPC transactions between Android container processes

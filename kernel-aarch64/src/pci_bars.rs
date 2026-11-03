@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! PCI Base Address Register assignment.
 //!
 //! A PCI device's BARs read back as zero until something programs them, and

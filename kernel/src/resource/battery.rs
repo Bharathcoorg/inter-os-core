@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Mobile Battery Fuel Gauge Driver & Power Drainage Engine
 //!
 //! Provides accurate Li-ion State of Charge (SoC %) estimation from cell voltage,

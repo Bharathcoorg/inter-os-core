@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Hardware True Random Number Generator (TRNG) & Entropy Pool
 //!
 //! Gathers hardware entropy via x86 RDRAND instruction, CPU timestamp counters,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Quick Controls: the control centre.
 //!
 //! WHY the composition follows the reference shade: `Ui Samples/07_quick_controls.png`

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! TLS 1.3 Client Stream and Session (RFC 8446)
 //!
 //! Provides `TlsClient<S>` wrapping any byte transport stream implementing `TlsStream`,

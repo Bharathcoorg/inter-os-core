@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Boots the QEMU guest, opens the launcher's search and the task switcher, and
 writes a screendump of each.
 

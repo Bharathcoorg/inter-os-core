@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Adversarial RAPP v2 format and Ed25519 trust-boundary tests."""
 import hashlib
 from cryptography.hazmat.primitives.asymmetric import ed25519

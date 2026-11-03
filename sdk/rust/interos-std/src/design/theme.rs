@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The platform theme: the roles an interface asks for, not raw colours.
 //!
 //! WHY this module exists: [`super::color`] is a palette. It says which colours

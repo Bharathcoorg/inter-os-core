@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Minimal on-disk InterOS filesystem backend.
 //!
 //! Block-backed filesystem boundary above `BlockDevice`.

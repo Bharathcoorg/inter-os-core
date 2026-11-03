@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! TLS 1.3 Record Layer (RFC 8446 Section 5)
 //!
 //! Provides bounded, authenticated encryption and decryption of TLS records

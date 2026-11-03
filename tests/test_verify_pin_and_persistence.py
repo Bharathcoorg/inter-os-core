@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """
 Test that a device with no credential boots to the plain lock screen and unlocks
 on a swipe, and that the account layer never claims a credential it does not hold.

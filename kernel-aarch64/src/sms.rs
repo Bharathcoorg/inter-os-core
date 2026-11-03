@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Autonomous Cellular SMS & Emergency PDU Dispatcher (AArch64)
 //!
 //! Provides bare-metal 3GPP TS 23.040 Short Message Service (SMS) Point-to-Point (PP)

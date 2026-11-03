@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Battery, Thermal & DVFS Power Governor (mobile profile)
 //!
 //! This module is a **thermal/DVFS policy engine and capability boundary, not a PMIC driver**.

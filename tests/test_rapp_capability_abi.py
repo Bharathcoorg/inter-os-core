@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Pins the tooling's capability aliases against the documented RAPP v2 ABI.
 
 WHY this parses `docs/RAPP_FORMAT.md` instead of hardcoding a copy: an alias

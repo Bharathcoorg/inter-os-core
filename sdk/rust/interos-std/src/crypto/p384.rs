@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Pure `no_std` ECDSA over the NIST P-384 curve (SEC 2, FIPS PUB 186-5).
 //!
 //! Verification only, like `super::p256`: the device holds no signing key.

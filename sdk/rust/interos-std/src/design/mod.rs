@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! InterOS Core visual design tokens shared by native Rust applications.
 //!
 //! These are semantic tokens, not app-specific styling. Apps should compose

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """The memory-retirement notice's truth contract.
 
 WHAT THIS FILE IS FOR: when the kernel cannot afford a surface for the app being

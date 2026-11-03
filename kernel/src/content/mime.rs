@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Media type detection for the platform's document index.
 //!
 //! WHY the bytes come first and the name only second: a file's name is a claim

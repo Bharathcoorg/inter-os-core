@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The browser's bounded HTTP/1.1 protocol layer.
 //!
 //! This module owns the parts of HTTP that sit between the transport and the

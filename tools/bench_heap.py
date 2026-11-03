@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Reads the kernel's heap accounting from a live guest at documented checkpoints.
 
 WHY this measures rather than estimates. `kernel/src/allocator.rs` exposes

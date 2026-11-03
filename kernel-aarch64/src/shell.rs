@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! AArch64 Interactive Mobile Graphical Shell & Touch Hit-Testing Engine
 //!
 //! Provides the smartphone user interface pipeline:

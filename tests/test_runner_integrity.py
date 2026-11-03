@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """WHAT THIS FILE IS FOR: it proves the contract runner itself is trustworthy.
 
 WHY: the runner is the gate every other suite depends on, so a bug that lets a
