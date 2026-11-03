@@ -1212,8 +1212,17 @@ const IMPORT_BTN: Rect = Rect { x: 578, y: 748, w: 118, h: 48 };
 const CAPTION_Y: usize = 800;
 
 /// The rows the caption is drawn on, and the rows a touch on it reads.
+///
+/// WHY the band ends at `TIMELINE_TOUCH_Y0`: the caption doubles as the queue
+/// loop control, and the timeline is the control that owns the space below the
+/// caption's ink (row 815). A free-standing top bound here let the two bands
+/// overlap on rows 816..819, so whether a press there scrubbed the bar or
+/// toggled the loop depended purely on the dispatcher's test order. Deriving
+/// the bound from the neighbour's band makes the two provably disjoint — the
+/// caption answers `y < CAPTION_TOUCH_Y1` and the timeline `y >=
+/// TIMELINE_TOUCH_Y0` — and covers the whole ink the caption paints (805..815).
 const CAPTION_TOUCH_Y0: usize = 800;
-const CAPTION_TOUCH_Y1: usize = 820;
+const CAPTION_TOUCH_Y1: usize = TIMELINE_TOUCH_Y0;
 
 /// The progress bar under the caption.
 ///
