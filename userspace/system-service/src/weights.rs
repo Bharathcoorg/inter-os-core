@@ -1317,6 +1317,17 @@ pub mod tests {
         let config = ModelConfig::from_gguf(&info).expect("the installed file is priced");
         assert_eq!(config.num_layers, 24);
         assert_eq!(kv_projection_width(&config), 256, "3 query heads, 1 key/value head");
+        // The window this run's blocks are cut to, taken from the file the run
+        // reads. The prompt below is 3 positions, so the span never binds here and
+        // the run's numbers are unchanged by it -- what this pins is that the
+        // declared 512 reaches the config the block loop consumes, rather than
+        // stopping in the metadata reader the way it did before.
+        assert_eq!(
+            config.sliding_window,
+            Some(512),
+            "the installed file states attention.sliding_window 512"
+        );
+        assert_eq!(config.attention_span_start(512), 1);
 
         let source = HostFileSource {
             file: rust_std::fs::File::open(&path).expect("the installed file opens"),
@@ -1576,10 +1587,16 @@ pub mod tests {
         // installed on this host, so the full-string embedding parity remains
         // UNVERIFIED and is stated as such wherever this run is reported. A real
         // Gemma-2 final-norm + mean-pool reference was NOT built, because the
-        // trunk's conventions (sliding window, per-head QK norms, RoPE pairing)
-        // are not fixed by the file the way the head's are, so such a comparison
-        // could only ever be labelled "matches my own reimplementation", never
-        // "matches a runtime".
+        // trunk still has conventions the file leaves open: it names no activation
+        // key for `blk.N.ffn_*` (the engine runs SwiGLU there and cannot claim the
+        // file said so), declares no `attention.layer_types` list beside its one
+        // global `sliding_window` of 512, and states a second RoPE base
+        // (`rope.freq_base_swa`) the engine cannot attach to a layer type the file
+        // never enumerated. The window's width and the per-head QK norms ARE fixed
+        // by the file and the graph now applies both; what stays unfixed is which
+        // layers the window exempts and what curve the MLP uses, so such a
+        // comparison could only ever be labelled "matches my own reimplementation",
+        // never "matches a runtime".
         {
             // The fixed probe: a deterministic 768-wide vector, so the head runs
             // on bytes the trunk cannot influence. p[i] = ((i*37) % 251)/251 - 0.5.

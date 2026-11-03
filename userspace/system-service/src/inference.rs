@@ -876,6 +876,23 @@ pub struct ModelConfig {
     pub vocab_size: usize,
     /// Positions one sequence addresses, and so the depth of the KV cache.
     pub seq_len: usize,
+    /// `<arch>.attention.sliding_window`: how many positions, the current one
+    /// included, one query is allowed to attend over.
+    ///
+    /// WHY this is a field and not a constant: the published
+    /// `embeddinggemma-300M-Q8_0.gguf` states 512 against the 2048-position
+    /// `context_length` it also states, and the `gemma2` fixture this engine was
+    /// written against states 32 against its own 64. A file that declares no
+    /// window is `None`, and the whole cached prefix is attended -- that is the
+    /// file's graph, not a default the engine preferred.
+    ///
+    /// WHAT IT DOES NOT CLAIM: a window the file states globally is applied
+    /// globally. The published file declares no `attention.layer_types` list, so
+    /// nothing in its bytes distinguishes a sliding layer from a full one, and
+    /// the engine does not invent that distinction. `rope.freq_base_swa`, which
+    /// the same file does state, stays unread for the same reason: taking it
+    /// would need the per-layer list the file never gave.
+    pub sliding_window: Option<usize>,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
 }
@@ -909,6 +926,10 @@ impl ModelConfig {
             head_dim: 32,
             vocab_size: 290,
             seq_len: 64,
+            // No window: this is a fixture with no file behind it, so there is no
+            // declaration to carry. A file that states one gets it through
+            // `from_gguf`, which is the only route a window can take.
+            sliding_window: None,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
         }
@@ -942,6 +963,27 @@ impl ModelConfig {
     /// This is the one number the engine's size limit is measured against.
     pub fn scratch_bytes(&self) -> usize {
         self.kv_cache_bytes().saturating_add(Scratch::bytes_for(self))
+    }
+
+    /// First cached position one query at `pos` may attend over, exclusive of
+    /// nothing: the span it names is `attention_span(pos)..pos + 1`.
+    ///
+    /// WHY the window is applied here and not folded into the loop bounds: the
+    /// published file states `attention.sliding_window` 512 beside a
+    /// `context_length` of 2048, and the engine builds the 2048-deep cache the
+    /// file asks for and then attended all of it. Returning the start from the
+    /// config keeps one owner for the rule, so the block loop, the pricing and
+    /// the tests all read the same answer.
+    ///
+    /// WHY `None` reaches the whole prefix: a file that states no window declares
+    /// no limit, and inventing one would narrow a graph the file never narrowed.
+    /// A window of one is the file saying "attend only yourself", and the span
+    /// collapses to `pos..pos + 1` -- still one position, never zero.
+    pub fn attention_span_start(&self, pos: usize) -> usize {
+        match self.sliding_window {
+            Some(window) if window > 0 => pos.saturating_add(1).saturating_sub(window),
+            _ => 0,
+        }
     }
 
     /// Refuses a declared shape whose scratch is over `SCRATCH_BYTE_BUDGET`.
@@ -1050,6 +1092,18 @@ impl ModelConfig {
             _ => num_heads,
         };
 
+        // The window the file says a query may look back over. A stated 0 is the
+        // file stating no usable span, so it is carried as no limit rather than
+        // turned into a span of zero positions, and a value too wide for the
+        // machine simply never binds -- the cache is `seq_len` deep and the span
+        // clamps to it either way. This is not `fits`: a missing window is a
+        // legal declaration (GPT-family and Llama files state none), unlike a
+        // missing width, which is why silence here means "attend the prefix".
+        let sliding_window = match info.sliding_window {
+            Some(stated) if stated > 0 => usize::try_from(stated).ok(),
+            _ => None,
+        };
+
         let config = Self {
             hidden_dim,
             intermediate_dim,
@@ -1059,6 +1113,7 @@ impl ModelConfig {
             head_dim,
             vocab_size,
             seq_len,
+            sliding_window,
             rms_norm_eps: info.rms_norm_eps.unwrap_or(1e-6),
             rope_theta: info.rope_theta.unwrap_or(10000.0),
         };
@@ -1867,14 +1922,25 @@ pub fn run_block(
     kv_cache.write(block, pos, 0, &k[..hd], &v_vec[..hd])?;
 
     // 6. Attention scores and softmax, then the weighted sum of values.
+    //
+    // The span is the one the file declared: `attention.sliding_window` positions
+    // ending at `pos`, or the whole cached prefix when the file stated no window.
+    // Softmax normalises over exactly that span, so a position the window excludes
+    // contributes no weight at all -- it is not scored and dropped afterwards, it
+    // is never scored. This is why the published file's 512 against its own 2048
+    // `context_length` is a graph difference and not a rounding one: past
+    // position 511 the old span handed probability mass to keys the model says
+    // this query does not see.
     let scale_att = 1.0f32 / f32_sqrt(hd as f32);
-    let seq_len_cur = pos + 1;
+    let span_start = config.attention_span_start(pos);
+    let span_end = pos + 1;
+    debug_assert!(span_start < span_end, "the window never excludes the query itself");
     for value in attn_out[..h_dim].iter_mut() {
         *value = 0.0f32;
     }
     for head in 0..config.num_heads {
         let h_base = head * hd;
-        for t in 0..seq_len_cur {
+        for t in span_start..span_end {
             let key_row = kv_cache
                 .k_row(block, t, 0)
                 .ok_or(InferenceError::ContextLengthExceeded)?;
@@ -1884,8 +1950,8 @@ pub fn run_block(
             }
             scores[t] = dot * scale_att;
         }
-        softmax(&mut scores[..seq_len_cur]);
-        for t in 0..seq_len_cur {
+        softmax(&mut scores[span_start..span_end]);
+        for t in span_start..span_end {
             let value_row = kv_cache
                 .v_row(block, t, 0)
                 .ok_or(InferenceError::ContextLengthExceeded)?;
@@ -3337,9 +3403,207 @@ pub mod tests {
             head_dim: 256,
             vocab_size: 256_000,
             seq_len: 8192,
+            sliding_window: None,
             rms_norm_eps: 1e-6,
             rope_theta: 1_000_000.0,
         }
+    }
+
+    /// `<arch>.attention.sliding_window` reaching the config the graph reads.
+    ///
+    /// The published file states 512 beside a `context_length` of 2048. Before
+    /// this, `gguf.rs` read the number, `GgufModelInfo` held it, two tests
+    /// asserted it arrived, and `ModelConfig` had nowhere to put it -- so
+    /// `run_block` attended the whole 2048-position prefix the file says a query
+    /// does not see. These cases pin the three answers a file can give: a window,
+    /// silence, and a stated zero.
+    #[test]
+    fn test_the_declared_window_reaches_the_config_and_silence_does_not() {
+        let published = ModelConfig::from_gguf(&published_file()).expect("the file is priced");
+        assert_eq!(published.sliding_window, Some(512));
+        // The window is not a pricing input: the 512 the file states beside its own
+        // 2048-position context costs exactly the bytes the context costs, so this
+        // change neither raised a bound nor asked the device for more RAM.
+        assert_eq!(published.scratch_bytes(), 101_767_680);
+        assert_eq!(published.check_scratch_budget(), Ok(()));
+
+        // A file that states no window gets no limit, not the engine's own guess.
+        // The rest of the declaration is the published file's, so the only thing
+        // missing is the window. (Silence about `head_count_kv` is a different
+        // story: `from_gguf` reads it as one KV head per query head, which is the
+        // format's multi-head case, and `check_attention_shape` then refuses the
+        // shape -- that arm is untouched here and covered by its own test.)
+        let mut unwindowed_info = published_file();
+        unwindowed_info.sliding_window = None;
+        let unwindowed = ModelConfig::from_gguf(&unwindowed_info)
+            .expect("a file with no window is still a file");
+        assert_eq!(unwindowed.sliding_window, None);
+        assert_eq!(unwindowed.attention_span_start(2047), 0);
+
+        // A file that states 0 states no usable span. Turning that into a span of
+        // zero positions would drop the query's own token, so it is read as silence.
+        let mut zeroed = published_file();
+        zeroed.sliding_window = Some(0);
+        let zeroed_config = ModelConfig::from_gguf(&zeroed)
+            .expect("a stated zero is refused as a span, not as a model");
+        assert_eq!(zeroed_config.sliding_window, None);
+
+        // A window wider than the context the file also states is carried as
+        // declared. Clamping it here would rewrite the file's number to the
+        // engine's convenience; the span clamps itself to the prefix it has.
+        let mut wider = published_file();
+        wider.sliding_window = Some(4096);
+        let config = ModelConfig::from_gguf(&wider).expect("an over-wide window is still declared");
+        assert_eq!(config.sliding_window, Some(4096));
+        assert_eq!(config.attention_span_start(2047), 0, "the span never runs past the cache");
+    }
+
+    /// The span arithmetic, independent of any weight: a window counts positions
+    /// backwards from the query and always includes the query itself.
+    #[test]
+    fn test_the_window_span_is_the_files_own_back_count() {
+        let base = ModelConfig::from_gguf(&published_file()).expect("the file is priced");
+        let windowed = |w: Option<usize>| ModelConfig {
+            sliding_window: w,
+            ..base
+        };
+
+        // 512 declared against 2048: positions 0..511 still see the whole prefix.
+        let w = windowed(Some(512));
+        assert_eq!(w.attention_span_start(0), 0);
+        assert_eq!(w.attention_span_start(511), 0);
+        // Position 512 is the first the window bites: it sees 1..513, not 0..513.
+        assert_eq!(w.attention_span_start(512), 1);
+        assert_eq!(w.attention_span_start(2047), 2048 - 512);
+        // The span always holds the query, so softmax never normalises an empty set.
+        assert!(w.attention_span_start(2047) < 2048);
+
+        // A window of one is the file saying "attend only yourself".
+        let solo = windowed(Some(1));
+        assert_eq!(solo.attention_span_start(7), 7);
+        assert_eq!(solo.attention_span_start(0), 0);
+
+        // No window: the whole cached prefix, which is the graph of every file that
+        // states none.
+        let none = windowed(None);
+        assert_eq!(none.attention_span_start(0), 0);
+        assert_eq!(none.attention_span_start(2047), 0);
+    }
+
+    /// The block's answer, after a whole prompt, at the position the caller names.
+    ///
+    /// WHY this reads `scratch.hidden` and not the logits: the fixture's one block
+    /// writes the residual stream there, and it is the value the pooling head turns
+    /// into an embedding, so it is the number a published model's caller sees.
+    fn hidden_over_prompt(
+        fixture: &LittleModel,
+        config: &ModelConfig,
+        prompt: &[u32],
+    ) -> [f32; LITTLE_HIDDEN] {
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
+        let (mut scratch, mut kv_cache) = fit(config);
+        for (pos, &token) in prompt.iter().enumerate() {
+            forward_step(
+                token,
+                pos,
+                &model,
+                config,
+                &mut kv_cache,
+                &mut scratch,
+            )
+            .expect("the fixture holds the row this token asks for");
+        }
+        let mut out = [0.0f32; LITTLE_HIDDEN];
+        out.copy_from_slice(&scratch.hidden[..LITTLE_HIDDEN]);
+        out
+    }
+
+    /// THE graph claim: a query cannot be influenced by a position its file's
+    /// window excludes.
+    ///
+    /// HOW this is independent of the code under test: the fixture has ONE block,
+    /// so a position's cached key and value are functions of that position's own
+    /// token and nothing else -- no earlier attention has shaped them yet. Two
+    /// prompts that agree inside the window and differ outside it therefore cannot
+    /// produce different answers at the last position, and the only thing that can
+    /// make them agree is a span that genuinely excludes the differing prefix. The
+    /// third assertion is what stops the first two from being vacuous: with no
+    /// window the same early tokens DO move the answer, so the equality above is
+    /// the window working and not a fixture that ignores its input.
+    #[test]
+    fn test_a_windowed_query_is_influenced_by_no_position_it_excludes() {
+        let fixture = LittleModel::new();
+        let window = ModelConfig {
+            sliding_window: Some(2),
+            ..LittleModel::config()
+        };
+
+        // Positions 2 and 3 are the span at pos 3; 0 and 1 are outside it.
+        let a = hidden_over_prompt(&fixture, &window, &[99, 105, 30, 40]);
+        let b = hidden_over_prompt(&fixture, &window, &[7, 11, 30, 40]);
+        assert_eq!(
+            a, b,
+            "a position the declared window excludes still reached the answer"
+        );
+
+        // A window of one leaves only the query's own token in the span.
+        let solo = ModelConfig {
+            sliding_window: Some(1),
+            ..LittleModel::config()
+        };
+        assert_eq!(
+            hidden_over_prompt(&fixture, &solo, &[10, 20, 30, 40]),
+            hidden_over_prompt(&fixture, &solo, &[5, 6, 7, 40]),
+            "a window of one must attend the query alone"
+        );
+
+        // Without the window the same early changes move the answer, so the two
+        // equalities above are the span doing the excluding.
+        let unwindowed = LittleModel::config();
+        let wide_a = hidden_over_prompt(&fixture, &unwindowed, &[99, 105, 30, 40]);
+        let wide_b = hidden_over_prompt(&fixture, &unwindowed, &[7, 11, 30, 40]);
+        assert_ne!(
+            wide_a, wide_b,
+            "the fixture ignores its early tokens even with no window, which would make \
+             the windowed equality meaningless"
+        );
+        assert_ne!(
+            wide_a, a,
+            "applying the declared window changed nothing at all, so the span is still \
+             being ignored by the block"
+        );
+    }
+
+    /// A window that has not yet bound is not a second code path with a second
+    /// answer: inside its own span the file's window costs exactly nothing.
+    ///
+    /// WHY it matters: the published file's 512 sits under a 2048-position context,
+    /// so positions 0..511 must be bit-identical to the same run with no window. If
+    /// they were not, the change would have altered every short prompt the device
+    /// has ever answered while claiming only to apply a declaration.
+    #[test]
+    fn test_a_window_that_does_not_yet_bind_changes_nothing() {
+        let fixture = LittleModel::new();
+        let unwindowed = LittleModel::config();
+        let reference = hidden_over_prompt(&fixture, &unwindowed, &[10, 20, 30, 40]);
+
+        for width in [4usize, 5, 64] {
+            let window = ModelConfig {
+                sliding_window: Some(width),
+                ..LittleModel::config()
+            };
+            assert_eq!(
+                hidden_over_prompt(&fixture, &window, &[10, 20, 30, 40]),
+                reference,
+                "a window of {width} positions does not bind at pos 3, so it must not \
+                 move the answer by one bit"
+            );
+        }
+
+        // The fixture's own default carries no window at all, which is the case a
+        // hand-built config reaches and `from_gguf` never produces.
+        assert_eq!(unwindowed.sliding_window, None);
     }
 
     /// The published model, by the shape its own file states. This is the result
@@ -3359,6 +3623,9 @@ pub mod tests {
         assert_eq!(config.vocab_size, 262_144);
         assert_eq!(config.seq_len, 2048);
         assert_eq!(config.rope_theta, 1_000_000.0);
+        // The window the file states beside its own 2048-position context, carried
+        // into the config instead of dropped between the reader and the graph.
+        assert_eq!(config.sliding_window, Some(512), "attention.sliding_window");
         // 2 x 24 x 2048 x 1 x 256 x 4: 96 MiB, which is 100 times the stack it
         // used to have to live on.
         assert_eq!(config.kv_cache_bytes(), 100_663_296);
@@ -3493,6 +3760,16 @@ pub mod tests {
         assert_eq!(config.kv_cache_bytes(), 100_663_296);
         assert_eq!(config.scratch_bytes(), 101_767_680);
         assert_eq!(config.check_scratch_budget(), Ok(()));
+        // The window the file states beside its own 2048-position context now
+        // reaches the graph. Taken from the file's bytes, not from the fixture:
+        // this is the assertion that would have failed while the reader collected
+        // the number and `ModelConfig` had nowhere to put it.
+        assert_eq!(
+            config.sliding_window,
+            Some(512),
+            "the real file states attention.sliding_window 512 and the graph must run it"
+        );
+        assert_eq!(config.attention_span_start(2047), 2048 - 512);
         file_bytes::println!(
             "REAL FILE {path}: 24 x 2048 x 1 x 256 cache = {} bytes + {} scratch = {} of \
              the {SCRATCH_BYTE_BUDGET} byte budget, {spare} spare",
