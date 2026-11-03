@@ -126,13 +126,20 @@ pub fn reset_slot_pool() {
     reset_box_cache();
 }
 
-/// The run that was placed last.
+/// A run's placement, remembered so the next pixel asks the same question.
 ///
 /// WHY this exists: a caller that paints a run asks for that same run for
 /// every pixel of it, and placing it rebuilt a sixty-four byte key --
 /// zeroed and then filled -- for each of those pixels. On a screen drawn
 /// one pixel at a time that was the single largest cost in a frame, and
 /// it grew with the number of pixels rather than with the amount of text.
+///
+/// WHY a table and not one entry: a pixel that several runs overlap asks for
+/// each of them in turn, which is what painting a frame one pixel at a time
+/// means, and a one-entry memo answers the first and rebuilds the rest. This
+/// is the same reasoning that gave the gate-box cache `BOX_SLOTS` entries.
+/// The table is direct-mapped on [`slot_for`], so a hit is one comparison and
+/// a collision costs a probe of the coverage table rather than a wrong answer.
 #[derive(Clone, Copy)]
 struct LastPlaced {
     em: u32,
@@ -144,7 +151,19 @@ struct LastPlaced {
     run: Option<OutlineRun>,
 }
 
-static mut LAST_PLACED: Option<LastPlaced> = None;
+static mut LAST_PLACED: [Option<LastPlaced>; SLOTS] = [None; SLOTS];
+
+/// Counters that make the memo's contract observable to a test.
+///
+/// WHY they exist: whether a placement was answered from the memo or by
+/// scanning the coverage table is invisible in the output -- both draw the
+/// same pixels -- so without a count there is no way to write a test that
+/// fails while the memo is too small to hold a frame's runs. They compile out
+/// of the guest entirely.
+#[cfg(test)]
+pub static MEMO_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static TABLE_PROBES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// How many gate boxes are remembered.
 ///
@@ -287,13 +306,15 @@ pub fn reset_box_cache() {
     }
 }
 
-/// Forgets the last placement.
+/// Forgets every placement the memo remembers.
 ///
 /// WHY it exists: a caller that keeps a frame plan across frames must be
 /// able to say that the cache no longer describes the screen.
 pub fn forget_last_placement() {
     unsafe {
-        *core::ptr::addr_of_mut!(LAST_PLACED) = None;
+        for entry in (*core::ptr::addr_of_mut!(LAST_PLACED)).iter_mut() {
+            *entry = None;
+        }
     }
 }
 
@@ -357,7 +378,7 @@ fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (
 
 /// Whether the named slot still holds exactly this run.
 ///
-/// WHY the question is asked at all: the one-entry memo names a slot, and a
+/// WHY the question is asked at all: a memo entry names a slot, and a
 /// caller that then places more distinct runs than the pool holds evicts the
 /// run that slot was drawn for. Reading the memo without checking would hand
 /// out the eviction's glyphs under the old run's name -- a wrong glyph set, not
@@ -396,18 +417,18 @@ fn slot_still_holds(
 /// far more often than one it has not, and it must be able to take that answer
 /// without touching the table.
 ///
-/// WHY the last placement is refreshed from a table hit: the one-entry memo is
-/// what makes the run a caller is painting right now cost a comparison rather
-/// than a scan. Without the refresh it would only ever hold a run from the
-/// first pixel of a frame, and a caller that cycles through a screen's runs --
-/// which is what painting a frame one pixel at a time means -- would miss it
-/// every time.
+/// WHY the memo is refreshed from a table hit: the memo is what makes a run the
+/// caller is painting right now cost one comparison rather than a scan.
+/// Without the refresh it would only ever hold a run from the first pixel of a
+/// frame, and a caller that cycles through a screen's runs -- which is what
+/// painting a frame one pixel at a time means -- would miss every one of them.
 fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<OutlineRun> {
+    let base = slot_for(em, x, y, text, bold);
     unsafe {
         // SAFETY: the static is read through a raw pointer and the reference it
         // yields does not outlive this block, and nothing reached from here
         // re-enters it.
-        if let Some(last) = (&*core::ptr::addr_of!(LAST_PLACED)).as_ref() {
+        if let Some(last) = (&*core::ptr::addr_of!(LAST_PLACED))[base].as_ref() {
             if last.em == em
                 && last.x == x
                 && last.y == y
@@ -421,6 +442,8 @@ fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<
                     // different run into it since. A miss here falls through to
                     // the table, which answers from what is actually resident.
                     if slot_still_holds(run.slot, em, x, y, text, bold) {
+                        #[cfg(test)]
+                        MEMO_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         // WHY the hit also stamps the slot: this is the run the
                         // pixel walk is asking for right now, so it must be the
                         // last candidate for eviction rather than the first.
@@ -429,14 +452,15 @@ fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<
                         {
                             entry.used = next_stamp();
                         }
-                        return last.run;
+                        return Some(run);
                     }
                 }
             }
         }
     }
 
-    let base = slot_for(em, x, y, text, bold);
+    #[cfg(test)]
+    TABLE_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let hit = unsafe {
         let loaded = &*core::ptr::addr_of!(LOADED);
         let mut found = None;
@@ -474,7 +498,7 @@ fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<
         }
         let mut key = [0u8; KEY_MAX];
         key[..text.len()].copy_from_slice(text);
-        *core::ptr::addr_of_mut!(LAST_PLACED) = Some(LastPlaced {
+        (*core::ptr::addr_of_mut!(LAST_PLACED))[base] = Some(LastPlaced {
             em,
             x,
             y,
@@ -588,8 +612,6 @@ pub fn place_run_cap(
     // The baseline is placed from the cap height rather than from the
     // bitmap's constant, so a run at any size sits on the same optical
     // line the other sizes do.
-    let cap_rows = typeface::line_metrics(em).0;
-    let _ = cap_rows;
     let baseline = y0 + ascent as usize;
     let run = OutlineRun::place_styled(x0, baseline, em, text, bold)?;
     if let Some(mw) = max_w {
@@ -1067,9 +1089,9 @@ mod tests {
     fn reset_slots() -> std::sync::MutexGuard<'static, ()> {
         let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot_pool();
-        // WHY the last placement is forgotten as well: the fast path answers
-        // a repeat placement from the run it placed last, and that run names
-        // the slot it was drawn into. A test that resets the pool releases
+        // WHY the placement memo is forgotten as well: the fast path answers a
+        // repeat placement from the memo table, and every entry there names the
+        // slot its run was drawn into. A test that resets the pool releases
         // those slots, so a later placement may draw a different run into the
         // slot the cached run names -- and the cached run would then be read
         // back over somebody else's glyphs. That is a failure that appears on
@@ -1205,6 +1227,7 @@ mod tests {
 
     #[test]
     fn a_baseline_too_close_to_the_top_is_refused_not_clipped() {
+        let _pool: Option<_> = Some(reset_slots());
         // `place(0, 3, 56, ..)` would put the ascender above the surface: the
         // only honest outcome is a refusal, so the caller keeps the bitmap face.
         assert!(OutlineRun::place(0, 3, 56, b"09:20").is_none());
@@ -1224,6 +1247,7 @@ mod tests {
 
     #[test]
     fn a_run_wider_or_taller_than_the_buffer_is_refused() {
+        let _pool: Option<_> = Some(reset_slots());
         // 680px is the buffer's width; a longer run at a large em exceeds it.
         let long = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
         assert!(OutlineRun::place(0, 2000, 96, long).is_none());
@@ -1334,6 +1358,61 @@ mod tests {
         let second = placed(56, b"09:20");
         assert_eq!(first.w, second.w);
         assert_eq!(first.h, second.h);
+    }
+
+    #[test]
+    fn a_pixel_walk_cycling_a_screens_runs_asks_the_table_once_per_run() {
+        use core::sync::atomic::Ordering;
+        let _pool: Option<_> = Some(reset_slots());
+        MEMO_HITS.store(0, Ordering::Relaxed);
+        TABLE_PROBES.store(0, Ordering::Relaxed);
+        // Six labels down one screen, the way the shell lays them out. A
+        // per-pixel painter asks for each of these once for every pixel it
+        // paints, so the cost of a frame is the number of asks and not the
+        // number of runs -- unless the memo holds a screen's worth of them.
+        const RUNS: [(&[u8], usize, u32); 6] = [
+            (b"09:20", 200, 56),
+            (b"Mon, 12 Oct", 260, 18),
+            (b"Ag", 320, 24),
+            (b"Alarms", 380, 20),
+            (b"Next up", 440, 16),
+            (b"Calendar", 500, 16),
+        ];
+        const PASSES: usize = 5;
+        // WHY the bases are pinned to be distinct: the memo is direct-mapped,
+        // so two runs that share one answer each other in turn -- a real cost
+        // of a hash change, and one this test must not mistake for the memo
+        // being too small.
+        let mut bases = [0usize; 6];
+        for (i, (text, y, em)) in RUNS.iter().enumerate() {
+            bases[i] = slot_for(*em, 20, *y, text, false);
+        }
+        for i in 0..RUNS.len() {
+            for j in (i + 1)..RUNS.len() {
+                assert_ne!(bases[i], bases[j], "the runs this test asks with collide in the memo");
+            }
+        }
+        for _ in 0..PASSES {
+            for (text, y, em) in RUNS.iter() {
+                OutlineRun::place(20, *y, *em, text).expect("placed");
+            }
+        }
+        // Two table probes per run: the pass that rasterises it and the pass
+        // that reads it back and puts it in the memo. After that the walk is
+        // answered from the memo. A one-entry memo paid a table probe on every
+        // ask from the second pass onward -- six runs times five passes is
+        // thirty probes, and each probe is a scan of the coverage pool done
+        // while the painter is holding a single pixel.
+        assert_eq!(
+            TABLE_PROBES.load(Ordering::Relaxed),
+            2 * RUNS.len(),
+            "a repeat placement must not cost a table probe"
+        );
+        assert_eq!(
+            MEMO_HITS.load(Ordering::Relaxed),
+            RUNS.len() * (PASSES - 2),
+            "the runs a pixel walk is cycling must be answered from the memo"
+        );
     }
 
     #[test]

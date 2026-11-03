@@ -180,11 +180,158 @@ pub fn str_advance_px(text: &str, px_per_em: u32) -> u32 {
 ///
 /// Decodes valid UTF-8 and advances each Unicode codepoint; falls back
 /// to byte-by-byte advances if not valid UTF-8.
+///
+/// WHY a memo on top of the walk: a caller that paints a screen one pixel at a
+/// time asks this the same question for every pixel of the run it is inside --
+/// a centred label re-derives its own width to find its left edge -- and the
+/// walk is a `from_utf8` validation plus one glyph lookup per character. The
+/// placement pool remembers the same run for the same reason; a width has no
+/// glyphs to keep, so this one is a table of numbers.
 pub fn text_advance_px(text: &[u8], px_per_em: u32) -> u32 {
-    if let Ok(s) = core::str::from_utf8(text) {
+    if let Some(w) = remembered_advance(text, px_per_em) {
+        return w;
+    }
+    #[cfg(test)]
+    ADVANCE_SCANS.with(|c| c.set(c.get() + 1));
+    let measured = if let Ok(s) = core::str::from_utf8(text) {
         str_advance_px(s, px_per_em)
     } else {
         text.iter().map(|c| advance_px(*c, px_per_em)).sum()
+    };
+    remember_advance(text, px_per_em, measured);
+    measured
+}
+
+/// How many widths are remembered.
+///
+/// WHY as many as the placement pool: the strings a screen repeats are the
+/// strings it draws -- one per label, plus the same labels at the sizes the
+/// ladder offers -- and a table that holds half of them answers nothing.
+const ADV_SLOTS: usize = 32;
+
+/// The longest string whose width is remembered.
+///
+/// WHY a bound well under the placement key's: a per-pixel caller repeats short
+/// strings -- a label, a time, a digit -- and asks a long line exactly once
+/// when it lays the line out. A key wide enough for prose would make the table
+/// four times the size to hold the entries that are never asked twice.
+const ADV_KEY_MAX: usize = 32;
+
+#[derive(Clone, Copy)]
+struct Advanced {
+    em: u32,
+    len: usize,
+    key: [u8; ADV_KEY_MAX],
+    w: u32,
+}
+
+static mut ADVANCES: [Option<Advanced>; ADV_SLOTS] = [None; ADV_SLOTS];
+
+/// Counts the widths the table had to re-derive, for the thread that asked.
+///
+/// WHY a count: a cache hit and a cache miss draw the same pixels, so without
+/// one there is no test that fails while the table is too small or too
+/// narrow-keyed to hold what a pixel walk repeats.
+///
+/// WHY thread-local rather than a process global: the harness runs other tests
+/// beside this one, every one of them measuring widths through the same shared
+/// table, and a global count would charge their work to whichever test happened
+/// to be reading. It compiles out of the guest.
+#[cfg(test)]
+std::thread_local! {
+    static ADVANCE_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub fn advance_scans() -> usize {
+    ADVANCE_SCANS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub fn reset_advance_scans() {
+    ADVANCE_SCANS.with(|c| c.set(0));
+}
+
+fn advance_slot(em: u32, text: &[u8]) -> usize {
+    let first = if text.is_empty() { 0 } else { text[0] as usize };
+    let last = if text.is_empty() { 0 } else { text[text.len() - 1] as usize };
+    let mut h = (em as usize) ^ (text.len() << 5) ^ (first << 9) ^ (last << 3);
+    h ^= (h >> 4) ^ (h >> 8);
+    h % ADV_SLOTS
+}
+
+/// The remembered width of exactly (`text`, `px_per_em`), if the table holds it.
+///
+/// WHY the whole key is compared: a width read out for a different string would
+/// put a label in the wrong place, and it is the kind of wrong that shows up on
+/// one label of one screen. `len` and the bytes are checked, not a hash.
+fn remembered_advance(text: &[u8], px_per_em: u32) -> Option<u32> {
+    if text.len() > ADV_KEY_MAX {
+        return None;
+    }
+    let base = advance_slot(px_per_em, text);
+    unsafe {
+        // SAFETY: the table is read through a raw pointer and the reference it
+        // yields does not outlive this block, and nothing reached from here
+        // re-enters it.
+        let table = &*core::ptr::addr_of!(ADVANCES);
+        for i in 0..ADV_SLOTS {
+            if let Some(entry) = table[(base + i) % ADV_SLOTS].as_ref() {
+                if entry.em == px_per_em
+                    && entry.len == text.len()
+                    && entry.key[..text.len()] == *text
+                {
+                    return Some(entry.w);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Remembers a measured width, replacing whatever shares its slot.
+///
+/// WHY no least-recently-used run here, unlike the box and placement caches:
+/// the cost of a wrong victim is one re-measured walk, not a re-rasterised
+/// glyph, so a collision that alternating pixels cause is bounded by the walk
+/// this function replaced rather than multiplied by it.
+fn remember_advance(text: &[u8], px_per_em: u32, w: u32) {
+    if text.len() > ADV_KEY_MAX {
+        return;
+    }
+    let base = advance_slot(px_per_em, text);
+    let mut key = [0u8; ADV_KEY_MAX];
+    key[..text.len()].copy_from_slice(text);
+    unsafe {
+        // SAFETY: as above -- one entry written through a raw pointer, and no
+        // borrow of the table is live here.
+        let table = &mut *core::ptr::addr_of_mut!(ADVANCES);
+        let mut target = base;
+        for i in 0..ADV_SLOTS {
+            let slot = (base + i) % ADV_SLOTS;
+            if table[slot].is_none() {
+                target = slot;
+                break;
+            }
+        }
+        table[target] = Some(Advanced {
+            em: px_per_em,
+            len: text.len(),
+            key,
+            w,
+        });
+    }
+}
+
+/// Forgets every remembered width.
+///
+/// WHY it is public: a test that reasons about the table has to start from an
+/// empty one, the same reason the placement pool is reset between tests.
+pub fn reset_advance_cache() {
+    unsafe {
+        for entry in (*core::ptr::addr_of_mut!(ADVANCES)).iter_mut() {
+            *entry = None;
+        }
     }
 }
 
@@ -1117,5 +1264,78 @@ mod tests {
 
         let bullet_adv = text_advance_px("• item".as_bytes(), 24);
         assert!(bullet_adv > text_advance_px(b"item", 24));
+    }
+
+    #[test]
+    fn a_repeated_width_is_measured_once_and_not_once_per_pixel() {
+        use std::println;
+        reset_advance_cache();
+        reset_advance_scans();
+        const ASKS: usize = 20_000;
+        // A centred label derives its own width for every pixel it paints, so
+        // the walk -- one UTF-8 validation plus one glyph lookup per character
+        // -- is what a per-pixel caller repeats. The table has to answer it.
+        // The bound is a ratio rather than an exact count because the harness
+        // runs other tests through this same shared table beside this one, and
+        // one of them can take the entry; what the test is asserting is that
+        // the walk is not what the repeat costs.
+        for _ in 0..ASKS {
+            assert_eq!(text_advance_px(b"09:20", 56), str_advance_px("09:20", 56));
+        }
+        let scans = advance_scans();
+        println!("advance scans: {} of {} asks", scans, ASKS);
+        assert!(
+            scans * 100 <= ASKS,
+            "{scans} of {ASKS} repeats re-walked the face; the width memo answered nothing"
+        );
+    }
+
+    #[test]
+    fn the_remembered_width_is_the_walks_own_answer() {
+        // The cache may only ever return what the walk would have. Every case
+        // is measured cold, then warm, then against the uncached walk directly,
+        // so a wrong key match, a truncation, or a stale entry shows up as a
+        // label landing in the wrong place rather than as a rendering that
+        // merely looks plausible.
+        reset_advance_cache();
+        for text in [
+            b"09:20".as_slice(),
+            b"Mon, 12 Oct".as_slice(),
+            "Café".as_bytes(),
+            "• item".as_bytes(),
+            b"Ag".as_slice(),
+            b"Ai".as_slice(),
+            b"".as_slice(),
+            "a long line that the width memo deliberately refuses to hold because it is past the key".as_bytes(),
+        ] {
+            for em in [17u32, 24, 34, 56, 102] {
+                reset_advance_cache();
+                let cold = text_advance_px(text, em);
+                let warm = text_advance_px(text, em);
+                let again = text_advance_px(text, em);
+                let walk = match core::str::from_utf8(text) {
+                    Ok(s) => str_advance_px(s, em),
+                    Err(_) => text.iter().map(|c| advance_px(*c, em)).sum(),
+                };
+                assert_eq!(cold, walk, "the first answer at em {em} is not the walk's");
+                assert_eq!(warm, walk, "the remembered answer at em {em} is not the walk's");
+                assert_eq!(again, walk, "the second repeat at em {em} is not the walk's");
+            }
+        }
+        // Two same-length strings asked in alternation: the shorter key's entry
+        // must not answer for the longer one's, which is the shape a truncated
+        // compare would get wrong.
+        reset_advance_cache();
+        let mut a = 0u32;
+        let mut b = 0u32;
+        for i in 0..64 {
+            if i % 2 == 0 {
+                a = text_advance_px(b"Ag", 40);
+            } else {
+                b = text_advance_px(b"Ai", 40);
+            }
+        }
+        assert_eq!(a, str_advance_px("Ag", 40));
+        assert_eq!(b, str_advance_px("Ai", 40));
     }
 }
