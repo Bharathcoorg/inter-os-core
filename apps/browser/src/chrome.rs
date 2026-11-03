@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! The boxes the browser paints its chrome controls in, and answers taps in.
 //!
 //! WHY this is a module and not a number at each call site: the renderer walks
@@ -16,6 +19,8 @@
 //! down. The origins live beside the boxes they contain, so moving a row moves
 //! its control.
 
+use crate::theme::{radius, spacing, type_scale, THEME};
+use interos_std::design::font;
 use interos_std::design::primitives::Rect;
 use interos_std::design::touch::MIN_TARGET;
 use interos_std::design::viewport::LOGICAL_WIDTH;
@@ -29,9 +34,158 @@ pub const PANEL_W: usize = LOGICAL_WIDTH;
 
 /// The gutter every sheet card and list row keeps from the panel's edge.
 pub const SIDE_GUTTER: usize = 24;
-
 /// The card's own width between the two gutters.
 pub const CARD_W: usize = PANEL_W - 2 * SIDE_GUTTER;
+
+// ---------------------------------------------------------------------------
+// The chrome tile: the plate, the ring and the ink every control wears
+// ---------------------------------------------------------------------------
+
+/// The two states a chrome control of this app is honestly in.
+///
+/// WHY only two: the kernel hands this app one tap event (`input.kind == 1`),
+/// never a press-down and a release, so there is no moment at which a control
+/// *is* pressed for the app to draw. What the app does know is which panel a
+/// tile opened: the tile whose sheet is on the screen is the current one, and
+/// a control that says "the panel under me is open" is reporting a state it
+/// actually holds. A resting/pressed highlight that no event could ever set is
+/// a state the app does not have, and would be a lie.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChromeState {
+    /// On the bar, doing nothing but waiting.
+    Resting,
+    /// The tile whose panel the app is currently showing, and the tile whose
+    /// job the app is currently doing (Reload while a page is loading is a
+    /// Stop, which is a different job on the same plate).
+    Current,
+}
+
+/// The plate a chrome control is painted on.
+///
+/// /// The ring that says it is a thing you can press, and the ink its mark
+/// takes, are [`tile_ring`] and [`tile_ink`]; the three are one decision about
+/// one control, which is why they are three functions over one `ChromeState`
+/// rather than colours chosen at each of the nine call sites.
+///
+/// WHY `surface_container_high` and not the bar's own `surface`: the platform's
+/// raised step is the role its own theme names "a raised card, a chip, a
+/// pressed control", and it is what [`components::pill`] and
+/// [`components::button_style`] (`Secondary`) fill a control with. It is only
+/// 1.11:1 off this app's `#FAFAFA` bar, so on its own it is a tone, not an
+/// edge -- which is exactly why the edge is [`tile_ring`]'s job and never this
+/// step's.
+///
+/// WHY the current plate is `inverted_surface`: it is the platform's answer to
+/// "this one is the one", given by `components::segment_style(_, true)` and
+/// `components::pill(.., selected)` for the launcher's tab row and every
+/// segmented control on the device, and by `ButtonKind::Primary` for the one
+/// control on a screen a person presses. On this theme it is `#0A0A0A` -- the
+/// same value as [`Theme::outline`] -- so no colour enters the app.
+///
+/// [`components::pill`]: interos_std::design::components::pill
+/// [`components::button_style`]: interos_std::design::components::button_style
+/// [`Theme::outline`]: interos_std::design::theme::Theme::outline
+pub const fn tile_plate(state: ChromeState) -> u32 {
+    match state {
+        ChromeState::Resting => THEME.surface_container_high,
+        ChromeState::Current => THEME.inverted_surface(),
+    }
+}
+
+/// The ring a chrome control is outlined with.
+///
+/// WHY `outline` and not `border`, and not the app's old `on_surface_variant`:
+/// [`Theme::border`] is the `#E5E5E5` hairline that separates two surfaces --
+/// 1.21:1 against this bar and 1.08:1 against the plate it would ring, which
+/// is a line nobody can see, and is why every control the app rang with it
+/// read as a wireframe with no surface in it. The app then moved the ring to
+/// `on_surface_variant` (`#525458`, 6.53:1 on the plate), which is *a* line --
+/// and is still what the reviewer saw: a hairline outline around a plate one
+/// step off the bar, which is a skeleton of a button rather than a button.
+///
+/// [`Theme::outline`] is the role the theme documents as "a prominent outline:
+/// a focused field, a selected control". It is what the SDK's own Back chip
+/// rings itself with (`back_button::colors_for_theme` hands out
+/// `(on_surface, outline, surface_container_high)`), what File Manager calls
+/// `CONTROL_OUTLINE` for every one of its secondary controls, and on this
+/// theme it is `#0A0A0A`: 18.97:1 against the bar and 17.15:1 against the
+/// plate. WCAG 1.4.11 asks 3:1 of a control's visible boundary; this clears it
+/// six times over without leaving the neutral ladder, and it makes the
+/// browser's nine chrome tiles and the Back chip beside them one set instead
+/// of two.
+///
+/// WHY the ring does not move on the current tile: `inverted_surface` and
+/// `outline` are the same value on this theme, so a tile that fills itself
+/// black keeps a continuous edge on a light theme and does not depend on the
+/// pairing.
+pub const fn tile_ring(state: ChromeState) -> u32 {
+    match state {
+        ChromeState::Resting | ChromeState::Current => THEME.outline,
+    }
+}
+
+/// The ink a chrome control's mark is drawn in.
+///
+/// WHY `on_surface` and not `on_surface_variant`: 17.04:1 on the plate against
+/// 6.53:1, and it is the role `back_button::colors_for_theme` gives the
+/// chevron it draws on the very same plate. A mark at the muted rung inside a
+/// plate whose ring is at the prominent rung reads as the plate's decoration
+/// rather than as its label; at `on_surface` the mark is the heaviest thing on
+/// the control, which is what a person aims at.
+///
+/// WHY the current tile takes `on_inverted_surface`: ink follows its surface,
+/// and this is the pair `segment_style` and `pill` put on the selected
+/// segment.
+pub const fn tile_ink(state: ChromeState) -> u32 {
+    match state {
+        ChromeState::Resting => THEME.on_surface,
+        ChromeState::Current => THEME.on_inverted_surface(),
+    }
+}
+
+/// How wide a ring a chrome control's plate wears.
+///
+/// WHY one name for it: the painter strokes the ring and the gates below count
+/// its pixels, and a width written at each call site is a width that can be
+/// edited out on one control while the other nine keep it.
+pub const TILE_RING_W: usize = 1;
+
+/// The corner every chrome tile is rounded at.
+///
+/// WHY a name here and not the `12` the app typed at nine call sites: it is
+/// the platform's [`radius::CONTROL`] step -- "buttons, interactive tiles and
+/// text fields" -- and the same step the SDK's Back chip rounds at
+/// (`back_button::RADIUS`). The gate binds it to both, so the tile cannot stop
+/// matching the chip beside it without failing to build.
+pub const TILE_R: usize = radius::CONTROL;
+
+const _: () = assert!(TILE_R == radius::CONTROL && TILE_R == 12);
+const _: () = assert!(TILE_R == THEME.radii.control);
+
+/// The corner a count badge is cut with: the platform's full-pill step.
+///
+/// WHY it is a name and not `999` typed at the call site: `draw_rounded_rect`
+/// clamps the radius to half the shorter edge, so the step is what turns a
+/// square plate into a disc, and a disc whose radius was typed is a disc that
+/// quietly becomes a rounded square when someone re-sizes it.
+pub const BADGE_R: usize = radius::PILL;
+
+const _: () = assert!(BADGE_R == radius::PILL);
+
+/// The extent every mark on a chrome tile is drawn at.
+///
+/// WHY the platform's icon box and not each glyph's own hand-tuned size: the
+/// browser drew its close mark seventeen rows across, its kebab five, its
+/// reload ring nine rows of radius and its plus two rows wide -- every one a
+/// different extent, and all of them smaller than the square every other glyph
+/// on the device fills. [`interos_std::design::monochrome::ICON_BOX`] is that
+/// square, and `monochrome::icon_px` draws the kit's shapes into any box, so a
+/// mark here is the kit's mark at the kit's extent at whatever size the plate
+/// allows.
+pub const ICON: usize = interos_std::design::monochrome::ICON_BOX;
+
+const _: () = assert!(ICON == 24);
+const _: () = assert!(ICON < MIN_TARGET);
 
 /// The sheet header's top row, and how tall the header band is.
 ///
@@ -159,19 +313,89 @@ const _: () = assert!(retry_rect(SHEET_HEADER_Y0).x + ACTION_W <= PANEL_W);
 ///
 /// WHY the block's top is named too: the heading is drawn above the plates, and
 /// the press path must not answer a tile in the heading's rows.
-pub const HOME_GRID_Y0: usize = 252;
-pub const HOME_TILE_Y: usize = 278;
+///
+/// WHY the whole block is now spaced off the type ladder rather than off four
+/// remembered numbers: the heading used to be set at the caption rung inside a
+/// band the block cut at `HOME_GRID_Y0 + font::line_height(CAPTION)`, which ran
+/// four rows *past* `HOME_TILE_Y` -- so the block painted the top four rows of
+/// every tile as flat page, shearing the rounded corners off all four plates --
+/// and the captions ran four rows past `HOME_GRID_Y1`, which shaved their
+/// descenders and cut the last four rows out of the band that answers them. Both
+/// clips were invisible in a screenshot and obvious on the device. Every step of
+/// this block is now `line_height(rung)` plus a multiple of the platform's
+/// 4-column grid, and the gates below fail the build if a box ever overlaps its
+/// neighbour again.
+pub const HOME_GRID_Y0: usize = 248;
 
-/// The tile's plate, and the caption the tile is read with.
+/// The rung a start-page section heading is set at.
+///
+/// WHY `BODY` and not `SECTION`: `SECTION` (cap 27) is the rung the platform
+/// gives a *screen's* title -- File Manager's `HEADER_TITLE_SCALE`. The heading
+/// above a group on a home screen is set at `BODY` in ink `on_surface`, which is
+/// how File Manager draws "Recently modified" and "Browse directories", and it
+/// is the rung that separates a group from its rows without shouting over the
+/// tiles under it.
+pub const HOME_HEADING_RUNG: usize = type_scale::BODY;
+
+/// The row a start-page heading's box starts on.
+pub const HOME_HEADING_Y: usize = HOME_GRID_Y0 + spacing::GRID_4;
+/// How tall a start-page heading's box is.
+pub const HOME_HEADING_H: usize = font::line_height(HOME_HEADING_RUNG);
+
+/// The plate row of the tile grid, and how tall the grid block is.
+pub const HOME_TILE_Y: usize = HOME_HEADING_Y + HOME_HEADING_H + spacing::GRID_8;
+
+/// The plate's square and the caption it is read with.
 pub const HOME_TILE_SIZE: usize = 64;
-pub const HOME_TILE_CAPTION_Y: usize = 350;
+/// The rung a tile's caption is set at.
+///
+/// WHY `CAPTION`: the platform's own icon tile draws its label one rung below
+/// the plate's title rung -- File Manager's `GRID_NAME_SCALE` is `CAPTION` for
+/// exactly this shape -- and the monogram inside the plate already carries the
+/// `BODY` rung, so plate and label read as one object with the plate leading.
+pub const HOME_CAPTION_RUNG: usize = type_scale::CAPTION;
+pub const HOME_TILE_CAPTION_Y: usize = HOME_TILE_Y + HOME_TILE_SIZE + spacing::GRID_4;
+/// The height of a tile's caption box.
+pub const HOME_CAPTION_H: usize = font::line_height(HOME_CAPTION_RUNG);
 
 /// The first row past the grid block, and so the bottom of a tile's band.
 ///
 /// WHY the band reaches past the plate: the caption is part of the tile -- it is
 /// the only thing that says what the tile opens -- and a press on the word
 /// "Wikipedia" used to do nothing at all while a press on the icon did.
-pub const HOME_GRID_Y1: usize = 376;
+pub const HOME_GRID_Y1: usize = HOME_TILE_CAPTION_Y + HOME_CAPTION_H + spacing::GRID_4;
+
+const _: () = assert!(HOME_GRID_Y0 < HOME_HEADING_Y);
+const _: () = assert!(HOME_HEADING_Y + HOME_HEADING_H < HOME_TILE_Y);
+const _: () = assert!(HOME_TILE_Y + HOME_TILE_SIZE <= HOME_TILE_CAPTION_Y);
+const _: () = assert!(HOME_TILE_CAPTION_Y + HOME_CAPTION_H <= HOME_GRID_Y1);
+const _: () = assert!(HOME_GRID_Y1 > HOME_TILE_Y);
+
+/// The heading row of the start page's second block, "Your pages", and the row
+/// the card block under it starts on.
+///
+/// WHY the pair is derived here: the heading used to be painted inside a band
+/// the app wrote as the literals `386..418` while the block above it ended at
+/// 376 and the cards below started at 422 -- three numbers that only ever
+/// matched by luck, and a heading box that grows is a heading that climbs into
+/// the tiles above it or sits on top of the cards below it. Both rows now come
+/// off `HOME_GRID_Y1`, the quick-link block's own last row, and the renderer
+/// stacks its cards from `HOME_LIST_Y1`, so the two cannot part.
+///
+/// WHY the cards themselves are NOT derived here: an earlier pass of this sweep
+/// did declare their geometry, and nothing painted it -- the renderer and the
+/// press path still stack their own four cards, which agree with each other, so
+/// there is no duplicated-rect defect to close. Moving that block onto boxes
+/// here is a separate change with its own review, not a constant nobody reads.
+/// What this module does own is the row the first card stands on, which
+/// `main.rs` takes as its stack's anchor, so a heading that grows off its band
+/// can no longer paint itself over the cards under it.
+pub const HOME_LIST_Y0: usize = HOME_GRID_Y1 + spacing::GRID_8;
+/// The row the first card stands on: one heading box and one grid step below
+/// the heading's own top.
+pub const HOME_LIST_Y1: usize = HOME_LIST_Y0 + HOME_HEADING_H + spacing::GRID_4;
+
+const _: () = assert!(HOME_LIST_Y1 > HOME_LIST_Y0);
 
 /// The columns a tile answers: the whole slice of the strip between its two
 /// neighbours, plate and caption together.
@@ -184,10 +408,69 @@ pub const HOME_GRID_Y1: usize = 376;
 /// nothing. Taking the half-gap each side of the plate gives every tile the
 /// columns up to its neighbour's edge, which is what a phone's icon row actually
 /// is: no dead strip between two icons, and never one column answered twice.
-const TILE_SLOP: usize = (HOME_TILE_X[1] - HOME_TILE_X[0] - HOME_TILE_SIZE) / 2;
+const TILE_SLOP: usize = (HOME_TILE_CELL - HOME_TILE_SIZE) / 2;
+
+/// How many quick-link tiles the start page offers, and how many it answers.
+pub const HOME_TILE_COLUMNS: usize = 4;
+
+/// The slice of the strip one tile owns: the content span, four ways.
+///
+/// WHY the row is derived from the span instead of typed as four columns: the
+/// four plates used to sit at 66, 234, 402 and 570, which is a block spanning
+/// 66..634 on a panel whose content runs 24..696 -- ten columns left of the
+/// panel's own centre line, with a right margin thirty-eight columns wider than
+/// its left. Four equal cells of a quarter of the content span put every plate on
+/// its cell's centre and make the four answer-bands tile the content span
+/// exactly, with no dead strip at either end.
+pub const HOME_TILE_CELL: usize = CARD_W / HOME_TILE_COLUMNS;
+
+const _: () = assert!(CARD_W % HOME_TILE_COLUMNS == 0);
+const _: () = assert!(HOME_TILE_CELL > HOME_TILE_SIZE);
 
 /// The plate column of each of the four tiles.
-pub const HOME_TILE_X: [usize; 4] = [66, 234, 402, 570];
+pub const HOME_TILE_X: [usize; 4] = [
+    SIDE_GUTTER + HOME_TILE_CELL * 0 + TILE_SLOP,
+    SIDE_GUTTER + HOME_TILE_CELL * 1 + TILE_SLOP,
+    SIDE_GUTTER + HOME_TILE_CELL * 2 + TILE_SLOP,
+    SIDE_GUTTER + HOME_TILE_CELL * 3 + TILE_SLOP,
+];
+
+/// The two-letter monogram each tile wears.
+///
+/// WHY a monogram at all, and why this one: three of the four tiles used to
+/// carry one or two letters at the *caption* rung -- sixteen rows of ink in a
+/// sixty-four row plate, the same size as the word under them -- and the fourth
+/// carried a hand-drawn play triangle. A mark the size of its own label reads as
+/// a placeholder that has not been filled in, which is what the reviewer put a
+/// finger on. All four now carry the site's initials at the body rung, centred
+/// in the plate by measurement.
+///
+/// WHY `YT` and `WK` beside `IO` and `GH`: one letter among two-letter marks
+/// reads as a truncation, and "W" for Wikipedia was the case in point.
+///
+/// WHY this is not a favicon: the app holds no icon for a start-page link --
+/// its `favicon` field is the *loaded* document's picture and nothing else, and
+/// the four links here are shipped addresses, not pages this device has visited
+/// -- so the honest mark is the initial of the name the caption already prints,
+/// not a picture this browser does not have.
+pub const HOME_TILE_MONOGRAM: [&[u8]; 4] = [b"IO", b"YT", b"GH", b"WK"];
+
+/// The rung a tile's monogram is set at, and the row its box starts on.
+///
+/// WHY the body rung: it is the platform's icon-title rung -- `SECTION_CAP_PX`
+/// and above it belongs to a screen's title -- and at cap 21 a two-letter mark
+/// fills a 64-row plate the way `monochrome::ICON_BOX` fills a chrome tile,
+/// instead of floating in it.
+pub const HOME_MONOGRAM_RUNG: usize = type_scale::BODY;
+pub const HOME_TILE_MONOGRAM_Y: usize =
+    HOME_TILE_Y + (HOME_TILE_SIZE - font::line_height(HOME_MONOGRAM_RUNG)) / 2;
+/// How far inside the plate a monogram must stay, so the plate reads as a plate
+/// and not as a letter with a border.
+const HOME_MONOGRAM_INSET: usize = spacing::GRID_8;
+
+const _: () = assert!(font::line_height(HOME_MONOGRAM_RUNG) <= HOME_TILE_SIZE);
+const _: () = assert!(HOME_TILE_MONOGRAM_Y + font::line_height(HOME_MONOGRAM_RUNG)
+    <= HOME_TILE_Y + HOME_TILE_SIZE - HOME_MONOGRAM_INSET / 2);
 
 /// The column each tile's caption starts at, and the caption itself.
 ///
@@ -196,11 +479,12 @@ pub const HOME_TILE_X: [usize; 4] = [66, 234, 402, 570];
 /// decoration next to it. The band under `home_tile_hit` answers it, and the gate
 /// after the table proves the ink is inside the band that answers it.
 ///
-/// WHY "Wikipedia" starts four columns left of its own plate: the caption is set
-/// centred under the plate it names, and the band reaches the same eight columns
-/// on either side of every plate, so the ink it starts outside still lands on
-/// this tile's band -- never its neighbour's, which the non-overlap gate holds.
-pub const HOME_TILE_CAPTION_X: [usize; 4] = [70, 238, 410, 566];
+/// WHY each column is its plate's centre line less half the run's measured
+/// width: the caption is set centred under the plate it names, and the band
+/// reaches the same `TILE_SLOP` columns on either side of every plate, so the ink
+/// it starts outside still lands on this tile's band -- never its neighbour's,
+/// which the non-overlap gate holds.
+pub const HOME_TILE_CAPTION_X: [usize; 4] = [80, 248, 420, 576];
 pub const HOME_TILE_CAPTION: [&[u8]; 4] = [b"InterOS", b"YouTube", b"GitHub", b"Wikipedia"];
 
 /// The address each tile opens, in the same order as its caption.

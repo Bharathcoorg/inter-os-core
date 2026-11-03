@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Inter OS Native Sovereign Browser & Web Client
 //!
 //! High-performance Ring-3 (User Mode) smartphone browser laid out for the
@@ -28,6 +31,7 @@ use interos_std::design::back_button;
 use interos_std::design::components;
 use interos_std::design::font;
 use interos_std::design::home_band;
+use interos_std::design::monochrome;
 use interos_std::design::primitives::{draw_rounded_rect, Rect};
 
 use browser::{
@@ -1238,10 +1242,15 @@ const FAVICON_FACE_PIXELS: usize = FAVICON_BOX.w * FAVICON_BOX.h;
 const TABS_TOP_BTN: Rect = Rect::new(540, 60, 46, 44);
 const KEBAB_BTN: Rect = Rect::new(596, 60, 44, 44);
 const CLOSE_BTN: Rect = Rect::new(650, 60, 44, 44);
-const BTN_R: usize = 12;
+/// The corner every chrome tile is cut with: the platform's control radius.
+///
+/// WHY it is `chrome`'s and not a second 12: the radius of a tile is part of
+/// the tile's treatment, and `chrome::TILE_R` is the value that treatment is
+/// defined against. A literal here is a number that can leave the platform
+/// without anyone deciding to.
+const BTN_R: usize = chrome::TILE_R;
 
-/// The pixel of a chrome control's box: the tile it is painted on and the
-/// edge that holds it.
+/// The pixel of a chrome control's box, at rest.
 ///
 /// WHY this exists: every control in the top toolbar and the bottom
 /// navigation bar used to be painted with a fill equal to the bar behind it
@@ -1250,48 +1259,115 @@ const BTN_R: usize = 12;
 /// `#FAFAFA` -- the navigation was invisible, and a person could not see
 /// that it existed let alone where its edges were.
 ///
-/// WHY these two tokens: the tile is the platform's raised surface
-/// (`#EFEEE9`), the step the app already paints every chip and field with, so
-/// the control reads as an object resting on the bar rather than as the bar.
-/// The edge is the platform's secondary ink (`#525458`), because
-/// `Theme::border` is `#E5E5E5` -- 1.21:1 against a `#FAFAFA` bar and 1.08:1
-/// against the tile it would ring, which is a hairline nobody can see. At
-/// 6.53:1 on the tile, 7.27:1 on the bar and 7.59:1 on a card the edge clears
-/// the 3:1 a non-text control needs with room to spare while staying inside
-/// the black-white-grey ladder: no new colour, and no geometry, hit band or
-/// position moves.
+/// WHY it delegates: the plate, the ring and the ink are one decision, made
+/// once in [`chrome`], so a tile cannot take the fill from one revision of
+/// the treatment and the edge from another.
 #[inline]
 fn chrome_control_px(x: usize, y: usize, rect: Rect, radius: usize) -> Option<u32> {
+    chrome_tile_px(x, y, rect, radius, chrome::ChromeState::Resting)
+}
+
+/// The pixel of a chrome control's box in one of the two states the app
+/// actually holds: resting, or the current one.
+///
+/// WHY [`chrome::ChromeState::Current`] exists and why it is not a press
+/// flash: the kernel delivers this app a tap and nothing else -- there is no
+/// down event to paint a highlight against, and a highlight that lasted only
+/// for the tap would be a state the app never had. What the app does hold is
+/// which panel its own open sheet names: the menu, the tab switcher, the
+/// bookmark list, whether the page is loading. That is the platform's
+/// selected treatment -- the same inverted plate `components::segment_style`
+/// gives the selected segment and `components::pill` gives the selected chip
+/// -- so the tile under it says what is true rather than what just happened.
+///
+/// WHY the ring moved to `Theme::outline`: the tile is
+/// `surface_container_high`, `#EFEEE9`, which is 1.11:1 off the `#FAFAFA` bar
+/// it rests on, and the old ring was `on_surface_variant`, `#525458` -- so the
+/// only thing separating the control from the bar was a hairline, which is
+/// what reads as a skeleton. `Theme::outline` is `#0A0A0A`: 18.97:1 on the bar
+/// and 17.15:1 on the plate. It is the ring the SDK's own `back_button` puts
+/// on the same tile and the one File Manager names `CONTROL_OUTLINE` for the
+/// same reason, so the chrome stops inventing its own weight. Nothing here
+/// moves a box: same rect, same radius, same position.
+#[inline]
+fn chrome_tile_px(
+    x: usize,
+    y: usize,
+    rect: Rect,
+    radius: usize,
+    state: chrome::ChromeState,
+) -> Option<u32> {
     draw_rounded_rect(
         x,
         y,
         rect,
         radius,
-        THEME.surface_container_high,
-        Some(THEME.on_surface_variant),
-        1,
+        chrome::tile_plate(state),
+        Some(chrome::tile_ring(state)),
+        chrome::TILE_RING_W,
     )
 }
 
-/// The ink of a sheet's close control: its plate, and the `X` centred in it.
+/// The square the platform's own icon grid is drawn into inside a tile.
 ///
-/// WHY the plate comes from `chrome_control_px` and the box from
-/// `browser::chrome`: the nine sheets each drew a bare 17-row `X` at a
-/// memorised (660, 145) and answered a press anywhere in `640..=695 x 120..=165`
-/// -- a strip whose top 17 rows and left 12 columns are header with nothing in
-/// them, and whose ink sits 12 rows off the strip's own middle. A person aiming
-/// at the mark they could see pressed a box they could not see, and a person
-/// pressing the middle of the box got nothing they could point to. The plate is
-/// the same tile the toolbar's controls wear, the glyph is centred in it, and the
-/// press answers exactly it.
+/// WHY derived from the tile: a mark that follows its plate is a mark that
+/// cannot be left behind when the plate moves, and every control here is a
+/// plate that already moves with the row it stands on.
+#[inline]
+fn tile_mark_box(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x + (rect.w - chrome::ICON) / 2,
+        rect.y + (rect.h - chrome::ICON) / 2,
+        chrome::ICON,
+        chrome::ICON,
+    )
+}
+
+/// A tile and the platform mark it wears, as one pixel lookup.
+///
+/// WHY the ink comes from the state and not from the caller: a `#0A0A0A` mark
+/// on the inverted plate of the current tile is 1.05:1 -- the mark vanishes
+/// exactly when the tile is saying most loudly that it is the one in use,
+/// which is the second half of the skeleton complaint. [`chrome::tile_ink`]
+/// keeps the mark and the plate in the same pair.
+#[inline]
+fn chrome_tile_mark_px(
+    x: usize,
+    y: usize,
+    rect: Rect,
+    icon: monochrome::Icon,
+    state: chrome::ChromeState,
+) -> Option<u32> {
+    let bg = chrome_tile_px(x, y, rect, BTN_R, state)?;
+    if let Some(ink) = monochrome::icon_px(x, y, tile_mark_box(rect), icon, chrome::tile_ink(state))
+    {
+        return Some(ink);
+    }
+    Some(bg)
+}
+
+/// The ink of a sheet's close control: its plate, and the kit's close mark
+/// centred in it.
+///
+/// WHY the plate comes from the chrome tile and the box from `browser::chrome`:
+/// the nine sheets each drew a bare 17-row `X` at a memorised (660, 145) and
+/// answered a press anywhere in `640..=695 x 120..=165` -- a strip whose top 17
+/// rows and left 12 columns are header with nothing in them, and whose ink sits
+/// 12 rows off the strip's own middle. A person aiming at the mark they could
+/// see pressed a box they could not see, and a person pressing the middle of the
+/// box got nothing they could point to. The plate is the same tile the toolbar's
+/// controls wear, the mark is the kit's `Close` at [`chrome::ICON`] -- the same
+/// extent the toolbar's close tile already fills, so one control does not appear
+/// twice on the screen at two sizes -- and the press answers exactly it.
 #[inline]
 fn sheet_close_pixel(x: usize, y: usize) -> Option<u32> {
-    let rect = chrome::SHEET_CLOSE;
-    let c = chrome_control_px(x, y, rect, BTN_R)?;
-    if close_glyph(x, y, rect.x + rect.w / 2, rect.y + rect.h / 2) {
-        return Some(THEME.on_surface_variant);
-    }
-    Some(c)
+    chrome_tile_mark_px(
+        x,
+        y,
+        chrome::SHEET_CLOSE,
+        monochrome::Icon::Close,
+        chrome::ChromeState::Resting,
+    )
 }
 
 /// The ink a disabled navigation glyph is painted with.
@@ -1380,27 +1456,69 @@ const _: () = assert!(chrome::home_tile_hit(0).x <= quick_tile_plate(0).x);
 const _: () = assert!(chrome::home_tile_hit(3).x + chrome::home_tile_hit(3).w
     >= quick_tile_plate(3).x + chrome::HOME_TILE_SIZE);
 
-/// The mark the `i`th quick-link tile wears inside its own plate.
+/// The row the start page's "Your pages" cards stack from, and one card's own
+/// height and the air between two of them.
 ///
-/// WHY set from the plate and not from four absolute columns: every offset here
-/// is the one the renderer used before this sweep (`plate.x + 20`, `plate.y + 22`,
-/// the play triangle at `+26 / +32`), restated so that moving a tile's plate
-/// moves its ink with it. Ink left behind by a moved plate is the dead mark this
-/// sweep is hunting.
+/// WHY the anchor is `chrome`'s heading row and not the literal `422` the
+/// renderer and the press path each carried: the heading above this list is set
+/// from the type ladder (`chrome::HOME_LIST_Y0..HOME_LIST_Y1`), and that band
+/// grew past 422 as soon as its rung was measured instead of remembered -- which
+/// made the heading's clip paint the top rows of the first card as flat page,
+/// shearing its corners off, exactly the defect this sweep was asked to close.
+/// Anchoring the stack on the row the heading ends on means the two can never
+/// overlap again, whichever rung either block is set at.
+///
+/// WHY the height and the gap stay here: the card's own ink -- its three lines
+/// and its trailing picture plate -- is laid out inside `main.rs`, and boxes
+/// that nothing paints are how this module acquired dead geometry once already.
+const HOME_CARD_Y0: usize = chrome::HOME_LIST_Y1;
+const HOME_CARD_H: usize = 100;
+const HOME_CARD_GAP: usize = 12;
+
+const _: () = assert!(HOME_CARD_Y0 > chrome::HOME_LIST_Y0);
+/// The four cards, their air and the empty-state card must stay above the
+/// navigation bar the start page is drawn behind.
+const _: () = assert!(
+    HOME_CARD_Y0 + 4 * HOME_CARD_H + 3 * HOME_CARD_GAP < NAV_BAR_Y0,
+    "the start page's card stack reaches into the navigation bar",
+);
+
+/// The `i`th "Your pages" card: the box the renderer fills and the box the
+/// press answers, one rect for both.
+const fn home_card(i: usize) -> Rect {
+    Rect::new(
+        chrome::SIDE_GUTTER,
+        HOME_CARD_Y0 + i * (HOME_CARD_H + HOME_CARD_GAP),
+        chrome::CARD_W,
+        HOME_CARD_H,
+    )
+}
+
+const _: () = assert!(home_card(0).x + home_card(0).w <= W);
+
+/// The mark a quick-link tile wears inside its own plate.
+///
+/// WHY the tile's monogram comes from `chrome`'s table at the platform's body
+/// rung instead of four hand-written strings at scale 1: the four tiles carried
+/// `"IO"`, a hand-inked play triangle, `"GH"` and `"W"` -- four different
+/// extents, four different inks, and three of them two rows from the plate's
+/// own edge. The plate is the tile; the monogram is the honest substitute for a
+/// picture this app does not store (see [`chrome::HOME_TILE_MONOGRAM`]), set in
+/// the same rung the app uses for every other label a person has to read.
 fn quick_tile_ink(x: usize, y: usize, i: usize, plate: Rect, bg: u32) -> Option<u32> {
-    match i {
-        0 => text_px(x, y, plate.x + 20, plate.y + 22, 1, b"IO", THEME.on_surface, bg, true),
-        1 => {
-            let px = (x as isize) - (plate.x + 26) as isize;
-            let py = ((y as isize) - (plate.y + 32) as isize).abs();
-            if px >= 0 && px <= 14 && py * 14 <= (14 - px) * 10 {
-                return Some(THEME.on_surface_variant);
-            }
-            None
-        }
-        2 => text_px(x, y, plate.x + 20, plate.y + 22, 1, b"GH", THEME.on_surface, bg, true),
-        _ => text_px(x, y, plate.x + 24, plate.y + 22, 1, b"W", THEME.on_surface, bg, true),
-    }
+    let mark = chrome::HOME_TILE_MONOGRAM[i];
+    let tx = centred_text_left(plate, mark, chrome::HOME_MONOGRAM_RUNG);
+    text_px(
+        x,
+        y,
+        tx,
+        chrome::HOME_TILE_MONOGRAM_Y,
+        chrome::HOME_MONOGRAM_RUNG,
+        mark,
+        chrome::tile_ink(chrome::ChromeState::Resting),
+        bg,
+        true,
+    )
 }
 
 /// Sovereign Bottom Navigation Bar (y 1350..1410)
@@ -1456,6 +1574,21 @@ const _: () = assert!(TABS_BTN.x + TABS_BTN.w <= W);
 /// default box at 1392 would answer the bar's own last rows with an exit. The
 /// box therefore claims every row the bar does not, still centred on the pill.
 const HOME_PILL: Rect = home_band::PILL;
+/// The ink the shell's home mark is painted with.
+///
+/// WHY a named constant and a gate on it: the mark used to be inked with
+/// `Theme::border`, which in this palette is `#E5E5E5` -- 1.19:1 against the
+/// `#FAFAFA` band it is drawn on. The SDK's own `home_band::pixel` takes the
+/// ink as a parameter precisely because that mistake was made once, centrally,
+/// and its docstring names `#E5E5E5` as "a hairline nobody can see". Every
+/// other app that paints this mark passes `Theme::on_surface_variant`
+/// (`#525458`, 7.03:1 here): Calendar, Messages, Music and Vault all read
+/// `THEME.on_surface_variant` at their own call site. So the reviewer's "empty
+/// grey band under the toolbar" was literally true -- the browser was the one
+/// app that painted the shell's mark invisibly, and the person had no mark to
+/// aim at.
+const HOME_PILL_INK: u32 = THEME.on_surface_variant;
+const _: () = assert!(HOME_PILL_INK == THEME.on_surface_variant);
 const HOME_HIT: Rect = home_band::hit_from(NAV_BAR_Y1);
 const _: () = assert!(HOME_PILL.y >= NAV_BAR_Y1 && HOME_PILL.y + HOME_PILL.h <= H);
 const _: () = assert!(HOME_HIT.y <= HOME_PILL.y && HOME_HIT.y + HOME_HIT.h == H);
@@ -6768,16 +6901,6 @@ fn favicon_pixel(x: usize, y: usize, face: &[[u8; 4]; FAVICON_FACE_PIXELS], bg: 
     Some(blend_toward(argb, bg, 255 - alpha as u32) | 0xFF00_0000)
 }
 
-/// Close 'X' Glyph (centered at cx, cy)
-fn close_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    if dx.abs() > 8 || dy.abs() > 8 {
-        return false;
-    }
-    (dx + dy).abs() <= 1 || (dx - dy).abs() <= 1
-}
-
 /// The close target inside the tab card at `card_y`.
 ///
 /// WHY a named box instead of `x >= 630`: the glyph is seventeen pixels across
@@ -6816,48 +6939,38 @@ fn star_glyph(x: usize, y: usize, cx: usize, cy: usize, filled: bool) -> bool {
     }
 }
 
-/// Reload Ring Glyph with Arrow
-fn reload_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    let d2 = dx * dx + dy * dy;
-    if d2 >= 49 && d2 <= 81 && !(dx > 3 && dy < -3) {
-        return true;
-    }
-    let t = (cx + 5) as isize - x as isize;
-    if t >= 0 && t <= 6 {
-        let half = 3 - (t * 3) / 6;
-        if (y as isize - (cy as isize - 8)).abs() <= half {
-            return true;
+/// Tab Count Badge: the number of tabs the app really holds.
+///
+/// WHY a filled disc and not a hairline square: the badge used to draw its own
+/// 27-row square with a `Theme::surface_container` fill and an
+/// `on_surface_variant` edge -- a second outline box inside a box that was
+/// already only an outline, which is the "skeleton like buttons" the reviewer
+/// counted twice in one control. The disc takes the tile's own ink pair: ink
+/// `#0A0A0A` on the resting plate's `#EFEEE9` is 17.15:1, and when the tile is
+/// the current one the pair inverts and the digit stays at 18.97:1, so the
+/// count is readable in both states instead of vanishing in the one that
+/// matters most. The digit is knocked out of the disc rather than drawn beside
+/// it, so nothing here adds a colour to a monochrome palette.
+fn tab_badge_pixel(
+    x: usize,
+    y: usize,
+    box_: Rect,
+    count: usize,
+    state: chrome::ChromeState,
+) -> Option<u32> {
+    let ink = chrome::tile_ink(state);
+    let plate = chrome::tile_plate(state);
+    let digit = [b'0' + count.clamp(1, 9) as u8];
+    let rung = chrome::HOME_CAPTION_RUNG;
+    let tx = centred_text_left(box_, &digit, rung);
+    let ty = box_.y + (box_.h - font::line_height(rung)) / 2;
+    if let Some(px) = draw_rounded_rect(x, y, box_, chrome::BADGE_R, ink, None, 0) {
+        if let Some(glyph) = text_px(x, y, tx, ty, rung, &digit, plate, px, true) {
+            return Some(glyph);
         }
-    }
-    false
-}
-
-/// Kebab Overflow Menu Glyph (3 vertical dots)
-fn kebab_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
-    let dx = (x as isize - cx as isize).abs();
-    let dy1 = (y as isize - (cy as isize - 8)).abs();
-    let dy2 = (y as isize - cy as isize).abs();
-    let dy3 = (y as isize - (cy as isize + 8)).abs();
-    dx <= 2 && (dy1 <= 2 || dy2 <= 2 || dy3 <= 2)
-}
-
-/// Tab Count Badge Box `[N]`
-fn tab_badge_pixel(x: usize, y: usize, cx: usize, cy: usize, count: usize) -> Option<u32> {
-    let dx = (x as isize - cx as isize).abs();
-    let dy = (y as isize - cy as isize).abs();
-    if dx > 13 || dy > 13 {
-        return None;
-    }
-    if (dx >= 11 && dx <= 13) || (dy >= 11 && dy <= 13) {
-        return Some(THEME.on_surface_variant);
-    }
-    let digit = [b'0' + (count as u8).min(9).max(1)];
-    if let Some(px) = text_px(x, y, cx - 4, cy - 10, 1, &digit, THEME.on_surface, THEME.surface_container, true) {
         return Some(px);
     }
-    Some(THEME.surface_container)
+    None
 }
 
 /// Link Arrow Glyph (`→`)
@@ -7355,13 +7468,22 @@ fn render_accessory_bar(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Dismiss Down Chevron.
         //
-        // WHY the chevron is set from the chip's own centre: the mark was drawn
-        // at column 662 and row 946, which is this chip's centre -- and a glyph
-        // that drifts out of the plate it is answered by is a mark with no
-        // control under it.
+        // WHY the chevron is the kit's mark in the tile's own mark box: the mark
+        // was drawn at column 662 and row 946, which is this chip's centre -- and
+        // a glyph that drifts out of the plate it is answered by is a mark with no
+        // control under it. Its extent now comes from `tile_mark_box`, the same
+        // square every other chrome mark on the device fills, so the strip's one
+        // glyph is not a hand-sized shape beside the kit's.
         let c_down = chrome::ACC_DISMISS;
         if let Some(c) = chrome_control_px(x, y, c_down, R_CHIP) {
-            if let Some(col) = draw_chevron_down(x, y, c_down.x + c_down.w / 2, c_down.y + c_down.h / 2, THEME.primary) {
+            let box_ = tile_mark_box(c_down);
+            if let Some(col) = monochrome::icon_px(
+                x,
+                y,
+                box_,
+                monochrome::Icon::ChevronDown,
+                THEME.primary,
+            ) {
                 return col;
             }
             return c;
@@ -7388,6 +7510,17 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Omnibox Capsule
+    //
+    // WHY the resting ring is the chrome tile's ring: the field and the five
+    // tiles to its right are one row of controls, and the field used to ring
+    // itself with `Theme::border` -- `#E5E5E5` on a `#FAFAFA` bar, 1.21:1 -- so
+    // the row read as five outlined boxes beside a field that was not there.
+    // [`chrome::tile_ring`] is the role the theme documents for a focused or
+    // selected control (`#0A0A0A`, 18.97:1 on the bar), which is what the
+    // platform's own outlined field uses and what makes the capsule the loudest
+    // object on the row, as the thing a person types into should be. Focusing it
+    // still moves the ring to `primary` at two pixels, so "you are editing this"
+    // remains a different mark from "this is a field".
     if let Some(c) = draw_rounded_rect(
         x,
         y,
@@ -7401,7 +7534,7 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         Some(if app.address_focused {
             THEME.primary
         } else {
-            THEME.border
+            chrome::tile_ring(chrome::ChromeState::Resting)
         }),
         if app.address_focused { 2 } else { 1 },
     ) {
@@ -7459,19 +7592,12 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // Reload / Stop Button
-    if let Some(c) = chrome_control_px(x, y, RELOAD_BTN, BTN_R) {
-        let cx = RELOAD_BTN.x + RELOAD_BTN.w / 2;
-        let cy = RELOAD_BTN.y + RELOAD_BTN.h / 2;
-        let active = if app.is_loading() {
-            close_glyph(x, y, cx, cy)
-        } else {
-            reload_glyph(x, y, cx, cy)
-        };
-        return if active {
-            THEME.on_surface_variant
-        } else {
-            c
-        };
+    if app.is_loading() {
+        if let Some(c) = chrome_tile_mark_px(x, y, RELOAD_BTN, monochrome::Icon::Stop, chrome::ChromeState::Current) {
+            return c;
+        }
+    } else if let Some(c) = chrome_tile_mark_px(x, y, RELOAD_BTN, monochrome::Icon::Refresh, chrome::ChromeState::Resting) {
+        return c;
     }
 
     // Tab Counter Badge `[N]` Button
@@ -7480,35 +7606,32 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // 27-pixel square, and every pixel of the target outside it used to fall
     // through to the bar's colour, so the rest of the 46x44 control a tap
     // answers was invisible.
-    if let Some(c) = chrome_control_px(x, y, TABS_TOP_BTN, BTN_R) {
-        let cx = TABS_TOP_BTN.x + TABS_TOP_BTN.w / 2;
-        let cy = TABS_TOP_BTN.y + TABS_TOP_BTN.h / 2;
-        if let Some(badge) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
+    let tabs_top_state = if app.overlay == SheetOverlay::TabSwitcher {
+        chrome::ChromeState::Current
+    } else {
+        chrome::ChromeState::Resting
+    };
+    if let Some(c) = chrome_tile_px(x, y, TABS_TOP_BTN, BTN_R, tabs_top_state) {
+        let box_ = tile_mark_box(TABS_TOP_BTN);
+        if let Some(badge) = tab_badge_pixel(x, y, box_, app.tabs.tab_count(), tabs_top_state) {
             return badge;
         }
         return c;
     }
 
     // Overflow Kebab Menu Button (`⋮`)
-    if let Some(c) = chrome_control_px(x, y, KEBAB_BTN, BTN_R) {
-        let cx = KEBAB_BTN.x + KEBAB_BTN.w / 2;
-        let cy = KEBAB_BTN.y + KEBAB_BTN.h / 2;
-        return if kebab_glyph(x, y, cx, cy) {
-            THEME.on_surface_variant
-        } else {
-            c
-        };
+    let kebab_state = if app.overlay == SheetOverlay::Menu {
+        chrome::ChromeState::Current
+    } else {
+        chrome::ChromeState::Resting
+    };
+    if let Some(c) = chrome_tile_mark_px(x, y, KEBAB_BTN, monochrome::Icon::More, kebab_state) {
+        return c;
     }
 
     // Close Button (dismisses app to launcher)
-    if let Some(c) = chrome_control_px(x, y, CLOSE_BTN, BTN_R) {
-        let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
-        let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
-        return if close_glyph(x, y, cx, cy) {
-            THEME.on_surface_variant
-        } else {
-            c
-        };
+    if let Some(c) = chrome_tile_mark_px(x, y, CLOSE_BTN, monochrome::Icon::Close, chrome::ChromeState::Resting) {
+        return c;
     }
 
     // Blue Loading Progress Bar (y 114..116)
@@ -7564,15 +7687,36 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return THEME.surface;
     }
 
-    // 2. Favorites / Quick Access Grid (y 252..376)
+    // 2. Quick links: the four addresses the app ships with
+    //    (chrome::HOME_GRID_Y0..chrome::HOME_GRID_Y1)
     if y >= chrome::HOME_GRID_Y0 && y < chrome::HOME_GRID_Y1 {
-        // Section label
-        if y >= chrome::HOME_GRID_Y0 && y < chrome::HOME_GRID_Y0 + font::line_height(1) {
+        // Section label.
+        //
+        // WHY the label now has a band of its own: it was painted from
+        // `HOME_GRID_Y0 + line_height(1)` while the tiles started at 278, so the
+        // two boxes overlapped and the last rows of "Quick links" were drawn
+        // under the tops of the plates. `chrome::HOME_HEADING_Y` and
+        // `chrome::HOME_HEADING_H` are one derived pair, and the gate beside them
+        // fails the build if the heading ever touches a plate again. Its rung is
+        // the platform's body step -- the one `components::list_section_header`
+        // reserves for a heading over a list -- and the caption below each tile
+        // is one step under it, so the two are a ladder rather than one size.
+        if y >= chrome::HOME_HEADING_Y && y < chrome::HOME_HEADING_Y + chrome::HOME_HEADING_H {
             // WHY the heading is "Quick links" and not "Favorites": the tiles
             // are a list the app shipped with, not the user's favourites. The
             // user's own bookmarks are the list below this one, and it says so
             // when it is empty.
-            if let Some(px) = text_px(x, y, 28, 254, 1, b"Quick links", THEME.on_surface_variant, THEME.surface, true) {
+            if let Some(px) = text_px(
+                x,
+                y,
+                chrome::SIDE_GUTTER,
+                chrome::HOME_HEADING_Y,
+                chrome::HOME_HEADING_RUNG,
+                b"Quick links",
+                THEME.on_surface_variant,
+                THEME.surface,
+                true,
+            ) {
                 return px;
             }
             return THEME.surface;
@@ -7585,18 +7729,26 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         // to draw a word its own band did not answer.
         for i in 0..chrome::HOME_TILE_X.len() {
             let plate = quick_tile_plate(i);
-            if let Some(c) = draw_rounded_rect(x, y, plate, R_SOFT, THEME.surface_container_high, Some(THEME.border), 1) {
-                if let Some(px) = quick_tile_ink(x, y, i, plate, c) {
-                    return px;
-                }
-                return c;
+            // WHY the plate takes the chrome tile's treatment: it is a tile of
+            // the same family as the ones on the bar, and it used to ring itself
+            // with `Theme::border` -- `#E5E5E5` on a `#EFEEE9` fill, 1.08:1 --
+            // which is why four filled squares read as four empty ones.
+            let Some(c) = chrome_tile_px(x, y, plate, chrome::TILE_R, chrome::ChromeState::Resting)
+            else {
+                continue;
+            };
+            if let Some(px) = quick_tile_ink(x, y, i, plate, c) {
+                return px;
             }
+            return c;
+        }
+        for i in 0..chrome::HOME_TILE_X.len() {
             if let Some(px) = text_px(
                 x,
                 y,
                 chrome::HOME_TILE_CAPTION_X[i],
                 chrome::HOME_TILE_CAPTION_Y,
-                1,
+                chrome::HOME_CAPTION_RUNG,
                 chrome::HOME_TILE_CAPTION[i],
                 THEME.on_surface,
                 THEME.surface,
@@ -7609,29 +7761,59 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return THEME.surface;
     }
 
-    // 3. "Your pages": saved bookmarks & session visits (y 386..1340)
-    if y >= 386 && y < 418 {
-        if let Some(px) = text_px(x, y, 28, 392, 1, b"Your pages", THEME.on_surface, THEME.surface, true) {
+    // 3. "Your pages": the person's own saved bookmarks and session visits.
+    //
+    // WHY the band is derived and not `386..418`: the heading used to be painted
+    // inside 386..418 at 392 with the cards starting at 422, while the block above
+    // it ended at 376 -- three numbers that only ever matched by luck. The pair
+    // now comes off the quick-link block's own last row, and the cards stack from
+    // `HOME_CARD_Y0`, which IS this band's last row, so the heading's clip can no
+    // longer paint the top of the first card as flat page.
+    if y >= chrome::HOME_LIST_Y0 && y < chrome::HOME_LIST_Y1 {
+        if let Some(px) = text_px(
+            x,
+            y,
+            chrome::SIDE_GUTTER,
+            chrome::HOME_LIST_Y0 + spacing::GRID_4,
+            chrome::HOME_HEADING_RUNG,
+            b"Your pages",
+            THEME.on_surface,
+            THEME.surface,
+            true,
+        ) {
             return px;
         }
         return THEME.surface;
     }
 
     // 4. Saved pages & recent visits cards
+    //
+    // WHY every inner box is set from the card's own rect: the empty state and
+    // the four cards each used to carry absolute rows (`422`, `438`, `442`,
+    // `461`), which is the duplicated-rect defect this sweep exists to close --
+    // a card that moves leaves its picture and its words behind, printed on the
+    // page.
     if home_row(app, 0).is_none() {
-        let empty_rect = Rect::new(24, 422, W - 48, 96);
+        let empty_rect = home_card(0);
         if let Some(c) = draw_rounded_rect(x, y, empty_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-            let star_box = Rect::new(44, 438, 46, 46);
+            let star_box = Rect::new(empty_rect.x + 20, empty_rect.y + 16, 46, 46);
             if let Some(sc) = draw_rounded_rect(x, y, star_box, R_CHIP, THEME.surface_container_low, None, 0) {
-                if star_glyph(x, y, 67, 461, false) {
+                if star_glyph(
+                    x,
+                    y,
+                    star_box.x + star_box.w / 2,
+                    star_box.y + star_box.h / 2,
+                    false,
+                ) {
                     return THEME.on_surface_variant;
                 }
                 return sc;
             }
-            if let Some(px) = text_px(x, y, 104, 442, 1, b"No Bookmarks Yet", THEME.on_surface, c, true) {
+            let text_x = empty_rect.x + 80;
+            if let Some(px) = text_px(x, y, text_x, empty_rect.y + 20, 1, b"No Bookmarks Yet", THEME.on_surface, c, true) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, 104, 468, 1, b"Bookmarked and visited pages appear here", THEME.on_surface_variant, c, false) {
+            if let Some(px) = text_px(x, y, text_x, empty_rect.y + 46, 1, b"Bookmarked and visited pages appear here", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
@@ -7640,28 +7822,31 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         return THEME.surface;
     }
 
-    let card_h = 100;
-    let card_gap = 12;
     for i in 0..4 {
-        let card_y = 422 + i * (card_h + card_gap);
-        let card_rect = Rect::new(24, card_y, W - 48, card_h);
+        let card_rect = home_card(i);
         let Some(row) = home_row(app, i) else {
             continue;
         };
 
         if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-            let thumb = Rect::new(W - 48 - 84, card_y + card_h - 88, 68, 68);
+            let thumb = Rect::new(
+                card_rect.x + card_rect.w - 40 - 68,
+                card_rect.y + card_rect.h - 88,
+                68,
+                68,
+            );
             // WHY the card's three lines are trimmed to the picture's edge: a
             // page names itself as long as it likes, and the last words of a
             // name that outgrew the card would land under its icon.
-            let line_w = thumb.x - 56;
+            let line_w = thumb.x - (card_rect.x + 32);
             let mut line = [0u8; 128];
+            let text_x = card_rect.x + 20;
             let n = font::ellipsize(row.title, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, 44, card_y + 20, 1, &line[..n], THEME.on_surface, THEME.surface_container_high, true) {
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + 20, 1, &line[..n], THEME.on_surface, THEME.surface_container_high, true) {
                 return px;
             }
             let n = font::ellipsize(row.url, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, 44, card_y + 48, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + 48, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             // WHY the category is muted and not accented: the accent is the
@@ -7669,7 +7854,7 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             // whole card is already that one target. An accent word inside a
             // tappable card reads as a second, narrower link that is not one.
             let n = font::ellipsize(row.meta, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, 44, card_y + card_h - 28, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + card_rect.h - 28, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             if let Some(tc) = draw_rounded_rect(x, y, thumb, R_CHIP, THEME.surface_container, None, 0) {
@@ -9122,25 +9307,23 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         // Close button: the target is painted, so the box a
                         // person can see is the box that answers the tap.
                         //
-                        // WHY the box carries an edge: the tile is white and the
-                        // card it sits on is the raised surface, so the fill was
-                        // 1.16:1 against the card -- a target nobody could find.
-                        // The edge is the platform's secondary ink, 4.59:1 on
-                        // that card, and the rectangle is still the one
-                        // `tab_close_rect` answers a tap in.
+                        // WHY the box is a chrome tile: the plate used to be
+                        // `surface_container` ringed in the secondary ink --
+                        // the same hairline-around-a-tone treatment the toolbar
+                        // tiles wore before this sweep, and the reason the card
+                        // read as a wireframe. It now takes the one tile
+                        // treatment every other control on the device uses, with
+                        // the kit's close mark at [`chrome::ICON`] inside it, and
+                        // the rectangle is still the one `tab_close_rect` answers
+                        // a tap in.
                         let close_rect = tab_close_rect(card_y);
-                        if let Some(cc) = draw_rounded_rect(
+                        if let Some(cc) = chrome_tile_mark_px(
                             x,
                             y,
                             close_rect,
-                            R_SMALL,
-                            THEME.surface_container,
-                            Some(THEME.on_surface_variant),
-                            1,
+                            monochrome::Icon::Close,
+                            chrome::ChromeState::Resting,
                         ) {
-                            if close_glyph(x, y, close_rect.x + close_rect.w / 2, close_rect.y + close_rect.h / 2) {
-                                return Some(THEME.on_surface_variant);
-                            }
                             return Some(cc);
                         }
                         return Some(c);
@@ -9965,23 +10148,18 @@ fn filter_row_pixel(x: usize, y: usize, app: &BrowserApp, hint: &[u8]) -> Option
     // The clear control, only when there is something to clear.
     //
     // WHY the plate is drawn at all: the row used to ink a bare `X` and answer a
-    // press anywhere in 73 columns of empty card around it. The tile is the same
-    // one the tab card's close wears -- the container step, ringed in the
-    // platform's secondary ink -- and the press now tests this very box.
+    // press anywhere in 73 columns of empty card around it. The tile is the
+    // platform's chrome tile -- the same plate, ring and mark extent the sheet's
+    // own close control and the toolbar's tiles wear -- and the press now tests
+    // this very box.
     if !filter.is_empty() {
-        let clear = chrome::FILTER_CLEAR;
-        if let Some(cc) = draw_rounded_rect(
+        if let Some(cc) = chrome_tile_mark_px(
             x,
             y,
-            clear,
-            R_CHIP,
-            THEME.surface_container,
-            Some(THEME.on_surface_variant),
-            1,
+            chrome::FILTER_CLEAR,
+            monochrome::Icon::Close,
+            chrome::ChromeState::Resting,
         ) {
-            if close_glyph(x, y, clear.x + clear.w / 2, clear.y + clear.h / 2) {
-                return Some(THEME.on_surface_variant);
-            }
             return Some(cc);
         }
     }
@@ -10030,33 +10208,48 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     }
 
     // 3. Home / New Tab `+` Button
-    if let Some(c) = chrome_control_px(x, y, HOME_TAB_BTN, BTN_R) {
-        let cx = HOME_TAB_BTN.x + HOME_TAB_BTN.w / 2;
-        let cy = HOME_TAB_BTN.y + HOME_TAB_BTN.h / 2;
-        let dx = (x as isize - cx as isize).abs();
-        let dy = (y as isize - cy as isize).abs();
-        if (dx <= 1 && dy <= 7) || (dy <= 1 && dx <= 7) {
-            return THEME.on_surface;
-        }
+    //
+    // WHY the state is the start page and not a press: this tile's whole job is
+    // to put `about:blank` on the screen, so "the page this tile opens is the
+    // page you are looking at" is a fact the app holds, and the platform's
+    // selected treatment says it without inventing a highlight the kernel never
+    // reported.
+    let home_tab_state = if app.current_url() == b"about:blank" {
+        chrome::ChromeState::Current
+    } else {
+        chrome::ChromeState::Resting
+    };
+    if let Some(c) = chrome_tile_mark_px(x, y, HOME_TAB_BTN, monochrome::Icon::Plus, home_tab_state) {
         return c;
     }
 
     // 4. Bookmark Star Button
-    if let Some(c) = chrome_control_px(x, y, ADD_BOOK_BTN, BTN_R) {
-        let cx = ADD_BOOK_BTN.x + ADD_BOOK_BTN.w / 2;
-        let cy = ADD_BOOK_BTN.y + ADD_BOOK_BTN.h / 2;
-        let filled = app.bookmarks.len() + app.bookmarks.unsaved_len() > 0;
-        if star_glyph(x, y, cx, cy, filled) {
-            return THEME.on_surface;
+    let book_state = if app.overlay == SheetOverlay::Bookmarks {
+        chrome::ChromeState::Current
+    } else {
+        chrome::ChromeState::Resting
+    };
+    if let Some(c) = chrome_tile_px(x, y, ADD_BOOK_BTN, BTN_R, book_state) {
+        if let Some(glyph) = monochrome::icon_px(
+            x,
+            y,
+            tile_mark_box(ADD_BOOK_BTN),
+            monochrome::Icon::Star,
+            chrome::tile_ink(book_state),
+        ) {
+            return glyph;
         }
         return c;
     }
 
     // 5. Tabs Counter `[N]`
-    if let Some(c) = chrome_control_px(x, y, TABS_BTN, BTN_R) {
-        let cx = TABS_BTN.x + TABS_BTN.w / 2;
-        let cy = TABS_BTN.y + TABS_BTN.h / 2;
-        if let Some(px) = tab_badge_pixel(x, y, cx, cy, app.tabs.tab_count()) {
+    let tabs_state = if app.overlay == SheetOverlay::TabSwitcher {
+        chrome::ChromeState::Current
+    } else {
+        chrome::ChromeState::Resting
+    };
+    if let Some(c) = chrome_tile_px(x, y, TABS_BTN, BTN_R, tabs_state) {
+        if let Some(px) = tab_badge_pixel(x, y, tile_mark_box(TABS_BTN), app.tabs.tab_count(), tabs_state) {
             return px;
         }
         return c;
@@ -10110,7 +10303,7 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
         return bottom_bar_pixel(x, y, app);
     }
     if y >= NAV_BAR_Y1 {
-        if let Some(c) = home_band::pixel(x, y, THEME.border) {
+        if let Some(c) = home_band::pixel(x, y, HOME_PILL_INK) {
             return c;
         }
         return THEME.surface;
@@ -11080,13 +11273,15 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // Start Page "Your pages" Cards Tap (y: 422..1340)
-    if app.status == PageStatus::Blank && x >= 24 && x < W - 24 {
-        let card_h = 100;
-        let card_gap = 12;
+    // Start Page "Your pages" Cards Tap
+    //
+    // WHY the box comes from `home_card`: the renderer stacks its cards from
+    // `chrome::HOME_LIST_Y1`, and this path used to write 422 a second time --
+    // so the moment the heading's band grew, the ink moved and the targets did
+    // not. One rect, read by both.
+    if app.status == PageStatus::Blank {
         for i in 0..4 {
-            let card_y = 422 + i * (card_h + card_gap);
-            if y >= card_y && y < card_y + card_h {
+            if home_card(i).contains(x, y) {
                 if let Some(row) = home_row(app, i) {
                     let _ = std::audio_haptic_click();
                     // WHY the record's address and not the card's text: the
