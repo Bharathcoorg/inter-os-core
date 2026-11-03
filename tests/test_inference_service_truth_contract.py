@@ -1799,7 +1799,12 @@ def test_the_loader_no_longer_claims_the_service_never_calls_it():
         "tokenizer::encode",
     ):
         assert kept in doc, f"the header stopped saying {kept!r}"
-    assert read("weights.rs").startswith("//! "), (
+    header = chr(10).join(
+        line
+        for line in read("weights.rs").splitlines()
+        if not line.startswith("// SPDX-")
+    ).lstrip()
+    assert header.startswith("//! "), (
         "the module's own words moved out of the header"
     )
 
