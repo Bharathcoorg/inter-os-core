@@ -3703,7 +3703,7 @@ impl PlannedInk {
     /// bitmap face are painted exactly as they were.
     #[inline(always)]
     fn paint(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
-        if let Some(run) = self.run {
+        if let Some(ref run) = self.run {
             return run.pixel(px, py, self.ink, bg);
         }
         if self.len == 0 {
