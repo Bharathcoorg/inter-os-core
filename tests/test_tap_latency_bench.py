@@ -17,6 +17,7 @@ The properties that matter most:
   - raw trial counts reconcile with the summary
 """
 
+import re
 import socket
 import sys
 from pathlib import Path
@@ -63,6 +64,124 @@ def _calculator_main():
 
 def _calculator_lib():
     return (ROOT / "apps" / "calculator" / "src" / "lib.rs").read_text(encoding="utf-8")
+
+
+def _rust_code(source: str) -> str:
+    """Strips `//` line and `/* */` block comments from Rust source.
+
+    WHY: a presence assertion that scans prose passes on a comment that quotes
+    the very expression the code no longer contains. The repository already does
+    this in `tests/test_native_ui_truth_contract.py` for the same reason.
+    """
+    without_block = re.sub(r"/\*.*?\*/", " ", source, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", without_block)
+
+
+_USIZE_CONST = re.compile(
+    r"^[ \t]*(?:pub[ \t]+)?const[ \t]+(\w+)[ \t]*:[ \t]*usize[ \t]*=[ \t]*([^;]+);",
+    re.M,
+)
+_USIZE_TABLE = re.compile(
+    r"^[ \t]*(?:pub[ \t]+)?const[ \t]+(\w+)[ \t]*:[ \t]*\[usize;[ \t]*\d+[ \t]*\]"
+    r"[ \t]*=[ \t]*\[([^\]]*)\];",
+    re.M,
+)
+_TOKEN = re.compile(r"\d+|[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*|[-+*/%()\[\]]")
+_ADDITIVE = ("+", "-")
+_MULTIPLICATIVE = ("*", "/", "%")
+
+
+def _app_layout(*sources: str):
+    """Every `usize` const and `[usize; N]` table the given Rust sources declare.
+
+    WHY parse rather than pin the literals: the keypad's geometry is deliberately
+    spread and derived now -- `BTN_H` in the renderer names
+    `calculator::KEYPAD_ROW_H` in the library, because the row is the plate a key
+    label is drawn on, the plate a thumb lands on and the height the label clamp is
+    checked against, and three places that have to agree are better as one. A
+    literal pin fails on a layout that never moved, and passes on a layout that did
+    move as long as the literal still survives somewhere in the file. Reading the
+    bindings back and recomputing the tap is the only form of this check that means
+    "the bench presses where the app paints".
+
+    A binding written as an expression of others -- `BTN_W * 2 + (COL_X[1] -
+    COL_X[0] - BTN_W)`, the width of a two-column key -- is resolved by looking
+    those names up in turn, in whichever file declares them. An expression this
+    reader cannot resolve raises rather than guessing.
+    """
+    consts, tables = {}, {}
+    for source in sources:
+        for name, expr in _USIZE_CONST.findall(source):
+            consts.setdefault(name, expr)
+        for name, items in _USIZE_TABLE.findall(source):
+            tables.setdefault(name, [i.strip() for i in items.split(",") if i.strip()])
+    return consts, tables
+
+
+def _eval_usize(consts, tables, expr: str) -> int:
+    tokens = _TOKEN.findall(expr)
+    value, pos = _parse_sum(consts, tables, tokens, 0)
+    assert tokens and pos == len(tokens), (
+        f"`{expr}` is not a plain usize expression (stopped at {tokens[pos:pos + 2]!r})"
+    )
+    return value
+
+
+def _read_usize(consts, tables, name: str) -> int:
+    assert name in consts, f"no `const {name}: usize` in the calculator's own sources"
+    return _eval_usize(consts, tables, consts[name])
+
+
+def _read_table(consts, tables, name: str) -> list[int]:
+    assert name in tables, f"no `const {name}: [usize; N]` in the calculator's own sources"
+    return [_eval_usize(consts, tables, item) for item in tables[name]]
+
+
+def _parse_sum(consts, tables, tokens, pos):
+    value, pos = _parse_product(consts, tables, tokens, pos)
+    while pos < len(tokens) and tokens[pos] in _ADDITIVE:
+        operator = tokens[pos]
+        right, pos = _parse_product(consts, tables, tokens, pos + 1)
+        value = value + right if operator == "+" else value - right
+    return value, pos
+
+
+def _parse_product(consts, tables, tokens, pos):
+    value, pos = _parse_atom(consts, tables, tokens, pos)
+    while pos < len(tokens) and tokens[pos] in _MULTIPLICATIVE:
+        operator = tokens[pos]
+        right, pos = _parse_atom(consts, tables, tokens, pos + 1)
+        if operator == "*":
+            value *= right
+        elif operator == "/":
+            value //= right
+        else:
+            value %= right
+    return value, pos
+
+
+def _parse_atom(consts, tables, tokens, pos):
+    assert pos < len(tokens), "a usize expression ended where a value was expected"
+    token, pos = tokens[pos], pos + 1
+    if token == "(":
+        value, pos = _parse_sum(consts, tables, tokens, pos)
+        assert pos < len(tokens) and tokens[pos] == ")", "an expression has no closing `)`"
+        return value, pos + 1
+    if token == "-":
+        value, pos = _parse_atom(consts, tables, tokens, pos)
+        return -value, pos
+    if token.isdigit():
+        return int(token), pos
+    name = token.rsplit("::", 1)[-1]
+    if name in tables:
+        assert pos < len(tokens) and tokens[pos] == "[", f"`{token}` is a table; index it"
+        index, pos = _parse_sum(consts, tables, tokens, pos + 1)
+        assert pos < len(tokens) and tokens[pos] == "]", "a table index has no closing `]`"
+        pos += 1
+        assert 0 <= index < len(tables[name]), f"`{token}[{index}]` is out of range"
+        return _eval_usize(consts, tables, tables[name][index]), pos
+    assert name in consts, f"`{token}` is declared in no calculator source"
+    return _read_usize(consts, tables, name), pos
 
 
 def test_calculator_emits_the_post_flip_marker():
@@ -169,28 +288,77 @@ def test_the_input_accepted_marker_requires_the_exact_coordinates():
 
 
 def test_keypad_coordinates_come_from_the_apps_own_geometry():
-    source = _calculator_main()
-    assert "const COL_X: [usize; 4] = [28, 194, 360, 526];" in source
-    assert "const ROW_Y: [usize; 6] = [420, 580, 740, 900, 1060, 1220];" in source
-    assert "const BTN_W: usize = 144;" in source
-    assert "const BTN_H: usize = 140;" in source
-    # Digit '7' is keypad row 1, column 0.
-    #
-    # WHY the library and not main.rs: the key map moved into the
-    # calculator's library so that it can be unit tested, and the bench
-    # has to agree with the map the app actually draws.
-    assert "(1, 0) => Some('7')" in _calculator_lib()
-    # Row 1 starts at y=580, column 0 at x=28; both centres must be inside
-    # their own button so the tap cannot fall between two keys.
-    #
-    # WHY six rows: the keypad gained a sixth row for the backspace,
-    # clear-entry and clear-all keys, and the rows above it moved up. A
-    # bench that kept the old y would tap the row below the one it meant
-    # and measure the wrong key.
-    assert btl.KEYPAD_X == 28 + 144 // 2
-    assert btl.KEYPAD_Y == 580 + 140 // 2
-    assert 28 <= btl.KEYPAD_X < 28 + 144
-    assert 580 <= btl.KEYPAD_Y < 580 + 140
+    """The bench must press the key the app paints, read out of the app's own layout.
+
+    WHY the literals this replaced are gone: `BTN_H` is no longer `140` written
+    out in the renderer. It is `calculator::KEYPAD_ROW_H`, which the text-size
+    work moved into the calculator's library so the renderer, the hit test and
+    the label clamp all name one number (apps/calculator/src/lib.rs declares it
+    as `pub const KEYPAD_ROW_H: usize = 140`). The keypad's geometry therefore
+    did not change -- this test now proves that, instead of re-asserting it
+    against a literal that had simply moved.
+
+    WHY six rows and four columns: the keypad carries twenty-two keys and a
+    four-column grid holds sixteen in four rows. The clear-all, clear-entry and
+    backspace keys are three keys a person has to be able to tell apart, and a
+    five-row grid had no room for them. A bench that kept the old y would tap
+    the row below the one it meant and measure the wrong key.
+    """
+    main = _rust_code(_calculator_main())
+    lib = _rust_code(_calculator_lib())
+    consts, tables = _app_layout(main, lib)
+
+    col_x = _read_table(consts, tables, "COL_X")
+    row_y = _read_table(consts, tables, "ROW_Y")
+    btn_w = _read_usize(consts, tables, "BTN_W")
+    btn_h = _read_usize(consts, tables, "BTN_H")
+
+    # The grid the renderer indexes is the grid the library declares. `KEY_CELLS`
+    # is their product, so a grid that gained a row in one file only cannot pass.
+    assert len(col_x) == _read_usize(consts, tables, "KEY_COLS")
+    assert len(row_y) == _read_usize(consts, tables, "KEY_ROWS")
+    assert _read_usize(consts, tables, "KEY_CELLS") == len(col_x) * len(row_y)
+
+    # Digit '7' is keypad row 1, column 0, from the app's own key map.
+    assert "(1, 0) => Some('7')" in lib
+
+    # WHY all of this is pinned, and not just the arithmetic below: the tap is
+    # only "where the app paints" while one accessor forms every key's rectangle
+    # and both the painter and the hit test ask it. `key_rect`'s plain-cell arm is
+    # `(row, col) -> Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H)`; if that arm took
+    # another shape, the centre computed below would pin nothing.
+    assert "fn key_rect(row: usize, col: usize) -> Option<Rect>" in main
+    assert "Some(Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H))" in main
+    assert "let rect = key_rect(row, col)?;" in main            # key_edges -- the ink
+    assert "let Some(rect) = key_rect(row, col) else { return false; };" in main  # key_hit -- the press
+
+    row, col = 1, 0
+    x0, y0 = col_x[col], row_y[row]
+
+    # Keys may not overlap: an overlapping grid would put one point inside two
+    # keys, and a centre "inside its own button" would stop meaning anything.
+    for left, right in zip(col_x, col_x[1:]):
+        assert left + btn_w <= right, "keypad columns overlap"
+    for above, below in zip(row_y, row_y[1:]):
+        assert above + btn_h <= below, "keypad rows overlap"
+
+    # The bench taps the centre of the key the app paints at (1, 0).
+    assert btl.KEYPAD_X == x0 + btn_w // 2
+    assert btl.KEYPAD_Y == y0 + btn_h // 2
+
+    # ...inside its own key, and outside every other key's plate.
+    assert x0 <= btl.KEYPAD_X < x0 + btn_w
+    assert y0 <= btl.KEYPAD_Y < y0 + btn_h
+    for index, top in enumerate(row_y):
+        if index != row:
+            assert not top <= btl.KEYPAD_Y < top + btn_h, (
+                f"the (1, 0) centre falls inside row {index}"
+            )
+    for index, left in enumerate(col_x):
+        if index != col:
+            assert not left <= btl.KEYPAD_X < left + btn_w, (
+                f"the (1, 0) centre falls inside column {index}"
+            )
 
 
 # --------------------------------------------------------------------------

@@ -1,10 +1,35 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
-from pathlib import Path
 import re
+from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _rust_fn(source: str, name: str) -> str:
+    """The text of one Rust function, found by its `fn NAME(` and brace matching.
+
+    WHY slice rather than `split` on `"\n}\n"`: a body's own closing braces sit at
+    other indents, and the first line that happens to be `}` at column zero ends the
+    extraction wherever it likes. These contracts assert that a piece of code does
+    NOT appear inside a particular function, so where the slice stops is load
+    bearing -- an extraction that stops early proves nothing about the rest of the
+    body and an extraction that runs long fails on prose in the next function.
+    """
+    start = source.index(f"fn {name}(")
+    open_brace = source.index("{", start)
+    depth = 0
+    for index in range(open_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"`fn {name}` never closes")
 
 
 def read(path: str) -> str:
@@ -906,13 +931,17 @@ def test_the_wallpaper_refactor_cannot_change_a_colour():
 
     # The resolved path must read the resolved tones rather than re-derive them,
     # which is the entire saving.
-    ref_body = source.split("pub fn scene_pixel_ref", 1)[-1].split("\n}\n", 1)[0]
+    # Sliced by brace matching, not by the first line that happens to be `}`: the
+    # assertion below is a "does not appear", and a slice that stopped early would
+    # pass on a re-derivation sitting in the part of the body it never read.
+    ref_body = _rust_fn(code, "scene_pixel_ref")
     for rederived in ("scene.horizon()", "scene.shadow()", "scene.mist()"):
         assert rederived not in ref_body, (
             f"scene_pixel_ref re-derives {rederived} on the per-pixel path again"
         )
 
-    # And the home surface must actually be on the resolved path.
+    # The home surface must actually be on the resolved path -- and never back on
+    # the per-pixel one.
     #
     # WHY the call takes the plan and not the scene reference: the plan is
     # what carries the wallpaper the user chose, and a document wallpaper has
@@ -920,12 +949,130 @@ def test_the_wallpaper_refactor_cannot_change_a_colour():
     # resolved path itself is unchanged: the plan's `scene_ref` is still what
     # `scene_pixel_ref` reads, and the resolved tones are still not
     # re-derived per pixel.
+    #
+    # WHAT CHANGED SINCE ad9fe66 and 6e662ac: this pinned the literal call
+    # `backdrop_ref(p, x, y)`, which is how the first hoist wrote it. The second
+    # hoist moved the pixel behind a `Backdrop` that resolves itself once, so the
+    # call reads `backdrop_ref(self.p, self.x, self.y)` and the reference it takes
+    # is the plan's field rather than a parameter. The routing is the same; the
+    # pin had simply stopped describing the code. So it is re-pointed at the
+    # routing itself, which is the thing that was ever meant to be true.
     home = _code_only(read("apps/launcher/src/screens/home.rs"))
-    assert "backdrop_ref(p, x, y)" in home
-    assert "scene_pixel_ref(&p.scene_ref, x, y," in home
     assert "SceneRef::new(state.home_wallpaper)" in home
+    # The surface's one backdrop entry point, fed by the plan's already-resolved
+    # reference -- not by a `SceneRef::new` built per pixel, which would put the
+    # hoisted work straight back on the pixel path.
+    assert "fn backdrop_ref(p: &Paint, x: usize, y: usize) -> u32" in home
+    assert "backdrop_from(&p.scene_ref, p.wallpaper_document, x, y)" in home
+    # ...and the resolved path is what answers the pixel.
+    assert "scene_pixel_ref(scene_ref, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)" in home
+    # The home surface must not have crept back onto the per-pixel entry.
+    # `scene_pixel_ref(` does not contain `scene_pixel(`, so this tells them apart.
+    assert "walls::scene_pixel(" not in home
+
+    # WHAT THE PINS ABOVE CANNOT SAY: they say the fast path is in place. They do
+    # not say it kept the colours, and no string search can. The evidence for that
+    # is a host test in the SDK -- a preserved copy of the shipped per-pixel
+    # expression, compared against the row-table path pixel for pixel over every
+    # scene at the full 720x1440 domain. Pinned here so the proof cannot be
+    # quietly narrowed, and executed by the companion test below so that a green
+    # run means the pixels were actually compared, not merely that a comparison
+    # exists somewhere.
+    assert "fn legacy_scene_pixel(" in code
+
+    # The reference must stay independent of the code under proof. If it read a row
+    # table it would be a second copy of the thing being tested and would agree
+    # with it for the wrong reason.
+    legacy = _rust_fn(code, "legacy_scene_pixel")
+    # The table path reaches the precomputed rows through three accessors, so staying
+    # independent means avoiding the accessors as well as the fields: `sky_at` on the
+    # preserved side would be the same row table wearing a different name, and the pin
+    # would pass on the very defect it exists to catch.
+    for table in ("sky_at(", "mtn_at(", "rock_at(", "sky_ramp", "mtn_ramp", "rock_ramp"):
+        assert table not in legacy, (
+            f"the preserved reference reads {table}; it is no longer independent of the table path"
+        )
+    # ...and the fast path really does answer from those rows, or the pins above would be
+    # guarding names nothing reads. Two levels: the resolved path calls the accessors, and
+    # each accessor indexes the row table the refactor precomputed. A `sky_at` that stopped
+    # reading `sky_ramp` would leave the reference and the fast path identical by
+    # construction, and the independence claim would mean nothing.
+    for accessor, table in (("sky_at(", "sky_ramp"), ("mtn_at(", "mtn_ramp"), ("rock_at(", "rock_ramp")):
+        assert accessor in ref_body, (
+            f"scene_pixel_ref no longer calls {accessor}, so it is not the table path any more"
+        )
+        assert table in _rust_fn(code, accessor.rstrip("(")), (
+            f"fn {accessor.rstrip('(')} no longer reads {table}: the fast path is not reading a table"
+        )
+    # The reference must still do the arithmetic the tables replaced, per pixel, for all
+    # three vertical stops -- not merely mention them.
+    assert "rel as u32 * 256 / horizon_y as u32" in legacy
+    assert "let vert_mtn =" in legacy
+    assert "let vert_rock =" in legacy
+    assert "band(vert_sky, across)" in legacy
+    # `near` is the one resolved value both paths share, exactly as it did before the row
+    # tables existed: the skyline is per column and was already hoisted, so the preserved
+    # copy reads `s.near` rather than re-deriving the clamp.
+    assert "s.near[col]" in legacy
+
+    proof = _rust_fn(
+        code, "the_table_path_reproduces_the_shipped_expression_pixel_for_pixel"
+    )
+    # Compared with whitespace removed: the proof's `assert_eq!` is wrapped across
+    # lines by the formatter, and a needle that only matches one layout would fail
+    # on a reflow that changed nothing about what is proved.
+    tight = "".join(proof.split())
+    assert "forsceneinSCENES.iter()" in tight, "the proof no longer walks every scene"
+    assert "foryin0..1440usize" in tight, "the proof no longer walks every row"
+    assert "forxin0..720usize" in tight, "the proof no longer walks every column"
+    assert "legacy_scene_pixel(&s,x,y,720,1440)" in tight
+    assert "scene_pixel_ref(&s,x,y,720,1440)" in tight
+    assert "assert_eq!(tables,shipped," in tight, "the proof no longer asserts equality"
 
 
+def test_the_wallpaper_equivalence_proof_actually_runs():
+    """Run the SDK's pixel-for-pixel wallpaper proof instead of only citing it.
+
+    WHY execute rather than re-point the string search: the invariant is that a
+    refactor paid for per-pixel speed changed no colour. That is 6 scenes x
+    1,036,800 pixels of comparison against a preserved copy of the shipped
+    expression, and the comparison is what carries the claim. The host suite takes
+    under a second once the crate is built, so a contract can afford to report its
+    result instead of its existence.
+
+    WHERE IT CANNOT RUN: with no cargo on PATH the contract says so out loud
+    rather than letting the suite report a colour proof that was never performed.
+    """
+    import shutil
+    import subprocess
+
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        pytest.skip(
+            "cargo is not on PATH: the wallpaper equivalence proof was not executed"
+        )
+
+    manifest = ROOT / "sdk" / "rust" / "interos-std" / "Cargo.toml"
+    result = subprocess.run(
+        [cargo, "test", "--manifest-path", str(manifest), "--lib", "design::walls"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=900,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "the SDK's wallpaper host tests are not passing:\n" + output[-4000:]
+    )
+    for proof in (
+        "the_table_path_reproduces_the_shipped_expression_pixel_for_pixel",
+        "the_convenience_entry_agrees_with_the_reference_path",
+        "the_table_path_holds_at_other_surface_sizes",
+    ):
+        assert f"design::walls::tests::{proof} ... ok" in output, (
+            f"{proof} did not run and pass, so the equivalence it is relied on for "
+            "was not demonstrated"
+        )
 def test_calculator_and_vault_do_not_paint_fabricated_status_or_success():
     calculator = read("apps/calculator/src/main.rs")
     vault = read("apps/vault/src/main.rs")
