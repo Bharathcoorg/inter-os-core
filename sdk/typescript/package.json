@@ -11,5 +11,5 @@
   },
   "keywords": ["interos", "rapp", "sovereign", "mobile", "rust"],
   "author": "Inter OS Sovereign Core Team",
-  "license": "Apache-2.0"
+  "license": "AGPL-3.0-only"
 }
