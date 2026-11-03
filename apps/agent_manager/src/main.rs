@@ -36,6 +36,7 @@
 use core::panic::PanicInfo;
 
 use interos_std as std;
+use std::design::accessibility::{DynamicType, UserTextScale};
 use std::design::components;
 use std::design::font;
 use std::design::monochrome::{self, Icon};
@@ -127,7 +128,85 @@ const ICON_BTN_TOP: usize = APPBAR_ROW - ICON_BTN / 2;
 /// would leave the bar's row and pushing it down to clear the band drops the
 /// letters below the control. Centring the caps -- half a cap height above the
 /// row and half below -- is what lines the word up with the button next to it.
-const APPBAR_TITLE_Y: usize = APPBAR_ROW - CAP_TITLE_ASCENT + CAP_TITLE as usize / 2;
+///
+/// WHY it is a `const fn` of the level and then a run-time face: the cap height
+/// and the ascent it is solved from both move with the person's text size, so a
+/// `const` here would be the platform's row for every level -- and the tab band
+/// beneath it, and the body beneath that, are all derived from where this
+/// line's ink ends.
+const fn appbar_title_y_at(level: u8) -> usize {
+    APPBAR_ROW - ascent_at(SCALE_TITLE, level) + cap_at(SCALE_TITLE, level) as usize / 2
+}
+#[inline]
+fn appbar_title_y() -> usize {
+    appbar_title_y_at(level())
+}
+/// The last row the app bar's title ink takes: its box's top plus the ascent the
+/// caps sit on, since a surface's name is written with no descender.
+const fn appbar_title_ink_bottom_at(level: u8) -> usize {
+    appbar_title_y_at(level) + ascent_at(SCALE_TITLE, level)
+}
+/// The first row the title's caps take: the baseline less the cap height the
+/// rung draws them at.
+const fn appbar_title_ink_top_at(level: u8) -> usize {
+    appbar_title_y_at(level) + ascent_at(SCALE_TITLE, level) - cap_at(SCALE_TITLE, level) as usize
+}
+/// The air the authored bar leaves under the title's line box, solved from the
+/// authored pair rather than written down: the bar was tall enough to hold the
+/// rung's whole box, and this is what was left over.
+const APPBAR_TITLE_AIR: usize =
+    APPBAR_H - (appbar_title_y_at(PLATFORM_LEVEL) + line_at(SCALE_TITLE, PLATFORM_LEVEL));
+/// The bar's own foot at a level: the authored band, or the title's line box
+/// plus its air when the rung has grown the box past the band.
+///
+/// WHY a run-time face and not a wider `const`: the band's number is the layout
+/// the platform's contract reads, and the only way to keep both that number and
+/// a name that fills it is to take the larger of the two at draw time -- which
+/// leaves the authored pixels exactly as they were and gives the raised ink the
+/// rows it needs.
+const fn appbar_bottom_at(level: u8) -> usize {
+    let grown = appbar_title_y_at(level) + line_at(SCALE_TITLE, level) + APPBAR_TITLE_AIR;
+    if grown > APPBAR_H {
+        grown
+    } else {
+        APPBAR_H
+    }
+}
+#[inline]
+fn appbar_bottom() -> usize {
+    appbar_bottom_at(level())
+}
+// WHY checked here: the bar's row was solved from the SDK's ladder before this
+// file read the setting at all, and the derivation is only honest while the
+// authored level answers that same authored formula.
+const _: () = assert!(appbar_title_y_at(PLATFORM_LEVEL)
+    == APPBAR_ROW
+        - font::ascent_for_scale(SCALE_TITLE)
+        + font::cap_for_scale(SCALE_TITLE) as usize / 2);
+const _: () = assert!(appbar_bottom_at(PLATFORM_LEVEL) == APPBAR_H);
+/// WHY checked here: the name is the largest thing on the bar and the segmented
+/// control is the first thing under it, so a raised rung that pushed the name's
+/// last inked row into the segments' first row would paint a title through the
+/// control a person taps -- and this platform paints no clip. The name's caps
+/// also may not climb into the rows the platform's own band owns.
+const fn appbar_title_clears_the_tabs_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= 3 {
+        if appbar_title_ink_bottom_at(level) >= tab_y_at(level) {
+            return false;
+        }
+        if appbar_title_ink_top_at(level) < STATUS_BAR_HEIGHT {
+            return false;
+        }
+        if appbar_bottom_at(level) > tab_y_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(appbar_title_clears_the_tabs_at_every_level());
+
 /// The floating action button's radius.
 const FAB_R: usize = 28;
 /// The floating action button's margin from the body's edge.
@@ -135,15 +214,50 @@ const FAB_MARGIN: usize = 16;
 /// The padding inside a chat bubble.
 const BUBBLE_PAD: usize = 12;
 /// The chat surface's composer band.
+///
+/// The authored band, and its floor: the field it holds follows the type, so at
+/// the larger levels the band is grown to the field plus the same air
+/// (`composer_h`), never shrunk below the number the layout was drawn with.
 const COMPOSER_H: usize = 76;
-/// The composer's field height.
 /// The composer's field height.
 ///
 /// WHY it follows the type rather than being a number: the platform's
 /// type scale names a line box, and a field that is shorter than the line
 /// it holds cannot hold it. A fixed height here broke the moment the
 /// ladder's rungs moved, because the arithmetic underflowed.
-const COMPOSER_FIELD_H: usize = LINE_BODY + 28;
+///
+/// WHY it moves with the published rung for the same reason: the field holds a
+/// body-rung line, and a field that keeps the Normal box while the ink is
+/// raised to Large is the same arithmetic mistake one rung further down.
+const fn composer_field_h_at(level: u8) -> usize {
+    line_at(SCALE_BODY, level) + 28
+}
+#[inline]
+fn composer_field_h() -> usize {
+    composer_field_h_at(level())
+}
+/// The air the authored band leaves around the field it centres, solved from
+/// the authored pair rather than written down, so the band can grow with the
+/// field without the field ever sitting in a band of a different proportions.
+const COMPOSER_AIR: usize = COMPOSER_H - composer_field_h_at(PLATFORM_LEVEL);
+/// The composer band at the published level: the authored band, or the field
+/// plus its air when the rung has grown the field past the band.
+///
+/// WHY a run-time face rather than a compile-time bound: the band's floor is a
+/// layout number the platform's contract reads, and the only honest way to keep
+/// both it and the field is to take the larger of the two at draw time.
+const fn composer_h_at(level: u8) -> usize {
+    let grown = composer_field_h_at(level) + COMPOSER_AIR;
+    if grown > COMPOSER_H {
+        grown
+    } else {
+        COMPOSER_H
+    }
+}
+#[inline]
+fn composer_h() -> usize {
+    composer_h_at(level())
+}
 /// The composer's send button radius.
 const COMPOSER_SEND_R: usize = 24;
 
@@ -152,22 +266,84 @@ const COMPOSER_SEND_R: usize = 24;
 /// WHY it follows the bar rather than sitting at a number of its own: the bar
 /// grew when it took the platform's back control, and a band pinned at the old
 /// bottom was drawn over the control it no longer clears.
+///
+/// WHY the same rule is now a function of the rung: the bar's title is centred
+/// caps, so a raised rung pushes the name's last inked row down, and a band
+/// that stayed at 120 while the caps ran past it would be drawn under the name
+/// it is supposed to sit clear of. The eight rows of air the authored layout
+/// gives the control are re-applied to the bar's own foot at every level, so the
+/// band moves only when the ink needs it to and the platform's pixels do not.
+const fn tab_y_at(level: u8) -> usize {
+    appbar_bottom_at(level) + 8
+}
+#[inline]
+fn tab_y() -> usize {
+    tab_y_at(level())
+}
 const TAB_Y: usize = 120;
 const TAB_H: usize = 44;
 const TAB_GAP: usize = 5;
 
 /// The scrollable body's band.
+///
+/// The authored top; `body_top()` is the same band after the tab row has moved
+/// for the rung, with the same sixteen rows of air the authored layout gives it.
 const BODY_TOP: usize = 180;
+const fn body_top_at(level: u8) -> usize {
+    tab_y_at(level) + TAB_H + 16
+}
+#[inline]
+fn body_top() -> usize {
+    body_top_at(level())
+}
 /// WHY at compile time: the three bands above are written as numbers so the
 /// platform's layout contract can read them, and a number is only honest while
-/// it still matches the geometry the controls are actually placed from.
+/// it still matches the geometry the controls are actually placed from. The two
+/// checks beside it say the derivation answers those same numbers at the level
+/// the numbers were authored for, and that raising a rung never pulls the body
+/// down past the action bar it scrolls inside.
 const _: () = assert!(
     APPBAR_H == HEADER_TOP + std::design::back_button::SIZE + 8
         && TAB_Y == APPBAR_H + 8
         && BODY_TOP == TAB_Y + TAB_H + 16
+        && tab_y_at(PLATFORM_LEVEL) == TAB_Y
+        && body_top_at(PLATFORM_LEVEL) == BODY_TOP
 );
+const fn bands_clear_the_action_bar_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= 3 {
+        if body_top_at(level) >= BODY_BOTTOM {
+            return false;
+        }
+        if tab_y_at(level) + TAB_H >= body_top_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(bands_clear_the_action_bar_at_every_level());
 const BODY_BOTTOM: usize = 1284;
 const BODY_H: usize = BODY_BOTTOM - BODY_TOP;
+/// The body's viewport at the published level: the authored band's floor, less
+/// the rows the raised type has given to the bar and the segmented control above
+/// it.
+///
+/// WHY the scroll state is built from this and not from `BODY_H`: the band's
+/// height is how much of the card stack a person can reach without scrolling, and
+/// a viewport that keeps the authored number after the band has moved reports a
+/// body that ends below the action bar -- a scroll range with rows in it that no
+/// pixel of the screen shows.
+#[inline]
+fn band_height() -> usize {
+    BODY_BOTTOM.saturating_sub(body_top())
+}
+// WHY checked here: the authored body's height is the platform's case, and the
+// band only narrows -- it never reaches past the action bar it scrolls inside.
+const _: () = assert!(band_height_at(PLATFORM_LEVEL) == BODY_H);
+const fn band_height_at(level: u8) -> usize {
+    BODY_BOTTOM.saturating_sub(body_top_at(level))
+}
 /// The bottom action bar's band.
 const ACTION_TOP: usize = 1284;
 const BUTTON_Y: usize = 1300;
@@ -183,20 +359,81 @@ const RESULT_Y: usize = 1364;
 /// y >= 1395` -- whose first term could never be the binding one, so the press
 /// claimed 321 columns and stopped 25 rows above the ink it stood for.
 const HOME_PILL: std::design::primitives::Rect = std::design::home_band::PILL;
+/// The first row of the answering box: the last row the action band's own ink
+/// takes, plus its air.
+///
+/// WHY it is authored rather than measured at draw time: it is the one number
+/// both halves of the action band agree on -- the result line is stamped so its
+/// ink ends here (see `result_y_at`), and the box begins here, so a content row
+/// of this app can never answer as the exit gesture.
+const HOME_HIT_TOP: usize = RESULT_Y + line_at(SCALE_CAPTION, PLATFORM_LEVEL) + 4;
 /// WHY `hit_from` and not the SDK's default box: the last action's result line
-/// paints down to `RESULT_Y + LINE_CAPTION + 4`, two rows past the default
-/// box's first, so the box begins where this app's own ink stops.
-const HOME_HIT: std::design::primitives::Rect =
-    std::design::home_band::hit_from(RESULT_Y + LINE_CAPTION + 4);
+/// paints down to the caption rung's whole line box plus its air, two rows
+/// past the default box's first, so the box begins where this app's own ink stops.
+const HOME_HIT: std::design::primitives::Rect = std::design::home_band::hit_from(HOME_HIT_TOP);
+
+/// The last row the buttons take: the result line is stamped below it.
+const fn buttons_bottom() -> usize {
+    BUTTON_Y + BUTTON_H
+}
+/// The row the last action's result line is stamped on.
+///
+/// WHY it moves and the answering box does not: the caption's line box grows
+/// with the published rung, and the box the ink stands in cannot be allowed to
+/// run under the home gesture's first row. So the ink is lifted inside the
+/// action band, where there is room, rather than pushing the answering box down
+/// past the touch floor its own gate names -- and where lifting it would put it
+/// on the buttons, the band's own floor holds it there instead.
+const fn result_y_at(level: u8) -> usize {
+    let wanted = HOME_HIT_TOP - line_at(SCALE_CAPTION, level) - 4;
+    if wanted < buttons_bottom() {
+        buttons_bottom()
+    } else {
+        wanted
+    }
+}
+#[inline]
+fn result_y() -> usize {
+    result_y_at(level())
+}
 
 /// WHY checked here: the answering box still clears the platform's touch floor,
 /// the mark stands inside the box it is drawn for, and nothing above the box is
 /// both this app's ink and a way out of the app.
-const _: () = assert!(HOME_HIT.y >= RESULT_Y + LINE_CAPTION + 4);
+const _: () = assert!(HOME_HIT.y >= RESULT_Y + line_at(SCALE_CAPTION, PLATFORM_LEVEL));
 const _: () = assert!(HOME_HIT.y + HOME_HIT.h == H);
 const _: () = assert!(HOME_HIT.h >= 40);
 const _: () = assert!(HOME_PILL.y >= HOME_HIT.y && HOME_PILL.y + HOME_PILL.h <= H);
 const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
+/// WHY checked here: the gates above are the box's own geometry, and the box only
+/// means anything if the row this app stamps its result on -- at the rung the
+/// person chose, not at the authored one -- ends above the box's first row and
+/// below the buttons it shares the band with. The four rows of air the authored
+/// layout left above the ink are what shrinks first, because the box's floor and
+/// the buttons' floor are the two bounds that cannot move: at the largest rung
+/// the line sits on the buttons' last row and its box ends clear of the gesture's
+/// first, so no row of this app's own text is answered as a way out.
+const fn result_line_holds_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= 3 {
+        if result_y_at(level) < buttons_bottom() {
+            return false;
+        }
+        if result_y_at(level) + line_at(SCALE_CAPTION, level) > HOME_HIT.y {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+// WHY apart: the clamp exists for the larger rungs, and the authored row and the
+/// authored air have to survive it -- the platform's pixels are the case both of
+/// these gates are written against.
+const _: () = assert!(result_y_at(PLATFORM_LEVEL) == RESULT_Y);
+const _: () = assert!(
+    result_y_at(PLATFORM_LEVEL) + line_at(SCALE_CAPTION, PLATFORM_LEVEL) + 4 == HOME_HIT.y
+);
+const _: () = assert!(result_line_holds_at_every_level());
 
 // WHY the action bar starts where the body ends: the two bands share an
 // edge, and a gap between them would be a strip of page that belongs to
@@ -215,13 +452,21 @@ const CARD_GAP: usize = 14;
 /// with a measurement is a measurement.
 ///
 /// WHY it is the section rung's own line box and not a number written down: a
-/// heading painted at `CAP_SECTION` reserves `line_height(SECTION_SCALE)` rows
-/// from the row it is stamped on, and forty was the cell's, not the rung's. The
+/// heading painted at the section cap reserves the section rung's line box from
+/// the row it is stamped on, and forty was the cell's, not the rung's. The
 /// gap under the heading happened to be wide enough to swallow the difference,
 /// so nothing on screen disagreed with the number -- and a row that is shorter
 /// than the ink it owns is only ever saved by luck, because this platform
 /// paints no clip and a rung that moves lands the surplus on the first line.
-const TITLE_ROW_H: usize = LINE_SECTION;
+///
+/// WHY it is a function of the rung as well: the heading's ink is now drawn at
+/// the published level, so a heading row that kept the authored box would be
+/// the same luck one rung further -- the surplus lands on the first measurement
+/// under it. The cards' heights are placed at build time from this number, and
+/// the body scrolls, so a taller stack reaches the person instead of being cut.
+const fn title_row_h_at(level: u8) -> usize {
+    line_at(SCALE_SECTION, level)
+}
 const TITLE_GAP: usize = 10;
 /// The height of a row.
 ///
@@ -230,8 +475,46 @@ const TITLE_GAP: usize = 10;
 /// minimum touch target is forty-four pixels.
 /// A row's height. It follows the type for the same reason the composer's
 /// field does.
-const ROW_H: usize = LINE_BODY + 20;
-const LINES_TOP: usize = CARD_PAD_TOP + TITLE_ROW_H + TITLE_GAP;
+const fn row_h_at(level: u8) -> usize {
+    line_at(SCALE_BODY, level) + 20
+}
+#[inline]
+fn row_h() -> usize {
+    row_h_at(level())
+}
+/// The row a card's first line sits on: its heading's whole plate plus the gap.
+const fn lines_top_at(level: u8) -> usize {
+    CARD_PAD_TOP + title_row_h_at(level) + TITLE_GAP
+}
+#[inline]
+fn lines_top() -> usize {
+    lines_top_at(level())
+}
+// WHY checked here: a heading plate and the first row under it are the two
+// numbers that used to be `const`s in agreement; at every selectable level the
+// plate still holds its own ink and the card's pad still clears it.
+const _: () = assert!(title_row_h_at(PLATFORM_LEVEL) == std::design::typography::SECTION_LINE_PX);
+const _: () = assert!(row_h_at(PLATFORM_LEVEL) == std::design::typography::BODY_LINE_PX + 20);
+const _: () = assert!(lines_top_at(PLATFORM_LEVEL) == CARD_PAD_TOP + std::design::typography::SECTION_LINE_PX + TITLE_GAP);
+const fn heading_plates_hold_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= 3 {
+        // The heading's ink is its cap on the section rung's baseline, and the
+        // plate reserves the rung's whole line box, so the plate has to be at
+        // least as tall as the ascent the caps sit on.
+        if title_row_h_at(level) < ascent_at(SCALE_SECTION, level) {
+            return false;
+        }
+        // A row carries the body rung's ink and the caption's chip, and it is
+        // the row a tap is answered on: never below the platform's floor.
+        if row_h_at(level) < std::design::touch::MIN_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(heading_plates_hold_at_every_level());
 
 /// The label column's width in pixels.
 /// The label column's width.
@@ -283,27 +566,122 @@ const WIDE_ROWS: usize = 20;
 // does this one: the rows are the 24px rung, the headings are the 48px
 // rung, and the difference between a heading and a row is the weight and
 // the ink as much as it is the size.
-/// The cap heights the design document names, in the units a reader sees.
+/// The four rungs this app draws on, named so a plate and the ink inside it can
+/// be asked for the same rung at the same text-size level.
+const SCALE_CAPTION: usize = std::design::typography::CAPTION_SCALE;
+const SCALE_BODY: usize = std::design::typography::BODY_SCALE;
+const SCALE_SECTION: usize = std::design::typography::SECTION_SCALE;
+const SCALE_TITLE: usize = std::design::typography::TITLE_SCALE;
+
+/// The text-size level this layout was authored against.
+///
+/// WHY it is named: every box below is derived twice -- once as a `const fn` of
+/// a level, so the compile-time gates can still prove a plate holds its ink at
+/// every selectable level, and once at run time through the published rung, so
+/// the pixels a person actually gets follow the setting they chose. The gates
+/// and the identity checks are written against this level, which is what keeps
+/// the app's pixels at Normal exactly the pixels it drew before it read the
+/// setting at all.
+const PLATFORM_LEVEL: u8 = font::TEXT_SCALE_NORMAL;
+
+/// The rung's cap height at a level, and the two boxes that go with it.
+///
+/// WHY these are `const fn`s of the level and not [`font::cap_for_scale`]: the
+/// ladder `cap_for_scale` is a compile-time ladder, called from const contexts
+/// across the tree, and it can never see a setting a person changes. The
+/// runtime faces (`font::cap_for_scale_user` and family) read the published
+/// rung instead, and a layout that moves its ink has to move its plate by the
+/// same rung -- which is the half of this the app used to leave out.
+const fn cap_at(scale: usize, level: u8) -> u32 {
+    font::cap_for_user_scale(scale, level)
+}
+const fn line_at(scale: usize, level: u8) -> usize {
+    font::line_height_for_user_scale(scale, level)
+}
+const fn ascent_at(scale: usize, level: u8) -> usize {
+    font::ascent_for_user_scale(scale, level)
+}
+
+/// The rung this process draws at, as published at startup.
+#[inline]
+fn level() -> u8 {
+    font::user_text_scale()
+}
+
+/// Reads the person's text size from the settings store and hands it to the
+/// renderer, once, before anything is drawn.
+///
+/// WHY here and why once: every box in this file -- a row, a chip, a sheet row,
+/// the composer's field, the bar's title and the home gesture's answering box --
+/// is derived from the rung at draw time, so the rung has to be published before
+/// the first of them is placed and it must not change underneath a body that was
+/// already wrapped. A setting the app never reads leaves the published level at
+/// Normal, which is the ladder's own default, so the pixels are what this app
+/// drew before the setting existed.
+///
+/// WHY a read of the store rather than a hardcoded rung: the size belongs to the
+/// person, and it is the same value Settings writes when they move the slider.
+///
+/// WHY nothing is allocated: the read is into a fixed buffer on this frame, the
+/// way the platform's own Settings surface reads it.
+fn publish_text_scale() {
+    let mut buf = [0u8; 32];
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        if let Some(scale) = UserTextScale::from_settings_value(&buf[..n]) {
+            DynamicType::new(scale).publish();
+        }
+    }
+}
+
+// WHY checked here: the app's boxes are authored against the ladder, and the
+// derivation above is only a faithful restatement of it if every rung answers
+// the platform's own number at the platform's level. Each of these is the value
+// the file used to read straight out of `typography`.
+const _: () = assert!(cap_at(SCALE_CAPTION, PLATFORM_LEVEL) == std::design::typography::CAPTION_CAP_PX);
+const _: () = assert!(cap_at(SCALE_BODY, PLATFORM_LEVEL) == std::design::typography::BODY_CAP_PX);
+const _: () = assert!(cap_at(SCALE_SECTION, PLATFORM_LEVEL) == std::design::typography::SECTION_CAP_PX);
+const _: () = assert!(cap_at(SCALE_TITLE, PLATFORM_LEVEL) == std::design::typography::TITLE_CAP_PX);
+const _: () = assert!(line_at(SCALE_CAPTION, PLATFORM_LEVEL) == std::design::typography::CAPTION_LINE_PX);
+const _: () = assert!(line_at(SCALE_BODY, PLATFORM_LEVEL) == std::design::typography::BODY_LINE_PX);
+const _: () = assert!(line_at(SCALE_SECTION, PLATFORM_LEVEL) == std::design::typography::SECTION_LINE_PX);
+const _: () = assert!(ascent_at(SCALE_TITLE, PLATFORM_LEVEL) == font::ascent_for_scale(SCALE_TITLE));
+
+/// The cap heights the design document names, drawn at the published level.
 ///
 /// WHY the app names them rather than a scale multiple: the platform's
 /// type scale is a ladder of cap heights, and a scale multiple is a
 /// ladder of multiples. One of them can be drawn exactly and the other
 /// has to be guessed at.
-const CAP_CAPTION: u32 = std::design::typography::CAPTION_CAP_PX;
-const CAP_BODY: u32 = std::design::typography::BODY_CAP_PX;
-const CAP_SECTION: u32 = std::design::typography::SECTION_CAP_PX;
-const CAP_TITLE: u32 = std::design::typography::TITLE_CAP_PX;
+#[inline]
+fn cap_caption() -> u32 {
+    cap_at(SCALE_CAPTION, level())
+}
+#[inline]
+fn cap_body() -> u32 {
+    cap_at(SCALE_BODY, level())
+}
+#[inline]
+fn cap_section() -> u32 {
+    cap_at(SCALE_SECTION, level())
+}
+#[inline]
+fn cap_title() -> u32 {
+    cap_at(SCALE_TITLE, level())
+}
 
-/// The line heights that go with the cap heights.
-const LINE_CAPTION: usize = std::design::typography::CAPTION_LINE_PX;
-const LINE_BODY: usize = std::design::typography::BODY_LINE_PX;
-const LINE_SECTION: usize = std::design::typography::SECTION_LINE_PX;
-/// The row the title rung's baseline sits on, below its line box's top.
+/// The line heights that go with the cap heights, at the published level.
 ///
-/// WHY it comes from the ladder: the app's own `text` puts the baseline at
-/// `y0 + ascent` with these exact face metrics, so a line placed from this
-/// number has its ink where the place was, and not a few rows away.
-const CAP_TITLE_ASCENT: usize = font::ascent_for_scale(std::design::typography::TITLE_SCALE);
+/// WHY they travel with the caps: a line box is the space a run reserves, and
+/// ink raised to Large inside a box written for Normal is ink the plate clips
+/// -- the defect class this file is being asked to close.
+#[inline]
+fn line_caption() -> usize {
+    line_at(SCALE_CAPTION, level())
+}
+#[inline]
+fn line_body() -> usize {
+    line_at(SCALE_BODY, level())
+}
 
 /// The length of the band's clock lane, as the RTC formats it.
 const CLOCK_LEN: usize = 5;
@@ -813,7 +1191,7 @@ impl AgentManagerApp {
             action_log: [0; ACTION_LOG_MAX],
             action_log_len: 0,
             action_tone: Tone::Muted,
-            scroll: ScrollState::new(0, BODY_H, 0),
+            scroll: ScrollState::new(0, band_height(), 0),
             cards: [Card::empty(); MAX_CARDS],
             card_count: 0,
             lines: [Line::empty(); MAX_LINES],
@@ -1260,7 +1638,7 @@ impl AgentManagerApp {
     /// cannot be reached while the answer is being read.
     pub fn body_bottom(&self) -> usize {
         if self.surface == Surface::Chat {
-            ACTION_TOP - COMPOSER_H
+            ACTION_TOP - composer_h()
         } else {
             ACTION_TOP
         }
@@ -1268,7 +1646,7 @@ impl AgentManagerApp {
 
     /// The height of the body's band on the current surface.
     pub fn body_h(&self) -> usize {
-        self.body_bottom().saturating_sub(BODY_TOP)
+        self.body_bottom().saturating_sub(body_top())
     }
 
     /// Rebuilds the body for the current surface.
@@ -1394,7 +1772,7 @@ impl AgentManagerApp {
         line.tone = tone;
         line.wide = wide;
         if wide {
-            let (starts, count) = wrap_rows(&line.value[..line.value_len as usize], CAP_CAPTION, WIDE_W);
+            let (starts, count) = wrap_rows(&line.value[..line.value_len as usize], cap_caption(), WIDE_W);
             line.row_starts = starts;
             line.row_count = count;
         }
@@ -1421,10 +1799,10 @@ impl AgentManagerApp {
             let mut width = CONTENT_W;
 
             if card.kind == CARD_PANEL {
-                height = LINES_TOP;
+                height = lines_top();
                 for line_index in 0..card.line_count as usize {
                     let line = self.lines[card.line_start as usize + line_index];
-                    height += line.rows() * ROW_H;
+                    height += line.rows() * row_h();
                 }
                 height += CARD_PAD_BOTTOM;
             } else {
@@ -1440,11 +1818,11 @@ impl AgentManagerApp {
                     rows_total += line.rows();
                     for row in 0..line.rows() {
                         let (start, end) = line.row_range(row);
-                        widest = widest.max(measure_cap(&line.value[start..end], CAP_CAPTION));
+                        widest = widest.max(measure_cap(&line.value[start..end], cap_caption()));
                     }
                 }
                 width = (widest + 2 * BUBBLE_PAD).min(CONTENT_W);
-                height = 2 * BUBBLE_PAD + rows_total * ROW_H;
+                height = 2 * BUBBLE_PAD + rows_total * row_h();
             }
 
             self.cards[index].y = y as u16;
@@ -2873,9 +3251,14 @@ fn get_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
             .unwrap_or(THEME.surface);
     }
-    let base = if y < APPBAR_H {
+    let base = if y < appbar_bottom() {
+        // WHY the bar's own foot is a function of the rung and not the authored
+        // `APPBAR_H`: which painter answers a row decides whether the name on the
+        // bar is drawn whole, and the bar now grows to the rung's line box. At the
+        // authored level the foot is the band the file has always used, so the
+        // boundary a Normal-size reader sees has not moved.
         appbar_pixel(x, y, app)
-    } else if y < BODY_TOP {
+    } else if y < body_top() {
         tab_pixel(x, y, app)
     } else {
         let bottom = app.body_bottom();
@@ -2929,13 +3312,13 @@ fn appbar_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     // would land on the search button's circle and read as part of it.
     let title = app.surface.title();
     let mut shown = [0u8; APPBAR_TITLE_BUF];
-    let len = fit_marked(title.as_bytes(), APPBAR_TITLE_MAX_W, CAP_TITLE, &mut shown);
+    let len = fit_marked(title.as_bytes(), APPBAR_TITLE_MAX_W, cap_title(), &mut shown);
     if let Some(c) = text(
         x,
         y,
         APPBAR_TITLE_X,
-        APPBAR_TITLE_Y,
-        CAP_TITLE,
+        appbar_title_y(),
+        cap_title(),
         &shown[..len],
         THEME.on_surface,
         THEME.surface,
@@ -2999,7 +3382,19 @@ fn appbar_more_rect() -> Rect {
 const SHEET_W: usize = 272;
 /// The sheet's row height.
 /// A sheet row's height. It follows the type for the same reason.
-const SHEET_ROW_H: usize = LINE_BODY + 24;
+///
+/// WHY it is a function of the rung: the row holds a body-rung line centred in
+/// it, and the sheet is the one plate on this screen that is grown by the same
+/// arithmetic both above and below -- its height, its rows and the hit test that
+/// answers them all read the published level, so no row can be shorter than the
+/// word it carries.
+const fn sheet_row_h_at(level: u8) -> usize {
+    line_at(SCALE_BODY, level) + 24
+}
+#[inline]
+fn sheet_row_h() -> usize {
+    sheet_row_h_at(level())
+}
 /// The sheet's padding.
 const SHEET_PAD: usize = 8;
 
@@ -3016,9 +3411,16 @@ const SHEET_ROWS: [(Icon, &str, Action); 4] = [
 ];
 
 /// The sheet's rectangle.
+///
+/// WHY it hangs from the tab row's top rather than the authored bar's: the sheet
+/// is opened from the bar and covers the control beneath it, and the control
+/// moves down when the bar's name needs the rows. At the authored level the two
+/// are the same row -- `TAB_Y == APPBAR_H + 8` is the gate above -- so the sheet
+/// is where it always was, and its height grows with the row the labels are cut
+/// at.
 fn sheet_rect() -> Rect {
-    let height = SHEET_PAD * 2 + SHEET_ROWS.len() * SHEET_ROW_H;
-    Rect::new(W - GUTTER - SHEET_W, APPBAR_H + 8, SHEET_W, height)
+    let height = SHEET_PAD * 2 + SHEET_ROWS.len() * sheet_row_h();
+    Rect::new(W - GUTTER - SHEET_W, tab_y(), SHEET_W, height)
 }
 
 /// The colour of `(x, y)` if it is the overflow sheet.
@@ -3033,12 +3435,12 @@ fn sheet_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
     let mut colour =
         monochrome::card_px(x, y, rect, THEME.surface_container, Some(THEME.border))?;
     for (index, (icon, label, _)) in SHEET_ROWS.iter().enumerate() {
-        let row_y = rect.y + SHEET_PAD + index * SHEET_ROW_H;
-        let row = Rect::new(rect.x, row_y, rect.w, SHEET_ROW_H);
+        let row_y = rect.y + SHEET_PAD + index * sheet_row_h();
+        let row = Rect::new(rect.x, row_y, rect.w, sheet_row_h());
         if !row.contains(x, y) {
             continue;
         }
-        let glyph = Rect::new(rect.x + 16, row_y + (SHEET_ROW_H - 22) / 2, 22, 22);
+        let glyph = Rect::new(rect.x + 16, row_y + (sheet_row_h() - 22) / 2, 22, 22);
         if let Some(c) = monochrome::icon_px(x, y, glyph, *icon, THEME.on_surface) {
             colour = c;
         }
@@ -3046,8 +3448,8 @@ fn sheet_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
             x,
             y,
             rect.x + 50,
-            row_y + (SHEET_ROW_H - LINE_BODY) / 2,
-            CAP_BODY,
+            row_y + (sheet_row_h() - line_body()) / 2,
+            cap_body(),
             label.as_bytes(),
             THEME.on_surface,
             THEME.surface_container,
@@ -3131,7 +3533,7 @@ fn tab_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     let index = (x.saturating_sub(GUTTER)) / (segment_w + TAB_GAP);
     if index < Surface::COUNT {
         let seg_x = GUTTER + index * (segment_w + TAB_GAP);
-        let seg = Rect::new(seg_x, TAB_Y, segment_w, TAB_H);
+        let seg = Rect::new(seg_x, tab_y(), segment_w, TAB_H);
         if seg.contains(x, y) {
             let selected = app.surface.index() == index;
             let (fill, ink) = if selected {
@@ -3149,14 +3551,14 @@ fn tab_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             .unwrap_or(fill);
 
             let label = Surface::ALL[index].tab_label().as_bytes();
-            let text_w = measure_cap(label, CAP_CAPTION);
+            let text_w = measure_cap(label, cap_caption());
             let text_x = seg_x + segment_w.saturating_sub(text_w) / 2;
             if let Some(c) = text(
                 x,
                 y,
                 text_x,
-                TAB_Y + (TAB_H - LINE_CAPTION) / 2,
-                CAP_CAPTION,
+                tab_y() + (TAB_H - line_caption()) / 2,
+                cap_caption(),
                 label,
                 ink,
                 fill,
@@ -3182,7 +3584,7 @@ fn body_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
 /// The scrollable body's cards.
 fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
     let offset = app.scroll.offset;
-    let content_y = y - BODY_TOP + offset;
+    let content_y = y - body_top() + offset;
 
     for index in 0..app.card_count as usize {
         let card = app.cards[index];
@@ -3192,7 +3594,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
             continue;
         }
 
-        let top = BODY_TOP as i64 + card_y as i64 - offset as i64;
+        let top = body_top() as i64 + card_y as i64 - offset as i64;
         let bottom = top + card_h as i64;
         if bottom <= 0 || top >= H as i64 {
             return None;
@@ -3214,16 +3616,16 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
 
         // The heading.
         let title_top = card_y + CARD_PAD_TOP;
-        if content_y < card_y + LINES_TOP {
+        if content_y < card_y + lines_top() {
             let title = &card.title[..card.title_len as usize];
             let mut shown = [0u8; 256];
-            let len = fit_marked(title, CONTENT_W - 2 * CARD_PAD_X, CAP_SECTION, &mut shown);
+            let len = fit_marked(title, CONTENT_W - 2 * CARD_PAD_X, cap_section(), &mut shown);
             if let Some(c) = text(
                 x,
                 y,
                 GUTTER + CARD_PAD_X,
-                BODY_TOP + title_top - offset,
-                CAP_SECTION,
+                body_top() + title_top - offset,
+                cap_section(),
                 &shown[..len],
                 card.title_tone.colour(),
                 THEME.surface_container,
@@ -3238,20 +3640,20 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
         }
 
         // The lines.
-        let lines_top = card_y + LINES_TOP;
+        let lines_top = card_y + lines_top();
         let mut cursor = lines_top;
         for line_index in 0..card.line_count as usize {
             let line = app.lines[card.line_start as usize + line_index];
-            let height = line.rows() * ROW_H;
+            let height = line.rows() * row_h();
             if content_y >= cursor && content_y < cursor + height {
-                let screen_y = BODY_TOP + cursor - offset;
+                let screen_y = body_top() + cursor - offset;
                 if line.wide {
-                    let row = (content_y - cursor) / ROW_H;
+                    let row = (content_y - cursor) / row_h();
                     let (start, end) = line.row_range(row);
                     if start < end {
                         let body = &line.value[start..end];
                         let mut shown = [0u8; 256];
-                        let len = fit_marked(body, WIDE_W, CAP_CAPTION, &mut shown);
+                        let len = fit_marked(body, WIDE_W, cap_caption(), &mut shown);
                         // WHY the row's own y and not the line's: a wide
                         // line that wraps has more than one physical row, and
                         // every one of them is a row of its own.
@@ -3259,8 +3661,8 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             x,
                             y,
                             GUTTER + CARD_PAD_X,
-                            screen_y + row * ROW_H,
-                            CAP_CAPTION,
+                            screen_y + row * row_h(),
+                            cap_caption(),
                             &shown[..len],
                             line.tone.colour(),
                             THEME.surface_container,
@@ -3272,13 +3674,13 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                 } else {
                     let label = &line.label[..line.label_len as usize];
                     let mut shown = [0u8; 256];
-                    let len = fit_marked(label, LABEL_W - LABEL_GAP, CAP_CAPTION, &mut shown);
+                    let len = fit_marked(label, LABEL_W - LABEL_GAP, cap_caption(), &mut shown);
                     if let Some(c) = text(
                         x,
                         y,
                         GUTTER + CARD_PAD_X,
-                        screen_y + (ROW_H - LINE_CAPTION) / 2,
-                        CAP_CAPTION,
+                        screen_y + (row_h() - line_caption()) / 2,
+                        cap_caption(),
                         &shown[..len],
                         THEME.on_surface_variant,
                         THEME.surface_container,
@@ -3296,7 +3698,7 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                             x,
                             y,
                             GUTTER + CONTENT_W - CARD_PAD_X,
-                            screen_y + (ROW_H - CHIP_H) / 2,
+                            screen_y + (row_h() - chip_h()) / 2,
                             value,
                             line.tone,
                         ) {
@@ -3309,20 +3711,20 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                         // reader is left with a different name for the thing
                         // than the platform gave, so the cut and the mark are
                         // decided in one place.
-                        let len = fit_marked(value, VALUE_W, CAP_BODY, &mut shown);
+                        let len = fit_marked(value, VALUE_W, cap_body(), &mut shown);
                         // WHY the value is right-aligned: a value that starts
                         // at a fixed column leaves a ragged edge, and a list of
                         // ragged values reads as a table of unrelated things.
                         // Aligned to the row's edge, the values form a column
                         // a person can scan down.
-                        let value_w = measure_cap(&shown[..len], CAP_BODY);
+                        let value_w = measure_cap(&shown[..len], cap_body());
                         let value_x = (GUTTER + CONTENT_W - CARD_PAD_X).saturating_sub(value_w).max(VALUE_X);
                         if let Some(c) = text(
                             x,
                             y,
                             value_x,
-                            screen_y + (ROW_H - LINE_BODY) / 2,
-                            CAP_BODY,
+                            screen_y + (row_h() - line_body()) / 2,
+                            cap_body(),
                             &shown[..len],
                             line.tone.colour(),
                             THEME.surface_container,
@@ -3379,7 +3781,7 @@ fn bubble_pixel(
             let len = fit_marked(
                 body,
                 width.saturating_sub(2 * BUBBLE_PAD),
-                CAP_CAPTION,
+                cap_caption(),
                 &mut shown,
             );
             if let Some(c) = text(
@@ -3387,7 +3789,7 @@ fn bubble_pixel(
                 y,
                 left + BUBBLE_PAD,
                 cursor,
-                CAP_CAPTION,
+                cap_caption(),
                 &shown[..len],
                 ink,
                 fill,
@@ -3395,7 +3797,7 @@ fn bubble_pixel(
             ) {
                 colour = c;
             }
-            cursor += ROW_H;
+            cursor += row_h();
         }
     }
     Some(colour)
@@ -3406,15 +3808,25 @@ const CHIP_PAD_Y: usize = 2;
 /// The height of a status chip.
 ///
 /// WHY it is the caption's own line box plus its padding and not a number
-/// written down: a chip holds one caption run, and the run reserves
-/// `LINE_CAPTION` rows whatever the chip was cut for, so a height written as
+/// written down: a chip holds one caption run, and the run reserves the caption
+/// rung's whole line box whatever the chip was cut for, so a height written as
 /// a literal is a promise the chip can break the moment the ladder moves --
 /// and the screen paints no clip, so the ink lands on the card.
 ///
 /// WHY one name for both places that need it: the chip's fill and the row
 /// that centres the chip are the same height, and two numbers for it are two
 /// numbers that can disagree without anything saying so.
-const CHIP_H: usize = LINE_CAPTION + 2 * CHIP_PAD_Y;
+///
+/// WHY it is a function of the rung: the word inside it is drawn at the
+/// published level, so the fill has to be cut at the same level or the mark
+/// stands taller than the pill it is set in.
+const fn chip_h_at(level: u8) -> usize {
+    line_at(SCALE_CAPTION, level) + 2 * CHIP_PAD_Y
+}
+#[inline]
+fn chip_h() -> usize {
+    chip_h_at(level())
+}
 /// What a chip spends around the word it holds: the leading inset, the dot,
 /// the gap after the dot and the trailing inset.
 ///
@@ -3426,10 +3838,22 @@ const CHIP_CHROME: usize = 10 + 8 + 6 + 10;
 
 // WHY at compile time: the chip is centred inside a row and painted with no
 // clip, so a chip taller than the row that carries it is a chip whose fill
-// lands on the row above and the row below. `CHIP_H` is built from the caption
-// rung and `ROW_H` from the body rung, so the two can part company without
-// anything on screen saying so until the ladder moves.
-const _: () = assert!(CHIP_H <= ROW_H);
+// lands on the row above and the row below. `chip_h_at` is built from the caption
+// rung and `row_h_at` from the body rung, so the two can part company without
+// anything on screen saying so until the ladder moves -- and now that both
+// follow the person's text size, the check has to be made at every selectable
+// level rather than once against a `const`.
+const fn chip_fits_its_row_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= 3 {
+        if chip_h_at(level) > row_h_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(chip_fits_its_row_at_every_level());
 
 /// The colour of `(x, y)` if it is a status chip whose right edge is at
 /// `right_x`.
@@ -3446,15 +3870,15 @@ fn chip_px(
     // its own fill into the label column and painted the label through the dot.
     // Trimming it is the only case this control can have too much to say.
     let mut shown = [0u8; MAX_RUN_BYTES];
-    let len = fit_marked(label, VALUE_W.saturating_sub(CHIP_CHROME), CAP_CAPTION, &mut shown);
+    let len = fit_marked(label, VALUE_W.saturating_sub(CHIP_CHROME), cap_caption(), &mut shown);
     let label = &shown[..len];
-    let text_w = measure_cap(label, CAP_CAPTION);
+    let text_w = measure_cap(label, cap_caption());
     let width = CHIP_CHROME + text_w;
     let left = right_x.saturating_sub(width);
-    let rect = Rect::new(left, top, width, CHIP_H);
+    let rect = Rect::new(left, top, width, chip_h());
     let mut colour = monochrome::chip_px(x, y, rect, THEME.surface_container_low, None)?;
     let dot_cx = left + 10 + 4;
-    let dot_cy = top + CHIP_H / 2;
+    let dot_cy = top + chip_h() / 2;
     if let Some(c) = monochrome::circle_px(x, y, dot_cx, dot_cy, 4, tone.colour(), None) {
         colour = c;
     }
@@ -3463,10 +3887,10 @@ fn chip_px(
         y,
         dot_cx + 10,
         // WHY the caption is centred against the chip: the caption reserves
-        // `LINE_CAPTION` rows from the row it is stamped on, and a stamp that
+        // its line box from the row it is stamped on, and a stamp that
         // leaves the box taller than the chip spills the word over the fill.
-        top + (CHIP_H - LINE_CAPTION) / 2,
-        CAP_CAPTION,
+        top + (chip_h() - line_caption()) / 2,
+        cap_caption(),
         label,
         tone.colour(),
         THEME.surface_container_low,
@@ -3487,19 +3911,19 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     if app.surface != Surface::Chat {
         return colour;
     }
-    let top = ACTION_TOP - COMPOSER_H;
+    let top = ACTION_TOP - composer_h();
     if y == top {
         colour = THEME.border;
     }
-    let field_y = top + COMPOSER_H.saturating_sub(COMPOSER_FIELD_H) / 2;
+    let field_y = top + composer_h().saturating_sub(composer_field_h()) / 2;
     let send_cx = W - GUTTER - COMPOSER_SEND_R;
-    let send_cy = top + COMPOSER_H / 2;
+    let send_cy = top + composer_h() / 2;
     let field_right = send_cx.saturating_sub(COMPOSER_SEND_R + 12);
     let field = Rect::new(
         GUTTER,
         field_y,
         field_right.saturating_sub(GUTTER),
-        COMPOSER_FIELD_H,
+        composer_field_h(),
     );
     if field.contains(x, y) {
         if let Some(c) =
@@ -3519,13 +3943,13 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             (prompt, THEME.on_surface)
         };
         let mut shown = [0u8; 256];
-        let len = fit_marked(body, field.w.saturating_sub(28), CAP_BODY, &mut shown);
+        let len = fit_marked(body, field.w.saturating_sub(28), cap_body(), &mut shown);
         if let Some(c) = text(
             x,
             y,
             field.x + 14,
-            field_y + (COMPOSER_FIELD_H - LINE_BODY) / 2,
-            CAP_BODY,
+            field_y + (composer_field_h() - line_body()) / 2,
+            cap_body(),
             &shown[..len],
             ink,
             THEME.surface_container,
@@ -3595,14 +4019,14 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
                     if index == 0 { None } else { Some(THEME.border) },
                 )
                 .unwrap_or(fill);
-                let text_w = measure_cap(button.label.as_bytes(), CAP_CAPTION);
+                let text_w = measure_cap(button.label.as_bytes(), cap_caption());
                 let text_x = bx + width.saturating_sub(text_w) / 2;
                 if let Some(c) = text(
                     x,
                     y,
                     text_x,
-                    BUTTON_Y + (BUTTON_H - LINE_CAPTION) / 2,
-                    CAP_CAPTION,
+                    BUTTON_Y + (BUTTON_H - line_caption()) / 2,
+                    cap_caption(),
                     button.label.as_bytes(),
                     ink,
                     fill,
@@ -3617,8 +4041,8 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
 
     // The last action's result.
     let message = &app.action_log[..app.action_log_len];
-    if y >= RESULT_Y && y < RESULT_Y + LINE_CAPTION + 4 {
-        let len = fit(message, CONTENT_W, CAP_CAPTION);
+    if y >= result_y() && y < result_y() + line_caption() + 4 {
+        let len = fit(message, CONTENT_W, cap_caption());
         // WHY the mark: a status line that stops in the middle of a word
         // reads as a word, and a reader who takes it for one is reading a
         // sentence the platform never said. The mark says the sentence
@@ -3635,8 +4059,8 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
             x,
             y,
             GUTTER,
-            RESULT_Y,
-            CAP_CAPTION,
+            result_y(),
+            cap_caption(),
             &shown[..len],
             app.action_tone.colour(),
             THEME.overlay,
@@ -3676,7 +4100,7 @@ fn hit_body(app: &AgentManagerApp, x: usize, y: usize) -> Option<i8> {
     if x < GUTTER || x >= GUTTER + CONTENT_W {
         return None;
     }
-    let content_y = y - BODY_TOP + app.scroll.offset;
+    let content_y = y - body_top() + app.scroll.offset;
     for index in 0..app.card_count as usize {
         let card = app.cards[index];
         let card_y = card.y as usize;
@@ -3689,10 +4113,10 @@ fn hit_body(app: &AgentManagerApp, x: usize, y: usize) -> Option<i8> {
         if card.kind != CARD_PANEL {
             continue;
         }
-        let mut cursor = card_y + LINES_TOP;
+        let mut cursor = card_y + lines_top();
         for line_index in 0..card.line_count as usize {
             let line = app.lines[card.line_start as usize + line_index];
-            let height = line.rows() * ROW_H;
+            let height = line.rows() * row_h();
             if content_y >= cursor && content_y < cursor + height {
                 if line.action >= 0 {
                     return Some(line.action);
@@ -3747,15 +4171,15 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
             return Tap::Redraw;
         }
         for (index, (_icon, _label, action)) in SHEET_ROWS.iter().enumerate() {
-            let row_y = sheet.y + SHEET_PAD + index * SHEET_ROW_H;
-            if uy >= row_y && uy < row_y + SHEET_ROW_H {
+            let row_y = sheet.y + SHEET_PAD + index * sheet_row_h();
+            if uy >= row_y && uy < row_y + sheet_row_h() {
                 app.sheet_open = false;
                 match action {
                     Action::Refresh => app.refresh(),
                     Action::RunTest => app.run_self_test(),
                     Action::OpenChat => {
                         app.surface = Surface::Chat;
-                        app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+                        app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                         app.rebuild();
                     }
                     Action::ClearChat => app.clear_chat(),
@@ -3771,7 +4195,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     if appbar_search_rect().contains(ux, uy) {
         if app.surface != Surface::Search {
             app.surface = Surface::Search;
-            app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+            app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
             app.rebuild();
         }
         return Tap::Redraw;
@@ -3784,7 +4208,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     }
 
     // The segmented control.
-    if uy >= TAB_Y && uy < TAB_Y + TAB_H {
+    if uy >= tab_y() && uy < tab_y() + TAB_H {
         // WHY the gap count is derived: see the note at the tab row's
         // own geometry.
         let segment_w = (CONTENT_W - (Surface::COUNT - 1) * TAB_GAP) / Surface::COUNT;
@@ -3792,7 +4216,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         if let Some(surface) = Surface::from_index(index) {
             if surface != app.surface {
                 app.surface = surface;
-                app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+                app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                 app.rebuild();
                 return Tap::Redraw;
             }
@@ -3827,7 +4251,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         Action::ClearChat => app.clear_chat(),
                         Action::OpenChat => {
                             app.surface = Surface::Chat;
-                            app.scroll = ScrollState::new(app.content_height as usize, BODY_H, 0);
+                            app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                             app.rebuild();
                         }
                     }
@@ -3840,9 +4264,9 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     }
 
     // The composer's send button.
-    if app.surface == Surface::Chat && uy >= ACTION_TOP - COMPOSER_H && uy < ACTION_TOP {
+    if app.surface == Surface::Chat && uy >= ACTION_TOP - composer_h() && uy < ACTION_TOP {
         let send_cx = W - GUTTER - COMPOSER_SEND_R;
-        let send_cy = ACTION_TOP - COMPOSER_H + COMPOSER_H / 2;
+        let send_cy = ACTION_TOP - composer_h() + composer_h() / 2;
         let dx = ux as i64 - send_cx as i64;
         let dy = uy as i64 - send_cy as i64;
         if dx * dx + dy * dy <= (COMPOSER_SEND_R * COMPOSER_SEND_R) as i64 {
@@ -3857,7 +4281,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     }
 
     // The floating action button.
-    if app.surface != Surface::Chat && uy >= BODY_TOP && uy < app.body_bottom() {
+    if app.surface != Surface::Chat && uy >= body_top() && uy < app.body_bottom() {
         let fab = fab_rect(app);
         let cx = fab.x + fab.w / 2;
         let cy = fab.y + fab.h / 2;
@@ -3874,7 +4298,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     }
 
     // The body.
-    if uy >= BODY_TOP && uy < app.body_bottom() {
+    if uy >= body_top() && uy < app.body_bottom() {
         if let Some(action) = hit_body(app, ux, uy) {
             app.select_provider(action as usize);
             return Tap::Redraw;
@@ -3929,6 +4353,14 @@ fn repaint_band(surface: u32, app: &AgentManagerApp) {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[AGENT_MGR (Ring 3)] Agent Manager online.").ok();
+
+    // WHY before the app is built, and before a surface exists: building the app
+    // builds its body -- the cards are placed, a wide line's rows are wrapped and
+    // the scroll range is solved, all from the rung's boxes -- and the first
+    // frame is painted from those numbers. A rung published after that would size
+    // the ink of the next frame against a body wrapped for the last one, which is
+    // the clipped-text defect this file exists to close.
+    publish_text_scale();
 
     let mut app = AgentManagerApp::new();
 
@@ -3991,7 +4423,7 @@ pub extern "C" fn _start() -> ! {
                 // list, and a list that cannot be scrolled is a list whose
                 // lower half cannot be reached.
                 let over_body =
-                    (input.y as usize) >= BODY_TOP && (input.y as usize) < app.body_bottom();
+                    (input.y as usize) >= body_top() && (input.y as usize) < app.body_bottom();
                 if (input.kind == 4 || input.kind == 10) && over_body {
                     app.scroll.apply_drag(input.dy as i32);
                     dirty = Dirty::All;
