@@ -483,6 +483,8 @@ fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<
     };
     let (slot, w, h) = hit?;
     let (ascent, _) = typeface::line_metrics(em);
+    let mut key = [0u8; KEY_MAX];
+    key[..text.len()].copy_from_slice(text);
     let run = OutlineRun {
         x,
         y,
@@ -490,14 +492,16 @@ fn resident_run(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> Option<
         h,
         ascent: ascent as usize,
         slot,
+        em,
+        bold,
+        len: text.len() as u8,
+        key,
     };
     // SAFETY: the borrow above is released before either pointer is taken here.
     unsafe {
         if let Some(entry) = (*core::ptr::addr_of_mut!(LOADED))[slot].as_mut() {
             entry.used = next_stamp();
         }
-        let mut key = [0u8; KEY_MAX];
-        key[..text.len()].copy_from_slice(text);
         (*core::ptr::addr_of_mut!(LAST_PLACED))[base] = Some(LastPlaced {
             em,
             x,
@@ -567,6 +571,18 @@ pub struct OutlineRun {
     h: usize,
     ascent: usize,
     slot: usize,
+    /// The placement key, carried so the run can re-place its own coverage.
+    ///
+    /// WHY the run holds its text: a frame plan places its runs once and
+    /// paints them later, and a plan with more distinct runs than the pool
+    /// evicts its own earliest entries -- whose pixels then answered None and
+    /// simply vanished. Re-placing an evicted run needs the em and the bytes,
+    /// and nothing else in the process still holds them, so the key travels
+    /// with the run: a lost slot costs a rasterisation, never the ink.
+    em: u32,
+    bold: bool,
+    len: u8,
+    key: [u8; KEY_MAX],
 }
 
 /// The em, in 1/2048 of an em, that gives a cap height of `cap_px` pixels.
@@ -654,6 +670,10 @@ impl OutlineRun {
         h: 0,
         ascent: 0,
         slot: 0,
+        em: 0,
+        bold: false,
+        len: 0,
+        key: [0u8; KEY_MAX],
     };
 
     /// Places `text` at `em` pixels per em with its baseline on row `y`.
@@ -775,6 +795,10 @@ impl OutlineRun {
             h: line_h,
             ascent: ascent as usize,
             slot,
+            em,
+            bold,
+            len: text.len() as u8,
+            key,
         };
         // SAFETY: as above -- the mutable access to this slot's cache entry,
         // taken and released here.
@@ -802,6 +826,21 @@ impl OutlineRun {
         (self.x, top, self.w, bottom.saturating_sub(top))
     }
 
+    /// The run's placement key, as the bytes it was placed from.
+    fn text(&self) -> &[u8] {
+        &self.key[..self.len as usize]
+    }
+
+    /// Whether this run's slot still holds exactly this placement.
+    ///
+    /// WHY the full key and not just the geometry: the slot may have been
+    /// redrawn with a different run that happens to share the origin and the
+    /// line box; reading its coverage under this run's name is the wrong
+    /// glyph set the residency check exists to forbid.
+    fn resident(&self) -> bool {
+        slot_still_holds(self.slot, self.em, self.x, self.y, self.text(), self.bold)
+    }
+
     /// The colour of (`px`, `py`) if this run inks it, blended over `bg`.
     #[allow(dead_code)]
     pub fn pixel(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
@@ -815,14 +854,18 @@ impl OutlineRun {
         if cov_row < 0 || cov_row >= self.h as isize {
             return None;
         }
-        unsafe {
-            if let Some(ref loaded) = (*core::ptr::addr_of!(LOADED))[self.slot] {
-                if loaded.w != self.w || loaded.h != self.h || loaded.x != self.x || loaded.y != self.y {
-                    return None;
-                }
-            } else {
-                return None;
-            }
+        // WHY the run re-places itself instead of answering None: a frame
+        // plan with more runs than the pool evicts its earliest placements,
+        // and answering None there dropped their ink -- the shade's header
+        // simply vanished mid-frame. Re-placing costs one rasterisation per
+        // evicted run per paint pass (each re-place stamps its run newest, so
+        // the eviction only cascades once through the plan), which is time
+        // the frame pays. Losing the pixel was the answer no reader forgives.
+        if !self.resident() {
+            let fresh = Self::place_styled(self.x, self.y, self.em, self.text(), self.bold)?;
+            // The re-placed run answers from a slot that holds its own key,
+            // so this read passes the residency check and cannot recurse.
+            return fresh.pixel(px, py, ink, bg);
         }
         let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
         let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];
@@ -846,14 +889,11 @@ impl OutlineRun {
         if cov_row < 0 || cov_row >= self.h as isize {
             return None;
         }
-        unsafe {
-            if let Some(ref loaded) = (*core::ptr::addr_of!(LOADED))[self.slot] {
-                if loaded.w != self.w || loaded.h != self.h || loaded.x != self.x || loaded.y != self.y {
-                    return None;
-                }
-            } else {
-                return None;
-            }
+        // WHY the re-place: same contract as [`OutlineRun::pixel`] -- degrade
+        // in speed, never in pixels, and never read a foreign slot's glyphs.
+        if !self.resident() {
+            let fresh = Self::place_styled(self.x, self.y, self.em, self.text(), self.bold)?;
+            return fresh.pixel_binary(px, py, ink);
         }
         let cov = unsafe { &*core::ptr::addr_of!(COVERAGE) };
         let c = cov[self.slot][(cov_row as usize) * self.w + (px - self.x)];
@@ -1701,6 +1741,35 @@ mod tests {
         let b = OutlineRun::place_styled(b_x, b_y, em, b_text, true).expect("b placed");
         assert!(still_readable(&a), "placing the second run evicted the first");
         assert!(still_readable(&b), "placing the first run evicted the second");
+    }
+
+    #[test]
+    fn a_shade_plan_bigger_than_the_pool_still_paints_its_first_run() {
+        let _pool: Option<_> = Some(reset_slots());
+        // The notifications shade plans four header runs and six labels per
+        // feed row before it paints any of them, and a full feed is over
+        // thirty distinct placements -- more than the pool holds. The plan
+        // alone evicted the header's runs, and a held run whose slot no
+        // longer answers reads as no ink at all: the clock and title simply
+        // vanished. A plan that outgrows the pool may cost time, never
+        // pixels, so every planned run must still ink when it is painted.
+        const PLANNED: usize = SLOTS + 2;
+        let mut plan = [OutlineRun::EMPTY; PLANNED];
+        for i in 0..PLANNED {
+            let mut text = [b'M'; 3];
+            text[0] = b'A' + (i % 26) as u8;
+            text[1] = b'a' + ((i / 26) % 26) as u8;
+            text[2] = b'0' + (i % 10) as u8;
+            plan[i] = OutlineRun::place(40, 200 + i * 20, 24, &text).expect("placed");
+        }
+        // Paint in plan order, header first, the way the shade does.
+        for i in 0..PLANNED {
+            let inked = count_ink(&plan[i]);
+            assert!(
+                inked > 0,
+                "planned run {i} lost all ink once the plan outgrew the pool"
+            );
+        }
     }
 
     #[test]
