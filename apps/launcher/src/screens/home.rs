@@ -295,7 +295,7 @@ pub fn deck_band() -> (usize, usize) {
     (deck.y, deck.y + deck.h)
 }
 
-/// The wallpaper at pixel `(x, y)`, scene resolved once per frame.
+/// The wallpaper at pixel `(x, y)`, from the scene the frame resolved once.
 ///
 /// WHY a scene and not `theme.ramp3`: the reference home panel's wallpaper is a
 /// photograph that runs from a bright sky at the top to a near-black foreground
@@ -304,24 +304,17 @@ pub fn deck_band() -> (usize, usize) {
 /// user chose for it, from the same catalogue the lock screen and the Settings
 /// picker read. Every piece of ink drawn on it is chosen from the pixel behind
 /// it rather than assumed, so the surface reads for any scene.
-fn backdrop(p: &Paint, x: usize, y: usize) -> u32 {
-    // WHY the document comes first: the wallpaper slot may name a document the
-    // user chose, and the document is what the user chose. A scene is the
-    // fallback the surface falls back to when the slot names no document or
-    // names one the platform cannot paint.
-    if let Some(document) = p.wallpaper_document {
-        return document.pixel(x, y, SCREEN_WIDTH, SCREEN_HEIGHT);
-    }
-    interos_std::design::walls::scene_pixel(p.scene, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
-}
-
-/// The wallpaper for a frame whose scene is already resolved.
 ///
-/// WHY a second entry point rather than changing [`backdrop`]'s signature: four
-/// painters call `backdrop(p.scene, ..)`, and two of them call it twice for the
-/// same pixel -- once to choose ink that contrasts, once to composite. Those
-/// callers want the resolved tones; the picker-style callers that pass a bare
-/// scene genuinely only want one pixel.
+/// WHY the document comes first: the wallpaper slot may name a document the
+/// user chose, and the document is what the user chose. A scene is the fallback
+/// the surface falls back to when the slot names no document or names one the
+/// platform cannot paint.
+///
+/// WHY the plan's [`Paint::scene_ref`] and not `walls::scene_pixel`: the scene's
+/// skyline, horizon, shadow and mist are the same for every pixel of the frame,
+/// and `scene_pixel` re-resolves all of them -- a 173-entry array and loop -- on
+/// the way to answering one pixel. This surface asks for a million pixels. The
+/// two answers are byte-for-byte the same colour; only the cost differs.
 #[inline(always)]
 fn backdrop_ref(p: &Paint, x: usize, y: usize) -> u32 {
     if let Some(document) = p.wallpaper_document {
@@ -679,24 +672,19 @@ impl DeckPlan {
 /// handler, while this is the painter's plan and is built once per rendered frame.
 struct Paint {
     frame: Frame,
-    /// The wallpaper this frame draws behind everything.
+    /// The wallpaper this frame draws behind everything, with its derived tones
+    /// and clamped skyline resolved once.
     ///
     /// WHY it is in the plan: the backdrop is read per pixel by four separate
     /// painters, and it is chosen by a value the settings store answers. Putting
     /// the resolved scene in the plan means each of them gets the same one and
     /// none of them has to resolve a stored key.
-    scene: &'static interos_std::design::walls::Scene,
-    /// The same scene with its derived tones and clamped skyline resolved once.
     ///
-    /// WHY both a `Scene` and a `SceneRef` are held: `SceneRef::new` borrows, and
-    /// the plan is built into a `'static` slot. Holding the reference keeps the
-    /// resolved tones alive exactly as long as the scene does, and the painter
-    /// never has to re-derive them.
-    ///
-    /// WHY this matters at all: the derived tones are three 4-channel blends
-    /// that depend only on the scene, and the per-pixel path used to recompute
-    /// them for every one of the surface's pixels. On a full repaint that is
-    /// millions of redundant blends.
+    /// WHY the reference and not the bare scene: the derived tones are three
+    /// 4-channel blends and the skyline is a 173-entry clamp, all of which depend
+    /// only on the scene, and the per-pixel path used to recompute them for every
+    /// one of the surface's pixels. On a full repaint that is millions of
+    /// redundant blends.
     scene_ref: interos_std::design::walls::SceneRef<'static>,
     /// The document wallpaper, when the wallpaper slot names one.
     ///
@@ -950,7 +938,6 @@ fn build(state: &LauncherState) -> Paint {
         deck,
         search_magnifier,
         search,
-        scene: state.home_wallpaper,
         scene_ref: interos_std::design::walls::SceneRef::new(state.home_wallpaper),
         wallpaper_document: state.home_wallpaper_document,
     }
@@ -1266,13 +1253,16 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
     if y >= STATUS_BAR_HEIGHT {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
+    // The wallpaper under this pixel is one value; the ink that contrasts with
+    // it and the composite behind each run both read that same value.
+    let bg = backdrop_ref(p, x, y);
+    let ink = layout::ink_on(theme, bg);
 
     // WHY gated on the source rather than drawn from the buffer: with no RTC
     // authority granted to this shell the read can be refused, and a clock is the
     // one thing on this surface a reader takes as a measurement. The gate itself is
     // resolved in the plan, so this is a plain "is the run there" test.
-    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop_ref(p, x, y))) {
+    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, bg)) {
         return Some(c);
     }
 
@@ -1320,14 +1310,17 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
         return None;
     }
 
-    // Ink is taken per row against the wallpaper ramp
-    let ink = layout::ink_on(theme, backdrop_ref(p, x, y));
+    // Ink is taken per row against the wallpaper ramp. The wallpaper under this
+    // pixel is one value, and the four runs asked for below all composite over
+    // that same value.
+    let bg = backdrop_ref(p, x, y);
+    let ink = layout::ink_on(theme, bg);
     for run in p.greeting.iter() {
-        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop_ref(p, x, y)) {
+        if let Some(c) = run.pixel_inked_aa(x, y, ink, bg) {
             return Some(c);
         }
     }
-    if let Some(c) = p.weather.pixel_inked(x, y, ink, backdrop_ref(p, x, y)) {
+    if let Some(c) = p.weather.pixel_inked(x, y, ink, bg) {
         return Some(c);
     }
     None
@@ -1563,7 +1556,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, _theme: &Theme) -> Optio
         return None;
     }
     if let Some(empty) = deck.empty.as_ref() {
-        return empty.pixel_inked(x, y, empty.ink, backdrop(p, x, y));
+        return empty.pixel_inked(x, y, empty.ink, backdrop_ref(p, x, y));
     }
 
     let index = deck.slot_at(x, y)?;
