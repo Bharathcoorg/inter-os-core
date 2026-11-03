@@ -383,9 +383,25 @@ impl Label {
         } else {
             None
         };
+        // WHY the fallback box is the ladder's line box, widened to the cell:
+        // `pixel` below hands a scale-one run to `font::test_text_aa`, which
+        // draws it with the outline face at the rung's cap height. That face
+        // puts its baseline at `y + ascent` and accumulates whole-pixel
+        // coverage (0..=255, no subpixel sampling) down to `y + ascent +
+        // descent`. A box of `GLYPH_H * scale` = 24 rows at rung one ends ON
+        // that baseline, so the clip discarded every row at or below it: the
+        // whole descender of g/j/p/q/y, and the last coverage row of a/c/o
+        // (measured in target/verify/desc_probe). The `max` keeps the bitmap
+        // cell's 48 rows where the outline face declines a run, so only rung
+        // one changes.
         let (bx, by, bw, bh) = outline
             .map(|r| r.bounds())
-            .unwrap_or((x, y, measure(run, scale), line_height(scale)));
+            .unwrap_or((
+                x,
+                y,
+                measure(run, scale),
+                font::line_height(scale).max(line_height(scale)),
+            ));
         Label {
             x: bx,
             top: by,

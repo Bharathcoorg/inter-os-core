@@ -44,7 +44,7 @@ const ROW_H: usize = 96;
 ///
 /// WHY the ladder and not `text::line_height`: the query and its placeholder
 /// draw with the outline face, whose line box at the BODY rung is
-/// `launcher::font::line_height` (36 rows), not the bitmap cell's 48. Centring the
+/// `launcher::font::line_height` (39 rows), not the bitmap cell's 48. Centring the
 /// taller bitmap box inside the 64-row field left the ink high, the gap below twice
 /// the gap above.
 const FIELD_TEXT_BOX_H: usize = launcher::font::line_height(type_scale::BODY);
