@@ -38,8 +38,9 @@
 //! because `fs_read_at` is a syscall there.
 
 use crate::inference::{
-    self, embedding_row_into, f32_sqrt, pooled_normalised, quantised_row_bytes, run_block,
-    InferenceError, KvCache, LayerWeights, ModelConfig, Scratch,
+    self, apply_pooling_head, embedding_row_into, f32_sqrt, l2_normalise, mean_of,
+    pooled_normalised, quantised_row_bytes, run_block, InferenceError, KvCache, LayerWeights,
+    ModelConfig, PoolingHead, Scratch,
 };
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -371,9 +372,27 @@ fn block_tensor_name<'b>(
 pub const TENSOR_TOKEN_EMBD: &str = "token_embd.weight";
 pub const TENSOR_OUTPUT_NORM: &str = "output_norm.weight";
 pub const TENSOR_OUTPUT_HEAD: &str = "output.weight";
-/// The published embedding model's pooling head, which this engine does not apply.
+/// The published embedding model's pooling head, read and applied between the
+/// mean pool and the L2 step by `run_streamed_embedding`.
 pub const TENSOR_DENSE_2: &str = "dense_2.weight";
 pub const TENSOR_DENSE_3: &str = "dense_3.weight";
+/// The head's biases, which the published file does NOT declare: 316 descriptors,
+/// none of them a bias tensor. They are read only when a file states them, because
+/// an absent bias is the file's fact about its own head and a fabricated one is a
+/// different model.
+pub const TENSOR_DENSE_2_BIAS: &str = "dense_2.bias";
+pub const TENSOR_DENSE_3_BIAS: &str = "dense_3.bias";
+
+/// The widest head-hidden layer this loader will map.
+///
+/// WHY a bound at all when the scratch budget is the engine's only size limit:
+/// the head slot is not scratch the budget prices -- it is loader heap held next
+/// to the cache the published file already takes 96 MiB of. 65,536 is eighty times
+/// the widest published head (`dense_2_feat_out` 3072 on the published file), so
+/// nothing real is refused and a file that states a monstrous hidden width is
+/// reported rather than allocated. The bound refuses by the two numbers it was
+/// given, not by a silent truncation.
+pub const MAX_HEAD_MID_DIM: usize = 65_536;
 
 /// The per-block tensors, in the order the graph consumes them.
 pub const BLOCK_QUANTISED: &[&str] = &[
@@ -499,6 +518,21 @@ pub struct WeightReader<S: PositionRead> {
     table: TensorTable,
     source: S,
     slot: BlockSlot,
+    /// The pooling head's matrices, read once and held for the reader's life:
+    /// the published file's pair is 5,013,504 bytes of Q8_0, which the run reads
+    /// once and reuses across every prompt it answers.
+    head_dense_2: Vec<u8>,
+    head_dense_3: Vec<u8>,
+    /// The head's biases, as the file declared them -- and it declared none, so
+    /// `None` is what the published file gets, and no zero vector stands in for it.
+    head_bias_2: Option<Vec<f32>>,
+    head_bias_3: Option<Vec<f32>>,
+    /// The head's hidden activations: `mid_dim` floats, sized from the descriptor.
+    head_hidden: Vec<f32>,
+    /// `(mid_dim, out_dim)` once the head has been read; `None` before.
+    head_dims: Option<(usize, usize)>,
+    /// The dtypes the descriptors declared for the two matrices.
+    head_types: (u32, u32),
     bytes_read: u64,
     tensors_read: usize,
     peak_slot_bytes: usize,
@@ -511,6 +545,13 @@ impl<S: PositionRead> WeightReader<S> {
             table,
             source,
             slot: BlockSlot::default(),
+            head_dense_2: Vec::new(),
+            head_dense_3: Vec::new(),
+            head_bias_2: None,
+            head_bias_3: None,
+            head_hidden: Vec::new(),
+            head_dims: None,
+            head_types: (0, 0),
             bytes_read: 0,
             tensors_read: 0,
             peak_slot_bytes: 0,
@@ -701,12 +742,145 @@ impl<S: PositionRead> WeightReader<S> {
     ///
     /// WHY this is a question and not a fallback: `dense_2.weight` and
     /// `dense_3.weight` sit between the mean pool and the L2 step in EmbeddingGemma,
-    /// and this engine has no head for them. A run reports the vector it computed as
-    /// the pooled pre-head stream when this is true, which is the file's own fact and
-    /// not this module's omission.
+    /// and `run_streamed_embedding` reads and applies them when this is true. When
+    /// it is false the run means-pools and normalises directly, and the caller must
+    /// label that vector pre-head -- applying half an architecture and calling it
+    /// the model's embedding is the defect this module exists to avoid.
     pub fn has_pooling_head(&self) -> bool {
         self.table.find(TENSOR_DENSE_2.as_bytes()).is_some()
             && self.table.find(TENSOR_DENSE_3.as_bytes()).is_some()
+    }
+
+    /// Reads the pooling head's tensors once, checking every shape against the
+    /// descriptors before a byte of them is asked for.
+    ///
+    /// WHY the checks come first: the head is where a loader can be silently wrong
+    /// -- `dense_2.weight` is [768, 3072] and `dense_3.weight` is [3072, 768], and
+    /// transposing one of the two still multiplies, still returns 768 floats, still
+    /// looks normalised. What the file declares (input width = the residual stream,
+    /// hidden width shared by both layers, output width = the vector) is what this
+    /// run is built to, and a disagreement is a `BadShape`, not a smaller answer.
+    ///
+    /// Idempotent: a reader that has already loaded the head reports the same
+    /// numbers without rereading, so every prompt one service answers pays the
+    /// 5,013,504 bytes once.
+    pub fn load_pooling_head(&mut self, hidden_dim: usize) -> Result<(), LoadError> {
+        if self.head_dims.is_some() {
+            return Ok(());
+        }
+        let d2 = self
+            .table
+            .locate(TENSOR_DENSE_2.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_DENSE_2, None))?;
+        let d3 = self
+            .table
+            .locate(TENSOR_DENSE_3.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_DENSE_3, None))?;
+        if quantised_row_bytes(d2.dtype, d2.cols as usize).is_none() {
+            return Err(LoadError::UnsupportedDtype(TENSOR_DENSE_2, d2.dtype));
+        }
+        if quantised_row_bytes(d3.dtype, d3.cols as usize).is_none() {
+            return Err(LoadError::UnsupportedDtype(TENSOR_DENSE_3, d3.dtype));
+        }
+        // The graph's contract with the file: layer one consumes the stream,
+        // layer one's width is layer two's width, and layer two returns the stream.
+        if d2.cols as usize != hidden_dim {
+            return Err(LoadError::BadShape(TENSOR_DENSE_2, d2.cols, hidden_dim as u64));
+        }
+        if d3.cols as usize != d2.rows as usize {
+            return Err(LoadError::BadShape(
+                TENSOR_DENSE_3,
+                d3.cols,
+                d2.rows,
+            ));
+        }
+        if d3.rows as usize != hidden_dim {
+            return Err(LoadError::BadShape(TENSOR_DENSE_3, d3.rows, hidden_dim as u64));
+        }
+        let mid_dim = d2.rows as usize;
+        if mid_dim == 0 || mid_dim > MAX_HEAD_MID_DIM {
+            // A head wider than the limit is not a head this service may map: it
+            // is loaded next to the 96 MiB cache, and a file that declared a
+            // 100,000-wide hidden layer is reported, not allocated.
+            return Err(LoadError::BadShape(
+                TENSOR_DENSE_2,
+                d2.rows,
+                MAX_HEAD_MID_DIM as u64,
+            ));
+        }
+        self.head_dense_2 = self.read_raw_tensor(TENSOR_DENSE_2, d2)?;
+        self.head_dense_3 = self.read_raw_tensor(TENSOR_DENSE_3, d3)?;
+        // The biases, only when the file states them. The published file does not:
+        // this stays `None` there, and the head runs as the file's own head.
+        self.head_bias_2 = self.load_head_bias(TENSOR_DENSE_2_BIAS, TENSOR_DENSE_2, mid_dim)?;
+        self.head_bias_3 = self.load_head_bias(TENSOR_DENSE_3_BIAS, TENSOR_DENSE_3, hidden_dim)?;
+        self.head_hidden.clear();
+        self.head_hidden
+            .try_reserve_exact(mid_dim)
+            .map_err(|_| LoadError::Arithmetic)?;
+        self.head_hidden.resize(mid_dim, 0.0f32);
+        self.head_dims = Some((mid_dim, hidden_dim));
+        self.head_types = (d2.dtype, d3.dtype);
+        Ok(())
+    }
+
+    /// Reads one head bias if the descriptor table names it, refusing a declared
+    /// bias that is not an F32 vector of the layer's own width. An absent bias is
+    /// `None` -- the file's silence, kept as silence.
+    fn load_head_bias(
+        &mut self,
+        bias_name: &'static str,
+        owner: &'static str,
+        width: usize,
+    ) -> Result<Option<Vec<f32>>, LoadError> {
+        let _ = owner;
+        let Some(handle) = self.table.locate(bias_name.as_bytes()) else {
+            return Ok(None);
+        };
+        let floats = self.read_f32_tensor(bias_name, handle)?;
+        if floats.len() != width {
+            return Err(LoadError::BadShape(bias_name, floats.len() as u64, width as u64));
+        }
+        Ok(Some(floats))
+    }
+
+    /// Runs the loaded head over one mean-pooled stream, writing the head's
+    /// output into `out` -- no normalisation, which is the caller's last step.
+    ///
+    /// WHY a method and not a free function: the hidden buffer lives with the
+    /// head's bytes, and handing both out as borrows from one `&mut self` is how
+    /// the run keeps zero fresh allocations in the interactive path.
+    pub fn run_pooling_head(&mut self, mean: &[f32], out: &mut [f32]) -> Result<(), LoadError> {
+        let Some((mid_dim, out_dim)) = self.head_dims else {
+            return Err(LoadError::TensorAbsent(TENSOR_DENSE_2, None));
+        };
+        if out.len() < out_dim {
+            return Err(InferenceError::BufferTooSmall.into());
+        }
+        let (dense_2_type, dense_3_type) = self.head_types;
+        let head = PoolingHead {
+            dense_2: &self.head_dense_2,
+            dense_2_type,
+            dense_2_bias: self.head_bias_2.as_deref(),
+            dense_3: &self.head_dense_3,
+            dense_3_type,
+            dense_3_bias: self.head_bias_3.as_deref(),
+            mid_dim,
+            out_dim,
+        };
+        apply_pooling_head(&head, mean, &mut self.head_hidden, &mut out[..out_dim])
+            .map_err(LoadError::Graph)
+    }
+
+    /// Bytes the head slot holds: the two matrices, any biases the file stated,
+    /// and the hidden activations. Zero before `load_pooling_head` has run.
+    pub fn head_held_bytes(&self) -> u64 {
+        (self.head_dense_2.len()
+            + self.head_dense_3.len()
+            + self.head_hidden.len() * size_of::<f32>()
+            + self.head_bias_2.as_ref().map_or(0, Vec::len) * size_of::<f32>()
+            + self.head_bias_3.as_ref().map_or(0, Vec::len) * size_of::<f32>())
+            as u64
     }
 
     fn read_raw_tensor(
@@ -783,8 +957,11 @@ pub struct StreamedRun {
     pub tensors_read: usize,
     /// The widest block slot the run held.
     pub peak_slot_bytes: usize,
-    /// Bytes held by the cache, the streams and the slot at once, from the numbers
-    /// the engine prices rather than from a guess.
+    /// Bytes the pooling head slot holds -- the two matrices, the file's own
+    /// biases and the hidden activations -- counted when the head was applied.
+    pub head_held_bytes: u64,
+    /// Bytes held by the cache, the streams, the slot and the head at once, from
+    /// the numbers the engine prices rather than from a guess.
     pub peak_held_bytes: u64,
 }
 
@@ -795,11 +972,16 @@ pub struct StreamedRun {
 /// hold all 24 blocks and the whole embedding table at once. Here each block is
 /// read, run and released, so the peak is one block.
 ///
-/// WHAT LEAVES THIS FUNCTION: the mean-pooled, L2-normalised residual stream of the
-/// blocks the file declares. When the file also carries a pooling head
-/// (`dense_2`/`dense_3`), the caller is told so by `WeightReader::has_pooling_head`
-/// and must report the vector as pre-head -- applying half an architecture and
-/// calling it the model's embedding is the defect this module exists to avoid.
+/// WHAT LEAVES THIS FUNCTION: the mean-pooled residual stream of the blocks the
+/// file declares, put through the file's pooling head when the file carries one
+/// (`dense_2` -> GELU (tanh approximation) -> `dense_3`, biases only if the file
+/// states them), and L2-normalised last -- the published architecture's order.
+/// The second half of the returned tuple says whether that head was applied:
+/// `true` means the vector left the head, and `false` means the file declared no
+/// head and the vector is the pooled pre-head stream, which the caller must
+/// label as such. Applying half an architecture and calling it the model's
+/// embedding is the defect this module exists to avoid; so is reporting the
+/// pre-head stream as though the head had run.
 pub fn run_streamed_embedding<S: PositionRead>(
     reader: &mut WeightReader<S>,
     config: &ModelConfig,
@@ -822,9 +1004,10 @@ pub fn run_streamed_embedding<S: PositionRead>(
                 bytes_read: 0,
                 tensors_read: 0,
                 peak_slot_bytes: 0,
+                head_held_bytes: 0,
                 peak_held_bytes: 0,
             },
-            reader.has_pooling_head(),
+            false,
         ));
     }
     config.check_scratch_budget()?;
@@ -875,8 +1058,23 @@ pub fn run_streamed_embedding<S: PositionRead>(
         kv_cache.len = pos + 1;
     }
 
-    pooled_normalised(&scratch.pooled[..h_dim], positions, &mut out[..h_dim]);
+    // The pool, then the head the file declares, then the L2 step -- in that
+    // order, because the head was trained on an un-normalised mean and the final
+    // normalisation belongs after it. A file that declares no head gets the mean
+    // and the norm back to back, which is the same vector the pre-head engine
+    // returned for that file, and the caller is told it is pre-head.
+    let head_applied = if reader.has_pooling_head() {
+        reader.load_pooling_head(h_dim)?;
+        mean_of(&scratch.pooled[..h_dim], positions, &mut scratch.hidden[..h_dim]);
+        reader.run_pooling_head(&scratch.hidden[..h_dim], &mut out[..h_dim])?;
+        l2_normalise(&mut out[..h_dim]);
+        true
+    } else {
+        pooled_normalised(&scratch.pooled[..h_dim], positions, &mut out[..h_dim]);
+        false
+    };
     let (bytes_read, peak_slot_bytes, tensors_read) = reader.measured();
+    let head_held_bytes = reader.head_held_bytes();
     Ok((
         StreamedRun {
             blocks_run: positions * config.num_layers,
@@ -884,11 +1082,13 @@ pub fn run_streamed_embedding<S: PositionRead>(
             bytes_read,
             tensors_read,
             peak_slot_bytes,
+            head_held_bytes,
             peak_held_bytes: (bytes_read_saturating(peak_slot_bytes)
+                + head_held_bytes
                 + config.kv_cache_bytes() as u64
                 + Scratch::bytes_for(config) as u64),
         },
-        reader.has_pooling_head(),
+        head_applied,
     ))
 }
 
@@ -1130,8 +1330,30 @@ pub mod tests {
         assert!(
             reader.has_pooling_head(),
             "the published file's dense_2/dense_3 pooling head disappeared, so the \
-             report below should stop calling the vector pre-head"
+             head below has nothing to apply and the report must say pre-head again"
         );
+
+        // 3b. The head's own descriptors, checked against what the run is built to.
+        // These four numbers are the file's: [768, 3072] and [3072, 768], Q8_0,
+        // 2,506,752 bytes each, and no bias tensor anywhere in its 316 descriptors.
+        {
+            let d2 = reader
+                .table()
+                .find(b"dense_2.weight")
+                .expect("the table walk kept dense_2.weight");
+            let d3 = reader
+                .table()
+                .find(b"dense_3.weight")
+                .expect("the table walk kept dense_3.weight");
+            assert_eq!((d2.cols, d2.rows, d2.dtype, d2.byte_len), (768, 3072, 8, 2_506_752));
+            assert_eq!((d3.cols, d3.rows, d3.dtype, d3.byte_len), (3072, 768, 8, 2_506_752));
+            assert!(
+                reader.table().find(b"dense_2.bias").is_none()
+                    && reader.table().find(b"dense_3.bias").is_none(),
+                "the published file states head biases it used to not have, so the \
+                 bias path below is now the one under test and must be labelled as such"
+            );
+        }
 
         // 4. One block, read, held and released.
         let first = reader.load_block(0).expect("block 0 reads");
@@ -1190,6 +1412,7 @@ pub mod tests {
                 bytes_read: 0,
                 tensors_read: 0,
                 peak_slot_bytes: 0,
+                head_held_bytes: 0,
                 peak_held_bytes: 0,
             },
             StreamedRun {
@@ -1198,10 +1421,11 @@ pub mod tests {
                 bytes_read: 0,
                 tensors_read: 0,
                 peak_slot_bytes: 0,
+                head_held_bytes: 0,
                 peak_held_bytes: 0,
             },
         ];
-        let mut pooling_head_present = false;
+        let mut head_applied = false;
         let prompts = [[1701u32, 4423, 88], [1701u32, 91001, 88]];
         for slot in 0..2usize {
             let tokens = &prompts[slot];
@@ -1220,22 +1444,33 @@ pub mod tests {
             .expect("the installed file runs the graph");
             vectors[slot].copy_from_slice(&out);
             reports[slot] = report;
-            pooling_head_present = pooling;
+            head_applied = pooling;
         }
         rust_std::println!(
             "HOST-BACKED RUN (this is the development host running the engine, not the \
              device): {} positions x {} blocks, {} tensors, {} bytes read, peak slot {} \
-             bytes, peak held {} bytes, in {:?}",
+             bytes, head slot {} bytes, peak held {} bytes, in {:?}",
             reports[0].positions,
             config.num_layers,
             reports[1].tensors_read,
             reports[1].bytes_read,
             reports[1].peak_slot_bytes,
+            reports[1].head_held_bytes,
             reports[1].peak_held_bytes,
             started.elapsed(),
         );
         assert_eq!(reports[0].blocks_run, 3 * 24);
-        assert!(pooling_head_present, "the file's dense_2/dense_3 head is gone");
+        assert!(
+            head_applied,
+            "the file's dense_2/dense_3 head stopped being applied, so the vectors \
+             below are pre-head again and must be labelled so"
+        );
+        assert_eq!(
+            reports[1].head_held_bytes,
+            2 * 2_506_752 + 3072 * 4,
+            "the head slot is not the two Q8_0 matrices plus the hidden buffer and \
+             no biases, which is exactly what the published file's descriptors state"
+        );
         for vector in vectors.iter() {
             assert!(vector.iter().all(|v| v.is_finite()));
             let mut length = 0.0f32;
@@ -1244,13 +1479,13 @@ pub mod tests {
             }
             assert!(
                 (length - 1.0).abs() < 0.01,
-                "the pooled vector is not L2-normalised (squared length {length})"
+                "the head-applied vector is not L2-normalised (squared length {length})"
             );
         }
         rust_std::println!(
-            "EMBEDDINGS from file bytes (pre-head: the file's dense_2/dense_3 are read \
-             by nobody yet): first four of A [{:.6}, {:.6}, {:.6}, {:.6}], first four of \
-             B [{:.6}, {:.6}, {:.6}, {:.6}]",
+            "EMBEDDINGS from file bytes (post-head: mean pool -> dense_2 -> GELU(tanh) \
+             -> dense_3 -> L2): first four of A [{:.6}, {:.6}, {:.6}, {:.6}], first four \
+             of B [{:.6}, {:.6}, {:.6}, {:.6}]",
             vectors[0][0],
             vectors[0][1],
             vectors[0][2],
@@ -1270,6 +1505,178 @@ pub mod tests {
             "two different token-id sequences produced the same vector, which means the \
              run read nothing that depends on the token"
         );
+
+        // 7. HOST-PROVED NUMERICAL PARITY of the pooling head against an
+        // independent reference.
+        //
+        // HISTORY THAT MATTERS: the constants in this block were first embedded
+        // from a host reference that read the tensor payloads with
+        // `np.frombuffer(memmap, offset=...)`. That mis-located the data -- it
+        // reported `dense_2.weight` row 0's block scales as all-zero, which a real
+        // Q8_0 weight block never is -- so those constants were computed from
+        // garbage and the parity claim then resting on them is WITHDRAWN. The
+        // numbers below are from a replacement reference, and the reference itself
+        // is self-verified before any number is taken from it.
+        //
+        // What now stands behind the constants is
+        // `target/verify/head_ref_independent.py` (host-only, untracked, numpy):
+        // it parses the GGUF from the wire format with plain `open()` plus explicit
+        // `seek`/`read` -- no memmap, no `frombuffer(offset=)` -- walks the header,
+        // the KV metadata and all 316 descriptors, takes `general.alignment` (32)
+        // and rounds the end of the descriptor table up to it for the data section
+        // start (6,530,464 in this file). It then reads
+        // `dense_2.weight` at 6,530,464 and `dense_3.weight` at 9,037,216 and
+        // dequantises Q8_0 with its own block reader. The engine shares no line of
+        // that code.
+        //
+        // The reader is checked before it is trusted, on the raw bytes:
+        // `dense_2.weight` row 0 block 0 is `fd 18` + 32 quants, i.e. a float16
+        // scale of 0.0024356842041015625 (non-zero, and a trained Q8_0 weight
+        // scale), whose largest quant is exactly -127 -- which is what Q8_0's
+        // `d = absmax / 127` forces. 1.000000 of the tensor's 73,728 blocks are
+        // saturated that way; start the same reader one byte late and the rate
+        // drops to 0.9707, so the check has teeth against a wrong offset.
+        //
+        // The LAYOUT comes from the file's own shape metadata, not from a guess:
+        // `dense_2.weight` declares dims [768, 3072] and `dense_3.weight`
+        // [3072, 768], with `dense_2_feat_in=768`, `dense_2_feat_out=3072`,
+        // `dense_3_feat_in=3072`, `dense_3_feat_out=768`. dims[0] is the
+        // contiguous dimension and is the layer's INPUT in both cases, so a row is
+        // one output unit and `gemv` contracts it correctly at rows=dims[1],
+        // cols=dims[0] -- 816-byte rows for dense_2, 3264-byte rows for dense_3.
+        // The other partition of the same bytes is not merely unchecked, it is
+        // uncomposable: read that way dense_2 demands a 3072-wide input while the
+        // residual stream is 768 wide. (Worth stating plainly: because 816 and 3264
+        // are both multiples of 34, both partitions land on real block boundaries,
+        // so the saturation test CANNOT separate them -- the dims and the
+        // feat_in/feat_out pair do.)
+        //
+        // And because a numpy view is exactly the thing that went wrong last time,
+        // the reference numbers were recomputed a second time with
+        // `target/verify/head_ref_pure_python.py` -- no numpy, no views, explicit
+        // per-byte `struct.unpack` of every scale and quant in rows streamed
+        // straight from the seeked file. The two agree with each other to 1.5e-16
+        // on the dot and 9e-16 on the sum, and the engine agrees with them to the
+        // diffs this block prints.
+        //
+        // ONE ASSUMPTION BOTH SIDES SHARE, and this test therefore cannot falsify
+        // on its own: that a Q8_0 block's 32 quants are the 32 CONSECUTIVE weights
+        // in input order. The saturation check proves each 34-byte run is one
+        // coherent quantisation group, so a reader that crossed block boundaries
+        // would be caught; a fixed permutation *within* a block would not show up
+        // in the bytes and would be reproduced identically here and in the engine.
+        // It is the format's documented layout, not something this file's bytes
+        // independently demonstrate.
+        //
+        // WHAT THIS PROVES: this engine's arithmetic of the head -- Q8_0 row
+        // layout, per-block `gemv` accumulation, the software tanh inside the GELU
+        // approximation, and the L2 step -- against the file's own bytes.
+        // WHAT IT DOES NOT PROVE: it says nothing about the 24-block trunk. No
+        // reference inference runtime (llama.cpp, torch, sentence-transformers) is
+        // installed on this host, so the full-string embedding parity remains
+        // UNVERIFIED and is stated as such wherever this run is reported. A real
+        // Gemma-2 final-norm + mean-pool reference was NOT built, because the
+        // trunk's conventions (sliding window, per-head QK norms, RoPE pairing)
+        // are not fixed by the file the way the head's are, so such a comparison
+        // could only ever be labelled "matches my own reimplementation", never
+        // "matches a runtime".
+        {
+            // The fixed probe: a deterministic 768-wide vector, so the head runs
+            // on bytes the trunk cannot influence. p[i] = ((i*37) % 251)/251 - 0.5.
+            let mut probe = [0.0f32; 768];
+            for (i, slot) in probe.iter_mut().enumerate() {
+                *slot = ((i * 37) % 251) as f32 / 251.0 - 0.5;
+            }
+            let mut head_out = [0.0f32; 768];
+            reader
+                .run_pooling_head(&probe, &mut head_out)
+                .expect("the loaded head runs the probe");
+            let mut pre_sq = 0.0f64;
+            for &v in head_out.iter() {
+                pre_sq += v as f64 * v as f64;
+            }
+            rust_std::println!(
+                "DEBUG pre-normalised head: length {pre_sq:.9}, first four [{:.7}, \
+                 {:.7}, {:.7}, {:.7}], hidden-free probe p[0..4] [{:.7}, {:.7}, {:.7}, {:.7}]",
+                head_out[0],
+                head_out[1],
+                head_out[2],
+                head_out[3],
+                probe[0],
+                probe[1],
+                probe[2],
+                probe[3],
+            );
+            // The reference's own pre-normalised numbers, for the same probe:
+            // length 18286.602317332, first four [-1.3382041, -3.0060657,
+            // -2.4349829, 5.3672430]. Checked before the normalise, because a
+            // wrong row stride shows up here and nowhere else downstream.
+            assert!(
+                (pre_sq - 18286.602317332).abs() / 18286.602317332 < 1e-3,
+                "the pre-normalised head length is {pre_sq}, which is not within 1e-3 \
+                 relative of the host reference's 18286.602317332"
+            );
+            l2_normalise(&mut head_out);
+
+            // Reference values, from the self-verified host pass described above,
+            // computed in float64 over the exact float32 probe the engine feeds in.
+            const REF_FIRST8: [f32; 8] = [
+                -0.009895913, -0.022229616, -0.018006504, 0.039690334, 0.048122807,
+                0.006227379, 0.038176101, 0.000294861,
+            ];
+            const REF_STRUCK_IDX: [usize; 7] = [100, 255, 400, 511, 640, 700, 767];
+            const REF_STRUCK: [f32; 7] = [
+                0.052586798, -0.001092177, -0.004823058, 0.001013292, -0.072825167,
+                0.027233438, 0.006801963,
+            ];
+            // dot(head_out, w) and sum(head_out) for w[i] = ((i*101) % 199)/199 - 0.5.
+            const REF_DOT: f64 = 0.07922463452848479;
+            const REF_SUM: f64 = 0.6634444519733849;
+
+            let mut max_diff = 0.0f32;
+            for i in 0..8 {
+                let d = (head_out[i] - REF_FIRST8[i]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+            for (slot, &i) in REF_STRUCK_IDX.iter().enumerate() {
+                let d = (head_out[i] - REF_STRUCK[slot]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+            let mut dot = 0.0f64;
+            let mut sum = 0.0f64;
+            let mut sq = 0.0f64;
+            for (i, &v) in head_out.iter().enumerate() {
+                let w = ((i * 101) % 199) as f32 / 199.0 - 0.5;
+                dot += v as f64 * w as f64;
+                sum += v as f64;
+                sq += v as f64 * v as f64;
+            }
+            rust_std::println!(
+                "HEAD PARITY (host-proved against target/verify/head_ref_independent.py, \
+                 which self-verifies its Q8_0 read on the raw bytes first): max sampled \
+                 component diff {max_diff:.3e}, dot diff {:.3e}, sum diff {:.3e}, \
+                 squared length {:.7}",
+                (dot - REF_DOT).abs(),
+                (sum - REF_SUM).abs(),
+                sq,
+            );
+            // 1e-3 leaves room for the software tanh/exp and the float32
+            // accumulation order. Measured on this host against the reference
+            // above: max sampled component 1.6e-8, dot 2.0e-9, sum 6.3e-8 --
+            // float32 rounding of the output itself, not a modelling gap. The
+            // head's two matrices are not square, so a transposed read cannot
+            // even be composed with a 768-wide stream, and a mis-offset read
+            // puts the block scales inside the quant runs and moves these
+            // components by orders of magnitude, not by 1e-3.
+            assert!(max_diff < 1e-3, "a sampled head component disagrees by {max_diff}");
+            assert!((dot - REF_DOT).abs() < 1e-3, "the head's full-vector dot disagrees");
+            assert!((sum - REF_SUM).abs() < 1e-3, "the head's full-vector sum disagrees");
+            assert!((sq - 1.0).abs() < 1e-4, "the head output is not unit length");
+        }
 
         // A request's vector has to be the same vector whether it is the first
         // request the process serves or the third. The pooling accumulator is the

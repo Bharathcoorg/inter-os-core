@@ -17,7 +17,9 @@
 //! - SwiGLU non-linear activation
 //! - Multi-Head Attention dot-product & softmax over the one key/value head
 //! - Autoregressive token generation loop with timeout / cancellation checks
-//! - Neural vector embedding extraction (EmbeddingGemma 2): mean pool, then L2
+//! - Neural vector embedding extraction (EmbeddingGemma 2): mean pool, then the
+//!   file's pooling head (`apply_pooling_head`: dense_2, GELU tanh approximation,
+//!   dense_3, biases when the file declares them) when the loader read one, then L2
 //!
 //! Nothing in the forward path falls back. A declaration the file has not stated,
 //! a quantisation the engine has no layout for, an embedding row the file does not
@@ -748,6 +750,41 @@ pub fn apply_rope(vec: &mut [f32], pos: usize, head_dim: usize, base: f32) {
             vec[i1] = v0 * s + v1 * c;
         }
     }
+}
+
+/// Software hyperbolic tangent for the pooling head's GELU approximation.
+///
+/// WHY this form: `tanh(x) = (1 - e^{-2x}) / (1 + e^{-2x})` needs only the
+/// exponential this module already has, and `e^{-2x}` stays inside `f32::MAX` for
+/// every `|x| <= 88`. Beyond `|x| = 20` the value is `-1.0`/`1.0` to float
+/// precision, so the clamp answers with what it would converge to rather than
+/// dividing two overflowing quantities.
+pub fn f32_tanh(x: f32) -> f32 {
+    if x <= -20.0 {
+        return -1.0;
+    }
+    if x >= 20.0 {
+        return 1.0;
+    }
+    let e = f32_exp(-2.0f32 * x);
+    (1.0f32 - e) / (1.0f32 + e)
+}
+
+/// GELU with the tanh approximation: the activation the EmbeddingGemma pooling
+/// head ships with.
+///
+/// WHY tanh and not the exact erf: the upstream reference (the Gemma2 family's
+/// `gelu_pytorch_tanh` hidden activation, and the sentence-transformers `Dense`
+/// module the published file's own `general.tags` names) uses the tanh
+/// approximation, and the GGUF format states no activation key this reading
+/// could check instead. The file declares `dense_2_feat_in/out` and
+/// `dense_3_feat_in/out` and nothing about the curve between them, so the
+/// approximation is the documented assumption the host-parity check is written
+/// against -- not a free choice dressed up as the file's own fact.
+pub fn gelu_tanh(x: f32) -> f32 {
+    // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    let inner = 0.7978845608028654f32 * (x + 0.044715f32 * x * x * x);
+    0.5f32 * x * (1.0f32 + f32_tanh(inner))
 }
 
 /// SwiGLU activation function: out = silu(gate) * up = (gate * sigmoid(gate)) * up
@@ -1576,13 +1613,13 @@ pub fn embedding_row_into(
     }
 }
 
-/// Mean-pools `count` accumulated positions and L2-normalises the result.
+/// Divides the accumulated stream by the position count, in place into `out`.
 ///
-/// Shared by `extract_embedding` and the streaming loader so the pooling rule an
-/// in-memory run applies and the one a file-read run applies cannot drift apart --
-/// two vectors from two different poolings compared by the search index would be a
-/// similarity the model never had.
-pub fn pooled_normalised(pooled: &[f32], count: usize, out: &mut [f32]) {
+/// WHY the count-zero case leaves `out` untouched: an empty prompt has no mean,
+/// and a zero-filled answer reported as "the mean of nothing" is the invention
+/// this module's refusals exist to avoid. The caller decides what an empty run
+/// means -- `extract_embedding` answers `Ok(0)` before it ever gets here.
+pub fn mean_of(pooled: &[f32], count: usize, out: &mut [f32]) {
     if count == 0 {
         return;
     }
@@ -1590,17 +1627,141 @@ pub fn pooled_normalised(pooled: &[f32], count: usize, out: &mut [f32]) {
     for (slot, &value) in out.iter_mut().zip(pooled) {
         *slot = value * inv_count;
     }
+}
+
+/// Scales a vector in place to L2 length 1, leaving the zero vector alone.
+///
+/// WHY the threshold rather than a plain divide: a run whose stream cancelled to
+/// (near) zero would otherwise divide by an underflowed norm and report noise as
+/// a unit vector. A direction that small has no direction; it is left as it is.
+pub fn l2_normalise(v: &mut [f32]) {
     let mut sum_sq = 0.0f32;
-    for &v in out.iter() {
-        sum_sq += v * v;
+    for &x in v.iter() {
+        sum_sq += x * x;
     }
     let norm = f32_sqrt(sum_sq);
     if norm > 1e-12 {
         let inv_norm = 1.0f32 / norm;
-        for v in out.iter_mut() {
-            *v *= inv_norm;
+        for x in v.iter_mut() {
+            *x *= inv_norm;
         }
     }
+}
+
+/// Mean-pools `count` accumulated positions and L2-normalises the result.
+///
+/// Shared by `extract_embedding` and the streaming loader so the pooling rule an
+/// in-memory run applies and the one a file-read run applies cannot drift apart --
+/// two vectors from two different poolings compared by the search index would be a
+/// similarity the model never had. A file that carries a pooling head means the
+/// normalisation belongs after that head instead (see `apply_pooling_head`), so
+/// the streaming path composes `mean_of` + head + `l2_normalise` and only reaches
+/// this function when the file declared no head.
+pub fn pooled_normalised(pooled: &[f32], count: usize, out: &mut [f32]) {
+    if count == 0 {
+        return;
+    }
+    mean_of(pooled, count, out);
+    l2_normalise(out);
+}
+
+/// The published embedding model's pooling head: the two dense layers that sit
+/// between the mean pool and the final L2 step.
+///
+/// WHY the shapes are carried and not re-derived: `dense_2.weight`'s row count is
+/// `dense_3.weight`'s column count, and both are the file's own descriptor
+/// numbers (`gemma-embedding.dense_2_feat_out` says 3072 on the published file,
+/// and the tensor declares [768, 3072]). A head built from one and run at the
+/// other would ask `gemv` for rows the bytes do not hold -- its refusal, but
+/// caught here at the shape instead of mid-multiply.
+///
+/// WHY the biases are optional: the published
+/// `embeddinggemma-300M-Q8_0.gguf` declares no `dense_2.bias` or `dense_3.bias`
+/// at all -- 316 descriptors, none of them a bias tensor. An absent bias is the
+/// file's silence, and the head runs without it; inventing one (or inventing
+/// zeros and calling them nothing) would apply a bias the file never shipped.
+/// A file that does declare biases has them read and added, and `apply_pooling_head`
+/// refuses one whose width is not the layer's output width.
+#[derive(Clone, Copy)]
+pub struct PoolingHead<'a> {
+    pub dense_2: &'a [u8],
+    pub dense_2_type: u32,
+    pub dense_2_bias: Option<&'a [f32]>,
+    pub dense_3: &'a [u8],
+    pub dense_3_type: u32,
+    pub dense_3_bias: Option<&'a [f32]>,
+    /// `dense_2.weight`'s row count: the hidden width both layers agree on.
+    pub mid_dim: usize,
+    /// `dense_3.weight`'s row count: the vector width the head returns.
+    pub out_dim: usize,
+}
+
+/// Runs the pooling head over a mean-pooled stream: dense_2, GELU (tanh
+/// approximation), dense_3 -- then leaves the L2 step to the caller.
+///
+/// The order is the published architecture's: pool first, head second,
+/// normalise last. Normalising before the head (as the pre-head engine did)
+/// would rescale an input the linear layers were trained on and return a
+/// different vector than the model's own final step takes.
+///
+/// WHY `hidden` is handed in and not allocated: the head's hidden width is the
+/// file's 3072 (against a 1152-wide feed-forward), so the buffer is sized from
+/// the descriptors, held by the loader that read them, and never taken fresh in
+/// an interactive path.
+pub fn apply_pooling_head(
+    head: &PoolingHead<'_>,
+    mean: &[f32],
+    hidden: &mut [f32],
+    out: &mut [f32],
+) -> Result<(), InferenceError> {
+    let in_dim = mean.len();
+    if head.mid_dim == 0 || head.out_dim == 0 || in_dim == 0 {
+        return Err(InferenceError::CorruptedWeights);
+    }
+    if hidden.len() < head.mid_dim || out.len() < head.out_dim {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    // A bias narrower than the layer it scales would leave its tail unadded,
+    // which is the same half-applied-tensor defect the block norms refuse.
+    if head
+        .dense_2_bias
+        .is_some_and(|bias| bias.len() < head.mid_dim)
+        || head
+            .dense_3_bias
+            .is_some_and(|bias| bias.len() < head.out_dim)
+    {
+        return Err(InferenceError::CorruptedWeights);
+    }
+    gemv(
+        head.dense_2,
+        head.dense_2_type,
+        mean,
+        &mut hidden[..head.mid_dim],
+        head.mid_dim,
+        in_dim,
+    )?;
+    if let Some(bias) = head.dense_2_bias {
+        for (slot, &b) in hidden[..head.mid_dim].iter_mut().zip(bias) {
+            *slot += b;
+        }
+    }
+    for slot in hidden[..head.mid_dim].iter_mut() {
+        *slot = gelu_tanh(*slot);
+    }
+    gemv(
+        head.dense_3,
+        head.dense_3_type,
+        &hidden[..head.mid_dim],
+        &mut out[..head.out_dim],
+        head.out_dim,
+        head.mid_dim,
+    )?;
+    if let Some(bias) = head.dense_3_bias {
+        for (slot, &b) in out[..head.out_dim].iter_mut().zip(bias) {
+            *slot += b;
+        }
+    }
+    Ok(())
 }
 
 /// Runs one transformer block over the residual stream in `scratch`.
@@ -2038,14 +2199,18 @@ pub fn extract_embedding(
         }
     }
 
-    // The same two lines the streaming loader runs, so an in-memory vector and a
-    // file-read vector cannot be pooled by two different rules.
+    // The same two primitives the streaming loader composes, so an in-memory
+    // vector and a file-read vector cannot be pooled by two different rules.
     //
     // WHAT THIS DOES NOT DO: the published file also carries `dense_2.weight`
-    // (768 -> 3072) and `dense_3.weight` (3072 -> 768) after the pool, and their
-    // dimensions are declared as `dense_2_feat_in/out` and `dense_3_feat_in/out`.
-    // This engine has never applied that head, so what comes back from either path
-    // is the pooled pre-head stream, not the published model's final embedding.
+    // (768 -> 3072) and `dense_3.weight` (3072 -> 768) after the pool -- the
+    // head `apply_pooling_head` runs, declared by `dense_2_feat_in/out` and
+    // `dense_3_feat_in/out`. A `ModelWeights` carries no head tensors, so what
+    // comes back from this in-memory path is the pooled pre-head stream, and its
+    // caller must say so; the streaming loader that reads the installed file
+    // applies the head when the file declares one (see
+    // `weights::run_streamed_embedding`), and this path may not be reported as
+    // the published model's final embedding.
     pooled_normalised(&scratch.pooled[..dim], count, &mut out_embedding[..dim]);
 
     Ok(dim)
@@ -2220,6 +2385,155 @@ pub mod tests {
         // silu(0) = 0 * 0.5 = 0
         assert_eq!(out[0], 0.0);
         assert!(out[1] > 0.0);
+    }
+
+    /// The pooling head's activation, pinned to the exact tanh-approximation
+    /// curve the upstream reference defines.
+    ///
+    /// WHY exact constants from outside the code: `0.5 * x * (1 + tanh(...))`
+    /// written twice is not a check, and the values below are the float
+    /// evaluations of the published formula (sqrt(2/pi), 0.044715) -- a wrong
+    /// inner constant, a missing cube, or a silu pasted in place of GELU moves
+    /// at least one of them by more than 1e-4. The software `f32_exp` behind the
+    /// tanh costs the comparison a few 1e-6, which the tolerance carries.
+    #[test]
+    fn test_gelu_tanh_is_the_reference_curve_not_a_near_miss() {
+        let cases: [(f32, f32); 8] = [
+            (0.0, 0.0),
+            (0.5, 0.34571400982514394),
+            (1.0, 0.8411919906082768),
+            (2.0, 1.954597694087775),
+            (4.0, 3.9999297540518075),
+            (-0.5, -0.15428599017485606),
+            (-1.0, -0.15880800939172324),
+            (-2.0, -0.04540230591222494),
+        ];
+        for &(x, expected) in cases.iter() {
+            let got = gelu_tanh(x);
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "gelu_tanh({x}) answered {got}, the reference curve answers {expected}"
+            );
+        }
+        // The saturation the clamp promises: beyond |x| = 20 the head sees the
+        // limit, not an overflowing exponential.
+        assert_eq!(gelu_tanh(30.0), 30.0);
+        assert!(gelu_tanh(-30.0).abs() < 1e-5);
+    }
+
+    /// The head, run end to end on a hand-built F32 fixture whose answer is
+    /// arithmetic the reader can check: dense_2 keeps element 0 and doubles
+    /// element 1, GELU lands on the two points pinned above, dense_3 is the
+    /// identity on the hidden pair.
+    ///
+    /// WHY both bias states: the published file declares no bias tensor, and a
+    /// head that ran with an invented one would add a constant the model never
+    /// trained with -- so the no-bias answer must be exactly the pre-bias answer,
+    /// and the declared bias must be added and not skipped.
+    #[test]
+    fn test_apply_pooling_head_is_dense_gelu_dense_with_or_without_bias() {
+        let f32_bytes = |values: &[f32]| -> Vec<u8> {
+            values.iter().flat_map(|v| v.to_le_bytes()).collect()
+        };
+        // dense_2: 2 rows of 4 (mid_dim 2, in_dim 4). Row 0 picks element 0,
+        // row 1 doubles element 1.
+        let dense_2 = f32_bytes(&[1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        // dense_3: 2 rows of 2 -- the identity on the hidden pair.
+        let dense_3 = f32_bytes(&[1.0, 0.0, 0.0, 1.0]);
+        let mean = [0.5f32, 1.0, 0.25, -0.25];
+        let mut hidden = [0.0f32; 2];
+        let mut out = [0.0f32; 2];
+
+        let head = PoolingHead {
+            dense_2: &dense_2,
+            dense_2_type: 0,
+            dense_2_bias: None,
+            dense_3: &dense_3,
+            dense_3_type: 0,
+            dense_3_bias: None,
+            mid_dim: 2,
+            out_dim: 2,
+        };
+        apply_pooling_head(&head, &mean, &mut hidden, &mut out).expect("the fixture head runs");
+        assert!((hidden[0] - 0.34571400982514394).abs() < 1e-4);
+        assert!((out[0] - 0.34571400982514394).abs() < 1e-4, "gelu(p0)");
+        assert!((out[1] - 1.954597694087775).abs() < 1e-4, "gelu(2 * p1)");
+
+        // The same head with declared biases: both are added, at both layers.
+        let bias_2 = [0.0f32, 0.0];
+        let bias_3 = [0.1f32, -0.2];
+        let biased = PoolingHead {
+            dense_2_bias: Some(&bias_2),
+            dense_3_bias: Some(&bias_3),
+            ..head
+        };
+        let mut out_b = [0.0f32; 2];
+        apply_pooling_head(&biased, &mean, &mut hidden, &mut out_b).expect("biases run");
+        assert!((out_b[0] - (0.34571400982514394 + 0.1)).abs() < 1e-4);
+        assert!((out_b[1] - (1.954597694087775 - 0.2)).abs() < 1e-4);
+
+        // A bias narrower than its layer is refused, not half-added: the tail
+        // would keep a bias the file did not state for it, which is the same
+        // defect the block-norm width checks refuse on the other side of the run.
+        let short = [0.1f32];
+        let narrowed = PoolingHead {
+            dense_3_bias: Some(&short),
+            ..head
+        };
+        assert_eq!(
+            apply_pooling_head(&narrowed, &mean, &mut hidden, &mut out_b),
+            Err(InferenceError::CorruptedWeights)
+        );
+        // A hidden buffer shorter than the file's mid_dim, and an out narrower
+        // than out_dim, are the caller's buffer refusal rather than a truncation.
+        let mut one_float = [0.0f32; 1];
+        assert_eq!(
+            apply_pooling_head(&head, &mean, &mut one_float, &mut out_b),
+            Err(InferenceError::BufferTooSmall)
+        );
+        assert_eq!(
+            apply_pooling_head(&head, &mean, &mut hidden, &mut out_b[..1]),
+            Err(InferenceError::BufferTooSmall)
+        );
+        // The empty shape a loader could hand over if it read dimensions from a
+        // guess: refused as the corrupt description it is, before a multiply.
+        assert_eq!(
+            apply_pooling_head(
+                &PoolingHead {
+                    mid_dim: 0,
+                    ..head
+                },
+                &mean,
+                &mut hidden,
+                &mut out,
+            ),
+            Err(InferenceError::CorruptedWeights)
+        );
+    }
+
+    /// `mean_of` and `l2_normalise` are the two steps the streaming path
+    /// composes around the head, and `pooled_normalised` is exactly their
+    /// pairing. WHY pinned directly: the streamed and in-memory pooling rules
+    /// are only honest if the decomposition cannot drift from the composite,
+    /// and a count of zero must leave the destination untouched rather than
+    /// answer "mean of nothing" with zeros.
+    #[test]
+    fn test_mean_of_and_l2_normalise_compose_to_pooled_normalised() {
+        let pooled = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+        let mut via_parts = [0.0f32; 4];
+        mean_of(&pooled, 2, &mut via_parts);
+        assert_eq!(via_parts, [0.5, 1.0, 1.5, 2.0]);
+        l2_normalise(&mut via_parts);
+        let mut via_composite = [0.0f32; 4];
+        pooled_normalised(&pooled, 2, &mut via_composite);
+        for i in 0..4 {
+            assert!((via_parts[i] - via_composite[i]).abs() < 1e-6);
+        }
+        let norm: f32 = via_parts.iter().map(|v| v * v).sum();
+        assert!((norm - 1.0).abs() < 1e-4);
+        let mut untouched = [7.0f32; 4];
+        mean_of(&pooled, 0, &mut untouched);
+        assert_eq!(untouched, [7.0; 4]);
     }
 
     /// The deterministic little model the forward tests run against: identity
