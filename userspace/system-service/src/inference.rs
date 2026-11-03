@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Real neural inference engine and model lifecycle for InterOS AI service (`aid`).
 //!
 //! Strictly `#![no_std]`. The graph's per-run footprint -- the KV cache and every

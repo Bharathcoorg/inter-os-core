@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Real Retrieval-Augmented Generation (RAG) pipeline for InterOS Core.
 //!
 //! Strictly `#![no_std]` and zero heap allocation in all execution and query loops.

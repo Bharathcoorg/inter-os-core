@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Lightweight, zero-allocation GGUF metadata & tensor parser for InterOS AI service (`aid`).
 //!
 //! Strictly `#![no_std]` and zero heap allocation.
@@ -2201,6 +2204,18 @@ pub fn probe_embedding_model() -> Result<(GgufHeader, &'static str), GgufError> 
         "/system/models/embeddinggemma-2-740m.gguf",
         "/data/models/model.gguf",
         "/system/models/model.gguf",
+        // WHY the installed file is a candidate, and why it is last: the install
+        // path writes `PATH_LOCAL_MODEL_DATA` and nothing else, so until this
+        // line the file the device puts in place could be probed for generation
+        // and was invisible to the embedding arm -- which answered from the
+        // lexical baseline about a weights file sitting in front of it. The
+        // generative probe has carried this candidate since the removal contract
+        // named it. It stays last because a header is the only thing a probe
+        // reads, and a generative file renamed into that slot must not outrank a
+        // path whose name the embedding family owns; what stops it being run as
+        // an embedding model is not this list but the tensors the loader refuses
+        // and the architecture the reply quotes.
+        PATH_LOCAL_MODEL_DATA,
     ];
     for &path in CANDIDATES {
         if let Ok(hdr) = read_gguf_header(path) {

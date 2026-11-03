@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 """Truth contract for the on-device inference service's replies.
 
 The service answered a chat prompt with words from weights it never loaded: a
@@ -1481,6 +1484,542 @@ def test_the_contract_can_fail():
     assert "FileSystemWrite" not in policy_arm(
         KERNEL_SERVICES.read_text(encoding="utf-8"), "Inference"
     )
+
+
+# The embedding arm's honesty, checked over `lib.rs` and `ai.rs`.
+#
+# WHY this section exists at all: every gate above was written against the
+# generative arm, and the embedding arm -- the one that answers a vector -- was
+# ungated. It computed a hash projection of the prompt's bytes, sent it with
+# `status: 0`, and `STATUS_SUCCESS` is the code a reader is told means "from the
+# weights". Meanwhile the search arm stamped `is_neural` from a directory
+# listing, so the first person to install a file would have had every lexical
+# match relabelled as a neural one. A change that fixes both is invisible to
+# every assertion above it, so the rule each fix replaced is pinned here.
+# WHY a code marker and not the `// 4. Embedding...` comment the other arms use:
+# several gates below slice a comment-stripped arm, where a comment marker has
+# already been removed -- and a helper that raises on the source it is handed
+# gets replaced by one that quietly returns the whole file.
+EMBEDDING_START = "let mut target_dim = embedding::EMBEDDING_DIM;"
+
+
+def embedding_arm(source: str) -> str:
+    """The dispatch arm that answers an embedding query, and nothing else."""
+    dispatch = function_body(source, "pub fn handle_ipc_inference_query(")
+    return dispatch[dispatch.index(EMBEDDING_START) :]
+
+
+SEARCH_START = "let mut target_dim = 256usize;"
+
+
+def search_arm(source: str) -> str:
+    """The retrieval arm, and nothing beside it.
+
+    WHY it stops where the embedding arm starts: `is_neural` is a field only this
+    arm writes, so a gate that read the rest of the dispatch function could pass
+    on a label the embedding arm invented.
+    """
+    dispatch = function_body(source, "pub fn handle_ipc_inference_query(")
+    return dispatch[dispatch.index(SEARCH_START) : dispatch.index(EMBEDDING_START)]
+
+
+def test_the_embedding_arm_labels_its_lexical_baseline():
+    """A hash of the prompt may never again be reported as a reply from weights.
+
+    The baseline is a legitimate answer -- it is deterministic, it costs nothing,
+    and it ranks documents today. What it never was is a model's embedding. The
+    status is where a reader learns which one it got, so the arm must emit the
+    baseline status on the baseline branch and must not reach `STATUS_SUCCESS`
+    from anywhere that has not read a tensor.
+    """
+    lib = lib_source()
+    baseline = function_body(lib, "fn reply_lexical_baseline(")
+    assert "embedding::compute_embedding_768(" in baseline, (
+        "the baseline stopped being the lexical projection it is named for"
+    )
+    assert "status: STATUS_BASELINE_LEXICAL" in baseline, (
+        "the baseline reply no longer carries the status that says it is a baseline"
+    )
+    assert "STATUS_SUCCESS" not in baseline, "the baseline claims weights again"
+
+    # The arm's code with comments dropped: a comment may name the success it is
+    # refusing to send, and one that names it while sending the baseline is the
+    # fault. `STATUS_SUCCESS` is allowed only past the point where the
+    # file-backed branch has had a run reported `Ok` -- which is the split below.
+    arm = without_comments(embedding_arm(lib))
+    assert "EmbeddingPlan::RunInstalledFile =>" in arm
+    before, after = arm.split("EmbeddingPlan::RunInstalledFile =>", 1)
+    assert "STATUS_SUCCESS" not in before, (
+        "the embedding arm picks a success status outside the file-backed branch"
+    )
+    assert "STATUS_SUCCESS" in after, (
+        "a run that read the file's tensors no longer answers with the neural status"
+    )
+    # One place computes the projection, and it is the labelled one.
+    assert "compute_embedding_768" not in arm, (
+        "a second projection appeared in the arm, beside the labelled one"
+    )
+    assert "EmbeddingPlan::LexicalBaseline =>" in arm
+    assert "reply_lexical_baseline(" in arm
+
+
+def test_a_file_on_the_device_earns_no_neural_claim_by_existing():
+    """`is_neural` and the neural status answer "what ran", not "what is installed".
+
+    This is the whole defect the search arm carried: `is_neural =
+    probed_models.embedding.is_some()` was true the instant a file landed, while
+    `rag::RagIndex` went on embedding both the chunks and the query with the same
+    hash projection it had always used. The gate is a shape check, because the
+    wrong side to be on is the one where a green suite means a false label.
+    """
+    lib = without_comments(lib_source())
+    arm = embedding_arm(lib)
+
+    # Search: the flag comes off the index that scored the match.
+    retrieval = search_arm(lib)
+    assert "is_neural: m.is_neural as u8" in retrieval, (
+        "the search hit no longer relays the index's own flag"
+    )
+    assert "rag::RagIndex::new(false)" in retrieval, (
+        "the retrieval index was built under a neural flag it does not earn; what "
+        "it ingests is the lexical projection, so nothing it matches is neural"
+    )
+    for site in ("is_neural = probed_models.embedding.is_some()",
+                 "if probed_models.embedding.is_some() { 1 } else { 0 }"):
+        assert site not in lib, f"the arm derives a neural label from the probe at {site!r}"
+
+    # Embedding: the probe is an input to a decision, never the decision itself.
+    assert (
+        "plan_embedding_run( probed_models.embedding.is_some(), token_ids.map(|ids| ids.len), strict_neural_required, )"
+        in flat(arm)
+    ), (
+        "the probe no longer feeds the planner, so the branch is being chosen by "
+        "something other than the inputs a reader can check"
+    )
+
+
+def test_the_embedding_branch_is_planned_from_inputs_and_proved_on_the_host():
+    """The choice between file, baseline and refusal must be a testable function.
+
+    WHY a shape gate on a decision: the arm cannot run the engine on the host --
+    `fs_open` and `fs_read_at` are syscalls, which is exactly why `weights.rs`
+    says the host suite cannot drive `ModelFileDescriptor`. So the branch is what
+    the host can prove, and it is provable only if picking it is a pure function
+    of the inputs rather than a chain of conditions tangled into the reply.
+    """
+    lib = lib_source()
+    planner = function_body(lib, "fn plan_embedding_run(")
+    for input_name in ("weights_present", "token_id_count", "strict_neural_required"):
+        assert input_name in planner, f"the planner no longer reads {input_name}"
+    assert "probed_models" not in planner, "the planner reaches past its inputs at the probe"
+    assert "fs_open" not in planner and "read_token_ids" not in planner, (
+        "the planner opens files or parses payloads: the decision is no longer a "
+        "function of the inputs and nothing can prove which branch answers"
+    )
+    for branch in ("RunInstalledFile", "LexicalBaseline", "Refuse"):
+        assert branch in planner, f"the planner lost the {branch} branch"
+
+    # And the host proves it, from the inputs, case by case.
+    proofs = (
+        "fn test_the_embedding_branch_is_chosen_from_the_inputs",
+        "fn test_a_file_present_is_never_by_itself_a_neural_answer",
+        "fn test_a_token_id_stream_is_read_or_refused_whole",
+        "fn test_the_arm_answers_the_baseline_labelled_even_with_a_file_installed",
+        "fn test_strict_neural_with_text_refuses_and_names_the_tokenizer_gap",
+        "fn test_strict_neural_with_no_file_is_refused_as_unavailable",
+        "fn test_a_token_id_stream_takes_the_file_backed_branch_not_the_baseline",
+        "fn test_a_loader_refusal_maps_to_the_status_that_names_it",
+    )
+    for proof in proofs:
+        assert proof in lib, f"the branch-selection proof {proof!r} is gone"
+
+
+def test_the_file_backed_branch_reaches_the_loader_it_was_written_for():
+    """The engine hop the loader exists to close, taken from the dispatch arm.
+
+    WHY this is a gate and not a comment: `weights.rs` was written, measured and
+    left unreachable, and every one of its host numbers stayed true while the
+    device answered from a hash. The claim "the service can run the installed
+    file" is only worth anything if the arm that answers a query is the code that
+    does it -- and only through the device's own positioned read, not a fixture.
+    """
+    lib = lib_source()
+    run = function_body(lib, "fn run_installed_embedding(")
+    for shipping in (
+        "weights::ModelFileDescriptor",
+        "weights::TensorTable::walk",
+        "gguf::read_model_info_stream",
+        "ModelConfig::from_gguf",
+        "weights::WeightReader::new",
+        "reader.load_final_norm",
+        "Scratch::new(&config)",
+        "KvCache::new(&config)",
+        "weights::run_streamed_embedding(",
+    ):
+        assert shipping in run, f"the file-backed branch no longer uses {shipping!r}"
+    assert "GgufStream::from_file(fd)" in run, (
+        "the table is walked from something other than the descriptor the guest opened"
+    )
+    assert "HostFileSource" not in run and "from_slice" not in run, (
+        "the device path reads a host fixture; the loader's host measurement would "
+        "no longer be a measurement of the code that ships"
+    )
+    assert "std::fs_close(fd)" in run, "the run leaks the descriptor it opened"
+    # The refusal the loader returns is answered, not swallowed.
+    assert "Err(error) =>" in embedding_arm(lib)
+    assert "file_embed_notice(&error" in embedding_arm(lib)
+
+
+def test_the_service_does_not_pass_its_own_id_guess_for_the_models_vocabulary():
+    """The tokenizer gap is named, not filled with the built-in table.
+
+    WHY this needs a gate more than anything else here: `tokenizer::encode` looks
+    like the missing piece and is not one. It matches thirty hard-coded subwords
+    and otherwise emits `4 + byte`; not one of those ids was ever checked against
+    the `tokenizer.ggml.tokens` array the installed file states, which the reader
+    deliberately does not walk. Wiring it into the file-backed branch would run
+    real arithmetic over real weights for tokens that mean something else and
+    report it as the model's embedding of the prompt -- a worse lie than the
+    baseline it would have replaced, and one every other gate here would still
+    pass. So the tempting wrong fix is the one this pins shut.
+    """
+    lib = without_comments(lib_source())
+    run = function_body(lib, "fn run_installed_embedding(")
+    assert "tokenizer::encode" not in run and "encode(" not in run, (
+        "the built-in id table now feeds the file-backed run: the ids are not the "
+        "file's vocabulary's, so the vector is not the prompt's embedding"
+    )
+    arm = embedding_arm(lib)
+    assert "read_token_ids(query_text)" in arm, (
+        "the ids no longer come from the caller, so something else is inventing them"
+    )
+    refusal = function_body(lib, "fn embedding_gap_notice<'a>(")
+    assert "NoVocabTokenizer" in refusal
+    assert "vocabulary" in refusal, "the refusal stopped naming the mapping it lacks"
+    # The status the refusal earns is the unsupported one: a gap in the platform,
+    # not a bad file and not a missing install.
+    assert "STATUS_UNSUPPORTED" in refusal
+    assert "STATUS_SUCCESS" not in refusal
+
+
+def test_every_embedding_refusal_earns_its_own_code():
+    """Three refusals with one code leave the reader guessing what would help.
+
+    A dtype the engine has no layout for, a heap that refused the cache and a
+    copy that stopped mid-tensor each have a different next move -- change the
+    file, resize the run, re-install. The old arm flattened all of it into one
+    number, so this checks the refusals are still distinguishable and that none
+    of them was quietly promoted to a success.
+    """
+    notice = function_body(lib_source(), "fn file_embed_notice<'a>(")
+    for code in ("STATUS_UNSUPPORTED", "STATUS_UNAVAILABLE", "STATUS_ERROR"):
+        assert code in notice, f"the refusals no longer report {code}"
+    assert "STATUS_SUCCESS" not in notice, "a refusal answered with a success"
+    for named in (
+        "UnsupportedDtype",
+        "MixedBlockDtype",
+        "TensorAbsent",
+        "BadShape",
+        "BadAlignment",
+        "ShortRead",
+        "ScratchTooLarge",
+        "ScratchUnavailable",
+        "ModelDeclaration",
+    ):
+        assert named in notice, f"the refusal for {named} no longer says which one it is"
+
+
+def test_the_installed_file_is_considered_for_embeddings():
+    """The install path writes one name, and the embedding probe must read it.
+
+    The file the Agent Manager installs lands at `PATH_LOCAL_MODEL_DATA`. That
+    path was already a generative candidate, so a person could install a model,
+    watch the device accept it, and still be told -- by the embedding arm and by
+    the search arm's `is_neural` -- that there are no weights, in the same minute
+    the screen had offered to remove the file it was holding.
+    """
+    gguf = read("gguf.rs")
+    probe = function_body(gguf, "pub fn probe_embedding_model(")
+    assert "PATH_LOCAL_MODEL_DATA," in probe, (
+        "the installed file is not an embedding candidate again"
+    )
+    assert probe.index("PATH_EMBEDDING_MODEL_DATA") < probe.index("PATH_LOCAL_MODEL_DATA"), (
+        "the installed file now outranks the paths the embedding family owns, so a "
+        "generative file renamed into that slot would be read as an embedding model"
+    )
+
+
+def test_the_baseline_status_is_its_own_number_and_not_a_synonym_for_success():
+    """A new status only says something if a reader can branch on it.
+
+    `0` meant success everywhere; if the baseline shared it the label would be
+    decoration. This pins the code apart, and pins that nothing renumbered the
+    five codes apps already read.
+    """
+    sdk = (ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs").read_text(encoding="utf-8")
+    codes = dict(
+        (name, int(value))
+        for name, value in re.findall(
+            r"pub const (STATUS_[A-Z_]+): u32 = (\d+);", sdk
+        )
+    )
+    assert codes["STATUS_SUCCESS"] == 0
+    assert codes["STATUS_BASELINE_LEXICAL"] == 5, (
+        f"the baseline shares a code with an existing status: {codes}"
+    )
+    assert len(set(codes.values())) == len(codes), f"two statuses share a number: {codes}"
+    assert "FLAG_INPUT_TOKEN_IDS: u32 = 0x10" in sdk, (
+        "the token-id flag moved, so a caller can no longer ask for the file-backed branch"
+    )
+    assert "FLAG_STRICT_NEURAL: u32 = 0x80" in sdk, (
+        "the strict flag moved, so the demand-for-weights bit is now someone else's"
+    )
+
+
+def test_the_loader_no_longer_claims_the_service_never_calls_it():
+    """`weights.rs` opens by saying what is not wired; that sentence is now false.
+
+    WHY a gate on a doc comment: a module that says "no dispatch arm calls into
+    this module yet" while an arm calls it on every token-id request is the exact
+    shape of the defect this repository exists to catch, and a reader who trusts
+    the header will trust the wrong thing about the device. The replacement
+    sentence has to keep the half that is still a limitation.
+    """
+    doc = " ".join(
+        " ".join(
+            line[3:].strip()
+            for line in read("weights.rs").splitlines()
+            if line.startswith("//!")
+        ).split()
+    )
+    assert "no dispatch arm" not in doc, "the header still denies the wiring that happened"
+    for kept in (
+        "never been executed by the guest",
+        "STATUS_BASELINE_LEXICAL",
+        "tokenizer::encode",
+    ):
+        assert kept in doc, f"the header stopped saying {kept!r}"
+    assert read("weights.rs").startswith("//! "), (
+        "the module's own words moved out of the header"
+    )
+
+
+def mutate_function(source: str, signature: str, old: str, new: str) -> str:
+    """`source` with one occurrence of `old` inside the named function replaced.
+
+    WHY mutations are scoped to a function: the gates below read a single body, and
+    a whole-file `str.replace` can put the fault somewhere the gate never looks --
+    where the meta-test then passes on a mutation that proves nothing. The assert is
+    the point: an unfound `old` means the gate's target moved, not that the fault is
+    unreachable.
+    """
+    body = function_body(source, signature)
+    assert old in body, f"{old!r} is not inside {signature!r}: the fault has nowhere to go"
+    return source.replace(body, body.replace(old, new, 1), 1)
+
+
+def status_codes(sdk: str) -> list:
+    return [int(value) for _, value in re.findall(
+        r"pub const (STATUS_[A-Z_]+): u32 = (\d+);", sdk
+    )]
+
+
+def test_the_embedding_contract_can_fail():
+    """A contract that cannot fail is a comment.
+
+    Each block below puts one fault back into a copy of the source and runs the
+    *same* detector expression the gate that would have caught it runs. A mutation
+    that no assertion fires on is a gate that has nothing left to see, which is the
+    failure this meta-test exists to find.
+    """
+    lib = lib_source()
+    sdk = (ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs").read_text(encoding="utf-8")
+    gguf = read("gguf.rs")
+
+    def label_of(source):
+        """The gate's own split: what status the arm may name before the file ran."""
+        arm = without_comments(embedding_arm(source))
+        return arm.split("EmbeddingPlan::RunInstalledFile =>", 1)
+
+    # 1. The baseline answers with the weights status -- the defect as it shipped.
+    relabelled = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "reply_lexical_baseline(sender_task_id, query_text, target_dim, latency_micros, tx_buf);",
+        "let _v = embedding::compute_embedding_768(query_text, target_dim);\n            "
+        "emit_response_as(sender_task_id, STATUS_SUCCESS, MSG_TYPE_EMBED, query_text, tx_buf);",
+    )
+    before, after = label_of(relabelled)
+    assert "STATUS_SUCCESS" in before, (
+        "the arm's status split no longer sees a success sent before the file ran"
+    )
+    assert "STATUS_SUCCESS" in after
+
+    # 2. A second, unlabelled projection beside the labelled one.
+    assert "compute_embedding_768" not in without_comments(embedding_arm(lib)), (
+        "the live arm already projects inside itself, so the gate's shape rule is idle"
+    )
+    duplicated = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "let plan = plan_embedding_run(",
+        "let _draft = embedding::compute_embedding_768(query_text, target_dim, None, None);\n    let plan = plan_embedding_run(",
+    )
+    assert "compute_embedding_768" in embedding_arm(without_comments(duplicated)), (
+        "a projection written inside the arm goes unnoticed by the one-place rule"
+    )
+
+    # 3. The retrieval flag borrowed back off the probe.
+    borrowed = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "rag::RagIndex::new(false)",
+        "let is_neural = probed_models.embedding.is_some();\n            rag::RagIndex::new(is_neural)",
+    )
+    retrieval = search_arm(without_comments(borrowed))
+    assert "rag::RagIndex::new(false)" not in retrieval, (
+        "the detector for a probe-borrowed neural flag has nothing left to trip on"
+    )
+    assert "is_neural = probed_models.embedding.is_some()" in retrieval
+
+    # 4. The wire field computed from the install instead of the index.
+    relayed = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "is_neural: m.is_neural as u8",
+        "is_neural: if probed_models.embedding.is_some() { 1 } else { 0 }",
+    )
+    assert "is_neural: m.is_neural as u8" not in search_arm(without_comments(relayed)), (
+        "the relay the gate pins is no longer the thing it reads"
+    )
+    # The gate's site loop reads the dispatch, so a live-file check closes it.
+    assert "if probed_models.embedding.is_some() { 1 } else { 0 }" not in lib
+
+    # 5. The probe replaced by a constant, so the branch stops being a decision.
+    decoupled = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "        probed_models.embedding.is_some(),\n        token_ids.map(|ids| ids.len),",
+        "        true,\n        token_ids.map(|ids| ids.len),",
+    )
+    assert (
+        "plan_embedding_run( probed_models.embedding.is_some(), token_ids.map(|ids| ids.len), strict_neural_required, )"
+        not in flat(embedding_arm(without_comments(decoupled)))
+    ), "the planner-input pin is satisfied by something other than the probe"
+
+    # 6. The planner opens files, so no host test can drive it from inputs.
+    reaching = mutate_function(
+        lib,
+        "fn plan_embedding_run(",
+        "match (weights_present, token_id_count, strict_neural_required) {",
+        "let weights_present = std::fs_open(path, std::FS_READ).is_ok();\n        "
+        "match (weights_present, token_id_count, strict_neural_required) {",
+    )
+    assert "fs_open" in function_body(reaching, "fn plan_embedding_run("), (
+        "a planner that reaches for the filesystem no longer reads as one"
+    )
+
+    # 7. A gap swallowed into a baseline answer, so nothing refuses.
+    swallowed = lib
+    for _ in range(3):
+        swallowed = mutate_function(
+            swallowed, "fn plan_embedding_run(",
+            "=> EmbeddingPlan::Refuse(", "=> EmbeddingPlan::Renamed(",
+        )
+    assert "Refuse" not in function_body(swallowed, "fn plan_embedding_run("), (
+        "the refusal branch the gate names is not the one the planner takes"
+    )
+
+    # 8. The wired loader swapped for a host fixture.
+    mocked = mutate_function(
+        lib, "fn run_installed_embedding(",
+        "weights::ModelFileDescriptor { fd }", "HostFileSource { file: std::fs::File::open(path)? }",
+    )
+    run = function_body(mocked, "fn run_installed_embedding(")
+    assert "weights::ModelFileDescriptor" not in run and "HostFileSource" in run, (
+        "the file-backed branch would pass while reading a fixture"
+    )
+
+    # 9. The engine hop undone: the table walked, but no graph stepped.
+    unwired = mutate_function(
+        lib, "fn run_installed_embedding(",
+        "weights::run_streamed_embedding(", "weights::run_streamed_prefix(",
+    )
+    assert "weights::run_streamed_embedding(" not in function_body(
+        unwired, "fn run_installed_embedding("
+    ), "the loader call the gate requires is not the call the branch makes"
+
+    # 10. The tempting wrong fix: the built-in id table feeding the run.
+    guessed = mutate_function(
+        lib, "fn run_installed_embedding(",
+        "    let fd = std::fs_open(path, std::FS_READ)",
+        "    let mut invented = [0u32; 8];\n    tokenizer::encode(path, &mut invented, true);\n"
+        "    let fd = std::fs_open(path, std::FS_READ)",
+    )
+    assert "tokenizer::encode" in function_body(guessed, "fn run_installed_embedding("), (
+        "the vocabulary rule cannot see ids invented inside the run"
+    )
+
+    # 11. A refusal promoted to a success.
+    promoted = mutate_function(
+        lib, "fn file_embed_notice<'a>(", "STATUS_UNAVAILABLE", "STATUS_SUCCESS"
+    )
+    assert "STATUS_SUCCESS" in function_body(promoted, "fn file_embed_notice<'a>("), (
+        "the no-success rule has nothing to read in the refusals"
+    )
+
+    # 12. The installed file dropped from, or moved to the front of, the probe.
+    blind = mutate_function(
+        gguf, "pub fn probe_embedding_model(", "        PATH_LOCAL_MODEL_DATA,\n", ""
+    )
+    assert "PATH_LOCAL_MODEL_DATA," not in function_body(blind, "pub fn probe_embedding_model("), (
+        "the candidate rule cannot see the installed file being removed"
+    )
+    reordered = mutate_function(
+        gguf, "pub fn probe_embedding_model(",
+        "        PATH_EMBEDDING_MODEL_DATA,",
+        "        PATH_LOCAL_MODEL_DATA,\n        PATH_EMBEDDING_MODEL_DATA,",
+    )
+    probe = function_body(reordered, "pub fn probe_embedding_model(")
+    assert probe.index("PATH_EMBEDDING_MODEL_DATA") > probe.index("PATH_LOCAL_MODEL_DATA"), (
+        "the order the gate pins is not the order it reads"
+    )
+
+    # 13. The baseline status renumbered onto an existing one.
+    merged = sdk.replace(
+        "pub const STATUS_BASELINE_LEXICAL: u32 = 5;",
+        "pub const STATUS_BASELINE_LEXICAL: u32 = 0;", 1
+    )
+    assert status_codes(merged) != status_codes(sdk) and len(set(status_codes(merged))) < len(
+        status_codes(merged)
+    ), "two statuses sharing a number would still leave the code list unique"
+
+    # 14. The header denying, again, the wiring that happened.
+    denied = "//! no dispatch arm in `lib.rs` calls into this module yet.\n" + read("weights.rs")
+    header = " ".join(
+        " ".join(
+            line[3:].strip()
+            for line in denied.splitlines()
+            if line.startswith("//!")
+        ).split()
+    )
+    assert "no dispatch arm" in header, "the header rule no longer reads the lines it names"
+
+    # None of the faults above are in the service as it stands.
+    live_run = function_body(lib, "fn run_installed_embedding(")
+    assert "HostFileSource" not in live_run and "tokenizer::encode" not in live_run
+    assert "weights::run_streamed_embedding(" in live_run
+    assert "PATH_LOCAL_MODEL_DATA," in function_body(gguf, "pub fn probe_embedding_model(")
+    assert function_body(gguf, "pub fn probe_embedding_model(").index(
+        "PATH_EMBEDDING_MODEL_DATA"
+    ) < function_body(gguf, "pub fn probe_embedding_model(").index("PATH_LOCAL_MODEL_DATA")
+    assert "STATUS_BASELINE_LEXICAL" in function_body(lib, "fn reply_lexical_baseline(")
+    assert "STATUS_SUCCESS" not in function_body(lib, "fn file_embed_notice<'a>(")
+    assert "Refuse" in function_body(lib, "fn plan_embedding_run(")
+    assert "fs_open" not in function_body(lib, "fn plan_embedding_run(")
+    assert "rag::RagIndex::new(false)" in search_arm(without_comments(lib))
+    assert "is_neural: m.is_neural as u8" in search_arm(without_comments(lib))
+    assert len(set(status_codes(sdk))) == len(status_codes(sdk))
 
 
 def main() -> int:

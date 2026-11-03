@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 #![no_std]
 
 // WHY `alloc` is linked here and nowhere else in this crate's dependants: the
@@ -63,8 +66,8 @@ pub use tokenizer::{
 pub use std::ai::{
     MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
     MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK,
-    MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_CANCELLED, STATUS_ERROR, STATUS_SUCCESS,
-    STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
+    MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
+    STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
 pub fn run(service_id: u8, name: &str) -> ! {
@@ -1152,6 +1155,455 @@ fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
     (status, notice.finish())
 }
 
+// ---------------------------------------------------------------------------
+// The embedding arm's branches: which one runs, and what its reply may claim.
+//
+// WHY the decision is a function of inputs rather than a chain of `if`s inside
+// the arm: the arm used to answer the lexical projection with `status: 0` and a
+// caller could not tell it from weights. A status chosen at the point a vector
+// is emitted is a status a reader cannot check ahead of time, so the three
+// outcomes are named here, the decision that picks between them reads no file
+// and makes no syscall, and `host_test_the_branch_selection` proves the mapping
+// from inputs to branch. The arm then reports whichever branch it executed.
+// ---------------------------------------------------------------------------
+
+/// The longest token-id stream one embedding request is answered with.
+///
+/// WHY a bound: the streamed run steps the whole graph once per position, so an
+/// unbounded stream is an unbounded request -- and `aid` answers every other
+/// query from the same loop that request blocks.
+const EMBED_TOKEN_IDS_MAX: usize = 32;
+
+/// Which of the three answers an embedding request gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingPlan {
+    /// The installed file's tensors, read block by block and run over the token
+    /// ids the caller supplied. Answers `STATUS_SUCCESS`.
+    RunInstalledFile,
+    /// `embedding::compute_embedding_768`, the lexical hash projection. Answers
+    /// `STATUS_BASELINE_LEXICAL` -- the status the projection always deserved and
+    /// never carried.
+    LexicalBaseline,
+    /// Nothing runs; the notice names the gap.
+    Refuse(EmbeddingGap),
+}
+
+/// The gap that stopped an embedding reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingGap {
+    /// The caller demanded physical weights and the probe found no file.
+    NoWeights,
+    /// The file is on the device and the caller demanded it, but the request
+    /// carries text and no ids. `tokenizer::encode` matches thirty hard-coded
+    /// subwords and otherwise emits `4 + byte`: an id table nothing ever checked
+    /// against the `tokenizer.ggml.tokens` array this file states, which the
+    /// reader deliberately does not walk. Running the graph on ids from that
+    /// guess would return real arithmetic over real weights for tokens that mean
+    /// something else, and label it the model's embedding of the prompt. The gap
+    /// is the vocabulary-backed mapping, and the reply says so instead of paying
+    /// it with a fabricated one.
+    NoVocabTokenizer,
+}
+
+/// Picks the branch from the inputs, before anything is opened.
+///
+/// `token_id_count` is `Some(n)` only when the request carried a whole number of
+/// little-endian `u32` ids under the token-id flag and the bound accepted them.
+fn plan_embedding_run(
+    weights_present: bool,
+    token_id_count: Option<usize>,
+    strict_neural_required: bool,
+) -> EmbeddingPlan {
+    match (weights_present, token_id_count, strict_neural_required) {
+        // Ids the caller owns plus a file the probe read: the engine runs.
+        (true, Some(_), _) => EmbeddingPlan::RunInstalledFile,
+        // Weights demanded, text supplied, and nothing maps one to the other.
+        (true, None, true) => EmbeddingPlan::Refuse(EmbeddingGap::NoVocabTokenizer),
+        (false, Some(_), true) => EmbeddingPlan::Refuse(EmbeddingGap::NoWeights),
+        (false, None, true) => EmbeddingPlan::Refuse(EmbeddingGap::NoWeights),
+        // Nothing demanded weights, so a labelled baseline still answers the
+        // query -- which is the difference between refusing and lying.
+        _ => EmbeddingPlan::LexicalBaseline,
+    }
+}
+
+/// A bounded token-id stream, held on the stack rather than the heap.
+#[derive(Clone, Copy)]
+struct TokenIds {
+    ids: [u32; EMBED_TOKEN_IDS_MAX],
+    len: usize,
+}
+
+impl TokenIds {
+    fn as_slice(&self) -> &[u32] {
+        &self.ids[..self.len]
+    }
+}
+
+/// Reads the caller's token ids, or reports that these bytes are not a stream.
+///
+/// `None` for an empty input, a byte count that is not a whole number of `u32`s,
+/// and a stream past `EMBED_TOKEN_IDS_MAX`: all three are refusals to run rather
+/// than reasons to invent ids, and none of them is text the arm should tokenize.
+fn read_token_ids(input: &[u8]) -> Option<TokenIds> {
+    if input.is_empty() || input.len() % 4 != 0 {
+        return None;
+    }
+    let count = input.len() / 4;
+    if count > EMBED_TOKEN_IDS_MAX {
+        return None;
+    }
+    let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];
+    for slot in 0..count {
+        let chunk = &input[slot * 4..slot * 4 + 4];
+        ids[slot] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Some(TokenIds { ids, len: count })
+}
+
+/// What one file-backed embedding run measured, so the reply is a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileEmbedReport {
+    /// Hidden dimension of the graph the file's own metadata configured.
+    hidden_dim: usize,
+    /// Positions stepped.
+    positions: usize,
+    /// Blocks run across every position.
+    blocks_run: usize,
+    /// Tensor payloads read for the whole run.
+    tensors_read: usize,
+    /// Bytes of the file the run read.
+    bytes_read: u64,
+    /// Whether the file's `dense_2`/`dense_3` pooling head was applied. `false`
+    /// means the vector is the pooled pre-head residual stream, which is not the
+    /// published model's final embedding and must not be reported as one.
+    head_applied: bool,
+}
+
+/// Why the installed file did not answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileEmbedError {
+    /// The path the probe read is not openable now.
+    Open,
+    /// The engine could not be built from the file's own declaration.
+    Config(InferenceError),
+    /// The descriptor table or a tensor read refused.
+    Load(weights::LoadError),
+}
+
+/// Reads the installed file one block at a time and runs it over `tokens`.
+///
+/// This is the hop the service had never taken on the device: `weights` had been
+/// called from nowhere but its own `#[cfg(test)]` block. Everything below is the
+/// loader's own code path, driven through `weights::ModelFileDescriptor` and the
+/// kernel `fs_read_at` the guest answers, not through the host's `File`.
+fn run_installed_embedding(
+    path: &str,
+    tokens: &[u32],
+    out: &mut [f32],
+) -> Result<FileEmbedReport, FileEmbedError> {
+    let fd = std::fs_open(path, std::FS_READ).map_err(|_| FileEmbedError::Open)?;
+    let source = weights::ModelFileDescriptor { fd };
+
+    let walked = {
+        let mut stream = GgufStream::from_file(fd);
+        weights::TensorTable::walk(&mut stream)
+    };
+    let table = match walked {
+        Ok(table) => table,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Load(error));
+        }
+    };
+
+    let read = {
+        let mut stream = GgufStream::from_file(fd);
+        gguf::read_model_info_stream(&mut stream)
+    };
+    let info = match read {
+        Ok(info) => info,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Load(weights::LoadError::Reader(error)));
+        }
+    };
+    let config = match ModelConfig::from_gguf(&info) {
+        Ok(config) => config,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Config(error));
+        }
+    };
+    if config.hidden_dim > out.len() {
+        let _ = std::fs_close(fd);
+        return Err(FileEmbedError::Config(InferenceError::BufferTooSmall));
+    }
+
+    let mut reader = weights::WeightReader::new(table, source);
+    let final_norm = match reader.load_final_norm(config.hidden_dim) {
+        Ok(norm) => norm,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Load(error));
+        }
+    };
+    let mut scratch = match Scratch::new(&config) {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Config(error));
+        }
+    };
+    let mut kv_cache = match KvCache::new(&config) {
+        Ok(cache) => cache,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            return Err(FileEmbedError::Config(error));
+        }
+    };
+    let mut row = alloc::vec::Vec::new();
+    let ran = weights::run_streamed_embedding(
+        &mut reader,
+        &config,
+        tokens,
+        &mut scratch,
+        &mut kv_cache,
+        &final_norm,
+        &mut row,
+        &mut out[..config.hidden_dim],
+    );
+    let _ = std::fs_close(fd);
+
+    match ran {
+        Ok((run, head_applied)) => Ok(FileEmbedReport {
+            hidden_dim: config.hidden_dim,
+            positions: run.positions,
+            blocks_run: run.blocks_run,
+            tensors_read: run.tensors_read,
+            bytes_read: run.bytes_read,
+            head_applied,
+        }),
+        Err(error) => Err(FileEmbedError::Load(error)),
+    }
+}
+
+/// The words and the status that say why the installed file did not answer.
+///
+/// WHY one function returns both: a status chosen apart from the sentence that
+/// explains it is a second mapping for the same refusal, and the two drift. Each
+/// arm below names the fact, the number that proves it, and the code a reader
+/// branches on, together.
+///
+/// WHY the codes differ at all: "this file quantises a dtype the engine has no
+/// layout for", "the heap refused the cache" and "the copy stopped mid-tensor"
+/// are three different facts with three different next moves -- change the file,
+/// resize the run, re-install -- and a reader handed one code for all three
+/// cannot tell which would help.
+///
+/// Pure over the refusal: it reads no file and makes no syscall, so the mapping
+/// is testable from a `LoadError` value alone.
+fn file_embed_notice<'a>(error: &FileEmbedError, buf: &'a mut [u8]) -> (u32, &'a [u8]) {
+    let mut notice = Notice::new(buf);
+    let status = match error {
+        FileEmbedError::Open => {
+            notice.word(
+                b"Embedding refused: the probed model file could not be opened since the probe ran.",
+            );
+            STATUS_UNAVAILABLE
+        }
+        FileEmbedError::Load(weights::LoadError::UnsupportedDtype(name, dtype)) => {
+            notice.word(b"Embedding refused: the file's tensor ");
+            notice.word(name.as_bytes());
+            notice.word(b" declares quantisation ");
+            notice.number(*dtype);
+            notice.word(b", a dtype this engine has no row layout for.");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::MixedBlockDtype(name, a, b)) => {
+            notice.word(b"Embedding refused: the block at ");
+            notice.word(name.as_bytes());
+            notice.word(b" splits across quantisations ");
+            notice.number(*a);
+            notice.word(b" and ");
+            notice.number(*b);
+            notice.word(b", and one block runs with one type.");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::TensorAbsent(name, _)) => {
+            notice.word(b"Embedding refused: the file holds no tensor named ");
+            notice.word(name.as_bytes());
+            notice.word(b", so this is not a graph the loader can build.");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::BadShape(name, stated, wanted)) => {
+            notice.word(b"Embedding refused: the tensor ");
+            notice.word(name.as_bytes());
+            notice.word(b" declares ");
+            notice.byte_count(*stated);
+            notice.word(b" where the graph needs ");
+            notice.byte_count(*wanted);
+            notice.word(b".");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::BadAlignment(value)) => {
+            notice.word(b"Embedding refused: the file states alignment ");
+            notice.byte_count(*value);
+            notice.word(b", which no GGUF file can place tensors with.");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::ShortRead(position, asked, got)) => {
+            notice.word(b"Embedding refused: a positioned read at byte ");
+            notice.byte_count(*position);
+            notice.word(b" came back with ");
+            notice.number(*got as u32);
+            notice.word(b" of the ");
+            notice.number(*asked as u32);
+            notice.word(b" bytes the descriptor states -- an install that stopped part-way.");
+            STATUS_ERROR
+        }
+        FileEmbedError::Config(InferenceError::ScratchTooLarge(needed, budget)) => {
+            notice.word(b"Embedding refused: this model needs ");
+            notice.byte_count(*needed as u64);
+            notice.word(b" bytes of scratch against a budget of ");
+            notice.byte_count(*budget as u64);
+            notice.word(b".");
+            STATUS_UNAVAILABLE
+        }
+        FileEmbedError::Config(InferenceError::ScratchUnavailable) => {
+            notice.word(
+                b"Embedding refused: the service heap refused the scratch this shape prices.",
+            );
+            STATUS_UNAVAILABLE
+        }
+        FileEmbedError::Config(InferenceError::ModelDeclaration(key, stated, limit)) => {
+            notice.word(b"Embedding refused: the file declares ");
+            notice.word(key.as_bytes());
+            notice.word(b" as ");
+            match stated {
+                Some(value) => notice.byte_count(*value as u64),
+                None => notice.word(b"nothing"),
+            }
+            notice.word(b" where the engine is bounded at ");
+            notice.byte_count(*limit as u64);
+            notice.word(b".");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Config(other) => {
+            notice.word(b"Embedding refused: the engine could not be built from this file (");
+            notice.word(inference_error_word(other));
+            notice.word(b").");
+            STATUS_UNSUPPORTED
+        }
+        FileEmbedError::Load(weights::LoadError::Reader(error)) => {
+            notice.word(b"Embedding refused: the file's descriptors did not parse (");
+            notice.word(gguf_error_word(error));
+            notice.word(b").");
+            STATUS_ERROR
+        }
+        FileEmbedError::Load(weights::LoadError::Graph(error)) => {
+            notice.word(b"Embedding refused: the graph stopped (");
+            notice.word(inference_error_word(error));
+            notice.word(b").");
+            STATUS_ERROR
+        }
+        FileEmbedError::Load(weights::LoadError::Arithmetic) => {
+            notice.word(
+                b"Embedding refused: a tensor's size did not fit this device's address width.",
+            );
+            STATUS_ERROR
+        }
+    };
+    (status, notice.finish())
+}
+
+/// A short name for an engine failure the loader surfaced whole.
+fn inference_error_word(error: &InferenceError) -> &'static [u8] {
+    match error {
+        InferenceError::BufferTooSmall => b"buffer too small",
+        InferenceError::CorruptedWeights => b"corrupted weights",
+        InferenceError::ScratchUnavailable => b"scratch unavailable",
+        _ => b"unsupported configuration",
+    }
+}
+
+/// A short name for a reader failure the loader surfaced whole.
+fn gguf_error_word(error: &crate::gguf::GgufError) -> &'static [u8] {
+    use crate::gguf::GgufError as E;
+    match error {
+        E::BufferTooShort => b"buffer too short",
+        E::InvalidMagic => b"not a GGUF file",
+        E::UnsupportedVersion(_) => b"unsupported GGUF version",
+        E::FileNotFound => b"file not found",
+        E::ReadFailed => b"read failed",
+        E::NoModelsFound => b"no model found",
+        E::InvalidMetadata => b"invalid metadata",
+        E::ArithmeticOverflow => b"arithmetic overflow",
+        E::CorruptedTensor => b"corrupted tensor",
+        E::InvalidAlignment(_) => b"invalid alignment",
+        E::MissingMetadata(..) => b"missing metadata",
+    }
+}
+
+/// Why the arm ran nothing at all.
+fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [u8]) {
+    let mut notice = Notice::new(buf);
+    let status = match gap {
+        EmbeddingGap::NoWeights => {
+            notice.word(
+                b"Embedding refused: the strict-neural flag is set and the model namespace holds no weights file the probe read.",
+            );
+            STATUS_UNAVAILABLE
+        }
+        EmbeddingGap::NoVocabTokenizer => {
+            notice.word(
+                b"Embedding refused: the strict-neural flag is set and this request carries text, not token ids. No mapping from text to this file's vocabulary is wired -- the vocabulary array is never walked and the built-in id table is a guess checked against nothing -- so the file's tensors cannot be run over this prompt. Send a token-id stream, or drop the flag and take the labelled lexical baseline.",
+            );
+            STATUS_UNSUPPORTED
+        }
+    };
+    (status, notice.finish())
+}
+
+/// Answers an embedding request with the lexical projection, labelled as such.
+///
+/// WHY a function: three branches can land here (no file, file plus text, and a
+/// planner change), and every one of them must carry the same status. The bug
+/// this closes was one of them carrying `STATUS_SUCCESS` instead.
+fn reply_lexical_baseline(
+    sender_task_id: u64,
+    query_text: &[u8],
+    target_dim: usize,
+    latency_micros: u64,
+    tx_buf: &mut [u8; 1024],
+) {
+    let mut q7_out = [0i8; EMBEDDING_DIM];
+    embedding::compute_embedding_768(query_text, target_dim, None, Some(&mut q7_out));
+
+    let resp = std::ai::AiInferenceResponse {
+        status: STATUS_BASELINE_LEXICAL,
+        output_dim: target_dim as u32,
+        latency_micros,
+        output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
+    };
+    let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+    let resp_bytes = unsafe {
+        core::slice::from_raw_parts(&resp as *const _ as *const u8, resp_hdr_len)
+    };
+    tx_buf[..resp_hdr_len].copy_from_slice(resp_bytes);
+
+    let vector_bytes = unsafe {
+        core::slice::from_raw_parts(q7_out.as_ptr() as *const u8, target_dim)
+    };
+    let total_len = resp_hdr_len + target_dim;
+    if total_len <= tx_buf.len() {
+        tx_buf[resp_hdr_len..total_len].copy_from_slice(vector_bytes);
+        if sender_task_id != 0 {
+            let _ = std::ipc_send(sender_task_id, MSG_TYPE_EMBED, &tx_buf[..total_len]);
+        }
+    }
+}
+
 /// Dispatches incoming IPC queries for `SERVICE_INFERENCE` (#12) with zero heap allocation.
 pub fn handle_ipc_inference_query(
     sender_task_id: u64,
@@ -1470,8 +1922,19 @@ pub fn handle_ipc_inference_query(
             .and_then(|_| std::get_ticks().ok())
             .unwrap_or(0);
 
-        let is_neural = probed_models.embedding.is_some();
-        let mut index = rag::RagIndex::new(is_neural);
+        // Platform Truth Contract: `is_neural` answers "did a model file's tensors
+        // produce this match", and for every match this arm can produce the honest
+        // answer is no. `rag::RagIndex::ingest` embeds each chunk through
+        // `embedding::compute_embedding_768` and `RagIndex::search` embeds the
+        // query the same way, so both sides of every cosine scored here are the
+        // lexical hash projection. Deriving the flag from
+        // `probed_models.embedding.is_some()` labelled a lexical match neural the
+        // moment anyone installed a file -- a file's presence is not a file's
+        // arithmetic. The flag now comes off the index that ran, so a neural
+        // retrieval has to change what the index was built from before a hit can
+        // claim to be one; until it does, the arm refuses the claim rather than
+        // inheriting it from a directory listing.
+        let mut index = rag::RagIndex::new(false);
         if index.load_from_disk(rag::PATH_SEARCH_INDEX_DATA).is_err()
             && index.load_from_disk(rag::PATH_SEARCH_INDEX_STORAGE).is_err()
         {
@@ -1508,7 +1971,12 @@ pub fn handle_ipc_inference_query(
                 end_offset: m.end_offset,
                 score_q15: m.score_q15,
                 confidence_percent: m.confidence_percent,
-                is_neural: if probed_models.embedding.is_some() { 1 } else { 0 },
+                // The index's own flag, which is the flag the scoring ran under,
+                // not a second reading of the probe. `STATUS_SUCCESS` on the frame
+                // header means this retrieval ran and these matches are real; it
+                // has never meant "neural", and a reader that needs that question
+                // asks `is_neural`, which is now answerable.
+                is_neural: m.is_neural as u8,
                 path_len: m.source_path_len as u16,
                 snippet_len: m.snippet_len,
             };
@@ -1554,6 +2022,7 @@ pub fn handle_ipc_inference_query(
     let mut target_dim = embedding::EMBEDDING_DIM;
     let mut query_text = payload;
     let mut strict_neural_required = false;
+    let mut request_flags: u32 = 0;
 
     // Check if the wire payload contains an AiInferenceRequest header (24 bytes)
     // Avoid mistaking raw text queries as AiInferenceRequest:
@@ -1568,13 +2037,12 @@ pub fn handle_ipc_inference_query(
             && ((req.input_len as usize) <= payload.len().saturating_sub(core::mem::size_of::<std::ai::AiInferenceRequest>()));
 
         if is_valid_req {
+            request_flags = req.flags;
             if let Some(m_dim) = std::ai::MatryoshkaDim::from_u32(req.target_dim) {
                 target_dim = m_dim.as_usize();
             }
-            if (req.flags & 0x80) != 0 || req.model_id == 1 {
-                if (req.flags & 0x80) != 0 {
-                    strict_neural_required = true;
-                }
+            if (req.flags & std::ai::FLAG_STRICT_NEURAL) != 0 {
+                strict_neural_required = true;
             }
             let start = core::mem::size_of::<std::ai::AiInferenceRequest>();
             if req.input_len > 0 {
@@ -1586,45 +2054,106 @@ pub fn handle_ipc_inference_query(
         }
     }
 
-    // Platform Truth Contract: if caller strictly required physical neural weights and they are absent
-    if strict_neural_required && probed_models.embedding.is_none() {
-        let resp = std::ai::AiInferenceResponse {
-            status: 1, // Status 1 = UNAVAILABLE
-            output_dim: 0,
-            latency_micros: 0,
-            output_offset: 0,
-        };
-        let resp_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &resp as *const _ as *const u8,
-                core::mem::size_of::<std::ai::AiInferenceResponse>(),
-            )
-        };
-        if sender_task_id != 0 {
-            let _ = std::ipc_send(sender_task_id, MSG_TYPE_EMBED, resp_bytes);
-        }
-        return;
-    }
+    // The ids this request carries, if it carries any. Read before the branch is
+    // chosen, because the branch is chosen from them: `Some(_)` is the only input
+    // that lets the installed file run at all.
+    let token_ids = if (request_flags & std::ai::FLAG_INPUT_TOKEN_IDS) != 0 {
+        read_token_ids(query_text)
+    } else {
+        None
+    };
 
     let start_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
         .ok()
         .and_then(|_| std::get_ticks().ok())
         .unwrap_or(0);
 
-    // Compute embedding directly into a stack buffer with zero heap allocation
-    let mut q7_out = [0i8; embedding::EMBEDDING_DIM];
-    embedding::compute_embedding_768(query_text, target_dim, None, Some(&mut q7_out));
+    // Platform Truth Contract: one decision, made from the inputs, that the reply
+    // then reports. `probed_models.embedding.is_some()` is an INPUT to the plan
+    // and never the answer -- a file sitting on the device is not a vector that
+    // came from it.
+    let plan = plan_embedding_run(
+        probed_models.embedding.is_some(),
+        token_ids.map(|ids| ids.len),
+        strict_neural_required,
+    );
 
+    let (report, dim, vector) = match plan {
+        EmbeddingPlan::Refuse(gap) => {
+            let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+            let (status, notice) = embedding_gap_notice(gap, &mut scratch);
+            emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+            return;
+        }
+        EmbeddingPlan::LexicalBaseline => {
+            let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
+                .ok()
+                .and_then(|_| std::get_ticks().ok())
+                .unwrap_or(start_tick);
+            let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
+            reply_lexical_baseline(sender_task_id, query_text, target_dim, latency_micros, tx_buf);
+            return;
+        }
+        EmbeddingPlan::RunInstalledFile => {
+            // The plan asked for both of these. A pair that is not here answers
+            // from the baseline rather than unwrapping, so no future change to the
+            // planner can turn this arm into a panic inside the service loop.
+            let (path, ids) = match (probed_models.embedding, token_ids) {
+                (Some((_hdr, path)), Some(ids)) => (path, ids),
+                _ => {
+                    let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
+                        .ok()
+                        .and_then(|_| std::get_ticks().ok())
+                        .unwrap_or(start_tick);
+                    let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
+                    reply_lexical_baseline(
+                        sender_task_id,
+                        query_text,
+                        target_dim,
+                        latency_micros,
+                        tx_buf,
+                    );
+                    return;
+                }
+            };
+
+            let mut vector = [0.0f32; embedding::EMBEDDING_DIM];
+            match run_installed_embedding(path, ids.as_slice(), &mut vector) {
+                Ok(report) => {
+                    // The Matryoshka prefix, renormalised: the same convention
+                    // `inference::extract_embedding` applies when it pools a
+                    // stream into `dim` components, so a truncated neural vector
+                    // and a truncated in-memory one are cut by one rule, not two.
+                    let dim = target_dim.min(report.hidden_dim);
+                    inference::l2_normalise(&mut vector[..dim]);
+                    (report, dim, vector)
+                }
+                Err(error) => {
+                    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+                    let (status, notice) = file_embed_notice(&error, &mut scratch);
+                    emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+                    return;
+                }
+            }
+        }
+    };
+
+    // Only the file-backed branch reaches here, and it carries the status the
+    // branch that actually ran earned: `STATUS_SUCCESS` now means tensors of the
+    // installed file were read and the graph was stepped over them position by
+    // position -- nothing more, and nothing less.
     let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
         .ok()
         .and_then(|_| std::get_ticks().ok())
         .unwrap_or(start_tick);
     let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
 
-    // Construct response header
+    let mut q7_out = [0i8; embedding::EMBEDDING_DIM];
+    std::ai::quantize_f32_to_q7(&vector[..dim], &mut q7_out[..dim]);
+
     let resp = std::ai::AiInferenceResponse {
-        status: 0, // Success
-        output_dim: target_dim as u32,
+        status: STATUS_SUCCESS,
+        output_dim: dim as u32,
         latency_micros,
         output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
     };
@@ -1636,16 +2165,35 @@ pub fn handle_ipc_inference_query(
     tx_buf[..resp_hdr_len].copy_from_slice(resp_bytes);
 
     // Copy Q7 embedding vector immediately after response header
-    let vector_bytes = unsafe {
-        core::slice::from_raw_parts(q7_out.as_ptr() as *const u8, target_dim)
-    };
-    let total_len = resp_hdr_len + target_dim;
-    if total_len <= tx_buf.len() {
+    let vector_bytes = unsafe { core::slice::from_raw_parts(q7_out.as_ptr() as *const u8, dim) };
+    let total_len = resp_hdr_len + dim;
+    if total_len <= tx_buf.len() && sender_task_id != 0 {
         tx_buf[resp_hdr_len..total_len].copy_from_slice(vector_bytes);
-        if sender_task_id != 0 {
-            let _ = std::ipc_send(sender_task_id, MSG_TYPE_EMBED, &tx_buf[..total_len]);
-        }
+        let _ = std::ipc_send(sender_task_id, MSG_TYPE_EMBED, &tx_buf[..total_len]);
     }
+
+    // WHAT THE VECTOR IS, said where a reader can check it rather than in a
+    // comment: the counts the run measured, and whether the file's pooling head
+    // ran. A pre-head vector presented as the model's embedding is the defect
+    // `weights.rs` returns that flag to prevent, so the flag travels.
+    let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+    let mut notice = Notice::new(&mut scratch);
+    notice.word(b"[file-backed embedding: ");
+    notice.byte_count(report.bytes_read);
+    notice.word(b" bytes, ");
+    notice.number(report.positions as u32);
+    notice.word(b" positions x ");
+    notice.number((report.blocks_run / report.positions.max(1)) as u32);
+    notice.word(b" blocks over ");
+    notice.number(report.hidden_dim as u32);
+    notice.word(b" wide, ");
+    if report.head_applied {
+        notice.word(b"pooling head applied, L2-normalised]");
+    } else {
+        notice.word(b"PRE-HEAD: this file declares no pooling head]");
+    }
+    let notice = notice.finish();
+    emit_response_as(sender_task_id, STATUS_SUCCESS, MSG_TYPE_EMBED, notice, tx_buf);
 }
 
 #[cfg(test)]
@@ -1693,7 +2241,11 @@ mod tests {
         let resp = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp.status, 0);
+        // Platform Truth Contract: this vector is the lexical hash projection, and
+        // the status says so. It used to be `0` -- `STATUS_SUCCESS` -- which made a
+        // function of the prompt's bytes indistinguishable from a model's weights.
+        assert_eq!(resp.status, STATUS_BASELINE_LEXICAL);
+        assert_ne!(resp.status, STATUS_SUCCESS, "the baseline claimed weights");
         assert_eq!(resp.output_dim, 768);
 
         // Vector bytes
@@ -1734,7 +2286,7 @@ mod tests {
         let resp = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp.status, 0);
+        assert_eq!(resp.status, STATUS_BASELINE_LEXICAL);
         assert_eq!(resp.output_dim, 256);
     }
 
@@ -1893,7 +2445,9 @@ mod tests {
         let resp = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp.status, 0);
+        // The long raw query is still the lexical baseline -- labelled, where it
+        // used to report `0`/`STATUS_SUCCESS` beside the projection.
+        assert_eq!(resp.status, STATUS_BASELINE_LEXICAL);
         assert_eq!(resp.output_dim, 768);
     }
 
@@ -2696,6 +3250,304 @@ mod tests {
             notice,
             b"Model file installed: 5000000000 bytes at /data/models/local_model.gguf."
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The embedding arm's branch selection, proved from its inputs.
+    //
+    // WHY these are the tests and not a run of the engine: the branch is chosen
+    // before a byte of any file is read, so the decision is host-provable, while
+    // the run it selects goes through `fs_open`/`fs_read_at` -- guest syscalls the
+    // host suite cannot drive, exactly as `weights.rs` says of `ModelFileDescriptor`.
+    // Nothing below mocks the loader: each case feeds the arm the same triple it
+    // reads from the wire and the probe, and asserts which branch answers.
+    // -----------------------------------------------------------------------
+
+    fn probed_embedding_models() -> gguf::ProbedModels {
+        gguf::ProbedModels {
+            embedding: Some((
+                gguf::GgufHeader {
+                    magic: gguf::GGUF_MAGIC,
+                    version: 3,
+                    tensor_count: 316,
+                    kv_count: 40,
+                },
+                gguf::PATH_EMBEDDING_MODEL_DATA,
+            )),
+            generative: None,
+        }
+    }
+
+    /// Every input combination, in a table rather than in prose.
+    #[test]
+    fn test_the_embedding_branch_is_chosen_from_the_inputs() {
+        use {EmbeddingGap::*, EmbeddingPlan::*};
+        let cases: [(bool, Option<usize>, bool, EmbeddingPlan); 8] = [
+            // Weights plus caller-owned ids: the file runs, flag or no flag.
+            (true, Some(3), false, RunInstalledFile),
+            (true, Some(3), true, RunInstalledFile),
+            // Weights, but text and a demand for neural: refuse, and name the
+            // vocabulary gap. This is the case the lexical projection used to
+            // answer with `STATUS_SUCCESS`.
+            (true, None, true, Refuse(NoVocabTokenizer)),
+            // Weights and text, nothing demanded: the baseline, labelled.
+            (true, None, false, LexicalBaseline),
+            // No file. Ids cannot run against nothing.
+            (false, Some(3), true, Refuse(NoWeights)),
+            (false, None, true, Refuse(NoWeights)),
+            (false, Some(3), false, LexicalBaseline),
+            (false, None, false, LexicalBaseline),
+        ];
+        for (weights, ids, strict, expected) in cases {
+            assert_eq!(
+                plan_embedding_run(weights, ids, strict),
+                expected,
+                "weights={weights} ids={ids:?} strict={strict}"
+            );
+        }
+    }
+
+    /// The defect this closes, stated as one assertion: a file on the device must
+    /// not become a neural answer on its own.
+    #[test]
+    fn test_a_file_present_is_never_by_itself_a_neural_answer() {
+        // The old search arm asked exactly this question and got the wrong answer.
+        assert_eq!(
+            plan_embedding_run(true, None, false),
+            EmbeddingPlan::LexicalBaseline,
+            "a probe that found a file now plans a run it has no ids for"
+        );
+        assert_ne!(
+            plan_embedding_run(true, None, false),
+            EmbeddingPlan::RunInstalledFile,
+            "the plan runs a file from the file's existence"
+        );
+    }
+
+    /// A token-id stream is read whole or refused whole -- never partly.
+    #[test]
+    fn test_a_token_id_stream_is_read_or_refused_whole() {
+        let two = [1701u32, 4423];
+        let bytes: alloc::vec::Vec<u8> = two
+            .iter()
+            .flat_map(|id| id.to_le_bytes())
+            .collect();
+        let ids = read_token_ids(&bytes).expect("two whole ids parse");
+        assert_eq!(ids.len, 2);
+        assert_eq!(ids.as_slice(), &two[..]);
+
+        assert_eq!(read_token_ids(b"").map(|i| i.len), None, "no bytes are no ids");
+        assert_eq!(
+            read_token_ids(&[0u8, 0, 0]).map(|i| i.len),
+            None,
+            "a part of an id parsed as an id would run the wrong token"
+        );
+        let too_many = [0u8; (EMBED_TOKEN_IDS_MAX + 1) * 4];
+        assert_eq!(
+            read_token_ids(&too_many).map(|i| i.len),
+            None,
+            "a stream past the bound was accepted, so one request is unbounded work"
+        );
+        let at_the_bound = [0u8; EMBED_TOKEN_IDS_MAX * 4];
+        assert_eq!(read_token_ids(&at_the_bound).map(|i| i.len), Some(EMBED_TOKEN_IDS_MAX));
+    }
+
+    /// The arm, end to end, with a file installed and a text query: the baseline
+    /// still answers, and says it is the baseline.
+    ///
+    /// WHY through `handle_ipc_inference_query` and not the planner alone: the
+    /// status is written where the vector is emitted. A planner that chooses right
+    /// and an arm that still reports `0` is the exact bug that shipped.
+    #[test]
+    fn test_the_arm_answers_the_baseline_labelled_even_with_a_file_installed() {
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        handle_ipc_inference_query(
+            0,
+            MSG_TYPE_EMBED,
+            b"query: battery consumption profile",
+            &models,
+            &mut tx_buf,
+        );
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, STATUS_BASELINE_LEXICAL);
+        assert_eq!(resp.output_dim, 768, "the baseline vector is still a real answer");
+        let vector = &tx_buf[resp_hdr_len..resp_hdr_len + 768];
+        assert!(
+            vector.iter().any(|&b| b != 0),
+            "the labelled baseline stopped producing a vector"
+        );
+    }
+
+    /// Strict neural, a file on the device, and text: the arm refuses and names
+    /// the missing vocabulary mapping instead of quietly answering.
+    #[test]
+    fn test_strict_neural_with_text_refuses_and_names_the_tokenizer_gap() {
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let payload = embedding_request_with(0x80, b"Summarize the battery report");
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, STATUS_UNSUPPORTED);
+        assert_ne!(resp.status, STATUS_BASELINE_LEXICAL, "it answered instead of refusing");
+        let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let notice = core::str::from_utf8(notice).expect("the refusal is text");
+        assert!(notice.contains("token ids"), "the refusal lost the gap: {notice}");
+        assert!(notice.contains("vocabulary"), "the refusal no longer names what is missing");
+    }
+
+    /// Strict neural with no file: refused as unavailable, as it always was --
+    /// this pins that the refactor kept the older refusal.
+    #[test]
+    fn test_strict_neural_with_no_file_is_refused_as_unavailable() {
+        let mut tx_buf = [0u8; 1024];
+        let empty = gguf::ProbedModels::empty();
+        let payload = embedding_request_with(0x80, b"Summarize the battery report");
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &empty, &mut tx_buf);
+
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, STATUS_UNAVAILABLE);
+        let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        assert!(core::str::from_utf8(notice).unwrap().contains("no weights file"));
+    }
+
+    /// Installing the file changes the branch the arm takes, proved by the reply
+    /// not being the baseline any more.
+    ///
+    /// The run itself reaches `fs_open`, which is a syscall: on the host it is
+    /// refused, and the arm answers with the file-backed refusal notice. Either
+    /// way it is not the labelled baseline -- which is the branch claim, and the
+    /// only claim this host case is allowed to make.
+    #[test]
+    fn test_a_token_id_stream_takes_the_file_backed_branch_not_the_baseline() {
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let ids: alloc::vec::Vec<u8> = [1701u32, 4423, 88]
+            .iter()
+            .flat_map(|id| id.to_le_bytes())
+            .collect();
+        let payload = embedding_request_with(0x10, &ids);
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_ne!(
+            resp.status,
+            STATUS_BASELINE_LEXICAL,
+            "a request carrying ids was answered by the projection"
+        );
+        assert_ne!(
+            resp.output_dim,
+            768,
+            "the reply still has the baseline's whole-width vector"
+        );
+    }
+
+    /// Every refusal the loader can surface earns its own code and its own words.
+    #[test]
+    fn test_a_loader_refusal_maps_to_the_status_that_names_it() {
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+
+        let (status, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::UnsupportedDtype("blk.0.attn_q.weight", 6)),
+            &mut out,
+        );
+        assert_eq!(status, STATUS_UNSUPPORTED);
+        assert_eq!(
+            core::str::from_utf8(notice).unwrap(),
+            "Embedding refused: the file's tensor blk.0.attn_q.weight declares quantisation 6, a dtype this engine has no row layout for."
+        );
+
+        let (status, notice) = file_embed_notice(
+            &FileEmbedError::Config(InferenceError::ScratchTooLarge(125_829_120, 12)),
+            &mut out,
+        );
+        assert_eq!(status, STATUS_UNAVAILABLE, "a shape the device cannot hold is not a bad file");
+        assert!(core::str::from_utf8(notice).unwrap().contains("125829120"));
+
+        let (status, _) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::ShortRead(4096, 816, 512)),
+            &mut out,
+        );
+        assert_eq!(status, STATUS_ERROR, "a short read is neither the file's shape nor the heap's");
+
+        let (status, _) = file_embed_notice(&FileEmbedError::Open, &mut out);
+        assert_eq!(status, STATUS_UNAVAILABLE);
+
+        // A refusal that shares a code with an unrelated refusal cannot be acted on.
+        let (dtype_status, _) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::BadAlignment(3)),
+            &mut out,
+        );
+        let (short_status, _) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::ShortRead(0, 8, 1)),
+            &mut out,
+        );
+        assert_ne!(dtype_status, short_status);
+
+        // `Notice::word` appends without a separator, so a fragment that forgot
+        // its own space reads as one invented word -- and a refusal a person cannot
+        // parse is barely a refusal. The interleavings (name then verb, number then
+        // word) are where it hides, so they are pinned as whole sentences.
+        let (_, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::BadShape(
+                "token_embd.weight",
+                3072,
+                768,
+            )),
+            &mut out,
+        );
+        assert_eq!(
+            core::str::from_utf8(notice).unwrap(),
+            "Embedding refused: the tensor token_embd.weight declares 3072 where the graph needs 768."
+        );
+        let (_, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::ShortRead(4096, 816, 512)),
+            &mut out,
+        );
+        assert_eq!(
+            core::str::from_utf8(notice).unwrap(),
+            "Embedding refused: a positioned read at byte 4096 came back with 512 of the 816 bytes the descriptor states -- an install that stopped part-way."
+        );
+        for error in [
+            FileEmbedError::Open,
+            FileEmbedError::Load(weights::LoadError::Arithmetic),
+            FileEmbedError::Config(InferenceError::CorruptedWeights),
+        ] {
+            let (_, notice) = file_embed_notice(&error, &mut out);
+            let text = core::str::from_utf8(notice).unwrap();
+            assert!(!text.contains("  "), "{text} carries a missing space");
+            assert!(text.starts_with("Embedding refused: "), "{text} does not open as a refusal");
+        }
+    }
+
+    /// Builds an embedding request carrying `input` as its input, under `flags`.
+    fn embedding_request_with(flags: u32, input: &[u8]) -> alloc::vec::Vec<u8> {
+        let req = std::ai::AiInferenceRequest {
+            model_id: 1,
+            target_dim: 768,
+            input_len: input.len() as u32,
+            flags,
+            input_offset: 0,
+        };
+        let hdr_len = core::mem::size_of::<std::ai::AiInferenceRequest>();
+        let mut payload = alloc::vec::Vec::with_capacity(hdr_len + input.len());
+        payload.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(&req as *const _ as *const u8, hdr_len)
+        });
+        payload.extend_from_slice(input);
+        payload
     }
 }
 

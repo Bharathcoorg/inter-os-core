@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Lightweight, zero-allocation tokenizer for Gemma vocabulary and byte-fallback encoding.
 //!
 //! Fully `#![no_std]` compliant with zero heap allocations.

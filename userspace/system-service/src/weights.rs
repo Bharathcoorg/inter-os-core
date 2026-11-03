@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! Reads an installed model file's tensors into the shapes `inference` runs.
 //!
 //! This is the hop between the GGUF reader, which could already name a tensor and
@@ -26,16 +29,25 @@
 //! Strictly `#![no_std]` with `alloc`: the per-block buffers are heap, the
 //! descriptor table is heap, and neither is on a 256 KiB service stack.
 //!
-//! WHAT IS NOT WIRED, so this file is not read as more than it is: no dispatch arm
-//! in `lib.rs` calls into this module yet. The embedding arm still answers from
-//! `embedding`'s lexical projection and the generative arm still answers with the
+//! WHAT IS WIRED, and what that does not prove: the embedding arm of
+//! `handle_ipc_inference_query` now reaches this module through
+//! `weights::run_streamed_embedding` and `ModelFileDescriptor`, when the request
+//! carries a token-id stream -- see `EmbeddingPlan::RunInstalledFile` in `lib.rs`.
+//! A request carrying only text still answers from `embedding`'s lexical
+//! projection, labelled with `STATUS_BASELINE_LEXICAL` rather than the
+//! `STATUS_SUCCESS` it used to claim, because the service holds no mapping from
+//! text to this file's vocabulary and `tokenizer::encode`'s thirty hard-coded ids
+//! have never been checked against it. The generative arm still answers with the
 //! gap notice, which is why that notice now says `none of whose tensors this reply
 //! reads` and not `the engine does not read its tensors` -- the second claim is
-//! false since this module existed, the first is still exactly what the device does.
-//! Everything measured here was measured on the development host, through
+//! false since this module existed, the first is still exactly what that reply
+//! does. Everything measured here was measured on the development host, through
 //! `tests::HostFileSource`, against the file `INTEROS_REAL_GGUF_PATH` names; the
 //! device's own source is `ModelFileDescriptor`, which the host suite cannot drive
-//! because `fs_read_at` is a syscall there.
+//! because `fs_read_at` is a syscall there. That means the wired path is
+//! host-proven as an engine and a loader, and has never been executed by the
+//! guest: the dispatch arm that calls it is compiled for the device, and no QEMU
+//! run of it has been performed.
 
 use crate::inference::{
     self, apply_pooling_head, embedding_row_into, f32_sqrt, l2_normalise, mean_of,

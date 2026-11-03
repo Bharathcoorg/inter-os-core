@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 //! On-Device Local AI & EmbeddingGemma 2 Vector Primitives
 //!
 //! Zero-allocation `#![no_std]` data structures and integer fixed-point vector
@@ -106,6 +109,37 @@ pub const STATUS_ERROR: u32 = 2;
 pub const STATUS_UNSUPPORTED: u32 = 3;
 /// Status code: Generation cancelled or timed out.
 pub const STATUS_CANCELLED: u32 = 4;
+/// Status code: the answer is the service's own, and it is not the model's.
+///
+/// WHAT IT MEANS: an embedding came back, and it was produced by the lexical
+/// hash projection in `interos_std::ai::compute_text_embedding_dim_f32` -- a
+/// deterministic function of the prompt's bytes and nothing else. No tensor of
+/// any model file was read to make it.
+///
+/// WHY it is not `STATUS_SUCCESS`: the projection answers a query, so the call
+/// did succeed, and it is not unavailable, so `STATUS_UNAVAILABLE` would be
+/// wrong too. What the old reply destroyed is the one thing a reader has to know
+/// -- that a number this service produced carries no model behind it -- and a
+/// reader that cannot tell the two apart will score a lexical match and call it
+/// a neural one. A reply that says which arithmetic ran is the whole contract.
+pub const STATUS_BASELINE_LEXICAL: u32 = 5;
+
+/// Request flag (bit 4): the input is a little-endian `u32` token-id stream.
+///
+/// WHY the ids come from the caller: the service holds no mapping from text to
+/// this file's vocabulary. `tokenizer::encode` matches thirty hard-coded subwords
+/// and falls back to `4 + byte`; nothing in it was ever checked against the
+/// `tokenizer.ggml.tokens` array the installed file states, and that array is
+/// deliberately never walked. Feeding those ids to the engine would return real
+/// arithmetic over real weights for tokens that mean something else, and report
+/// it as the model's embedding of the prompt -- a worse defect than the lexical
+/// projection it would have replaced. So the file-backed branch runs on ids the
+/// caller owns, and the reply names them and their count; text with no ids is
+/// answered by the baseline or by a refusal, and never by a guess.
+pub const FLAG_INPUT_TOKEN_IDS: u32 = 0x10;
+
+/// Request flag (bit 7): answer only from physical weights, never from the baseline.
+pub const FLAG_STRICT_NEURAL: u32 = 0x80;
 
 /// Valid Matryoshka representation dimensions for EmbeddingGemma 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
