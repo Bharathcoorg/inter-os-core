@@ -10,6 +10,8 @@
 //! - Full arithmetic execution engine: Add, Subtract, Multiply, Divide, Modulo, Clear, Evaluate
 //! - History drawer / overlay for past calculations ledger
 //! - Banded rendering (`render_calculator_band`): only dirty rows are re-rasterised
+//! - Text laid out once per repaint: one frame plan places every run, and the
+//!   pixel path only samples the box it was placed into
 //! - Graceful lifecycle supervision and clean return to Launcher
 
 #![no_std]
@@ -21,6 +23,7 @@ use calculator::theme::{THEME, radius, typography};
 
 use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::components;
+use interos_std::design::outline_text;
 use interos_std::design::primitives::Rect;
 
 
@@ -445,71 +448,337 @@ fn key_hit(row: usize, col: usize, x: usize, y: usize) -> bool {
 // (`HOME_HIT`) are both declared in `calculator::chrome`, beside the numbers
 // the press asks.
 
+// -----------------------------------------------------------------------------
+// The per-repaint frame plan
+// -----------------------------------------------------------------------------
+
+/// One run the frame paints, placed once for a whole repaint.
+///
+/// WHY the run itself is the plan entry: every run below used to be placed where
+/// it is drawn, and this surface is drawn one pixel at a time -- a repaint asks a
+/// little over a million questions, and a hundred thousand of them were "where
+/// does this run sit, how wide is it, how many rows does it reserve". An
+/// [`outline_text::OutlineRun`] is a plain `Copy` value that carries its own ink
+/// box, so the plan can hold that answer and the pixel path can ask the box the
+/// one question that does change per pixel.
+///
+/// WHY the bytes travel with the run: a run the outline face refuses is drawn by
+/// the bitmap face, which still needs them -- see [`PlannedRun::paint`].
+///
+/// WHY `N` is a parameter and not a generous constant: every slot is sized from
+/// the state that fills it (the `*_RUN_MAX` constants below). A run longer than
+/// its buffer would be painted truncated, and a truncated run is a pixel change,
+/// which is exactly what this refactor is not allowed to make.
 #[derive(Clone, Copy)]
-struct CalcDisplayPlan {
-    has_tape: bool,
-    tape_xs: [usize; calculator::TAPE_MAX_LINES],
+struct PlannedRun<const N: usize> {
+    x: usize,
+    y: usize,
+    cap: u32,
+    bold: bool,
+    len: usize,
+    buf: [u8; N],
+    run: Option<outline_text::OutlineRun>,
+}
+
+/// The longest run each planned slot can hold, read off what paints into it.
+///
+/// WHY they name the state and not the strings: the strings below are fixed and
+/// the state is not -- a tape line, a result number and a wrapped ledger
+/// expression are all bounded by the buffers `lib.rs` declares, so that is what
+/// sizes the slots. The fixed strings are shorter than the slot that carries
+/// them: `Calculation History` is nineteen bytes and `No recent calculations`
+/// twenty-one, in a twenty-four-byte header slot; `History`, `CLEAR` and `CLOSE`
+/// are at most seven, in an eight-byte pill slot; the longest key label is
+/// `DEL`, `+/-` or `mod` at three, in a four-byte key slot.
+const TAPE_RUN_MAX: usize = 128;
+const RESULT_RUN_MAX: usize = 32;
+const ERROR_RUN_MAX: usize = 24;
+const KEY_RUN_MAX: usize = 4;
+const PILL_RUN_MAX: usize = 8;
+const HEADER_RUN_MAX: usize = 24;
+const HIST_EXPR_RUN_MAX: usize = 64;
+const HIST_RESULT_RUN_MAX: usize = 32;
+
+/// Every cell of the keypad grid, including the two holes in its last row: the
+/// painter indexes its key by `(row, col)`, so the plan answers the same index.
+const KEY_CELLS: usize = calculator::KEY_ROWS * calculator::KEY_COLS;
+
+impl<const N: usize> PlannedRun<N> {
+    /// A run with no bytes in it, which inks nothing anywhere.
+    fn blank() -> PlannedRun<N> {
+        PlannedRun {
+            x: 0,
+            y: 0,
+            cap: 0,
+            bold: false,
+            len: 0,
+            buf: [0; N],
+            run: None,
+        }
+    }
+
+    /// The colour of (`px`, `py`) if this run inks it, blended over `bg`.
+    ///
+    /// WHY the two size gates are still applied here: they are the gates the
+    /// painter's own [`test_text`] applied before it reached either face, and a
+    /// pixel outside them was answered `None` whatever the run's box said. A
+    /// run's box is taller than a clamped cap's gate can be, so dropping them
+    /// would ink rows the shipped frame leaves as fill.
+    ///
+    /// WHY the bitmap fallback is still here: a run the outline face refuses --
+    /// a character the typeface has no outline for, a run wider than its scratch
+    /// buffer -- is drawn by the bitmap face, and that answer is not something
+    /// the plan can carry. What the plan saves is the placement question, not
+    /// the ink: a pixel that falls back is painted exactly as it was.
+    #[inline(always)]
+    fn paint(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
+        if self.cap == 0 || self.len == 0 {
+            return None;
+        }
+        let cap = self.cap as usize;
+        if py < self.y || py >= self.y + cap.saturating_mul(2) + 8 {
+            return None;
+        }
+        let max_w = self.len.saturating_mul(cap.saturating_mul(2) + 4) + 16;
+        if px < self.x || px >= self.x + max_w {
+            return None;
+        }
+        if let Some(ref run) = self.run {
+            return run.pixel(px, py, ink, bg);
+        }
+        test_text(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.cap,
+            &self.buf[..self.len],
+            ink,
+            bg,
+            self.bold,
+        )
+    }
+}
+
+/// The run as the frame will draw it: `text` placed at (`x`, `y`), at `cap`.
+///
+/// WHY this mirrors [`test_text`] instead of asking the face something cleverer:
+/// the painter's helper hands the outline face exactly these arguments -- the
+/// run's own bytes, no width cap, the bold flag -- so only a placement made the
+/// same way can stand in for its answer. `test_text` reaches the face through
+/// `monochrome::text_px`, which tries `place_run_cap` first and falls back to the
+/// bitmap face, so the run resolved here is the run that path would have resolved
+/// per pixel. Where none resolves, the plan keeps the bytes and
+/// [`PlannedRun::paint`] takes the original path.
+fn planned_run<const N: usize>(
+    x: usize,
+    y: usize,
+    cap: u32,
+    text: &[u8],
+    bold: bool,
+) -> PlannedRun<N> {
+    debug_assert!(
+        text.len() <= N,
+        "planned run of {} bytes does not fit its {}-byte slot",
+        text.len(),
+        N
+    );
+    let mut run = PlannedRun::<N>::blank();
+    let n = text.len().min(N);
+    run.buf[..n].copy_from_slice(&text[..n]);
+    run.x = x;
+    run.y = y;
+    run.cap = cap;
+    run.bold = bold;
+    run.len = n;
+    if n != 0 && cap != 0 {
+        run.run = outline_text::place_run_cap(x, y, cap, &run.buf[..n], None, bold);
+    }
+    run
+}
+
+/// One ledger row of the history drawer: the band it is painted in, and the two
+/// runs it holds.
+///
+/// WHY the band rides along: the row's stride and its height both grow with the
+/// person's text size, and the painter tests a pixel against them before it asks
+/// anything else. They were derived per pixel; now the row is measured once and
+/// every pixel of the drawer reads the same two numbers it was painted with.
+#[derive(Clone, Copy)]
+struct PlannedRow {
+    y0: usize,
+    y1: usize,
+    expr: PlannedRun<HIST_EXPR_RUN_MAX>,
+    result: PlannedRun<HIST_RESULT_RUN_MAX>,
+}
+
+impl PlannedRow {
+    fn blank() -> PlannedRow {
+        PlannedRow {
+            y0: 0,
+            y1: 0,
+            expr: PlannedRun::blank(),
+            result: PlannedRun::blank(),
+        }
+    }
+}
+
+/// The history drawer: its header, its two pills, and the ledger it lists.
+#[derive(Clone, Copy)]
+struct DrawerPlan {
+    title: PlannedRun<HEADER_RUN_MAX>,
+    clear: PlannedRun<PILL_RUN_MAX>,
+    close: PlannedRun<PILL_RUN_MAX>,
+    notice: PlannedRun<HEADER_RUN_MAX>,
+    rows: [PlannedRow; calculator::HISTORY_MAX_ROWS],
+    row_count: usize,
+}
+
+impl DrawerPlan {
+    fn blank() -> DrawerPlan {
+        DrawerPlan {
+            title: PlannedRun::blank(),
+            clear: PlannedRun::blank(),
+            close: PlannedRun::blank(),
+            notice: PlannedRun::blank(),
+            rows: [PlannedRow::blank(); calculator::HISTORY_MAX_ROWS],
+            row_count: 0,
+        }
+    }
+}
+
+/// What the whole surface settles before it paints a single pixel.
+///
+/// WHY a plan at all: the app asks its pixel function for every pixel of a
+/// 720x1440 surface, and until now that function re-derived the ink of every run
+/// it owns from the published text size -- a clamped cap, a measured width, a
+/// line box and a placement -- once per pixel. The plan answers those once per
+/// repaint from the same state the painter is handed.
+///
+/// WHY the card's geometry rides in it too: the tape's line box, the card's
+/// bottom and the badge's height are all derived from the same run rows, and the
+/// card painted here and the card the press answers have to be one answer.
+#[derive(Clone, Copy)]
+struct CalcFramePlan {
+    /// The header row, painted in every frame, drawer open or not.
+    title: PlannedRun<HEADER_RUN_MAX>,
+    history_pill: PlannedRun<PILL_RUN_MAX>,
+    /// The display card. `badge_rows` is the plate the pending operation stands
+    /// on, grown by the rows the published level gives the result run.
+    badge_rows: usize,
+    value_y0: usize,
+    card_y1: usize,
+    tape_rows: usize,
+    tape_y1: usize,
     tape_count: usize,
     tape_first: usize,
     tape_overflow: bool,
+    has_tape: bool,
     is_error: bool,
-    err_text: &'static [u8],
-    err_x: usize,
-    err_cap: u32,
-    digits_len: usize,
-    digits_cap: u32,
-    digits_x: usize,
-    /// The cap the tape is drawn at, the tape's own line box, and the three
-    /// rows the card is built out of -- all of them at the text-size level this
-    /// process publishes.
-    ///
-    /// WHY they ride in the plan and are not read where they are drawn: the
-    /// pixel engine runs once per pixel of the band, and a box that the display
-    /// re-derived per pixel would answer seven hundred and twenty thousand
-    /// times the question the frame asks once. The plan is built once per
-    /// repaint, and both the painter and the press read what it settled on, so
-    /// the card cannot be painted at one size and pressed at another.
-    expr_cap: u32,
-    tape_rows: usize,
-    tape_y1: usize,
-    value_y0: usize,
-    card_y1: usize,
+    result_rows: usize,
+    error_rows: usize,
+    tape: [PlannedRun<TAPE_RUN_MAX>; chrome::TAPE_LINES],
+    result: PlannedRun<RESULT_RUN_MAX>,
+    error: PlannedRun<ERROR_RUN_MAX>,
+    /// The keypad's labels, indexed the way the painter indexes its grid.
+    keys: [PlannedRun<KEY_RUN_MAX>; KEY_CELLS],
+    /// The drawer, planned only for a frame that opens it.
+    drawer: DrawerPlan,
 }
 
-static mut CALC_PLAN: Option<CalcDisplayPlan> = None;
-
-/// The plan a display band with nothing typed in it draws.
-///
-/// WHY it exists: the painter reads the plan for its geometry, and the first
-/// frames of the app -- and any band repaint that runs before the plan is
-/// built -- must not answer with a card of no rows. This is the ladder's own
-/// card, which is exactly what the app drew before it had a plan.
-const DEFAULT_PLAN: CalcDisplayPlan = CalcDisplayPlan {
-    has_tape: false,
-    tape_xs: [0; calculator::TAPE_MAX_LINES],
-    tape_count: 0,
-    tape_first: 0,
-    tape_overflow: false,
-    is_error: false,
-    err_text: b"",
-    err_x: 0,
-    err_cap: ERROR_LADDER[0],
-    digits_len: 0,
-    digits_cap: RESULT_LADDER[0],
-    digits_x: 0,
-    expr_cap: CAP_EXPRESSION,
-    tape_rows: calculator::chrome::TAPE_LINE_H,
-    tape_y1: calculator::chrome::TAPE_Y1,
-    value_y0: calculator::chrome::VALUE_Y0,
-    card_y1: calculator::chrome::DISPLAY_Y1,
-};
+impl CalcFramePlan {
+    /// The frame the app draws with nothing typed in it and the drawer shut.
+    ///
+    /// WHY it exists: every field has an answer before the builder looks at the
+    /// state, and the builder fills in only the half of the screen the frame
+    /// actually paints -- so a section that was never planned inks nothing.
+    fn blank() -> CalcFramePlan {
+        CalcFramePlan {
+            title: PlannedRun::blank(),
+            history_pill: PlannedRun::blank(),
+            badge_rows: 34,
+            value_y0: chrome::VALUE_Y0,
+            card_y1: chrome::DISPLAY_Y1,
+            tape_rows: chrome::TAPE_LINE_H,
+            tape_y1: chrome::TAPE_Y1,
+            tape_count: 0,
+            tape_first: 0,
+            tape_overflow: false,
+            has_tape: false,
+            is_error: false,
+            result_rows: 0,
+            error_rows: 0,
+            tape: [PlannedRun::blank(); chrome::TAPE_LINES],
+            result: PlannedRun::blank(),
+            error: PlannedRun::blank(),
+            keys: [PlannedRun::blank(); KEY_CELLS],
+            drawer: DrawerPlan::blank(),
+        }
+    }
+}
 
 /// The width of the display's content column.
 fn display_column_w() -> usize {
     (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(DISPLAY_X0 + DISPLAY_PAD)
 }
 
-fn prepare_calc_plan(calc: &CalculatorState) {
+/// The answers in [`CalcFramePlan`], from the state the repaint is about to draw.
+///
+/// WHY every number here is the one the painter used to take: each line below is
+/// a derivation lifted out of the pixel path unchanged -- the same clamped caps,
+/// the same measured widths, the same centring, the same plate floors -- so the
+/// colour a pixel gets is the colour the shipped frame gave it. What moved is
+/// where the question is asked, not what it asks.
+fn build_calc_plan(calc: &CalculatorState) -> CalcFramePlan {
+    let mut plan = CalcFramePlan::blank();
+
+    // The header is painted in every frame, drawer open or not: the pixel engine
+    // answers its rows before it ever looks at the sheet.
+    //
+    // WHY the cap comes from `cap_in_plate`: the header is one hundred and
+    // ten rows and the display card owns the row below it, so this plate
+    // cannot grow with the person's text size -- the run's own box is already
+    // taller than the band it stands in at the ladder's title rung. The
+    // guard therefore clamps the run into the plate it has and never below
+    // the size the ladder draws there today, which keeps the title on the
+    // row it is on now and stops a larger setting from painting further past
+    // the band. Growing it is a layout change the card below does not have
+    // room for, not a font change.
+    let title_cap = chrome::cap_in_plate(
+        interos_std::design::typography::TITLE_CAP_PX,
+        HEADER_H - HEADER_TITLE_Y0,
+    );
+    plan.title = planned_run(92, HEADER_TITLE_Y0, title_cap, b"Calculator", true);
+
+    let hw_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, HISTORY_PILL.h);
+    let hw = calculator::text_width(b"History", hw_cap);
+    let hx = HISTORY_PILL.x + (HISTORY_PILL.w - hw) / 2;
+    // WHY the line box and not the cap: a run reserves its ascent and its
+    // descent, and centring the cap inside a forty-eight-row pill left the box's
+    // last two rows painted on the page under it.
+    let hy = HISTORY_PILL.y + (HISTORY_PILL.h - run_rows(hw_cap)) / 2;
+    plan.history_pill = planned_run(hx, hy, hw_cap, b"History", true);
+
+    // WHY the two halves of the screen are planned one at a time: the pixel
+    // engine returns inside its drawer branch and never reaches the display card
+    // or the keypad while the sheet is open, so a frame paints one half or the
+    // other. The outline face keeps a fixed number of runs resident and evicts
+    // its own earliest placement when a frame asks for more than fit, and an
+    // evicted run re-rasterises itself for every pixel that still wants it --
+    // slower than placing it ever was. Planning only the half this frame paints
+    // keeps every run it inks resident for the whole walk.
+    if calc.show_history {
+        build_drawer_plan(&mut plan, calc);
+        return plan;
+    }
+    build_display_plan(&mut plan, calc);
+    build_keypad_plan(&mut plan);
+    plan
+}
+
+/// The display card and the keypad, which are what a frame paints with the
+/// drawer shut.
+fn build_display_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
     // The card's geometry at the level this process publishes. The tape grows
     // its own line box, the result stands below it, and the whole card is
     // clamped clear of the keypad -- see `chrome::KEYPAD_TOP`.
@@ -518,26 +787,16 @@ fn prepare_calc_plan(calc: &CalculatorState) {
     let tape_y1 = TAPE_Y0 + TAPE_LINES * tape_rows;
     let value_y0 = tape_y1 + VALUE_GAP;
     let room = KEYPAD_TOP.saturating_sub(DISPLAY_PAD).saturating_sub(value_y0);
-    let mut plan = CalcDisplayPlan {
-        has_tape: false,
-        tape_xs: [0; calculator::TAPE_MAX_LINES],
-        tape_count: 0,
-        tape_first: 0,
-        tape_overflow: false,
-        is_error: false,
-        err_text: b"",
-        err_x: 0,
-        err_cap: ERROR_LADDER[0],
-        digits_len: 0,
-        digits_cap: RESULT_LADDER[0],
-        digits_x: 0,
-        expr_cap,
-        tape_rows,
-        tape_y1,
-        value_y0,
-        card_y1: chrome::DISPLAY_Y1,
-    };
     let column = display_column_w();
+
+    // The caps the badge's height is measured against. WHY they keep the
+    // ladder's rungs when the frame has no result or no error to size: the
+    // badge grows from whichever of the two the card drew, and a card that drew
+    // the other one measured against the ladder's rung before too -- see the
+    // note beside the badge below.
+    let mut digits_cap = RESULT_LADDER[0];
+    let mut err_cap = ERROR_LADDER[0];
+
     if calc.tape_count > 0 {
         plan.tape_count = calc.tape_count;
         // WHY the scroll model stays in the ladder's rows: the engine counts
@@ -553,13 +812,29 @@ fn prepare_calc_plan(calc: &CalculatorState) {
         } else {
             TAPE_TEXT_X1
         };
-        for index in 0..calc.tape_count.min(calculator::TAPE_MAX_LINES) {
-            let width =
-                calculator::text_width(&calc.tape_lines[index][..calc.tape_lens[index]], expr_cap);
-            plan.tape_xs[index] = right.saturating_sub(width);
+        // WHY the runs are planned by row and not by line: the painter turns a
+        // pixel's `y` into a row and a row into a line, and only the rows this
+        // frame can land on are ever inked. A row whose line does not exist gets
+        // a blank run, which inks nothing -- exactly the answer the painter's
+        // `line < tape_count` test gave.
+        let line_count = calc.tape_count.min(calculator::TAPE_MAX_LINES);
+        for row in 0..TAPE_LINES {
+            let line = plan.tape_first + row;
+            if line < line_count {
+                let text = &calc.tape_lines[line][..calc.tape_lens[line]];
+                let width = calculator::text_width(text, expr_cap);
+                plan.tape[row] = planned_run(
+                    right.saturating_sub(width),
+                    TAPE_Y0 + row * tape_rows,
+                    expr_cap,
+                    text,
+                    true,
+                );
+            }
         }
         plan.has_tape = true;
     }
+
     if calc.error || calc.calc_error.is_some() {
         let err_text: &'static [u8] = match calc.calc_error {
             Some(CalcError::DivisionByZero) => b"Error: Div by zero",
@@ -578,25 +853,187 @@ fn prepare_calc_plan(calc: &CalculatorState) {
         // rung that fits the column but not the card would be painted past the
         // card's own bottom edge, so both bounds are answered together by
         // `fit_display_cap`.
-        plan.err_cap = fit_display_cap(&ERROR_LADDER, err_text, column, room);
-        plan.err_x = (DISPLAY_X1 - DISPLAY_PAD)
-            .saturating_sub(calculator::text_width(err_text, plan.err_cap));
-        plan.err_text = err_text;
+        err_cap = fit_display_cap(&ERROR_LADDER, err_text, column, room);
+        let err_x =
+            (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(calculator::text_width(err_text, err_cap));
+        plan.error = planned_run(err_x, value_y0, err_cap, err_text, true);
         plan.is_error = true;
-        plan.card_y1 = chrome::card_y1(run_rows(plan.err_cap));
+        plan.error_rows = run_rows(err_cap);
+        plan.card_y1 = chrome::card_y1(plan.error_rows);
     } else {
         let digits = &calc.display_buf[..calc.display_len];
         // WHY the result comes down a rung when it does not fit: the length
         // of a number is not the width of it, and a long number at the title
         // rung would run off the card.
-        plan.digits_cap = fit_display_cap(&RESULT_LADDER, digits, column, room);
-        let total_w = calculator::text_width(digits, plan.digits_cap);
-        plan.digits_x = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
-        plan.digits_len = calc.display_len;
-        plan.card_y1 = chrome::card_y1(run_rows(plan.digits_cap));
+        digits_cap = fit_display_cap(&RESULT_LADDER, digits, column, room);
+        let total_w = calculator::text_width(digits, digits_cap);
+        let digits_x = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
+        plan.result = planned_run(digits_x, value_y0, digits_cap, digits, true);
+        plan.result_rows = run_rows(digits_cap);
+        plan.card_y1 = chrome::card_y1(plan.result_rows);
     }
-    unsafe {
-        CALC_PLAN = Some(plan);
+
+    plan.tape_rows = tape_rows;
+    plan.tape_y1 = tape_y1;
+    plan.value_y0 = value_y0;
+
+    // The pending operation's badge, level with the result.
+    //
+    // WHY it sits beside the result and not beside the expression: the
+    // expression is what was typed and the result is the number the
+    // pending operation is waiting on, so the badge belongs to the
+    // number.
+    //
+    // WHY the badge grows by the result's rows gained, not by its box:
+    // it is the operation the result is waiting on, drawn in the result's
+    // own rows, so a plate left at thirty-four while the number beside it
+    // doubles is a badge the reader can no longer line up with anything.
+    // But the plate's shipped thirty-four is not a line box of any rung --
+    // it is the designer's number -- so the growth is measured against the
+    // tallest rung the result stands at, the way Messages measures a raised
+    // rung against the ladder's own box: the saturated difference answers
+    // nought at the default level, which keeps the shipped plate pixel for
+    // pixel, and adds exactly the rows the published level gives the run.
+    // WHY the saturated difference answers nought below the ladder: at a level
+    // under one hundred per cent the result's rung is smaller than the ladder's,
+    // and the plate does not shrink past the thirty-four the design shipped --
+    // only grows.
+    plan.badge_rows =
+        34 + run_rows(digits_cap.max(err_cap)).saturating_sub(run_rows(RESULT_LADDER[0]));
+}
+
+/// The keypad's twenty-two key labels, placed once for the repaint.
+///
+/// WHY this is the dominant saving: the keypad is a little over half of the
+/// surface, and every pixel of it used to clamp a cap, measure a label, take a
+/// line box and place a run before it answered a colour.
+///
+/// WHY every cell is visited and most are left blank: the painter indexes its key
+/// by `(row, col)`, so the plan answers the same index. The keys that draw a
+/// glyph rather than a run -- the operators and the equals -- place none, because
+/// their ink was never the text face's to give.
+fn build_keypad_plan(plan: &mut CalcFramePlan) {
+    // WHY the key's own height is the plate: the keypad grid is what a thumb
+    // lands on and the app's gate says a key label's box must stand inside its
+    // keycap. The clamp keeps that true at every text size, and centring the
+    // *box* -- not the cap -- on the keycap is what keeps the label where the
+    // person is aiming. Every keycap is `BTN_H` rows tall, so the clamp is
+    // answered once for the grid rather than twenty-four times a frame.
+    let key_cap = chrome::cap_in_plate(CAP_KEY_LABEL, BTN_H);
+    let key_rows = run_rows(key_cap);
+    for row in 0..calculator::KEY_ROWS {
+        for col in 0..calculator::KEY_COLS {
+            let Some(rect) = key_rect(row, col) else {
+                continue;
+            };
+            let Some(act) = get_button_action(row, col) else {
+                continue;
+            };
+            if matches!(act, '/' | '*' | '-' | '+' | '=') {
+                continue;
+            }
+            let label: &[u8] = match act {
+                'C' | 'E' | 'B' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
+                _ => &[act as u8],
+            };
+            let w = calculator::text_width(label, key_cap);
+            let x0 = (rect.x + rect.w / 2).saturating_sub(w / 2);
+            // WHY the box and not the cap: a run reserves its line box, so
+            // centring the box puts the run's middle on the keycap's middle.
+            // Centring from the cap left a scale-two box hanging ten rows below
+            // the key it labels.
+            let y0 = (rect.y + rect.h / 2).saturating_sub(key_rows / 2);
+            plan.keys[row * calculator::KEY_COLS + col] =
+                planned_run(x0, y0, key_cap, label, true);
+        }
+    }
+}
+
+/// The history drawer: its header, its two pills and the ledger it lists.
+fn build_drawer_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
+    // WHY clamped to the drawer's own header band: the band is the pill's height
+    // plus four rows, the pills are the platform's minimum target and do not
+    // move, and a run scaled past the band is painted over the separator and the
+    // first ledger row. The clamp keeps the title inside the header it belongs
+    // to.
+    let drawer_cap = chrome::cap_in_plate(
+        typography::SECTION_CAP_PX,
+        DRAWER_HEADER_Y1 - DRAWER_TITLE_Y0,
+    );
+    plan.drawer.title = planned_run(48, DRAWER_TITLE_Y0, drawer_cap, b"Calculation History", true);
+
+    // The two pills: the rects the press answers, drawn from the same plate.
+    let clear_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, chrome::PILL_H);
+    let cw = calculator::text_width(b"CLEAR", clear_cap);
+    let clear_x0 = CLEAR_PILL.x + (CLEAR_PILL.w - cw) / 2;
+    let clear_y0 = chrome::PILL_TOP + (chrome::PILL_H - run_rows(clear_cap)) / 2;
+    plan.drawer.clear = planned_run(clear_x0, clear_y0, clear_cap, b"CLEAR", true);
+
+    let close_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, chrome::PILL_H);
+    let cw = calculator::text_width(b"CLOSE", close_cap);
+    let close_x0 = CLOSE_PILL.x + (CLOSE_PILL.w - cw) / 2;
+    let close_y0 = chrome::PILL_TOP + (chrome::PILL_H - run_rows(close_cap)) / 2;
+    plan.drawer.close = planned_run(close_x0, close_y0, close_cap, b"CLOSE", true);
+
+    let count = calc.history.count();
+    if count == 0 {
+        let msg = b"No recent calculations";
+        let msg_cap = chrome::cap_in_plate(
+            typography::SECTION_CAP_PX,
+            chrome::DRAWER_SHEET_Y1 - EMPTY_NOTE_Y0,
+        );
+        let mw = calculator::text_width(msg, msg_cap);
+        let mx0 = DISPLAY_X0 + (DISPLAY_X1 - DISPLAY_X0 - mw) / 2;
+        plan.drawer.notice = planned_run(mx0, EMPTY_NOTE_Y0, msg_cap, msg, false);
+        return;
+    }
+
+    // WHY the row's geometry is read from the chrome and not from the ladder's
+    // constants: the row holds two runs, and both grow with the person's text
+    // size. The stride grows with them, so a row never paints on the row below
+    // it, and the number of rows the drawer shows is the number that stands
+    // inside the sheet -- a larger setting shows fewer entries at once rather
+    // than entries running off the sheet's bottom edge.
+    let pitch = chrome::history_pitch();
+    let row_h = chrome::history_row_h();
+    let expr_cap = chrome::cap_in_plate(CAP_LABEL, row_h - HIST_EXPR_DY);
+    let result_dy = HIST_EXPR_DY + run_rows(expr_cap);
+    let result_cap = chrome::cap_in_plate(CAP_SECTION, row_h - result_dy);
+    for i in 0..count.min(chrome::history_visible_rows()) {
+        if i >= plan.drawer.rows.len() {
+            break;
+        }
+        let row_y0 = HIST_LIST_Y0 + i * pitch;
+        let mut row = PlannedRow::blank();
+        row.y0 = row_y0;
+        row.y1 = row_y0 + row_h;
+        if let Some(entry) = calc.history.get_recent(i) {
+            let expr_bytes = &entry.expr[..entry.expr_len];
+            if !expr_bytes.is_empty() {
+                let mut ebuf = [0u8; HIST_EXPR_RUN_MAX];
+                // WHY the ellipsis is measured at the size the run is drawn at:
+                // the ledger's column is five hundred and ninety rows wide and
+                // the scaled expression is not, so the line that stops fitting
+                // gets its `...` cut at the same rung the ink is painted at.
+                // Measuring the truncation at the ladder's rung and drawing at
+                // the person's is how a scaled row ends up running past the
+                // column it was "fitted" to.
+                let elen = calculator::ellipsize_cap(expr_bytes, expr_cap, 590, &mut ebuf);
+                let ew = calculator::text_width(&ebuf[..elen], expr_cap);
+                let ex0 = 650usize.saturating_sub(ew).max(60);
+                row.expr = planned_run(ex0, row_y0 + HIST_EXPR_DY, expr_cap, &ebuf[..elen], false);
+            }
+
+            let mut res_buf = [0u8; HIST_RESULT_RUN_MAX];
+            let rlen = entry.result.format(&mut res_buf);
+            let rw = calculator::text_width(&res_buf[..rlen], result_cap);
+            let rx0 = 650usize.saturating_sub(rw).max(60);
+            row.result = planned_run(rx0, row_y0 + result_dy, result_cap, &res_buf[..rlen], true);
+        }
+        plan.drawer.rows[i] = row;
+        if plan.drawer.row_count < i + 1 {
+            plan.drawer.row_count = i + 1;
+        }
     }
 }
 
@@ -639,8 +1076,16 @@ fn chrome_level() -> u8 {
 // -----------------------------------------------------------------------------
 // Pixel Color Resolution Engine
 // -----------------------------------------------------------------------------
+/// The colour of (`x`, `y`) of the frame `plan` laid out.
+///
+/// WHY the plan is an argument and not something this function reads out of a
+/// global: a repaint carries a little over twenty runs, and the cheapest way to
+/// hand them over is the one reference the walk already holds. Nothing here
+/// measures, clamps or places: every text question this function used to answer
+/// per pixel is answered in [`build_calc_plan`] and sampled from the run's own
+/// box here.
 #[inline(never)]
-fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
+fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcFramePlan) -> u32 {
     // 0. Status Band (y < STATUS_BAR_HEIGHT)
     if y < STATUS_BAR_HEIGHT {
         let band = components::StatusBand::new(W);
@@ -659,20 +1104,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 
         // Canonical App Title: "Calculator" vertically centered with back button and history pill
         //
-        // WHY the cap comes from `cap_in_plate`: the header is one hundred and
-        // ten rows and the display card owns the row below it, so this plate
-        // cannot grow with the person's text size -- the run's own box is already
-        // taller than the band it stands in at the ladder's title rung. The
-        // guard therefore clamps the run into the plate it has and never below
-        // the size the ladder draws there today, which keeps the title on the
-        // row it is on now and stops a larger setting from painting further past
-        // the band. Growing it is a layout change the card below does not have
-        // room for, not a font change.
-        let title_cap = chrome::cap_in_plate(
-            interos_std::design::typography::TITLE_CAP_PX,
-            HEADER_H - HEADER_TITLE_Y0,
-        );
-        if let Some(c) = test_text(x, y, 92, HEADER_TITLE_Y0, title_cap, b"Calculator", THEME.on_surface, THEME.surface, true) {
+        // WHY the run is sampled here and not laid out: its clamped cap and its
+        // placement are the header's one answer for the repaint -- the note on
+        // why the plate cannot grow rides with the clamp in [`build_calc_plan`].
+        if let Some(c) = plan.title.paint(x, y, THEME.on_surface, THEME.surface) {
             return c;
         }
 
@@ -695,14 +1130,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             if rx < 2 || ry < 2 {
                 return border;
             }
-            let hw_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, HISTORY_PILL.h);
-            let hw = calculator::text_width(b"History", hw_cap);
-            let hx = HISTORY_PILL.x + (HISTORY_PILL.w - hw) / 2;
-            // WHY the line box and not the cap: a run reserves its ascent and
-            // its descent, and centring the cap inside a forty-eight-row pill
-            // left the box's last two rows painted on the page under it.
-            let hy = HISTORY_PILL.y + (HISTORY_PILL.h - run_rows(hw_cap)) / 2;
-            if let Some(c) = test_text(x, y, hx, hy, hw_cap, b"History", text_c, bg, true) {
+            // WHY the run is sampled from the plan: the pill's label is centred
+            // from its measured width and its line box, both of which the frame
+            // settles once -- see [`build_calc_plan`].
+            if let Some(c) = plan.history_pill.paint(x, y, text_c, bg) {
                 return c;
             }
             return bg;
@@ -728,16 +1159,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             if y >= DRAWER_HEADER_Y0 && y < DRAWER_HEADER_Y1 {
                 // "Calculation History" title
                 //
-                // WHY clamped to the drawer's own header band: the band is the
-                // pill's height plus four rows, the pills are the platform's
-                // minimum target and do not move, and a run scaled past the band
-                // is painted over the separator and the first ledger row. The
-                // clamp keeps the title inside the header it belongs to.
-                let drawer_cap = chrome::cap_in_plate(
-                    typography::SECTION_CAP_PX,
-                    DRAWER_HEADER_Y1 - DRAWER_TITLE_Y0,
-                );
-                if let Some(c) = test_text(x, y, 48, DRAWER_TITLE_Y0, drawer_cap, b"Calculation History", THEME.on_surface, THEME.surface_container, true) {
+                // WHY the run is sampled here: the clamp that keeps it inside the
+                // drawer's own header band is the frame's answer, not the
+                // pixel's -- see [`build_drawer_plan`].
+                if let Some(c) = plan
+                    .drawer
+                    .title
+                    .paint(x, y, THEME.on_surface, THEME.surface_container)
+                {
                     return c;
                 }
 
@@ -755,11 +1184,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    let clear_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, chrome::PILL_H);
-                    let cw = calculator::text_width(b"CLEAR", clear_cap);
-                    let cx0 = CLEAR_PILL.x + (CLEAR_PILL.w - cw) / 2;
-                    let cy0 = chrome::PILL_TOP + (chrome::PILL_H - run_rows(clear_cap)) / 2;
-                    if let Some(c) = test_text(x, y, cx0, cy0, clear_cap, b"CLEAR", THEME.error, THEME.surface_container_high, true) {
+                    if let Some(c) = plan.drawer.clear.paint(x, y, THEME.error, THEME.surface_container_high) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -779,11 +1204,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     if prx < 2 || pry < 2 {
                         return THEME.border;
                     }
-                    let close_cap = chrome::cap_in_plate(typography::BODY_CAP_PX, chrome::PILL_H);
-                    let cw = calculator::text_width(b"CLOSE", close_cap);
-                    let cx0 = CLOSE_PILL.x + (CLOSE_PILL.w - cw) / 2;
-                    let cy0 = chrome::PILL_TOP + (chrome::PILL_H - run_rows(close_cap)) / 2;
-                    if let Some(c) = test_text(x, y, cx0, cy0, close_cap, b"CLOSE", THEME.on_surface, THEME.surface_container_high, true) {
+                    if let Some(c) = plan.drawer.close.paint(x, y, THEME.on_surface, THEME.surface_container_high) {
                         return c;
                     }
                     return THEME.surface_container_high;
@@ -796,42 +1217,33 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
 
             // History Entries
-            let count = calc.history.count();
+            //
+            // WHY the drawer's rows come from the plan: a row's band, its two
+            // clamped caps, its ellipsised expression and its formatted result
+            // are one answer per row per repaint, and the sheet is over eight
+            // hundred thousand pixels of this surface. The painter's own branch
+            // is what built them, so a row the plan did not place inks nothing
+            // and the sheet paints its fill exactly as it did.
+            //
             // WHY the platform's list-row treatment: the row's fill, its
             // radius and its divider come from the platform, so a history
             // row here is the same row an app that lists things would
             // draw.
             let row_style = components::list_row_style(&THEME, false);
-            if count == 0 {
-                let msg = b"No recent calculations";
-                let msg_cap = chrome::cap_in_plate(
-                    typography::SECTION_CAP_PX,
-                    chrome::DRAWER_SHEET_Y1 - EMPTY_NOTE_Y0,
-                );
-                let mw = calculator::text_width(msg, msg_cap);
-                let mx0 = DISPLAY_X0 + (DISPLAY_X1 - DISPLAY_X0 - mw) / 2;
-                if let Some(c) = test_text(x, y, mx0, EMPTY_NOTE_Y0, msg_cap, msg, THEME.on_surface_variant, THEME.surface_container, false) {
+            if plan.drawer.row_count == 0 {
+                if let Some(c) = plan
+                    .drawer
+                    .notice
+                    .paint(x, y, THEME.on_surface_variant, THEME.surface_container)
+                {
                     return c;
                 }
             } else {
-                // WHY the row's geometry is read from the chrome and not from
-                // the ladder's constants: the row holds two runs, and both grow
-                // with the person's text size. The stride grows with them, so a
-                // row never paints on the row below it, and the number of rows
-                // the drawer shows is the number that stands inside the sheet --
-                // a larger setting shows fewer entries at once rather than
-                // entries running off the sheet's bottom edge.
-                let pitch = chrome::history_pitch();
-                let row_h = chrome::history_row_h();
-                let expr_cap = chrome::cap_in_plate(CAP_LABEL, row_h - HIST_EXPR_DY);
-                let result_dy = HIST_EXPR_DY + run_rows(expr_cap);
-                let result_cap = chrome::cap_in_plate(CAP_SECTION, row_h - result_dy);
-                for i in 0..count.min(chrome::history_visible_rows()) {
-                    let row_y0 = HIST_LIST_Y0 + i * pitch;
-                    let row_y1 = row_y0 + row_h;
-                    if y >= row_y0 && y < row_y1 && x >= 40 && x < 680 {
+                for i in 0..plan.drawer.row_count {
+                    let row = &plan.drawer.rows[i];
+                    if y >= row.y0 && y < row.y1 && x >= 40 && x < 680 {
                         let erx = (x - 40).min(679 - x);
-                        let ery = (y - row_y0).min(row_y1 - 1 - y);
+                        let ery = (y - row.y0).min(row.y1 - 1 - y);
                         if erx < row_style.radius && ery < row_style.radius {
                             let cdx = (row_style.radius - erx) as isize;
                             let cdy = (row_style.radius - ery) as isize;
@@ -840,36 +1252,18 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             }
                         }
 
-                        if let Some(entry) = calc.history.get_recent(i) {
-                            // Top line: expression
-                            let expr_bytes = &entry.expr[..entry.expr_len];
-                            if !expr_bytes.is_empty() {
-                                let mut ebuf = [0u8; 64];
-                                // WHY the ellipsis is measured at the size the
-                                // run is drawn at: the ledger's column is five
-                                // hundred and ninety rows wide and the scaled
-                                // expression is not, so the line that stops
-                                // fitting gets its `...` cut at the same rung the
-                                // ink is painted at. Measuring the truncation at
-                                // the ladder's rung and drawing at the person's is
-                                // how a scaled row ends up running past the column
-                                // it was "fitted" to.
-                                let elen = calculator::ellipsize_cap(expr_bytes, expr_cap, 590, &mut ebuf);
-                                let ew = calculator::text_width(&ebuf[..elen], expr_cap);
-                                let ex0 = 650usize.saturating_sub(ew).max(60);
-                                if let Some(c) = test_text(x, y, ex0, row_y0 + HIST_EXPR_DY, expr_cap, &ebuf[..elen], THEME.on_surface_variant, row_style.fill, false) {
-                                    return c;
-                                }
-                            }
-
-                            // Bottom line: result
-                            let mut res_buf = [0u8; 32];
-                            let rlen = entry.result.format(&mut res_buf);
-                            let rw = calculator::text_width(&res_buf[..rlen], result_cap);
-                            let rx0 = 650usize.saturating_sub(rw).max(60);
-                            if let Some(c) = test_text(x, y, rx0, row_y0 + result_dy, result_cap, &res_buf[..rlen], THEME.on_surface, row_style.fill, true) {
-                                return c;
-                            }
+                        // Top line: expression, then bottom line: result. Both
+                        // were cut and placed by the plan; the note on why the
+                        // ellipsis is measured at the rung the ink is painted at
+                        // rides with the cutting in [`build_drawer_plan`].
+                        if let Some(c) = row
+                            .expr
+                            .paint(x, y, THEME.on_surface_variant, row_style.fill)
+                        {
+                            return c;
+                        }
+                        if let Some(c) = row.result.paint(x, y, THEME.on_surface, row_style.fill) {
+                            return c;
                         }
 
                         if erx < 2 || ery < 2 {
@@ -897,7 +1291,6 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // person's text size, and the card is the box that holds them. The plan is
     // built once per repaint from the level this process publishes, and the
     // card painted here and the card the press answers are the same rows.
-    let plan = unsafe { CALC_PLAN }.unwrap_or(DEFAULT_PLAN);
     if (DISPLAY_Y0..plan.card_y1).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         // WHY the platform's card treatment: the card's fill, its hairline
         // and its radius come from the platform's own elevation, so an app
@@ -915,25 +1308,12 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 
         // The pending operation's badge, level with the result.
         //
-        // WHY it sits beside the result and not beside the expression: the
-        // expression is what was typed and the result is the number the
-        // pending operation is waiting on, so the badge belongs to the
-        // number.
-        //
-        // WHY the badge grows by the result's rows gained, not by its box:
-        // it is the operation the result is waiting on, drawn in the result's
-        // own rows, so a plate left at thirty-four while the number beside it
-        // doubles is a badge the reader can no longer line up with anything.
-        // But the plate's shipped thirty-four is not a line box of any rung --
-        // it is the designer's number -- so the growth is measured against the
-        // tallest rung the result stands at, the way Messages measures a raised
-        // rung against the ladder's own box: the saturated difference answers
-        // nought at the default level, which keeps the shipped plate pixel for
-        // pixel, and adds exactly the rows the published level gives the run.
+        // WHY its height is read from the plan: the plate grows by the rows the
+        // published level gives the result run, and that is the card's one answer
+        // for the repaint -- the reasoning rides with the arithmetic in
+        // [`build_display_plan`].
         if let Some(op) = calc.active_operation {
-            let badge_rows = 34
-                + run_rows(plan.digits_cap.max(plan.err_cap))
-                    .saturating_sub(run_rows(RESULT_LADDER[0]));
+            let badge_rows = plan.badge_rows;
             let badge_cy = plan.value_y0 + badge_rows / 2;
             if (plan.value_y0..plan.value_y0 + badge_rows).contains(&y) && (44..104).contains(&x) {
                 let prx = (x - 44).min(103 - x);
@@ -962,13 +1342,13 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             }
         }
 
-        // Dual-line Top Line and Main Line / Error Banner via precomputed plan
+        // Dual-line Top Line and Main Line / Error Banner, sampled from the plan.
         //
-        // WHY the plate is rebuilt from the plan instead of re-derived: the plan
-        // settled this frame's tape geometry once, and a chip measured again here
-        // would be a second answer to one question.
+        // WHY the plate is read from the plan instead of re-derived: the plan
+        // settled this frame's tape geometry and placed this frame's runs once,
+        // and a chip measured or a run placed again here would be a second answer
+        // to one question.
         {
-            let p = plan;
             // The expression tape.
             //
             // WHY the tape shows wrapped lines and not the last thirty-two
@@ -976,13 +1356,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             // nothing said about it, so the part of the expression the
             // person could not see was simply gone. The tape now holds the
             // whole expression and scrolls through it.
-            if p.has_tape && y >= TAPE_Y0 && y < p.tape_y1 {
-                let row = (y - TAPE_Y0) / p.tape_rows;
-                let line = p.tape_first + row;
-                if line < p.tape_count {
-                    let line_y = TAPE_Y0 + row * p.tape_rows;
-                    let text = &calc.tape_lines[line][..calc.tape_lens[line]];
-                    if let Some(c) = test_text(x, y, p.tape_xs[line], line_y, p.expr_cap, text, THEME.on_surface, THEME.surface_container, true) {
+            if plan.has_tape && y >= TAPE_Y0 && y < plan.tape_y1 {
+                let row = (y - TAPE_Y0) / plan.tape_rows;
+                let line = plan.tape_first + row;
+                if line < plan.tape_count {
+                    if let Some(c) = plan.tape[row].paint(x, y, THEME.on_surface, THEME.surface_container) {
                         return c;
                     }
                 }
@@ -1000,8 +1378,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 // caption it carries. A chip left at the ladder's height would
                 // be painted over the last tape line and would answer less than
                 // the control the person can see.
-                if p.tape_overflow {
-                    let plate_h = p.tape_y1 - TAPE_Y0;
+                if plan.tape_overflow {
+                    let plate_h = plan.tape_y1 - TAPE_Y0;
                     if x >= SCROLL_PLATE_X && x < SCROLL_PLATE_X + SCROLL_PLATE_W && y >= TAPE_Y0
                         && y < TAPE_Y0 + plate_h
                     {
@@ -1027,18 +1405,15 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     }
                 }
             }
-            if p.is_error {
-                let h = run_rows(p.err_cap);
-                if y >= p.value_y0 && y < p.value_y0 + h {
-                    if let Some(c) = test_text(x, y, p.err_x, p.value_y0, p.err_cap, p.err_text, THEME.error, THEME.surface_container, true) {
+            if plan.is_error {
+                if y >= plan.value_y0 && y < plan.value_y0 + plan.error_rows {
+                    if let Some(c) = plan.error.paint(x, y, THEME.error, THEME.surface_container) {
                         return c;
                     }
                 }
             } else {
-                let h = run_rows(p.digits_cap);
-                if y >= p.value_y0 && y < p.value_y0 + h {
-                    let digits = &calc.display_buf[..p.digits_len.min(calc.display_buf.len())];
-                    if let Some(c) = test_text(x, y, p.digits_x, p.value_y0, p.digits_cap, digits, THEME.on_surface, THEME.surface_container, true) {
+                if y >= plan.value_y0 && y < plan.value_y0 + plan.result_rows {
+                    if let Some(c) = plan.result.paint(x, y, THEME.on_surface, THEME.surface_container) {
                         return c;
                     }
                 }
@@ -1140,25 +1515,15 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             return c;
                         }
                     } else {
-                        let label: &[u8] = match act {
-                            'C' | 'E' | 'B' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
-                            _ => &[act as u8],
-                        };
-                        // WHY the key's own height is the plate: the keypad grid
-                        // is what a thumb lands on and the app's gate says a key
-                        // label's box must stand inside its keycap. The clamp
-                        // keeps that true at every text size, and centring the
-                        // *box* -- not the cap -- on the keycap is what keeps the
-                        // label where the person is aiming.
-                        let key_cap = chrome::cap_in_plate(CAP_KEY_LABEL, rect.h);
-                        let w = calculator::text_width(label, key_cap);
-                        let x0 = center_x.saturating_sub(w / 2);
-                        // WHY the box and not the cap: a run reserves its line
-                        // box, so centring the box puts the run's middle on the
-                        // keycap's middle. Centring from the cap left a scale-two
-                        // box hanging ten rows below the key it labels.
-                        let y0 = center_y.saturating_sub(run_rows(key_cap) / 2);
-                        if let Some(c) = test_text(x, y, x0, y0, key_cap, label, text_color, btn_bg, true) {
+                        // WHY the label is sampled from the plan: its clamped cap,
+                        // its measured width and its line box are the keypad's one
+                        // answer for the repaint, and this grid is over half of the
+                        // surface -- the note on why the keycap is the plate and the
+                        // box is centred rather than the cap rides with the clamp in
+                        // [`build_keypad_plan`].
+                        if let Some(c) = plan.keys[row * calculator::KEY_COLS + col]
+                            .paint(x, y, text_color, btn_bg)
+                        {
                             return c;
                         }
                     }
@@ -1186,7 +1551,12 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 }
 
 fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
-    prepare_calc_plan(calc);
+    // WHY the plan is built here and not where it is read: this is one of the two
+    // walks of `get_calculator_pixel` the app has, and the walk crosses every
+    // section of the screen. A plan built inside the pixel function would place
+    // its runs again for every pixel that wants them, which is the cost this
+    // removes.
+    let plan = build_calc_plan(calc);
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -1195,7 +1565,7 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_calculator_pixel(x, y, calc);
+            chunk[i] = get_calculator_pixel(x, y, calc, &plan);
             x += 1;
             if x == W {
                 x = 0;
@@ -1208,7 +1578,11 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
 }
 
 fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: usize) {
-    prepare_calc_plan(calc);
+    // WHY the plan is rebuilt for a band rather than reused from the last full
+    // repaint: the band is painted from the state it is about to draw, and a plan
+    // left over from an earlier state would paint the number the person has just
+    // replaced. One build per repaint is the cost; see `render_calculator_ui`.
+    let plan = build_calc_plan(calc);
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
@@ -1217,7 +1591,7 @@ fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: u
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_calculator_pixel(x, y, calc);
+            chunk[i] = get_calculator_pixel(x, y, calc, &plan);
             x += 1;
             if x == W {
                 x = 0;
@@ -1416,6 +1790,12 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
         // hard-code: the rows a person can reach are the rows that stand inside
         // the sheet at this text size, and a press that answered a row the
         // painter never drew is the disagreement a thumb can feel.
+        //
+        // WHY the same two chrome answers the plan builds its rows from: the band
+        // a row is painted in is `build_drawer_plan`'s `y0`/`y1`, and those are
+        // these same `history_pitch()` and `history_row_h()` at the level this
+        // process publishes -- one derivation, read by both sides, so the row the
+        // person lands on is the row they can see.
         let count = calc.history.count();
         for i in 0..count.min(chrome::history_visible_rows()) {
             let row_y0 = HIST_LIST_Y0 + i * chrome::history_pitch();
