@@ -13,7 +13,14 @@ use super::{switch_context, TaskContext, TaskControlBlock, TaskId, TaskState};
 use crate::capability::CapabilityTable;
 use crate::task::process::ReapError;
 
-/// Default time slice allotted to a task before preemption (in timer ticks, e.g. 5 = 50ms at 100Hz).
+/// Default time slice allotted to a task before preemption.
+///
+/// The unit is a real millisecond, because `SYSTEM_TICKS` is the HPET-derived
+/// count and the slice is now aged by the same elapsed measure. It used to be
+/// counted in timer *deliveries*, which is a host decision: a host that
+/// resolves its timers at 15.6 ms made five of them ~78 ms, so a task woken by
+/// a touch waited that long for the CPU while the device still called its clock
+/// milliseconds. See `check_timer_tick`.
 pub const TIME_SLICE_TICKS: u64 = 5;
 
 /// Standard priority levels for system and user workloads.
@@ -742,7 +749,16 @@ impl Scheduler {
     }
 
     /// Invoked on timer tick: updates accounting and returns switch pointers if time slice expired.
-    pub fn check_timer_tick(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
+    ///
+    /// `elapsed_ms` is what this one delivery of the timer stood for -- the same
+    /// measure `SYSTEM_TICKS` was advanced by. The slice has to be aged by it
+    /// rather than by one per delivery, or the slice a task gets before its
+    /// blocked neighbour is scheduled is set by the host's timer resolution
+    /// instead of by the device.
+    pub fn check_timer_tick(
+        &mut self,
+        elapsed_ms: u64,
+    ) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         if !self.initialized || self.tasks.is_empty() {
             return (None, None);
         }
@@ -759,7 +775,7 @@ impl Scheduler {
             }
         }
 
-        self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
+        self.ticks_in_slice = self.ticks_in_slice.saturating_add(elapsed_ms.max(1));
 
         // Real-time UI tasks get rapid low-latency 1-tick slices when other RT tasks wait
         let has_competing_rt = self.tasks.iter().enumerate().any(|(i, t)| {
@@ -975,7 +991,7 @@ pub fn yield_now() -> bool {
 }
 
 /// Invoked from the timer interrupt handler (IRQ 32) to perform preemptive time slicing.
-pub fn on_timer_tick() {
+pub fn on_timer_tick(elapsed_ms: u64) {
     let ticks = crate::interrupts::get_system_ticks();
     if let Some(mut fm) = crate::task::futex::FUTEX_MANAGER.try_lock() {
         let timed_out = fm.check_timeouts(ticks);
@@ -990,7 +1006,7 @@ pub fn on_timer_tick() {
 
     let (prev, next) = {
         if let Some(mut sched) = SCHEDULER.try_lock() {
-            sched.check_timer_tick()
+            sched.check_timer_tick(elapsed_ms)
         } else {
             (None, None)
         }

@@ -45,6 +45,16 @@ pub static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
 /// context where it blocks nothing.
 pub static PROCESS_TABLE_DUMP_DUE: AtomicBool = AtomicBool::new(false);
 
+/// The one-second liveness line, printed by the kernel's loop for the same
+/// reason as the dump above.
+///
+/// One line is small, but a line written from the handler is written with IF
+/// clear, so a touch that arrives during its byte-at-a-time transmit waits for
+/// the serial port before it can be serviced. The stamp travels with the flag
+/// so the number stays the one the second actually crossed at.
+pub static TICK_HEARTBEAT_DUE: AtomicBool = AtomicBool::new(false);
+pub static TICK_HEARTBEAT_AT: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Real-time clock source
 // ---------------------------------------------------------------------------
@@ -751,7 +761,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     let previous = SYSTEM_TICKS.fetch_add(elapsed, Ordering::Relaxed);
     let ticks = previous.saturating_add(elapsed);
     if period_crossed(previous, ticks, 1000) {
-        serial_println!("[KERNEL TICK HEARTBEAT] System uptime: {} ticks", ticks);
+        TICK_HEARTBEAT_AT.store(ticks, Ordering::Relaxed);
+        TICK_HEARTBEAT_DUE.store(true, Ordering::Relaxed);
     }
     if period_crossed(previous, ticks, 2000) {
         PROCESS_TABLE_DUMP_DUE.store(true, Ordering::Relaxed);
@@ -768,7 +779,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     crate::event::on_timer_tick(ticks);
 
     // Preemptive multitasking time slice accounting & rescheduling
-    crate::task::on_timer_tick();
+    crate::task::on_timer_tick(elapsed);
 }
 
 /// Prints the process table when the timer tick has asked for it.
@@ -779,6 +790,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 /// that consumes it are unchanged -- only the context it runs in moved.
 #[cfg(not(target_os = "windows"))]
 pub fn service_deferred_diagnostics() {
+    if TICK_HEARTBEAT_DUE.swap(false, Ordering::Relaxed) {
+        crate::serial_println!(
+            "[KERNEL TICK HEARTBEAT] System uptime: {} ticks",
+            TICK_HEARTBEAT_AT.load(Ordering::Relaxed)
+        );
+    }
     if !PROCESS_TABLE_DUMP_DUE.swap(false, Ordering::Relaxed) {
         return;
     }
