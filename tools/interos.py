@@ -1594,17 +1594,27 @@ def cmd_run(args):
 # =============================================================================
 def cmd_contracts(args):
     """Run fast static system-contract checks without building the kernel."""
-    test_file = WORKSPACE_ROOT / "tests" / "test_system_contracts.py"
-    if not test_file.exists():
-        log_error("System contract test file is missing.")
-        return 1
-    log("Running InterOS system contract checks...")
-    result = subprocess.run([sys.executable, str(test_file)], cwd=str(WORKSPACE_ROOT))
-    if result.returncode == 0:
-        log_success("System contract checks passed.")
-    else:
-        log_error("System contract checks failed.")
-    return result.returncode
+    # WHY the licence gate is on this list too: `contracts` is the fast static
+    # check the contribution rules ask for before anything is built, and whether a
+    # source file carries the AGPL notice, whether a tracked file is declared in
+    # REUSE.toml, and whether a manifest's licence field agrees are all static
+    # facts about the tree that cost about two seconds to read. The gate lives in
+    # tests/, where run_all_contracts.py also discovers it, so the two entry
+    # points check the same thing and cannot drift apart.
+    overall_rc = 0
+    for test_name in ("test_system_contracts.py", "test_licence_contracts.py"):
+        test_file = WORKSPACE_ROOT / "tests" / test_name
+        if not test_file.exists():
+            log_error(f"System contract test file is missing: tests/{test_name}")
+            return 1
+        log(f"Running InterOS system contract checks ({test_name})...")
+        result = subprocess.run([sys.executable, str(test_file)], cwd=str(WORKSPACE_ROOT))
+        if result.returncode == 0:
+            log_success(f"System contract checks passed ({test_name}).")
+        else:
+            log_error(f"System contract checks failed ({test_name}).")
+            overall_rc = result.returncode
+    return overall_rc
 
 
 # =============================================================================
