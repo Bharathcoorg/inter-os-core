@@ -1157,7 +1157,17 @@ const CONTENT_W: usize = W - 2 * MARGIN;
 /// owns the rows above it, and a 48-tall control placed there ends at 104 -- the
 /// rule has to fall below that or it cuts the control in half.
 const BAR_H: usize = 112;
-const BACK: Rect = Rect::new(24, interos_std::design::viewport::HEADER_TOP, 72, 48);
+
+/// The header's dismiss control is the platform's chip, owned outright by
+/// `std::design::back_button`: the painter asks `pixel_for_theme` and the press
+/// answers `back_button::contains`, both over the identical 24..72 by
+/// HEADER_TOP..+48 square.
+///
+/// WHY the app's own 72x48 `BACK` rect at (24, HEADER_TOP) is gone: it was a
+/// second copy of the chip's box, 24 columns wider than the plate the painter
+/// inks, so a press on the bare surface beside the control -- over the gap the
+/// centred title stands in -- dismissed the app. One declaration, read by both
+/// sides, is what keeps the picture and the target together.
 
 const ART_X: usize = 136;
 const ART_Y: usize = 128;
@@ -2796,10 +2806,13 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
     let y = py as usize;
 
     // Dismiss control in the top bar, or the home gesture band.
-    if std::design::back_button::contains(x, y)
-        || BACK.contains(x, y)
-        || HOME_HIT.contains(x, y)
-    {
+    //
+    // WHY the chip's box is `back_button::contains` alone: it is the same call
+    // the painter uses (`pixel_for_theme`), so the press answers exactly the
+    // plate that is inked. The union used to carry the app's own wider `BACK`
+    // rect (24..96), whose extra columns were bare surface between the chip and
+    // the centred title -- dead space that dismissed the app anyway.
+    if std::design::back_button::contains(x, y) || HOME_HIT.contains(x, y) {
         return Tap::Leave("[MUSIC APP] Dismiss control or home gesture pressed. Exiting to launcher.");
     }
 

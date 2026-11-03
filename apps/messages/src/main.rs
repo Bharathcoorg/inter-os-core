@@ -4425,11 +4425,19 @@ fn handle_tap_inner(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[MESSAGES APP] Home gesture pressed. Exiting to launcher.");
     }
 
-    // Header Back button (x 24..100, y HEADER_TOP..HEADER_TOP + 48): the
-    // platform control plus the slack of the row it stands in.
-    if std::design::back_button::contains(x, y)
-        || (x >= 24 && x < 100 && y >= HEADER_TOP && y < HEADER_TOP + 48)
-    {
+    // Header Back control: the platform chip, answered by the box the painter
+    // inks and nothing else.
+    //
+    // WHY the old union is gone: the header paints the chip through
+    // `back_button::pixel_for_theme`, whose plate is 24..72, while this press
+    // also answered a hand-written 24..100 band. The columns between the plate
+    // and the band's edge were bare `THEME.surface_container` -- the accent dot
+    // at x 96 is a status mark, not a control -- so the old band let a tap on
+    // dead space beside the button pop the view stack anyway. `contains` is the
+    // SDK's own square for the same plate, and at 48x48 it still clears the
+    // platform's touch floor, so matching the picture to the target costs no
+    // reachability.
+    if std::design::back_button::contains(x, y) {
         match app.view_mode {
             ViewMode::Conversation => {
                 // Return to conversation directory

@@ -1177,7 +1177,10 @@ def test_the_back_affordance_paints_the_box_a_person_can_tap():
     """
     flat = {
         app: " ".join(read(f"apps/{app}/src/main.rs").split())
-        for app in ("browser", "vault", "camera", "video_player", "calendar", "agent_manager")
+        for app in (
+            "browser", "vault", "camera", "video_player", "calendar",
+            "agent_manager", "messages", "music",
+        )
     }
 
     # The four apps that adopt the chip: paint and target from the same SDK call.
@@ -1202,6 +1205,25 @@ def test_the_back_affordance_paints_the_box_a_person_can_tap():
     assert "BACK_RECT.contains(x, y)" not in flat["camera"]
     assert "x >= 24 && x < 100 && y >= HEADER_TOP" not in flat["calendar"]
     assert "ux >= 24 && ux < 88 && uy >= HEADER_TOP" not in flat["agent_manager"]
+
+    # The two apps that closed task #209's back-chip reconciliation. Both painted
+    # the platform chip through `pixel_for_theme` -- plate 24..72 -- while the
+    # press unioned that box with a hand-written wider one: Messages answered
+    # 24..100 (a 28-column strip of bare surface, ending just short of the
+    # accent dot, which is a status mark and not a control), and Music carried a
+    # second copy of the rect, `const BACK: Rect = Rect::new(24, HEADER_TOP, 72,
+    # 48)`, whose columns 72..96 were blank header between the plate and the
+    # centred title. Tapping that dead space popped a view (Messages) or quit the
+    # app (Music). After the fix each press names the SDK's own square, and the
+    # second copy is gone from the source entirely.
+    for app in ("messages", "music"):
+        assert "back_button::pixel_for_theme(x, y, &THEME)" in flat[app], (
+            f"{app} no longer paints the platform chip")
+        assert "back_button::contains(x, y)" in flat[app], (
+            f"{app} no longer tests the tap through the SDK's own box")
+    assert "x >= 24 && x < 100" not in flat["messages"]
+    assert "const BACK: Rect = Rect::new(24," not in flat["music"]
+    assert "BACK.contains(x, y)" not in flat["music"]
 
     # The two overrides with a real layout reason keep their own rect, but the
     # rect is built from the SDK's control size, and one rect feeds both the
