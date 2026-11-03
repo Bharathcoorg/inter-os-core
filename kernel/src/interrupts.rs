@@ -5,7 +5,7 @@
 
 #[cfg(not(target_os = "windows"))]
 use conquer_once::spin::Lazy;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(not(target_os = "windows"))]
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
@@ -32,6 +32,18 @@ pub const PIT_DIVISOR: u16 = (PIT_BASE_HZ / SYSTEM_TICK_HZ) as u16;
 
 /// Global atomic system tick counter (milliseconds of real time since boot).
 pub static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Set by the timer tick when the process table is due to be printed, and
+/// consumed by the kernel's own loop.
+///
+/// WHY deferred rather than printed in the handler: the dump emits one `[PROC]`
+/// line per task, and an `x86-interrupt` handler runs with IF clear, so all of
+/// those byte-at-a-time transmits happened with the timer and a freshly arrived
+/// touch held off. That made the longest interrupt-off window in the kernel land
+/// on a fixed two-second cadence. Deferring keeps every `[PROC]` line and its
+/// period -- the Studio's process panel reads them -- and moves the cost to a
+/// context where it blocks nothing.
+pub static PROCESS_TABLE_DUMP_DUE: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Real-time clock source
@@ -307,10 +319,36 @@ pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
     }
+    // WHY written to by hand: `pic8259` exposes `initialize`,
+    // `handle_interrupt` and `notify_end_of_interrupt` and nothing else, and
+    // `initialize` deliberately restores whatever masks the chip already held --
+    // so no call in the crate can lift one. Firmware leaves COM1's IRQ4 masked,
+    // which made the UART's own data-ready interrupt inert: setting IER without
+    // clearing this bit changes nothing at all.
+    unmask_pic_irq(4);
 }
 
 #[cfg(target_os = "windows")]
 pub fn init_pics() {}
+
+/// Clears one IRQ line's mask bit in its PIC's interrupt mask register.
+///
+/// The slave is indexed from its own zero, so IRQ8 becomes bit 0 of port 0xA1.
+/// Reading first and writing back keeps every other line exactly as firmware
+/// left it: this opens one interrupt, not a reset of the controller.
+#[cfg(not(target_os = "windows"))]
+fn unmask_pic_irq(irq: u8) {
+    let (imr_port, bit) = if irq >= 8 {
+        (0xA1u16, irq - 8)
+    } else {
+        (0x21u16, irq)
+    };
+    unsafe {
+        let mut port = Port::<u8>::new(imr_port);
+        let held = port.read();
+        port.write(held & !(1u8 << bit));
+    }
+}
 
 /// Maps and enables the HPET main counter, returning its period in counts per
 /// millisecond once it has been seen to advance.
@@ -716,9 +754,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         serial_println!("[KERNEL TICK HEARTBEAT] System uptime: {} ticks", ticks);
     }
     if period_crossed(previous, ticks, 2000) {
-        if let Some(sched) = crate::task::SCHEDULER.try_lock() {
-            sched.dump_process_table();
-        }
+        PROCESS_TABLE_DUMP_DUE.store(true, Ordering::Relaxed);
     }
 
     unsafe {
@@ -734,6 +770,25 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     // Preemptive multitasking time slice accounting & rescheduling
     crate::task::on_timer_tick();
 }
+
+/// Prints the process table when the timer tick has asked for it.
+///
+/// WHY this is called from the kernel's loop and not from the tick: the dump is
+/// one `[PROC]` line per task, and a handler writes them with IF clear, so the
+/// whole dump was an interrupt-off window. Cadence, content and the Studio panel
+/// that consumes it are unchanged -- only the context it runs in moved.
+#[cfg(not(target_os = "windows"))]
+pub fn service_deferred_diagnostics() {
+    if !PROCESS_TABLE_DUMP_DUE.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    if let Some(sched) = crate::task::SCHEDULER.try_lock() {
+        sched.dump_process_table();
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn service_deferred_diagnostics() {}
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

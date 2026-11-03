@@ -8,6 +8,7 @@ use spin::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
+use uart_16550::spec::registers::{FifoTriggerLevel, IER};
 use uart_16550::{Config, Uart16550};
 use crate::drivers::display::DisplayDriver;
 use crate::storage::block::BlockDevice;
@@ -19,13 +20,12 @@ pub struct SerialPort(Uart16550<PioBackend>);
 /// dropped.
 ///
 /// WHY bounded: `Uart16550::send_bytes_exact` is documented as spinning
-/// indefinitely. `_print_internal` runs with interrupts disabled, so if the
-/// host stops draining COM1 -- QEMU's TCP chardev applies backpressure when
-/// its peer pauses, and the Studio's collector briefly stops reading while it
-/// persists each line -- the kernel used to wedge permanently inside a
-/// `serial_println!`. Diagnostics are droppable; the CPU is not. Once a byte
-/// times out the rest of that line is dropped too, so a dead console costs one
-/// bounded wait per print rather than one per character.
+/// indefinitely. If the host stops draining COM1 -- QEMU's TCP chardev applies
+/// backpressure when its peer pauses, and the Studio's collector briefly stops
+/// reading while it persists each line -- the kernel used to wedge permanently
+/// inside a `serial_println!`. Diagnostics are droppable; the CPU is not. Once a
+/// byte times out the rest of that line is dropped too, so a dead console costs
+/// one bounded wait per print rather than one per character.
 const TX_POLL_BUDGET: usize = 10_000;
 
 impl SerialPort {
@@ -104,12 +104,29 @@ const ANCHOR_CHUNK_HEX_CHARS: usize = 240;
 ///
 /// Avoids `test_loopback()` which panics if external TCP or terminal clients
 /// transmit bytes into COM1 during machine startup or reset.
+///
+/// WHY the data-ready interrupt is raised rather than left at the default:
+/// `Config::DEFAULT` writes `IER = 0`, so COM1 never asserts IRQ4 and an
+/// arriving touch byte wakes nothing of its own. A CPU parked in
+/// `enable_and_hlt` then resumes only on the next timer tick, which put a whole
+/// tick between a person's tap and the kernel ever looking at it.
+///
+/// WHY the one-byte FIFO trigger: at the default fourteen the chip holds a
+/// short command -- `TAP 100 650` is eleven bytes -- back until its character
+/// timeout, so arrival would still be reported late with IRQ4 open. The trigger
+/// costs one interrupt per byte instead of one per line, and the handler drains
+/// the FIFO in the same pass, so a burst cannot overrun it into silence.
 pub fn init() {
     let mut port = match unsafe { Uart16550::new_port(0x3F8) } {
         Ok(p) => p,
         Err(_) => return,
     };
-    let _ = port.init(Config::default());
+    let config = Config {
+        interrupts: IER::DATA_READY,
+        fifo_trigger_level: Some(FifoTriggerLevel::One),
+        ..Config::DEFAULT
+    };
+    let _ = port.init(config);
     *SERIAL1.lock() = Some(SerialPort(port));
 }
 
@@ -124,21 +141,29 @@ pub fn _print(args: fmt::Arguments) {
 /// never deadlock if `SERIAL1` was held when a fault occurred.
 /// Inside the locked region, `write_fmt` errors are safely discarded instead
 /// of panicking via `.expect(...)`.
+///
+/// WHY interrupts stay on: this used to run inside `with_interrupts_disabled`,
+/// whose stated purpose was to stop an interrupt handler deadlocking against the
+/// same spinlock. The COM1 handler does not take this lock at all --
+/// `poll_serial_rx` reads the raw receiver port and takes `RX_BUF` -- so the
+/// mask never protected anything, and it made every console line an
+/// interrupt-off window: a single `DIAG_STATE` reply held the timer and a
+/// arriving tap out for as long as its ~230 bytes took to leave the port. The
+/// bounded `try_lock` is what actually prevents the deadlock, and a handler that
+/// cannot get the lock drops its line instead of spinning.
 pub fn _print_internal(args: fmt::Arguments) -> bool {
     use core::fmt::Write;
 
-    crate::arch::with_interrupts_disabled(|| {
-        for _ in 0..10_000 {
-            if let Some(mut guard) = SERIAL1.try_lock() {
-                if let Some(ref mut serial) = *guard {
-                    let _ = serial.write_fmt(args);
-                }
-                return true;
+    for _ in 0..10_000 {
+        if let Some(mut guard) = SERIAL1.try_lock() {
+            if let Some(ref mut serial) = *guard {
+                let _ = serial.write_fmt(args);
             }
-            core::hint::spin_loop();
+            return true;
         }
-        false
-    })
+        core::hint::spin_loop();
+    }
+    false
 }
 
 /// Prints formatted text to the COM1 serial interface.
@@ -210,6 +235,21 @@ struct RxState {
     qcount: usize,
     /// Completed lines dropped because the queue was full.
     dropped: u32,
+    /// The tick each queued line became complete, indexed alongside `queue`.
+    qpush_ticks: [u64; RX_QUEUE_SLOTS],
+    /// How long the line most recently handed to `handle_serial_command` had
+    /// already waited, the worst such wait since boot, and how many lines have
+    /// been dispatched. All three are in `SYSTEM_TICKS` units, which are
+    /// milliseconds.
+    ///
+    /// WHY measured at all: a byte reaching this queue is not the event a person
+    /// is waiting on -- dispatch only happens where `service_serial_commands`
+    /// is called, so the queue can hold a finished command while nothing looks.
+    /// Without the wait in the open, that stall is indistinguishable from a slow
+    /// handler or a slow app.
+    last_wait_ticks: u64,
+    max_wait_ticks: u64,
+    dispatched: u64,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -225,6 +265,10 @@ impl RxState {
             qtail: 0,
             qcount: 0,
             dropped: 0,
+            qpush_ticks: [0; RX_QUEUE_SLOTS],
+            last_wait_ticks: 0,
+            max_wait_ticks: 0,
+            dispatched: 0,
         }
     }
 
@@ -237,6 +281,8 @@ impl RxState {
         let len = self.len;
         self.queue[self.qtail][..len].copy_from_slice(&self.buf[..len]);
         self.qlens[self.qtail] = len;
+        self.qpush_ticks[self.qtail] = crate::interrupts::SYSTEM_TICKS
+            .load(core::sync::atomic::Ordering::Relaxed);
         self.qtail = (self.qtail + 1) % RX_QUEUE_SLOTS;
         self.qcount += 1;
         true
@@ -248,10 +294,22 @@ impl RxState {
             return 0;
         }
         let len = self.qlens[self.qhead];
+        let now = crate::interrupts::SYSTEM_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let waited = now.saturating_sub(self.qpush_ticks[self.qhead]);
+        self.last_wait_ticks = waited;
+        if waited > self.max_wait_ticks {
+            self.max_wait_ticks = waited;
+        }
+        self.dispatched += 1;
         out[..len].copy_from_slice(&self.queue[self.qhead][..len]);
         self.qhead = (self.qhead + 1) % RX_QUEUE_SLOTS;
         self.qcount -= 1;
         len
+    }
+
+    /// The queue-wait readings the diagnostics line publishes.
+    fn wait_stats(&self) -> (u64, u64, u64) {
+        (self.last_wait_ticks, self.max_wait_ticks, self.dispatched)
     }
 }
 
@@ -820,7 +878,12 @@ fn handle_rapp_command(s: &str) -> bool {
             return true;
         }
         crate::input::post_touch_event(slot, px, py, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
-        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, px, py);
+        // WHY an accepted touch is not printed: a drag is twenty to forty of these
+        // lines, each one a byte-poked transmit that used to hold interrupts off
+        // for its whole length, all to say nothing a host could not act on. The
+        // rejections above stay, because those are the answers that change what the
+        // sender does next. The tap path keeps its own marker
+        // (`Hardware touch tap received`) for the latency bench to correlate on.
         return true;
     }
 
@@ -1313,10 +1376,21 @@ fn handle_serial_command(cmd: &[u8]) {
             };
             (mb, ep, shm)
         };
+        let (q_wait_last, q_wait_max, q_lines) = {
+            // The wait a finished command line spent here is the part of a tap's
+            // journey that no app or flip counter can show: the bytes arrived,
+            // but dispatch only runs where a context chose to call
+            // `service_serial_commands`.
+            if let Some(state) = RX_BUF.try_lock() {
+                state.wait_stats()
+            } else {
+                (0, 0, 0)
+            }
+        };
         crate::serial_println!(
-            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={} last_flip={} last_flip_compose_cycles={} last_flip_present_cycles={}",
+            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={} last_flip={} last_flip_compose_cycles={} last_flip_present_cycles={} input_queue_wait_last_ms={} input_queue_wait_max_ms={} input_lines={}",
             tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free,
-            last_flip, comp_cyc, pres_cyc
+            last_flip, comp_cyc, pres_cyc, q_wait_last, q_wait_max, q_lines
         );
         return;
     }
