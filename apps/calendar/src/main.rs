@@ -1680,9 +1680,10 @@ fn month_view_pixel(
         }
     }
 
-    // Home Gesture Pill
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return THEME.on_surface_variant;
+    // Home Gesture Pill -- the SDK's own mark, from the same declaration
+    // `handle_tap` answers below.
+    if let Some(c) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return c;
     }
 
     THEME.surface
@@ -3321,8 +3322,19 @@ fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
 }
 
 fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
-    // 1. Home gesture strip
-    if x >= 240 && x <= 480 && y >= 1400 {
+    // 1. Home gesture -- the SDK's answering box, the same declaration the
+    // month view inks above.
+    //
+    // WHY it comes from `home_band`: the press used to be a hand-written
+    // `x >= 240 && x <= 480 && y >= 1400` -- 241 columns by 40 rows,
+    // off-centre about column 360.5 and under the platform's 44-row touch
+    // floor -- while the pill it answers was painted from independent
+    // literals at `260..460, 1418..1424`, which is how the two drifted apart.
+    // `home_band::HIT` is the pill's neighbourhood at the 48-row preferred
+    // target, centred and reaching the panel's last row, and the app's own
+    // content stops at 1360, so the box claims only rows this app paints
+    // empty.
+    if std::design::home_band::contains(x, y) {
         return Tap::Leave("[CALENDAR APP] Back button or home gesture pressed. Exiting to launcher.");
     }
 
@@ -3625,7 +3637,22 @@ pub extern "C" fn _start() {
                     };
                     let mut dirty = Dirty::EMPTY;
                     while std::input_event_poll(&mut input).is_ok() {
-                        if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                        // WHY the pan and fling answer the SDK's home box:
+                        // this used to exit for a navigation gesture from
+                        // anywhere on the screen, so a scroll inside the month
+                        // list threw the user out of the calendar. It now
+                        // answers `home_band::contains` -- the same 240x48 box
+                        // the tap above answers and the pill painter inks.
+                        if (input.kind == 4
+                            || input.kind == 6
+                            || input.kind == 7
+                            || input.kind == 8
+                            || input.kind == 10)
+                            && std::design::home_band::contains(
+                                input.x as usize,
+                                input.y as usize,
+                            )
+                        {
                             std::log("[CALENDAR APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             exit_to_launcher(surface);
                         }

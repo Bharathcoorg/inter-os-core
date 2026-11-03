@@ -187,10 +187,47 @@ def test_the_keystore_slot_is_not_confused_with_a_capability_slot():
 
 
 def test_the_home_gesture_only_leaves_the_app_from_the_home_strip():
-    """A pan or a fling from anywhere returned to the launcher."""
+    """A pan or a fling from anywhere returned to the launcher.
+
+    WHY this contract changed: the app answered a hand-written strip,
+    `input.y >= 1400 && input.x >= 240 && input.x <= 480` -- 241 columns
+    by 40 rows, off-centre about column 360.5 and under the platform's
+    44-row touch floor, so a thumb one row clear of the box did nothing
+    and read as a hung device. The app now answers the SDK's home-band
+    declaration: `home_band::HIT` is 240 columns centred on a 720-wide
+    panel (x 240..=479), 48 rows -- the preferred touch target -- from
+    row 1392 to the panel's last row 1439, and it covers the 200x6 pill
+    ink at (260, 1418) that the app now paints through
+    `home_band::pixel`. The gate pins the reference to that declaration
+    and the declaration's own numbers in the SDK source; it is not
+    weakened -- the old literals may not come back.
+    """
     source = vault_main()
-    assert "let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;" in source
+    assert (
+        "let is_home_gesture = std::design::home_band::contains("
+        "input.x as usize, input.y as usize);" in source
+    )
     assert "if is_home_gesture" in source
+    # The hand-written 241-by-40 strip may not return.
+    assert "input.y >= 1400" not in source
+    assert "input.x <= 480" not in source
+    # The mark and the tap answer are the SDK's, not three app-local copies.
+    assert "std::design::home_band::pixel(x, y, THEME.on_surface_variant)" in source
+    assert "const GESTURE_MARK_X0: usize = 260;" not in source
+    assert "const GESTURE_BAND_H: usize = 40;" not in source
+
+    sdk = read("sdk/rust/interos-std/src/design/mod.rs")
+    # The answering box the app points at, as the SDK declares it.
+    assert "const HIT_W: usize = 240;" in sdk
+    assert "const HIT_H: usize = super::touch::PREFERRED_TARGET;" in sdk
+    assert "pub const PREFERRED_TARGET: usize = 48;" in sdk
+    assert "pub const MIN_TARGET: usize = 44;" in sdk
+    # The pill the box must cover, and the panel both are centred on.
+    assert "pub const PILL_W: usize = 200;" in sdk
+    assert "pub const PILL_H: usize = 6;" in sdk
+    assert "pub const LOGICAL_WIDTH: usize = 720;" in sdk
+    assert "pub const LOGICAL_HEIGHT: usize = 1440;" in sdk
+    assert "super::viewport::LOGICAL_HEIGHT - 22," in sdk  # the pill's row: 1418
 
 
 def test_no_lock_badge_appears_without_a_platform_confirmation():

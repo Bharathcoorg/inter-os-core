@@ -34,7 +34,7 @@ use interos_std::design::scroll::ScrollState;
 
 use core::panic::PanicInfo;
 use interos_std as std;
-use gallery::theme::{MIN_TOUCH_TARGET, THEME};
+use gallery::theme::THEME;
 use std::design::font;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 use std::design::radius;
@@ -381,11 +381,17 @@ const _: () = assert!(BADGE_TEXT_INSET + font::line_height(1) + BADGE_BORDER <= 
 
 /// The system home gesture strip: a 200x6 indicator drawn inside a 240x44 box.
 ///
-/// WHY 44 and not 40: the design system's minimum touch target is 44 logical
-/// pixels, and this strip was 40. The strip now reaches the bottom edge of the
-/// surface, which is where the indicator already was.
-const HOME_HIT: Rect = Rect::new(240, 1396, 240, MIN_TOUCH_TARGET);
-const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
+/// The box the home gesture is answered in, and the mark it is answered for.
+///
+/// Both come from `std::design::home_band` now. They used to be authored here:
+/// the strip was 240 columns from row 1396 -- four rows of a platform floor this
+/// app had measured for itself, in a place where the platform had already
+/// decided -- while the swipe path below answered a *different* box, `y >= 1400`
+/// by 241 columns, asymmetric about the pill's centre and eight rows shallower
+/// than the tap. One declaration, so a tap and a swipe on the same mark do the
+/// same thing.
+const HOME_HIT: Rect = std::design::home_band::HIT;
+const HOME_PILL: Rect = std::design::home_band::PILL;
 
 // Inspection view geometry.
 /// Where the title's line box starts, in the app bar.
@@ -5724,7 +5730,7 @@ pub extern "C" fn _start() -> ! {
                     // threw the user out of the gallery. The gesture belongs
                     // to the bottom strip, which is where the system draws
                     // it.
-                    let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;
+                    let is_home_gesture = HOME_HIT.contains(input.x as usize, input.y as usize);
                     if is_home_gesture
                         && (input.kind == 4
                             || input.kind == 6

@@ -340,25 +340,39 @@ const FLASH_TEXT_W: usize = FLASH_RECT.w.saturating_sub(44);
 
 /// The system's home indicator, as the pill this app draws.
 ///
-/// WHY the tap band starts at the mark: the hit box used to be a 240x48 rect at
-/// `y = 1392`, which began 26 rows above the 6-row indicator and inside the
-/// dock band this app paints, so a press on blank chassis well above the pill
-/// closed the app. The mark's own rows to the foot of the canvas are the strip
-/// the app gives up to the system, and the pan and fling the event loop
-/// recognises still carry the platform's wider gesture.
-const HOME_MARK_X0: usize = 260;
-const HOME_MARK_W: usize = 200;
-const HOME_MARK_Y: usize = 1418;
-const HOME_MARK_H: usize = 6;
-const HOME_PILL: Rect = Rect::new(HOME_MARK_X0, HOME_MARK_Y, HOME_MARK_W, HOME_MARK_H);
-const HOME_HIT: Rect = Rect::new(HOME_MARK_X0, HOME_MARK_Y, HOME_MARK_W, H - HOME_MARK_Y);
+/// Both numbers come from `std::design::home_band` now, because the mark every
+/// application draws and the box that answers it used to be four literals
+/// written by hand in this file, and they had already drifted: the pill was 200
+/// columns by 6 rows while the press answered those same 200 columns from the
+/// pill's own top row, so the ink and its neighbourhood were one declaration
+/// that no other screen agreed with.
+///
+/// WHY the answering box is `hit_from(DOCK_BAND_Y1)` and not the SDK's default:
+/// the shutter dock paints down to row 1410, and the default box begins at 1392
+/// -- inside the dock. That was measured and reported before, when a 240x48 box
+/// at 1392 closed the app on a press of blank chassis above the pill; the fix is
+/// not to go back there. The box therefore claims every row the dock does not
+/// own, from its last row to the foot of the canvas, and the SDK's own centred
+/// 240 columns: 240x30 at 1410, which covers the mark and is 40 columns wider
+/// and 8 rows deeper than the box it replaces.
+///
+/// WHAT IT CANNOT REACH: the 44-row touch floor. This screen gives up 30 rows to
+/// the gesture, because its dock wants the other 1410. The floor-sized escape
+/// here is the header's back chip, which the same press answers at the full
+/// 48x48, and the pan and fling the event loop recognises still carry the
+/// platform's wider swipe.
+const HOME_PILL: Rect = std::design::home_band::PILL;
+const HOME_HIT: Rect = std::design::home_band::hit_from(DOCK_BAND_Y1);
 
 /// WHY checked at compile time: the indicator is bottom-anchored, so a taller
 /// mark or a shorter canvas puts it off the surface, and a dock band that grew
 /// past its own last row would paint over it.
-const _: () = assert!(HOME_MARK_X0 + HOME_MARK_W <= W);
-const _: () = assert!(HOME_MARK_Y + HOME_MARK_H <= H);
-const _: () = assert!(DOCK_BAND_Y1 <= HOME_MARK_Y);
+const _: () = assert!(HOME_PILL.x + HOME_PILL.w <= W);
+const _: () = assert!(HOME_PILL.y + HOME_PILL.h <= H);
+const _: () = assert!(DOCK_BAND_Y1 <= HOME_PILL.y);
+const _: () = assert!(HOME_HIT.y <= HOME_PILL.y);
+const _: () = assert!(HOME_HIT.y + HOME_HIT.h == H);
+const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
 
 // Shutter button (r=48 core, outer ring 64px), as the model places it.
 const SHUTTER_CX: usize = camera::SHUTTER_CX;
@@ -1323,7 +1337,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
     }
 
     // The system's home indicator: the pill, and the strip below it the tap
-    // handler answers, both read off HOME_MARK_*.
+    // handler answers, both read off `std::design::home_band`.
     if HOME_PILL.contains(x, y) {
         return chrome::TEXT_DIM;
     }

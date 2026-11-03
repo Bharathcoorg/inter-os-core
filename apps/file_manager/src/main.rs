@@ -171,8 +171,12 @@ const _: () = assert!(
 );
 
 /// The system home indicator, and the strip that contains it.
-const HOME_HIT: Rect = Rect::new(240, 1392, 240, 48);
-const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
+///
+/// Both come from the platform's own declaration: the mark this app paints and
+/// the box that answers a press are then one fact, not two, and the press box is
+/// the touch floor rather than the six rows of ink.
+const HOME_HIT: Rect = std::design::home_band::HIT;
+const HOME_PILL: Rect = std::design::home_band::PILL;
 
 /// Right edge the header readout is aligned to (the 24px right margin).
 const READOUT_X1: usize = W - HEADER_MARGIN;
@@ -4264,7 +4268,7 @@ pub extern "C" fn _start() -> ! {
                     // WHY the home gesture is the only one that leaves from
                     // outside a control: a pan anywhere on the screen used to
                     // throw the user out of the file list.
-                    let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;
+                    let is_home_gesture = HOME_HIT.contains(input.x as usize, input.y as usize);
                     if is_home_gesture
                         && (input.kind == 4
                             || input.kind == 6

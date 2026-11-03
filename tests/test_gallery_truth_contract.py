@@ -163,10 +163,17 @@ def test_the_home_gesture_only_leaves_the_app_from_the_home_strip():
     """A pan or a fling from anywhere exited the gallery.
 
     Scrolling the grid threw the user out of the app.
+
+    WHY the pin names the SDK box now: the gallery used to answer a hand-written
+    `y >= 1400 && x >= 240 && x <= 480`, a strip of its own invention. The press
+    and the swipe now read one declaration -- `design::home_band::HIT` -- so the
+    contract is that the gesture is gated by that box at all, not the old rows.
     """
     source = gallery_main()
-    assert "let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;" in source
+    assert "let is_home_gesture = HOME_HIT.contains(input.x as usize, input.y as usize);" in source
+    assert "const HOME_HIT: Rect = std::design::home_band::HIT;" in source
     assert "if is_home_gesture" in source
+    assert "input.y >= 1400 && input.x >= 240 && input.x <= 480" not in source
 
 
 def test_the_empty_state_does_not_name_a_shortcut_that_does_not_exist():

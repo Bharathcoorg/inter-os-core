@@ -844,8 +844,8 @@ fn pin_keypad_pixel(x: usize, y: usize) -> Option<u32> {
 }
 
 fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
-    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
-        return THEME.on_surface_variant;
+    if let Some(c) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return c;
     }
     if let Some(c) = back_button_pixel(x, y) {
         return c;
@@ -945,8 +945,8 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 }
 
 fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
-    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
-        return THEME.on_surface_variant;
+    if let Some(c) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return c;
     }
     if let Some(c) = back_button_pixel(x, y) {
         return c;
@@ -1145,44 +1145,53 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
 /// Rows the status line owns: one scale-2 run at `STATUS_Y`.
 const STATUS_H: usize = std::design::font::line_height(2);
-/// The home-gesture band's own height, measured up from the foot of the surface.
+/// The home-gesture box this app answers, and the rows its stack yields to it.
 ///
 /// WHY named: the strip is the platform's and it is bottom-anchored, so the row
 /// this app's stack stops owning is a property of the canvas, not a number to
 /// remember -- a taller surface or a taller band has to move the boundary with
 /// it rather than leave the stack painted into the system's indicator.
-const GESTURE_BAND_H: usize = 40;
+///
+/// WHY it is read off `home_band::HIT` and is no longer a remembered 40: the
+/// box this app answered was a hand-written 241 columns by 40 rows from row
+/// 1400 -- asymmetric about column 360.5 and under the platform's 44-row touch
+/// floor -- so a thumb one row clear of the box did nothing, which reads as a
+/// hung device. The SDK names the answering box: the pill's neighbourhood at
+/// the 48-row preferred target, centred and reaching the panel's last row.
+/// The stack yields exactly the rows that box claims, because the press and
+/// the ownership boundary were always one decision.
+const GESTURE_BAND_H: usize = std::design::home_band::HIT.h;
 /// The system's home-gesture strip: the indicator below it is the platform's,
 /// bottom-anchored, and this app's stack grows toward it rather than over it.
 const GESTURE_Y0: usize = H - GESTURE_BAND_H;
-/// WHY checked at compile time: the band is the last `GESTURE_BAND_H` rows of the
-/// surface and nothing else may live in it -- the mark inside it, the stack above
-/// it, both have to agree with the boundary the same derivation gives.
+/// WHY checked at compile time: the band is the last `GESTURE_BAND_H` rows of
+/// the surface and nothing else may live in it -- the mark inside it, the
+/// stack above it, both have to agree with the boundary the same derivation
+/// gives, and the boundary has to be the top of the box the press answers.
 const _: () = assert!(GESTURE_Y0 + GESTURE_BAND_H == H);
+const _: () = assert!(GESTURE_Y0 == std::design::home_band::HIT.y);
+const _: () = assert!(GESTURE_BAND_H >= std::design::touch::MIN_TARGET);
 
-/// The indicator this app draws for that strip, and the rows its own tap
-/// gesture owns from.
+/// The indicator this app draws, and the box its tap answers, both come from
+/// the SDK's home band rather than from copies of its numbers.
 ///
-/// WHY the mark is named: three painters spelled it `1418..1424, 260..460` as
-/// literals while the tap path owned every column from 1400 down -- eighteen
+/// WHY the mark was named by literals: three painters spelled `1418..1424,
+/// 260..460` while the tap path owned every column from 1400 down -- eighteen
 /// rows above the mark and two hundred columns outside it. A press on blank
 /// surface beside the indicator closed the app, which is a control that is
-/// tappable where it is not drawn.
+/// tappable where it is not drawn. The ink and the answer were two independent
+/// decisions about one control, which is how they drifted; `home_band::pixel`
+/// now inks the shell's own pill and `home_band::contains` answers the box it
+/// is declared inside, so paint and press are one declaration read twice.
 ///
-/// WHY the gesture still owns the rows under the mark: from the mark to the
-/// bottom of the canvas this app paints nothing of its own, and the strip is
-/// the system's; the tap keeps its thumb-height without claiming a card.
-const GESTURE_MARK_X0: usize = 260;
-const GESTURE_MARK_X1: usize = 460;
-const GESTURE_MARK_Y: usize = 1418;
-const GESTURE_MARK_H: usize = 6;
-const GESTURE_MARK_Y1: usize = GESTURE_MARK_Y + GESTURE_MARK_H;
-
-/// WHY checked at compile time: the mark belongs to the strip the stack above
-/// is not allowed to grow into, and it has to be inside the canvas. Grow the
-/// stack and the first fact fails; grow the mark and the second does.
-const _: () = assert!(GESTURE_Y0 <= GESTURE_MARK_Y);
-const _: () = assert!(GESTURE_MARK_Y1 <= H);
+/// WHY the gesture still owns the rows under the mark: from the answering box
+/// to the bottom of the canvas this app paints nothing of its own, and the
+/// strip is the system's; the press keeps the touch floor's height without
+/// claiming a card.
+const _: () = assert!(std::design::home_band::PILL.y >= GESTURE_Y0);
+const _: () = assert!(
+    std::design::home_band::PILL.y + std::design::home_band::PILL.h <= H
+);
 
 /// The rung a metric row's label and verdict are set in, and the rung its
 /// provenance line is set in.
@@ -1415,7 +1424,14 @@ const BTN_X: [usize; 2] = [24, 368];
 /// lowered, no plate shortened, and every target kept its minimum. Of the stack's
 /// bands the status line is the only one that is neither a control nor a plate,
 /// and the gate under it says what the foot may never cross.
-const STATUS_Y: usize = BTN_Y + BTN_H + spacing::GRID_8;
+///
+/// WHY the last row of that air went: the SDK's answering box starts eight rows
+/// lower than the strip this app used to hand-write, and the foot of the stack
+/// ended level with it. The status line is not a plate, so the step under it
+/// gave up the row -- one pixel of air, and the press box keeps every row the
+/// panel's last column of empty canvas owns.
+const STATUS_STEP: usize = spacing::GRID_8 - 1;
+const STATUS_Y: usize = BTN_Y + BTN_H + STATUS_STEP;
 
 /// WHY checked at compile time: `repaint` re-rasterises `STATUS_Y..STATUS_Y +
 /// STATUS_H`, and the gesture strip below it is the platform's -- a stack that
@@ -1784,8 +1800,8 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         return credentials_view_pixel(x, y, vault);
     }
     // Home gesture pill.
-    if y >= GESTURE_MARK_Y && y < GESTURE_MARK_Y1 && x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 {
-        return THEME.on_surface_variant;
+    if let Some(c) = std::design::home_band::pixel(x, y, THEME.on_surface_variant) {
+        return c;
     }
     if let Some(c) = cred_action_pixel(x, y, vault) {
         return c;
@@ -2314,22 +2330,16 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     let x = x as usize;
     let y = y as usize;
 
-    // Back button, or a tap on the home indicator: exit to the launcher.
+    // Back button, or a press in the SDK's home box: exit to the launcher.
     //
-    // WHY the indicator's own rectangle: this used to be `y >= GESTURE_Y0`,
-    // which took every column of the strip from eighteen rows above the mark
-    // the app draws, so a press on blank surface next to the indicator closed
-    // the vault. The pan and fling the event loop recognises keeps the
-    // platform's wider strip -- see `tests/test_vault_truth_contract.py`.
-    //
-    // WHY the chip is tested through `back_button::contains` alone: the painter
-    // asks `back_button::pixel_for_theme`, and this used to union that test
-    // with `in_round(.., BACK_X, BACK_Y, BACK_S, BACK_S, 14)` -- the same
-    // square, drawn from the app's own copy of its numbers. One call, one box,
-    // and the box is the SDK's.
-    if std::design::back_button::contains(x, y)
-        || (x >= GESTURE_MARK_X0 && x < GESTURE_MARK_X1 && y >= GESTURE_MARK_Y)
-    {
+    // WHY the box is `home_band::contains`: the tap used to be tested against
+    // the mark's own columns from its row down while the event loop answered a
+    // hand-written 241-column, 40-row strip -- two boxes for one gesture,
+    // neither of them the platform's, the ink and the answer typed as
+    // independent literals. The SDK declaration now names the answering box for
+    // both paths at the 48-row touch floor, centred on the panel and covering
+    // the pill it inks; `tests/test_vault_truth_contract.py` pins it.
+    if std::design::back_button::contains(x, y) || std::design::home_band::contains(x, y) {
         if vault.pin_modal_open {
             vault.pin_modal_open = false;
             vault.pin_len = 0;
@@ -2648,11 +2658,16 @@ pub extern "C" fn _start() -> ! {
                 };
                 let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
-                    // WHY the gesture is bound to the home strip: the old
-                    // code returned to the launcher for a pan or a fling
-                    // from anywhere on the screen, so a scroll threw the
-                    // user out of the vault.
-                    let is_home_gesture = input.y >= 1400 && input.x >= 240 && input.x <= 480;
+                    // WHY the gesture is bound to the SDK's home box: the old
+                    // code returned to the launcher for a pan or a fling from
+                    // anywhere on the screen, so a scroll threw the user out of
+                    // the vault. The first fix answered a hand-written 241 by
+                    // 40 strip at row 1400 -- under the platform's 44-row touch
+                    // floor and off-centre about column 360.5 -- so a thumb one
+                    // row clear of the box did nothing, which reads as a hung
+                    // device. `home_band::contains` answers the SDK's box: 240
+                    // columns centred on the pill, 48 rows reaching 1439.
+                    let is_home_gesture = std::design::home_band::contains(input.x as usize, input.y as usize);
                     if is_home_gesture
                         && (input.kind == 4
                             || input.kind == 6
