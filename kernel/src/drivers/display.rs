@@ -145,6 +145,28 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
         // measurement benefit.
         crate::performance::record_frame(comp_cyc, pres_cyc, flip);
 
+        // One line per touch this flip answered, and only that. `[KMS PERF]`
+        // samples, so the flip carrying an arbitrary tap would otherwise never
+        // be printed; this is the number that says how long the screen took to
+        // agree with the finger, measured entirely inside the guest.
+        // `take_tap_to_flip` snapshots the earlier stages as it consumes the
+        // touch, so the split cannot be read out of order and collapse into the
+        // total.
+        if let Some(latency) =
+            crate::performance::take_tap_to_flip(crate::interrupts::get_system_ticks())
+        {
+            crate::serial_println!(
+                "[TAP FLIP] tap_to_scanout_ms={} wake_to_paint_ms={} paint_to_fliprequest_ms={} app_writes={} flip={} compose_cycles={} present_cycles={}",
+                latency.total_ms,
+                latency.paint_ms.unwrap_or(latency.total_ms),
+                latency.flip_request_ms.unwrap_or(latency.total_ms),
+                latency.writes,
+                flip,
+                comp_cyc,
+                pres_cyc,
+            );
+        }
+
         if flip <= 15 || flip % 30 == 0 {
             crate::serial_println!(
                 "[KMS PERF] flip={} compose_cycles={} present_cycles={} total_cycles={} scanout={}x{}",

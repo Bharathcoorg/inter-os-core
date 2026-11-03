@@ -376,6 +376,10 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
             core::hint::spin_loop();
         }
         crate::event::post_event(TaskId(owner), crate::event::EVENT_TOUCH_INPUT);
+        // Stamped after the wake is posted: the clock this measures is the one a
+        // person waits on, which starts when the owning task is told there is
+        // input and ends when a flip puts the result on the scanout.
+        crate::performance::record_touch_dispatched(crate::interrupts::get_system_ticks(), owner);
         crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
     }
 }

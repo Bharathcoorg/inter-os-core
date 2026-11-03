@@ -2772,6 +2772,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // The client has now drawn into this surface, so a capture of it is
             // a picture of what the client is showing.
             surface.has_frame = true;
+            // The paint starts at the first write that really landed. This
+            // handler, not `sys_surface_write`, is what every client reaches.
+            crate::performance::record_paint_after_touch(crate::interrupts::get_system_ticks(), owner.0);
             // Record which surface rows moved, exactly as the safer
             // `write_surface_pixels` path does.
             //
@@ -4905,6 +4908,10 @@ pub fn sys_surface_destroy(cap_slot: usize, surface_id: u32) -> Result<(), Sysca
 /// Composites display surfaces and atomically flips the scanout buffer.
 pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     let owner = require_display_service(cap_slot)?;
+    // Stamped before the lock, because this is the moment the app stopped
+    // drawing: everything after it is the kernel's, and the two are different
+    // bugs in different files.
+    crate::performance::record_flip_request(crate::interrupts::get_system_ticks(), owner.0);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.commit_surfaces(Some(owner.0));
     // WHY the flip is skipped when it would publish a torn frame: the flip
