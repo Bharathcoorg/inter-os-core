@@ -20,10 +20,7 @@
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
-use launcher::theme::{
-    space, type_scale, Theme, CONTENT_PADDING, NAV_BAR_HEIGHT,
-    SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
-};
+use launcher::theme::{space, type_scale, Theme, CONTENT_PADDING, STATUS_BAR_HEIGHT};
 
 /// Rows the drawer shows at once.
 ///
@@ -86,13 +83,6 @@ const BADGE_GLYPHS: usize = 3;
 const DOT_D: usize = space::SM;
 const DOT_GAP: usize = space::MD;
 
-/// Height of the home gesture pill.
-///
-/// WHY 6 and not a spacing token: the pill is an indicator, not a control, and on a
-/// 1,440px surface a 4px line reads as a rendering fault while an 8px bar reads as a
-/// button. Six is the line.
-const GESTURE_PILL_H: usize = 6;
-
 /// Capacity of the formatted render-complete log line.
 // WHY allowed dead: the entry points below are what the shell calls once it wires
 // the drawer hit test and the render log (see the module report). Until then they
@@ -149,7 +139,6 @@ struct Frame {
     chips: Rect,
     grid: Rect,
     dots: Rect,
-    pill: Rect,
 }
 
 fn frame() -> Frame {
@@ -168,19 +157,18 @@ fn frame() -> Frame {
         620,
         GRID_H,
     );
-    let nav_top = SCREEN_HEIGHT - NAV_BAR_HEIGHT;
-    let pill = Rect::new(
-        (SCREEN_WIDTH - space::XXL * 4) / 2,
-        nav_top + (NAV_BAR_HEIGHT - GESTURE_PILL_H) / 2,
-        space::XXL * 4,
-        GESTURE_PILL_H,
-    );
+    // WHY the home mark is not in this frame: it used to be `Rect::new`ed here
+    // from `space::XXL * 4` columns, centred inside the navigation band, which put
+    // a 192 x 6 bar at (264, 1405) -- eight columns narrower than the platform's
+    // mark and thirteen rows above the row the device paints it on, because the
+    // band's own centre was this screen's arithmetic. The painter below asks
+    // `design::home_band::pixel` for the ink, so a rectangle kept here would be a
+    // second copy of a geometry nothing reads.
     Frame {
         search,
         chips,
         grid,
         dots,
-        pill,
     }
 }
 
@@ -1059,8 +1047,8 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < STATUS_BAR_HEIGHT {
         return status_bar(x, y, &theme, &paint(x, y, state).status);
     }
-    if f.pill.contains(x, y) {
-        return theme.on_surface_variant;
+    if let Some(ink) = interos_std::design::home_band::pixel(x, y, theme.on_surface_variant) {
+        return ink;
     }
     if f.search.contains(x, y) {
         return search_field(x, y, &f.search, &theme, paint(x, y, state));

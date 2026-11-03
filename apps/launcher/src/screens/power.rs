@@ -376,9 +376,22 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return COLOR_BG_TOP;
     }
 
-    // 2. Home bottom gesture bar (y: 1410..1416)
-    if y >= 1410 && y <= 1416 && x >= 260 && x <= 460 {
-        return 0x55FFFFFF;
+    // 2. The home mark, painted by the platform's own raster.
+    //
+    // WHY this replaced a filled box: the sheet used to ink these rows with
+    // `y >= 1410 && y <= 1416 && x >= 260 && x <= 460`, which filled 201 columns
+    // by SEVEN rows with square ends -- wider than the panel's own 200-column
+    // mark, starting eight rows above it, and one more rectangle the shell kept
+    // for a gesture the rest of the device shows one mark for. `home_band::pixel`
+    // is the shape every
+    // application copies, so the sheet now shows the mark the rest of the device
+    // shows, and nothing else in these rows.
+    //
+    // WHAT DID NOT MOVE: what a tap here does. The sheet still dismisses on any
+    // tap its own controls did not take (`power_menu_hit`'s `Dismiss` arm); only
+    // the ink changed.
+    if let Some(ink) = interos_std::design::home_band::pixel(x, y, 0x55FFFFFF) {
+        return ink;
     }
 
     // 3. Main Modal Sheet Drawer

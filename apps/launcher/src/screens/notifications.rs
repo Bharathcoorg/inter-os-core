@@ -19,7 +19,7 @@
 use crate::{test_text_aa, LauncherState, NotificationRecord};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{space, type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
+use launcher::theme::{space, type_scale, radius, Theme, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 // -----------------------------------------------------------------------------
 // Constants & Geometry
@@ -182,7 +182,15 @@ const SECTION_HEAD_ADVANCE: usize = SECTION_LABEL_BOX_H + SECTION_HEAD_GAP;
 /// indicator -- a feed that reads as broken rather than as short. The cutoff is
 /// the bottom chrome minus one card, so the stack ends where the surface does:
 /// the card grew with the body rung, so the edge it stops at moves up to match.
-const FEED_BOTTOM: usize = 1223;
+///
+/// WHY 1225 and not the 1223 it carried: the rule is `HOME_PILL.y - ROW_H`, and
+/// the mark this gate is solved against moved with this change -- the shade drew
+/// it at row 1416 from a rectangle of its own, the platform draws it at row 1418.
+/// Two rows lower, so the feed's edge is two rows lower, and the card that stops
+/// on it still closes exactly where the ink begins rather than running two rows
+/// under it. The gate beside the literal re-derives it from the platform's row, so
+/// the number below is that arithmetic's answer for the contract's parser.
+const FEED_BOTTOM: usize = 1225;
 const _: () = assert!(
     FEED_BOTTOM + ROW_H == HOME_PILL.y,
     "the feed must stop one card clear of the home indicator it is stacked above",
@@ -273,8 +281,38 @@ const _: () = assert!(
     "a pill label sits a rung above the captions on this surface, so its box must reserve more",
 );
 
-/// Home gesture indicator pill.
-const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 24, 180, 6);
+/// The home mark this shade paints, taken from the platform.
+///
+/// WHY it was wrong: the shade drew it 180 columns by six at (270, 1416) while
+/// the dashboard next door drew the same mark 180 by FIVE at (270, 1420), the
+/// drawer drew it 192 by six at (264, 1405) and the power sheet filled 201
+/// columns by seven at (260, 1410) -- four objects for one gesture, painted by
+/// the shell every application is told to copy, while the box that answered the
+/// gesture on each of those surfaces was a cut across the panel's whole width
+/// rather than the mark's neighbourhood. This rectangle was also two rows
+/// shorter than the platform's and 20 columns narrower, which is what the feed's
+/// own fit gate under it was measured against, so that number had to be
+/// re-solved with it.
+///
+/// WHAT it is now: `design::home_band::PILL` -- 200 columns by six, centred, at
+/// rows 1418..=1423 -- painted by `home_band::pixel`, with the tap answered by
+/// `design::home_band::HIT` (240 columns by 48, reaching the panel's last row) in
+/// the shell's input loop.
+const HOME_PILL: Rect = Rect::new(
+    interos_std::design::home_band::PILL.x,
+    interos_std::design::home_band::PILL.y,
+    interos_std::design::home_band::PILL.w,
+    interos_std::design::home_band::PILL.h,
+);
+
+/// The mark on this surface is the platform's, to the row and the column: the
+/// feed gate under it is only true if this is true.
+const _: () = assert!(
+    HOME_PILL.y == interos_std::design::home_band::PILL.y
+        && HOME_PILL.w == interos_std::design::home_band::PILL_W
+        && HOME_PILL.h == interos_std::design::home_band::PILL_H,
+    "the shade's home mark must be the platform's mark, not a rectangle of its own",
+);
 
 // -----------------------------------------------------------------------------
 // Rounded Geometry Helpers
@@ -774,7 +812,6 @@ struct EventsFrame {
     hidden: usize,
     empty_head: LabelRun,
     empty_body: LabelRun,
-    home_pill: Rect,
 }
 
 // -----------------------------------------------------------------------------
@@ -1171,7 +1208,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         hidden,
         empty_head,
         empty_body,
-        home_pill: HOME_PILL,
     }
 }
 
@@ -1476,8 +1512,13 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     }
 
     // 7. Home Indicator Pill
-    if rounded_contains(f.home_pill, x, y, 3) {
-        return theme.on_surface_variant;
+    //
+    // WHY the platform paints it: this surface had its own rectangle and its own
+    // corner test, so the shade's mark was a different object from the dashboard's
+    // beside it. `home_band::pixel` is the raster every application copies, which
+    // makes the two the same shape by construction instead of by a comment.
+    if let Some(ink) = interos_std::design::home_band::pixel(x, y, theme.on_surface_variant) {
+        return ink;
     }
 
     theme.surface

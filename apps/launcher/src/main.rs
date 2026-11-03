@@ -10,6 +10,12 @@ use launcher::nav::{self, NavTarget};
 use launcher::theme::*;
 // Wallpaper catalogue shared with the Settings app that writes it.
 use std::design::walls;
+// The box a home tap is answered in, and the mark that says so. The shell paints
+// it on four of its own surfaces and every application is told to copy that one;
+// the tap rules in the input loop below ask the same box, so the ink and the
+// answer are one geometry. See `launcher::nav` for the home screen's separate
+// three-control bar, which is not this mark and did not move.
+use std::design::home_band;
 
 // Visual baseline theme: InterOS Stock
 // WHY one file per screen: every renderer was a function in this file, so two
@@ -4395,7 +4401,26 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 break;
                             }
-                            if input.kind == 1 && input.y >= 1400 {
+                            // WHY the platform's box and not a row cut: this rule
+                            // read `y >= 1400` across all 720 columns, while the
+                            // drawer painted its home mark 192 x 6 at (264, 1405) --
+                            // so the rows beside the ink answered a gesture the ink
+                            // never advertised, and the ink itself was under a
+                            // seventh of the 44-row touch floor. Both are the
+                            // platform's now:
+                            // the mark is `design::home_band::PILL` (200 x 6 at
+                            // 1418..=1423) and the box that answers is
+                            // `home_band::HIT` (240 x 48 at 1392..=1439, x 240..=479).
+                            //
+                            // WHAT DID NOT MOVE: what the tap does. It still closes
+                            // the drawer and presents the home grid, and a tap under
+                            // the mark that claims no control still falls through to
+                            // the dismiss rule below, because that rule is the
+                            // drawer's own "nothing here" answer and not the mark's
+                            // box.
+                            if input.kind == 1
+                                && home_band::contains(input.x as usize, input.y as usize)
+                            {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 surface_flip_display();
@@ -4468,8 +4493,23 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::Notifications => {
                             // Swipe up or bottom tap returns to HomeScreen
+                            //
+                            // WHY the box is `home_band::HIT` and not `y >= 1350`:
+                            // the shade answered the whole width from row 1350,
+                            // sixty-six rows of bare surface above the 180 x 6 mark
+                            // it painted at (270, 1416), so a tap far from any ink
+                            // closed the surface. The platform's box is 240 columns
+                            // by 48 at 1392..=1439 and it covers the mark the shade
+                            // now paints, `home_band::PILL`. What the tap does is
+                            // unchanged -- back to the home grid -- and a swipe up
+                            // still returns from anywhere; only the rows and columns
+                            // that count as a home tap moved.
                             if (is_drag(input.kind) && input.dy <= -60)
-                                || (input.kind == 1 && input.y >= 1350)
+                                || (input.kind == 1
+                                    && home_band::contains(
+                                        input.x as usize,
+                                        input.y as usize,
+                                    ))
                             {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
@@ -4567,8 +4607,21 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::LiveWidgets => {
                             // Swipe right returns to HomeScreen
+                            //
+                            // WHY the box is `home_band::HIT`: the dashboard painted
+                            // its mark 180 columns by FIVE rows at (270, 1420) and
+                            // then answered `y >= 1400` across all 720 columns -- a
+                            // five-row ink inside a forty-row band of silence. The
+                            // mark is now `home_band::PILL` (200 x 6, rows
+                            // 1418..=1423) and the answer is the platform's box
+                            // (240 x 48, rows 1392..=1439). Returning home is
+                            // unchanged; the swipe right still works from anywhere.
                             if (is_drag(input.kind) && input.dx >= 60)
-                                || (input.kind == 1 && input.y >= 1400)
+                                || (input.kind == 1
+                                    && home_band::contains(
+                                        input.x as usize,
+                                        input.y as usize,
+                                    ))
                             {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
@@ -4752,7 +4805,20 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     }
-                                } else if y >= 1400 {
+                                } else if home_band::contains(x, y) {
+                                    // WHY the platform's box: this rule read `y >=
+                                    // 1400` over all 720 columns, the same cut the
+                                    // drawer and the dashboard answered with, and it
+                                    // is now the 240 x 48 box every other surface on
+                                    // the device answers -- rows 1392..=1439, columns
+                                    // 240..=479. What the tap does is unchanged.
+                                    //
+                                    // WHAT THIS SURFACE STILL DOES NOT DO: paint the
+                                    // mark inside that box. `screens/search.rs` draws
+                                    // its field, its rows and its status line and
+                                    // nothing below row 812, so the answer here is
+                                    // invisible on the search screen and is inked on
+                                    // the four surfaces that own one.
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();
@@ -5174,6 +5240,16 @@ pub extern "C" fn _start() -> ! {
                                 // above y 1400 and did nothing at all below it, and
                                 // the back control at x 120 fell into the catch-all
                                 // and performed Home.
+                                //
+                                // WHY the retired 240..=480 row cut is not the
+                                // platform's home box: `design::home_band::HIT` is
+                                // 240 columns by 48 at rows 1392..=1439 and it is the
+                                // box the shell's own panels -- the drawer, the shade,
+                                // the dashboard and the search view -- answer to leave
+                                // themselves. This bar is not a panel over another
+                                // surface; it is the home surface's three controls, its
+                                // thirds are the committed hit test, and they did not
+                                // move with that change.
                                 //
                                 // WHY Back reports instead of pretending: the
                                 // launcher home surface is the root of the view

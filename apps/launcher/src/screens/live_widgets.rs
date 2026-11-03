@@ -16,11 +16,58 @@
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{type_scale, radius, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
+use launcher::theme::{type_scale, radius, Theme, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 const THEME: Theme = launcher::theme::SHELL;
 
-const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
+/// The home mark this screen paints, taken from the platform instead of from
+/// a measurement of this screen.
+///
+/// WHY it was wrong: the dashboard drew the mark 180 columns by FIVE rows at
+/// (270, 1420) while the shade beside it drew the same mark 180 by SIX at
+/// (270, 1416), the drawer drew it 192 by six at (264, 1405) and the power sheet
+/// filled 201 columns by seven at (260, 1410) -- four objects for one gesture,
+/// painted by the shell every application is told to copy, while the box that
+/// answered the gesture on each of those surfaces was a cut across the panel's
+/// whole width rather than the mark's neighbourhood. Five rows is also under a
+/// seventh of the 44-row touch floor the platform promises a thumb.
+///
+/// WHAT THIS CHANGE DID NOT MOVE: the control centre's own 160 x 8 indicator at
+/// (280, 1428), which is the anchor the whole shade panel is centred from, and the
+/// home surface's three-control bar in `launcher::nav`, whose 88 x 11 home capsule
+/// sits inside committed 240 x 60 thirds. Both are named here so that the number of
+/// home marks on this device is stated rather than implied.
+///
+/// WHAT it is now: `design::home_band::PILL`, the platform's mark -- 200 columns
+/// by six, centred, at rows 1418..=1423 -- and the box that answers it,
+/// `design::home_band::HIT`, 240 columns by 48 reaching the panel's last row.
+/// The painter below asks the platform's own raster for the ink, so the shape
+/// cannot drift from the shape the rest of the tree draws; this rectangle is left
+/// for the fit gate under it, which has to know the row the card column stops
+/// above.
+///
+/// WHY the launcher's `Rect` and not the SDK's: the frame and the gates on this
+/// surface are typed in `launcher::layout::Rect`, so the four fields are copied
+/// rather than a second rectangle type threaded through the painter.
+const HOME_PILL: Rect = Rect::new(
+    interos_std::design::home_band::PILL.x,
+    interos_std::design::home_band::PILL.y,
+    interos_std::design::home_band::PILL.w,
+    interos_std::design::home_band::PILL.h,
+);
+
+/// The mark on this screen is the platform's, to the row and the column.
+///
+/// WHY restated rather than assumed: the gate below keeps the card column above
+/// `HOME_PILL.y`, so it only means what it says if `HOME_PILL` still is
+/// `home_band::PILL`. The old rectangle satisfied neither, and no check on this
+/// surface could tell.
+const _: () = assert!(
+    HOME_PILL.y == interos_std::design::home_band::PILL.y
+        && HOME_PILL.h == interos_std::design::home_band::PILL_H
+        && HOME_PILL.w == interos_std::design::home_band::PILL_W,
+    "the dashboard's home mark must be the platform's mark, not a rectangle of its own",
+);
 
 /// The line box a run at `scale` reserves, named once so a card's rows can be
 /// stacked from the ladder rather than from a fitted literal.
@@ -215,6 +262,17 @@ const _: () = assert!(READING_SUB_DY + lh(type_scale::CAPTION) <= READING_CARD_H
 const _: () = assert!(READINGS_HEAD_Y + lh(type_scale::SECTION) <= READINGS_CARD0_Y);
 const _: () = assert!(AUDIO_ROW_Y >= STORAGE_ROW.y + STORAGE_ROW.h);
 const _: () = assert!(ROW3_Y >= AUDIO_ROW.y + AUDIO_ROW.h);
+/// The card column's last row against the mark's first row.
+///
+/// WHY this needed re-solving rather than a passing glance: the gate is written
+/// against `HOME_PILL.y`, and the mark moved two rows UP with this change -- from
+/// the 1420 this screen typed for itself to the platform's 1418 -- so the
+/// clearance it guards shrank by two rows and had to be re-measured, not
+/// re-asserted from the old number. The column solves to 789 + 4 x 94 + 82, so the
+/// fifth readings card closes at row 1247 and sits 171 rows clear of the mark:
+/// the gate holds with the platform's row exactly as it held with this screen's
+/// own, because every row in the column is derived from the type ladder above it
+/// and none was ever measured off the pill.
 const _: () = assert!(
     READINGS_CARD0_Y + (READINGS_CARD_COUNT - 1) * READING_PITCH + READING_CARD_H <= HOME_PILL.y,
     "the dashboard's last readings card must stay above the home gesture pill",
@@ -559,9 +617,6 @@ struct WidgetsPlan {
 
     // Real System Readings Cards (5 cards)
     readings: [DashboardReadingCard; 5],
-
-    // Home indicator
-    home_pill: Rect,
 }
 
 /// Appends `extra` to a label buffer, stopping at its end rather than wrapping.
@@ -952,7 +1007,6 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         vault_chip_label,
         readings_head,
         readings,
-        home_pill: HOME_PILL,
     }
 }
 
@@ -1192,8 +1246,14 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
 
     // 8. Home Indicator Pill
-    if rounded_contains(f.home_pill, x, y, 2) {
-        return theme.on_surface_variant;
+    //
+    // WHY the platform draws it and not this screen: the pixel function below had
+    // its own rectangle and its own corner radius (2 on a five-row box), so the
+    // mark grew square ends no other surface on the device had. `home_band::pixel`
+    // is the raster every application is told to copy, so the ink here is that
+    // shape by construction rather than by a comment claiming the two agree.
+    if let Some(ink) = interos_std::design::home_band::pixel(x, y, theme.on_surface_variant) {
+        return ink;
     }
 
     theme.surface
