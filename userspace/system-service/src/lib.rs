@@ -520,6 +520,11 @@ pub fn run_ai() -> ! {
 }
 
 /// Extracts prompt text from IPC payload, stripping header prefixes if present.
+///
+/// WHY the shape test is `generative_payload_is_header_shaped` and not a local
+/// clause: this route's cut guard has to fire on exactly the payloads this parse
+/// would have trusted, and the only way to keep the two clause sets from drifting
+/// is for one of them to call the other.
 fn extract_prompt_text(payload: &[u8]) -> &[u8] {
     if payload.len() >= 4 && (&payload[..4] == b"GENR" || &payload[..4] == b"GEN:") {
         return &payload[4..];
@@ -528,7 +533,7 @@ fn extract_prompt_text(payload: &[u8]) -> &[u8] {
         let req = unsafe {
             core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiInferenceRequest)
         };
-        if req.model_id <= 16 && req.flags <= 255 {
+        if generative_payload_is_header_shaped(&req) {
             let start = core::mem::size_of::<std::ai::AiInferenceRequest>();
             if req.input_len > 0 {
                 let end = start + (req.input_len as usize).min(payload.len().saturating_sub(start));
@@ -1072,7 +1077,43 @@ fn model_gap_notice<'a>(
     notice.finish()
 }
 
+/// Why the generative arm ran nothing at all because its prompt never arrived.
+///
+/// WHY this is written beside `reply_with_answer` rather than folded into the arm:
+/// the two counts are the whole content of the refusal, and the test that pins them
+/// reads this function; an arm that built its notice inline would let the sentence
+/// and the guard drift apart the way the embedding route's did until
+/// `embedding_gap_notice` pulled them together.
+///
+/// WHY both counts go back to the caller: the caller knows how long its prompt was
+/// and cannot see what the transport did to it. A refusal that said only "too long"
+/// would leave it guessing what would have fit -- and unlike an embedding, a
+/// generation answered from a prefix reads as fluent prose, so nothing downstream
+/// can spot the cut.
+fn generation_overrun_notice<'a>(
+    declared: usize,
+    arrived: usize,
+    out: &'a mut [u8],
+) -> (u32, &'a [u8]) {
+    let mut notice = Notice::new(out);
+    notice.word(b"Generation refused: this request declares ");
+    notice.byte_count(declared as u64);
+    notice.word(b" prompt bytes and the transport delivered ");
+    notice.byte_count(arrived as u64);
+    notice.word(
+        b". Nothing was answered from the piece that arrived: the bytes in front of this service are the request's own header followed partway through the prompt, and words made from them would be an answer to a question the device never received.",
+    );
+    notice.word(b" Re-send with a prompt no longer than the bytes that arrived.");
+    (std::ai::STATUS_UNSUPPORTED, notice.finish())
+}
+
 /// Answers a generative query, streaming the bytes when the mailbox cannot hold them.
+///
+/// WHY this is the delivery route for a refusal as much as for an answer: a notice
+/// past the forty bytes an inline mailbox reply keeps must travel whole, and
+/// `stream_answer` under `MSG_TYPE_GENERATE_CHUNK` is the channel the reader on the
+/// other end already drains -- the same idiom `emit_embed_notice` established on the
+/// embedding route, with that route's message type substituted for this one's.
 fn reply_with_answer(
     sender_task_id: u64,
     status: u32,
@@ -1289,6 +1330,18 @@ enum EmbeddingGap {
     /// Both counts go back to the caller because "shorten the prompt" is only
     /// actionable if the caller can see how much room the transport leaves.
     InputTruncated(usize, usize),
+    /// The strict-neural flag was set and the request carries neither text nor
+    /// token ids: `input_len` zero with no input byte behind the header.
+    ///
+    /// WHY this is its own gap rather than a case of `NoVocabTokenizer`: that
+    /// variant's sentence tells the caller its request "carries text, not token
+    /// ids" and offers two next moves -- send a token-id stream, or drop the flag
+    /// and take the labelled lexical baseline. A caller that sent nothing can take
+    /// neither. The mapping is not the gap here, and neither is the flag: there is
+    /// no query for a neural run or for a lexical projection to work on, so the
+    /// baseline guidance would be advice to do the same nothing differently. The
+    /// refusal names the state the payload is actually in.
+    EmptyRequest,
 }
 
 /// Do these bytes read as an `AiInferenceRequest`, setting length aside?
@@ -1307,19 +1360,44 @@ fn payload_is_header_shaped(req: &std::ai::AiInferenceRequest) -> bool {
         && (req.flags <= 255)
 }
 
-/// Was this payload a request whose input did not all arrive?
+/// Do these bytes read as an `AiInferenceRequest` on the generative route?
 ///
-/// `Some((declared, arrived))` for a payload that is header-shaped and states an
-/// input length larger than the bytes holding it: the shape test is the arm's own,
-/// so this fires only on a payload the arm would otherwise have treated as a request.
-/// `arrived` is the input region the payload has, which is what the caller can
-/// compare against its own prompt; the header is not counted in it.
+/// WHY this is not `payload_is_header_shaped`: the two routes ask different
+/// questions of a header, and each guard has to answer its own route's. The
+/// embedding arm reads `target_dim` and picks a projection width from it, so a
+/// dimension the SDK never names means those bytes were not an embedding request;
+/// a generation has no output dimension to name, so its parse -- and therefore its
+/// guard -- must ask nothing of that field, or a request whose author left a
+/// dimension in would go unanswered by a route that has no use for it.
 ///
-/// WHY a function rather than a clause inside the arm's parse: the parse's answer to
-/// an over-long declaration is to ignore the header, and ignoring it is what leaves
-/// the whole buffer -- header included -- as the query the arm then answers. The
-/// event has to be named, not defaulted around.
-fn declared_input_overrun(payload: &[u8]) -> Option<(usize, usize)> {
+/// The two clauses this does share with `extract_prompt_text` are shared by
+/// construction: that parse calls this function, so a payload cannot be refused as
+/// a cut prompt by a guard and read as prose by the parse, nor the other way round.
+fn generative_payload_is_header_shaped(req: &std::ai::AiInferenceRequest) -> bool {
+    (req.model_id <= 16) && (req.flags <= 255)
+}
+
+/// Was this payload a request whose input did not all arrive, measured by the
+/// clauses of the route that is asking?
+///
+/// `Some((declared, arrived))` for a payload the route reads as a header and which
+/// states an input length larger than the bytes holding it. `arrived` is the input
+/// region the payload has, which is what the caller can compare against its own
+/// prompt; the header is not counted in it.
+///
+/// WHY a function rather than a clause inside each arm's parse: the parse's answer
+/// to an over-long declaration is to ignore the header (embedding) or to clamp to
+/// the bytes it has (generation), and both defaults leave a service answering from
+/// bytes the caller never sent. The event has to be named, not worked around.
+///
+/// WHY the shape is the only parameter: the length comparison is the same
+/// arithmetic on the same wire layout for both routes, and it is the clause sets
+/// that differ. Putting the shared half in one body is what keeps a fix to the
+/// comparison from being applied to one route and forgotten on the other.
+fn declared_overrun(
+    payload: &[u8],
+    shape: impl Fn(&std::ai::AiInferenceRequest) -> bool,
+) -> Option<(usize, usize)> {
     let hdr = core::mem::size_of::<std::ai::AiInferenceRequest>();
     if payload.len() < hdr {
         return None;
@@ -1328,11 +1406,56 @@ fn declared_input_overrun(payload: &[u8]) -> Option<(usize, usize)> {
         core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiInferenceRequest)
     };
     let arrived = payload.len() - hdr;
-    if payload_is_header_shaped(&req) && (req.input_len as usize) > arrived {
+    if shape(&req) && (req.input_len as usize) > arrived {
         Some((req.input_len as usize, arrived))
     } else {
         None
     }
+}
+
+/// The embedding arm's cut test, with the embedding arm's clauses.
+fn declared_input_overrun(payload: &[u8]) -> Option<(usize, usize)> {
+    declared_overrun(payload, payload_is_header_shaped)
+}
+
+/// The generative arm's cut test, with the generative arm's clauses.
+///
+/// WHY a second name rather than a call with an argument at the site: each arm
+/// reads the predicate its own parse uses, and a call site that named the shape
+/// inline could be pointed at the other route's function without a reader noticing.
+fn declared_prompt_overrun(payload: &[u8]) -> Option<(usize, usize)> {
+    declared_overrun(payload, generative_payload_is_header_shaped)
+}
+
+/// Does this payload claim to be a strict-neural request that carries nothing?
+///
+/// `true` only for a header this arm's own parse would have trusted, with the
+/// strict-neural flag set, an `input_len` of zero and no input byte behind it -- so
+/// neither of the two things a strict request can carry (text, token ids) is
+/// present. Bytes after the header are the query the parse takes, so a header
+/// declaring zero input in a longer buffer is not an empty request; and prose that
+/// happens to be twenty-four bytes fails the shape test, exactly as it does in the
+/// parse, rather than being refused for a header nobody sent.
+///
+/// WHY the flag word alone is not enough: with `input_len` zero the parse falls
+/// back to the whole payload, and on a buffer that is only the header that leaves
+/// `model_id`, `target_dim`, `input_len`, `flags` and `input_offset` as the query.
+/// A device holding the installed file segments those bytes with no complaint --
+/// they are bytes -- so the request the caller sent as nothing would be answered as
+/// a prompt about the request's own header. That is why this is a guard on the
+/// payload, placed ahead of the id read and the mapping like
+/// `declared_input_overrun`, and not a rewording of a branch the file can overrule.
+fn strict_neural_request_is_empty(payload: &[u8]) -> bool {
+    let hdr = core::mem::size_of::<std::ai::AiInferenceRequest>();
+    if payload.len() != hdr {
+        return false;
+    }
+    let req = unsafe {
+        core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiInferenceRequest)
+    };
+    payload_is_header_shaped(&req)
+        && (req.flags & std::ai::FLAG_STRICT_NEURAL) != 0
+        && req.input_len == 0
 }
 
 /// Picks the branch from the inputs, before anything is opened.
@@ -1878,6 +2001,19 @@ fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [
             notice.word(b" Re-send with an input no longer than the bytes that arrived.");
             STATUS_UNSUPPORTED
         }
+        EmbeddingGap::EmptyRequest => {
+            // WHAT this refusal may not do is recycle the sentence above it. Every
+            // other strict-neural gap here can point the caller at dropping the
+            // flag, because the labelled lexical projection genuinely answers a text
+            // request -- but an empty request has no query for that projection
+            // either, so "drop the flag" would promise an answer that does not
+            // exist. And it may not claim the request carried text: it carried
+            // nothing, which is the whole reason nothing runs.
+            notice.word(
+                b"Embedding refused: the strict-neural flag is set and this request carries neither text nor token ids -- it declares no input and the transport delivered none, so nothing reached this service for a model to run on. Dropping the flag is not a way past it: the labelled lexical baseline has no query to project either, and a vector out of an empty request would be this service answering a question nobody asked. Send text, or a token-id stream.",
+            );
+            STATUS_UNSUPPORTED
+        }
     };
     (status, notice.finish())
 }
@@ -2084,6 +2220,27 @@ pub fn handle_ipc_inference_query(
         || msg_type == MSG_TYPE_GENERATE_ALT
         || (payload.len() >= 4 && (&payload[..4] == b"GENR" || &payload[..4] == b"GEN:"))
     {
+        // A prompt the transport cut is refused here, before the task is registered
+        // and before the model file is opened.
+        //
+        // WHY this position and not further in: `extract_prompt_text` clamps the
+        // declared length to the bytes that arrived (`req.input_len.min(...)`) and
+        // hands back the prefix, so every site below this one already believes it
+        // holds a whole prompt -- it opens the file, reads the metadata and answers
+        // the piece that survived as though the caller had asked that question. For
+        // an embedding the reader at least sees a vector of the width they asked for;
+        // a generation is fluent prose either way, so nothing downstream can spot the
+        // cut and this arm is the only party that still can.
+        //
+        // WHY before the registration: an active session is one the device can be
+        // asked to cancel, and a request that never fully arrived started nothing.
+        if let Some((declared, arrived)) = declared_prompt_overrun(payload) {
+            let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+            let (status, notice) = generation_overrun_notice(declared, arrived, &mut scratch);
+            reply_with_answer(sender_task_id, status, notice, tx_buf);
+            return;
+        }
+
         ACTIVE_GENERATION_TASK.store(sender_task_id, core::sync::atomic::Ordering::Relaxed);
         CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
 
@@ -2467,6 +2624,30 @@ pub fn handle_ipc_inference_query(
         let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
         let (status, notice) =
             embedding_gap_notice(EmbeddingGap::InputTruncated(declared, arrived), &mut scratch);
+        emit_embed_notice(sender_task_id, status, notice, tx_buf);
+        return;
+    }
+
+    // A strict-neural request carrying neither text nor token ids is an empty
+    // request, and it is refused for being empty rather than answered as though it
+    // had carried something.
+    //
+    // WHY the position is here, ahead of the id read and the mapping: below this
+    // point the parse's fallback hands `query_text` the payload's own twenty-four
+    // header bytes, and on a device holding the installed file those bytes segment
+    // into ids with no complaint -- so the request sent as nothing would come back
+    // as a vector over the request's own header, filed under this caller. The host
+    // cannot watch that happen, because nothing can open the file here, which is why
+    // the guard is a decision of the payload alone and not a branch the file's own
+    // answer can still overrule.
+    //
+    // WHY the refusal is unconditional on the probe: `NoWeights` is a real gap for a
+    // caller who demanded weights and sent a prompt, but the caller who sent no
+    // prompt is stopped by the missing prompt first, and naming the file instead
+    // would describe a run that could not have happened either way.
+    if strict_neural_request_is_empty(payload) {
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) = embedding_gap_notice(EmbeddingGap::EmptyRequest, &mut scratch);
         emit_embed_notice(sender_task_id, status, notice, tx_buf);
         return;
     }
@@ -4237,6 +4418,304 @@ mod tests {
         not_a_request[0] = 17;
         not_a_request.truncate(MAILBOX_CUT);
         assert_eq!(declared_input_overrun(&not_a_request), None);
+    }
+
+    /// A strict-neural request that carries neither text nor token ids is an empty
+    /// request, and the refusal has to name it as one.
+    ///
+    /// WHAT THE ARM SAID BEFORE: `this request carries text, not token ids`. With
+    /// `input_len` zero and no input byte behind the header, that sentence describes
+    /// a payload the caller never sent -- and the arm's own fallback then hands
+    /// `query_text` the twenty-four header bytes, so a device holding the file could
+    /// answer the request's own header as though it were the prompt. The host cannot
+    /// see that second half (nothing opens the file here), which is why the guard is
+    /// a decision of the payload alone, placed ahead of the id read and the mapping
+    /// like `declared_input_overrun`, rather than a rewording of a branch the file's
+    /// own answer can still overrule.
+    ///
+    /// WHY the baseline guidance had to change too: every other strict refusal here
+    /// can point at dropping the flag, because the labelled lexical projection does
+    /// answer a text request. An empty request has no query for the baseline to
+    /// project either, so the honest sentence says the flag is not what is missing.
+    #[test]
+    fn test_a_strict_neural_request_with_nothing_in_it_is_named_empty() {
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let payload = embedding_request_with(0x80, b"");
+        assert_eq!(
+            payload.len(),
+            core::mem::size_of::<std::ai::AiInferenceRequest>(),
+            "an empty request is a header and nothing else"
+        );
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(
+            resp.status,
+            STATUS_UNSUPPORTED,
+            "an empty request was answered rather than refused (status {})",
+            resp.status
+        );
+        assert_eq!(resp.latency_micros, 0, "a refusal timed a run that never happened");
+        let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let notice = core::str::from_utf8(notice).expect("the refusal is text");
+        // The whole sentence: `Notice::word` appends with no separator, so a
+        // fragment that lost its space reads as one invented word.
+        assert_eq!(
+            notice,
+            "Embedding refused: the strict-neural flag is set and this request carries \
+             neither text nor token ids -- it declares no input and the transport delivered \
+             none, so nothing reached this service for a model to run on. Dropping the flag \
+             is not a way past it: the labelled lexical baseline has no query to project \
+             either, and a vector out of an empty request would be this service answering a \
+             question nobody asked. Send text, or a token-id stream."
+        );
+        // The false claim, named as the thing that must not come back: this refusal
+        // is reached from a request that carries nothing, so no sentence about what
+        // it "carries" may assert text.
+        assert!(
+            !notice.contains("carries text"),
+            "an empty request was described as carrying text: {notice}"
+        );
+    }
+
+    /// Which requests the empty guard names, and which it leaves alone.
+    ///
+    /// WHY the directions matter as much as the fire: the guard refuses before the
+    /// mapping, so a payload that only *looks* empty -- a non-strict request, which
+    /// the labelled baseline still answers, or prose, which is a query whatever its
+    /// header-shaped neighbour -- would lose an answer it was owed. And why the ids
+    /// flag does not save an empty one: `read_token_ids` of zero bytes is no stream,
+    /// so a strict request under that flag carries neither of the two things its
+    /// refusal used to claim it carried.
+    #[test]
+    fn test_an_empty_strict_neural_request_is_read_from_the_payload_alone() {
+        const HDR: usize = core::mem::size_of::<std::ai::AiInferenceRequest>();
+
+        // The empty request, both flag shapes: strict, and no input byte declared
+        // and none arrived.
+        assert!(strict_neural_request_is_empty(&embedding_request_with(0x80, b"")));
+        assert!(strict_neural_request_is_empty(&embedding_request_with(0x90, b"")));
+
+        // Text, however short, is not empty.
+        assert!(!strict_neural_request_is_empty(&embedding_request_with(0x80, b"x")));
+        assert!(!strict_neural_request_is_empty(&embedding_request_with(0x80, b"battery")));
+
+        // A prompt is not empty because the caller did not ask for strict weights.
+        assert!(!strict_neural_request_is_empty(&embedding_request_with(0x00, b"")));
+
+        // A stream of ids is not empty either, and neither is prose or a short
+        // buffer: the guard fires only on a payload this arm's own parse would have
+        // read as a request.
+        assert!(!strict_neural_request_is_empty(&embedding_request_with(0x90, &[7u8; 4])));
+        assert!(!strict_neural_request_is_empty(b"query: battery consumption profile"));
+        assert!(!strict_neural_request_is_empty(&[0u8; HDR - 1]));
+
+        // A header declaring no input with trailing bytes is not empty: those bytes
+        // are what the parse takes as the query.
+        let mut trailing = embedding_request_with(0x80, b"");
+        trailing.extend_from_slice(b"leftover");
+        assert!(!strict_neural_request_is_empty(&trailing));
+
+        // And a payload failing the shape clauses is prose, whatever it declares:
+        // `model_id` 17 is outside the table the SDK writes.
+        let mut not_a_request = embedding_request_with(0x80, b"");
+        not_a_request[0] = 17;
+        assert!(!strict_neural_request_is_empty(&not_a_request));
+
+        // End to end, the direction the guard must NOT fire in: a non-strict empty
+        // request still gets the labelled baseline it was always answered with.
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let payload = embedding_request_with(0x00, b"");
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(
+            resp.status,
+            STATUS_BASELINE_LEXICAL,
+            "a caller who never demanded weights was refused for a gap it does not care about"
+        );
+    }
+
+    /// The header the generative route reads.
+    ///
+    /// WHY it is not the embedding helper: `extract_prompt_text` trusts a payload
+    /// whose `model_id` and `flags` the SDK could have written and asks nothing of
+    /// `target_dim` -- a generation names no output dimension. The cut guard has to
+    /// share those clauses with the parse it guards, or the two disagree about which
+    /// bytes are a request and a prompt the route would have answered goes unrefused.
+    fn generative_request_with(input: &[u8]) -> alloc::vec::Vec<u8> {
+        generative_request_shaped(0, input)
+    }
+
+    /// The same header with a `target_dim` the embedding route would reject.
+    fn generative_request_shaped(target_dim: u32, input: &[u8]) -> alloc::vec::Vec<u8> {
+        let req = std::ai::AiInferenceRequest {
+            model_id: 2,
+            target_dim,
+            input_len: input.len() as u32,
+            flags: 1,
+            input_offset: 0,
+        };
+        let hdr_len = core::mem::size_of::<std::ai::AiInferenceRequest>();
+        let mut payload = alloc::vec::Vec::with_capacity(hdr_len + input.len());
+        payload.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(&req as *const _ as *const u8, hdr_len)
+        });
+        payload.extend_from_slice(input);
+        payload
+    }
+
+    /// The same transport cut `3dcadd9d` refuses for an embedding, on the route that
+    /// answers in words.
+    ///
+    /// WHY the generative route needed it separately: `extract_prompt_text` clamps
+    /// the declared length to the bytes it has (`req.input_len.min(...)`) and hands
+    /// back the prefix, so the arm never learns a prompt was cut -- it opens the
+    /// model file and answers the piece that arrived as though the caller had asked
+    /// that question. A wrong answer costs a generation far more than an embedding:
+    /// the reader cannot see a truncated prompt the way they can see a vector of the
+    /// dimension they asked for, and the reply is fluent either way.
+    #[test]
+    fn test_a_generative_prompt_cut_in_transit_is_refused_with_both_byte_counts() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        const MAILBOX_CUT: usize = 64;
+        let mut tx_buf = [0u8; 1024];
+        let models = gguf::ProbedModels::empty();
+        let mut payload = generative_request_with(&[b'x'; 300]);
+        payload.truncate(MAILBOX_CUT);
+        handle_ipc_inference_query(0, MSG_TYPE_GENERATE, &payload, &models, &mut tx_buf);
+
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(
+            resp.status,
+            STATUS_UNSUPPORTED,
+            "a generation answered a prompt that did not arrive whole (status {})",
+            resp.status
+        );
+        assert_eq!(resp.latency_micros, 0, "a refusal timed a run that never happened");
+        let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let notice = core::str::from_utf8(notice).expect("the refusal is text");
+        assert_eq!(
+            notice,
+            "Generation refused: this request declares 300 prompt bytes and the transport \
+             delivered 40. Nothing was answered from the piece that arrived: the bytes in \
+             front of this service are the request's own header followed partway through \
+             the prompt, and words made from them would be an answer to a question the \
+             device never received. Re-send with a prompt no longer than the bytes that \
+             arrived."
+        );
+    }
+
+    /// The guard is the cut test the embedding arm already runs, against the clauses
+    /// the generative route itself trusts -- and it does not fire in the directions
+    /// that would refuse a prompt that arrived, or a message that never was one.
+    #[test]
+    fn test_a_generative_prompt_is_measured_by_the_clauses_that_route_trusts() {
+        const MAILBOX_CUT: usize = 64;
+
+        // A prompt delivered whole is not a cut one, at any length.
+        assert_eq!(declared_prompt_overrun(&generative_request_with(b"Explain queues")), None);
+        let whole = generative_request_with(&[b'p'; 500]);
+        assert_eq!(declared_prompt_overrun(&whole), None);
+        assert_eq!(
+            declared_prompt_overrun(&generative_request_with(&[])),
+            None,
+            "an empty prompt declares nothing, so nothing went missing"
+        );
+
+        // The cut, with both counts in prompt bytes rather than payload bytes.
+        let mut cut = generative_request_with(&[b'x'; 300]);
+        cut.truncate(MAILBOX_CUT);
+        assert_eq!(declared_prompt_overrun(&cut), Some((300, 40)));
+        cut.truncate(core::mem::size_of::<std::ai::AiInferenceRequest>());
+        assert_eq!(declared_prompt_overrun(&cut), Some((300, 0)));
+
+        // A payload the route reads as prose is never a cut prompt, however long.
+        assert_eq!(declared_prompt_overrun(b"GENR: explain the battery report"), None);
+        assert_eq!(declared_prompt_overrun(&[b'w'; 900]), None);
+        let mut not_a_request = generative_request_with(&[b'x'; 300]);
+        not_a_request[0] = 17;
+        not_a_request.truncate(MAILBOX_CUT);
+        assert_eq!(declared_prompt_overrun(&not_a_request), None);
+
+        // The one clause the two routes do NOT share: a generation names no output
+        // dimension, so `extract_prompt_text` asks nothing of `target_dim` and the
+        // guard cannot either -- while the embedding arm, which does read it, keeps
+        // refusing that payload as prose. The clause sets are each their own route's.
+        let mut odd_dim = generative_request_shaped(1024, &[b'x'; 300]);
+        odd_dim.truncate(MAILBOX_CUT);
+        assert_eq!(
+            declared_prompt_overrun(&odd_dim),
+            Some((300, 40)),
+            "the generative guard stopped sharing its own route's clauses"
+        );
+        assert_eq!(
+            declared_input_overrun(&odd_dim),
+            None,
+            "the embedding guard's shape clause moved, so the two guards are no longer \
+             each their own route's"
+        );
+
+        // End to end, the direction that must not fire: a whole prompt is answered
+        // by whatever the model branch holds, not refused for its length.
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        let mut tx_buf = [0u8; 1024];
+        let models = gguf::ProbedModels::empty();
+        let payload = generative_request_with(b"Summarize notifications");
+        handle_ipc_inference_query(0, MSG_TYPE_GENERATE, &payload, &models, &mut tx_buf);
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        assert_eq!(
+            reason,
+            b"On-device generative stream unavailable: no local model weights loaded.",
+            "a prompt that arrived whole was refused for a cut that did not happen"
+        );
+    }
+
+    /// The generative refusal is longer than the mailbox keeps, which is why it
+    /// travels the way `b8af2a1d` established: whole onto an answer channel, and
+    /// inline only when no channel is free.
+    #[test]
+    fn the_generative_refusal_is_streamed_because_the_mailbox_would_cut_it() {
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) = generation_overrun_notice(300, 40, &mut out);
+        assert_eq!(status, STATUS_UNSUPPORTED, "a refusal answered with a status of its own");
+        assert!(
+            notice.len() > MAILBOX_NOTICE_ROOM,
+            "the generative refusal is now only {} bytes, at or under the {}-byte room an \
+             inline reply keeps, so it no longer needs the channel -- and the wrong fix \
+             would be to shorten it",
+            notice.len(),
+            MAILBOX_NOTICE_ROOM,
+        );
+
+        // The reader's drain, reassembled the way the app reads the answer pipe:
+        // every byte the notice declared arrives, and a slot the transport refuses
+        // is named as a shortfall rather than lost.
+        let mut reassembled = alloc::vec::Vec::new();
+        let streamed =
+            stream_in_slots(notice, std::ai::ANSWER_SLOT_BYTES, |chunk| {
+                reassembled.extend_from_slice(chunk);
+                true
+            });
+        assert_eq!(streamed, notice.len(), "the drain stranded the tail of the refusal");
+        assert_eq!(reassembled, notice, "a reader reassembles something other than the notice");
+
+        // And the shape of the bug it replaces: an inline send reaches this screen
+        // with the first forty bytes and no sign that the rest was dropped.
+        assert_eq!(notice.len().min(MAILBOX_NOTICE_ROOM), MAILBOX_NOTICE_ROOM);
     }
 
     /// Installing the file changes the branch the arm takes, proved by the reply

@@ -314,7 +314,14 @@ def test_the_notice_carries_what_the_walk_read_counted_and_refused():
     # the sentence a test fixture produced, not the widest sentence the reader can
     # be handed, and Notice cuts mid-word once its window is full. The measurement
     # now lives in the Rust guard it is named after.
-    assert arm.count("let mut scratch = [0u8; NOTICE_WINDOW_BYTES];") == 4
+    #
+    # WHY the count is five and not the four it was: the generative route grew a
+    # refusal of its own -- the prompt that did not all arrive, named by both byte
+    # counts before the parse clamps it to the prefix -- and that sentence is wider
+    # than the forty bytes an inline reply keeps, so it takes the same window as the
+    # others. An arm that reached for its own narrower buffer is what the `stale`
+    # loop below refuses.
+    assert arm.count("let mut scratch = [0u8; NOTICE_WINDOW_BYTES];") == 5
     for stale in ("[0u8; 448]", "[0u8; 320]", "[0u8; 240]", "[0u8; 512]", "[0u8; 704]"):
         assert stale not in arm, f"an arm kept its own narrower window {stale!r}"
     assert "const NOTICE_WINDOW_BYTES: usize = 768;" in lib
@@ -1963,6 +1970,353 @@ def test_a_request_cut_in_transit_is_refused_before_its_bytes_are_mapped():
         "the arm's parse grew its own copy of the clauses, so the guard and the "
         "parse can disagree about which bytes are a request"
     )
+
+
+# The generative route's cut guard, and the empty strict-neural request beside it.
+#
+# WHY either needs a shape gate the way the embedding cut does: both guards are a
+# position, and a position is the only thing they have. Their job is to run before
+# a parse further down the same arm -- `extract_prompt_text` clamps a declared
+# prompt to the prefix that arrived, and the embedding parse hands `query_text`
+# the header's own twenty-four bytes when `input_len` is zero -- and a host test
+# can say what a function returns, never where the arm calls it. Past the guard is
+# where the device reads real weights, which is precisely the case no host can
+# run, so the order is pinned here as a shape and not left to be inferred from
+# green tests.
+#
+# WHY a detector that returns faults instead of a list of asserts: the self-test
+# below runs the same reading against a source with a guard moved, deleted, or
+# pointed at the other route's clauses. A second copy of these expressions there
+# would be a second thing that can drift, and an assert stops at the first fault
+# and hides the rest.
+
+
+def tolerant_body(source: str, signature: str) -> str:
+    """`function_body` for a source that may not hold the function at all.
+
+    WHY the difference matters: a mutation that deletes a whole guard has to be
+    reported as the fault it is, not raise before the detector says anything.
+    """
+    try:
+        return function_body(source, signature)
+    except (AssertionError, ValueError):
+        return ""
+
+
+def _generative_cut_faults(lib: str) -> list:
+    """Every way the generative arm can go back to answering a prompt it never got whole."""
+    faults = []
+    arm = without_comments(generative_arm(lib))
+
+    guard = "declared_prompt_overrun(payload)"
+    if guard not in arm:
+        return [f"the generative arm no longer asks whether the prompt arrived: {guard!r} is gone"]
+    at = arm.index(guard)
+
+    for site, why in (
+        (
+            "ACTIVE_GENERATION_TASK.store(sender_task_id",
+            "a request that never fully arrived started a session the device can be "
+            "asked to cancel",
+        ),
+        (
+            "extract_prompt_text(payload)",
+            "the parse clamps the declaration to the prefix, so every site below it "
+            "already believes it holds a whole prompt",
+        ),
+        (
+            "std::fs_open(path, std::FS_READ)",
+            "the model file was opened and the prefix answered from before the cut "
+            "was named",
+        ),
+    ):
+        if site not in arm:
+            faults.append(f"{site!r} is no longer in the arm, so the guard's position cannot be read")
+        elif at > arm.index(site):
+            faults.append(f"the cut guard runs after {site!r}: {why}")
+
+    block = tolerant_body(arm, "if let Some((declared, arrived)) = " + guard + " {")
+    if "generation_overrun_notice(declared, arrived" not in block:
+        faults.append("the guard answers without the refusal that names both byte counts")
+    if "reply_with_answer(sender_task_id, status, notice, tx_buf)" not in block:
+        faults.append("the refusal is not handed to the route that streams a generative answer")
+    if "STATUS_SUCCESS" in block:
+        faults.append("a prompt that never arrived is answered as a success")
+
+    notice = tolerant_body(lib, "fn generation_overrun_notice<'a>(")
+    for counting in ("byte_count(declared as u64)", "byte_count(arrived as u64)"):
+        if counting not in notice:
+            faults.append(
+                f"the refusal no longer names {counting!r} -- the caller knows how long "
+                "its prompt was and cannot see what the transport did to it"
+            )
+    if "Nothing was answered from the piece that arrived" not in notice:
+        faults.append("the refusal stopped saying the prefix went unanswered")
+    if "STATUS_UNSUPPORTED" not in notice:
+        faults.append("the refusal carries no status of its own")
+    if "STATUS_SUCCESS" in notice:
+        faults.append("a cut prompt answers with a success")
+
+    # The sentence this route writes is wider than the mailbox keeps, so the route
+    # that carries it is the one that streams.
+    delivery = tolerant_body(lib, "fn reply_with_answer(")
+    if "stream_answer(sender_task_id, status, MSG_TYPE_GENERATE_CHUNK, message)" not in delivery:
+        faults.append(
+            "a generative answer no longer travels the channel the reader drains, so a "
+            "refusal arrives as the first forty bytes of itself"
+        )
+
+    # Guard and parse must share their clauses, and each route keeps its own.
+    guard_shape = tolerant_body(lib, "fn declared_prompt_overrun(")
+    if "declared_overrun(payload, generative_payload_is_header_shaped)" not in guard_shape:
+        faults.append("the generative guard no longer measures with the clauses the generative parse trusts")
+    parse = tolerant_body(lib, "fn extract_prompt_text(")
+    if "generative_payload_is_header_shaped(&req)" not in parse:
+        faults.append(
+            "the parse grew clauses of its own, so guard and parse can disagree about "
+            "which bytes are a request -- and prose starts being refused for a header "
+            "nobody sent"
+        )
+    clauses = tolerant_body(lib, "fn generative_payload_is_header_shaped(")
+    for clause in ("req.model_id <= 16", "req.flags <= 255"):
+        if clause not in clauses:
+            faults.append(f"the generative shape test no longer reads {clause!r}")
+    if "target_dim" in clauses:
+        faults.append(
+            "a generation names no output dimension, so a guard that reads one refuses "
+            "requests its own parse would answer"
+        )
+    embedding_guard = tolerant_body(lib, "fn declared_input_overrun(")
+    if "declared_overrun(payload, payload_is_header_shaped)" not in embedding_guard:
+        faults.append("the embedding guard stopped measuring with its own route's clauses")
+    return faults
+
+
+def _empty_strict_neural_faults(lib: str) -> list:
+    """Every way a strict-neural request carrying nothing gets answered again."""
+    faults = []
+    arm = embedding_arm(without_comments(lib))
+
+    guard = "strict_neural_request_is_empty(payload)"
+    if guard not in arm:
+        return [f"the embedding arm no longer asks what a strict request carries: {guard!r} is gone"]
+    at = arm.index(guard)
+
+    for site, why in (
+        (
+            "read_token_ids(query_text)",
+            "the header's own bytes were already read as the caller's token ids",
+        ),
+        (
+            "encode_with_installed_file(",
+            "the mapping ran over the header, so a request that carried nothing earns "
+            "the file-backed branch",
+        ),
+        (
+            "plan_embedding_run(",
+            "the branch was chosen from the probe, and an empty request gave the file "
+            "nothing to run on either way",
+        ),
+    ):
+        if site not in arm:
+            faults.append(f"{site!r} is no longer in the arm, so the guard's position cannot be read")
+        elif at > arm.index(site):
+            faults.append(f"the empty-request guard runs after {site!r}: {why}")
+
+    block = tolerant_body(arm, "if " + guard + " {")
+    if "EmbeddingGap::EmptyRequest" not in block:
+        faults.append("an empty strict-neural request is refused as some other gap")
+    if "emit_embed_notice(sender_task_id, status, notice, tx_buf)" not in block:
+        faults.append("the empty-request refusal is not delivered on the route that streams")
+
+    notice = tolerant_body(lib, "fn embedding_gap_notice<'a>(")
+    empty = tolerant_body(notice, "EmbeddingGap::EmptyRequest =>")
+    if "neither text nor token ids" not in empty:
+        faults.append("the refusal no longer says what the request did not carry")
+    if "Dropping the flag is not a way past it" not in empty:
+        faults.append(
+            "the refusal promises the labelled baseline again, and a request with no "
+            "query has no baseline answer either -- so the line would point the caller "
+            "at a reply that does not exist"
+        )
+    if "STATUS_UNSUPPORTED" not in empty:
+        faults.append("the empty-request refusal carries no status of its own")
+    if "STATUS_SUCCESS" in empty:
+        faults.append("a request that carried nothing answers with a success")
+
+    predicate = tolerant_body(lib, "fn strict_neural_request_is_empty(")
+    for clause in (
+        "payload.len() != hdr",
+        "FLAG_STRICT_NEURAL",
+        "req.input_len == 0",
+        "payload_is_header_shaped(&req)",
+    ):
+        if clause not in predicate:
+            faults.append(f"the empty-request predicate no longer reads {clause!r}")
+    return faults
+
+
+def test_a_generative_prompt_cut_in_transit_is_refused_before_the_run_starts():
+    """A prompt the transport cut must not become an answer to its own prefix.
+
+    Sixty-four bytes is what an IPC message carries, and the kernel truncates
+    rather than refusing. A generation whose prompt was longer than that arrives
+    here as a whole header plus a fragment; `extract_prompt_text` clamps the
+    declared length to the bytes it has and hands back the prefix, and every site
+    below it -- the file open, the metadata read, the engine -- then answers the
+    piece that survived as though the caller had asked that question. For an
+    embedding the reader at least sees a vector of the width they asked for; a
+    generation is fluent prose either way, so nothing downstream can spot the cut
+    and this arm is the only party that still can.
+    """
+    faults = _generative_cut_faults(lib_source())
+    assert not faults, faults
+
+
+def test_an_empty_strict_neural_request_is_refused_as_empty():
+    """A request carrying nothing is not a request carrying its own header.
+
+    With `input_len` zero, the embedding parse falls back to the whole payload,
+    and on a buffer that is only the header that leaves `model_id`, `target_dim`,
+    `input_len`, `flags` and `input_offset` as the query. On a device holding the
+    installed file those bytes segment into ids with no complaint -- they are
+    bytes -- and the vector comes back filed under this caller as the model's
+    reading of a request about itself. The caller sent nothing, so the only
+    honest reply is that nothing reached the service.
+    """
+    faults = _empty_strict_neural_faults(lib_source())
+    assert not faults, faults
+
+
+def test_the_generative_and_empty_request_gates_can_fail():
+    """A contract that cannot fail is a comment.
+
+    Each block puts one fault back into a copy of the source and runs the *same*
+    detector the gate above runs. `mutate_function` refuses an `old` it cannot
+    find, so an arm whose target has moved fails here rather than going quiet.
+    """
+    lib = lib_source()
+    dispatch = "pub fn handle_ipc_inference_query("
+
+    clean = _generative_cut_faults(lib)
+    assert not clean, f"the cut detector fires on the service as it stands: {clean}"
+    clean_empty = _empty_strict_neural_faults(lib)
+    assert not clean_empty, f"the empty-request detector fires as it stands: {clean_empty}"
+
+    # The guard's own lines, read from the source rather than remembered here: an
+    # arm that carried a hard copy of them would fail for a reformat, and a
+    # failure that is not the fault it names is the one thing a mutation test is
+    # not allowed to produce.
+    def block_of(source, opener):
+        start = source.index(opener)
+        line_start = source.rfind("\n", 0, start) + 1
+        indent = source[line_start:start]
+        assert indent.strip() == "", f"{opener!r} is not the first thing on its line"
+        end = source.index("\n" + indent + "}\n", start) + len("\n" + indent + "}\n")
+        return source[line_start:end]
+
+    cut_block = block_of(lib, "if let Some((declared, arrived)) = declared_prompt_overrun(payload) {")
+    empty_block = block_of(lib, "if strict_neural_request_is_empty(payload) {")
+
+    # 1. The guard moved past the registration, so a request that never fully
+    #    arrived starts a cancellable session before it is refused.
+    moved = mutate_function(lib, dispatch, cut_block, "")
+    moved = mutate_function(
+        moved, dispatch, "struct ActiveTaskGuard;", cut_block + "        struct ActiveTaskGuard;"
+    )
+    order = _generative_cut_faults(moved)
+    assert any("ACTIVE_GENERATION_TASK" in fault for fault in order), (
+        f"a guard behind the registration reads as a guard in front of it: {order}"
+    )
+
+    # 2. The guard kept in place but its refusal swallowed, so the cut is detected
+    #    and answered from anyway.
+    swallowed = mutate_function(
+        lib, dispatch, "reply_with_answer(sender_task_id, status, notice, tx_buf);", "let _ = (status, notice);"
+    )
+    assert any("streams a generative answer" in fault for fault in _generative_cut_faults(swallowed))
+
+    # 3. One of the two counts dropped from the sentence.
+    one_count = mutate_function(
+        lib, "fn generation_overrun_notice<'a>(", "notice.byte_count(arrived as u64);", ""
+    )
+    assert any("byte_count(arrived as u64)" in fault for fault in _generative_cut_faults(one_count)), (
+        "a refusal naming only the declaration leaves the caller guessing what would have fit"
+    )
+
+    # 4. The route's clauses swapped: the generative guard reads the embedding
+    #    arm's shape, which also demands a known output dimension.
+    crossed = mutate_function(
+        lib,
+        "fn declared_prompt_overrun(",
+        "declared_overrun(payload, generative_payload_is_header_shaped)",
+        "declared_overrun(payload, payload_is_header_shaped)",
+    )
+    assert any("clauses the generative parse trusts" in fault for fault in _generative_cut_faults(crossed))
+
+    # 5. A dimension demanded of a route that has no output width to name.
+    widened = mutate_function(
+        lib,
+        "fn generative_payload_is_header_shaped(",
+        "(req.model_id <= 16) && (req.flags <= 255)",
+        "(req.model_id <= 16) && (req.flags <= 255) && (req.target_dim == 768)",
+    )
+    assert any("no output dimension" in fault for fault in _generative_cut_faults(widened))
+
+    # 6. The answer put back on the mailbox alone, where it is cut at forty bytes.
+    inline = mutate_function(
+        lib,
+        "fn reply_with_answer(",
+        "stream_answer(sender_task_id, status, MSG_TYPE_GENERATE_CHUNK, message)",
+        "false",
+    )
+    assert any("the channel the reader drains" in fault for fault in _generative_cut_faults(inline))
+
+    # 7. The empty-request guard deleted, so a header-only request is answered as
+    #    a prompt about its own header.
+    gone = mutate_function(lib, dispatch, empty_block, "")
+    gone_faults = _empty_strict_neural_faults(gone)
+    assert any("no longer asks what a strict request carries" in fault for fault in gone_faults), (
+        f"a deleted guard leaves the arm with nothing to say about an empty request: {gone_faults}"
+    )
+
+    # 8. The guard left in place but placed after the ids, the mapping and the
+    #    plan -- which is where a host test still sees it refuse.
+    late = mutate_function(lib, dispatch, empty_block, "")
+    late = mutate_function(
+        late,
+        dispatch,
+        "let plan = apply_file_vocabulary(plan, &text_ids);",
+        empty_block + "    let plan = apply_file_vocabulary(plan, &text_ids);",
+    )
+    late_faults = _empty_strict_neural_faults(late)
+    for site in ("read_token_ids(query_text)", "encode_with_installed_file(", "plan_embedding_run("):
+        assert any(site in fault for fault in late_faults), (
+            f"a guard behind {site!r} still reads as one in front of it: {late_faults}"
+        )
+
+    # 9. The empty request refused for the file it did not get rather than for
+    #    what it did not send.
+    mislabelled = mutate_function(
+        lib, dispatch, "embedding_gap_notice(EmbeddingGap::EmptyRequest, &mut scratch)",
+        "embedding_gap_notice(EmbeddingGap::NoWeights, &mut scratch)",
+    )
+    assert any("refused as some other gap" in fault for fault in _empty_strict_neural_faults(mislabelled))
+
+    # 10. The neighbour's sentence recycled: "drop the flag" promises a baseline
+    #     answer that an empty request has no query to reach.
+    promised = mutate_function(
+        lib, "fn embedding_gap_notice<'a>(", "Dropping the flag is not a way past it",
+        "Drop the strict-neural flag to take the labelled lexical baseline",
+    )
+    assert any("no baseline answer" in fault for fault in _empty_strict_neural_faults(promised))
+
+    # 11. The predicate widened to any payload at least a header long, so prose
+    #     that happens to be twenty-four bytes starts being refused.
+    broadened = mutate_function(
+        lib, "fn strict_neural_request_is_empty(", "payload.len() != hdr", "payload.len() < hdr"
+    )
+    assert any("payload.len() != hdr" in fault for fault in _empty_strict_neural_faults(broadened))
 
 
 def test_the_file_backed_branch_reaches_the_loader_it_was_written_for():

@@ -81,6 +81,13 @@ pub const MSG_TYPE_GENERATE_ALT: u32 = 0x4745_4E45;
 pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;
 
 /// IPC message type for streaming generation chunks: `0x4745_4E43` (ASCII `b"GENC"`).
+///
+/// WHY a refusal travels on this type as well as an answer: a generative refusal
+/// names the two byte counts of a prompt the transport cut, and that sentence runs
+/// past the forty bytes an inline mailbox reply keeps -- the same reason
+/// [`MSG_TYPE_EMBED_CHUNK`] exists, with this route's type. A reader that drains an
+/// answer drains a refusal the same way and tells them apart by the status the
+/// notice carries, not by the channel it arrived on.
 pub const MSG_TYPE_GENERATE_CHUNK: u32 = 0x4745_4E43;
 
 /// IPC message type naming a retrieval frame waiting on a shared-memory
