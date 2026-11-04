@@ -160,12 +160,12 @@ fn frame() -> Frame {
         620,
         GRID_H,
     );
-    // WHY the home mark is not in this frame: it used to be `Rect::new`ed here
+    // WHY the bar's marks are not in this frame: they used to be `Rect::new`ed here
     // from `space::XXL * 4` columns, centred inside the navigation band, which put
     // a 192 x 6 bar at (264, 1405) -- eight columns narrower than the platform's
     // mark and thirteen rows above the row the device paints it on, because the
     // band's own centre was this screen's arithmetic. The painter below asks
-    // `design::home_band::pixel` for the ink, so a rectangle kept here would be a
+    // `launcher::nav::mark_ink` for the ink, so a rectangle kept here would be a
     // second copy of a geometry nothing reads.
     Frame {
         search,
@@ -1082,7 +1082,19 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < STATUS_BAR_HEIGHT {
         return status_bar(x, y, &theme, &paint(x, y, state).status);
     }
-    if let Some(ink) = interos_std::design::home_band::pixel(x, y, theme.on_surface_variant) {
+    // The bottom bar's three controls.
+    //
+    // WHY all three and not the one home pill this used to draw: the shell answers a
+    // tap anywhere in `launcher::nav::band()` from `nav::target_at`, so this screen
+    // showed a single 200 x 6 mark while three thirds were live under it. The marks
+    // and the hit test now come from the same module, on the same band, on every
+    // surface that has one.
+    if let Some(ink) = launcher::nav::mark_ink(
+        x,
+        y,
+        launcher::nav::Offered::PANEL,
+        [theme.on_surface_variant; launcher::nav::MARK_SLOTS],
+    ) {
         return ink;
     }
     if f.search.contains(x, y) {

@@ -19,6 +19,15 @@
 //! point of the split: a geometry the painter and the hit test share cannot
 //! silently stop agreeing.
 //!
+//! WHY the paint is a function of this module and not of the screen that draws it:
+//! [`mark_ink`] is the only routine that inks the bar, every surface that answers a
+//! tap from [`target_at`] calls it, and [`Offered`] is the one value that says which
+//! of the three controls that surface actually has. When the marks were painted by
+//! the home surface alone the other screens kept answering all three thirds while
+//! showing nothing -- and one screen kept answering a control the panel above it
+//! had no place to go back to. Paint and tap are now the same two calls on the same
+//! geometry, on every surface that has a bar.
+//!
 //! WHAT IS DELIBERATELY NOT DERIVED: [`BAND_TOP`] and [`THIRD_W`] are the hit
 //! test as committed. `tests/test_serial_tcp.py` and the lifecycle suites tap
 //! the middle third of the bottom 60 rows, and a person's muscle memory is
@@ -251,6 +260,103 @@ pub fn mark_at(x: usize, y: usize) -> Option<NavTarget> {
 }
 
 // -----------------------------------------------------------------------------
+// The one painter: a surface that answers a tap from [`target_at`] inks its marks
+// with [`mark_ink`], and nothing else
+// -----------------------------------------------------------------------------
+
+/// How many inks a surface has to supply: one per control.
+pub const MARK_SLOTS: usize = 3;
+
+/// Which of the three controls the surface a person is looking at actually offers.
+///
+/// WHY a surface gets to say: the bar's left third is Back, and Back is only a
+/// control when there is something under this screen to go back to. On the home
+/// grid -- the root of the shell's own view tree -- there is not, and the tap
+/// there has always reported "nothing to dismiss". Painting the chevron anyway
+/// would put a control on the panel that answers nothing, which is the same defect
+/// this module exists to close, seen from the other side. So the set a surface
+/// offers is one value that both the painter and the hit test read, and a control
+/// that is not in it is neither inked nor answered.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Offered(u8);
+
+impl Offered {
+    /// A bar that offers nothing: the empty set, and the seed the sets below build.
+    pub const fn none() -> Offered {
+        Offered(0)
+    }
+
+    /// This set plus `target`.
+    pub const fn with(self, target: NavTarget) -> Offered {
+        Offered(self.0 | (1 << target.index()))
+    }
+
+    /// Whether this set offers `target`.
+    pub const fn has(self, target: NavTarget) -> bool {
+        self.0 & (1 << target.index()) != 0
+    }
+
+    /// The root surface: Home and Recents. Back has nothing under it to reveal.
+    pub const ROOT: Offered = Offered::none()
+        .with(NavTarget::Home)
+        .with(NavTarget::Recents);
+
+    /// A surface that opened over another one: all three controls, because a tap
+    /// on any of them does move the person somewhere.
+    pub const PANEL: Offered = Offered::none()
+        .with(NavTarget::Back)
+        .with(NavTarget::Home)
+        .with(NavTarget::Recents);
+}
+
+/// The ink of one pixel of the bar, or `None` where the bar paints nothing.
+///
+/// WHY this is the only way a screen inks the bar: the marks used to be painted by
+/// `screens/home.rs` alone, so the drawer, the search surface and the switcher
+/// answered all three thirds while showing either nothing or one leftover pill.
+/// Every surface that routes [`offered_target_at`] now calls this, so the paint and
+/// the hit test read the same [`mark_at`] and the same [`Offered`] set -- a control
+/// cannot be live on one screen and invisible on the next.
+///
+/// WHY the ink comes in as three values: the home surface samples each mark's own
+/// centre out of the wallpaper, because a graded band would otherwise put two
+/// colours on one control, while a flat panel takes one theme colour for all
+/// three. Both are answers of the shape this routine needs, and neither restates a
+/// coordinate.
+pub fn mark_ink(
+    x: usize,
+    y: usize,
+    offered: Offered,
+    ink: [u32; MARK_SLOTS],
+) -> Option<u32> {
+    if !band().contains(x, y) {
+        return None;
+    }
+    let target = mark_at(x, y)?;
+    if offered.has(target) {
+        Some(ink[target.index()])
+    } else {
+        None
+    }
+}
+
+/// Which control a completed tap at (`x`, `y`) selects on a surface that offers
+/// `offered`, or `None` when the tap landed on the bar's rows but on no control
+/// that surface owns.
+///
+/// WHY this beside [`target_at`]: [`target_at`] is the committed geometry and did
+/// not move; this is the same thirds with the surface's own set applied, so the
+/// rows a screen shows nothing on fall through to whatever that screen does with a
+/// bare tap instead of swallowing it.
+#[must_use]
+pub const fn offered_target_at(x: usize, y: usize, offered: Offered) -> Option<NavTarget> {
+    match target_at(x, y) {
+        Some(target) if offered.has(target) => Some(target),
+        _ => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Gates: the paint must land inside the tap, and every number must come from MARK
 // -----------------------------------------------------------------------------
 
@@ -290,4 +396,20 @@ const _: () = assert!(
 const _: () = assert!(
     STROKE >= 3,
     "a stroke under three rows is the hairline this module exists to replace",
+);
+
+/// The two sets the surfaces use, pinned to what they are for: the root has no
+/// Back to show, and a panel has all three. A set that inked a control it does not
+/// answer -- or answered one it does not ink -- is the defect this module is for.
+const _: () = assert!(
+    !Offered::ROOT.has(NavTarget::Back)
+        && Offered::ROOT.has(NavTarget::Home)
+        && Offered::ROOT.has(NavTarget::Recents),
+    "the root surface must offer Home and Recents and never Back",
+);
+const _: () = assert!(
+    Offered::PANEL.has(NavTarget::Back)
+        && Offered::PANEL.has(NavTarget::Home)
+        && Offered::PANEL.has(NavTarget::Recents),
+    "a panel must offer every control the bar answers",
 );

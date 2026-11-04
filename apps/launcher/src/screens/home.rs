@@ -2070,8 +2070,10 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint) -> Option<u32> {
     if !f.nav.contains(x, y) {
         return None;
     }
-    let target = launcher::nav::mark_at(x, y)?;
-    Some(p.nav_ink[target.index()])
+    // The root surface offers Home and Recents; Back has nothing under the grid to
+    // reveal, so the chevron is not inked here and the shell does not answer it
+    // either -- both read `launcher::nav::Offered::ROOT`.
+    launcher::nav::mark_ink(x, y, launcher::nav::Offered::ROOT, p.nav_ink)
 }
 
 // -----------------------------------------------------------------------------

@@ -872,6 +872,23 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return fill;
     }
 
+    // 7. The bottom bar's three controls.
+    //
+    // WHY the switcher carries them: it answers a tap in `launcher::nav::band()`
+    // exactly as the drawer and the search surface do -- the left and middle thirds
+    // leave for the home grid and the right third re-opens this very screen -- so
+    // the three marks are painted here from the same geometry the shell tests. A
+    // switcher with an empty strip under it while all three thirds answer is the
+    // defect this module exists to close.
+    if let Some(c) = launcher::nav::mark_ink(
+        x,
+        y,
+        launcher::nav::Offered::PANEL,
+        [theme.on_surface_variant; launcher::nav::MARK_SLOTS],
+    ) {
+        return c;
+    }
+
     theme.surface
 }
 

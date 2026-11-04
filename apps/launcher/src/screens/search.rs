@@ -26,19 +26,29 @@ use launcher::theme::{radius, space, type_scale, Theme, STATUS_BAR_HEIGHT};
 /// The theme the surface is drawn with.
 const THEME: Theme = launcher::theme::SHELL;
 
+/// The bar's three marks, in the one ink this flat surface has.
+///
+/// WHY an array and not a colour: the home surface samples each mark out of its
+/// own wallpaper, so the shared painter takes one ink per control. Here the panel
+/// is flat, so all three slots carry the same ink -- and the geometry behind each
+/// slot is still [`launcher::nav`]'s, not this file's.
+const NAV_INK: [u32; launcher::nav::MARK_SLOTS] = [THEME.on_surface_variant; launcher::nav::MARK_SLOTS];
+
 /// How many results the list shows.
-const MAX_ROWS: usize = 6;
+const MAX_ROWS: usize = launcher::layout::SEARCH_MAX_ROWS;
 
-/// The query field.
-const FIELD_X: usize = 32;
-const FIELD_Y: usize = 76;
-const FIELD_W: usize = 656;
-const FIELD_H: usize = 64;
-
-/// Where the result list starts.
-const ROWS_Y: usize = 216;
-/// The height of one result row.
-const ROW_H: usize = 96;
+/// The query field, the list's first row and one row's height.
+///
+/// WHY these are read from `launcher::layout` and not typed here: the rows a
+/// keystroke repaints ([`query_band`]) are computed from the same rectangles, and
+/// `apps/launcher/src/tests.rs` checks the two against each other. A copy in this
+/// file would be a number no host test could tie to the band.
+const FIELD: Rect = launcher::layout::SEARCH_FIELD;
+const ROW_H: usize = launcher::layout::SEARCH_ROW_H;
+const FIELD_X: usize = FIELD.x;
+const FIELD_Y: usize = FIELD.y;
+const FIELD_W: usize = FIELD.w;
+const FIELD_H: usize = FIELD.h;
 
 /// The rows the query field's text reserves on the outline face at its rung.
 ///
@@ -54,12 +64,8 @@ const _: () = assert!(
 );
 
 /// The card the per-source verdicts are drawn in.
-const STATUS_X: usize = 32;
-const STATUS_Y: usize = 812;
-const STATUS_W: usize = 656;
-const STATUS_H: usize = 256;
-/// The height of one verdict line.
-const STATUS_LINE_H: usize = 56;
+const STATUS_CARD: Rect = launcher::layout::SEARCH_STATUS_CARD;
+const STATUS_X: usize = STATUS_CARD.x;
 
 /// One result row, resolved.
 #[derive(Clone, Copy)]
@@ -150,7 +156,7 @@ fn build(state: &LauncherState) -> Plan {
             },
             theme.on_surface,
         ),
-        field: Rect::new(FIELD_X, FIELD_Y, FIELD_W, FIELD_H),
+        field: FIELD,
         query: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface),
         placeholder: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface_variant),
         headline: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface),
@@ -164,7 +170,7 @@ fn build(state: &LauncherState) -> Plan {
             chip: Label::EMPTY,
         }; MAX_ROWS],
         row_count: 0,
-        status_card: Rect::new(STATUS_X, STATUS_Y, STATUS_W, STATUS_H),
+        status_card: STATUS_CARD,
         status: [
             StatusPlan {
                 name: Label::EMPTY,
@@ -223,7 +229,13 @@ fn build(state: &LauncherState) -> Plan {
     } else {
         b"Results".as_slice()
     };
-    plan.headline = Label::at(FIELD_X, 168, type_scale::BODY, headline, theme.on_surface);
+    plan.headline = Label::at(
+        FIELD_X,
+        launcher::layout::SEARCH_HEADLINE_TOP,
+        type_scale::BODY,
+        headline,
+        theme.on_surface,
+    );
 
     // The result rows.
     let mut row = 0usize;
@@ -234,7 +246,7 @@ fn build(state: &LauncherState) -> Plan {
         let Some(entry) = state.search_index.get(hit.index as usize) else {
             break;
         };
-        let y = ROWS_Y + row * ROW_H;
+        let y = launcher::layout::search_row_top(row);
         let mut badge = [0u8; 4];
         let mut badge_len = 0usize;
         let icon = match entry.kind {
@@ -316,7 +328,7 @@ fn build(state: &LauncherState) -> Plan {
         b"Apps",
         state.search_results.apps,
         STATUS_X + space::MD,
-        STATUS_Y + space::MD,
+        launcher::layout::search_status_line_top(0),
         &theme,
         waiting,
     );
@@ -324,7 +336,7 @@ fn build(state: &LauncherState) -> Plan {
         b"Settings",
         state.search_results.settings,
         STATUS_X + space::MD,
-        STATUS_Y + space::MD + STATUS_LINE_H,
+        launcher::layout::search_status_line_top(1),
         &theme,
         waiting,
     );
@@ -332,7 +344,7 @@ fn build(state: &LauncherState) -> Plan {
         b"Files",
         state.search_results.files,
         STATUS_X + space::MD,
-        STATUS_Y + space::MD + STATUS_LINE_H * 2,
+        launcher::layout::search_status_line_top(2),
         &theme,
         waiting,
     );
@@ -340,18 +352,13 @@ fn build(state: &LauncherState) -> Plan {
         b"AI",
         state.search_results.ai,
         STATUS_X + space::MD,
-        STATUS_Y + space::MD + STATUS_LINE_H * 3,
+        launcher::layout::search_status_line_top(3),
         &theme,
         waiting,
     );
 
-    plan.hint = Label::at(
-        FIELD_X,
-        STATUS_Y + STATUS_H + space::LG,
-        type_scale::CAPTION,
-        b"Tap a result to open it. Backspace edits the query.",
-        theme.on_surface_variant,
-    );
+    // The hint line, from the same call the band is measured against.
+    plan.hint = launcher::layout::search_hint_label(theme.on_surface_variant);
 
     plan
 }
@@ -441,7 +448,12 @@ fn reason_text(reason: &str, buf: &mut [u8]) -> usize {
 /// painter drew and the row the tap resolves have to be the same row, and
 /// there is only one place that knows where a row is.
 pub fn result_rect(rank: usize) -> Rect {
-    Rect::new(FIELD_X, ROWS_Y + rank * ROW_H, FIELD_W, ROW_H - 8)
+    Rect::new(
+        FIELD_X,
+        launcher::layout::search_row_top(rank),
+        FIELD_W,
+        ROW_H - 8,
+    )
 }
 
 /// The result at (`x`, `y`).
@@ -458,15 +470,30 @@ pub fn result_at(x: usize, y: usize, count: usize) -> Option<usize> {
 ///
 /// WHY an accessor here and not a band typed in the shell: the field's text, the
 /// headline counting the results, the result rows and the per-source verdict
-/// card are the four things `build` resolves from the query, and all four are
-/// rectangles in this file. Reading them back is what keeps the band the shell
-/// repaints equal to the band the painter inked.
+/// card are the four things `build` resolves from the query, and the shell has to
+/// repaint what they claim. The rectangles themselves live in
+/// [`launcher::layout`], because the band's bottom is the hint line's own claimed
+/// box and a host gate reads that number -- nothing under `screens/` is reachable
+/// from `cargo test`, so geometry a test has to see has to live in the library.
 ///
-/// WHY the status bar and the hint line are outside it: the clock in the bar is
-/// a reading this surface did not change, and the hint is a literal. Both are
-/// the same bytes for every query, so a keystroke may not re-rasterise them.
+/// WHY the hint line is INSIDE it, against the note that used to sit here: the old
+/// band stopped at the verdict card's edge, `STATUS_Y + STATUS_H` = row 1,068, while
+/// the hint this screen plans claims rows 1,092..1,122 as its own box -- and
+/// [`launcher::text::Label::pixel`] ink nothing outside the box it claims. Every
+/// `Dirty::SearchQuery` frame therefore re-inked the field, the rows and the card
+/// and never once visited the hint's lower 30 rows, so whatever those rows held from
+/// the last full-surface paint is what stayed on the panel. That is the whole
+/// "descenders went missing on the search screen" report, and the band was the wrong
+/// side of the arithmetic, not the clip: `apps/launcher/src/tests.rs` now pins
+/// `query_band()` against every box `build` plans.
+///
+/// WHY the status bar and the navigation band stay outside it: the clock in the bar
+/// is a reading this surface did not change, and the bar below row
+/// [`launcher::nav::BAND_TOP`] is painted from `Dirty::NavBar`, which is its own
+/// 60 rows. A keystroke may not re-rasterise either -- this band is 1,046 rows, not
+/// the 1,440-row walk that `3d4af947` removed.
 pub fn query_band() -> (usize, usize) {
-    (FIELD_Y, STATUS_Y + STATUS_H)
+    launcher::layout::search_content_band()
 }
 
 /// The colour of (`x`, `y`) on the search surface.
@@ -544,6 +571,17 @@ pub fn get_search_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
 
     if let Some(c) = p.hint.pixel(x, y, theme.surface) {
+        return c;
+    }
+
+    // The bottom bar's three controls.
+    //
+    // WHY this surface inks them now: the shell answers a tap here from
+    // `launcher::nav::target_at`, and it used to answer the middle third only,
+    // from a platform box this screen never drew -- so a person typing a query saw
+    // an empty strip of panel and had to aim at nothing. Paint and tap are the same
+    // two calls on the same geometry as on every other surface with a bar.
+    if let Some(c) = launcher::nav::mark_ink(x, y, launcher::nav::Offered::PANEL, NAV_INK) {
         return c;
     }
 

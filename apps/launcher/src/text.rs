@@ -28,6 +28,7 @@
 pub use crate::font::{BASELINE, CAP_TOP, GLYPH_H, GLYPH_W};
 
 use crate::font;
+use crate::layout::Rect;
 
 /// The em, in pixels, that a run at `scale` is measured and drawn at.
 ///
@@ -418,6 +419,17 @@ impl Label {
     /// The label's width in pixels.
     pub fn width(&self) -> usize {
         self.w
+    }
+
+    /// The exact box this label claims in surface coordinates.
+    ///
+    /// WHY this is public: [`Label::pixel`] clips to it, so it is the only set of
+    /// rows a label can ever ink -- and a band that repaints fewer rows than this
+    /// leaves the label's own rows unpainted. `pixel` answers the ink, so nothing
+    /// outside this rectangle can ever appear, which makes it the number a dirty
+    /// band has to be checked against.
+    pub const fn rect(&self) -> Rect {
+        Rect::new(self.x, self.top, self.w, self.h)
     }
 
     /// The colour of (`px`, `py`) if this label inks it, blended over `bg`.

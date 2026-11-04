@@ -3580,7 +3580,36 @@ pub extern "C" fn _start() -> ! {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                // A. The selector rail: bring that app's card
+                                // A. The bottom bar's three controls, which this
+                                // surface now paints.
+                                //
+                                // WHY ahead of the card rules: the bar's rows are
+                                // below every card, chip and pill the switcher owns,
+                                // so nothing here is being claimed away -- and the
+                                // backdrop rule at the end used to be the only thing
+                                // that answered a tap in the band, which sent all
+                                // three thirds to the home grid while showing none of
+                                // them.
+                                if nav_panel_tap(
+                                    surface,
+                                    &mut state,
+                                    x,
+                                    y,
+                                    "[LAUNCHER] Returned to home grid from the task switcher via nav bar.",
+                                ) {
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // B. The selector rail: bring that app's card
                                 // to the front without switching to it.
                                 if let Some(slot) =
                                     screens::activity::selector_hit(&state, x, y)
@@ -3601,7 +3630,7 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // B. The close control on the focused card.
+                                // C. The close control on the focused card.
                                 if let Some(slot) = screens::activity::activity_close_hit(&state, x, y) {
                                     screens::activity::activity_close_slot(&mut state, slot);
                                     present_dirty(surface, &state, Dirty::ActivityCards);
@@ -3618,7 +3647,7 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // C. "Close all".
+                                // D. "Close all".
                                 else if {
                                     let ca = screens::activity::close_all_rect();
                                     x >= ca.x.saturating_sub(40) && x <= ca.x + ca.w + 40 && y >= ca.y.saturating_sub(25) && y <= ca.y + ca.h + 25
@@ -3667,7 +3696,7 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // D. A card's body: bring that task to the front.
+                                // E. A card's body: bring that task to the front.
                                 //
                                 // WHY the card is the only thing that opens a task: the
                                 // switcher's job is to switch to something that is
@@ -3692,7 +3721,7 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // E. The backdrop: back to the home surface.
+                                // F. The backdrop: back to the home surface.
                                 else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
@@ -4456,30 +4485,31 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 break;
                             }
-                            // WHY the platform's box and not a row cut: this rule
-                            // read `y >= 1400` across all 720 columns, while the
-                            // drawer painted its home mark 192 x 6 at (264, 1405) --
-                            // so the rows beside the ink answered a gesture the ink
-                            // never advertised, and the ink itself was under a
-                            // seventh of the 44-row touch floor. Both are the
-                            // platform's now:
-                            // the mark is `design::home_band::PILL` (200 x 6 at
-                            // 1418..=1423) and the box that answers is
-                            // `home_band::HIT` (240 x 48 at 1392..=1439, x 240..=479).
+                            // WHY the bar's own thirds and not the platform's home
+                            // box: this rule read `home_band::contains` while the
+                            // drawer painted one 200 x 6 pill in the middle of the
+                            // band, so the left and right thirds were live to a tap
+                            // and invisible to an eye, and the rows beside the pill
+                            // answered a gesture the pill never advertised. The
+                            // drawer now inks all three marks from `launcher::nav`,
+                            // and this answers them from the same geometry: what the
+                            // person sees is the control they get.
                             //
-                            // WHAT DID NOT MOVE: what the tap does. It still closes
-                            // the drawer and presents the home grid, and a tap under
-                            // the mark that claims no control still falls through to
-                            // the dismiss rule below, because that rule is the
-                            // drawer's own "nothing here" answer and not the mark's
-                            // box.
+                            // WHAT DID NOT MOVE: what the middle third does. It still
+                            // closes the drawer and presents the home grid, on the same
+                            // log line the runtime suites wait for, and a tap under the
+                            // band that claims no control still falls through to the
+                            // dismiss rule below, because that rule is the drawer's own
+                            // "nothing here" answer and not the bar's box.
                             if input.kind == 1
-                                && home_band::contains(input.x as usize, input.y as usize)
+                                && nav_panel_tap(
+                                    surface,
+                                    &mut state,
+                                    input.x as usize,
+                                    input.y as usize,
+                                    "[LAUNCHER] Returned to Home from App Drawer.",
+                                )
                             {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                surface_flip_display();
-                                std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
@@ -4881,24 +4911,24 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     }
-                                } else if home_band::contains(x, y) {
-                                    // WHY the platform's box: this rule read `y >=
-                                    // 1400` over all 720 columns, the same cut the
-                                    // drawer and the dashboard answered with, and it
-                                    // is now the 240 x 48 box every other surface on
-                                    // the device answers -- rows 1392..=1439, columns
-                                    // 240..=479. What the tap does is unchanged.
-                                    //
-                                    // WHAT THIS SURFACE STILL DOES NOT DO: paint the
-                                    // mark inside that box. `screens/search.rs` draws
-                                    // its field, its rows and its status line and
-                                    // nothing below row 812, so the answer here is
-                                    // invisible on the search screen and is inked on
-                                    // the four surfaces that own one.
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    surface_flip_display();
-                                    std::log("[LAUNCHER] Returned to home grid from search via home tap.").ok();
+                                } else if nav_panel_tap(
+                                    surface,
+                                    &mut state,
+                                    x,
+                                    y,
+                                    "[LAUNCHER] Returned to home grid from search via home tap.",
+                                ) {
+                                    // WHY the bar's thirds and not the platform's home box:
+                                    // this rule read `home_band::contains` -- 240 columns at
+                                    // rows 1392..=1439 -- while `screens/search.rs` inked
+                                    // nothing below row 812, so a person who typed a query
+                                    // saw an empty strip and had to aim at it. The three
+                                    // marks are painted on this surface now, from the same
+                                    // `launcher::nav` geometry this call answers, so what is
+                                    // on the panel is what a tap does: Back and Home leave for
+                                    // the root grid, Recents opens the switcher, and a tap
+                                    // that lands on none of them falls through to the swipe
+                                    // rule below exactly as it did before.
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -5340,7 +5370,9 @@ pub extern "C" fn _start() -> ! {
                                 // 490..645, which overlaps the Recents target.
                                 // Without the gate a single press would open the
                                 // overview and then immediately the drawer.
-                                if let Some(target) = nav::target_at(x, y) {
+                                if let Some(target) =
+                                    nav::offered_target_at(x, y, nav::Offered::ROOT)
+                                {
                                     match target {
                                         NavTarget::Recents => {
                                             refresh_runtime_recents(&mut state);
@@ -5369,11 +5401,19 @@ pub extern "C" fn _start() -> ! {
                                             present_dirty(surface, &state, Dirty::NavBar);
                                             std::log("[LAUNCHER] Home surface presented via home button.").ok();
                                         }
-                                        NavTarget::Back => {
-                                            std::log("[LAUNCHER] Back button at the launcher root: nothing to dismiss.",
-                                            )
-                                            .ok();
-                                        }
+                                        // WHY this arm is empty: `Offered::ROOT` is
+                                        // Home and Recents and never Back -- the
+                                        // compile-time gate at the bottom of
+                                        // `launcher::nav` says so -- so a tap on the
+                                        // bar's left third is not a control on this
+                                        // surface and falls through to the rules
+                                        // below. The log line that used to sit here
+                                        // reported "nothing to dismiss" for a chevron
+                                        // the root surface no longer inks: painting a
+                                        // control and answering it with words only is
+                                        // the defect this change exists to remove, seen
+                                        // from the other side.
+                                        NavTarget::Back => {}
                                     }
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -5642,6 +5682,71 @@ pub extern "C" fn _start() -> ! {
             }
         std::yield_now();
     }
+}
+
+/// Answers a completed tap on the bottom navigation bar for a surface that opened
+/// over the home grid: the app drawer, the search screen and the task switcher.
+///
+/// WHY one body for three screens: all three ink the bar with
+/// `launcher::nav::mark_ink` and `nav::Offered::PANEL`, so the three controls the
+/// person sees are exactly the three this answers, and what each of them means on a
+/// panel is the same thing everywhere -- Back and Home both reveal the root grid
+/// underneath, Recents opens the switcher. Three hand-written copies of that match
+/// are three chances for a mark to be painted on one screen and dead on the next,
+/// which is the bug this routine was written to close.
+///
+/// WHY the Home log line is an argument: the runtime suites wait for the exact words
+/// each surface has always printed when a tap leaves it ("Returned to Home from App
+/// Drawer", "Returned to home grid from search via home tap"), so sharing the body
+/// must not rewrite what a screen reports.
+///
+/// WHY the band's rows are left to the caller's own fall-through: `nav::target_at`
+/// covers all 720 columns of the bar, so a tap here always lands on a control; a tap
+/// above or below the band answers `false` and the screen carries on with its own
+/// rules. `Dirty::NavBar` paints these 60 rows when a tap stays on the bar, and a
+/// tap that leaves the view repaints them as part of the surface it moves to.
+///
+/// Returns `true` when the tap moved the person somewhere, which is how the calling
+/// arm knows to drain and break.
+fn nav_panel_tap(
+    surface: u32,
+    state: &mut LauncherState,
+    x: usize,
+    y: usize,
+    home_log: &'static str,
+) -> bool {
+    let Some(target) = nav::offered_target_at(x, y, nav::Offered::PANEL) else {
+        return false;
+    };
+    match target {
+        // Back reveals what this panel opened over. It is inked here, and only here,
+        // because a panel has something under it; the root grid answers neither this
+        // third nor this word.
+        NavTarget::Back => {
+            state.current_view = ViewMode::HomeScreen;
+            render_view(surface, state);
+            surface_flip_display();
+            std::log("[LAUNCHER] Back revealed the home grid under the panel surface.").ok();
+        }
+        NavTarget::Home => {
+            state.current_view = ViewMode::HomeScreen;
+            render_view(surface, state);
+            surface_flip_display();
+            std::log(home_log).ok();
+        }
+        NavTarget::Recents => {
+            refresh_runtime_recents(state);
+            suspend_background_apps(state);
+            screens::activity::refresh_previews(state);
+            state.current_view = ViewMode::ActivitySpace;
+            let mut win_buf = [0u8; 1024];
+            let _ = std::window_list(&mut win_buf);
+            render_view(surface, state);
+            surface_flip_display();
+            std::log("[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
+        }
+    }
+    true
 }
 
 #[cfg(not(test))]

@@ -1476,3 +1476,130 @@ fn the_three_nav_marks_do_not_touch_each_other() {
         }
     }
 }
+
+/// Every control the bar offers is inked, inked pixels answer as the control they
+/// are inked as, and a control a surface does not offer is neither.
+///
+/// WHY this is pinned: the drawer, the search surface and the switcher route their
+/// taps through `nav::offered_target_at` and their paint through `nav::mark_ink`,
+/// so the two answers are the whole contract of a bar -- and the defect this module
+/// was written against is a screen that kept one and lost the other. A mark inked
+/// where no third answers is a control a thumb cannot press; a third answered under
+/// an empty strip is a control the person cannot aim at.
+#[test]
+fn the_bar_inks_exactly_the_controls_it_answers() {
+    let ink = [0x00_FF_00u32; crate::nav::MARK_SLOTS];
+    for offered in [crate::nav::Offered::ROOT, crate::nav::Offered::PANEL] {
+        let mut inked = [0usize; crate::nav::MARK_SLOTS];
+        for y in 0..H {
+            for x in 0..W {
+                let mark = crate::nav::mark_at(x, y);
+                let painted = crate::nav::mark_ink(x, y, offered, ink);
+                let answered = crate::nav::offered_target_at(x, y, offered);
+                match mark.filter(|target| offered.has(*target)) {
+                    // A mark this surface offers is inked in its own slot's colour
+                    // and a tap on its pixel answers that same control.
+                    Some(target) => {
+                        inked[target.index()] += 1;
+                        assert_eq!(
+                            painted,
+                            Some(ink[target.index()]),
+                            "({x}, {y}) is inked as {:?} in a different slot's ink",
+                            target
+                        );
+                        assert_eq!(
+                            answered,
+                            Some(target),
+                            "({x}, {y}) is inked as {:?} but a tap there answers {:?}",
+                            target,
+                            answered
+                        );
+                    }
+                    // An unoffered mark inks nothing, and a pixel that claims no
+                    // mark falls through to the screen's own rules. Nothing outside
+                    // the band's rows is ever inked, either.
+                    None => {
+                        assert_eq!(painted, None, "({x}, {y}) is inked with no mark offered there");
+                        if y < crate::nav::BAND_TOP || y >= crate::nav::BAND_BOTTOM {
+                            assert_eq!(
+                                answered, None,
+                                "({x}, {y}) is off the bar yet answers {answered:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for (target, count) in [
+            (crate::nav::NavTarget::Back, inked[0]),
+            (crate::nav::NavTarget::Home, inked[1]),
+            (crate::nav::NavTarget::Recents, inked[2]),
+        ] {
+            if offered.has(target) {
+                assert!(count > 0, "a surface that offers {target:?} inks no pixel of it");
+            } else {
+                assert_eq!(count, 0, "a surface that does not offer {target:?} inks {count} pixels of it");
+            }
+        }
+    }
+}
+
+/// The band one keystroke on the search surface repaints holds every box that
+/// keystroke can move -- and nothing the keystroke did not change.
+///
+/// WHY this is pinned: the band used to stop at the verdict card's own bottom edge
+/// while the hint line below the card claimed thirty rows for itself, and
+/// `Label::pixel` inks nothing outside the box a label claims. So every query frame
+/// re-inked the field, the rows and the card and never visited the hint's lower
+/// rows: the descenders had not been clipped by the renderer, they had been left
+/// out of the repaint.
+#[test]
+fn the_search_band_holds_every_box_a_query_can_move() {
+    let (top, bottom) = search_content_band();
+    assert_eq!(top, SEARCH_FIELD.y, "the band begins where the field does");
+
+    for (name, rect) in [
+        ("the query field", SEARCH_FIELD),
+        ("the verdict card", SEARCH_STATUS_CARD),
+        ("the hint line", search_hint_box()),
+    ] {
+        assert!(
+            rect.y >= top && rect.y + rect.h <= bottom,
+            "{name} claims rows {}..{} and the band only reaches {top}..{bottom}",
+            rect.y,
+            rect.y + rect.h
+        );
+    }
+
+    // The regression, stated as the row the old band cut off rather than as a
+    // containment proof the old band also satisfied.
+    assert!(
+        bottom > SEARCH_STATUS_CARD.y + SEARCH_STATUS_CARD.h,
+        "the band stops at the verdict card again, so the hint's own rows are never repainted"
+    );
+
+    // The rows the list shows, and the verdict lines the card carries, are all
+    // inside the same band.
+    let rows_bottom = SEARCH_ROWS_TOP + SEARCH_ROW_H * SEARCH_MAX_ROWS;
+    assert!(rows_bottom <= bottom, "the last result row escapes the band");
+    for index in 0..SEARCH_STATUS_LINES {
+        let line = search_status_line_top(index);
+        assert!(line >= SEARCH_STATUS_CARD.y, "verdict line {index} is above the card");
+        assert!(
+            line + SEARCH_STATUS_LINE_H <= SEARCH_STATUS_CARD.y + SEARCH_STATUS_CARD.h,
+            "verdict line {index} reaches past the card's foot"
+        );
+    }
+
+    // And what a keystroke did not touch stays out: the clock is the status bar's
+    // reading, and the bar below `nav::BAND_TOP` is repainted by `Dirty::NavBar`.
+    assert!(
+        top >= STATUS_BAR_HEIGHT,
+        "a query re-rasterises the status bar: band starts at {top}"
+    );
+    assert!(
+        bottom <= crate::nav::BAND_TOP,
+        "a query re-rasterises the navigation bar: band ends at {bottom}, the bar starts at {}",
+        crate::nav::BAND_TOP
+    );
+}

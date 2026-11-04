@@ -15,7 +15,8 @@
 //! it goes. That is what makes the shell adapt to available apps instead of
 //! describing them.
 
-use crate::theme::{space, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::text::Label;
+use crate::theme::{space, type_scale, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// A rectangle in logical surface coordinates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -264,6 +265,97 @@ pub fn app_drawer_chip_row() -> ChipRow {
         *chip = Rect::new(band.x + i * (chip_w + CHIP_GAP), chip_y, chip_w, CHIP_H);
     }
     ChipRow { band, chips }
+}
+
+// -----------------------------------------------------------------------------
+// The search surface: its fixed rectangles, its one literal line, and the rows a
+// query can move
+// -----------------------------------------------------------------------------
+
+/// The query field.
+///
+/// WHY here and not in `screens/search.rs`: the shell repaints this surface as one
+/// band of rows (`Dirty::SearchQuery`), and a host test has to be able to check
+/// that band against what the surface plans. Nothing under `screens/` is reachable
+/// from `cargo test` -- the binary is `#![no_main]` -- so a geometry that only the
+/// screen could see was a geometry no gate could read. The drawer's chip row
+/// ([`app_drawer_chip_row`]) is the same precedent.
+pub const SEARCH_FIELD: Rect = Rect::new(32, 76, 656, 64);
+
+/// The headline's box top: "Type to search" / "Results" / "No results".
+pub const SEARCH_HEADLINE_TOP: usize = 168;
+
+/// The first result row's top, one row's height, and how many rows the list shows.
+pub const SEARCH_ROWS_TOP: usize = 216;
+pub const SEARCH_ROW_H: usize = 96;
+pub const SEARCH_MAX_ROWS: usize = 6;
+
+/// The card the four per-source verdicts are drawn in, and one verdict line.
+pub const SEARCH_STATUS_CARD: Rect = Rect::new(32, 812, 656, 256);
+pub const SEARCH_STATUS_LINE_H: usize = 56;
+
+/// How many verdict lines the card carries.
+pub const SEARCH_STATUS_LINES: usize = 4;
+
+/// The one hint line under the verdict card.
+pub const SEARCH_HINT_TEXT: &[u8] = b"Tap a result to open it. Backspace edits the query.";
+
+/// The hint line's box top: one `space::LG` under the verdict card.
+pub const SEARCH_HINT_TOP: usize = SEARCH_STATUS_CARD.y + SEARCH_STATUS_CARD.h + space::LG;
+
+/// The top of the verdict card's `index`th line.
+pub const fn search_status_line_top(index: usize) -> usize {
+    SEARCH_STATUS_CARD.y + space::MD + SEARCH_STATUS_LINE_H * index
+}
+
+/// The top of result row `index`.
+pub const fn search_row_top(index: usize) -> usize {
+    SEARCH_ROWS_TOP + SEARCH_ROW_H * index
+}
+
+/// The hint line exactly as the search surface places it.
+pub fn search_hint_label(ink: u32) -> Label {
+    Label::at(
+        SEARCH_FIELD.x,
+        SEARCH_HINT_TOP,
+        type_scale::CAPTION,
+        SEARCH_HINT_TEXT,
+        ink,
+    )
+}
+
+/// The rows the hint line claims for itself.
+///
+/// WHY this builds the label instead of naming a height: the box is `Label`'s own
+/// arithmetic -- the ladder's line box, widened to the bitmap cell where the
+/// outline face declines a run at rung one -- and a band computed from a second
+/// copy of that arithmetic is exactly the defect [`search_content_band`] closes.
+/// The ink is irrelevant to a box, so this answers with the ink the surface
+/// actually draws the line in.
+pub fn search_hint_box() -> Rect {
+    search_hint_label(crate::theme::SHELL.on_surface_variant).rect()
+}
+
+/// Every row a keystroke in the query field can move.
+///
+/// WHY the bottom is the widest claim and not the verdict card's edge: the card
+/// used to be the last word here, and the hint line below it claims rows past it.
+/// A band shorter than a box the surface planned leaves those rows holding the
+/// pixels from whatever painted them last, which is what "the dirty band optimisation
+/// ate my descenders" looks like from the outside.
+///
+/// WHY the hint, the card and the list and nothing else: the status bar's clock is
+/// a reading this surface did not change, the field, headline, rows and verdicts are
+/// all above the card, and the navigation bar below row [`crate::nav::BAND_TOP`] is
+/// painted from its own band, so a query may not re-rasterise either.
+pub fn search_content_band() -> (usize, usize) {
+    let hint = search_hint_box();
+    let rows_bottom = SEARCH_ROWS_TOP + SEARCH_ROW_H * SEARCH_MAX_ROWS;
+    let card_bottom = SEARCH_STATUS_CARD.y + SEARCH_STATUS_CARD.h;
+    (
+        SEARCH_FIELD.y,
+        (hint.y + hint.h).max(card_bottom).max(rows_bottom),
+    )
 }
 
 /// Picks foreground ink that stays legible on `bg`.
