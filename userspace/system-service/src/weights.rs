@@ -48,6 +48,20 @@
 //! host-proven as an engine and a loader, and has never been executed by the
 //! guest: the dispatch arm that calls it is compiled for the device, and no QEMU
 //! run of it has been performed.
+//!
+//! WHY the descriptor re-chunks and the tensors do not: the kernel answers one
+//! positioned read of at most 64 KiB (`MAX_FS_IO_BYTES` in
+//! `kernel/src/syscall/mod.rs`) and refuses anything wider with
+//! `InvalidArguments`, while a Q8_0 `attn_q.weight` is 2,507,520 bytes and is
+//! handed to the reader as one request. An on-guest probe of the installed 333 MB
+//! file showed exactly that: the engine read for a quarter of a million ticks and
+//! then answered `Embedding refused: a positioned read at ...`, because the
+//! refusal and a truncated install shared one arm. `ModelFileDescriptor::read_at`
+//! now walks the caller's buffer in windows of the platform's own bound, so a
+//! request of any length is a sequence of legal reads, and the two refusals are
+//! separate: `ShortRead` means the bytes ran out, `ReadRefused` means the platform
+//! said no to a read it was allowed to answer. The bound was not raised and the
+//! kernel was not touched.
 
 use crate::inference::{
     self, apply_pooling_head, embedding_row_into, f32_sqrt, l2_normalise, mean_of,
@@ -95,7 +109,27 @@ pub enum LoadError {
     /// A positioned read came back short. Carries the position, the bytes asked for
     /// and the bytes that arrived: a truncated install is a different fact from a
     /// corrupt tensor, and only one of them is the file's fault.
+    ///
+    /// THIS IS THE END-OF-FILE REFUSAL AND NOTHING ELSE. After the descriptor layer
+    /// started re-chunking to the platform's own read bound (`MAX_POSITIONED_READ_BYTES`),
+    /// a short read means the bytes ran out mid-request; a platform that said no to a
+    /// bounded request is `ReadRefused`, and the two used to be the same arm -- which
+    /// is how a 64 KiB syscall bound reached the screen as "an install that stopped
+    /// part-way" on a file that is whole.
     ShortRead(u64, usize, usize),
+    /// The platform refused a positioned read it was allowed to answer. Carries the
+    /// position, the bytes that one bounded request asked for, and the code the call
+    /// gave back (`-3` is `InvalidArguments`). A refusal is the kernel saying no to
+    /// the request, not the file running out: the first calls for a loader change,
+    /// the second for a re-install.
+    ReadRefused(u64, usize, i64),
+    /// A positioned read reported more bytes than the window it was handed. Carries
+    /// the position, the window's width and the count claimed. Walking by a count
+    /// wider than the request would skip the bytes that follow it and leave the rest
+    /// of the tensor holding whatever the buffer had before, so the read is refused
+    /// rather than believed -- the same rule `GgufStream::read_exact` applies to a
+    /// count wider than the buffer it names.
+    OverDeliveredChunk(u64, usize, usize),
     /// The descriptor's own dimensions do not describe the tensor the graph needs
     /// (a row width that is not a whole number of quantisation blocks, or a table
     /// with no rows). Carries the tensor's suffix and the two numbers read.
@@ -123,11 +157,110 @@ impl From<InferenceError> for LoadError {
 /// against the real published file with the host's own file handle. Both answers
 /// have to drive the same per-block code path, or the measurement would be of a
 /// different reader than the one that ships.
+///
+/// WHAT AN IMPLEMENTATION OVER A SYSCALL OWES THE CALLER: `into.len()` is the
+/// tensor's stated size, which for a Q8_0 block matrix runs past the platform's
+/// per-request read bound, so the implementation -- not every call site -- splits
+/// the request. `read_in_bounded_chunks` is that split, and
+/// `ModelFileDescriptor::read_at` is the shipping use of it.
 pub trait PositionRead {
     /// Reads exactly `into.len()` bytes from `position`, or reports why it could
     /// not. A short read is a failure, not a partial success: a block's tail left
     /// unread is a block the graph would run with the previous block's bytes.
     fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError>;
+}
+
+/// The largest single positioned read the platform will answer.
+///
+/// WHY this is a caller-side number and not a kernel change: `fs_read_at` refuses
+/// any request whose `buf_len` exceeds the kernel's own `MAX_FS_IO_BYTES`
+/// (`kernel/src/syscall/mod.rs`, the constant and the `164 =>` dispatch arm), and
+/// that bound is the syscall ABI -- other callers depend on it and the gate
+/// `test_a_step_past_a_file_costs_no_request_and_a_read_names_its_position` pins
+/// the arm as bounded. So the bound is correct and the request was not: a loader
+/// that hands the call a whole 2,507,520-byte tensor row block asks for thirty-
+/// eight times what one call may carry, and the refusal arrives as a failed read.
+///
+/// WHY it is `64 * 1024` here rather than imported: the kernel's constant is
+/// private to its crate, and a userspace service has no way to read a bare-metal
+/// symbol. The number is therefore a stated agreement between the two sides, and
+/// the Python gate reads the kernel's declaration and this one together so a
+/// change on one side fails the contract instead of silently over-asking.
+pub const MAX_POSITIONED_READ_BYTES: usize = 64 * 1024;
+
+/// What one bounded positioned read came back as.
+///
+/// WHY three answers and not `Ok(usize)`: the loader has to tell a file that ends
+/// here apart from a platform that refuses, because they are different facts with
+/// different next moves -- re-install the model versus re-chunk the request -- and
+/// the old code folded both into one refusal, which is the bug this enum exists to
+/// keep impossible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkRead {
+    /// The source delivered this many bytes into the window it was handed.
+    Got(usize),
+    /// The source has no byte at this position: the file ends here.
+    End,
+    /// The platform refused the request, carrying the code it answered with.
+    Refused(i64),
+}
+
+/// Reads `into` from `position` as a sequence of requests no wider than
+/// `MAX_POSITIONED_READ_BYTES`, advancing by the bytes actually delivered.
+///
+/// WHY the caller's buffer is walked with a slice window instead of a stack chunk
+/// buffer: a `[u8; 65536]` on this service's 256 KiB stack is a quarter of it, and
+/// the caller already holds the destination -- so each request reads straight into
+/// `into[filled..filled + wanted]` and nothing is copied twice. No allocation is
+/// added to any interactive path: the loop's state is two integers.
+///
+/// WHY the step is a closure and not a second trait: the shipping loop and the
+/// host's measurement of it have to be the same code. `ModelFileDescriptor` hands
+/// this function the syscall; a test hands it a stand-in that refuses an
+/// over-wide request exactly as `kernel/src/syscall/mod.rs` does, so the chunking
+/// is measured rather than asserted about.
+///
+/// WHAT IS PRESERVED: a zero-length request is `Ok(())` without a call, and a
+/// request that starts at or past the end of the file is
+/// `ShortRead(position, asked, 0)` -- both exactly as the single-shot reader
+/// answered them, because those bounds are pinned elsewhere and are not this
+/// function's to change.
+pub fn read_in_bounded_chunks<F>(
+    position: u64,
+    into: &mut [u8],
+    mut one_read: F,
+) -> Result<(), LoadError>
+where
+    F: FnMut(u64, &mut [u8]) -> ChunkRead,
+{
+    let asked = into.len();
+    let mut filled = 0usize;
+    while filled < asked {
+        let chunk_position = position
+            .checked_add(filled as u64)
+            .ok_or(LoadError::Arithmetic)?;
+        let room = asked - filled;
+        let wanted = if room > MAX_POSITIONED_READ_BYTES {
+            MAX_POSITIONED_READ_BYTES
+        } else {
+            room
+        };
+        match one_read(chunk_position, &mut into[filled..filled + wanted]) {
+            // Nothing arrived: the file ends here. `filled` says how much of the
+            // request was real, which is the whole of what a short read reports.
+            ChunkRead::Got(0) | ChunkRead::End => {
+                return Err(LoadError::ShortRead(chunk_position, asked, filled));
+            }
+            ChunkRead::Got(got) if got > wanted => {
+                return Err(LoadError::OverDeliveredChunk(chunk_position, wanted, got));
+            }
+            ChunkRead::Got(got) => filled += got,
+            ChunkRead::Refused(errno) => {
+                return Err(LoadError::ReadRefused(chunk_position, wanted, errno));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The device's source: one descriptor the service already opened.
@@ -140,21 +273,22 @@ pub struct ModelFileDescriptor {
 }
 
 impl PositionRead for ModelFileDescriptor {
+    /// Reads a request of any length by asking for at most
+    /// `MAX_POSITIONED_READ_BYTES` at a time.
+    ///
+    /// WHY this sits here and not at the tensor call sites: `read_raw_tensor` is
+    /// handed the byte length a descriptor states, and a Q8_0 `attn_q.weight` is
+    /// 2,507,520 bytes of it. Every caller-sized slice would have to be split by
+    /// hand, and a split forgotten in one of them is a refusal that reads on screen
+    /// as a corrupt install. One loop, at the seam, is the whole of the bound.
     fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError> {
-        let mut filled = 0usize;
-        while filled < into.len() {
-            let got = crate::std::fs_read_at(self.fd, position + filled as u64, &mut into[filled..])
-                .map_err(|_| LoadError::ShortRead(position + filled as u64, into.len(), filled))?;
-            if got == 0 {
-                return Err(LoadError::ShortRead(
-                    position + filled as u64,
-                    into.len(),
-                    filled,
-                ));
+        read_in_bounded_chunks(position, into, |position, window| {
+            match crate::std::fs_read_at(self.fd, position, window) {
+                Ok(got) if got == 0 => ChunkRead::End,
+                Ok(got) => ChunkRead::Got(got),
+                Err(errno) => ChunkRead::Refused(errno),
             }
-            filled += got;
-        }
-        Ok(())
+        })
     }
 }
 
@@ -1766,5 +1900,531 @@ pub mod tests {
             None,
             "Q5_K must not resolve to a row width, or the loader will read it as Q4_K"
         );
+    }
+
+    /// `SyscallResult::InvalidArguments`, which is what
+    /// `kernel/src/syscall/mod.rs` returns for a read wider than `MAX_FS_IO_BYTES`.
+    const KERNEL_INVALID_ARGUMENTS: i64 = -3;
+
+    /// A byte at a position, so a read that advanced by the wrong count lands on
+    /// different bytes rather than the same byte twice.
+    fn image_byte(position: usize) -> u8 {
+        ((position.wrapping_mul(31)) ^ (position >> 3)) as u8
+    }
+
+    /// The bytes a `BoundedImage` reads, built once so the test can compare against
+    /// the same image the source served.
+    fn image_of(size: usize) -> Vec<u8> {
+        let mut image = Vec::new();
+        image.resize(size, 0u8);
+        for (position, byte) in image.iter_mut().enumerate() {
+            *byte = image_byte(position);
+        }
+        image
+    }
+
+    /// A file image behind the platform's read bound: the same
+    /// `read_in_bounded_chunks` loop the shipping descriptor runs, with the
+    /// kernel's own answer to an over-wide request put back in front of it.
+    ///
+    /// WHY it refuses rather than truncates: the refusal IS the finding this module
+    /// fixes. A reader that handed `fs_read_at` a whole tensor got `-3` on the
+    /// device and reported it as a short file, so the only faithful host stand-in is
+    /// one that says no the same way -- and a revert to the single-shot read fails
+    /// here instead of passing.
+    ///
+    /// WHY the image is borrowed and not owned: the loader case below reads through
+    /// this source and then compares the tensors it loaded against the image, so the
+    /// image has to outlive the reader's borrow of the source.
+    struct BoundedImage<'a> {
+        image: &'a [u8],
+        /// Every request this source was actually handed, as position and width.
+        requests: Vec<(u64, usize)>,
+        /// Requests wider than the bound. Must stay zero.
+        over_wide: usize,
+    }
+
+    impl<'a> BoundedImage<'a> {
+        fn new(image: &'a [u8]) -> Self {
+            Self {
+                image,
+                requests: Vec::new(),
+                over_wide: 0,
+            }
+        }
+    }
+
+    impl PositionRead for BoundedImage<'_> {
+        fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError> {
+            let mut seen = Vec::new();
+            let outcome = read_in_bounded_chunks(position, into, |chunk_position, window| {
+                seen.push((chunk_position, window.len()));
+                if window.len() > MAX_POSITIONED_READ_BYTES {
+                    self.over_wide += 1;
+                    return ChunkRead::Refused(KERNEL_INVALID_ARGUMENTS);
+                }
+                let start = chunk_position as usize;
+                if start >= self.image.len() {
+                    return ChunkRead::End;
+                }
+                let take = (self.image.len() - start).min(window.len());
+                window[..take].copy_from_slice(&self.image[start..start + take]);
+                ChunkRead::Got(take)
+            });
+            self.requests.extend(seen);
+            outcome
+        }
+    }
+
+    /// The bug, in one line: a request wider than the platform's bound is answered
+    /// as a sequence of requests that are inside it, and the bytes that come back
+    /// are the file's own bytes across every boundary.
+    #[test]
+    fn a_request_wider_than_the_platform_bound_is_read_as_bounded_chunks() {
+        let image = image_of(201_000);
+        let mut source = BoundedImage::new(&image);
+        let mut buffer = Vec::new();
+        buffer.resize(200_000, 0u8);
+
+        source
+            .read_at(1_000, &mut buffer)
+            .expect("a 200,000-byte request is four legal reads, not one refusal");
+
+        // The exact request list the bound forces: three full windows and the
+        // remainder, each starting where the previous one delivered to. An
+        // off-by-one in the advance lands on a different tuple, and so does a
+        // window that is one byte wide.
+        assert_eq!(
+            source.requests,
+            [
+                (1_000, MAX_POSITIONED_READ_BYTES),
+                (1_000 + MAX_POSITIONED_READ_BYTES as u64, MAX_POSITIONED_READ_BYTES),
+                (
+                    1_000 + 2 * MAX_POSITIONED_READ_BYTES as u64,
+                    MAX_POSITIONED_READ_BYTES
+                ),
+                (1_000 + 3 * MAX_POSITIONED_READ_BYTES as u64, 3_392),
+            ],
+            "the chunking is not the platform's bound walked by the bytes delivered"
+        );
+        assert_eq!(source.over_wide, 0, "a request wider than the bound was asked");
+
+        for (position, byte) in buffer.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                image_byte(1_000 + position),
+                "byte {} of the request is not the file's byte {}",
+                position,
+                1_000 + position
+            );
+        }
+
+        // The boundaries themselves, either side of each join, because a chunk that
+        // repeats or skips one byte is invisible everywhere else in the buffer.
+        for join in [
+            MAX_POSITIONED_READ_BYTES,
+            2 * MAX_POSITIONED_READ_BYTES,
+            3 * MAX_POSITIONED_READ_BYTES,
+        ] {
+            for offset in [join - 1, join, join + 1] {
+                assert_eq!(
+                    buffer[offset],
+                    image_byte(1_000 + offset),
+                    "the byte at the join {join} is wrong at {offset}"
+                );
+            }
+        }
+    }
+
+    /// A tensor row's worth of bytes, read through the loader's own seam.
+    ///
+    /// WHY through `WeightReader` and not just the loop: `load_block` is what hands
+    /// `read_at` a multi-megabyte slice (`read_raw_tensor` passes the descriptor's
+    /// whole `byte_len`), so the bound has to hold at that call site and not only in
+    /// a helper. The table below is hand-written for the same reason the dtype case
+    /// above is: it is the one place a test may invent bytes, and it invents only
+    /// sizes, never a payload -- every payload byte asserted here comes out of the
+    /// image the source was built from.
+    #[test]
+    fn the_loader_reads_a_block_whose_tensors_are_wider_than_the_bound() {
+        let hidden = 768usize;
+        let row_bytes = quantised_row_bytes(8, hidden).expect("Q8_0 has a 768-wide row");
+        let wide_rows = 3_072usize;
+        let wide_bytes = wide_rows * row_bytes;
+        assert!(
+            wide_bytes > MAX_POSITIONED_READ_BYTES,
+            "the fixture stopped being wider than the platform's bound: {wide_bytes} bytes"
+        );
+
+        // Six norms of `hidden` floats, then the seven matrices, laid end to end
+        // from an offset that is not a multiple of the bound -- so every tensor but
+        // the first starts mid-chunk, exactly where a real file puts them. The
+        // offset is the published file's `data_start` (6,530,464) taken modulo the
+        // bound, which puts the joins where the device puts them without holding
+        // the 6.5 MB of vocabulary and descriptors before them.
+        let mut entries = Vec::new();
+        let mut position = 6_530_464u64 % MAX_POSITIONED_READ_BYTES as u64;
+        let mut ranges = Vec::new();
+        for suffix in BLOCK_NORMS {
+            entries.push(TensorEntry {
+                name: suffix.as_bytes().to_vec(),
+                dtype: 0,
+                cols: hidden as u64,
+                rows: hidden as u64,
+                n_dims: 1,
+                byte_len: (hidden * size_of::<f32>()) as u64,
+                stated_offset: position,
+                position,
+            });
+            position += (hidden * size_of::<f32>()) as u64;
+        }
+        for (index, suffix) in BLOCK_QUANTISED.iter().enumerate() {
+            let rows = if index < 3 { wide_rows } else { hidden };
+            let cols = if index == 3 || index == 6 { wide_rows } else { hidden };
+            let bytes = rows * quantised_row_bytes(8, cols).expect("a row width");
+            entries.push(TensorEntry {
+                name: suffix.as_bytes().to_vec(),
+                dtype: 8,
+                cols: cols as u64,
+                rows: rows as u64,
+                n_dims: 2,
+                byte_len: bytes as u64,
+                stated_offset: position,
+                position,
+            });
+            ranges.push((position as usize, bytes));
+            position += bytes as u64;
+        }
+        // The block names are `blk.N.suffix`, so prefix them the way the loader
+        // builds them rather than handing it names it will never ask for.
+        for entry in entries.iter_mut() {
+            let mut name = Vec::new();
+            name.extend_from_slice(b"blk.0.");
+            name.extend_from_slice(&entry.name);
+            entry.name = name;
+        }
+        let table = TensorTable {
+            entries,
+            data_start: 0,
+            alignment: 32,
+            window_pulls: 0,
+        };
+
+        let image = image_of(position as usize);
+        let source = BoundedImage::new(&image);
+        let mut reader = WeightReader::new(table, source);
+        let read = reader.load_block(0).expect("a block wider than the bound loads");
+
+        assert_eq!(read.tensors_read, 13);
+        assert_eq!(
+            reader.source.over_wide, 0,
+            "a request wider than the bound was asked"
+        );
+        assert!(
+            reader.source.requests.len() > 13,
+            "thirteen tensors, several of them wider than the bound, in {} requests",
+            reader.source.requests.len()
+        );
+        for (_, width) in reader.source.requests.iter() {
+            assert!(
+                *width <= MAX_POSITIONED_READ_BYTES,
+                "the loader asked the platform for {width} bytes in one read"
+            );
+        }
+        let weights = reader.block();
+        for (index, matrix) in [
+            weights.attn_q,
+            weights.attn_k,
+            weights.attn_v,
+            weights.attn_o,
+            weights.ffn_gate,
+            weights.ffn_up,
+            weights.ffn_down,
+        ]
+        .iter()
+        .enumerate() {
+            let (start, bytes) = ranges[index];
+            assert_eq!(
+                *matrix,
+                &image[start..start + bytes],
+                "blk.0's matrix {index} is not the file's bytes at its own position"
+            );
+        }
+    }
+
+    /// The two refusals are still two facts. A file that ends mid-request is a
+    /// short read; a platform that says no to a bounded request is a refusal, and
+    /// the loader may not call one the other.
+    #[test]
+    fn a_refusal_and_an_end_of_file_are_not_reported_as_each_other() {
+        // The bytes run out inside the third chunk of a wide request.
+        let image = image_of(100_000);
+        let mut short = BoundedImage::new(&image);
+        let mut buffer = Vec::new();
+        buffer.resize(200_000, 0u8);
+        let error = short
+            .read_at(0, &mut buffer)
+            .expect_err("the file ends 100,000 bytes into a 200,000-byte request");
+        assert_eq!(
+            error,
+            LoadError::ShortRead(100_000, 200_000, 100_000),
+            "a file that ended here is not the platform refusing"
+        );
+        // Everything the file did hold arrived first: the refusal is not an excuse
+        // to leave the buffer as the caller found it.
+        for position in 0..100_000 {
+            assert_eq!(buffer[position], image_byte(position));
+        }
+
+        // A platform that refuses a request it was allowed to answer -- a closed
+        // descriptor, a capability withheld -- is a refusal, not a short file. The
+        // request handed to the step is inside the bound, which is the point: the
+        // loader may not blame the file for what the call said no to.
+        let error = read_in_bounded_chunks(4_096, &mut [0u8; 8], |_, window| {
+            assert_eq!(window.len(), 8, "the request was already wider than the bound");
+            ChunkRead::Refused(KERNEL_INVALID_ARGUMENTS)
+        })
+        .expect_err("a refusing platform is a refusal");
+        assert_eq!(
+            error,
+            LoadError::ReadRefused(4_096, 8, KERNEL_INVALID_ARGUMENTS),
+            "the refusal arrived as a short file, which is the misreport this fix exists for"
+        );
+
+        // A source that claims more than the window it was handed is refused rather
+        // than walked past, because the bytes after the window would never be read.
+        let error = read_in_bounded_chunks(0, &mut [0u8; 16], |_, window| {
+            ChunkRead::Got(window.len() + 1)
+        })
+        .expect_err("an over-wide count is not a larger read");
+        assert_eq!(error, LoadError::OverDeliveredChunk(0, 16, 17));
+    }
+
+    /// The two bounds the chunking must not move: an empty request and a position
+    /// the file does not reach. Both are pinned by other contracts, so they are
+    /// asserted here rather than assumed by the loop's shape.
+    #[test]
+    fn an_empty_request_and_a_read_past_the_end_are_untouched_by_the_chunking() {
+        let image = image_of(1_024);
+        let mut source = BoundedImage::new(&image);
+        source
+            .read_at(0, &mut [])
+            .expect("a zero-length request is not a read");
+        assert_eq!(source.requests.len(), 0, "an empty request asked the platform");
+
+        let mut buffer = Vec::new();
+        buffer.resize(16, 0u8);
+        let error = source
+            .read_at(4_096, &mut buffer)
+            .expect_err("nothing lives at 4,096 of a 1,024-byte image");
+        assert_eq!(error, LoadError::ShortRead(4_096, 16, 0));
+
+        // The exact end of the file, asked for exactly: the last byte is readable
+        // and the byte after it is not, so the bound is the image and not a rounding.
+        let mut tail = Vec::new();
+        tail.resize(1, 0u8);
+        source
+            .read_at(1_023, &mut tail)
+            .expect("the last byte of the image is readable");
+        assert_eq!(tail[0], image_byte(1_023));
+        assert_eq!(
+            source
+                .read_at(1_024, &mut tail)
+                .expect_err("one past the image is one past the file"),
+            LoadError::ShortRead(1_024, 1, 0)
+        );
+    }
+
+    /// The real published file, read through the platform's own bound.
+    ///
+    /// WHY this is not the same case as the one above it: `BoundedImage` proves the
+    /// loop's arithmetic on bytes this test invented. A stand-in can be right about
+    /// an offset and wrong about a file, so the claim that matters -- that
+    /// `ModelFileDescriptor`'s chunking delivers the published tensor bytes -- is
+    /// taken here, against the 333 MB GGUF, by loading the same block and the same
+    /// pooling head twice: once through a source that refuses any request wider
+    /// than the platform's bound (exactly what the guest's `fs_read_at` does) and
+    /// once through the plain host handle. The two answers must be the same bytes.
+    ///
+    /// HOST-BACKED, and said so in its own output: this is the development host
+    /// running the loader with the host's file handle. It says nothing about the
+    /// device, where the same loop runs over the syscall.
+    #[test]
+    fn the_installed_file_loads_through_the_platform_read_bound() {
+        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            rust_std::println!(
+                "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset, so \
+                 no tensor of the 333 MB GGUF was read through the platform's read bound."
+            );
+            return;
+        };
+
+        let (table, prefix, _) = walk_the_installed_table(&path)
+            .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked: {why}"));
+        let mut info_stream = crate::gguf::GgufStream::from_slice(&prefix);
+        let info = crate::gguf::read_model_info_stream(&mut info_stream).expect("the file configures");
+        let config = ModelConfig::from_gguf(&info).expect("the installed file is priced");
+        let hidden = config.hidden_dim;
+
+        let (bounded_table, _, _) = walk_the_installed_table(&path)
+            .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked twice: {why}"));
+
+        let bounded = BoundedFileSource {
+            file: rust_std::fs::File::open(&path).expect("the installed file opens"),
+            requests: 0,
+            widest: 0,
+        };
+        let plain = HostFileSource {
+            file: rust_std::fs::File::open(&path).expect("the installed file opens again"),
+        };
+        let mut bounded_reader = WeightReader::new(bounded_table, bounded);
+        let mut plain_reader = WeightReader::new(table, plain);
+
+        let first = bounded_reader
+            .load_block(0)
+            .expect("block 0 loads through the platform's read bound");
+        let second = plain_reader
+            .load_block(0)
+            .expect("block 0 loads without the bound");
+        assert_eq!(first.bytes_read, second.bytes_read);
+        assert_eq!(first.tensors_read, second.tensors_read);
+        assert!(
+            first.bytes_read > MAX_POSITIONED_READ_BYTES as u64,
+            "the block stopped being wider than the bound: {} bytes",
+            first.bytes_read
+        );
+
+        let a = bounded_reader.block();
+        let b = plain_reader.block();
+        for (name, x, y) in [
+            ("attn_q", a.attn_q, b.attn_q),
+            ("attn_k", a.attn_k, b.attn_k),
+            ("attn_v", a.attn_v, b.attn_v),
+            ("attn_o", a.attn_o, b.attn_o),
+            ("ffn_gate", a.ffn_gate, b.ffn_gate),
+            ("ffn_up", a.ffn_up, b.ffn_up),
+            ("ffn_down", a.ffn_down, b.ffn_down),
+        ] {
+            assert_eq!(x, y, "blk.0.{name} is not the same bytes read through the bound");
+        }
+        for (name, x, y) in [
+            ("attn_norm", a.attn_norm, b.attn_norm),
+            ("attn_q_norm", a.attn_q_norm, b.attn_q_norm),
+            ("attn_k_norm", a.attn_k_norm, b.attn_k_norm),
+            ("post_attn_norm", a.post_attn_norm, b.post_attn_norm),
+            ("ffn_norm", a.ffn_norm, b.ffn_norm),
+            ("post_ffn_norm", a.post_ffn_norm, b.post_ffn_norm),
+        ] {
+            assert_eq!(x, y, "blk.0.{name} is not the same floats read through the bound");
+        }
+
+        // The pooling head is where the published file's widest tensors outside the
+        // embedding table sit: 2,506,752 bytes each, so every one of them is about
+        // 39 requests once the bound is applied.
+        bounded_reader
+            .load_pooling_head(hidden)
+            .expect("the head loads through the platform's read bound");
+        plain_reader
+            .load_pooling_head(hidden)
+            .expect("the head loads without the bound");
+        let mut probe_a: Vec<f32> = Vec::new();
+        let mut probe_b: Vec<f32> = Vec::new();
+        probe_a.resize(hidden, 0.0f32);
+        probe_b.resize(hidden, 0.0f32);
+        for (index, slot) in probe_a.iter_mut().enumerate() {
+            *slot = ((index * 37) % 251) as f32 / 251.0 - 0.5;
+        }
+        probe_b.copy_from_slice(&probe_a);
+        let mut out_a: Vec<f32> = Vec::new();
+        let mut out_b: Vec<f32> = Vec::new();
+        out_a.resize(hidden, 0.0f32);
+        out_b.resize(hidden, 0.0f32);
+        bounded_reader
+            .run_pooling_head(&probe_a, &mut out_a)
+            .expect("the bounded head runs");
+        plain_reader
+            .run_pooling_head(&probe_b, &mut out_b)
+            .expect("the unbounded head runs");
+        assert_eq!(
+            out_a, out_b,
+            "the pooling head answered differently once its two matrices were read in \
+             chunks of the platform's bound"
+        );
+
+        let requests = bounded_reader.source.requests;
+        let widest = bounded_reader.source.widest;
+        rust_std::println!(
+            "HOST-BACKED BOUND CHECK (the development host with the host's file handle, \
+             not the device): blk.0 and the pooling head read in {requests} positioned \
+             requests, widest {widest} bytes against a platform bound of \
+             {MAX_POSITIONED_READ_BYTES}, and the bytes are identical to the unbounded read.",
+        );
+        assert!(
+            widest <= MAX_POSITIONED_READ_BYTES,
+            "a request of {widest} bytes was asked of a platform bounded at \
+             {MAX_POSITIONED_READ_BYTES}"
+        );
+        assert!(
+            requests > 100,
+            "only {requests} requests were needed, which means the bound was not \
+             binding on this file"
+        );
+    }
+
+    /// The published file behind the platform's read bound, on the host.
+    ///
+    /// WHY a second host source beside `HostFileSource`: `HostFileSource` is the
+    /// host's own `File`, which answers a request of any width, so a loader driven
+    /// only by it cannot see the bound the guest enforces. This type keeps the same
+    /// shipping loop as `ModelFileDescriptor` and puts the kernel's refusal in front
+    /// of it, which is the one host arrangement that can show a chunking bug.
+    struct BoundedFileSource {
+        file: rust_std::fs::File,
+        /// Positioned requests actually made, so the run reports its own cost.
+        requests: usize,
+        /// The widest request any of them carried.
+        widest: usize,
+    }
+
+    impl PositionRead for BoundedFileSource {
+        fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError> {
+            use rust_std::io::{Read, Seek, SeekFrom};
+            let mut requests = 0usize;
+            let mut widest = 0usize;
+            let outcome = read_in_bounded_chunks(position, into, |chunk_position, window| {
+                if window.len() > MAX_POSITIONED_READ_BYTES {
+                    return ChunkRead::Refused(KERNEL_INVALID_ARGUMENTS);
+                }
+                requests += 1;
+                if window.len() > widest {
+                    widest = window.len();
+                }
+                if self
+                    .file
+                    .seek(SeekFrom::Start(chunk_position))
+                    .is_err()
+                {
+                    return ChunkRead::Refused(KERNEL_INVALID_ARGUMENTS);
+                }
+                let mut filled = 0usize;
+                while filled < window.len() {
+                    match self.file.read(&mut window[filled..]) {
+                        Ok(0) => break,
+                        Ok(got) => filled += got,
+                        Err(_) => break,
+                    }
+                }
+                if filled == 0 {
+                    ChunkRead::End
+                } else {
+                    ChunkRead::Got(filled)
+                }
+            });
+            self.requests += requests;
+            if widest > self.widest {
+                self.widest = widest;
+            }
+            outcome
+        }
     }
 }

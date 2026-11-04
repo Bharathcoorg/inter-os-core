@@ -1653,6 +1653,35 @@ fn file_embed_notice<'a>(error: &FileEmbedError, buf: &'a mut [u8]) -> (u32, &'a
             notice.word(b" bytes the descriptor states -- an install that stopped part-way.");
             STATUS_ERROR
         }
+        FileEmbedError::Load(weights::LoadError::ReadRefused(position, asked, errno)) => {
+            notice.word(b"Embedding refused: the platform refused a read of ");
+            notice.byte_count(*asked as u64);
+            notice.word(b" bytes at byte ");
+            notice.byte_count(*position);
+            notice.word(b" with code ");
+            if *errno < 0 {
+                notice.word(b"-");
+            }
+            notice.number(u32::try_from(errno.unsigned_abs()).unwrap_or(u32::MAX));
+            notice.word(b", which is the call saying no to a bounded request and not a");
+            notice.word(b" file that ran short -- re-install is the wrong next move.");
+            STATUS_ERROR
+        }
+        FileEmbedError::Load(weights::LoadError::OverDeliveredChunk(
+            position,
+            window,
+            claimed,
+        )) => {
+            notice.word(b"Embedding refused: a read at byte ");
+            notice.byte_count(*position);
+            notice.word(b" answered with ");
+            notice.byte_count(*claimed as u64);
+            notice.word(b" bytes for a ");
+            notice.byte_count(*window as u64);
+            notice.word(b"-byte window, so the loader stopped rather than trust the");
+            notice.word(b" count and leave the rest of the tensor as it found it.");
+            STATUS_ERROR
+        }
         FileEmbedError::Config(InferenceError::ScratchTooLarge(needed, budget)) => {
             notice.word(b"Embedding refused: this model needs ");
             notice.byte_count(*needed as u64);
@@ -4123,10 +4152,46 @@ mod tests {
             core::str::from_utf8(notice).unwrap(),
             "Embedding refused: a positioned read at byte 4096 came back with 512 of the 816 bytes the descriptor states -- an install that stopped part-way."
         );
+
+        // The two refusals a chunked read can produce, each in its own words. The
+        // first is the one the device actually hit: a bounded request the platform
+        // said no to. Calling that "an install that stopped part-way" -- which is
+        // what it used to be called -- sends a reader to re-install a 333 MB file
+        // that is whole, so the sentence and the code have to stay apart.
+        let (status, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::ReadRefused(6_530_464, 65_536, -3)),
+            &mut out,
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            core::str::from_utf8(notice).unwrap(),
+            "Embedding refused: the platform refused a read of 65536 bytes at byte 6530464 \
+             with code -3, which is the call saying no to a bounded request and not a file \
+             that ran short -- re-install is the wrong next move."
+        );
+
+        let (status, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::OverDeliveredChunk(
+                4_096,
+                65_536,
+                65_537,
+            )),
+            &mut out,
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            core::str::from_utf8(notice).unwrap(),
+            "Embedding refused: a read at byte 4096 answered with 65537 bytes for a \
+             65536-byte window, so the loader stopped rather than trust the count and \
+             leave the rest of the tensor as it found it."
+        );
+
         for error in [
             FileEmbedError::Open,
             FileEmbedError::Load(weights::LoadError::Arithmetic),
             FileEmbedError::Config(InferenceError::CorruptedWeights),
+            FileEmbedError::Load(weights::LoadError::ReadRefused(1, 2, -3)),
+            FileEmbedError::Load(weights::LoadError::OverDeliveredChunk(1, 2, 3)),
         ] {
             let (_, notice) = file_embed_notice(&error, &mut out);
             let text = core::str::from_utf8(notice).unwrap();

@@ -1338,6 +1338,196 @@ def test_the_loader_contract_can_fail():
     )
 
 
+def _byte_literal(text: str) -> int:
+    """`64 * 1024` as the number it writes.
+
+    WHY not `eval`: the two sides of the syscall declare the same bound in their
+    own file, and the contract is that the numbers agree. Multiplying the factors
+    is the whole of what reading a `usize` literal needs.
+    """
+    value = 1
+    for token in text.split("*"):
+        value *= int(token.strip().replace("_", ""))
+    return value
+
+
+# The platform's per-request read bound, checked on both sides of the syscall.
+#
+# WHY this exists at all: the kernel answers one positioned read of at most
+# `MAX_FS_IO_BYTES` and refuses anything wider with `InvalidArguments`, while the
+# published file's tensors are megabytes -- `blk.0.attn_q.weight` is 2,507,520
+# bytes. On a real on-guest probe the loader handed the call the whole tensor and
+# the refusal came back as `ShortRead`, so a 64 KiB ABI bound reached the screen as
+# "an install that stopped part-way" for a 333,590,944-byte file that is whole. The
+# bound is correct and the request was not; these detectors keep the split at the
+# descriptor seam and keep the two failures from collapsing back into one.
+def _bounded_read_defects(weights: str, kernel: str, lib: str) -> list[str]:
+    """What would let one over-wide read be reported as a truncated model."""
+    defects = []
+
+    kernel_bound = re.search(r"const MAX_FS_IO_BYTES: usize = ([0-9_ *]+);", kernel)
+    caller_bound = re.search(
+        r"pub const MAX_POSITIONED_READ_BYTES: usize = ([0-9_ *]+);", weights
+    )
+    if kernel_bound is None or caller_bound is None:
+        defects.append("the per-request read bound is not stated on both sides")
+    elif _byte_literal(kernel_bound.group(1)) != _byte_literal(caller_bound.group(1)):
+        defects.append("the caller's read bound is not the kernel's")
+
+    arm = function_body(kernel, "164 => {")
+    if "buf_len > MAX_FS_IO_BYTES" not in arm:
+        defects.append("the kernel no longer refuses a request wider than its bound")
+
+    seam = function_body(weights, "impl PositionRead for ModelFileDescriptor")
+    if "read_in_bounded_chunks(" not in seam:
+        defects.append("the descriptor hands the platform the caller's whole slice")
+    if "ChunkRead::End" not in seam or "ChunkRead::Refused" not in seam:
+        defects.append("the descriptor reports one failure where the platform gives two")
+
+    loop = function_body(weights, "pub fn read_in_bounded_chunks<")
+    if "MAX_POSITIONED_READ_BYTES" not in loop:
+        defects.append("the chunking loop is bounded by nothing")
+    if "&mut into[filled..filled + wanted]" not in loop:
+        defects.append("the chunking loop asks for the whole rest of the request")
+    if (
+        "ChunkRead::Got(0) | ChunkRead::End =>" not in loop
+        or "LoadError::ShortRead(chunk_position, asked, filled)" not in loop
+    ):
+        defects.append("a file that ends mid-request stopped being a short read")
+    if "LoadError::ReadRefused(chunk_position, wanted, errno)" not in loop:
+        defects.append("a platform refusal is reported as a short file again")
+    if "LoadError::OverDeliveredChunk(chunk_position, wanted, got)" not in loop:
+        defects.append("a count wider than its window is walked past instead of refused")
+
+    notice = function_body(lib, "fn file_embed_notice<'a>(")
+    if "weights::LoadError::ReadRefused" not in notice:
+        defects.append("the platform refusal has no arm of its own in the notice")
+    if "weights::LoadError::OverDeliveredChunk" not in notice:
+        defects.append("the over-wide count has no arm of its own in the notice")
+    if "an install that stopped part-way" not in notice:
+        defects.append("the short-file sentence stopped naming the fact it reports")
+    return defects
+
+
+def test_a_tensor_wider_than_the_platform_read_bound_is_read_in_chunks():
+    """The split happens at the descriptor, and the two refusals stay separate."""
+    defects = _bounded_read_defects(
+        read("weights.rs"),
+        KERNEL_SYSCALL.read_text(encoding="utf-8"),
+        lib_source(),
+    )
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_bounded_read_contract_can_fail():
+    """Each detector above is tripped by the fault it exists for.
+
+    The sources below are the live loader with one rule reversed: the bound raised
+    on one side of the syscall only, the kernel's refusal removed, the descriptor
+    back to one call per tensor, the window left unbounded, a refusal collapsed into
+    a short read, an over-wide count believed, and the notice arm deleted.
+    """
+    weights = read("weights.rs")
+    kernel = KERNEL_SYSCALL.read_text(encoding="utf-8")
+    lib = lib_source()
+    assert _bounded_read_defects(weights, kernel, lib) == []
+
+    raised = weights.replace(
+        "pub const MAX_POSITIONED_READ_BYTES: usize = 64 * 1024;",
+        "pub const MAX_POSITIONED_READ_BYTES: usize = 4 * 1024 * 1024;",
+        1,
+    )
+    assert raised != weights, "the caller's bound the contract watches is gone"
+    assert any("not the kernel's" in d for d in _bounded_read_defects(raised, kernel, lib)), (
+        "a loader that over-asks by sixty-four still passed"
+    )
+
+    unbounded = kernel.replace(
+        "const MAX_FS_IO_BYTES: usize = 64 * 1024;",
+        "const MAX_FS_IO_BYTES: usize = 4 * 1024 * 1024;",
+        1,
+    )
+    assert unbounded != kernel, "the kernel's bound the contract watches is gone"
+    assert any("not the kernel's" in d for d in _bounded_read_defects(weights, unbounded, lib)), (
+        "the two sides disagreeing went unnoticed"
+    )
+
+    no_refusal = kernel.replace(
+        "            if buf_len > MAX_FS_IO_BYTES {\n"
+        "                return SyscallResult::InvalidArguments as i64;\n"
+        "            }\n"
+        "            let mut kbuf = [0u8; 4096];\n"
+        "            let mut done = 0usize;\n"
+        "            while done < buf_len {\n"
+        "                let want = (buf_len - done).min(kbuf.len());\n"
+        "                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {",
+        "            let mut kbuf = [0u8; 4096];\n"
+        "            let mut done = 0usize;\n"
+        "            while done < buf_len {\n"
+        "                let want = (buf_len - done).min(kbuf.len());\n"
+        "                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {",
+        1,
+    )
+    assert no_refusal != kernel, "the refusal the kernel rule watches is gone"
+    assert any(
+        "no longer refuses" in d for d in _bounded_read_defects(weights, no_refusal, lib)
+    ), "an unbounded positioned read passed the contract"
+
+    single_shot = weights.replace(
+        "        read_in_bounded_chunks(position, into, |position, window| {",
+        "        match crate::std::fs_read_at(self.fd, position, into) {",
+        1,
+    )
+    assert single_shot != weights, "the seam the chunking rule watches moved"
+    assert any(
+        "caller's whole slice" in d
+        for d in _bounded_read_defects(single_shot, kernel, lib)
+    ), "the descriptor went back to one call per tensor and nothing said so"
+
+    whole_window = weights.replace(
+        "match one_read(chunk_position, &mut into[filled..filled + wanted]) {",
+        "match one_read(chunk_position, &mut into[filled..]) {",
+        1,
+    )
+    assert whole_window != weights, "the window the loop is watched on moved"
+    assert any(
+        "whole rest of the request" in d
+        for d in _bounded_read_defects(whole_window, kernel, lib)
+    ), "a loop that asks for the whole remainder passed the contract"
+
+    collapsed = weights.replace(
+        "return Err(LoadError::ReadRefused(chunk_position, wanted, errno));",
+        "return Err(LoadError::ShortRead(chunk_position, asked, filled));",
+        1,
+    )
+    assert collapsed != weights, "the refusal arm the contract watches moved"
+    assert any(
+        "short file again" in d for d in _bounded_read_defects(collapsed, kernel, lib)
+    ), "a platform refusal reported as a truncated install passed the contract"
+
+    believed = weights.replace(
+        "return Err(LoadError::OverDeliveredChunk(chunk_position, wanted, got));",
+        "filled += got;",
+        1,
+    )
+    assert believed != weights, "the count guard the contract watches moved"
+    assert any(
+        "walked past instead of refused" in d
+        for d in _bounded_read_defects(believed, kernel, lib)
+    ), "a source that lies about its own count was believed"
+
+    merged_notice = lib.replace(
+        "FileEmbedError::Load(weights::LoadError::ReadRefused(position, asked, errno)) => {",
+        "FileEmbedError::Load(weights::LoadError::Arithmetic) => {",
+        1,
+    )
+    assert merged_notice != lib, "the notice arm the contract watches moved"
+    assert any(
+        "no arm of its own in the notice" in d
+        for d in _bounded_read_defects(weights, kernel, merged_notice)
+    ), "the refusal lost its sentence and the contract did not notice"
+
+
 def test_the_loader_runs_the_installed_file_or_says_it_did_not():
     """The one case that runs the graph over the 333 MB file has to say when it did not.
 
@@ -1779,6 +1969,8 @@ def test_every_embedding_refusal_earns_its_own_code():
         "BadShape",
         "BadAlignment",
         "ShortRead",
+        "ReadRefused",
+        "OverDeliveredChunk",
         "ScratchTooLarge",
         "ScratchUnavailable",
         "ModelDeclaration",
