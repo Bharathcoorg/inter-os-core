@@ -567,6 +567,86 @@ const ALBUM_ROWS: usize = ALBUM_CELLS / 2;
 const _: () = assert!(ALBUM_CELLS % 2 == 0);
 
 // -----------------------------------------------------------------------------
+// The touch floor, stated once against the plates the painter inks.
+//
+// WHY these gates live beside the rectangles and not in a Python pin: every
+// control above is declared as one `Rect` that the renderer draws and the press
+// answers -- that half of the contract is already true, and a second copy of the
+// numbers to compare against would only be a second thing that can drift. What
+// was never held down is the size: the gallery shipped with no statement of the
+// platform's floor anywhere in it, so a plate grown shorter than 44 rows would
+// have painted a control a thumb could see and not press. A `const` sweep is the
+// strongest form available here: this app's bin target carries `test = false`, so
+// a `#[test]` in this file would never run, and these gates fail the build.
+// -----------------------------------------------------------------------------
+const _: () = {
+    use interos_std::design::touch::MIN_TARGET;
+    let plates = [
+        VIEWER_CLOSE,
+        VIEWER_ZOOM,
+        CAPTURE_BTN,
+        CLOSE,
+        PLAY_PAUSE_BTN,
+        FULLSCREEN_BTN,
+        ASPECT_BTN,
+        PHOTO_FULLSCREEN_BTN,
+        DETAIL_INFO,
+        PHOTO_FAV_BTN,
+        PHOTO_DEL_BTN,
+        SET_WALLPAPER_BTN,
+        DELETE_CONFIRM_BTN,
+        DELETE_CANCEL_BTN,
+        WP_TARGET_HOME_BTN,
+        WP_TARGET_LOCK_BTN,
+        WP_TARGET_BOTH_BTN,
+        WP_TARGET_CANCEL_BTN,
+        HOME_HIT,
+    ];
+    let mut i = 0;
+    while i < plates.len() {
+        assert!(plates[i].w >= MIN_TARGET);
+        assert!(plates[i].h >= MIN_TARGET);
+        assert!(plates[i].x + plates[i].w <= W);
+        assert!(plates[i].y + plates[i].h <= H);
+        i += 1;
+    }
+    // The information sheet's two controls are a `const fn` of the sheet, so no
+    // rung of the ladder can reach them -- but the plate they clear and the
+    // floor they hold can both be pinned.
+    let open_with = info_open_with_btn();
+    let dismiss = info_dismiss_btn();
+    let sheet = info_sheet_rect();
+    assert!(open_with.w >= MIN_TARGET && open_with.h >= MIN_TARGET);
+    assert!(dismiss.w >= MIN_TARGET && dismiss.h >= MIN_TARGET);
+    assert!(open_with.x >= sheet.x && open_with.y >= sheet.y);
+    assert!(open_with.x + open_with.w <= sheet.x + sheet.w);
+    assert!(open_with.y + open_with.h <= sheet.y + sheet.h);
+    assert!(dismiss.x >= sheet.x && dismiss.y >= sheet.y);
+    assert!(dismiss.x + dismiss.w <= sheet.x + sheet.w);
+    assert!(dismiss.y + dismiss.h <= sheet.y + sheet.h);
+    // The rows the grid, the video grid and the album cards answer: every cell
+    // is far wider than the floor, and no cell reaches off its own column.
+    assert!(CELL >= MIN_TARGET);
+    assert!(CHIP_H >= MIN_TARGET);
+    assert!(TAB_H >= MIN_TARGET);
+    assert!(VIDEO_COL_W >= MIN_TARGET);
+    assert!(VIDEO_ROW_H >= MIN_TARGET);
+    // The chip row's own floor: the narrowest chip the row may ever lay out,
+    // whatever label the filter it names carries.
+    assert!(gallery::chip_row::MIN_W >= MIN_TARGET);
+    assert!(gallery::chip_row::GAP < gallery::chip_row::MIN_W);
+    // The back control is the platform's, and its plate clears the floor.
+    assert!(std::design::back_button::SIZE >= MIN_TARGET);
+    // The scrub band answers the bar it is drawn for: the same columns, and the
+    // bar's own ink standing inside the rows the press takes.
+    assert!(SCRUB_HIT.h >= MIN_TARGET);
+    assert!(SCRUB_HIT.x == SCRUB_BAR.x);
+    assert!(SCRUB_HIT.w == SCRUB_BAR.w);
+    assert!(SCRUB_HIT.y <= SCRUB_BAR.y);
+    assert!(SCRUB_HIT.y + SCRUB_HIT.h >= SCRUB_BAR.y + SCRUB_BAR.h);
+};
+
+// -----------------------------------------------------------------------------
 // Text rendering helpers - the gate always matches the glyph line box, so
 // glyphs are never clipped mid-row.
 // -----------------------------------------------------------------------------
