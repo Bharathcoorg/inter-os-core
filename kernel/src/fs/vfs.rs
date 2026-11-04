@@ -5422,6 +5422,322 @@ mod tests {
         assert_eq!(got, 16);
         assert_eq!(&head[..], &payload[..16], "from the start, which the positioned read left alone");
     }
+
+    // -----------------------------------------------------------------
+    // Provisioned-weights staging disk (host only, #[ignore])
+    //
+    // WHY this lives here and not beside the InterFS tests: the one thing a
+    // staging disk gets wrong is the name the payload is stored under, and that
+    // name is produced by `spill_path_for` above -- the very function the
+    // importer calls. Building the image in this module means the test writes
+    // the name the kernel reads, with no second copy of the digest rule that
+    // could drift away from it.
+    // -----------------------------------------------------------------
+
+    /// Sector count of the guest's data disk: the 6 GiB ATA primary slave the
+    /// emulator attaches (`emulator/server.py`, `ensure_data_disk`).
+    const STAGING_DATA_DISK_SECTORS: u32 = 6 * 1024 * 1024 * 2;
+
+    /// The model the importer is being handed: the published EmbeddingGemma 300M
+    /// Q8_0 weights, measured from the file rather than assumed.
+    const STAGING_MODEL_SOURCE: &str =
+        "target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+
+    /// Where the throwaway staging disk is written.
+    const STAGING_DISK_TARGET: &str = "target/verify/staging-model-disk.img";
+
+    /// The VFS path the weights are provisioned at: the first candidate
+    /// `probe_embedding_model` tries, and inside `MODEL_NAMESPACE` so the
+    /// importer accepts it.
+    const STAGING_MODEL_VFS_PATH: &str = "/data/models/embeddinggemma-2.gguf";
+
+    /// The repository root, derived from the manifest directory so the test does
+    /// not hard-code one developer's absolute path.
+    fn staging_repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("kernel/ sits directly under the repository root")
+            .to_path_buf()
+    }
+
+    /// A `BlockDevice` over a real sparse file.
+    ///
+    /// WHY the image is sparse and the payload streamed: the region is 6 GiB and
+    /// the payload 333 MB, so neither may be resident. `set_len` gives the file
+    /// its size without allocating the untouched middle, and the payload arrives
+    /// in 128 KiB chunks, which is the same shape the kernel itself spills a
+    /// model in.
+    struct StagingImageDevice {
+        file: std::fs::File,
+        total: u32,
+    }
+
+    /// One `io::Error` becomes the one fault the block trait speaks.
+    fn staging_io_error(_: std::io::Error) -> crate::storage::block::BlockDeviceError {
+        crate::storage::block::BlockDeviceError::DeviceFault
+    }
+
+    impl StagingImageDevice {
+        /// Creates (or reclaims) a zero-filled image of exactly `total_sectors`.
+        ///
+        /// WHY the length is reset to zero first: re-running the builder over an
+        /// image it already formatted would otherwise let `mount_region` succeed
+        /// on the old filesystem, and the test would pass while proving nothing
+        /// about what it wrote.
+        fn create(path: &std::path::Path, total_sectors: u32) -> Self {
+            use std::io::Seek;
+            use std::io::Write;
+            // WHY `truncate`: a re-run must not mount the filesystem a previous
+            // run formatted, or the test would pass on bytes it did not write.
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .unwrap_or_else(|e| panic!("{} opens for writing: {e}", path.display()));
+            file.write_all(&[0u8; 1]).expect("the image takes its first byte");
+            file.seek(std::io::SeekFrom::Start(0)).expect("the image rewinds");
+            file.set_len(total_sectors as u64 * crate::storage::block::SECTOR_SIZE as u64)
+                .expect("the image reaches the data disk's size");
+            Self { file, total: total_sectors }
+        }
+
+        fn open(path: &std::path::Path) -> Self {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap_or_else(|e| panic!("{} opens: {e}", path.display()));
+            let total = (file.metadata().expect("the image has a length").len()
+                / crate::storage::block::SECTOR_SIZE as u64) as u32;
+            Self { file, total }
+        }
+    }
+
+    impl BlockDevice for StagingImageDevice {
+        fn read_sector(
+            &mut self,
+            lba: u32,
+            buf: &mut [u8; crate::storage::block::SECTOR_SIZE],
+        ) -> Result<(), crate::storage::block::BlockDeviceError> {
+            use std::io::Read;
+            use std::io::Seek;
+            if lba >= self.total {
+                return Err(crate::storage::block::BlockDeviceError::LbaOutOfRange);
+            }
+            self.file
+                .seek(std::io::SeekFrom::Start(
+                    lba as u64 * crate::storage::block::SECTOR_SIZE as u64,
+                ))
+                .map_err(staging_io_error)?;
+            self.file.read_exact(buf).map_err(staging_io_error)?;
+            Ok(())
+        }
+
+        fn write_sector(
+            &mut self,
+            lba: u32,
+            buf: &[u8; crate::storage::block::SECTOR_SIZE],
+        ) -> Result<(), crate::storage::block::BlockDeviceError> {
+            use std::io::Seek;
+            use std::io::Write;
+            if lba >= self.total {
+                return Err(crate::storage::block::BlockDeviceError::LbaOutOfRange);
+            }
+            self.file
+                .seek(std::io::SeekFrom::Start(
+                    lba as u64 * crate::storage::block::SECTOR_SIZE as u64,
+                ))
+                .map_err(staging_io_error)?;
+            self.file.write_all(buf).map_err(staging_io_error)?;
+            Ok(())
+        }
+
+        fn sector_count(&self) -> u32 {
+            self.total
+        }
+
+        fn model(&self) -> &str {
+            "HOST-STAGING-IMAGE"
+        }
+
+        fn flush(&mut self) -> Result<(), crate::storage::block::BlockDeviceError> {
+            self.file.sync_all().map_err(staging_io_error)
+        }
+    }
+
+    /// The spill name the device must hold the payload under for `vfs_path`.
+    fn staging_spill_name(vfs_path: &str) -> String {
+        spill_path_for(vfs_path)
+    }
+
+    /// Builds the throwaway staging disk that carries real weights into the guest.
+    ///
+    /// WHAT IT DOES, in the order that matters: format the InterFS region with
+    /// the kernel's own placement code (`init_block_filesystem_with_device`, so
+    /// the base LBA, the journal tail and the boot guard are exactly what a boot
+    /// would apply), stream the model's bytes to the spill name its VFS path
+    /// digests to, write the `path|byte-count` manifest line at
+    /// `PROVISION_MANIFEST_PATH`, flush.
+    ///
+    /// WHY it then reads the disk back through `load_provision_manifest_with_device`
+    /// and `data_file_len_with_device`: those are the two calls
+    /// `import_provisioned_models` makes on the guest. A wrong spill name, a wrong
+    /// region, or a manifest the window cuts off is therefore caught here, in
+    /// seconds, instead of in a boot log.
+    ///
+    /// WHY `#[ignore]`: it writes a 6 GiB disk and the model's whole 333 MB into
+    /// it, and it can only run on a host that already holds the weights -- the
+    /// ordinary suite runs on a checkout that does not, and must stay green.
+    /// Measured on this host: 3.6 s end to end, the model's copy included.
+    #[test]
+    #[ignore = "writes a 6 GiB disk and the model's 333 MB into it; run with -- --ignored"]
+    fn staging_disk_builder_lays_real_weights_on_a_data_disk() {
+        let repo = staging_repo_root();
+        let model = repo.join(STAGING_MODEL_SOURCE);
+        let image = repo.join(STAGING_DISK_TARGET);
+
+        let mut source = std::fs::File::open(&model)
+            .unwrap_or_else(|e| panic!("the model file {} is readable: {e}", model.display()));
+        let model_bytes = source
+            .metadata()
+            .expect("the model has a length")
+            .len();
+        assert_eq!(
+            model_bytes, 333_590_944,
+            "{} is the published EmbeddingGemma Q8_0 weights",
+            model.display()
+        );
+        {
+            use std::io::{Read, Seek};
+            let mut magic = [0u8; 4];
+            source.read_exact(&mut magic).expect("the model's magic reads");
+            assert_eq!(&magic, b"GGUF", "and it is a GGUF container");
+            source
+                .seek(std::io::SeekFrom::Start(0))
+                .expect("the model rewinds for the copy");
+        }
+
+        let spill_name = staging_spill_name(STAGING_MODEL_VFS_PATH);
+        assert!(
+            spill_name.len() <= crate::storage::interfs::MAX_PATH,
+            "the device names files in {} bytes; the spill name is {}",
+            crate::storage::interfs::MAX_PATH,
+            spill_name.len()
+        );
+        assert!(STAGING_MODEL_VFS_PATH.len() <= MAX_PATH_LEN);
+        assert!(is_model_namespace(STAGING_MODEL_VFS_PATH));
+        assert_eq!(normalize_path(STAGING_MODEL_VFS_PATH), STAGING_MODEL_VFS_PATH);
+
+        let manifest = alloc::format!("{STAGING_MODEL_VFS_PATH}|{model_bytes}\n");
+        assert!(
+            manifest.len() < crate::storage::filesystem::PROVISION_MANIFEST_WINDOW,
+            "the manifest has to arrive inside the window the kernel reads"
+        );
+
+        let mut dev = StagingImageDevice::create(&image, STAGING_DATA_DISK_SECTORS);
+        assert_eq!(dev.sector_count(), STAGING_DATA_DISK_SECTORS);
+
+        crate::storage::filesystem::init_block_filesystem_with_device(&mut dev)
+            .expect("the staging disk formats");
+
+        // The ceiling the boot will print, measured off the disk just formatted.
+        let ceiling = crate::storage::filesystem::max_data_file_bytes_with_device(&mut dev);
+        assert_eq!(ceiling, 6_437_453_824, "one extent on a 6 GiB region");
+        assert!(model_bytes < ceiling);
+
+        // The payload: one reserved extent, then every byte in place, read from
+        // the model a chunk at a time so the 333 MB never has to be resident.
+        crate::storage::filesystem::reserve_data_file_checked_with_device(
+            &mut dev,
+            &spill_name,
+            model_bytes,
+        )
+        .expect("the model reserves one contiguous extent on the staging disk");
+
+        const CHUNK: usize = 128 * 1024;
+        let mut chunk = alloc::vec![0u8; CHUNK];
+        let mut written: u64 = 0;
+        while written < model_bytes {
+            let want = core::cmp::min(CHUNK as u64, model_bytes - written) as usize;
+            {
+                use std::io::Read;
+                source
+                    .read_exact(&mut chunk[..want])
+                    .unwrap_or_else(|e| panic!("byte {written} of the model reads: {e}"));
+            }
+            let put = crate::storage::filesystem::store_data_file_range_with_device(
+                &mut dev,
+                &spill_name,
+                written,
+                &chunk[..want],
+            )
+            .unwrap_or_else(|e| panic!("the chunk at {written} landed: {e:?}"));
+            assert_eq!(put, want, "the store takes every byte it was handed");
+            written += want as u64;
+        }
+        assert_eq!(written, model_bytes, "every byte of the model reached the disk");
+
+        // The manifest, at the device-side name the importer reads.
+        crate::storage::filesystem::store_data_file_with_device(
+            &mut dev,
+            crate::storage::filesystem::PROVISION_MANIFEST_PATH,
+            manifest.as_bytes(),
+        )
+        .expect("the manifest is written to the staging disk");
+        dev.flush().expect("the staging disk is flushed");
+        drop(dev);
+
+        // Read it back the way the guest will: reopen the file from disk so
+        // nothing the builder held in memory can help the assertions pass.
+        let mut dev = StagingImageDevice::open(&image);
+
+        let mut window = [0u8; crate::storage::filesystem::PROVISION_MANIFEST_WINDOW];
+        let len = crate::storage::filesystem::load_provision_manifest_with_device(&mut dev, &mut window)
+            .expect("the manifest reads back off the staging disk");
+        assert_eq!(len, manifest.len(), "and is exactly the entry written");
+        assert_eq!(&window[..len], manifest.as_bytes());
+
+        let device_len =
+            crate::storage::filesystem::data_file_len_with_device(&mut dev, &spill_name)
+                .expect("the device holds the payload under the importer's spill name");
+        assert_eq!(
+            device_len, model_bytes,
+            "the length the importer will take from the extent, not from the manifest"
+        );
+
+        // The importer's own check, restated here so a spill-name drift fails
+        // at the byte rather than as a silently-absent model.
+        let mut head = [0u8; 24];
+        crate::storage::filesystem::load_data_file_range_with_device(
+            &mut dev,
+            &spill_name,
+            0,
+            &mut head,
+        )
+        .expect("the payload's header reads back");
+        assert_eq!(&head[..4], b"GGUF", "the bytes at the spill name are the model");
+
+        // And the tail, because a copy that stopped early is the failure the
+        // device length is supposed to catch.
+        let tail_at = model_bytes - 24;
+        let mut tail = [0u8; 24];
+        crate::storage::filesystem::load_data_file_range_with_device(
+            &mut dev,
+            &spill_name,
+            tail_at,
+            &mut tail,
+        )
+        .expect("the payload's tail reads back");
+        let mut expected = [0u8; 24];
+        {
+            use std::io::{Read, Seek};
+            source.seek(std::io::SeekFrom::Start(tail_at)).expect("the model seeks");
+            source.read_exact(&mut expected).expect("the model's tail reads");
+        }
+        assert_eq!(tail, expected, "the last 24 bytes of the model are on the disk");
+    }
 }
 
 
