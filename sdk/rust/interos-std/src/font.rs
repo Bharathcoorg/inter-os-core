@@ -2394,7 +2394,11 @@ pub fn ellipsize<'a>(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
 
     for (i, &c) in text.iter().enumerate() {
         let adv = crate::design::typeface::advance_px(c, em) as usize;
-        if current_w + adv > budget || fit_len + 3 > out_buf.len() {
+        // WHY the byte is charged before the mark's three: this guard is read
+        // while `fit_len` is still the run taken *so far*, so a bound that leaves
+        // room for the dots alone lets one more byte in and the copy below then
+        // writes its mark past the caller's end.
+        if current_w + adv > budget || fit_len + 1 + 3 > out_buf.len() {
             break;
         }
         current_w += adv;
@@ -2541,7 +2545,7 @@ pub fn fit(text: &[u8], scale: usize, max_w: usize, out: &mut [u8]) -> usize {
     let mut taken = 0usize;
     for (i, &c) in text.iter().enumerate() {
         let adv = advance_of(c, false) * scale;
-        if used + adv > budget || taken + 3 > out.len() {
+        if used + adv > budget || taken + 1 + 3 > out.len() {
             break;
         }
         used += adv;
@@ -2636,7 +2640,7 @@ pub fn fit_weighted(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &m
     let mut taken = 0usize;
     for (i, &c) in text.iter().enumerate() {
         let adv = advance_of(c, bold) * scale;
-        if used + adv > budget || taken + 3 > out.len() {
+        if used + adv > budget || taken + 1 + 3 > out.len() {
             break;
         }
         used += adv;
@@ -2922,6 +2926,51 @@ mod tests {
                 adv_0,
                 "Digit '{}' must have tabular advance equal to '0'",
                 d as char
+            );
+        }
+    }
+
+    /// The three bytes an ellipsis costs are held back out of the caller's buffer
+    /// *before* the walk spends it, so a run trimmed into a short buffer comes back
+    /// as the prefix plus its mark rather than writing past the buffer's end.
+    ///
+    /// WHY the sweep is of buffers and not of widths: every caller in the tree
+    /// hands these helpers a buffer wider than the lane can fill, so the walk
+    /// stopped on its width bound and the buffer bound was never read. Charged
+    /// after the byte is taken rather than before, that bound let one more glyph
+    /// in than there were bytes left, and the mark's own copy then ran off the
+    /// slice -- a panic in the painter's hot path, not a wrong pixel.
+    #[test]
+    fn a_trim_leaves_the_marks_three_bytes_inside_the_buffer() {
+        // Wide enough that the mark is wanted, narrow enough that the run is cut,
+        // and a run long enough that it is the buffer -- not the lane -- that a
+        // short slice hands to the walk.
+        const LANE: usize = 500;
+        let long = [b'e'; 200];
+        for room in 3..24 {
+            let mut buf = [0u8; 24];
+            let mut weighted = [0u8; 24];
+            let kept = ellipsize(&long, 2, LANE, &mut buf[..room]);
+            assert!(
+                kept <= room,
+                "ellipsize wrote {} bytes into a {}-byte buffer",
+                kept,
+                room
+            );
+            assert!(buf[..kept].ends_with(b"..."));
+            let kept_fit = fit(&long, 2, LANE, &mut buf[..room]);
+            assert!(
+                kept_fit <= room,
+                "fit wrote {} bytes into a {}-byte buffer",
+                kept_fit,
+                room
+            );
+            let kept_weighted = fit_weighted(&long, 2, LANE, true, &mut weighted[..room]);
+            assert!(
+                kept_weighted <= room,
+                "fit_weighted wrote {} bytes into a {}-byte buffer",
+                kept_weighted,
+                room
             );
         }
     }
