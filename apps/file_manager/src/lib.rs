@@ -658,6 +658,418 @@ pub const fn later(a: usize, b: usize) -> usize {
     }
 }
 
+// -----------------------------------------------------------------------------
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box below was authored as the platform's type
+// ladder read at one hundred per cent, so a person who raised "Text size" in
+// Settings got a *smaller* reading surface here -- the ink moves through the
+// runtime helpers, the plate does not move at all. Settings writes the level,
+// `DynamicType::publish` hands it to the renderer, and the faces under
+// [`rows_at`] answer at it. A layout that moves its ink but keeps its box is the
+// defect this app had; a layout that moves its box to a rung the renderer never
+// got is the same defect mirrored, so the rung is read from the one cell the
+// renderer draws from.
+// -----------------------------------------------------------------------------
+
+/// The text-size level every box in this file was authored against.
+///
+/// WHY it is named: each box is derived twice -- once as a `const fn` of a level,
+/// so the compile-time gates can still sweep all four selectable levels, and once
+/// at run time through the published rung, so the pixels a person gets follow the
+/// setting they chose. The identity checks beside each derivation say the
+/// level-aware form answers the authored number at *this* level, which is what
+/// keeps the app's Normal-size pixels exactly the pixels it drew before it read
+/// the setting at all.
+pub const PLATFORM_LEVEL: u8 = font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep
+/// to. [`UserTextScale::from_u8`] clamps anything above it, so a sweep past this
+/// rung would be a sweep over a level no renderer can be handed.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`: [`outline_text::row_band`]'s
+/// union of the outline line box and the bitmap cell, asked at a level rather
+/// than at the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is the platform's own answer and
+/// it is a `const fn` of the ladder, so a plate sized from it can never see the
+/// setting. The arithmetic below is the same walk -- the lower of the two
+/// faces' baselines, the deeper of the two faces' bottoms -- with every metric
+/// read through the `*_user_scale` faces, and the gate beside it refuses the day
+/// the two answers disagree at the level they were authored at.
+///
+/// At a raised rung the union collapses, and the sweep below pins that it does:
+/// the line box the ladder rasterises the outline face at *is* the box the
+/// platform's own `line_height` returns for that rung (`ascent_at` and
+/// `line_at` read the same `line_metrics` at the same em), so the deeper of the
+/// two faces' bottoms is the outline's and the band is the line box. The bitmap
+/// cell cannot out-grow it: the rung the person chose is never below the
+/// authored one, `rows_at` is swept to run forwards with the level, and at the
+/// authored level this equals [`outline_text::row_band`] by the gate above.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) = interos_std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// An authored vertical stride between two stacked runs, grown by the rows the
+/// rung's box gained above the level the stride was authored at.
+///
+/// WHY this form: a stride is the space one run's box plus its air, and the only
+/// honest way to keep the authored pixels at Normal *and* carry a raised rung is
+/// to add exactly the growth the box took. It never shrinks a stride, and at the
+/// authored level it is the stride itself.
+pub const fn grown(stride: usize, scale: usize, level: u8) -> usize {
+    stride + rows_at(scale, level).saturating_sub(rows_at(scale, PLATFORM_LEVEL))
+}
+
+/// A plate that reserves a rung's box plus its authored air, never below the
+/// height it was drawn with.
+///
+/// WHY the floor: several of this app's band heights are numbers the platform's
+/// layout contract reads, so a plate may only ever grow -- at the authored level
+/// this is `authored` exactly, and the air is solved from the authored pair
+/// rather than invented here.
+///
+/// This is the one plate form, and it serves both ways this app paints: a run
+/// through the surface's pixel test and a run blitted out of a widget buffer.
+/// They used to be sized from two derivations, [`rows_at`] and the platform's
+/// `line_height`, on the theory that the union band and the line box are
+/// different numbers a plate had to pick between. They are not -- the sweep
+/// beside the identity gates above proves the band equals the line box at every
+/// rung this app offers and every level the ladder carries -- so the second form
+/// was a second name for the same arithmetic, and a plate that disagreed with the
+/// ink it bounded could have been written either way and checked neither.
+pub const fn plate_at(authored: usize, scale: usize, level: u8) -> usize {
+    let air = authored.saturating_sub(rows_at(scale, PLATFORM_LEVEL));
+    later(authored, rows_at(scale, level) + air)
+}
+
+// -----------------------------------------------------------------------------
+// The rung the painter and the hit test both ask for
+//
+// WHY these exist beside the `*_at` derivations: a plate that moves to the
+// person's rung while the run inside it is still rasterised at the ladder's em
+// is the mirror image of the defect the plates were written to fix -- the box
+// grows and the ink does not. Every one of these answers the *same* rung
+// [`draw_level`] hands every plate in this file, and at the authored level each
+// delegates straight to the platform's ladder, so adopting the setting moves no
+// pixel for a reader who never raised it.
+// -----------------------------------------------------------------------------
+
+/// The rows a run at `scale` can ink at the rung this process draws at.
+#[inline]
+pub fn run_rows(scale: usize) -> usize {
+    rows_at(scale, draw_level())
+}
+
+/// The cap height a run at `scale` is rasterised at, at this app's rung.
+#[inline]
+pub fn run_cap(scale: usize) -> u32 {
+    cap_at(scale, draw_level())
+}
+
+/// The line box a run at `scale` reserves at this app's rung.
+#[inline]
+pub fn run_line(scale: usize) -> usize {
+    line_at(scale, draw_level())
+}
+
+/// The advance a run takes at `scale` on the level `lvl` names.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return font::measure(text, scale);
+    }
+    let w = font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// The advance a run takes at the rung this process draws at.
+#[inline]
+pub fn run_w(text: &[u8], scale: usize) -> usize {
+    run_w_at(text, scale, draw_level())
+}
+
+/// The advance a run the surface can actually take, in the column `available`.
+///
+/// WHY it restates [`outline_text::drawn_advance`] rather than calling it: that
+/// function folds `scale` through the platform's em, so a run centred with it at a
+/// raised rung is centred on the width the painter no longer inks. Above the
+/// authored level the answer is [`run_w_at`], which measures the run at the em the
+/// ladder rasterises it at and decodes it the way `typeface::text_advance_px` does
+/// -- one advance per codepoint, never one per byte, because a byte walk charges a
+/// multi-byte name's continuation bytes as Latin-1 glyphs the painter never inks.
+/// A run wider than the column is not the painter's to draw, and the platform's
+/// own branch answers that with a plain `font::measure`, so this does too.
+pub fn drawn_w(text: &[u8], scale: usize, available: usize) -> usize {
+    let lvl = draw_level();
+    if lvl == PLATFORM_LEVEL {
+        return outline_text::drawn_advance(text, scale, Some(available))
+            .unwrap_or_else(|| font::measure(text, scale));
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    let w = run_w_at(text, scale, lvl);
+    if w > available {
+        font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// `font::ellipsize` at the rung this process draws at.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in
+/// the ladder's em, so a run cut to a lane at one rung and inked at another is
+/// the ellipsis-past-the-edge this repo keeps being asked to kill. At the
+/// authored level this *is* `font::ellipsize`, byte for byte.
+pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]) -> usize {
+    let lvl = draw_level();
+    if lvl == PLATFORM_LEVEL {
+        return font::ellipsize(text, scale, max_w, out_buf);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = run_w_at(dots, scale, lvl);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let budget = max_w - dots_w;
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    // WHY one decision, not one per byte: the width the painter then answers with
+    // is `typeface::text_advance_px`, and that function validates the *whole* run
+    // once -- decoding it and charging one advance per codepoint, or, when the
+    // slice is not UTF-8 at all, charging every byte the bitmap face's own. A walk
+    // that decided per suffix would charge a valid word sitting behind one
+    // undecodable byte as a codepoint while the painter charged its bytes, which
+    // is a run trimmed narrower than the run inked. A byte walk over valid UTF-8
+    // is the same mistake sideways, and a walk that fell back to `font::measure`
+    // charged the *platform* em for a glyph the raised rung inks larger, which is
+    // the mismatch this helper exists to kill.
+    let decodes = core::str::from_utf8(text).is_ok();
+    let mut next = 0usize;
+    while next < text.len() {
+        let (adv, step) = if decodes {
+            match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => (
+                    interos_std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                    ch.len_utf8(),
+                ),
+                None => break,
+            }
+        } else {
+            (
+                interos_std::design::typeface::advance_px(text[next], em) as usize,
+                1,
+            )
+        };
+        if current_w + adv > budget || fit_len + step + 3 > out_buf.len() {
+            break;
+        }
+        current_w += adv;
+        fit_len = next + step;
+        next = fit_len;
+    }
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// Whether a level's home stack is answered by the panel it is painted on: every
+/// row a touch is answered on is a touch target, every plate that carries a label
+/// is a control a finger can hit, and the note that closes the screen ends above
+/// the gesture band.
+const fn home_stack_fits(level: u8) -> bool {
+    if home_recent_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+        return false;
+    }
+    if category_first_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+        return false;
+    }
+    if category_other_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+        return false;
+    }
+    if home_browse_btn_at(level).h < theme::MIN_TOUCH_TARGET {
+        return false;
+    }
+    home_note_y_at(level) + rows_at(LABEL_RUNG, level) < 1440 - 40
+}
+
+/// Whether the rung this process draws at is one this app can paint.
+///
+/// WHY a clamp and not the published rung itself: the home screen has no scroll,
+/// so its stack -- header, storage card, four recents, four category rows, button
+/// and note -- has a height the 1440-row panel either answers or does not. Growing
+/// every box to the person's rung is the right half of this change; the other half
+/// is refusing a rung the panel cannot carry and drawing at the largest one it can,
+/// rather than letting the note and the last category row walk off the bottom of
+/// the screen. This is the same discipline the platform's 44-row touch floor is: a
+/// bound the app cannot move, so the rung gives way rather than the ink.
+///
+/// WHY a downward walk: the stack's height grows with the rung and never shrinks,
+/// so the largest rung that fits is found by stepping down from the one the person
+/// asked for -- and at the authored level the walk never moves.
+pub const fn draw_level_at(want: u8) -> u8 {
+    let mut level = want;
+    while level > 0 && !home_stack_fits(level) {
+        level -= 1;
+    }
+    level
+}
+#[inline]
+pub fn draw_level() -> u8 {
+    draw_level_at(font::user_text_scale())
+}
+
+// WHY swept, and why against the clamp rather than the raw rung: the clamp only
+// earns its place if every selectable level answers the panel once the clamp has
+// had it, and the authored level must be untouched by it -- otherwise the app would
+// resize the screen for a reader who asked for nothing.
+const fn draw_level_holds_at_every_level() -> bool {
+    if draw_level_at(PLATFORM_LEVEL) != PLATFORM_LEVEL {
+        return false;
+    }
+    let mut want = 0;
+    while want <= MAX_LEVEL {
+        let chosen = draw_level_at(want);
+        if chosen > want {
+            return false;
+        }
+        if !home_stack_fits(chosen) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(draw_level_holds_at_every_level());
+
+// WHY checked here: the derivations above are only a faithful restatement of the
+// ladder if every rung answers the platform's own number at the platform's level.
+const _: () = assert!(rows_at(theme::type_scale::CAPTION, PLATFORM_LEVEL)
+    == outline_text::row_band(0, theme::type_scale::CAPTION).1);
+const _: () = assert!(rows_at(theme::type_scale::BODY, PLATFORM_LEVEL)
+    == outline_text::row_band(0, theme::type_scale::BODY).1);
+const _: () = assert!(rows_at(theme::type_scale::SECTION, PLATFORM_LEVEL)
+    == outline_text::row_band(0, theme::type_scale::SECTION).1);
+const _: () = assert!(line_at(theme::type_scale::BODY, PLATFORM_LEVEL) == font::line_height(theme::type_scale::BODY));
+const _: () = assert!(cap_at(theme::type_scale::SECTION, PLATFORM_LEVEL) == font::cap_for_scale(theme::type_scale::SECTION));
+const _: () = assert!(ascent_at(theme::type_scale::SECTION, PLATFORM_LEVEL) == font::ascent_for_scale(theme::type_scale::SECTION));
+
+/// WHY the union is pinned to be a collapse: `rows_at` is the walk `outline_text::
+/// row_band` does, and `plate_at` is sized from it, so a plate that reserved more
+/// or less than the box the painter walks is a plate that clips ink or leaves a
+/// gap in it. The two faces that walk are one face at a raised rung -- `ascent_at`
+/// and `line_at` both read `line_metrics` at the em the ladder rasterises at -- so
+/// the band and the line box are the same number, and this is what lets the file
+/// size a blitted row's plate and a pixel-tested row's plate from one derivation.
+/// Written as a sweep because the claim is about the raised rungs, and an
+/// assertion at the authored level alone is true of any two faces that happen to
+/// agree there.
+const _: () = assert!(rows_are_line_boxes_at_every_rung());
+const fn rows_are_line_boxes_at_every_rung() -> bool {
+    let rungs = [
+        0,
+        theme::type_scale::CAPTION,
+        theme::type_scale::BODY,
+        theme::type_scale::SECTION,
+        theme::type_scale::TITLE,
+    ];
+    let mut rung = 0;
+    while rung < rungs.len() {
+        let scale = rungs[rung];
+        let mut level = PLATFORM_LEVEL as usize;
+        while level <= MAX_LEVEL as usize {
+            if rows_at(scale, level as u8) != line_at(scale, level as u8) {
+                return false;
+            }
+            level += 1;
+        }
+        rung += 1;
+    }
+    true
+}
+/// WHY a sweep and not one check: a plate that shrinks at Compact or a box that
+/// runs backwards at Extra Large is invisible to an assertion written at the
+/// authored level alone, and this file's gates are all written against the pair.
+const _: () = assert!(rows_monotone_up_to_max_level());
+const fn rows_monotone_up_to_max_level() -> bool {
+    let rungs = [
+        theme::type_scale::CAPTION,
+        theme::type_scale::BODY,
+        theme::type_scale::SECTION,
+        theme::type_scale::TITLE,
+    ];
+    let mut rung = 0;
+    while rung < rungs.len() {
+        let scale = rungs[rung];
+        if rows_at(scale, PLATFORM_LEVEL) != outline_text::row_band(0, scale).1 {
+            return false;
+        }
+        let mut level = 1;
+        while level <= MAX_LEVEL {
+            if rows_at(scale, level) < rows_at(scale, level - 1) {
+                return false;
+            }
+            level += 1;
+        }
+        let mut compact = 1;
+        while compact <= MAX_LEVEL {
+            if rows_at(scale, PLATFORM_LEVEL.saturating_sub(compact)) > rows_at(scale, PLATFORM_LEVEL) {
+                return false;
+            }
+            compact += 1;
+        }
+        rung += 1;
+    }
+    true
+}
+
 /// The rung the header's title draws at: the platform's section rung, named
 /// rather than written as a multiplier so a ladder move cannot silently lower
 /// it here.
@@ -677,6 +1089,21 @@ pub const HEADER_TITLE_SCALE: usize = theme::type_scale::SECTION;
 /// at the rung, which is what a container has to reserve for a run at `scale`.
 pub const HEADER_TITLE_ROWS: usize = outline_text::row_band(0, HEADER_TITLE_SCALE).1;
 
+/// The rows the title row reserves at a text-size level.
+///
+/// WHY it follows the rung: the title is inked at the published level, and a row
+/// that kept the authored box while the ink moved to Large is ink escaping its
+/// plate -- the class of defect the gates beside [`HEADER_H`] were written to
+/// refuse. The authored `const` above stays as the level it was drawn at, because
+/// the platform's layout contract reads it.
+const fn header_title_rows_at(level: u8) -> usize {
+    rows_at(HEADER_TITLE_SCALE, level)
+}
+#[inline]
+pub fn header_title_rows() -> usize {
+    header_title_rows_at(draw_level())
+}
+
 /// The row the title and the platform's back control share: the middle of the
 /// control's own band.
 pub const HEADER_ROW: usize = back_button::Y + back_button::SIZE / 2;
@@ -695,6 +1122,27 @@ pub const HEADER_TITLE_Y: usize = later(
     HEADER_ROW.saturating_sub(HEADER_TITLE_ROWS / 2),
 );
 
+/// The row the title's whole box stands on at a level: the box centred on
+/// [`HEADER_ROW`], clamped to the first row the app's chrome may claim.
+///
+/// WHY the same clamp applies at every level: the platform's status band paints
+/// over `0..HEADER_TOP` whatever rung the person chose, so a raised box that
+/// wants to climb past the inset is held at the inset and grows *downward* -- and
+/// the band below answers the whole of it, which is what [`header_h_at`] is for.
+const fn header_title_y_at(level: u8) -> usize {
+    later(
+        viewport::HEADER_TOP,
+        HEADER_ROW.saturating_sub(header_title_rows_at(level) / 2),
+    )
+}
+#[inline]
+pub fn header_title_y() -> usize {
+    header_title_y_at(draw_level())
+}
+// WHY checked here: the centring's clamp only means something while it is
+// answering the authored box too.
+const _: () = assert!(header_title_y_at(PLATFORM_LEVEL) == HEADER_TITLE_Y);
+
 /// The rung the header's two readout lines draw at: the caption rung.
 ///
 /// WHY named in the model: the painter used to pass a bare `1` at both draw
@@ -704,6 +1152,15 @@ pub const HEADER_READOUT_SCALE: usize = theme::type_scale::CAPTION;
 
 /// The rows one readout line reserves at that rung.
 pub const HEADER_READOUT_ROWS: usize = outline_text::row_band(0, HEADER_READOUT_SCALE).1;
+
+/// The rows one readout line reserves at a level.
+const fn header_readout_rows_at(level: u8) -> usize {
+    rows_at(HEADER_READOUT_SCALE, level)
+}
+#[inline]
+pub fn header_readout_rows() -> usize {
+    header_readout_rows_at(draw_level())
+}
 
 /// Air between the header's two readout lines.
 ///
@@ -731,13 +1188,51 @@ pub const HEADER_READOUT_LINE1_Y: usize = HEADER_TITLE_Y
     + font::ascent_for_scale(HEADER_TITLE_SCALE)
     - font::cap_for_scale(HEADER_TITLE_SCALE) as usize;
 
+/// The row the readout's first line stands on at a level: the row the title's
+/// caps start on, so the two runs keep sharing an optical top at any rung.
+///
+/// WHY derived from the same level as the title above: the authored pair is
+/// "the title box's top, less what its caps do not occupy". Solve it from the
+/// ladder and the caption stays put while the caps move, which is the drift this
+/// band was fixed for once already.
+const fn header_readout_line1_y_at(level: u8) -> usize {
+    header_title_y_at(level)
+        + ascent_at(HEADER_TITLE_SCALE, level)
+        - cap_at(HEADER_TITLE_SCALE, level) as usize
+}
+#[inline]
+pub fn header_readout_line1_y() -> usize {
+    header_readout_line1_y_at(draw_level())
+}
+
 /// The row the readout's second line stands on: one whole line box plus the gap
 /// under the first, so a first line with a descender cannot paint into it.
 pub const HEADER_READOUT_LINE2_Y: usize =
     HEADER_READOUT_LINE1_Y + HEADER_READOUT_ROWS + HEADER_READOUT_GAP;
 
+/// The foot of the readout's two-line stack at a level: the first line's row,
+/// two whole boxes and the gap between them.
+const fn header_readout_line2_y_at(level: u8) -> usize {
+    header_readout_line1_y_at(level)
+        + header_readout_rows_at(level)
+        + HEADER_READOUT_GAP
+}
+#[inline]
+pub fn header_readout_line2_y() -> usize {
+    header_readout_line2_y_at(draw_level())
+}
+
 /// The foot of the readout's two-line stack.
 pub const HEADER_READOUT_Y1: usize = HEADER_READOUT_LINE2_Y + HEADER_READOUT_ROWS;
+
+/// The foot of the readout's stack at a level.
+const fn header_readout_y1_at(level: u8) -> usize {
+    header_readout_line2_y_at(level) + header_readout_rows_at(level)
+}
+#[inline]
+pub fn header_readout_y1() -> usize {
+    header_readout_y1_at(draw_level())
+}
 
 /// The header's title lane: the widest the title run may stand.
 ///
@@ -776,6 +1271,70 @@ pub const HEADER_H: usize = later(
     ),
     back_button::Y + back_button::SIZE,
 ) + HEADER_BOTTOM_AIR;
+
+/// The header band at a level: the lowest row any of its occupants occupies at
+/// that level, plus its air.
+///
+/// WHY a function of the rung and not the authored figure: every row of this
+/// app's two screens starts on this band's foot, and a band that stayed at 152
+/// while the readout's stack grew to the person's rung would paint the surplus
+/// over the first thing below it -- this platform paints no clip. At the authored
+/// level the two are the same number, so nothing moves for a reader who never
+/// raised the setting.
+const fn header_h_at(level: u8) -> usize {
+    later(
+        later(
+            header_readout_y1_at(level),
+            header_title_y_at(level) + header_title_rows_at(level),
+        ),
+        back_button::Y + back_button::SIZE,
+    ) + HEADER_BOTTOM_AIR
+}
+#[inline]
+pub fn header_h() -> usize {
+    header_h_at(draw_level())
+}
+// WHY checked here: the band's number is the layout the platform's contract
+// reads, and the derivation must answer it at the level it was read at.
+const _: () = assert!(header_h_at(PLATFORM_LEVEL) == HEADER_H);
+
+/// The last row the header's title ink takes at a level: its box's top plus the
+/// union box the painter's own band test uses.
+const fn header_title_ink_y1_at(level: u8) -> usize {
+    header_title_y_at(level) + header_title_rows_at(level)
+}
+
+/// Truth gate, swept over every selectable level: the band answers the whole box
+/// of each of its own runs, keeps its air inside itself, and never shrinks below
+/// the band it was drawn with.
+///
+/// WHY a sweep rather than the four single-level asserts above it: those say the
+/// authored pixels are unchanged. The only claim that matters for a person on
+/// Large or Extra Large is that the *same* containment holds at the rung they
+/// chose, and no number written at build time for one rung can say that.
+const fn header_holds_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        if header_title_ink_y1_at(level) > header_h_at(level) {
+            return false;
+        }
+        if header_readout_y1_at(level) > header_h_at(level) {
+            return false;
+        }
+        if back_button::Y + back_button::SIZE > header_h_at(level) {
+            return false;
+        }
+        if header_title_y_at(level) < viewport::HEADER_TOP {
+            return false;
+        }
+        if header_readout_line1_y_at(level) < header_title_y_at(level) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(header_holds_at_every_level());
 
 /// Truth gates: the band answers every row each of its own runs occupies, no run
 /// starts inside the rows the platform's status band owns, and the band's air is
@@ -845,12 +1404,127 @@ const _: () = assert!(
 /// screen draws, and a card authored from a remembered row loses its top rows to
 /// the header the moment a rung grows the band above it.
 pub const HOME_STORAGE_CARD: Rect = Rect::new(36, HEADER_H, 648, 148);
+
+/// The card's three runs, as the band it was drawn with placed them: its title
+/// row, the two strides under it and the air below the last box.
+///
+/// WHY solved from the authored card rather than written as new numbers: the
+/// card's height is a figure the home screen's own layout contract reads, and the
+/// only way to grow it for a raised rung without moving a pixel at Normal is to
+/// re-state the distances the painter already used and add each run's own growth.
+const HOME_CARD_TITLE_DY: usize = 20;
+const HOME_CARD_LINE1_STRIDE: usize = 56;
+const HOME_CARD_LINE2_STRIDE: usize = 28;
+const HOME_CARD_FOOT_AIR: usize = 148
+    - (HOME_CARD_TITLE_DY
+        + HOME_CARD_LINE1_STRIDE
+        + HOME_CARD_LINE2_STRIDE
+        + outline_text::row_band(0, theme::type_scale::CAPTION).1);
+
+/// The row the card's first line stands on at a level, below the card's top.
+pub const fn home_card_line1_dy_at(level: u8) -> usize {
+    HOME_CARD_TITLE_DY + grown(HOME_CARD_LINE1_STRIDE, theme::type_scale::BODY, level)
+}
+/// The row the card's status line stands on at a level, below the card's top.
+pub const fn home_card_line2_dy_at(level: u8) -> usize {
+    home_card_line1_dy_at(level)
+        + grown(HOME_CARD_LINE2_STRIDE, theme::type_scale::CAPTION, level)
+}
+/// The card's height at a level: its three boxes and the air it kept under the
+/// last of them.
+pub const fn home_storage_card_h_at(level: u8) -> usize {
+    home_card_line2_dy_at(level)
+        + rows_at(theme::type_scale::CAPTION, level)
+        + HOME_CARD_FOOT_AIR
+}
+/// The card at a level: it starts on the header's foot row and answers its own
+/// stack, so a raised rung moves it down and grows it -- it never loses its top
+/// rows to the band above it.
+pub const fn home_storage_card_at(level: u8) -> Rect {
+    Rect::new(
+        HOME_STORAGE_CARD.x,
+        header_h_at(level),
+        HOME_STORAGE_CARD.w,
+        home_storage_card_h_at(level),
+    )
+}
+#[inline]
+pub fn home_storage_card() -> Rect {
+    home_storage_card_at(draw_level())
+}
+/// The row the storage card's title stands on, at this app's rung.
+#[inline]
+pub fn home_card_title_y() -> usize {
+    home_storage_card().y + HOME_CARD_TITLE_DY
+}
+/// The row the storage card's first line stands on, at this app's rung.
+#[inline]
+pub fn home_card_line1_y() -> usize {
+    home_storage_card().y + home_card_line1_dy_at(draw_level())
+}
+/// The row the storage card's status line stands on, at this app's rung.
+#[inline]
+pub fn home_card_line2_y() -> usize {
+    home_storage_card().y + home_card_line2_dy_at(draw_level())
+}
+/// The rung the storage card's title is inked at: the Body rung its box reserves.
+pub const HOME_CARD_TITLE_SCALE: usize = theme::type_scale::BODY;
+/// The rung the storage card's two lines are inked at: the caption rung the card's
+/// foot reserves below them.
+pub const HOME_CARD_LINE_SCALE: usize = theme::type_scale::CAPTION;
+const _: () = assert!(
+    home_storage_card_at(PLATFORM_LEVEL).y == HOME_STORAGE_CARD.y
+        && home_storage_card_at(PLATFORM_LEVEL).h == HOME_STORAGE_CARD.h
+);
+
+/// The rung the recents section's heading and caption draw at.
+const HOME_RECENTS_TITLE_SCALE: usize = theme::type_scale::BODY;
+const HOME_RECENTS_CAPTION_SCALE: usize = theme::type_scale::CAPTION;
+/// The strides the home screen authored between the card, the heading, the
+/// caption and the first row.
+const HOME_RECENTS_TITLE_STRIDE: usize = 16;
+const HOME_RECENTS_CAPTION_STRIDE: usize = 48;
+const HOME_RECENTS_FIRST_ROW_STRIDE: usize = 28;
+
+/// The recents section's heading row at a level.
+pub const fn home_recents_title_y_at(level: u8) -> usize {
+    let card = home_storage_card_at(level);
+    card.y + card.h + HOME_RECENTS_TITLE_STRIDE
+}
+/// The recents caption row at a level.
+pub const fn home_recents_caption_y_at(level: u8) -> usize {
+    home_recents_title_y_at(level) + grown(HOME_RECENTS_CAPTION_STRIDE, HOME_RECENTS_TITLE_SCALE, level)
+}
+/// The first recents row's top at a level.
+pub const fn home_recents_y0_at(level: u8) -> usize {
+    home_recents_caption_y_at(level)
+        + grown(HOME_RECENTS_FIRST_ROW_STRIDE, HOME_RECENTS_CAPTION_SCALE, level)
+}
+#[inline]
+pub fn home_recents_title_y() -> usize {
+    home_recents_title_y_at(draw_level())
+}
+#[inline]
+pub fn home_recents_caption_y() -> usize {
+    home_recents_caption_y_at(draw_level())
+}
+#[inline]
+pub fn home_recents_y0() -> usize {
+    home_recents_y0_at(draw_level())
+}
 /// The recents section's heading and caption.
 pub const HOME_RECENTS_TITLE_Y: usize = 316;
 pub const HOME_RECENTS_CAPTION_Y: usize = 364;
 /// The recents rows. The card holds the most recent documents the index
 /// reported, in the index's own modification-time order.
 pub const HOME_RECENTS_Y0: usize = 392;
+
+// WHY checked here: the three rows above are the authored layout the platform's
+// contract reads, and the level-aware forms beside them are only an honest
+// restatement while they answer those same numbers at the authored level.
+const _: () = assert!(home_recents_title_y_at(PLATFORM_LEVEL) == HOME_RECENTS_TITLE_Y);
+const _: () = assert!(home_recents_caption_y_at(PLATFORM_LEVEL) == HOME_RECENTS_CAPTION_Y);
+const _: () = assert!(home_recents_y0_at(PLATFORM_LEVEL) == HOME_RECENTS_Y0);
 /// The rung a recent's name draws at: the Body rung, so a file's name reads as
 /// the row's title and its "Modified:" line reads as the caption under it.
 ///
@@ -863,6 +1537,35 @@ pub const HOME_RECENT_NAME_DY: usize = 4;
 /// name with a descender cannot paint into it.
 pub const HOME_RECENT_TIME_DY: usize =
     HOME_RECENT_NAME_DY + interos_std::font::line_height(HOME_RECENT_NAME_SCALE);
+
+/// A recents row's two boxes at a level: the name's line box, then the caption
+/// under it, then the divider's row.
+///
+/// WHY a function of the rung: the row stacks a body-rung name over a caption,
+/// and both are inked at the published level. A row authored from the ladder's
+/// two boxes is the luck the comment beside [`HOME_RECENT_ROW_H`] already
+/// describes, one rung further down.
+const HOME_RECENT_DIVIDER_AIR: usize = 6;
+pub const fn home_recent_time_dy_at(level: u8) -> usize {
+    HOME_RECENT_NAME_DY + line_at(HOME_RECENT_NAME_SCALE, level)
+}
+pub const fn home_recent_row_h_at(level: u8) -> usize {
+    home_recent_time_dy_at(level)
+        + line_at(HOME_RECENT_CAPTION_SCALE, level)
+        + HOME_RECENT_DIVIDER_AIR
+}
+/// The rung a recent's "Modified:" line draws at.
+const HOME_RECENT_CAPTION_SCALE: usize = theme::type_scale::CAPTION;
+#[inline]
+pub fn home_recent_time_dy() -> usize {
+    home_recent_time_dy_at(draw_level())
+}
+#[inline]
+pub fn home_recent_row_h() -> usize {
+    home_recent_row_h_at(draw_level())
+}
+const _: () = assert!(home_recent_time_dy_at(PLATFORM_LEVEL) == HOME_RECENT_TIME_DY);
+const _: () = assert!(home_recent_row_h_at(PLATFORM_LEVEL) == HOME_RECENT_ROW_H);
 /// A recents row: the two boxes it draws plus the air its divider needs below
 /// them.
 ///
@@ -876,6 +1579,36 @@ pub const HOME_RECENT_ROW_H: usize =
 pub const HOME_RECENTS_VISIBLE: usize = 4;
 /// Where the recents block ends, and so where the section under it begins.
 pub const HOME_RECENTS_Y1: usize = HOME_RECENTS_Y0 + HOME_RECENTS_VISIBLE * HOME_RECENT_ROW_H;
+
+/// The recents block's foot at a level, and the category section's heading,
+/// first row and last row with it.
+///
+/// WHY the whole chain is a function of the rung: the heading is painted at the
+/// row the block above it ends on, so a block that grew without the heading
+/// moving would have the last recent's caption painted through the section title
+/// that answers taps below it. Deriving the chain from the row height is what lets
+/// a raised rung push the sections under it down instead of running through them.
+pub const fn home_recents_y1_at(level: u8) -> usize {
+    home_recents_y0_at(level) + HOME_RECENTS_VISIBLE * home_recent_row_h_at(level)
+}
+pub const fn category_title_y_at(level: u8) -> usize {
+    home_recents_y1_at(level)
+}
+/// The air the home screen authored between a section heading and its first row.
+const CATEGORY_HEAD_STRIDE: usize = 52;
+pub const fn category_y0_at(level: u8) -> usize {
+    category_title_y_at(level) + grown(CATEGORY_HEAD_STRIDE, CATEGORY_LABEL_SCALE, level)
+}
+#[inline]
+pub fn home_recents_y1() -> usize {
+    home_recents_y1_at(draw_level())
+}
+#[inline]
+pub fn category_y0() -> usize {
+    category_y0_at(draw_level())
+}
+const _: () = assert!(home_recents_y1_at(PLATFORM_LEVEL) == HOME_RECENTS_Y1);
+const _: () = assert!(category_y0_at(PLATFORM_LEVEL) == CATEGORY_Y0);
 /// The category section's heading, and the four rows under it.
 ///
 /// WHY it starts where the recents block ends: a heading that began inside the
@@ -887,26 +1620,141 @@ pub const CATEGORY_Y0: usize = HOME_CATEGORY_TITLE_Y + 52;
 /// its label, so it is taller than the three that follow it.
 pub const CATEGORY_FIRST_ROW_H: usize = 100;
 pub const CATEGORY_OTHER_ROW_H: usize = 70;
+
+/// A category row's plate at a level: the boxes its own runs ink, plus the air
+/// the authored rows left around them, never below the row it was drawn with.
+///
+/// WHY derived the same way for both: the first row carries a caption under its
+/// label and the other three carry only the label, and both authored heights leave
+/// the same thirty-one rows of air. Solving the air from the authored pair keeps
+/// that proportion at every rung instead of pinning the plate to Normal.
+const CATEGORY_ROW_AIR: usize = 31;
+pub const fn category_first_row_h_at(level: u8) -> usize {
+    let content = line_at(CATEGORY_LABEL_SCALE, level)
+        + line_at(CATEGORY_CAPTION_SCALE, level)
+        + CATEGORY_ROW_AIR;
+    later(CATEGORY_FIRST_ROW_H, content)
+}
+pub const fn category_other_row_h_at(level: u8) -> usize {
+    let content = line_at(CATEGORY_LABEL_SCALE, level) + CATEGORY_ROW_AIR;
+    later(CATEGORY_OTHER_ROW_H, content)
+}
+#[inline]
+pub fn category_first_row_h() -> usize {
+    category_first_row_h_at(draw_level())
+}
+#[inline]
+pub fn category_other_row_h() -> usize {
+    category_other_row_h_at(draw_level())
+}
 pub const CATEGORY_COUNT: usize = 4;
 pub const CATEGORY_Y1: usize =
     CATEGORY_Y0 + CATEGORY_FIRST_ROW_H + (CATEGORY_COUNT - 1) * CATEGORY_OTHER_ROW_H;
+
+/// The category block's foot at a level, its "browse everything" control and the
+/// honest note under it.
+pub const fn category_y1_at(level: u8) -> usize {
+    category_y0_at(level)
+        + category_first_row_h_at(level)
+        + (CATEGORY_COUNT - 1) * category_other_row_h_at(level)
+}
+/// The gap the home screen authored between the last category row and its button,
+/// and between the button and the note that closes the screen.
+const CATEGORY_BUTTON_STRIDE: usize = 18;
+const CATEGORY_NOTE_STRIDE: usize = 20;
+pub const fn home_browse_btn_at(level: u8) -> Rect {
+    Rect::new(
+        HOME_BROWSE_BTN.x,
+        category_y1_at(level) + CATEGORY_BUTTON_STRIDE,
+        HOME_BROWSE_BTN.w,
+        plate_at(HOME_BROWSE_BTN.h, LABEL_RUNG, level),
+    )
+}
+pub const fn home_note_y_at(level: u8) -> usize {
+    let btn = home_browse_btn_at(level);
+    btn.y + btn.h + CATEGORY_NOTE_STRIDE
+}
+#[inline]
+pub fn category_y1() -> usize {
+    category_y1_at(draw_level())
+}
+/// The category section's heading row, at this app's rung.
+#[inline]
+pub fn home_category_title_y() -> usize {
+    category_title_y_at(draw_level())
+}
+/// The air a category row keeps above its label: the row's own top air, which is
+/// air and not a box, so it does not move with the rung.
+pub const CATEGORY_FIRST_LABEL_DY: usize = 22;
+/// The air the three rows without a caption keep above their label.
+pub const CATEGORY_OTHER_LABEL_DY: usize = 11;
+/// The gap the first row authored between its label's box and its caption's box:
+/// `72 - 22 - line(BODY)`, solved from the pair rather than written anew.
+const CATEGORY_CAPTION_GAP: usize =
+    72 - CATEGORY_FIRST_LABEL_DY - interos_std::font::line_height(theme::type_scale::BODY);
+/// The row the first category row's caption stands on, at this app's rung: one
+/// whole label box under the label, so a label with a descender cannot ink into it.
+#[inline]
+pub fn category_caption_dy() -> usize {
+    CATEGORY_FIRST_LABEL_DY + run_line(CATEGORY_LABEL_SCALE) + CATEGORY_CAPTION_GAP
+}
+#[inline]
+pub fn home_browse_btn() -> Rect {
+    home_browse_btn_at(draw_level())
+}
+#[inline]
+pub fn home_note_y() -> usize {
+    home_note_y_at(draw_level())
+}
+const _: () = assert!(category_y1_at(PLATFORM_LEVEL) == CATEGORY_Y1);
+const _: () = assert!(
+    home_browse_btn_at(PLATFORM_LEVEL).y == HOME_BROWSE_BTN.y
+        && home_browse_btn_at(PLATFORM_LEVEL).h == HOME_BROWSE_BTN.h
+);
+const _: () = assert!(home_note_y_at(PLATFORM_LEVEL) == HOME_NOTE_Y);
 /// The home screen's "browse everything" control: the first thing below the
 /// last category row, with the gap it has always had.
 pub const HOME_BROWSE_BTN: Rect = Rect::new(36, CATEGORY_Y1 + 18, 648, 56);
 /// The honest note under it.
 pub const HOME_NOTE_Y: usize = HOME_BROWSE_BTN.y + HOME_BROWSE_BTN.h + 20;
 
-/// Truth gates: a recents row holds the two boxes it paints and the divider
-/// under them, and the note that closes the home screen still sits above the
-/// gesture bar the panel reserves at its foot.
-const _: () = assert!(
-    HOME_RECENT_TIME_DY + interos_std::font::line_height(1) + 1 < HOME_RECENT_ROW_H,
-    "a recents row must close over its caption's box and its own divider"
-);
-const _: () = assert!(
-    HOME_NOTE_Y + interos_std::font::line_height(1) < 1440 - 40,
-    "the home screen's closing note must stay on the panel"
-);
+/// Truth gates: a recents row holds the two boxes it paints, every touch band
+/// on the home screen stays a target, and the browse control stays pressable.
+///
+/// WHY swept over every level: the first claim is about a stack of ink, and at
+/// the authored level it is true by 1 row -- a rung the person can choose eats
+/// that margin outright, so the gate has to be asked at the largest rung it,
+/// not the one the layout was drawn at.
+///
+/// WHY the panel fit is NOT claimed here: the home screen has no scroll, so a
+/// raw sweep cannot promise the note clears the gesture bar at every level.
+/// That promise is made where it is kept -- `draw_level_holds_at_every_level`
+/// asserts it of the level the screen actually draws at, which is the wanted
+/// level clamped down until the stack fits.
+const fn home_stack_holds_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        let row = home_recent_row_h_at(level);
+        if home_recent_time_dy_at(level) + line_at(HOME_RECENT_CAPTION_SCALE, level) + 1 > row {
+            return false;
+        }
+        if row < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if category_first_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if category_other_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if home_browse_btn_at(level).h < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(home_stack_holds_at_every_level());
 
 /// The category row at a y, as `(index, top, height)`.
 ///
@@ -914,16 +1762,16 @@ const _: () = assert!(
 /// the hit test have to agree on which row a touch landed on, and two copies
 /// of one table is how they stop agreeing.
 pub fn category_row_at(y: usize) -> Option<(usize, usize, usize)> {
-    if y < CATEGORY_Y0 {
+    let lvl = draw_level();
+    let first = category_first_row_h_at(lvl);
+    let other = category_other_row_h_at(lvl);
+    let stack_top = category_y0_at(lvl);
+    if y < stack_top {
         return None;
     }
-    let mut top = CATEGORY_Y0;
+    let mut top = stack_top;
     for index in 0..CATEGORY_COUNT {
-        let height = if index == 0 {
-            CATEGORY_FIRST_ROW_H
-        } else {
-            CATEGORY_OTHER_ROW_H
-        };
+        let height = if index == 0 { first } else { other };
         if y < top + height {
             return Some((index, top, height));
         }
@@ -945,6 +1793,18 @@ pub fn category_row_at(y: usize) -> Option<(usize, usize, usize)> {
 /// starting inside the rows the header answers loses its top rows to a surface
 /// that never asks the stack what it is drawing.
 pub const BROWSE_STACK_Y: usize = HEADER_H;
+
+/// The row the browse stack starts on at a level: the header's foot row at that
+/// level, which is the same claim the authored `const` makes at Normal.
+pub const fn browse_stack_y_at(level: u8) -> usize {
+    header_h_at(level)
+}
+#[inline]
+pub fn browse_stack_y() -> usize {
+    browse_stack_y_at(draw_level())
+}
+const _: () = assert!(browse_stack_y_at(PLATFORM_LEVEL) == BROWSE_STACK_Y);
+
 /// The search field: the app's one text input.
 pub const SEARCH_FIELD: Rect = Rect::new(36, BROWSE_STACK_Y, 648, 56);
 /// The clear action inside the search field.
@@ -954,6 +1814,86 @@ pub const SCOPE_Y: usize = BROWSE_STACK_Y + 62;
 /// The two search scopes, as pills the user can press.
 pub const SCOPE_THIS_PILL: Rect = Rect::new(432, BROWSE_STACK_Y + 58, 120, 48);
 pub const SCOPE_ALL_PILL: Rect = Rect::new(560, BROWSE_STACK_Y + 58, 124, 48);
+
+/// The field, its clear control, the caption beside the pills and the two pills
+/// themselves, all placed at a level.
+///
+/// WHY the whole row moves together: the field holds the query at the rung the
+/// person chose, the caption and the pills' labels hold theirs, and every one of
+/// them is answered by a tap -- so a raised field that left its clear control and
+/// its scope row where they were would put the control's rows on the field's ink.
+/// The authored air each element keeps is solved from the authored stack, so the
+/// row's proportions are the layout's and not new numbers.
+const SEARCH_CLEAR_DY: usize = 4;
+const SCOPE_ROW_DY: usize = 58;
+const SCOPE_CAPTION_DY: usize = 62;
+
+pub const fn search_field_at(level: u8) -> Rect {
+    Rect::new(
+        SEARCH_FIELD.x,
+        browse_stack_y_at(level),
+        SEARCH_FIELD.w,
+        plate_at(SEARCH_FIELD.h, SEARCH_TEXT_SCALE, level),
+    )
+}
+pub const fn search_clear_at(level: u8) -> Rect {
+    Rect::new(
+        SEARCH_CLEAR.x,
+        search_field_at(level).y + SEARCH_CLEAR_DY,
+        later(SEARCH_CLEAR.w, cap_at(SEARCH_TEXT_SCALE, level) as usize),
+        later(SEARCH_CLEAR.h, rows_at(SEARCH_TEXT_SCALE, level)),
+    )
+}
+pub const fn scope_pill_at(level: u8, first: bool) -> Rect {
+    let authored = if first { &SCOPE_THIS_PILL } else { &SCOPE_ALL_PILL };
+    Rect::new(
+        authored.x,
+        browse_stack_y_at(level) + grown(SCOPE_ROW_DY, SEARCH_TEXT_SCALE, level),
+        authored.w,
+        plate_at(authored.h, LABEL_RUNG, level),
+    )
+}
+pub const fn scope_y_at(level: u8) -> usize {
+    browse_stack_y_at(level) + grown(SCOPE_CAPTION_DY, SEARCH_TEXT_SCALE, level)
+}
+pub const fn scope_row_y1_at(level: u8) -> usize {
+    let pill = scope_pill_at(level, true);
+    pill.y + pill.h
+}
+#[inline]
+pub fn search_field() -> Rect {
+    search_field_at(draw_level())
+}
+#[inline]
+pub fn search_clear() -> Rect {
+    search_clear_at(draw_level())
+}
+#[inline]
+pub fn scope_this_pill() -> Rect {
+    scope_pill_at(draw_level(), true)
+}
+#[inline]
+pub fn scope_all_pill() -> Rect {
+    scope_pill_at(draw_level(), false)
+}
+#[inline]
+pub fn scope_y() -> usize {
+    scope_y_at(draw_level())
+}
+#[inline]
+pub fn scope_row_y1() -> usize {
+    scope_row_y1_at(draw_level())
+}
+const _: () = assert!(
+    search_field_at(PLATFORM_LEVEL).y == SEARCH_FIELD.y
+        && search_field_at(PLATFORM_LEVEL).h == SEARCH_FIELD.h
+);
+const _: () = assert!(search_clear_at(PLATFORM_LEVEL).y == SEARCH_CLEAR.y);
+const _: () = assert!(scope_pill_at(PLATFORM_LEVEL, true).y == SCOPE_THIS_PILL.y);
+const _: () = assert!(scope_pill_at(PLATFORM_LEVEL, false).y == SCOPE_ALL_PILL.y);
+const _: () = assert!(scope_y_at(PLATFORM_LEVEL) == SCOPE_Y);
+const _: () = assert!(scope_row_y1_at(PLATFORM_LEVEL) == SCOPE_ROW_Y1);
+
 // The scope caption's own lane is derived from the first pill's column in
 // "The lanes the painter draws into" below, as `SCOPE_CAPTION_MAX_W`.
 
@@ -963,6 +1903,43 @@ pub const TOOLBAR_H: usize = 48;
 pub const SORT_PILL: Rect = Rect::new(36, TOOLBAR_Y, 160, TOOLBAR_H);
 pub const LIST_PILL: Rect = Rect::new(512, TOOLBAR_Y, 84, TOOLBAR_H);
 pub const GRID_PILL: Rect = Rect::new(600, TOOLBAR_Y, 84, TOOLBAR_H);
+
+/// The toolbar's row at a level: it keeps the gap the authored stack left under
+/// the scope row, and its pills answer the label rung they carry.
+const TOOLBAR_GAP: usize = TOOLBAR_Y - SCOPE_ROW_Y1;
+pub const fn toolbar_y_at(level: u8) -> usize {
+    scope_row_y1_at(level) + TOOLBAR_GAP
+}
+pub const fn toolbar_h_at(level: u8) -> usize {
+    plate_at(TOOLBAR_H, LABEL_RUNG, level)
+}
+pub const fn toolbar_pill_at(level: u8, index: usize) -> Rect {
+    let authored = match index {
+        0 => &SORT_PILL,
+        1 => &LIST_PILL,
+        _ => &GRID_PILL,
+    };
+    Rect::new(
+        authored.x,
+        toolbar_y_at(level),
+        authored.w,
+        toolbar_h_at(level),
+    )
+}
+#[inline]
+pub fn toolbar_y() -> usize {
+    toolbar_y_at(draw_level())
+}
+#[inline]
+pub fn toolbar_h() -> usize {
+    toolbar_h_at(draw_level())
+}
+#[inline]
+pub fn toolbar_pill(index: usize) -> Rect {
+    toolbar_pill_at(draw_level(), index)
+}
+const _: () = assert!(toolbar_y_at(PLATFORM_LEVEL) == TOOLBAR_Y);
+const _: () = assert!(toolbar_h_at(PLATFORM_LEVEL) == TOOLBAR_H);
 
 /// The foot of the scope row: the two pills stand taller than the caption
 /// beside them, so the pills answer the row's last row.
@@ -974,6 +1951,11 @@ pub const BREADCRUMB_SCALE: usize = theme::type_scale::CAPTION;
 /// The rows one crumb run reserves at that rung.
 pub const BREADCRUMB_ROWS: usize = outline_text::row_band(0, BREADCRUMB_SCALE).1;
 
+/// The crumb's box at a level.
+const fn breadcrumb_rows_at(level: u8) -> usize {
+    rows_at(BREADCRUMB_SCALE, level)
+}
+
 /// The breadcrumb's touch strip: the whole gap between the scope row's foot and
 /// the toolbar's top, and nothing more.
 ///
@@ -981,9 +1963,14 @@ pub const BREADCRUMB_ROWS: usize = outline_text::row_band(0, BREADCRUMB_SCALE).1
 /// `BROWSE_STACK_Y + 110` to `+ 158` while the toolbar's rows start at `+ 154`,
 /// so the crumb strip and the toolbar both claimed the same four rows and the tap
 /// handler had to clamp one against the other to keep the pair honest. The gap the
-/// two bands leave between them is 48 rows -- the height every other control band
-/// in this stack holds, and four rows more than the platform's minimum target --
-/// so the strip is that whole gap: no dead row above it, no borrowed row below it.
+/// two bands leave between them is 48 rows at the rung this stack was authored at,
+/// four rows more than the platform's minimum target, so the strip is that whole
+/// gap: no dead row above it, no borrowed row below it. Raised rungs grow the two
+/// bands around it at different rates, so the gap is not 48 there and is not
+/// claimed to be -- what holds at every rung is that the strip stays a minimum
+/// target tall and that its foot *is* the toolbar's top, and the sweep beside
+/// [`crumb_hit_at`] is what says so. The tap handler reads that second claim as
+/// permission to stop a press at the strip's foot without clamping it again.
 pub const BREADCRUMB_HIT_Y0: usize = SCOPE_ROW_Y1;
 pub const BREADCRUMB_HIT_Y1: usize = TOOLBAR_Y;
 
@@ -991,6 +1978,30 @@ pub const BREADCRUMB_HIT_Y1: usize = TOOLBAR_Y;
 /// answers it, so the painted run and the hit strip agree at any rung.
 pub const BREADCRUMB_Y: usize = BREADCRUMB_HIT_Y0
     + (BREADCRUMB_HIT_Y1 - BREADCRUMB_HIT_Y0 - BREADCRUMB_ROWS) / 2;
+
+/// The crumb strip and the row it centres its box on, at a level.
+pub const fn crumb_hit_at(level: u8) -> (usize, usize) {
+    (scope_row_y1_at(level), toolbar_y_at(level))
+}
+pub const fn crumb_y_at(level: u8) -> usize {
+    let (y0, y1) = crumb_hit_at(level);
+    y0 + (y1.saturating_sub(y0).saturating_sub(breadcrumb_rows_at(level)) / 2)
+}
+#[inline]
+pub fn crumb_hit() -> (usize, usize) {
+    crumb_hit_at(draw_level())
+}
+#[inline]
+pub fn crumb_y() -> usize {
+    crumb_y_at(draw_level())
+}
+#[inline]
+pub fn crumb_rows() -> usize {
+    breadcrumb_rows_at(draw_level())
+}
+const _: () = assert!(crumb_hit_at(PLATFORM_LEVEL).0 == BREADCRUMB_HIT_Y0);
+const _: () = assert!(crumb_hit_at(PLATFORM_LEVEL).1 == BREADCRUMB_HIT_Y1);
+const _: () = assert!(crumb_y_at(PLATFORM_LEVEL) == BREADCRUMB_Y);
 
 /// Truth gates: the crumb strip is a touch target, it answers its own run, and
 /// it never claims a row the bands on either side of it own.
@@ -1008,6 +2019,60 @@ const _: () = assert!(
     "the crumbs must stand entirely inside the strip that answers them"
 );
 
+/// WHY swept over every level: the three gates above are the authored layout's
+/// own claims, and the same three claims have to hold at the rung the person
+/// chose -- where the field, the pills and the crumb box have all grown and the
+/// strip between the scope row and the toolbar is what has to carry it.
+const fn browse_stack_holds_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        let field = search_field_at(level);
+        if field.h < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if field.y + rows_at(SEARCH_TEXT_SCALE, level) > field.y + field.h {
+            return false;
+        }
+        let clear = search_clear_at(level);
+        if clear.h < theme::MIN_TOUCH_TARGET || clear.w < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if clear.y < field.y || clear.y + clear.h > field.y + field.h {
+            return false;
+        }
+        let scope_y = scope_y_at(level);
+        if scope_y + rows_at(SCOPE_CAPTION_SCALE, level) > scope_row_y1_at(level) {
+            return false;
+        }
+        let pill = scope_pill_at(level, true);
+        if pill.h < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        let bar = toolbar_y_at(level);
+        if bar < scope_row_y1_at(level) {
+            return false;
+        }
+        let (hit0, hit1) = crumb_hit_at(level);
+        if hit1 - hit0 < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if hit1 != bar {
+            return false;
+        }
+        let rows = breadcrumb_rows_at(level);
+        let y = crumb_y_at(level);
+        if y < hit0 || y + rows > hit1 {
+            return false;
+        }
+        if toolbar_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(browse_stack_holds_at_every_level());
+
 /// The entries card.
 ///
 /// WHY the card is the region and not the size of the list: a long directory
@@ -1015,6 +2080,164 @@ const _: () = assert!(
 pub const ENTRIES_CARD: Rect = Rect::new(36, 364, 648, 920);
 /// The height of one entry row.
 pub const ENTRY_ROW_H: usize = 56;
+
+/// The list viewport at a level: it starts the row the toolbar's foot clears, and
+/// it ends where the status line starts, so a stack of taller rows narrows the
+/// window instead of walking off the screen -- and the scroll inside it carries the
+/// rows the window no longer shows.
+///
+/// WHY the card's height is a subtraction and not a plate: `BODY_H` in the
+/// reference is the same idea. A viewport that kept the authored 920 rows after the
+/// stack above it had grown would report content below the panel, which is a scroll
+/// range with rows in it that no pixel of the screen shows.
+const ENTRIES_TOOLBAR_STRIDE: usize = 364 - (TOOLBAR_Y + TOOLBAR_H);
+const STATUS_CARD_STRIDE: usize = STATUS_Y - (364 + 920);
+
+/// The status line's row at a level: where it was authored while its box still
+/// clears the action bar, and lifted onto the bar's own foot row when the rung has
+/// grown the box past the room between them.
+pub const fn status_y_at(level: u8) -> usize {
+    let rows = rows_at(STATUS_SCALE, level);
+    if STATUS_Y + rows <= ACTION_BAR_Y0 {
+        STATUS_Y
+    } else {
+        ACTION_BAR_Y0.saturating_sub(rows)
+    }
+}
+pub const fn entries_card_at(level: u8) -> Rect {
+    let y = toolbar_y_at(level) + TOOLBAR_H + ENTRIES_TOOLBAR_STRIDE;
+    let bottom = status_y_at(level).saturating_sub(STATUS_CARD_STRIDE);
+    Rect::new(
+        ENTRIES_CARD.x,
+        y,
+        ENTRIES_CARD.w,
+        bottom.saturating_sub(y),
+    )
+}
+/// A list row's plate at a level.
+///
+/// WHY sized from the line box: the row is blitted out of a widget buffer whose
+/// paint loop walks the platform's `line_height`, and the sweep beside the
+/// identity gates proves that box and [`rows_at`] are the same number at every
+/// rung on offer -- and the buffer beside it is sized at the largest rung the
+/// ladder offers, so no raised row is ever cut by the buffer that carries it.
+pub const fn entry_row_h_at(level: u8) -> usize {
+    plate_at(ENTRY_ROW_H, ENTRY_NAME_SCALE, level)
+}
+/// A grid cell's plate at a level: the cell carries its name at the grid's own
+/// rung, and the glyph above it keeps the room it was drawn with.
+pub const fn grid_cell_h_at(level: u8) -> usize {
+    plate_at(GRID_CELL_H, GRID_NAME_SCALE, level)
+}
+#[inline]
+pub fn entries_card() -> Rect {
+    entries_card_at(draw_level())
+}
+#[inline]
+pub fn entry_row_h() -> usize {
+    entry_row_h_at(draw_level())
+}
+#[inline]
+pub fn grid_cell_h() -> usize {
+    grid_cell_h_at(draw_level())
+}
+#[inline]
+pub fn status_y() -> usize {
+    status_y_at(draw_level())
+}
+/// The rows the status line's own box reserves at this app's rung: the foot the
+/// painter's band and the tap handler's strip both stop on.
+#[inline]
+pub fn status_rows() -> usize {
+    rows_at(STATUS_SCALE, draw_level())
+}
+/// The empty-card pair: the headline's own drop from the card's top and the stride
+/// to the subline under it, both restated so each moves by the box above it.
+const EMPTY_HEADLINE_DY: usize = 150;
+const EMPTY_SUBLINE_STRIDE: usize = 214 - 150;
+/// The row the empty card's headline stands on, at this app's rung.
+#[inline]
+pub fn empty_headline_y() -> usize {
+    entries_card().y + grown(EMPTY_HEADLINE_DY, EMPTY_HEADLINE_SCALE, draw_level())
+}
+/// The row the empty card's explanation stands on, at this app's rung: one whole
+/// headline stride under the headline, so a headline with a descender cannot ink
+/// into it.
+#[inline]
+pub fn empty_subline_y() -> usize {
+    empty_headline_y() + grown(EMPTY_SUBLINE_STRIDE, EMPTY_SUBLINE_SCALE, draw_level())
+}
+const _: () = assert!(
+    entries_card_at(PLATFORM_LEVEL).y == ENTRIES_CARD.y
+        && entries_card_at(PLATFORM_LEVEL).h == ENTRIES_CARD.h
+);
+const _: () = assert!(entry_row_h_at(PLATFORM_LEVEL) == ENTRY_ROW_H);
+const _: () = assert!(grid_cell_h_at(PLATFORM_LEVEL) == GRID_CELL_H);
+const _: () = assert!(status_y_at(PLATFORM_LEVEL) == STATUS_Y);
+
+/// The largest row plate any selectable level asks for, so the widget buffers the
+/// renderer blits through are big enough for the rung a person can choose rather
+/// than the one the layout was drawn at.
+pub const fn entry_row_h_max() -> usize {
+    let mut level = 0;
+    let mut tallest = ENTRY_ROW_H;
+    while level <= MAX_LEVEL {
+        let h = entry_row_h_at(level);
+        if h > tallest {
+            tallest = h;
+        }
+        level += 1;
+    }
+    tallest
+}
+
+/// The largest grid cell any selectable level asks for, for the same reason
+/// [`entry_row_h_max`] sizes the row buffer: the cell is blitted through a widget
+/// buffer, and a buffer cut to the rung the layout happened to be drawn at cuts
+/// the rung the person chose.
+pub const fn grid_cell_h_max() -> usize {
+    let mut level = 0;
+    let mut tallest = GRID_CELL_H;
+    while level <= MAX_LEVEL {
+        let h = grid_cell_h_at(level);
+        if h > tallest {
+            tallest = h;
+        }
+        level += 1;
+    }
+    tallest
+}
+
+/// Truth gate, swept: every list row and grid cell is still a touch target at the
+/// largest rung, and the viewport the rows scroll inside keeps a row's worth of
+/// height rather than closing to nothing when the stack above it grows.
+const fn entry_plates_hold_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        if entry_row_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if grid_cell_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        let card = entries_card_at(level);
+        if card.h < entry_row_h_at(level) {
+            return false;
+        }
+        if card.y + card.h > status_y_at(level) {
+            return false;
+        }
+        if status_y_at(level) + rows_at(STATUS_SCALE, level) > ACTION_BAR_Y0 {
+            return false;
+        }
+        if entry_row_h_at(level) > entry_row_h_max() {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(entry_plates_hold_at_every_level());
 
 /// The grid's cell, its gap and the padding inside the card.
 ///
@@ -1047,6 +2270,99 @@ pub const DETAILS_LINE_H: usize = 40;
 pub const DETAILS_OPEN: Rect = Rect::new(60, 884, 280, 48);
 pub const DETAILS_CLOSE: Rect = Rect::new(380, 884, 280, 48);
 
+/// The details card at a level: it stands where the entries card stands, its title
+/// keeps the air above it, its lines keep the stride the ladder gave them plus
+/// their own growth, and its two buttons stay inside it.
+///
+/// WHY the card grows rather than the rows being cut: it lists a fixed number of
+/// lines and has no scroll of its own, so a rung that grew the title and every line
+/// without growing the card would run the last line through the buttons that close
+/// it -- and the closing buttons are the only way out of the view.
+const DETAILS_TITLE_DY: usize = DETAILS_TITLE_Y - DETAILS_CARD.y;
+const DETAILS_LINES_DY: usize = DETAILS_LINE_Y0 - DETAILS_CARD.y;
+const DETAILS_BUTTON_DY: usize = DETAILS_OPEN.y - DETAILS_CARD.y;
+/// The air the authored card keeps below its two buttons.
+const DETAILS_FOOT_AIR: usize =
+    DETAILS_CARD.h - (DETAILS_BUTTON_DY + DETAILS_OPEN.h);
+
+pub const fn details_title_dy_at(level: u8) -> usize {
+    grown(DETAILS_TITLE_DY, DETAILS_TITLE_SCALE, level)
+}
+pub const fn details_lines_dy_at(level: u8) -> usize {
+    grown(DETAILS_LINES_DY, DETAILS_TITLE_SCALE, level)
+}
+pub const fn details_line_h_at(level: u8) -> usize {
+    plate_at(DETAILS_LINE_H, DETAILS_LINE_SCALE, level)
+}
+pub const fn details_button_h_at(level: u8) -> usize {
+    plate_at(DETAILS_OPEN.h, LABEL_RUNG, level)
+}
+pub const fn details_button_dy_at(level: u8) -> usize {
+    later(
+        DETAILS_BUTTON_DY,
+        details_lines_dy_at(level) + MAX_DETAILS_LINES * details_line_h_at(level) + 12,
+    )
+}
+pub const fn details_card_at(level: u8) -> Rect {
+    Rect::new(
+        DETAILS_CARD.x,
+        entries_card_at(level).y,
+        DETAILS_CARD.w,
+        details_button_dy_at(level) + details_button_h_at(level) + DETAILS_FOOT_AIR,
+    )
+}
+pub const fn details_title_y_at(level: u8) -> usize {
+    entries_card_at(level).y + details_title_dy_at(level)
+}
+pub const fn details_line_y_at(level: u8, index: usize) -> usize {
+    entries_card_at(level).y + details_lines_dy_at(level) + index * details_line_h_at(level)
+}
+pub const fn details_open_at(level: u8) -> Rect {
+    Rect::new(
+        DETAILS_OPEN.x,
+        entries_card_at(level).y + details_button_dy_at(level),
+        DETAILS_OPEN.w,
+        details_button_h_at(level),
+    )
+}
+pub const fn details_close_at(level: u8) -> Rect {
+    let open = details_open_at(level);
+    Rect::new(DETAILS_CLOSE.x, open.y, DETAILS_CLOSE.w, open.h)
+}
+#[inline]
+pub fn details_card() -> Rect {
+    details_card_at(draw_level())
+}
+#[inline]
+pub fn details_title_y() -> usize {
+    details_title_y_at(draw_level())
+}
+#[inline]
+pub fn details_line_y(index: usize) -> usize {
+    details_line_y_at(draw_level(), index)
+}
+#[inline]
+pub fn details_line_h() -> usize {
+    details_line_h_at(draw_level())
+}
+#[inline]
+pub fn details_open() -> Rect {
+    details_open_at(draw_level())
+}
+#[inline]
+pub fn details_close() -> Rect {
+    details_close_at(draw_level())
+}
+const _: () = assert!(
+    details_card_at(PLATFORM_LEVEL).y == DETAILS_CARD.y
+        && details_card_at(PLATFORM_LEVEL).h == DETAILS_CARD.h
+);
+const _: () = assert!(details_title_y_at(PLATFORM_LEVEL) == DETAILS_TITLE_Y);
+const _: () = assert!(details_line_y_at(PLATFORM_LEVEL, 0) == DETAILS_LINE_Y0);
+const _: () = assert!(details_line_h_at(PLATFORM_LEVEL) == DETAILS_LINE_H);
+const _: () = assert!(details_open_at(PLATFORM_LEVEL).y == DETAILS_OPEN.y);
+const _: () = assert!(details_close_at(PLATFORM_LEVEL).y == DETAILS_CLOSE.y);
+
 /// The confirmation sheet, drawn over the list.
 pub const SHEET: Rect = Rect::new(36, 900, 648, 300);
 /// The destination slots in the copy and move sheet.
@@ -1058,6 +2374,132 @@ pub const SHEET_NAME_H: usize = 48;
 /// The sheet's confirm and cancel slots.
 pub const SHEET_BUTTON_Y: usize = 1120;
 pub const SHEET_BUTTON_H: usize = 48;
+
+/// The sheet at a level: its heading, its field or destination slots and its two
+/// buttons each answer the rung they carry, and the sheet grows to hold them rather
+/// than painting the buttons off its own plate.
+const SHEET_DEST_DY: usize = SHEET_DEST_Y - SHEET.y;
+const SHEET_BUTTON_DY: usize = SHEET_BUTTON_Y - SHEET.y;
+/// The air the authored sheet keeps below its two buttons.
+const SHEET_FOOT_AIR: usize = SHEET.h - (SHEET_BUTTON_DY + SHEET_BUTTON_H);
+
+pub const fn sheet_slot_h_at(level: u8) -> usize {
+    plate_at(SHEET_DEST_H, LABEL_RUNG, level)
+}
+pub const fn sheet_dest_y_at(level: u8) -> usize {
+    SHEET.y + grown(SHEET_DEST_DY, LABEL_RUNG, level)
+}
+pub const fn sheet_button_y_at(level: u8) -> usize {
+    let stack = sheet_dest_y_at(level) + sheet_slot_h_at(level) + 12;
+    later(SHEET.y + SHEET_BUTTON_DY, stack)
+}
+pub const fn sheet_at(level: u8) -> Rect {
+    Rect::new(
+        SHEET.x,
+        SHEET.y,
+        SHEET.w,
+        sheet_button_y_at(level) + sheet_slot_h_at(level) + SHEET_FOOT_AIR - SHEET.y,
+    )
+}
+pub const fn sheet_name_h_at(level: u8) -> usize {
+    plate_at(SHEET_NAME_H, SEARCH_TEXT_SCALE, level)
+}
+#[inline]
+pub fn sheet() -> Rect {
+    sheet_at(draw_level())
+}
+#[inline]
+pub fn sheet_dest_y() -> usize {
+    sheet_dest_y_at(draw_level())
+}
+#[inline]
+pub fn sheet_slot_h() -> usize {
+    sheet_slot_h_at(draw_level())
+}
+#[inline]
+pub fn sheet_button_y() -> usize {
+    sheet_button_y_at(draw_level())
+}
+#[inline]
+pub fn sheet_name_y() -> usize {
+    sheet_dest_y_at(draw_level())
+}
+#[inline]
+pub fn sheet_name_h() -> usize {
+    sheet_name_h_at(draw_level())
+}
+/// The air the sheet keeps above its heading, and the stride between the name
+/// lines under it -- both as the sheet was drawn with, restated so a raised rung
+/// moves each line by the box above it rather than running the lines together.
+pub const SHEET_TITLE_DY: usize = 20;
+pub const SHEET_TITLE_SCALE: usize = theme::type_scale::BODY;
+const SHEET_NAME_FIRST_DY: usize = 76;
+const SHEET_NAME_STRIDE: usize = 24;
+pub const SHEET_NAME_LIST_SCALE: usize = theme::type_scale::CAPTION;
+/// The sheet's heading row, at this app's rung.
+#[inline]
+pub fn sheet_title_y() -> usize {
+    sheet().y + SHEET_TITLE_DY
+}
+/// The row the sheet's `index`-th name line stands on, at this app's rung.
+#[inline]
+pub fn sheet_name_line_y(index: usize) -> usize {
+    let lvl = draw_level();
+    sheet().y
+        + grown(SHEET_NAME_FIRST_DY, SHEET_TITLE_SCALE, lvl)
+        + index * grown(SHEET_NAME_STRIDE, SHEET_NAME_LIST_SCALE, lvl)
+}
+const _: () = assert!(sheet_at(PLATFORM_LEVEL).h == SHEET.h);
+const _: () = assert!(sheet_dest_y_at(PLATFORM_LEVEL) == SHEET_DEST_Y);
+const _: () = assert!(sheet_slot_h_at(PLATFORM_LEVEL) == SHEET_DEST_H);
+const _: () = assert!(sheet_button_y_at(PLATFORM_LEVEL) == SHEET_BUTTON_Y);
+const _: () = assert!(sheet_name_h_at(PLATFORM_LEVEL) == SHEET_NAME_H);
+
+/// Truth gate, swept: the two overlay plates hold every run they paint and stay on
+/// the panel at the largest rung.
+///
+/// WHY these two are checked together: both are drawn over the list and both close
+/// with a button, so a card whose last line reaches its own buttons and a sheet
+/// whose button walks off the panel are the same defect seen from the two surfaces
+/// that have no scroll.
+const fn overlays_hold_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        let card = details_card_at(level);
+        let last_line = details_line_y_at(level, MAX_DETAILS_LINES - 1)
+            + rows_at(DETAILS_LINE_SCALE, level);
+        if last_line > details_open_at(level).y {
+            return false;
+        }
+        if details_open_at(level).y + details_button_h_at(level) > card.y + card.h {
+            return false;
+        }
+        if card.y + card.h > 1440 {
+            return false;
+        }
+        if details_title_y_at(level) + rows_at(DETAILS_TITLE_SCALE, level)
+            > details_lines_dy_at(level) + card.y
+        {
+            return false;
+        }
+        let sheet = sheet_at(level);
+        if sheet.y + sheet.h > 1440 {
+            return false;
+        }
+        if sheet_button_y_at(level) < sheet_dest_y_at(level) + sheet_slot_h_at(level) {
+            return false;
+        }
+        if sheet_slot_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        if details_button_h_at(level) < theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(overlays_hold_at_every_level());
 
 /// The longest a status or scope line may be.
 pub const LINE_LEN: usize = 128;
@@ -1226,13 +2668,13 @@ pub fn crumb_step(label: &[u8], x: usize, is_last: bool, buf: &mut [u8]) -> Opti
     if room < CRUMB_MIN_ROOM {
         return None;
     }
-    let len = font::ellipsize(label, BREADCRUMB_SCALE, room, buf);
+    let len = ellipsize_run(label, BREADCRUMB_SCALE, room, buf);
     if len == 0 {
         return None;
     }
-    let w = font::measure(&buf[..len], BREADCRUMB_SCALE);
+    let w = run_w(&buf[..len], BREADCRUMB_SCALE);
     let after_run = x + w + CRUMB_SEP_GAP;
-    let sep_w = font::measure(CRUMB_SEP, BREADCRUMB_SCALE);
+    let sep_w = run_w(CRUMB_SEP, BREADCRUMB_SCALE);
     let sep_x = if !is_last && after_run + sep_w <= CRUMB_ROW_X1 {
         Some(after_run)
     } else {
@@ -1297,7 +2739,7 @@ pub fn fitted_run<'a>(
     lane: usize,
     buf: &'a mut [u8],
 ) -> &'a [u8] {
-    let len = font::ellipsize(label, scale, lane, buf);
+    let len = ellipsize_run(label, scale, lane, buf);
     if len == 0 {
         return label;
     }
@@ -1368,16 +2810,22 @@ const _: () = assert!(CRUMB_MIN_ROOM > CRUMB_SEP_GAP);
 
 /// The height of the list's content for a given number of items.
 pub fn list_content_height(item_count: usize) -> usize {
-    item_count * ENTRY_ROW_H
+    item_count * entry_row_h()
 }
 
 /// The rectangle one item's row is drawn in.
 ///
 /// The renderer calls this, and the hit test calls [`entry_at_point`], so a
 /// row that is drawn and a row that is tapped are the same row.
+///
+/// WHY the row's height comes from the published rung: the card scrolls its rows,
+/// so a taller stack reaches the person instead of being cut -- which is only true
+/// while the row the painter fills, the index the tap resolves and the scroll
+/// range that carries them all answer the same one number.
 pub fn entry_row_rect(card: Rect, index: usize, scroll_offset: usize) -> Rect {
-    let top = (card.y + index * ENTRY_ROW_H).saturating_sub(scroll_offset);
-    Rect::new(card.x, top, card.w, ENTRY_ROW_H)
+    let row_h = entry_row_h();
+    let top = (card.y + index * row_h).saturating_sub(scroll_offset);
+    Rect::new(card.x, top, card.w, row_h)
 }
 
 /// The item under a point, or `None` when the point is not on a row.
@@ -1397,7 +2845,7 @@ pub fn entry_at_point(
     if y < card.y || y >= card.y + card.h {
         return None;
     }
-    let index = (y - card.y + scroll_offset) / ENTRY_ROW_H;
+    let index = (y - card.y + scroll_offset) / entry_row_h();
     if index >= item_count {
         return None;
     }
@@ -1430,16 +2878,18 @@ pub fn grid_content_height(item_count: usize) -> usize {
         return 0;
     }
     let rows = item_count.div_ceil(GRID_COLS);
-    rows * GRID_CELL_H + rows.saturating_sub(1) * GRID_GAP
+    let cell_h = grid_cell_h();
+    rows * cell_h + rows.saturating_sub(1) * GRID_GAP
 }
 
 /// The rectangle one grid cell is drawn in.
 pub fn grid_cell_rect(card: Rect, index: usize, scroll_offset: usize) -> Rect {
     let row = index / GRID_COLS;
     let col = index % GRID_COLS;
+    let cell_h = grid_cell_h();
     let x = card.x + GRID_PAD + col * (GRID_CELL_W + GRID_GAP);
-    let top = (card.y + row * (GRID_CELL_H + GRID_GAP)).saturating_sub(scroll_offset);
-    Rect::new(x, top, GRID_CELL_W, GRID_CELL_H)
+    let top = (card.y + row * (cell_h + GRID_GAP)).saturating_sub(scroll_offset);
+    Rect::new(x, top, GRID_CELL_W, cell_h)
 }
 
 /// The grid item under a point, or `None` in the padding or a gap.
@@ -1470,8 +2920,9 @@ pub fn grid_at_point(
         return None;
     }
     let rel_y = y - card.y + scroll_offset;
-    let row = rel_y / (GRID_CELL_H + GRID_GAP);
-    if rel_y % (GRID_CELL_H + GRID_GAP) >= GRID_CELL_H {
+    let cell_h = grid_cell_h();
+    let row = rel_y / (cell_h + GRID_GAP);
+    if rel_y % (cell_h + GRID_GAP) >= cell_h {
         return None;
     }
     let index = row * GRID_COLS + col;
@@ -1499,13 +2950,23 @@ pub fn action_slot_rect(index: usize) -> Rect {
 /// width, and a slot authored twice is a slot whose lane the gate cannot trust.
 pub fn sheet_destination_rect(index: usize) -> Rect {
     let x = SHEET_DEST_X0 + index * (SHEET_DEST_SLOT_W + SHEET_DEST_SLOT_GAP);
-    Rect::new(x, SHEET_DEST_Y, SHEET_DEST_SLOT_W, SHEET_DEST_H)
+    Rect::new(
+        x,
+        sheet_dest_y_at(draw_level()),
+        SHEET_DEST_SLOT_W,
+        sheet_slot_h_at(draw_level()),
+    )
 }
 
 /// The confirmation sheet's confirm and cancel slots.
 pub fn sheet_button_rect(confirm: bool) -> Rect {
     let x = if confirm { SHEET_CONFIRM_X } else { SHEET_CANCEL_X };
-    Rect::new(x, SHEET_BUTTON_Y, SHEET_BUTTON_W, SHEET_BUTTON_H)
+    Rect::new(
+        x,
+        sheet_button_y_at(draw_level()),
+        SHEET_BUTTON_W,
+        sheet_slot_h_at(draw_level()),
+    )
 }
 
 // -----------------------------------------------------------------------------

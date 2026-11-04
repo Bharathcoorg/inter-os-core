@@ -27,6 +27,7 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 use file_manager::theme::{THEME, spacing};
+use std::design::accessibility::{DynamicType, UserTextScale};
 use std::design::components;
 use std::design::font;
 use std::design::outline_text;
@@ -50,28 +51,47 @@ use file_manager::{
     FileAction,
     IndexedDocument, LayoutMode, MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
     SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
-    ACTION_LABELS, ACTION_SLOT_W, BREADCRUMB_HIT_Y0, BREADCRUMB_HIT_Y1, BREADCRUMB_ROWS,
-    BREADCRUMB_SCALE, BREADCRUMB_Y, CATEGORY_CAPTION_SCALE, CATEGORY_COUNT, CATEGORY_LABEL_LANE,
-    CATEGORY_LABEL_SCALE, CATEGORY_LABEL_X, CATEGORY_ROW_X1, CATEGORY_Y0, CATEGORY_Y1, CRUMB_ROW_X0, CRUMB_ROW_X1,
-    CRUMB_SEP, DETAILS_CARD, DETAILS_CLOSE, DETAILS_INSET, DETAILS_LINE_LANE,
-    DETAILS_LINE_SCALE, DETAILS_LINE_H, DETAILS_LINE_Y0, DETAILS_OPEN, DETAILS_TITLE_LANE,
-    DETAILS_TITLE_SCALE, DETAILS_TITLE_Y, EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE,
+    ACTION_LABELS, ACTION_SLOT_W, BREADCRUMB_SCALE,
+    CATEGORY_CAPTION_SCALE, CATEGORY_COUNT, CATEGORY_FIRST_LABEL_DY, CATEGORY_LABEL_LANE,
+    CATEGORY_LABEL_SCALE, CATEGORY_LABEL_X, CATEGORY_OTHER_LABEL_DY, CATEGORY_ROW_X1,
+    CRUMB_ROW_X0, CRUMB_ROW_X1,
+    CRUMB_SEP, DETAILS_INSET, DETAILS_LINE_LANE,
+    DETAILS_LINE_SCALE, DETAILS_TITLE_LANE,
+    DETAILS_TITLE_SCALE, EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE,
     EMPTY_SUBLINE_SCALE, ENTRY_GLYPH_X, ENTRY_NAME_LANE, ENTRY_NAME_SCALE,
     ENTRY_RIGHT_AIR, ENTRY_SUB_SCALE, ENTRY_TEXT_X,
-    ENTRIES_CARD, fitted_run, GRID_CELL_H, GRID_CELL_W, GRID_NAME_LANE, GRID_NAME_SCALE,
-    GRID_TEXT_INSET, HEADER_BOTTOM_AIR, HEADER_H, HEADER_READOUT_LINE1_Y, HEADER_READOUT_LINE2_Y,
+    fitted_run, GRID_CELL_W, GRID_NAME_LANE, GRID_NAME_SCALE,
+    GRID_TEXT_INSET, HEADER_BOTTOM_AIR, HEADER_H, HEADER_READOUT_LINE2_Y,
     HEADER_READOUT_MAX_W, HEADER_READOUT_ROWS, HEADER_READOUT_SCALE, HEADER_TITLE_MAX_W,
-    HEADER_TITLE_ROWS, HEADER_TITLE_SCALE, HEADER_TITLE_Y, HOME_BROWSE_BTN,
-    HOME_CATEGORY_TITLE_Y, HOME_NOTE_Y, HOME_RECENTS_CAPTION_Y, HOME_RECENTS_TITLE_Y,
-    HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE, HOME_RECENT_ROW_H, HOME_RECENT_TIME_DY,
-    HOME_RECENTS_VISIBLE, HOME_RECENTS_Y0,
-    HOME_ROW_X, HOME_ROW_W, HOME_STORAGE_CARD, LABEL_RUNG, LINE_LEN, LIST_PILL, GRID_PILL,
+    HEADER_TITLE_ROWS, HEADER_TITLE_SCALE, HEADER_TITLE_Y,
+    HOME_CARD_LINE_SCALE, HOME_CARD_TITLE_SCALE,
+    HOME_RECENT_NAME_DY, HOME_RECENT_NAME_SCALE,
+    HOME_RECENTS_VISIBLE,
+    HOME_ROW_X, HOME_ROW_W, LABEL_RUNG, LINE_LEN,
     PANEL_CONTENT_X1,
-    SCOPE_ALL_PILL, SCOPE_CAPTION_MAX_W, SCOPE_CAPTION_SCALE, SCOPE_THIS_PILL, SCOPE_TEXT_X,
-    SCOPE_Y, SEARCH_CLEAR, SEARCH_FIELD, SEARCH_TEXT_LANE, SEARCH_TEXT_SCALE, SEARCH_TEXT_X,
-    SHEET, SHEET_NAME_H,
-    SHEET_NAME_Y, SHEET_DEST_SLOT_W, SORT_PILL, STATUS_LANE, STATUS_SCALE, STATUS_TEXT_X,
-    STATUS_Y, TOOLBAR_Y,
+    SCOPE_CAPTION_MAX_W, SCOPE_CAPTION_SCALE, SCOPE_TEXT_X,
+    SEARCH_TEXT_LANE, SEARCH_TEXT_SCALE, SEARCH_TEXT_X,
+    SHEET, SHEET_NAME_LIST_SCALE, SHEET_DEST_SLOT_W, SHEET_TITLE_SCALE,
+    STATUS_LANE, STATUS_SCALE, STATUS_TEXT_X,
+    // The same boxes, derived at the rung the person chose. Every paint site and
+    // every hit test below asks one of these, so the rectangle the app inks is
+    // literally the expression the app answers a press with. The authored names
+    // above are the ones a press is never measured against: the flat bands
+    // (`ACTION_BAR_Y0..Y1`) that the ladder does not move, the insets and lanes a
+    // run is trimmed to, and the scales themselves.
+    cap_at, category_caption_dy, category_y0,
+    category_y1, crumb_hit, crumb_rows, crumb_y, drawn_w, draw_level, empty_headline_y,
+    empty_subline_y, ellipsize_run, entry_row_h_max, entries_card, entries_card_at,
+    grid_cell_h_max, grown,
+    header_h, header_readout_line1_y, header_readout_line2_y,
+    header_title_y, home_browse_btn, home_card_line1_y,
+    home_card_line2_y, home_card_title_y, home_category_title_y, home_note_y, home_recent_row_h,
+    home_recent_time_dy, home_recents_caption_y, home_recents_title_y, home_recents_y0,
+    home_storage_card, PLATFORM_LEVEL, rows_at, run_line, run_rows, run_w, search_clear, search_field,
+    scope_all_pill, scope_this_pill, scope_row_y1, scope_y, sheet,
+    sheet_name_h, sheet_name_line_y, sheet_name_y, sheet_title_y, status_rows,
+    status_y, details_card, details_close, details_line_y, details_open,
+    details_title_y, toolbar_pill,
 };
 
 /// The platform's list-row treatment, at the two states the file list uses.
@@ -211,7 +231,7 @@ const _: () = assert!(
 );
 
 /// The readout's lane width is [`HEADER_READOUT_MAX_W`] in the library, and the
-/// title's is [`HEADER_TITLE_MAX_W`]: `font::ellipsize` trims to the first here
+/// title's is [`HEADER_TITLE_MAX_W`]: `ellipsize_run` trims to the first here
 /// while the host test measures the trimmed run against it there, and two copies
 /// of one lane is how a header comes to reserve room at one rung and measure its
 /// runs at another. This gate is what keeps the trim honest about *why* it
@@ -231,22 +251,65 @@ const DISABLED: u32 = THEME.border;
 // Rasterisers
 // -----------------------------------------------------------------------------
 
-/// Rasterises one text run into the pixel at `(x, y)`.
+/// Inks one text run's pixel at `(x, y)`, at the rung this app draws at.
 ///
 /// `bg` is the fill the run is drawn on top of, because the anti-aliased glyph
 /// edges are blended toward what is actually under them.
 ///
-/// WHY the outline face comes first: the title is drawn at scale 3 and section
-/// headings at scale 2, so on the bitmap face both are a 16x24 cell magnified
+/// WHY the outline face comes first: the title is drawn at the section rung and
+/// the headings at the body rung, so on the bitmap face both are a cell magnified
 /// by an integer -- a soft ramp where an edge belongs.
 ///
-/// WHY the band comes from `row_band` and not from `line_height`: `row_band` is
-/// the SDK's own answer for the rows a run at `scale` can ink -- the union of the
-/// outline line box and the bitmap cell -- and it is the function the header's
-/// boxes beside [`HEADER_H`] are sized from. Asking the pixel test for the same
-/// one is what keeps a reserved box and a rejected pixel from disagreeing; today
-/// the two are the same number at every rung this file draws, so this re-points
-/// the draw site without moving a pixel.
+/// WHY the band comes from the model's `rows_at` and not from `line_height`:
+/// `rows_at` is [`outline_text::row_band`]'s union of the outline line box and the
+/// bitmap cell, asked at the rung the plate was sized from. A run inked at one
+/// rung inside a band answered at another is the defect every gate in the library
+/// exists to refuse, and the library's identity checks say the two answers are
+/// the same number at the level the app was authored at -- so the ladder path
+/// below re-points the draw site without moving a pixel.
+#[inline(always)]
+fn ink_run(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let lvl = draw_level();
+    if lvl == PLATFORM_LEVEL {
+        // The ladder's own path, unchanged.
+        let band_bottom = outline_text::row_band(y0, scale).1;
+        if y < y0 || y >= band_bottom {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
+            return run.pixel(x, y, color, bg);
+        }
+        return font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
+    }
+    let cap = cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, text, None, false) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. WHY the band grows with the
+    // level: a run fitted to a scaled em walks taller than the unscaled cell, so
+    // the ladder's band would cut the descenders of the very run it enlarged.
+    if y >= y0 && y < y0 + rows_at(scale, lvl) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, text, color, bg, false);
+    }
+    None
+}
+
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -258,21 +321,57 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    let band_bottom = outline_text::row_band(y0, scale).1;
-    if x < x0 || x >= W || y < y0 || y >= band_bottom {
+    if x < x0 || x >= W {
         return None;
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
-        return run.pixel(x, y, color, bg);
-    }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+    ink_run(x, y, x0, y0, scale, text, color, bg)
 }
 
 #[inline(always)]
 fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
-    let w = outline_text::drawn_advance(text, scale, Some(available))
-        .unwrap_or_else(|| std::design::font::measure(text, scale));
+    let w = drawn_w(text, scale, available);
     x0 + if w >= available { 0 } else { (available - w) / 2 }
+}
+
+// -----------------------------------------------------------------------------
+// The person's text size, and the rung this app draws at
+//
+// WHY this block is in the binary and not the library: publishing is the app's
+// job -- the library only answers the cell the renderer was handed. Half of
+// adopting Settings' "Text size" is reading `display.text_scale` and handing the
+// level to the renderer; the other half is drawing through the helpers that read
+// it back. Both halves are this app's own, and a surface that did only the first
+// would resize nothing, while one that did only the second would be stuck at one
+// hundred per cent forever.
+// -----------------------------------------------------------------------------
+
+/// Reads the platform's text-size setting and hands the rung to the renderer.
+///
+/// Returns whether the rung the last frame was laid out with actually moved,
+/// which is the caller's signal that the whole screen has to be repainted and not
+/// just the band something else dirtied.
+///
+/// WHY the shared parser and not this app's own chain of compares: the store
+/// accepts both the digit and the word for a level, and a reader that understood
+/// fewer spellings than the writer produces would read an existing preference as
+/// "unset" and quietly reset the rung.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame
+/// that fell back to one hundred per cent because the store was busy would resize
+/// the screen under a person who never touched the setting.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a
+    // level above the ladder's largest setting is clamped on the way in, and a
+    // caller that repaints because "the level changed" should be wrong about that
+    // only when the pixels really did move.
+    DynamicType::new(next).publish() != before
 }
 
 // -----------------------------------------------------------------------------
@@ -509,7 +608,7 @@ impl FileManagerApp {
             entry_count: 0,
             selected_document: SelectedDocument::EMPTY,
             has_selected_document: false,
-            scroll: ScrollState::new(0, ENTRIES_CARD.h, 0),
+            scroll: ScrollState::new(0, entries_card_at(PLATFORM_LEVEL).h, 0),
             query: TypedField::EMPTY,
             results: [IndexedDocument::EMPTY; MAX_SEARCH_RESULTS],
             result_count: 0,
@@ -834,10 +933,21 @@ impl FileManagerApp {
     fn scroll_for(&self, offset: usize) -> ScrollState {
         let count = self.card_item_count();
         if self.layout == LayoutMode::Grid {
-            grid_scroll(count, ENTRIES_CARD, offset)
+            grid_scroll(count, entries_card(), offset)
         } else {
-            list_scroll(count, ENTRIES_CARD, offset)
+            list_scroll(count, entries_card(), offset)
         }
+    }
+
+    /// Re-solve the listing's scroll state after the platform's rung moved.
+    ///
+    /// WHY it is a call of its own: the card's height and every row inside it are
+    /// derived from the rung this process draws at, so an extent solved before the
+    /// rung moved bounds a screen that no longer exists -- a thumb sized against
+    /// the card the person left, and an offset past the new bottom no tap can
+    /// reach back.
+    pub fn relayout_for_rung(&mut self) {
+        self.scroll = self.scroll_for(self.scroll.offset);
     }
 
     /// The number of rows the card shows.
@@ -1633,7 +1743,7 @@ fn read_origin_url(path: &str, out: &mut [u8]) -> Option<usize> {
 /// here.
 fn fit_details(view: &mut DetailsView) {
     let mut title = [0u8; 64];
-    let title_len = font::ellipsize(
+    let title_len = ellipsize_run(
         &view.title[..view.title_len],
         DETAILS_TITLE_SCALE,
         DETAILS_TITLE_LANE,
@@ -1646,7 +1756,7 @@ fn fit_details(view: &mut DetailsView) {
     }
     for index in 0..view.line_count {
         let mut line = [0u8; MAX_DETAILS_LINE];
-        let line_len = font::ellipsize(
+        let line_len = ellipsize_run(
             &view.lines[index][..view.line_lens[index]],
             DETAILS_LINE_SCALE,
             DETAILS_LINE_LANE,
@@ -1803,7 +1913,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
             .unwrap_or(THEME.surface);
     }
-    if y < HEADER_H {
+    if y < header_h() {
         return header_color(x, y, app);
     }
     match app.view {
@@ -1860,7 +1970,7 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         x,
         y,
         TITLE_X,
-        HEADER_TITLE_Y,
+        header_title_y(),
         HEADER_TITLE_SCALE,
         b"Files",
         THEME.on_surface,
@@ -1874,14 +1984,15 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // a refusal.
     let path = &app.current_path[..app.current_path_len];
     let mut path_buf = [0u8; MAX_PATH_LEN];
-    let path_len = font::ellipsize(path, HEADER_READOUT_SCALE, HEADER_READOUT_MAX_W, &mut path_buf);
-    let path_w = font::measure(&path_buf[..path_len], HEADER_READOUT_SCALE);
+    let path_len =
+        ellipsize_run(path, HEADER_READOUT_SCALE, HEADER_READOUT_MAX_W, &mut path_buf);
+    let path_w = run_w(&path_buf[..path_len], HEADER_READOUT_SCALE);
     if path_w <= HEADER_READOUT_MAX_W {
         if let Some(color) = test_text(
             x,
             y,
             READOUT_X1 - path_w,
-            HEADER_READOUT_LINE1_Y,
+            header_readout_line1_y(),
             HEADER_READOUT_SCALE,
             &path_buf[..path_len],
             THEME.on_surface_variant,
@@ -1892,19 +2003,19 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     let mut label_buf = [0u8; 40];
-    let label_len = font::ellipsize(
+    let label_len = ellipsize_run(
         &app.probe_label[..app.probe_label_len],
         HEADER_READOUT_SCALE,
         HEADER_READOUT_MAX_W,
         &mut label_buf,
     );
-    let label_w = font::measure(&label_buf[..label_len], HEADER_READOUT_SCALE);
+    let label_w = run_w(&label_buf[..label_len], HEADER_READOUT_SCALE);
     if label_w <= HEADER_READOUT_MAX_W {
         if let Some(color) = test_text(
             x,
             y,
             READOUT_X1 - label_w,
-            HEADER_READOUT_LINE2_Y,
+            header_readout_line2_y(),
             HEADER_READOUT_SCALE,
             &label_buf[..label_len],
             THEME.warning,
@@ -1921,12 +2032,13 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 /// directory entry points.
 fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // 1. The storage card.
-    if HOME_STORAGE_CARD.contains(x, y) {
+    let card = home_storage_card();
+    if card.contains(x, y) {
         let style = components::card_style(&THEME, components::Elevation::Resting);
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            HOME_STORAGE_CARD,
+            card,
             style.radius,
             style.fill,
             style.border,
@@ -1938,8 +2050,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             60,
-            HOME_STORAGE_CARD.y + 20,
-            2,
+            home_card_title_y(),
+            HOME_CARD_TITLE_SCALE,
             b"Storage",
             THEME.on_surface,
             style.fill,
@@ -1950,8 +2062,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             60,
-            HOME_STORAGE_CARD.y + 76,
-            1,
+            home_card_line1_y(),
+            HOME_CARD_LINE_SCALE,
             &app.storage_line[..app.storage_line_len],
             THEME.on_surface_variant,
             style.fill,
@@ -1962,8 +2074,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             60,
-            HOME_STORAGE_CARD.y + 104,
-            1,
+            home_card_line2_y(),
+            HOME_CARD_LINE_SCALE,
             app.storage_status(),
             THEME.warning,
             style.fill,
@@ -1978,8 +2090,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         x,
         y,
         36,
-        HOME_RECENTS_TITLE_Y,
-        2,
+        home_recents_title_y(),
+        HOME_CARD_TITLE_SCALE,
         b"Recently modified",
         THEME.on_surface,
         THEME.surface,
@@ -1990,8 +2102,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         x,
         y,
         36,
-        HOME_RECENTS_CAPTION_Y,
-        1,
+        home_recents_caption_y(),
+        HOME_CARD_LINE_SCALE,
         b"Newest first, from the platform's document index",
         THEME.on_surface_variant,
         THEME.surface,
@@ -2012,7 +2124,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             HOME_ROW_X,
-            HOME_RECENTS_Y0 + 8,
+            home_recents_y0() + 8,
             LABEL_RUNG,
             line,
             ink,
@@ -2021,13 +2133,14 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return color;
         }
     } else {
+        let recent_row_h = home_recent_row_h();
         let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
         for index in 0..visible {
-            let top = HOME_RECENTS_Y0 + index * HOME_RECENT_ROW_H;
-            if y < top || y >= top + HOME_RECENT_ROW_H || x < HOME_ROW_X || x >= PANEL_CONTENT_X1 {
+            let top = home_recents_y0() + index * recent_row_h;
+            if y < top || y >= top + recent_row_h || x < HOME_ROW_X || x >= PANEL_CONTENT_X1 {
                 continue;
             }
-            if y == top + HOME_RECENT_ROW_H - 1 {
+            if y == top + recent_row_h - 1 {
                 return ROW.divider;
             }
             let name = &app.recents[index].name[..app.recents[index].name_len];
@@ -2035,7 +2148,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(ink) = glyph_ink(
                 mime,
                 x as isize - 47,
-                y as isize - (top as isize + ((HOME_RECENT_ROW_H - 25) / 2) as isize),
+                y as isize - (top as isize + ((recent_row_h - 25) / 2) as isize),
                 THEME.on_surface,
             ) {
                 return ink;
@@ -2044,7 +2157,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             // matches the browse rows so a long name cannot reach the border.
             let max_w = 684 - 100 - 24;
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, HOME_RECENT_NAME_SCALE, max_w, &mut name_buf);
+            let name_len = ellipsize_run(name, HOME_RECENT_NAME_SCALE, max_w, &mut name_buf);
             if name_len > 0 {
                 if let Some(color) = test_text(
                     x,
@@ -2063,8 +2176,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 100,
-                top + HOME_RECENT_TIME_DY,
-                1,
+                top + home_recent_time_dy(),
+                HOME_CARD_LINE_SCALE,
                 &app.recent_time[index][..app.recent_time_len[index]],
                 THEME.on_surface_variant,
                 THEME.surface,
@@ -2080,8 +2193,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         x,
         y,
         36,
-        HOME_CATEGORY_TITLE_Y,
-        2,
+        home_category_title_y(),
+        HOME_CARD_TITLE_SCALE,
         b"Browse directories",
         THEME.on_surface,
         THEME.surface,
@@ -2089,7 +2202,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         return color;
     }
 
-    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y)
+    if (category_y0()..category_y1()).contains(&y)
         && (HOME_ROW_X..CATEGORY_ROW_X1).contains(&x)
     {
         let Some((index, row_top, row_h)) = category_row_at(y) else {
@@ -2124,9 +2237,9 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return ink;
         }
         let label_y = if index == 0 {
-            row_top + 22
+            row_top + CATEGORY_FIRST_LABEL_DY
         } else {
-            row_top + 11
+            row_top + CATEGORY_OTHER_LABEL_DY
         };
         // The row's own label lane: the row's right edge, less the column the
         // label stands in and the air it keeps there. The four directories are
@@ -2166,7 +2279,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 CATEGORY_LABEL_X,
-                row_top + 72,
+                row_top + category_caption_dy(),
                 CATEGORY_CAPTION_SCALE,
                 status,
                 THEME.on_surface_variant,
@@ -2179,7 +2292,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 4. The browse-everything control.
-    if HOME_BROWSE_BTN.contains(x, y) {
+    let browse_btn = home_browse_btn();
+    if browse_btn.contains(x, y) {
         // WHY the outline: `border` (#E5E5E5) was 1.08:1 on this pill's own
         // #EFEEE9 fill and 1.21:1 on the #FAFAFA page, and the fill is only
         // 1.11:1 off the page, so the app's one entry-to-everything control was
@@ -2188,7 +2302,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if let Some(base) = draw_pill(
             x,
             y,
-            HOME_BROWSE_BTN,
+            browse_btn,
             THEME.surface_container_high,
             Some(CONTROL_OUTLINE),
         ) {
@@ -2196,12 +2310,12 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let shown = fitted_run(
                 b"Browse all files",
                 LABEL_RUNG,
-                control_label_lane(HOME_BROWSE_BTN.w),
+                control_label_lane(browse_btn.w),
                 &mut label_buf,
             );
-            let lx = centered_x(shown, LABEL_RUNG, HOME_BROWSE_BTN.x, HOME_BROWSE_BTN.w);
-            let ly = HOME_BROWSE_BTN.y
-                + HOME_BROWSE_BTN.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+            let lx = centered_x(shown, LABEL_RUNG, browse_btn.x, browse_btn.w);
+            let ly = browse_btn.y
+                + browse_btn.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
             if let Some(color) = test_text(
                 x,
                 y,
@@ -2220,12 +2334,13 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 5. The honest note.
+    let note_y = home_note_y();
     if let Some(color) = test_text(
         x,
         y,
         36,
-        HOME_NOTE_Y,
-        1,
+        note_y,
+        HOME_CARD_LINE_SCALE,
         b"Recents come from the platform's document index.",
         THEME.on_surface_variant,
         THEME.surface,
@@ -2236,8 +2351,8 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         x,
         y,
         36,
-        HOME_NOTE_Y + 24,
-        1,
+        note_y + grown(24, HOME_CARD_LINE_SCALE, draw_level()),
+        HOME_CARD_LINE_SCALE,
         b"Files the index has not walked are not listed here.",
         THEME.on_surface_variant,
         THEME.surface,
@@ -2256,9 +2371,10 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 /// The browse screen.
 fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // 1. The search field and its clear action.
-    if (SEARCH_FIELD.y..SEARCH_FIELD.y + SEARCH_FIELD.h).contains(&y)
-        && x >= SEARCH_FIELD.x
-        && x < SEARCH_FIELD.x + SEARCH_FIELD.w
+    let field = search_field();
+    if (field.y..field.y + field.h).contains(&y)
+        && x >= field.x
+        && x < field.x + field.w
     {
         let field_fill = THEME.surface_container_high;
         // WHY the outline: `border` (#E5E5E5) is 1.08:1 against this field's own
@@ -2270,7 +2386,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            SEARCH_FIELD,
+            field,
             THEME.radii.control,
             field_fill,
             Some(CONTROL_OUTLINE),
@@ -2278,9 +2394,10 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         ) else {
             return THEME.surface;
         };
-        if !app.query.is_empty() && SEARCH_CLEAR.contains(x, y) {
-            let cx = SEARCH_CLEAR.x + SEARCH_CLEAR.w / 2;
-            let cy = SEARCH_CLEAR.y + SEARCH_CLEAR.h / 2;
+        let clear = search_clear();
+        if !app.query.is_empty() && clear.contains(x, y) {
+            let cx = clear.x + clear.w / 2;
+            let cy = clear.y + clear.h / 2;
             let dx = x as i32 - cx as i32;
             let dy = y as i32 - cy as i32;
             if dx.abs() <= 6 && dy.abs() <= 6 && (dx.abs() - dy.abs()).abs() <= 2 {
@@ -2288,8 +2405,8 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             }
             return base;
         }
-        let mx = SEARCH_FIELD.x + 28;
-        let my = SEARCH_FIELD.y + 26;
+        let mx = field.x + 28;
+        let my = field.y + 26;
         let dx = x as i32 - mx as i32;
         let dy = y as i32 - my as i32;
         let ring = dx * dx + dy * dy;
@@ -2316,7 +2433,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             SEARCH_TEXT_X,
-            SEARCH_FIELD.y + 16,
+            field.y + grown(16, SEARCH_TEXT_SCALE, draw_level()),
             SEARCH_TEXT_SCALE,
             shown,
             ink,
@@ -2328,9 +2445,10 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 2. The search scope caption and its two pills.
-    if (SCOPE_Y..SCOPE_Y + font::line_height(SCOPE_CAPTION_SCALE)).contains(&y)
+    let scope_this = scope_this_pill();
+    if (scope_y()..scope_row_y1()).contains(&y)
         && x >= SCOPE_TEXT_X
-        && x < SCOPE_THIS_PILL.x
+        && x < scope_this.x
     {
         let mut buf = [0u8; LINE_LEN];
         let shown = fitted_run(
@@ -2344,7 +2462,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 SCOPE_TEXT_X,
-                SCOPE_Y,
+                scope_y(),
                 SCOPE_CAPTION_SCALE,
                 shown,
                 THEME.on_surface_variant,
@@ -2358,7 +2476,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if let Some(color) = pill_color(
         x,
         y,
-        SCOPE_THIS_PILL,
+        scope_this,
         SearchScope::ThisFolder.label(),
         app.search_scope == SearchScope::ThisFolder,
     ) {
@@ -2367,7 +2485,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if let Some(color) = pill_color(
         x,
         y,
-        SCOPE_ALL_PILL,
+        scope_all_pill(),
         SearchScope::AllStorage.label(),
         app.search_scope == SearchScope::AllStorage,
     ) {
@@ -2379,7 +2497,8 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // answered wherever its ink reaches -- and the row is laid out by
     // `crumb_step`, the same function the tap handler walks, so a crumb is only
     // inked where it can be tapped and a run never straddles the strip's edge.
-    if (BREADCRUMB_Y..BREADCRUMB_Y + BREADCRUMB_ROWS).contains(&y)
+    let crumb_top = crumb_y();
+    if (crumb_top..crumb_top + crumb_rows()).contains(&y)
         && (CRUMB_ROW_X0..CRUMB_ROW_X1).contains(&x)
     {
         let mut cursor = CRUMB_ROW_X0;
@@ -2401,7 +2520,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 step.x,
-                BREADCRUMB_Y,
+                crumb_top,
                 BREADCRUMB_SCALE,
                 run,
                 ink,
@@ -2414,7 +2533,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     x,
                     y,
                     sep_x,
-                    BREADCRUMB_Y,
+                    crumb_top,
                     BREADCRUMB_SCALE,
                     CRUMB_SEP,
                     THEME.on_surface_variant,
@@ -2432,7 +2551,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if let Some(color) = pill_color(
         x,
         y,
-        SORT_PILL,
+        toolbar_pill(0),
         &app.sort_label[..app.sort_label_len],
         false,
     ) {
@@ -2441,7 +2560,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if let Some(color) = pill_color(
         x,
         y,
-        LIST_PILL,
+        toolbar_pill(1),
         LayoutMode::List.label(),
         app.layout == LayoutMode::List,
     ) {
@@ -2450,7 +2569,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     if let Some(color) = pill_color(
         x,
         y,
-        GRID_PILL,
+        toolbar_pill(2),
         LayoutMode::Grid.label(),
         app.layout == LayoutMode::Grid,
     ) {
@@ -2472,15 +2591,16 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 7. The entries card.
-    if (ENTRIES_CARD.y..ENTRIES_CARD.y + ENTRIES_CARD.h).contains(&y) {
-        if x < ENTRIES_CARD.x || x >= ENTRIES_CARD.x + ENTRIES_CARD.w {
+    let card = entries_card();
+    if (card.y..card.y + card.h).contains(&y) {
+        if x < card.x || x >= card.x + card.w {
             return THEME.surface;
         }
         let style = components::card_style(&THEME, components::Elevation::Resting);
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            ENTRIES_CARD,
+            card,
             style.radius,
             style.fill,
             style.border,
@@ -2493,7 +2613,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if let Some(ink) = glyph_ink(
                 FileMime::Directory,
                 x as isize - 343,
-                y as isize - (ENTRIES_CARD.y as isize + 97),
+                y as isize - (empty_headline_y() as isize - 53),
                 THEME.primary,
             ) {
                 return ink;
@@ -2538,12 +2658,12 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let mut headline_buf = [0u8; LINE_LEN];
             let headline =
                 fitted_run(headline, EMPTY_HEADLINE_SCALE, EMPTY_CARD_LANE, &mut headline_buf);
-            let hx = centered_x(headline, EMPTY_HEADLINE_SCALE, ENTRIES_CARD.x, ENTRIES_CARD.w);
+            let hx = centered_x(headline, EMPTY_HEADLINE_SCALE, card.x, card.w);
             if let Some(color) = test_text(
                 x,
                 y,
                 hx,
-                ENTRIES_CARD.y + 150,
+                empty_headline_y(),
                 EMPTY_HEADLINE_SCALE,
                 headline,
                 headline_ink,
@@ -2554,12 +2674,12 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let mut subline_buf = [0u8; LINE_LEN];
             let subline =
                 fitted_run(subline, EMPTY_SUBLINE_SCALE, EMPTY_CARD_LANE, &mut subline_buf);
-            let sx = centered_x(subline, EMPTY_SUBLINE_SCALE, ENTRIES_CARD.x, ENTRIES_CARD.w);
+            let sx = centered_x(subline, EMPTY_SUBLINE_SCALE, card.x, card.w);
             if let Some(color) = test_text(
                 x,
                 y,
                 sx,
-                ENTRIES_CARD.y + 214,
+                empty_subline_y(),
                 EMPTY_SUBLINE_SCALE,
                 subline,
                 THEME.on_surface_variant,
@@ -2572,7 +2692,8 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 8. The status line.
-    if (STATUS_Y..STATUS_Y + font::line_height(STATUS_SCALE)).contains(&y)
+    let status_top = status_y();
+    if (status_top..status_top + status_rows()).contains(&y)
         && (STATUS_TEXT_X..CRUMB_ROW_X1).contains(&x)
     {
         if app.status_len > 0 {
@@ -2587,7 +2708,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 x,
                 y,
                 STATUS_TEXT_X,
-                STATUS_Y,
+                status_top,
                 STATUS_SCALE,
                 shown,
                 THEME.on_surface_variant,
@@ -2641,7 +2762,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 let shown =
                     fitted_run(label, LABEL_RUNG, control_label_lane(ACTION_SLOT_W), &mut label_buf);
                 let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-                let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+                let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
                 if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
                     return color;
                 }
@@ -2703,7 +2824,7 @@ fn pill_color(
     let mut label_buf = [0u8; LINE_LEN];
     let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
     let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-    let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+    let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
     if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
         return Some(color);
     }
@@ -2732,14 +2853,15 @@ fn action_slot_state(app: &FileManagerApp, slot: usize) -> (&'static [u8], bool,
 
 /// The details card, drawn over the entries card.
 fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
-    if !DETAILS_CARD.contains(x, y) {
+    let dcard = details_card();
+    if !dcard.contains(x, y) {
         return None;
     }
     let style = components::card_style(&THEME, components::Elevation::Raised);
     let Some(base) = draw_rounded_rect(
         x,
         y,
-        DETAILS_CARD,
+        dcard,
         style.radius,
         style.fill,
         style.border,
@@ -2750,8 +2872,8 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
     if let Some(color) = test_text(
         x,
         y,
-        DETAILS_CARD.x + DETAILS_INSET,
-        DETAILS_TITLE_Y,
+        dcard.x + DETAILS_INSET,
+        details_title_y(),
         DETAILS_TITLE_SCALE,
         app.details.title_str().as_bytes(),
         THEME.on_surface,
@@ -2764,8 +2886,8 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if let Some(color) = test_text(
             x,
             y,
-            DETAILS_CARD.x + DETAILS_INSET,
-            DETAILS_LINE_Y0 + index * DETAILS_LINE_H,
+            dcard.x + DETAILS_INSET,
+            details_line_y(index),
             DETAILS_LINE_SCALE,
             line,
             if index == 3 && !app.details.has_handler {
@@ -2779,8 +2901,8 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         }
     }
     for (rect, label, primary) in [
-        (DETAILS_OPEN, b"Open".as_slice(), true),
-        (DETAILS_CLOSE, b"Close".as_slice(), false),
+        (details_open(), b"Open".as_slice(), true),
+        (details_close(), b"Close".as_slice(), false),
     ] {
         if primary && !app.details.is_dir && !app.details.has_handler {
             // WHY the button is absent rather than greyed out: a button that
@@ -2817,7 +2939,7 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
             let mut label_buf = [0u8; LINE_LEN];
             let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
             let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+            let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
             if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
                 return Some(color);
             }
@@ -2836,20 +2958,21 @@ fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
 
 /// The confirmation sheet, drawn over the entries card.
 fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
-    if !SHEET.contains(x, y) {
+    let sheet = sheet();
+    if !sheet.contains(x, y) {
         return None;
     }
     let style = components::card_style(&THEME, components::Elevation::Raised);
-    let Some(base) = draw_rounded_rect(x, y, SHEET, style.radius, style.fill, style.border, 1)
+    let Some(base) = draw_rounded_rect(x, y, sheet, style.radius, style.fill, style.border, 1)
     else {
         return Some(THEME.surface);
     };
     if let Some(color) = test_text(
         x,
         y,
-        SHEET.x + 20,
-        SHEET.y + 20,
-        2,
+        sheet.x + 20,
+        sheet_title_y(),
+        SHEET_TITLE_SCALE,
         &app.sheet_title[..app.sheet_title_len],
         THEME.on_surface,
         style.fill,
@@ -2860,9 +2983,9 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         if let Some(color) = test_text(
             x,
             y,
-            SHEET.x + 20,
-            SHEET.y + 76 + index * 24,
-            1,
+            sheet.x + 20,
+            sheet_name_line_y(index),
+            SHEET_NAME_LIST_SCALE,
             &app.sheet_names[index][..app.sheet_name_lens[index]],
             THEME.on_surface_variant,
             style.fill,
@@ -2908,7 +3031,7 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
                 &mut label_buf,
             );
             let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+            let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
             if let Some(color) = test_text(
                 x,
                 y,
@@ -2925,7 +3048,7 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         }
     }
     if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
-        let field = Rect::new(SHEET.x + 20, SHEET_NAME_Y, SHEET.w - 40, SHEET_NAME_H);
+        let field = Rect::new(SHEET.x + 20, sheet_name_y(), SHEET.w - 40, sheet_name_h());
         if field.contains(x, y) {
             // WHY the plate moved: its old fill was `surface_container_high`,
             // which is what the `Raised` sheet is painted with -- #EFEEE9 on
@@ -2948,8 +3071,8 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
                 x,
                 y,
                 field.x + 12,
-                field.y + 12,
-                1,
+                field.y + grown(12, SEARCH_TEXT_SCALE, draw_level()),
+                SEARCH_TEXT_SCALE,
                 app.rename_field.as_slice(),
                 THEME.on_surface,
                 fill,
@@ -2991,7 +3114,7 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
         let mut label_buf = [0u8; LINE_LEN];
         let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
         let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-        let ly = rect.y + rect.h.saturating_sub(font::line_height(LABEL_RUNG)) / 2;
+        let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
         if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
             return Some(color);
         }
@@ -3005,11 +3128,15 @@ fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
 // -----------------------------------------------------------------------------
 
 const ROW_BUFFER_W: usize = 648;
-const ROW_BUFFER_H: usize = 56;
+/// WHY the largest selectable rung rather than the one drawn with: a row is painted
+/// into this buffer and blitted out of it, so a buffer cut to the rung the layout
+/// happened to answer at would clip the taller row the person's Text size asks for
+/// -- and the clip is invisible to the pixel function, which never sees the row.
+const ROW_BUFFER_H: usize = entry_row_h_max();
 static mut ROW_BUFFER: [u32; ROW_BUFFER_W * ROW_BUFFER_H] = [0; ROW_BUFFER_W * ROW_BUFFER_H];
 
 const CELL_BUFFER_W: usize = GRID_CELL_W;
-const CELL_BUFFER_H: usize = GRID_CELL_H;
+const CELL_BUFFER_H: usize = grid_cell_h_max();
 static mut CELL_BUFFER: [u32; CELL_BUFFER_W * CELL_BUFFER_H] =
     [0; CELL_BUFFER_W * CELL_BUFFER_H];
 
@@ -3022,11 +3149,9 @@ fn render_widgets(surface: u32, app: &FileManagerApp) {
         LayoutMode::List => render_rows(surface, app),
         LayoutMode::Grid => render_grid(surface, app),
     }
-    if let Some((thumb_y, thumb_h)) =
-        app.scroll
-            .thumb_rect(ENTRIES_CARD.y + 4, ENTRIES_CARD.h - 8, 24)
-    {
-        let tx = ENTRIES_CARD.x + ENTRIES_CARD.w - 10;
+    let card = entries_card();
+    if let Some((thumb_y, thumb_h)) = app.scroll.thumb_rect(card.y + 4, card.h - 8, 24) {
+        let tx = card.x + card.w - 10;
         let thumb = [THEME.primary; 4];
         for y in thumb_y..thumb_y + thumb_h {
             let _ = std::surface_write(surface, y * W + tx, &thumb);
@@ -3040,12 +3165,20 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         return;
     }
     let offset = app.scroll.offset;
+    let card = entries_card();
+    let lvl = draw_level();
     let is_video_ctx = app.current_path_str().starts_with("/storage/videos");
     for index in 0..count {
-        if !row_is_visible(ENTRIES_CARD, index, offset) {
+        if !row_is_visible(card, index, offset) {
             continue;
         }
-        let rect = entry_row_rect(ENTRIES_CARD, index, offset);
+        let rect = entry_row_rect(card, index, offset);
+        // WHY the buffer is walked to the row's own height and not to the buffer's:
+        // the buffer is sized at the largest rung a person can choose, while the row
+        // painted into it is the rung this frame draws at. Filling the whole buffer
+        // would paint the divider and the selection bar past the row's foot, into the
+        // rows the next entry owns.
+        let row_h = rect.h;
         let selected = app.selected_entry == Some(index) || app.selection.is_marked(index);
         let fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
         let name = app.card_item_name(index);
@@ -3060,10 +3193,10 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         };
         let ink = if selected { THEME.primary } else { THEME.on_surface };
         let buffer: &mut [u32] = unsafe { &mut *(&raw mut ROW_BUFFER) };
-        for ry in 0..ROW_BUFFER_H {
+        for ry in 0..row_h {
             for rx in 0..ROW_BUFFER_W {
                 let mut color = fill;
-                if ry == ROW_BUFFER_H - 1 {
+                if ry == row_h - 1 {
                     color = ROW.divider;
                 }
                 if selected && rx < 6 {
@@ -3075,7 +3208,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         paint_glyph(
             buffer,
             ROW_BUFFER_W,
-            ROW_BUFFER_H,
+            row_h,
             ENTRY_GLYPH_X,
             16,
             mime,
@@ -3090,14 +3223,14 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             // in and the air before its right edge -- at the caption rung, so
             // the trim the row applies is the trim the gate measures.
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf);
+            let name_len = ellipsize_run(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf);
             if name_len > 0 {
                 draw_buffer_text(
                     buffer,
                     ROW_BUFFER_W,
-                    ROW_BUFFER_H,
+                    row_h,
                     ENTRY_TEXT_X,
-                    6,
+                    grown(6, ENTRY_SUB_SCALE, lvl),
                     ENTRY_SUB_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
@@ -3106,15 +3239,19 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             let mut path = [0u8; MAX_PATH_LEN];
             if let Some(path_len) = app.card_item_path(index, &mut path) {
                 let mut path_buf = [0u8; MAX_PATH_LEN];
-                let shown =
-                    font::ellipsize(&path[..path_len], ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut path_buf);
+                let shown = ellipsize_run(
+                    &path[..path_len],
+                    ENTRY_SUB_SCALE,
+                    ENTRY_NAME_LANE,
+                    &mut path_buf,
+                );
                 if shown > 0 {
                     draw_buffer_text(
                         buffer,
                         ROW_BUFFER_W,
-                        ROW_BUFFER_H,
+                        row_h,
                         ENTRY_TEXT_X,
-                        28,
+                        grown(28, ENTRY_SUB_SCALE, lvl),
                         ENTRY_SUB_SCALE,
                         &path_buf[..shown],
                         THEME.on_surface_variant,
@@ -3126,17 +3263,17 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             // the two runs never claim the same column of the row, and the lane
             // they split is still the row's own.
             let trailing = app.card_item_trailing(index);
-            let trailing_w = font::measure(trailing, ENTRY_NAME_SCALE);
+            let trailing_w = run_w(trailing, ENTRY_NAME_SCALE);
             let max_w = ENTRY_NAME_LANE.saturating_sub(trailing_w);
             let mut name_buf = [0u8; 48];
-            let name_len = font::ellipsize(name, ENTRY_NAME_SCALE, max_w, &mut name_buf);
+            let name_len = ellipsize_run(name, ENTRY_NAME_SCALE, max_w, &mut name_buf);
             if name_len > 0 {
                 draw_buffer_text(
                     buffer,
                     ROW_BUFFER_W,
-                    ROW_BUFFER_H,
+                    row_h,
                     ENTRY_TEXT_X,
-                    (ROW_BUFFER_H - font::line_height(ENTRY_NAME_SCALE)) / 2,
+                    (row_h.saturating_sub(run_line(ENTRY_NAME_SCALE))) / 2,
                     ENTRY_NAME_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
@@ -3146,9 +3283,9 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
                 draw_buffer_text(
                     buffer,
                     ROW_BUFFER_W,
-                    ROW_BUFFER_H,
+                    row_h,
                     ROW_BUFFER_W - ENTRY_RIGHT_AIR - trailing_w,
-                    (ROW_BUFFER_H - font::line_height(ENTRY_NAME_SCALE)) / 2,
+                    (row_h.saturating_sub(run_line(ENTRY_NAME_SCALE))) / 2,
                     ENTRY_NAME_SCALE,
                     trailing,
                     THEME.on_surface_variant,
@@ -3157,8 +3294,8 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         }
 
         // Only the part of the row that is on the card is written.
-        let top = rect.y.max(ENTRIES_CARD.y);
-        let bottom = (rect.y + ROW_BUFFER_H).min(ENTRIES_CARD.y + ENTRIES_CARD.h);
+        let top = rect.y.max(card.y);
+        let bottom = (rect.y + row_h).min(card.y + card.h);
         if bottom <= top {
             continue;
         }
@@ -3166,7 +3303,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
         let rows = bottom - top;
         write_pixels_rows(
             surface,
-            top * W + ENTRIES_CARD.x,
+            top * W + card.x,
             &buffer[from * ROW_BUFFER_W..(from + rows) * ROW_BUFFER_W],
             ROW_BUFFER_W,
         );
@@ -3179,14 +3316,18 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
         return;
     }
     let offset = app.scroll.offset;
+    let card = entries_card();
+    let lvl = draw_level();
     let is_video_ctx = app.current_path_str().starts_with("/storage/videos");
     for index in 0..count {
-        let rect = grid_cell_rect(ENTRIES_CARD, index, offset);
-        if rect.y >= ENTRIES_CARD.y + ENTRIES_CARD.h
-            || rect.y + rect.h <= ENTRIES_CARD.y
-        {
+        let rect = grid_cell_rect(card, index, offset);
+        if rect.y >= card.y + card.h || rect.y + rect.h <= card.y {
             continue;
         }
+        // WHY the buffer is walked to the cell's own height: as in `render_rows`,
+        // the buffer is sized at the largest selectable rung and the cell painted
+        // into it at the rung this frame draws at.
+        let cell_h = rect.h;
         let selected = app.selected_entry == Some(index) || app.selection.is_marked(index);
         let fill = if selected {
             THEME.surface_container_high
@@ -3205,33 +3346,33 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
         };
         let ink = if selected { THEME.primary } else { THEME.on_surface };
         let buffer: &mut [u32] = unsafe { &mut *(&raw mut CELL_BUFFER) };
-        for py in 0..CELL_BUFFER_H {
+        for py in 0..cell_h {
             for px in 0..CELL_BUFFER_W {
                 let mut color = fill;
                 if selected && px < 4 {
                     color = THEME.primary;
                 }
-                if py == CELL_BUFFER_H - 1 {
+                if py == cell_h - 1 {
                     color = ROW.divider;
                 }
                 buffer[py * CELL_BUFFER_W + px] = color;
             }
         }
-        paint_glyph(buffer, CELL_BUFFER_W, CELL_BUFFER_H, 83, 30, mime, ink);
+        paint_glyph(buffer, CELL_BUFFER_W, cell_h, 83, 30, mime, ink);
 
         // The cell's own lane: `GRID_CELL_W` less the inset it stands on each
         // side. The name and the fact under it both answer that lane, so a long
         // name is trimmed with an ellipsis the user can see rather than cut off
         // at the cell's edge, where the next cell's ink begins.
         let mut name_buf = [0u8; 48];
-        let name_len = font::ellipsize(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf);
+        let name_len = ellipsize_run(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf);
         if name_len > 0 {
             draw_buffer_text(
                 buffer,
                 CELL_BUFFER_W,
-                CELL_BUFFER_H,
+                cell_h,
                 GRID_TEXT_INSET,
-                66,
+                grown(66, GRID_NAME_SCALE, lvl),
                 GRID_NAME_SCALE,
                 &name_buf[..name_len],
                 ink,
@@ -3241,15 +3382,19 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
             let mut path = [0u8; MAX_PATH_LEN];
             if let Some(path_len) = app.card_item_path(index, &mut path) {
                 let mut path_buf = [0u8; MAX_PATH_LEN];
-                let shown =
-                    font::ellipsize(&path[..path_len], GRID_NAME_SCALE, GRID_NAME_LANE, &mut path_buf);
+                let shown = ellipsize_run(
+                    &path[..path_len],
+                    GRID_NAME_SCALE,
+                    GRID_NAME_LANE,
+                    &mut path_buf,
+                );
                 if shown > 0 {
                     draw_buffer_text(
                         buffer,
                         CELL_BUFFER_W,
-                        CELL_BUFFER_H,
+                        cell_h,
                         GRID_TEXT_INSET,
-                        96,
+                        grown(96, GRID_NAME_SCALE, lvl),
                         GRID_NAME_SCALE,
                         &path_buf[..shown],
                         THEME.on_surface_variant,
@@ -3259,14 +3404,15 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
         } else {
             let trailing = app.card_item_trailing(index);
             let mut trailing_buf = [0u8; 48];
-            let shown = font::ellipsize(trailing, GRID_NAME_SCALE, GRID_NAME_LANE, &mut trailing_buf);
+            let shown =
+                ellipsize_run(trailing, GRID_NAME_SCALE, GRID_NAME_LANE, &mut trailing_buf);
             if shown > 0 {
                 draw_buffer_text(
                     buffer,
                     CELL_BUFFER_W,
-                    CELL_BUFFER_H,
+                    cell_h,
                     GRID_TEXT_INSET,
-                    96,
+                    grown(96, GRID_NAME_SCALE, lvl),
                     GRID_NAME_SCALE,
                     &trailing_buf[..shown],
                     THEME.on_surface_variant,
@@ -3274,8 +3420,8 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
             }
         }
 
-        let top = rect.y.max(ENTRIES_CARD.y);
-        let bottom = (rect.y + GRID_CELL_H).min(ENTRIES_CARD.y + ENTRIES_CARD.h);
+        let top = rect.y.max(card.y);
+        let bottom = (rect.y + cell_h).min(card.y + card.h);
         if bottom <= top {
             continue;
         }
@@ -3318,6 +3464,18 @@ fn paint_glyph(
 }
 
 /// Draws a text run into a widget buffer, blending toward the pixels under it.
+///
+/// WHY the band and the width come from the rung: the plate the row or cell is
+/// filled to is `plate_at`'s, i.e. the platform's `line_height` *at the level*,
+/// and a blit loop that walked the ladder's box inside a rung-sized plate
+/// would leave the bottom of every enlarged row unpainted -- pixels the hit test
+/// still answers. At the level the layout was authored at these are the ladder's
+/// own two numbers, so no row changes.
+///
+/// WHY the ladder's anti-aliased face is kept at that level: a widget buffer is
+/// blitted whole, and swapping its face for the outline one would repaint rows
+/// the platform's truth contract already samples. Above it the bitmap face is
+/// asked for the rung's cap height, which is the same face grown.
 fn draw_buffer_text(
     buffer: &mut [u32],
     width: usize,
@@ -3328,16 +3486,24 @@ fn draw_buffer_text(
     text: &[u8],
     color: u32,
 ) {
-    let line_h = font::line_height(scale);
-    let text_w = font::measure(text, scale);
+    if scale == 0 || text.is_empty() {
+        return;
+    }
+    let lvl = draw_level();
+    let line_h = run_line(scale);
+    let text_w = run_w(text, scale);
     let x1 = (x0 + text_w).min(width);
     let y1 = (y0 + line_h).min(height);
+    let cap = cap_at(scale, lvl);
     for py in y0..y1 {
         for px in x0..x1 {
             let bg = buffer[py * width + px];
-            if let Some(inked) =
+            let inked = if lvl == PLATFORM_LEVEL {
                 font::test_text_aa(px, py, x0, y0, scale, text, color, bg, false)
-            {
+            } else {
+                std::design::monochrome::text_px(px, py, x0, y0, cap, text, color, bg, false)
+            };
+            if let Some(inked) = inked {
                 buffer[py * width + px] = inked;
             }
         }
@@ -3388,8 +3554,8 @@ fn render_file_manager_band(surface: u32, app: &FileManagerApp, y0: usize, y1: u
         offset += count;
     }
     if surface > 0
-        && y0 < ENTRIES_CARD.y + ENTRIES_CARD.h
-        && y1 > ENTRIES_CARD.y
+        && y0 < entries_card().y + entries_card().h
+        && y1 > entries_card().y
     {
         render_widgets(surface, app);
     }
@@ -3650,7 +3816,12 @@ fn perform_action(app: &mut FileManagerApp, surface: u32) {
         app.status_len = len;
         app.notice_len = 0;
         if surface > 0 {
-            render_file_manager_band(surface, app, STATUS_Y, STATUS_Y + font::line_height(1));
+            // The band the painter treats as the status line, asked at the rung
+            // it inks at: `STATUS_Y` plus a one-em line is the authored strip, and
+            // above the authored rung the row grows past it -- a progress tick
+            // would repaint the top of the line and leave its tail on screen.
+            let status_top = status_y();
+            render_file_manager_band(surface, app, status_top, status_top + status_rows());
             let _ = std::surface_flip();
         }
 
@@ -3765,7 +3936,7 @@ fn crumb_at(app: &FileManagerApp, x: usize) -> Option<usize> {
         let Some(step) = crumb_step(label, cursor, index + 1 == app.crumb_count, &mut buf) else {
             break;
         };
-        let width = font::measure(&buf[..step.len], BREADCRUMB_SCALE);
+        let width = run_w(&buf[..step.len], BREADCRUMB_SCALE);
         if x >= step.x && x < step.x + width {
             return Some(index);
         }
@@ -3848,9 +4019,10 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     // A recent document opens its folder and its details card.
     if app.recents_error == 0 && app.recents_count > 0 {
         let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
+        let row_h = home_recent_row_h();
         for index in 0..visible {
-            let top = HOME_RECENTS_Y0 + index * HOME_RECENT_ROW_H;
-            if y >= top && y < top + HOME_RECENT_ROW_H
+            let top = home_recents_y0() + index * row_h;
+            if y >= top && y < top + row_h
                 && (HOME_ROW_X..PANEL_CONTENT_X1).contains(&x)
             {
                 app.open_recent(index);
@@ -3861,7 +4033,7 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
 
     // The category rows.
-    if (CATEGORY_Y0..CATEGORY_Y1).contains(&y)
+    if (category_y0()..category_y1()).contains(&y)
         && (HOME_ROW_X..PANEL_CONTENT_X1).contains(&x)
     {
         let Some((index, _, _)) = category_row_at(y) else {
@@ -3877,7 +4049,7 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     }
 
     // Browse everything.
-    if HOME_BROWSE_BTN.contains(x, y) {
+    if home_browse_btn().contains(x, y) {
         app.view = ViewMode::Browse;
         app.set_path("/storage");
         app.reset_browse_state();
@@ -3891,11 +4063,12 @@ fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
 
 fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32) -> Tap {
     // The search field and its clear action.
-    if (SEARCH_FIELD.y..SEARCH_FIELD.y + SEARCH_FIELD.h).contains(&y)
-        && x >= SEARCH_FIELD.x
-        && x < SEARCH_FIELD.x + SEARCH_FIELD.w
+    let field = search_field();
+    if (field.y..field.y + field.h).contains(&y)
+        && x >= field.x
+        && x < field.x + field.w
     {
-        if !app.query.is_empty() && SEARCH_CLEAR.contains(x, y) {
+        if !app.query.is_empty() && search_clear().contains(x, y) {
             app.clear_search();
             std::log("[FILE_MANAGER] The search was cleared.").ok();
             return Tap::Redraw(Dirty::All);
@@ -3908,7 +4081,7 @@ fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32)
     }
 
     // The two search scopes.
-    if SCOPE_THIS_PILL.contains(x, y) || SCOPE_ALL_PILL.contains(x, y) {
+    if scope_this_pill().contains(x, y) || scope_all_pill().contains(x, y) {
         app.search_scope = app.search_scope.toggle();
         if app.searching && !app.query.is_empty() {
             app.run_search();
@@ -3920,9 +4093,11 @@ fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32)
     }
 
     // The breadcrumbs. The strip is derived as the gap between the scope row's
-    // foot and the toolbar's top, so it ends on `TOOLBAR_Y` by construction; the
-    // clamp stays because a strip and a toolbar must never answer one row.
-    if y >= BREADCRUMB_HIT_Y0 && y < BREADCRUMB_HIT_Y1.min(TOOLBAR_Y) {
+    // foot and the toolbar's top, so its foot is the toolbar's top by
+    // construction -- a clamp against it here would be arithmetic on one number,
+    // and the gate beside the derivation refuses the day it stops being one.
+    let (crumb_y0, crumb_y1) = crumb_hit();
+    if y >= crumb_y0 && y < crumb_y1 {
         if let Some(index) = crumb_at(app, x) {
             let prefix_len = app.crumbs[index].prefix_len;
             let mut prefix = [0u8; 128];
@@ -3939,17 +4114,17 @@ fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32)
     }
 
     // The sort and layout toolbar.
-    if SORT_PILL.contains(x, y) {
+    if toolbar_pill(0).contains(x, y) {
         app.apply_sort();
         return Tap::Redraw(Dirty::All);
     }
-    if LIST_PILL.contains(x, y) {
+    if toolbar_pill(1).contains(x, y) {
         if app.layout != LayoutMode::List {
             app.toggle_layout();
         }
         return Tap::Redraw(Dirty::All);
     }
-    if GRID_PILL.contains(x, y) {
+    if toolbar_pill(2).contains(x, y) {
         if app.layout != LayoutMode::Grid {
             app.toggle_layout();
         }
@@ -3968,10 +4143,10 @@ fn handle_browse_tap(app: &mut FileManagerApp, x: usize, y: usize, surface: u32)
 
     // The entries card: a row or a cell.
     let count = app.card_item_count();
-    if count > 0 && ENTRIES_CARD.contains(x, y) {
+    if count > 0 && entries_card().contains(x, y) {
         let hit = match app.layout {
-            LayoutMode::List => entry_at_point(ENTRIES_CARD, app.scroll.offset, count, x, y),
-            LayoutMode::Grid => grid_at_point(ENTRIES_CARD, app.scroll.offset, count, x, y),
+            LayoutMode::List => entry_at_point(entries_card(), app.scroll.offset, count, x, y),
+            LayoutMode::Grid => grid_at_point(entries_card(), app.scroll.offset, count, x, y),
         };
         if let Some(index) = hit {
             if app.multi_select {
@@ -4060,7 +4235,7 @@ fn handle_sheet_tap(
     }
     // The name field, for a rename.
     if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
-        let field = Rect::new(SHEET.x + 20, SHEET_NAME_Y, SHEET.w - 40, SHEET_NAME_H);
+        let field = Rect::new(SHEET.x + 20, sheet_name_y(), SHEET.w - 40, sheet_name_h());
         if field.contains(x, y) {
             app.rename_field.focus();
             return Tap::Redraw(Dirty::All);
@@ -4132,7 +4307,7 @@ fn handle_details_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     // when the device named a handler, and the launch asks the platform
     // again before it hands anything over.
     let open_offered = app.details.is_dir || app.details.has_handler;
-    if open_offered && DETAILS_OPEN.contains(x, y) {
+    if open_offered && details_open().contains(x, y) {
         if app.details.is_dir {
             let row = app.selected_entry;
             app.close_details();
@@ -4149,7 +4324,7 @@ fn handle_details_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         }
         return Tap::Redraw(Dirty::All);
     }
-    if DETAILS_CLOSE.contains(x, y) || !DETAILS_CARD.contains(x, y) {
+    if details_close().contains(x, y) || !details_card().contains(x, y) {
         app.close_details();
         return Tap::Redraw(Dirty::All);
     }
@@ -4199,12 +4374,12 @@ fn long_press_hit(app: &FileManagerApp, x: usize, y: usize) -> Option<usize> {
         return None;
     }
     let count = app.card_item_count();
-    if count == 0 || !ENTRIES_CARD.contains(x, y) {
+    if count == 0 || !entries_card().contains(x, y) {
         return None;
     }
     match app.layout {
-        LayoutMode::List => entry_at_point(ENTRIES_CARD, app.scroll.offset, count, x, y),
-        LayoutMode::Grid => grid_at_point(ENTRIES_CARD, app.scroll.offset, count, x, y),
+        LayoutMode::List => entry_at_point(entries_card(), app.scroll.offset, count, x, y),
+        LayoutMode::Grid => grid_at_point(entries_card(), app.scroll.offset, count, x, y),
     }
 }
 
@@ -4215,6 +4390,12 @@ fn long_press_hit(app: &FileManagerApp, x: usize, y: usize) -> Option<usize> {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[FILE_MANAGER (Ring 3)] Sovereign File Manager & VFS Explorer online.").ok();
+
+    // WHY before the app is built and the surface exists: every box in this
+    // screen is derived from the rung the renderer holds, so a rung handed over
+    // after the first frame is painted is a first frame laid out at one hundred
+    // per cent and never re-laid.
+    publish_text_scale();
 
     let mut app = FileManagerApp::new();
 
@@ -4254,6 +4435,18 @@ pub extern "C" fn _start() -> ! {
         // clock read per wake -- never one per pixel, and never inside the
         // rasteriser.
         let clock_moved = refresh_clock(&mut app);
+        // WHY on every wake rather than once at launch: the person changes the
+        // size in Settings while this screen is alive, and a rung read only at
+        // startup is a screen that resizes on the next cold open -- if ever.
+        let rung_moved = publish_text_scale();
+        // WHY before the poll rather than beside the repaint below: a tap in this
+        // same wake would paint the new rung off the frame, and the listing's
+        // scroll extent is solved from the card the *old* rung left behind. The
+        // extent has to move with the rung, or the thumb sizes a card that is no
+        // longer there and an offset past the new bottom no tap can reach back.
+        if rung_moved {
+            app.relayout_for_rung();
+        }
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         let mut repainted_wholly = false;
         if let Ok(triggered) = std::event_poll(interest, 100) {
@@ -4288,7 +4481,7 @@ pub extern "C" fn _start() -> ! {
                         && app.view == ViewMode::Browse
                         && !app.has_pending
                         && !app.has_details
-                        && ENTRIES_CARD.contains(input.x as usize, input.y as usize)
+                        && entries_card().contains(input.x as usize, input.y as usize)
                     {
                         if app.scroll_by(input.dy) {
                             dirty = Dirty::All;
@@ -4362,6 +4555,16 @@ pub extern "C" fn _start() -> ! {
                 render_file_manager_band(surface, &app, 0, STATUS_BAR_HEIGHT);
                 let _ = std::surface_flip();
             }
+        }
+        // The whole screen, not a band: the rung moves the header, the card's
+        // rows, the toolbar's pills and the status strip, so a band repaint would
+        // leave every region the previous frame sized at the size the person just
+        // left behind. WHY outside the poll guard above: `publish_text_scale` has
+        // already moved the rung the library answers from, so a poll that errored
+        // would leave one frame painted across two rungs.
+        if rung_moved && !repainted_wholly && surface > 0 {
+            render_file_manager_ui(surface, &app);
+            let _ = std::surface_flip();
         }
         std::yield_now();
     }

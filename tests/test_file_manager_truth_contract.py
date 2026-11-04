@@ -211,8 +211,36 @@ def test_the_text_is_drawn_with_the_outline_typeface():
     outline face rasterised at the screen's own resolution.
     """
     source = fm_main()
+    lib = fm_lib()
     assert "outline_text::place_run" in source
-    assert "outline_text::drawn_advance" in source
+    # The advance a run is laid out with now lives in the library's rung-aware
+    # `drawn_w`, because the width has to be measured at the rung the painter
+    # inks and the painter's rung is one number the binary no longer hard-codes.
+    # Both halves are pinned: a `drawn_w` the painter stopped calling, or a
+    # `drawn_w` that stopped answering from the outline face, is the soft
+    # magnified glyph this gate was written for.
+    assert "drawn_w(" in source, "the painter stopped asking the library for its advance"
+    assert "outline_text::drawn_advance" in lib, (
+        "the platform rung's advance stopped coming from the outline face, so the "
+        "painter measures a run it does not ink"
+    )
+    # Above the platform rung `drawn_w` charges the same face at the raised em,
+    # through `run_w_at` -- the ladder's own run measure. A `drawn_w` that grew a
+    # third model here would agree with the painter at rung 1 and disagree above it.
+    assert "let w = run_w_at(text, scale, lvl);" in lib, (
+        "the raised rung's advance stopped coming from the outline face's own "
+        "metrics, so `drawn_w` is measuring a run it does not ink"
+    )
+    # The trim walks the same face, per codepoint where the run decodes and per
+    # byte where it does not -- the split `typeface::text_advance_px` makes once
+    # for the whole slice. Both arms are pinned because a trim that charges one
+    # model and cuts with the other leaves a run past the lane it was cut to.
+    assert "advance_codepoint(ch as u32, em)" in lib, (
+        "the trim stopped charging the decodable run codepoint by codepoint"
+    )
+    assert "typeface::advance_px(text[next], em)" in lib, (
+        "the trim stopped charging the undecodable run byte by byte"
+    )
 
 
 def fm_lib() -> str:
@@ -276,6 +304,17 @@ def test_the_fit_gate_measures_at_the_rung_the_painter_inks():
     a typed `1` against a width the destination slot stopped using the day the
     sheet was re-laid. Each measurement now names the rung the matching draw site
     passes, in both files, so the ladder cannot move one and not the other.
+
+    The painter's half moved from `font::ellipsize` to the library's
+    `ellipsize_run` when this app started answering the person's text size, and
+    that is the same claim rather than a weaker one: at the authored rung
+    `ellipsize_run` *is* `font::ellipsize` -- the gate below pins that branch --
+    and above it the helper charges the raised em's own advances rather than the
+    ladder's, and refuses rather than hand back a run it could not cut to the
+    lane. What the rung path is *not* is host-tested: `draw_level()` reads the
+    published rung, so a host suite only ever exercises the platform branch, and
+    the pins here are the code's shape plus the authored-rung equalities the
+    library asserts.
     """
     lib = fm_lib()
     main = fm_main()
@@ -288,10 +327,19 @@ def test_the_fit_gate_measures_at_the_rung_the_painter_inks():
     ):
         assert rung_lane in lib, f"the fit gate stopped measuring the painter's rung: {rung_lane}"
 
+    # The rung-aware trim, and the branch that makes it the authored helper at
+    # the rung the host can actually run.
+    assert "return font::ellipsize(text, scale, max_w, out_buf);" in lib, (
+        "`ellipsize_run` no longer falls back to the authored ellipsize at the "
+        "platform rung, so the fit gate above measures a different call than the "
+        "painter makes"
+    )
+
     for painter_site in (
-        "font::ellipsize(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf)",
-        "font::ellipsize(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf)",
-        "DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
+        "ellipsize_run(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf)",
+        "ellipsize_run(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf)",
+        "ellipsize_run(\n        &view.title[..view.title_len],\n        DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
+        "ellipsize_run(\n            &view.lines[index][..view.line_lens[index]],\n            DETAILS_LINE_SCALE,\n            DETAILS_LINE_LANE,",
         "fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf)",
     ):
         assert painter_site in main, f"the painter stopped using the library's rung and lane: {painter_site}"
@@ -305,11 +353,23 @@ def test_a_cut_run_says_so_rather_than_disappearing():
     control because `centered_x` left-aligns what it cannot centre. Every centred
     label now goes through the model's `fitted_run`, and the gate beside it
     refuses a container narrower than the mark that says a run was cut.
+
+    The trim this app makes is `ellipsize_run`, which is `font::ellipsize` at the
+    authored rung and its equal at a raised one, so the promise has to be pinned
+    on both branches: a run whose ellipsis will not fit is answered zero rather
+    than inked past the lane, and `fitted_run` hands the caller the whole label
+    when it is refused.
     """
     lib = fm_lib()
     main = fm_main()
     assert "pub fn fitted_run" in lib
-    assert "let len = font::ellipsize(label, scale, lane, buf);" in lib
+    assert "let len = ellipsize_run(label, scale, lane, buf);" in lib
+    trim = lib[lib.index("pub fn ellipsize_run("):]
+    assert "return font::ellipsize(text, scale, max_w, out_buf);" in trim
+    assert "if dots_w > max_w || out_buf.len() < 3 {\n        return 0;\n    }" in trim, (
+        "the raised rung's trim lost the refusal that makes a cut run say so"
+    )
+    assert "return label;" in lib[lib.index("pub fn fitted_run"):]
     assert lib.count("cut without an ellipsis") + lib.count("silent clip") >= 2
     # The centred labels of this app go through the helper rather than straight
     # to the rasteriser.
@@ -326,6 +386,11 @@ def test_the_crumb_row_painted_is_the_crumb_row_tapped():
     `1` -- and answered letters that were never inked. Both halves now walk the
     model's `crumb_step`, which trims a run to the room the strip has left and
     stops when there is none.
+
+    The width the tap band is built from has to be the rung-aware one: `crumb_step`
+    advances the strip by `run_w` of the run it just trimmed, so a hit test that
+    measured the same run with `font::measure` would answer a narrower crumb than
+    the one painted as soon as the person raised the text size.
     """
     lib = fm_lib()
     main = fm_main()
@@ -340,5 +405,228 @@ def test_the_crumb_row_painted_is_the_crumb_row_tapped():
         "the tap handler went back to measuring the raw label instead of the run"
         " the strip actually inked"
     )
+    assert "run_w(&buf[..step.len], BREADCRUMB_SCALE)" in hit_test, (
+        "the crumb's tap band stopped measuring the inked run at the rung the"
+        " strip inks it, so the band and the paint are two widths again"
+    )
     assert "(36..684)" not in code_only(main), "the crumb row went back to remembered columns"
+
+
+def test_the_app_asks_the_platform_for_the_persons_text_size():
+    """A ladder the binary never reads is a ladder nobody climbs.
+
+    Every box on this screen is derived from the rung the renderer holds, so an
+    app that never publishes the setting lays out at the platform rung forever
+    and Settings' "Text size" changes nothing the person can see here. The
+    helper existed, compiled, and was never called -- which is why this is pinned
+    as a call site and not as a green suite: no host test can tell a rung that
+    was read from one that was left at its default.
+
+    Two call sites, and the repaint they imply: once before the first frame is
+    laid out, so the opening screen is not drawn at a rung the person has already
+    left, and once per wake, because the size is changed in Settings while this
+    screen is alive. A moved rung repaints the whole surface -- the header, the
+    card, the toolbar and the status strip all move with it, so a band repaint
+    would leave a region at the size the person just left behind.
+    """
+    code = code_only(fm_main())
+    body = code[code.index("fn _start"):]
+    boot = body[: body.index("loop {")]
+    assert "publish_text_scale();" in boot, (
+        "the first frame is laid out before the rung is read"
+    )
+    assert "let rung_moved = publish_text_scale();" in body, (
+        "the loop stopped re-reading the setting, so a size change while this "
+        "app is open shows nothing until the next cold open"
+    )
+    site = body.index("if rung_moved && !repainted_wholly && surface > 0 {")
+    repaint = body[site : site + 200]
+    assert "render_file_manager_ui(surface, &app);" in repaint, (
+        "a moved rung no longer repaints the whole screen"
+    )
+    assert "render_file_manager_band" not in repaint, (
+        "a moved rung repaints only a band, so the regions it also moves stay "
+        "at the rung the person left"
+    )
+    # The extent moves with the rung, and before anything paints: the card's
+    # height and its rows are derived from the rung, so a scroll state solved at
+    # the old one bounds a screen that no longer exists.
+    before_poll = body[body.index("let rung_moved = publish_text_scale();"):
+                       body.index("std::event_poll(")]
+    assert "app.relayout_for_rung();" in before_poll, (
+        "the rung moved but the listing kept the scroll extent the previous rung "
+        "solved, so the thumb sizes a card that is not there"
+    )
+    relayout = fm_main()
+    start = relayout.index("pub fn relayout_for_rung(")
+    relayout_body = relayout[start : relayout.index("\n    }", start)]
+    assert "self.scroll = self.scroll_for(self.scroll.offset);" in relayout_body, (
+        "the re-layout dropped the reader's place in the listing instead of "
+        "re-solving the extent the offset sits in"
+    )
+
+
+# The authored box, and the ladder call that answers a press with its rung-aware
+# twin. Each name on the left is geometry the screen had at the platform rung;
+# every one of them still anchors the derivation, so the right column is the same
+# rectangle re-measured at the rung the person chose.
+AUTHORED_BOXES_A_PRESS_MAY_NOT_ANSWER_WITH: list[tuple[str, str]] = [
+    ("SEARCH_FIELD", "search_field()"),
+    ("SEARCH_CLEAR", "search_clear()"),
+    ("SCOPE_THIS_PILL", "scope_this_pill()"),
+    ("SCOPE_ALL_PILL", "scope_all_pill()"),
+    ("SORT_PILL", "toolbar_pill(0)"),
+    ("LIST_PILL", "toolbar_pill(1)"),
+    ("GRID_PILL", "toolbar_pill(2)"),
+    ("BREADCRUMB_HIT_Y0", "crumb_hit()"),
+    ("BREADCRUMB_HIT_Y1", "crumb_hit()"),
+    # The toolbar's own row is answered by the pills drawn in it, so the rung-aware
+    # name beside the authored top is `crumb_hit()`: the strip that stops at the
+    # toolbar is the only press that reads this edge.
+    ("TOOLBAR_Y", "crumb_hit()"),
+    ("CATEGORY_Y0", "category_y0()"),
+    ("CATEGORY_Y1", "category_y1()"),
+    ("HOME_RECENTS_Y0", "home_recents_y0()"),
+    ("HOME_RECENT_ROW_H", "home_recent_row_h()"),
+    ("HOME_BROWSE_BTN", "home_browse_btn()"),
+    ("DETAILS_OPEN", "details_open()"),
+    ("DETAILS_CLOSE", "details_close()"),
+    ("DETAILS_CARD", "details_card()"),
+]
+
+
+def press_region(code: str) -> str:
+    """Everything in the binary that turns a finger into a decision.
+
+    `crumb_at` through `long_press_hit`: the tap, long-press and gesture handlers,
+    and nothing else. The rung-aware column of the table above is compared against
+    this region, because a box the press never answers is not this gate's business.
+    """
+    return code[code.index("fn crumb_at(") : code.index("fn widen(")]
+
+
+def test_a_press_is_measured_against_the_box_that_was_painted():
+    """A hit test left at the authored rung answers a rectangle nobody inked.
+
+    Every box on this screen is derived from the rung the renderer holds, so the
+    press that answers it has to be measured from the same derivation. It was not:
+    the details card offered "Open" at `details_open()` and tested the press
+    against `DETAILS_OPEN`, so above the authored rung a finger on the word the
+    person just read fell outside the authored rect, hit the `!card.contains`
+    escape instead, and closed the card. The same split across the search field,
+    its clear button, the scope and toolbar pills, the crumb band, the recents
+    rows, the browse button and the category band.
+
+    No host test can see this: the crate's suite exercises the derivations in
+    `lib.rs` and the binary's handlers only compile-check, so a handler left at
+    the authored constant is green at every level. What this gate is, is a textual
+    bound on the *name*, and it is deliberately one-sided: the authored constant is
+    refused anywhere in the binary -- press site or paint site, because a
+    `details_color` that inked the authored rect while the press answered the
+    derived one is the same split wearing the other half -- while the rung-aware
+    twin is required in the press region. It does not prove the two agree: a
+    re-typed number reads as clean here, and the equality of a painted box and the
+    box that answers it is pinned instead by the crate's `*_at(PLATFORM_LEVEL) ==
+    AUTHORED` anchors and the sweeps beside them.
+
+    The refusals are only as strong as the boxes they could still be written
+    against, which is why every authored constant on the left has to stay declared
+    in the crate: a gate satisfied by deleting the box it was meant to forbid
+    forbids nothing.
+    """
+    main = fm_main()
+    lib = fm_lib()
+    binary = code_only(main)
+    press = press_region(binary)
+    for authored, live in AUTHORED_BOXES_A_PRESS_MAY_NOT_ANSWER_WITH:
+        assert re.search(r"\b" + authored + r"\b", binary) is None, (
+            f"{authored} -- the box authored at the platform rung -- is back in the "
+            f"binary, while the screen inks {live} at the person's rung"
+        )
+        assert live in press, (
+            f"{live} no longer answers a press, so {authored} has no rung-aware "
+            "counterpart for this gate to compare against"
+        )
+        # The authored constant is the ladder's anchor, not a leftover: deleting
+        # it would turn the refusals above into vacuous passes. The declaration is
+        # matched to its colon, because `pub const SEARCH_CLEAR_CLEARANCE` is not
+        # the box `SEARCH_CLEAR` was.
+        assert re.search(r"\bpub const " + authored + r"\s*:", lib), (
+            f"{authored} stopped existing in the crate, so refusing to use it "
+            "proves nothing about the code that could"
+        )
+    # A count, so the region cannot be shrunk to nothing to pass: 27 rectangles
+    # are answered by these handlers and at least a dozen of them are the boxes
+    # the ladder moves.
+    assert press.count(".contains(") >= 20, (
+        "the press region stopped measuring rectangles at all, which would make "
+        "every refusal above vacuously true"
+    )
+    # The name this gate cannot cover: refusing the authored *name* does not
+    # refuse the authored *number*. A press re-measured at the platform rung
+    # without naming it -- `Rect::new(380, 884, 280, 48)` or
+    # `details_close_at(PLATFORM_LEVEL)` -- reads the same here as the parity fix.
+    # The rung the renderer holds is the only rung a press may be measured at, so
+    # asking the ladder for the platform's is caught by name.
+    assert "PLATFORM_LEVEL" not in press, (
+        "a press is measured at the rung the machine was built at rather than the "
+        "rung the person chose, which is the split this gate exists to refuse"
+    )
+    # The sheet's name field is the one box the binary composes itself instead of
+    # asking the crate for. Paint and press spell it identically today; a third
+    # spelling is how the two become two screens again.
+    field = "Rect::new(SHEET.x + 20, sheet_name_y(), SHEET.w - 40, sheet_name_h())"
+    assert code_only(fm_main()).count(field) == 2, (
+        "the sheet's name field is no longer one expression inked and answered "
+        "twice from the same line"
+    )
+
+
+def test_a_progress_tick_repaints_the_rows_the_painter_inks():
+    """The band a progress tick repaints is a geometry decision, and it was authored.
+
+    `perform_action` writes the status line and repaints only that line, because
+    a copy is long and the whole screen would flicker per file. The band it asked
+    for was `STATUS_Y` plus one `font::line_height(1)` -- the strip the status row
+    occupied at the platform rung. Above it the row grows past that strip, so each
+    tick repainted the top of the line and left the tail of the previous file's
+    name on the surface underneath.
+
+    Two sites spell this band, and both are pinned: the painter's own region test
+    and the tick's repaint call. A fix that moved one and not the other would
+    repaint a strip the surface no longer paints, which is the same leftover
+    pixels wearing a different hat.
+    """
+    main = code_only(fm_main())
+    action = main[main.index("fn perform_action(") : main.index("fn exit_to_launcher(")]
+    site = action.index("let status_top = status_y();")
+    band = action[site : site + 200]
+    assert (
+        "render_file_manager_band(surface, app, status_top, status_top + status_rows())"
+        in band
+    ), "the progress tick repaints a band the painter did not derive at the person's rung"
+    # The painter's half: the region that inks the status run, measured with the
+    # same two calls in the same order.
+    assert "if (status_top..status_top + status_rows()).contains(&y)" in main, (
+        "the surface stopped painting the status rows the ladder derives, so the "
+        "tick's band no longer matches what is on it"
+    )
+    assert main.count("let status_top = status_y();") == 2, (
+        "the status band is no longer two sites -- the paint and the repaint -- "
+        "written from one derivation"
+    )
+    assert "STATUS_Y" not in main, (
+        "the repaint went back to the authored status strip"
+    )
+    assert "font::line_height(1)" not in main, (
+        "the repaint counted one authored line where the ladder rows the line out"
+    )
+    # The refusals above are only worth having if the rung-aware pair is real.
+    lib = fm_lib()
+    assert "pub fn status_y() -> usize {\n    status_y_at(draw_level())\n}" in lib, (
+        "`status_y` stopped answering the rung the renderer holds"
+    )
+    assert "pub fn status_rows() -> usize {\n    rows_at(STATUS_SCALE, draw_level())\n}" in lib, (
+        "`status_rows` stopped counting the rows the ladder rows the status line out"
+    )
 
