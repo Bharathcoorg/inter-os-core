@@ -581,12 +581,14 @@ const ALBUM_TEXT_LANE: usize = VIDEO_COL_W - 2 * ALBUM_TEXT_X;
 // checked here as well as in the library: the library owns the derivation and
 // this binary owns the band the cards are laid out in, and a card grown at the
 // top rung that walks past `GRID_BOTTOM` is an empty state the grid band answers
-// underneath it. The authored pixels are the anchor -- the platform rung paints
-// 112 / 146 on a 180-row plate at a 200-row stride, exactly as it painted before.
+// underneath it. The authored name is the anchor -- the platform rung still paints
+// the name at 112 -- and the count band now starts at the name's own ink bottom
+// (151) rather than a remembered pixel, so the settled plate is 185 rows at a
+// 205-row stride. The five rows the card grew are exactly the overlap it lost.
 const _: () = assert!(gallery::album_title_inset_at(gallery::PLATFORM_LEVEL) == 112);
-const _: () = assert!(gallery::album_count_inset_at(gallery::PLATFORM_LEVEL) == 146);
-const _: () = assert!(gallery::album_card_h_at(gallery::PLATFORM_LEVEL) == 180);
-const _: () = assert!(gallery::album_stride_at(gallery::PLATFORM_LEVEL) == 200);
+const _: () = assert!(gallery::album_count_inset_at(gallery::PLATFORM_LEVEL) == 151);
+const _: () = assert!(gallery::album_card_h_at(gallery::PLATFORM_LEVEL) == 185);
+const _: () = assert!(gallery::album_stride_at(gallery::PLATFORM_LEVEL) == 205);
 const _: () = assert!(ALBUM_TEXT_LANE > 0);
 /// WHY swept rather than checked once: the stride is what both the painter and
 /// the press divide a content offset by, so it has to stay a whole number of rows

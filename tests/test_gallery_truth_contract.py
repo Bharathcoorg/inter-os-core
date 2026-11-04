@@ -394,7 +394,19 @@ def test_the_album_card_paint_and_its_press_band_move_to_the_rung_together() -> 
                 f"{authored_name} -- the box authored at the platform rung -- is back "
                 f"in the album {label}"
             )
-    for remembered in (r"\b180\b", r"\b200\b", r"\b112\b", r"\b146\b"):
+    # 146 is the remembered count pixel that put the band five rows inside the
+    # name's own ink (Issue #249); 151 / 185 / 205 are the settled derived pixels.
+    # None of them may reappear as a hand-picked constant in the slices -- every
+    # one has to come from the rung-aware faces.
+    for remembered in (
+        r"\b180\b",
+        r"\b200\b",
+        r"\b112\b",
+        r"\b146\b",
+        r"\b151\b",
+        r"\b185\b",
+        r"\b205\b",
+    ):
         for label, sliced in (("paint", region), ("press band", band), ("scroll extent", scroll)):
             assert re.search(remembered, sliced) is None, (
                 f"the album {label} went back to the authored pixel {remembered} "
@@ -405,8 +417,8 @@ def test_the_album_card_paint_and_its_press_band_move_to_the_rung_together() -> 
     # choice the code could undo rather than an absence that proves nothing.
     lib = gallery_lib()
     for anchor in (
-        "pub const AUTHORED_ALBUM_CARD_H: usize = 180;",
-        "pub const AUTHORED_ALBUM_STRIDE: usize = 200;",
+        "pub const AUTHORED_ALBUM_CARD_H: usize = 185;",
+        "pub const AUTHORED_ALBUM_STRIDE: usize = 205;",
         "pub const ALBUM_TITLE_INSET: usize",
         "pub const ALBUM_COUNT_INSET: usize",
     ):
@@ -434,7 +446,7 @@ def test_the_album_derivations_answer_the_authored_pixels_at_every_level() -> No
     main = gallery_main()
     for pin in (
         "const _: () = assert!(album_title_inset_at(PLATFORM_LEVEL) == 112);",
-        "const _: () = assert!(album_count_inset_at(PLATFORM_LEVEL) == 146);",
+        "const _: () = assert!(album_count_inset_at(PLATFORM_LEVEL) == 151);",
         "const _: () = assert!(album_card_h_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_CARD_H);",
         "const _: () = assert!(album_stride_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_STRIDE);",
         "const _: () = assert!(album_grid_holds_at_every_level());",
@@ -589,6 +601,147 @@ def test_the_album_derivations_floor_at_the_authored_size_at_every_level() -> No
     )
 
     count = lib[lib.index("pub const fn album_count_inset_at("):]
-    assert "grown(ALBUM_COUNT_STRIDE, ALBUM_TITLE_RUNG, level)" in count[:250], (
-        "the count line stopped following the title box it was stacked under"
+    assert "rows_at(ALBUM_TITLE_RUNG, level)" in count[:250], (
+        "the count line stopped being derived from the name band's own ladder rows; "
+        "a remembered stride is how the two boxes came to overlap (Issue #249)"
+    )
+    assert "album_title_inset_at(level)" in count[:250], (
+        "the count line stopped starting from the name band's inset, so its "
+        "relationship to the name's ink is no longer shared-derived"
+    )
+
+    # ALBUM_RUNG_GAP is the one free number in the stack; if it were a hand-picked
+    # negative pixel again the count band would open inside the name's ink.
+    gap = lib[lib.index("pub const ALBUM_RUNG_GAP: usize"):]
+    assert "pub const ALBUM_RUNG_GAP: usize = 0;" in gap[:80], (
+        "ALBUM_RUNG_GAP is no longer the settled zero air between the two bands"
+    )
+
+
+# The overlap gate: the count band's box must never open above the name band's
+# own ink bottom. This is the defect Issue #249 reported -- two ink bands placed
+# by independently authored pixels -- and it is refused by construction because
+# the count band is derived from the name band's shared ladder metric. The
+# detector reads the live source and returns a tagged fault for each way the
+# guarantee could quietly break; the self-test beside it mutates the source and
+# proves each arm actually fires, so the gate is not decoration.
+def _album_band_overlap_faults(source: str) -> list[str]:
+    """Return tagged faults for each way the album bands could overlap again.
+
+    The walk runs against comment-stripped code, so a gate that is only *named* in
+    a doc comment, or commented out to make it look present, is refused rather than
+    trusted -- the same rule the rest of this contract holds its negated pins to.
+    """
+    source = code_only(source)
+    faults: list[str] = []
+    # The authored stride that caused the overlap must stay gone.
+    if re.search(r"\bALBUM_COUNT_STRIDE\b", source):
+        faults.append("album-count-stride-returned")
+    # The count face must derive from the name band's shared metric, not a
+    # remembered pixel, and must carry the rung gap.
+    fn = source[source.index("pub const fn album_count_inset_at("):]
+    body = fn[fn.index("{") :]
+    body = body[: body.index("}")]
+    if "rows_at(ALBUM_TITLE_RUNG, level)" not in body:
+        faults.append("album-count-not-derived-from-name-rows")
+    if "album_title_inset_at(level)" not in body:
+        faults.append("album-count-not-started-from-name-inset")
+    if "ALBUM_RUNG_GAP" not in body:
+        faults.append("album-count-dropped-the-rung-gap")
+    # The compile-time sweep that refuses any overlapping rung must be present and
+    # must actually assert, not merely compute a bool nobody checks.
+    if "const _: () = assert!(album_bands_never_overlap_at_every_level());" not in source:
+        faults.append("album-overlap-gate-removed")
+    sweep = source[source.index("const fn album_bands_never_overlap_at_every_level"):]
+    if "while level <= MAX_LEVEL as usize" not in sweep[:400]:
+        faults.append("album-overlap-gate-stopped-sweeping-rungs")
+    clear = source[source.index("const fn album_bands_clear_at("):]
+    clear_body = clear[clear.index("{") :]
+    if (
+        "album_count_inset_at(level) >= album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level)"
+        not in clear_body[:240]
+    ):
+        faults.append("album-overlap-predicate-not-an-ink-bottom-test")
+    return faults
+
+
+def test_the_album_bands_never_overlap() -> None:
+    """The count band starts at or below the name band's ink at every rung."""
+    assert _album_band_overlap_faults(gallery_lib()) == [], (
+        "the album card's count band is placed by a remembered pixel again, so it can "
+        "open inside the name's own ink -- Issue #249 is back"
+    )
+
+
+def test_the_album_band_overlap_contract_can_fail() -> None:
+    """Each mutation to the derivation must make its own overlap arm fire.
+
+    A gate that cannot fail proves nothing: every fault the detector names is
+    reproduced here by editing the live source in exactly one place, so the
+    guarantee is shown to be load-bearing rather than a description of the
+    current file. Each arm is guarded by asserting its needle is unique first, so
+    a mutation that silently matched two spots fails loudly instead of testing a
+    different region than it names.
+    """
+    lib = gallery_lib()
+
+    def arm(label: str, needle: str, replacement: str, expected: str) -> None:
+        assert lib.count(needle) == 1, f"{label}: needle is not unique in lib.rs"
+        mutated = lib.replace(needle, replacement)
+        faults = _album_band_overlap_faults(mutated)
+        assert expected in faults, (
+            f"{label}: expected the {expected!r} fault, got {faults}"
+        )
+
+    # 1. The count face stops deriving from the name band's shared metric and
+    #    falls back to a hand-picked stride -- the exact bug Issue #249 reported.
+    arm(
+        "count-drops-name-rows",
+        "album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level) + ALBUM_RUNG_GAP",
+        "album_title_inset_at(level) + 34",
+        "album-count-not-derived-from-name-rows",
+    )
+    # 2. The name's own inset is dropped from the derivation, so the two bands no
+    #    longer share a start.
+    arm(
+        "count-drops-name-inset",
+        "album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level) + ALBUM_RUNG_GAP",
+        "rows_at(ALBUM_TITLE_RUNG, level) + ALBUM_RUNG_GAP",
+        "album-count-not-started-from-name-inset",
+    )
+    # 3. The rung gap air is removed from the face.
+    arm(
+        "count-drops-rung-gap",
+        "album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level) + ALBUM_RUNG_GAP",
+        "album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level)",
+        "album-count-dropped-the-rung-gap",
+    )
+    # 4. The overlap sweep gate is deleted -- nothing refuses an overlapping rung.
+    arm(
+        "overlap-gate-removed",
+        "const _: () = assert!(album_bands_never_overlap_at_every_level());",
+        "// const _: () = assert!(album_bands_never_overlap_at_every_level());",
+        "album-overlap-gate-removed",
+    )
+    # 5. The sweep stops walking the ladder and checks only the authored rung.
+    arm(
+        "overlap-sweep-stops",
+        "    while level <= MAX_LEVEL as usize {\n        if !album_bands_clear_at(level as u8) {",
+        "    while level <= PLATFORM_LEVEL as usize {\n        if !album_bands_clear_at(level as u8) {",
+        "album-overlap-gate-stopped-sweeping-rungs",
+    )
+    # 6. The predicate stops comparing against the name's ink bottom.
+    arm(
+        "overlap-predicate-wrong",
+        "album_count_inset_at(level) >= album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level)",
+        "album_count_inset_at(level) >= album_title_inset_at(level)",
+        "album-overlap-predicate-not-an-ink-bottom-test",
+    )
+    # 7. The authored stride that caused the overlap is reintroduced.
+    arm(
+        "count-stride-returned",
+        "pub const ALBUM_ROW_AIR: usize = AUTHORED_ALBUM_STRIDE - AUTHORED_ALBUM_CARD_H;",
+        "pub const ALBUM_COUNT_STRIDE: usize = 34;\n"
+        "pub const ALBUM_ROW_AIR: usize = AUTHORED_ALBUM_STRIDE - AUTHORED_ALBUM_CARD_H;",
+        "album-count-stride-returned",
     )

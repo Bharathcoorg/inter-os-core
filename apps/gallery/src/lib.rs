@@ -1587,19 +1587,31 @@ pub fn fitted_run<'a>(label: &'a [u8], scale: usize, lane: usize, buf: &'a mut [
 // The album cards: the plate, the stride and the two runs, all at the rung
 // -----------------------------------------------------------------------------
 
-/// The album card's authored height: the box the screen has always drawn.
-pub const AUTHORED_ALBUM_CARD_H: usize = 180;
+/// The album card's authored height: the box the screen has always drawn. It is
+/// the settled face -- the name's band plus the count band stacked below it plus
+/// their authored air -- after the two ink bands were derived from one another so
+/// the count can no longer open inside the name.
+pub const AUTHORED_ALBUM_CARD_H: usize = 185;
 /// The authored distance from one album row's top to the next.
-pub const AUTHORED_ALBUM_STRIDE: usize = 200;
+pub const AUTHORED_ALBUM_STRIDE: usize = 205;
 /// The banner every album card carries. It is a picture, not type, so no rung of
 /// the ladder ever moves it and the card's growth is all below it.
 pub const ALBUM_BANNER_H: usize = 100;
 /// The title's line-box top inside a card, measured from the card's own top.
 pub const ALBUM_TITLE_INSET: usize = ALBUM_BANNER_H + 12;
-/// The count line's line-box top inside a card, from the card's own top.
-pub const ALBUM_COUNT_INSET: usize = ALBUM_BANNER_H + 46;
-/// The authored stride from the title's box to the count line's.
-pub const ALBUM_COUNT_STRIDE: usize = ALBUM_COUNT_INSET - ALBUM_TITLE_INSET;
+/// Air left between the name's ink bottom and the count band's top.
+///
+/// WHY this is the only free number in the stack: the two bands no longer carry
+/// independently authored pixels -- the count band is placed at the name band's
+/// own ink bottom, measured through the ladder's `rows_at`, plus this air. A count
+/// band that started at a remembered pixel instead is how the two boxes came to
+/// overlap, so no such pixel is allowed to reappear here.
+pub const ALBUM_RUNG_GAP: usize = 0;
+/// The count line's line-box top inside a card, at the authored level, where the
+/// screen has always drawn it once the name's own band is respected. Derived, so
+/// it can never drift back under the name's ink: it is `album_count_inset_at`
+/// asked at the platform rung, which is the name's inset plus the name's box.
+pub const ALBUM_COUNT_INSET: usize = album_count_inset_at(PLATFORM_LEVEL);
 /// Air between the count line's box and the card's bottom edge, solved from the
 /// authored pair so the authored plate is exactly [`AUTHORED_ALBUM_CARD_H`] at
 /// the authored level rather than a number remembered beside it.
@@ -1618,10 +1630,17 @@ pub const fn album_title_inset_at(_level: u8) -> usize {
     ALBUM_TITLE_INSET
 }
 
-/// The count line's line-box top inside a card, at a level: the title's box grown
-/// by the rows the rung took, and nothing else.
+/// The count line's line-box top inside a card, at a level: the name's inset plus
+/// the rows the name's own band inks at this level, plus [`ALBUM_RUNG_GAP`] of air.
+///
+/// WHY derived from the name band and not a stride of its own: the count band must
+/// never open above the name's ink bottom, and the name's ink bottom is the name's
+/// inset plus the ladder's `rows_at` for its rung. Placing the count at a hand-
+/// picked pixel (a remembered stride) is what let the two boxes overlap; reading
+/// it off the shared metric makes the overlap impossible at every rung, because
+/// both bands move together with the level.
 pub const fn album_count_inset_at(level: u8) -> usize {
-    album_title_inset_at(level) + grown(ALBUM_COUNT_STRIDE, ALBUM_TITLE_RUNG, level)
+    album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level) + ALBUM_RUNG_GAP
 }
 
 /// The card's height at a level: never below the plate it was drawn with, and tall
@@ -1672,13 +1691,40 @@ const _: () = assert!(ascent_at(ALBUM_COUNT_RUNG, PLATFORM_LEVEL)
 const _: () = assert!(em_at(ALBUM_TITLE_RUNG, PLATFORM_LEVEL)
     == interos_std::design::font::em_for_scale(ALBUM_TITLE_RUNG));
 
-// WHY these anchors hold to the numbers on the screen: the album card has always
-// been 180 rows with its name at 112 and its count at 146, so adopting the
-// setting must move no pixel for a reader who left it alone.
+// WHY these anchors hold to the numbers on the screen: the album card's name has
+// always sat at 112, and the card grew from 180 to 185 rows only so the count
+// line -- once pinned at a remembered 146, five rows inside the name's own 39-row
+// band -- now starts at the name's ink bottom (151) instead of overlapping it.
+// A reader who left the setting alone gets the same name; the count only moved the
+// few rows that ended the overlap, and the card grew to keep its air.
 const _: () = assert!(album_title_inset_at(PLATFORM_LEVEL) == 112);
-const _: () = assert!(album_count_inset_at(PLATFORM_LEVEL) == 146);
+const _: () = assert!(album_count_inset_at(PLATFORM_LEVEL) == 151);
 const _: () = assert!(album_card_h_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_CARD_H);
 const _: () = assert!(album_stride_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_STRIDE);
+
+/// Whether a level's count band starts at or below the name band's ink bottom --
+/// the overlap Issue #249 reported, refused here at the rung it was drawn at.
+const fn album_bands_clear_at(level: u8) -> bool {
+    album_count_inset_at(level) >= album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level)
+}
+
+/// WHY a sweep and not the authored rung alone: the count band is derived from the
+/// name band through the shared ladder metric, so the two move together and the
+/// count can only ever start at the name's ink bottom plus `ALBUM_RUNG_GAP`. The
+/// gate proves that no selectable rung reopens the overlap the hand-picked stride
+/// caused -- if `ALBUM_RUNG_GAP` were ever negative, or the count were placed at a
+/// remembered pixel again, one of these four levels would fail.
+const fn album_bands_never_overlap_at_every_level() -> bool {
+    let mut level = 0usize;
+    while level <= MAX_LEVEL as usize {
+        if !album_bands_clear_at(level as u8) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(album_bands_never_overlap_at_every_level());
 
 /// Whether a level's album card holds both of its runs and both fit under the
 /// plate the press path cuts.
@@ -2529,41 +2575,43 @@ mod tests {
         assert_eq!(t.src_h, 48);
     }
 
-    /// The album card stacks its name and its count 34 rows apart while the name's
-    /// own line box is 39 rows deep at the authored rung, so the count line's box
-    /// opens five rows inside the name's. That is the layout the screen has always
-    /// been drawn with, and this change is about the rung rather than about it, so
-    /// what is pinned here is what the ladder does to it: every rung above the
-    /// authored one grows the name's box and the stride below it by the same rows,
-    /// which leaves the overlap exactly as it was found, and the rung below the
-    /// authored one keeps the authored stride rather than shrinking it, which
-    /// separates the two boxes instead of pushing the count line up into a name.
-    /// The five-row overlap itself is unfinished work, not a contract.
+    /// The album card stacks its count line below its name's own ink, and the gap
+    /// between them is never negative at any rung the ladder publishes.
+    ///
+    /// WHY a sweep and not the authored rung alone: Issue #249 was the two ink
+    /// bands placed by independently authored pixels, so the count band's box opened
+    /// inside the name band's box. The fix derives the count band from the name
+    /// band's own ladder metric, which means the gap is the same shared number plus
+    /// `ALBUM_RUNG_GAP` at every level. Testing only the authored rung would let a
+    /// single level reopen the overlap, so this walks all four selectable rungs and
+    /// refuses any whose count band starts above the name's ink bottom.
     #[test]
-    fn the_album_runs_keep_their_gap_at_every_rung() {
+    fn the_count_band_starts_below_the_names_ink_at_every_rung() {
         let gap_at = |lvl: u8| {
             album_count_inset_at(lvl) as isize
                 - (album_title_inset_at(lvl) + rows_at(ALBUM_TITLE_RUNG, lvl)) as isize
         };
-        let authored = gap_at(PLATFORM_LEVEL);
-        assert_eq!(
-            authored, -5,
-            "the album name's box and its count line moved against each other at the \
-             authored rung, where the card was drawn 34 rows apart behind a 39-row band"
-        );
-        for lvl in PLATFORM_LEVEL..=MAX_LEVEL {
+        for lvl in 0..=MAX_LEVEL {
+            assert!(
+                gap_at(lvl) >= 0,
+                "rung {} put the album count line {} rows inside the name's own ink band",
+                lvl,
+                -gap_at(lvl)
+            );
+        }
+        // The derivation leaves exactly `ALBUM_RUNG_GAP` of air at every rung, so
+        // the gap is not merely non-negative -- it is the one free number, constant
+        // across the whole ladder rather than a per-level hand-picked pixel.
+        let authored_gap = gap_at(PLATFORM_LEVEL);
+        for lvl in 0..=MAX_LEVEL {
             assert_eq!(
                 gap_at(lvl),
-                authored,
-                "rung {} changed the overlap between the album name's box and its count line",
+                authored_gap,
+                "rung {} moved the album bands apart by a different air than the \
+                 authored rung, so the gap is no longer derived from one shared metric",
                 lvl
             );
         }
-        assert!(
-            gap_at(0) >= 0,
-            "the smallest rung put the count line {} rows inside the album name's box",
-            -gap_at(0)
-        );
     }
 
     /// A plate too small to hold the three-byte mark is the one refusal
