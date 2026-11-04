@@ -878,20 +878,29 @@ pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
         return 0;
     }
     let em = em_at(scale, lvl);
-    let budget = max_w - dots_w;
+    let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+/// given `room` bytes of the caller's buffer for them.
+///
+/// WHY one decision, not one per byte: the width the painter then answers with
+/// is `typeface::text_advance_px`, and that function validates the *whole* run
+/// once -- decoding it and charging one advance per codepoint, or, when the
+/// slice is not UTF-8 at all, charging every byte the bitmap face's own. A walk
+/// that decided per suffix would charge a valid word sitting behind one
+/// undecodable byte as a codepoint while the painter charged its bytes, which
+/// is a run trimmed narrower than the run inked. A byte walk over valid UTF-8
+/// is the same mistake sideways, and a walk that fell back to `font::measure`
+/// charged the *platform* em for a glyph the raised rung inks larger, which is
+/// the mismatch this helper exists to kill.
+fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+    let decodes = core::str::from_utf8(text).is_ok();
     let mut current_w = 0usize;
     let mut fit_len = 0usize;
-    // WHY one decision, not one per byte: the width the painter then answers with
-    // is `typeface::text_advance_px`, and that function validates the *whole* run
-    // once -- decoding it and charging one advance per codepoint, or, when the
-    // slice is not UTF-8 at all, charging every byte the bitmap face's own. A walk
-    // that decided per suffix would charge a valid word sitting behind one
-    // undecodable byte as a codepoint while the painter charged its bytes, which
-    // is a run trimmed narrower than the run inked. A byte walk over valid UTF-8
-    // is the same mistake sideways, and a walk that fell back to `font::measure`
-    // charged the *platform* em for a glyph the raised rung inks larger, which is
-    // the mismatch this helper exists to kill.
-    let decodes = core::str::from_utf8(text).is_ok();
     let mut next = 0usize;
     while next < text.len() {
         let (adv, step) = if decodes {
@@ -908,16 +917,14 @@ pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
                 1,
             )
         };
-        if current_w + adv > budget || fit_len + step + 3 > out_buf.len() {
+        if current_w + adv > max_w || fit_len + step > room {
             break;
         }
         current_w += adv;
         fit_len = next + step;
         next = fit_len;
     }
-    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
-    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
-    fit_len + 3
+    fit_len
 }
 
 /// Whether a level's home stack is answered by the panel it is painted on: every
@@ -2748,15 +2755,20 @@ pub const STATUS_SCALE: usize = theme::type_scale::CAPTION;
 pub const STATUS_LANE: usize = ENTRIES_CARD.w;
 
 /// The run a container hands its painter: `label` whole when the container holds
-/// it, otherwise the same label cut to `lane` with an ellipsis on it.
+/// it, otherwise the same label cut to `lane` with an ellipsis on it -- and when
+/// the lane cannot even carry the ellipsis, the leading glyphs the lane does
+/// hold, cut hard rather than spilled past the container.
 ///
 /// WHY it lives in the model: every call site is a per-pixel branch this app's
 /// binary cannot test, and the claim a fit gate is worth making -- a run this app
 /// draws is either whole or visibly cut, never silently missing -- has to be
 /// checked against the same function the painter calls. A lane narrower than the
-/// ellipsis itself answers `font::ellipsize` with nothing, which is the one case
-/// where a word would vanish rather than be trimmed; the gate beside this refuses
-/// that for every lane in this file.
+/// ellipsis itself answers `font::ellipsize` with nothing, and nothing is the one
+/// answer that used to be worse than the run: the helper handed back `label`
+/// whole, so a run the lane could not hold was inked past the lane's edge anyway
+/// and the pixels outside it belonged to whatever was drawn next. The hard cut
+/// keeps the bound the container asked for; the gate beside this is what refuses
+/// a lane so narrow that the cut loses its mark.
 /// `label` and `buf` share one lifetime because the answer is either of them: the
 /// caller's borrow ends where the painted run does, which is the block that draws
 /// it.
@@ -2767,10 +2779,14 @@ pub fn fitted_run<'a>(
     buf: &'a mut [u8],
 ) -> &'a [u8] {
     let len = ellipsize_run(label, scale, lane, buf);
-    if len == 0 {
+    if len > 0 {
+        return &buf[..len];
+    }
+    if label.is_empty() || scale == 0 {
         return label;
     }
-    &buf[..len]
+    let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());
+    &buf[..fit]
 }
 
 /// The confirmation sheet's destination slots: the first slot's column, the slot
@@ -4816,22 +4832,100 @@ mod tests {
             "a run cut to a lane lost its ellipsis -- the silent clip this helper exists to refuse"
         );
 
-        // The one case the helper hands back the whole run is the case where the
-        // ellipsis itself would not fit, so no container this app draws into may
-        // be narrower than the mark that says a run was cut.
-        for lane in [
-            ENTRY_NAME_LANE,
-            GRID_NAME_LANE,
-            EMPTY_CARD_LANE,
-            STATUS_LANE,
-            CATEGORY_LABEL_LANE,
-            control_label_lane(ACTION_SLOT_W),
-            control_label_lane(SHEET_DEST_SLOT_W),
+        // The one case the helper hands back less than the whole run without a
+        // mark is the case where the ellipsis itself would not fit, so no
+        // container this app draws into may be narrower than the mark that says a
+        // run was cut -- and the mark is weighed in the rung its own label inks
+        // at, at every rung the person can ask for, not at the caption's.
+        for (lane, scale) in [
+            (ENTRY_NAME_LANE, ENTRY_NAME_SCALE),
+            (GRID_NAME_LANE, GRID_NAME_SCALE),
+            (EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE),
+            (STATUS_LANE, STATUS_SCALE),
+            (CATEGORY_LABEL_LANE, CATEGORY_LABEL_SCALE),
+            (SEARCH_TEXT_LANE, SEARCH_TEXT_SCALE),
+            (SCOPE_CAPTION_MAX_W, SCOPE_CAPTION_SCALE),
+            (control_label_lane(ACTION_SLOT_W), LABEL_RUNG),
+            (control_label_lane(SHEET_DEST_SLOT_W), LABEL_RUNG),
+            (control_label_lane(SHEET_BUTTON_W), LABEL_RUNG),
         ] {
+            let mut level = 0;
+            while level <= MAX_LEVEL {
+                assert!(
+                    run_w_at(b"...", scale, level) <= lane,
+                    "a lane of {} px cannot hold the ellipsis its own label inks at rung {}",
+                    lane,
+                    level
+                );
+                level += 1;
+            }
+        }
+        // The browse control's lane is the one fitted label whose box the ladder
+        // resizes, so it is swept with the rung rather than at the authored width.
+        let mut level = 0;
+        while level <= MAX_LEVEL {
+            let lane = control_label_lane(home_browse_btn_at(level).w);
             assert!(
-                font::measure(b"...", ENTRY_SUB_SCALE) <= lane,
-                "a lane of {} rows cannot hold the ellipsis that marks a cut run",
-                lane
+                run_w_at(b"...", LABEL_RUNG, level) <= lane,
+                "the browse control's lane of {} px cannot hold its own ellipsis at rung {}",
+                lane,
+                level
+            );
+            level += 1;
+        }
+    }
+
+    /// A lane narrower than the ellipsis is cut hard: what the container gets is
+    /// the leading glyphs it can hold, never the whole run it cannot.
+    ///
+    /// WHY this is a test of the helper rather than of a lane: no lane this app
+    /// draws into is that narrow -- the sweep above refuses the day one is -- but
+    /// the fallback is the part of `fitted_run` that used to answer a refusal by
+    /// handing the painter the unbounded run, and a contract that only holds while
+    /// its precondition happens to be true is not the contract the centred labels
+    /// are drawn under.
+    #[test]
+    fn a_lane_narrower_than_the_mark_is_cut_to_it_rather_than_spilled() {
+        let long = [b'e'; MAX_PATH_LEN - 1];
+        let lvl = draw_level();
+        for lane in [0usize, 1, 4, 8, 12] {
+            let mut buf = [0u8; MAX_PATH_LEN];
+            let cut = fitted_run(&long, ENTRY_NAME_SCALE, lane, &mut buf);
+            assert!(
+                run_w_at(cut, ENTRY_NAME_SCALE, lvl) <= lane,
+                "a run cut to a {}px lane still overflowed it by {}px",
+                lane,
+                run_w_at(cut, ENTRY_NAME_SCALE, lvl).saturating_sub(lane)
+            );
+        }
+    }
+
+    /// The caller's buffer is a bound the cut run keeps to, whatever the lane: a
+    /// run trimmed into four bytes is four bytes of run, not the mark's three
+    /// written past the end of what the painter was handed.
+    ///
+    /// WHY the buffer is swept as a slice rather than left to the arrays this file
+    /// declares: a lane here is 596 rows wide while the run beside it may hold 191
+    /// bytes, and a narrow run is out of buffer long before it is out of lane. That
+    /// is the branch the platform's own trim took one glyph past, and the mark's
+    /// copy then wrote past the slice's end -- a panic in the painter, not a pixel
+    /// in the wrong place.
+    #[test]
+    fn a_short_buffer_is_filled_to_its_end_and_never_past_it() {
+        let long = [b'e'; MAX_PATH_LEN - 1];
+        for room in [0usize, 1, 2, 3, 4, 5, 8, 16] {
+            let mut backing = [0u8; MAX_PATH_LEN];
+            let cut = fitted_run(
+                &long,
+                ENTRY_NAME_SCALE,
+                ENTRY_NAME_LANE,
+                &mut backing[..room],
+            );
+            assert!(
+                cut.len() <= room,
+                "a run cut for a {}-byte buffer came back {} bytes long",
+                room,
+                cut.len()
             );
         }
     }

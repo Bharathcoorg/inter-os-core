@@ -357,8 +357,14 @@ def test_a_cut_run_says_so_rather_than_disappearing():
     The trim this app makes is `ellipsize_run`, which is `font::ellipsize` at the
     authored rung and its equal at a raised one, so the promise has to be pinned
     on both branches: a run whose ellipsis will not fit is answered zero rather
-    than inked past the lane, and `fitted_run` hands the caller the whole label
-    when it is refused.
+    than inked past the lane. What `fitted_run` answered that zero with used to be
+    `label` whole -- a refusal that was correct and a fallback that was not, since
+    the run handed back is the run that does not fit -- so it now answers with the
+    leading glyphs the lane holds, walked in the same em the painter inks at, and
+    the width that walk spends is the width the ellipsis was going to be charged
+    against. The library's own test sweeps every lane in this file against the
+    mark its own label inks at every rung, which is what keeps this fallback a
+    bound rather than a route any of this app's words takes.
     """
     lib = fm_lib()
     main = fm_main()
@@ -369,7 +375,14 @@ def test_a_cut_run_says_so_rather_than_disappearing():
     assert "if dots_w > max_w || out_buf.len() < 3 {\n        return 0;\n    }" in trim, (
         "the raised rung's trim lost the refusal that makes a cut run say so"
     )
-    assert "return label;" in lib[lib.index("pub fn fitted_run"):]
+    fitted = lib[lib.index("pub fn fitted_run"):]
+    assert "let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());" in fitted, (
+        "`fitted_run` stopped cutting a refused trim to the lane, so the whole "
+        "label is handed back to a container that cannot hold it"
+    )
+    assert "let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);" in trim, (
+        "the trim and the hard cut no longer spend the lane's width in one walk"
+    )
     assert lib.count("cut without an ellipsis") + lib.count("silent clip") >= 2
     # The centred labels of this app go through the helper rather than straight
     # to the rasteriser.
