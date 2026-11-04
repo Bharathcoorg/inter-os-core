@@ -3078,6 +3078,83 @@ const BTN_H: usize = 124;
 const COL_X: [usize; 3] = [48, 270, 492];
 const ROW_Y: [usize; 4] = [410, 560, 710, 860];
 
+// -----------------------------------------------------------------------------
+// The touch floor, stated once against the plates the renderer inks.
+//
+// WHY here and not only in `chrome`: `chrome` owns the card's controls and
+// already carries its own gates. The keypad, the action bar, the dock, the tab
+// row and the two lists below are the rest of what this app paints a person can
+// press, and until now nothing in the crate held any of them to the floor. The
+// bin target carries `test = false`, so a `#[test]` beside these numbers would
+// never run: these are build-time gates, and they fail the build.
+// -----------------------------------------------------------------------------
+const _: () = {
+    use interos_std::design::touch::MIN_TARGET;
+    // The keypad: the cell the renderer fills and the press answers are one
+    // rectangle, and the disc inked inside it clears the floor across.
+    assert!(BTN_W >= MIN_TARGET);
+    assert!(BTN_H >= MIN_TARGET);
+    assert!(KEY_RADIUS * 2 >= MIN_TARGET);
+    let mut r = 0;
+    while r < ROW_Y.len() {
+        assert!(ROW_Y[r] + BTN_H <= ACTION_Y0);
+        if r + 1 < ROW_Y.len() {
+            assert!(ROW_Y[r] + BTN_H <= ROW_Y[r + 1]);
+        }
+        r += 1;
+    }
+    let mut c = 0;
+    while c < COL_X.len() {
+        assert!(COL_X[c] >= 24 && COL_X[c] + BTN_W <= 696);
+        if c + 1 < COL_X.len() {
+            assert!(COL_X[c] + BTN_W <= COL_X[c + 1]);
+        }
+        c += 1;
+    }
+    // The action bar's three discs, and the pill the call control draws.
+    assert!(SOS_R as usize * 2 >= MIN_TARGET);
+    assert!(BACKSPACE_R as usize * 2 >= MIN_TARGET);
+    assert!(CONTACTS_R as usize * 2 >= MIN_TARGET);
+    assert!(CALL_PILL_R as usize * 2 >= MIN_TARGET);
+    // WHY the discs are compared in `i32`: their radii are signed because the
+    // painter measures a pixel against a centre with a subtraction that may go
+    // negative. Carrying the same signedness through the gate keeps the round-trip
+    // the press does, `x as i32 - cx as i32`, and the gate describing one thing.
+    assert!(SOS_CY as i32 - SOS_R >= ACTION_Y0 as i32);
+    assert!(SOS_CY as i32 + SOS_R <= ACTION_Y1 as i32);
+    assert!(BACKSPACE_CY as i32 - BACKSPACE_R >= ACTION_Y0 as i32);
+    assert!(BACKSPACE_CY as i32 + BACKSPACE_R <= ACTION_Y1 as i32);
+    assert!(CONTACTS_CY as i32 - CONTACTS_R >= ACTION_Y0 as i32);
+    assert!(CONTACTS_CY as i32 + CONTACTS_R <= ACTION_Y1 as i32);
+    assert!(SOS_CX as i32 + SOS_R <= CALL_CX as i32 - CALL_PILL_HALF_SPINE);
+    assert!(BACKSPACE_CX as i32 - BACKSPACE_R >= CALL_CX as i32 + CALL_PILL_HALF_SPINE);
+    assert!(CALL_CX as i32 - CALL_PILL_HALF_SPINE - CALL_PILL_R >= SOS_CX as i32 + SOS_R);
+    assert!(CONTACTS_CX as i32 + CONTACTS_R <= 696);
+    // The dock: four slots in the card's own columns, each floor-sized.
+    assert!(DOCK_Y1 - DOCK_Y0 >= MIN_TARGET);
+    assert!(DOCK_ITEM_W >= MIN_TARGET);
+    let mut s = 0;
+    while s < DOCK_ITEM_X0.len() {
+        assert!(DOCK_ITEM_X0[s] >= 24 && DOCK_ITEM_X0[s] + DOCK_ITEM_W <= 696);
+        assert!(DOCK_ICON_Y0 >= DOCK_Y0 && DOCK_ICON_Y0 + DOCK_ICON_H <= DOCK_Y1);
+        assert!(DOCK_LABEL_Y0 + line_at(DOCK_LABEL_SCALE, PLATFORM_LEVEL) <= DOCK_Y1);
+        if s + 1 < DOCK_ITEM_X0.len() {
+            assert!(DOCK_ITEM_X0[s] + DOCK_ITEM_W <= DOCK_ITEM_X0[s + 1]);
+        }
+        s += 1;
+    }
+    // The segmented tab row: the band the pills are drawn on and answered from.
+    assert!(TAB_BAND_H >= MIN_TARGET);
+    assert!(TAB_W >= MIN_TARGET);
+    // The two lists the settings and recents surfaces scroll.
+    assert!(SETTINGS_ROW_H >= MIN_TARGET);
+    assert!(RECENTS_ROW_H >= MIN_TARGET);
+    assert!(RINGTONE_BACK_H >= MIN_TARGET);
+    // The back chip and the home box are the platform's own.
+    assert!(std::design::back_button::SIZE >= MIN_TARGET);
+    assert!(chrome::HOME_HIT.w >= MIN_TARGET && chrome::HOME_HIT.h >= MIN_TARGET);
+};
+
 // Contacts section geometry.
 //
 // WHY the whole layout is pinned here instead of flowing: `#![no_std]` with no
