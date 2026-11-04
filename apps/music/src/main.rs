@@ -1221,7 +1221,10 @@ const CAPTION_Y: usize = 800;
 /// the bound from the neighbour's band makes the two provably disjoint — the
 /// caption answers `y < CAPTION_TOUCH_Y1` and the timeline `y >=
 /// TIMELINE_TOUCH_Y0` — and covers the whole ink the caption paints (805..815).
-const CAPTION_TOUCH_Y0: usize = 800;
+/// WHY derived from `CAPTION_Y` and not authored beside it: the band is the rows
+/// the caption's run reserves, and a second copy of `800` is a row the painter
+/// can move without the press following.
+const CAPTION_TOUCH_Y0: usize = CAPTION_Y;
 const CAPTION_TOUCH_Y1: usize = TIMELINE_TOUCH_Y0;
 
 /// The progress bar under the caption.
@@ -1241,7 +1244,10 @@ const TIMELINE_THUMB_CY: usize = 831;
 /// band now runs from below the caption's ink to the row above the volume
 /// controls, which is the whole space the bar owns.
 const TIMELINE_TOUCH_Y0: usize = 816;
-const TIMELINE_TOUCH_Y1: usize = 859;
+/// WHY derived from the row below rather than written as `859`: the band is the
+/// space the bar owns, and the volume controls are the next owner of the page.
+/// A hand-written last row is one edit away from reaching into their plate.
+const TIMELINE_TOUCH_Y1: usize = VOLUME_Y0 - 1;
 
 /// The search query's capacity, in bytes.
 const SEARCH_CAP: usize = 32;
@@ -1310,6 +1316,22 @@ const LIST_SUB_Y: usize = 1210;
 
 /// Track-list row pitch and the pitch body of each row.
 const TRACKLIST_ROW_H: usize = 96;
+/// The rows a row inks, and the row inside it its three reorder plates stand on.
+///
+/// WHY named: the painter clipped every row's plate at `row_y + 84` and the
+/// press answered `coff < 84`, and both placed its glyphs at `row_y + 24` while
+/// the press answered `coff - 24`. Two sites, four literals, no proof they were
+/// the same four. The row answers the plate it inks and nothing else.
+const ROW_INK_H: usize = 84;
+const ROW_CTRL_CY: usize = 24;
+/// The half-extent of each reorder plate, read off the platform's floor, and the
+/// three centres in the order the press asks them: move up, move down, delete.
+const ROW_CTRL_HALF: usize = interos_std::design::touch::MIN_TARGET / 2;
+const ROW_CTRL_CXS: [usize; 3] = [
+    MARGIN + CONTENT_W - 116,
+    MARGIN + CONTENT_W - 72,
+    MARGIN + CONTENT_W - 28,
+];
 /// The control that publishes the library into the device's document index.
 const PUBLISH_BTN: Rect = Rect { x: 236, y: 1054, w: 136, h: 48 };
 /// The control that sets the currently selected track as system ringtone.
@@ -1341,6 +1363,78 @@ const HOME_PILL: Rect = std::design::home_band::PILL;
 const _: () = assert!(HOME_PILL.y >= LIST_HIT_Y1);
 const _: () = assert!(HOME_PILL.y >= HOME_HIT.y && HOME_PILL.y + HOME_PILL.h <= H);
 const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HOME_PILL.x + HOME_PILL.w);
+
+// -----------------------------------------------------------------------------
+// The touch floor, stated once against the plates the painter inks.
+//
+// WHY `const` and not `#[test]`: this app's bin target carries `test = false`,
+// so a `#[test]` written beside these rectangles would never run. A build-time
+// gate is the strongest proof available here, and it fails the build rather
+// than the render.
+// -----------------------------------------------------------------------------
+const _: () = {
+    use interos_std::design::touch::MIN_TARGET;
+    let plates = [
+        SEARCH_FIELD,
+        SORT_BTN,
+        IMPORT_BTN,
+        VOL_MINUS,
+        VOL_PLUS,
+        PUBLISH_BTN,
+        RINGTONE_BTN,
+        ADD_BTN,
+        ADD_TITLE_FIELD,
+        ADD_DUR_FIELD,
+        ADD_SAVE_BTN,
+        ADD_CANCEL_BTN,
+        HOME_HIT,
+    ];
+    let mut i = 0;
+    while i < plates.len() {
+        assert!(plates[i].w >= MIN_TARGET);
+        assert!(plates[i].h >= MIN_TARGET);
+        assert!(plates[i].x + plates[i].w <= W);
+        assert!(plates[i].y + plates[i].h <= H);
+        i += 1;
+    }
+    // The transport discs: the press is `in_transport`, the same centre and the
+    // same radius the renderer draws.
+    assert!(SIDE_R * 2 >= MIN_TARGET);
+    assert!(PLAY_R * 2 >= MIN_TARGET);
+    assert!(PLAY_R > SIDE_R);
+    assert!(PREV_CX + SIDE_R <= PLAY_CX - PLAY_R);
+    assert!(NEXT_CX - SIDE_R >= PLAY_CX + PLAY_R);
+    assert!(TRANSPORT_Y0 >= VOLUME_Y1);
+    assert!(TRANSPORT_Y1 <= LIST_LABEL_Y);
+    // The seek band answers the floor in rows, and owns only the space between
+    // the caption's ink and the volume row's own plate.
+    assert!(TIMELINE_TOUCH_Y1 - TIMELINE_TOUCH_Y0 + 1 >= MIN_TARGET);
+    assert!(TIMELINE_TOUCH_Y1 + 1 == VOLUME_Y0);
+    assert!(TIMELINE_RECT.y >= TIMELINE_TOUCH_Y0);
+    assert!(TIMELINE_RECT.y + TIMELINE_RECT.h <= TIMELINE_TOUCH_Y1 + 1);
+    assert!(TIMELINE_THUMB_CY >= TIMELINE_TOUCH_Y0);
+    assert!(TIMELINE_RECT.x == VOL_MINUS.x);
+    // The queue's reorder plates: one floor-sized square per glyph, at the three
+    // centres the row inks, and never overlapping one another.
+    assert!(2 * ROW_CTRL_HALF + 1 >= MIN_TARGET);
+    assert!(ROW_CTRL_CXS[2] + ROW_CTRL_HALF <= MARGIN + CONTENT_W);
+    assert!(ROW_CTRL_CXS[0] >= MARGIN + ROW.pad);
+    let mut c = 0;
+    while c + 1 < ROW_CTRL_CXS.len() {
+        // The plates are exactly one floor apart: their bounds meet on a single
+        // shared column, and the press asks them right-to-left, so the seam goes
+        // to the plate that owns it rather than to neither.
+        assert!(ROW_CTRL_CXS[c] + 2 * ROW_CTRL_HALF <= ROW_CTRL_CXS[c + 1]);
+        assert!(ROW_CTRL_CXS[c + 1] - ROW_CTRL_CXS[c] == MIN_TARGET);
+        c += 1;
+    }
+    assert!(ROW_CTRL_CY + ROW_CTRL_HALF <= ROW_INK_H);
+    assert!(ROW_INK_H <= TRACKLIST_ROW_H);
+    assert!(TRACKLIST_ROW_H >= MIN_TARGET);
+    // The back control is the platform's, and its plate clears the floor.
+    assert!(std::design::back_button::SIZE >= MIN_TARGET);
+    assert!(VOL_METER_Y0 >= VOL_MINUS.y && VOL_METER_Y1 <= VOL_PLUS.y + VOL_PLUS.h);
+};
 
 // -----------------------------------------------------------------------------
 // Text helpers - the gate is the glyph line box, so ink is never clipped.
@@ -2473,7 +2567,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         };
         let t = app.store.get(store_idx).unwrap();
         // WHY clipped: a row that inked past the band's foot promises a press the gesture answers.
-        let row_bottom = (row_y + 84).min(LIST_HIT_Y1);
+        let row_bottom = (row_y + ROW_INK_H).min(LIST_HIT_Y1);
         if y >= row_y && y < row_bottom {
             let selected = store_idx == app.current_track_idx;
             // The platform's list-row treatment: the fill of the row the tap
@@ -2500,16 +2594,16 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 // The queue's reorder affordances. The three controls sit on
                 // 44 px centres, so each hit region is a 44 px target with no
                 // overlap (the platform's minimum is 44 px).
-                if up_glyph(x, y, MARGIN + CONTENT_W - 116, row_y + 24) {
+                if up_glyph(x, y, ROW_CTRL_CXS[0], row_y + ROW_CTRL_CY) {
                     return THEME.muted;
                 }
-                if down_glyph(x, y, MARGIN + CONTENT_W - 72, row_y + 24) {
+                if down_glyph(x, y, ROW_CTRL_CXS[1], row_y + ROW_CTRL_CY) {
                     return THEME.muted;
                 }
                 // Delete affordance, matching its hit region in the tap handler.
-                let del_x = MARGIN + CONTENT_W - 28;
+                let del_x = ROW_CTRL_CXS[2];
                 let ddx = x as isize - del_x as isize;
-                let ddy = y as isize - (row_y + 24) as isize;
+                let ddy = y as isize - (row_y + ROW_CTRL_CY) as isize;
                 if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
                     return THEME.muted;
                 }
@@ -3033,13 +3127,14 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         let ry = y.saturating_sub(LIST_TOP) + app.list_scroll.offset;
         let idx = ry / TRACKLIST_ROW_H;
         let coff = ry % TRACKLIST_ROW_H;
-        if idx < app.order_len && coff < 84 && x >= MARGIN && x < MARGIN + CONTENT_W {
-            let control_y = coff as isize - 24;
+        if idx < app.order_len && coff < ROW_INK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
+            let control_y = coff as isize - ROW_CTRL_CY as isize;
             let in_control = |centre: usize| {
-                (x as isize - centre as isize).abs() <= 22 && control_y.abs() <= 22
+                (x as isize - centre as isize).abs() <= ROW_CTRL_HALF as isize
+                    && control_y.abs() <= ROW_CTRL_HALF as isize
             };
             // Delete: the rightmost control.
-            if in_control(MARGIN + CONTENT_W - 28) {
+            if in_control(ROW_CTRL_CXS[2]) {
                 if app.remove_at(idx) {
                     app.clear_feedback();
                     std::log("[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
@@ -3053,7 +3148,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw(Dirty::All);
             }
             // Move down: toward the end of the queue.
-            if in_control(MARGIN + CONTENT_W - 72) {
+            if in_control(ROW_CTRL_CXS[1]) {
                 if app.move_down(idx) {
                     app.sync_list_extent();
                     app.clear_feedback();
@@ -3069,7 +3164,7 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw(Dirty::All);
             }
             // Move up: toward the front of the queue.
-            if in_control(MARGIN + CONTENT_W - 116) {
+            if in_control(ROW_CTRL_CXS[0]) {
                 if app.move_up(idx) {
                     app.sync_list_extent();
                     app.clear_feedback();
