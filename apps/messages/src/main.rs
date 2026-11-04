@@ -628,26 +628,31 @@ const CHUNK: usize = 4096;
 /// The settings key the platform's Settings app writes the text size to.
 const TEXT_SCALE_KEY: &str = "display.text_scale";
 
-/// Reads the person's text size and hands it to the renderer.
+/// Reads the person's text size and hands it to the renderer, answering whether
+/// the rung actually moved.
 ///
-/// WHY it is called before `surface_create` and once only: the boxes below are
-/// derived from the published rung every time the painter asks for one, so a
-/// rung that arrived mid-frame would move a row out from under a finger that is
-/// already inside it. Publishing once at startup is also the only place a
-/// settings query belongs -- asking the store per glyph would put a syscall
+/// WHY it is called before `surface_create` and again on every wake of the event
+/// loop: the boxes below are derived from the published rung every time the
+/// painter asks for one, so a rung that arrived mid-frame would move a row out
+/// from under a finger already inside it -- and a rung read only at startup is a
+/// screen that resizes on the next cold open, if ever, while the person changed
+/// the size in Settings with this screen alive. Once per wake is also the only
+/// place a settings query belongs: asking the store per glyph would put a syscall
 /// inside the paint loop.
 ///
 /// WHY `if let` and not a default: a value this app cannot read is not a level
 /// the person chose, and publishing a rung the store never named would resize
 /// the screen on a guess. The renderer's own default -- the ladder, at one
 /// hundred per cent -- stands.
-fn publish_user_text_scale() {
+fn publish_user_text_scale() -> bool {
+    let before = std::design::font::user_text_scale();
     let mut buf = [0u8; 32];
     if let Ok(n) = std::settings_get(TEXT_SCALE_KEY, &mut buf) {
         if let Some(level) = UserTextScale::from_settings_value(&buf[..n]) {
             let _ = DynamicType::new(level).publish();
         }
     }
+    std::design::font::user_text_scale() != before
 }
 
 /// Whether the published rung is the ladder's own hundred per cent.
@@ -4997,6 +5002,19 @@ pub extern "C" fn _start() -> ! {
     let interest_mask =
         std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
     loop {
+        // WHY on every wake rather than once at launch: the person changes the
+        // text size in Settings while this screen is alive, and a rung read only
+        // at startup resizes nothing until the app is opened cold again. This is
+        // one settings query per wake, ahead of the blocking poll -- never one
+        // per glyph, which is the cost the note beside `publish_user_text_scale`
+        // refuses to pay.
+        let rung_moved = publish_user_text_scale();
+        if rung_moved {
+            // The dock's rows are the recipient band's height at the rung, so the
+            // keyboard module has to be told again before anything measures a
+            // band on this wake.
+            messages::keyboard::set_band_extra_rows(band_extra_rows());
+        }
         match std::event_poll(interest_mask, 30) {
             Ok(events) => {
                 if events & (std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK) != 0 {
@@ -5110,6 +5128,12 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                     }
+                    // WHY a moved rung is a whole-screen repaint: every band on
+                    // this screen -- search row, recipient field, thread list,
+                    // conversation, dock -- is derived from the rung the publish
+                    // above just wrote, so a repaint of one band would leave the
+                    // others sized for the size the person left.
+                    let dirty = if rung_moved { Dirty::All } else { dirty };
                     if dirty != Dirty::None && surface > 0 {
                         match dirty {
                             Dirty::None => {}

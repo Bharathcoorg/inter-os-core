@@ -658,28 +658,33 @@ fn level() -> u8 {
 }
 
 /// Reads the person's text size from the settings store and hands it to the
-/// renderer, once, before anything is drawn.
+/// renderer, answering whether the rung actually moved.
 ///
-/// WHY here and why once: every box in this file -- a row, a chip, a sheet row,
-/// the composer's field, the bar's title and the home gesture's answering box --
-/// is derived from the rung at draw time, so the rung has to be published before
-/// the first of them is placed and it must not change underneath a body that was
-/// already wrapped. A setting the app never reads leaves the published level at
-/// Normal, which is the ladder's own default, so the pixels are what this app
-/// drew before the setting existed.
+/// WHY here and why once before the first frame and again on every wake: every
+/// box in this file -- a row, a chip, a sheet row, the composer's field, the
+/// bar's title and the home gesture's answering box -- is derived from the rung
+/// at draw time, so the rung has to be published before the first of them is
+/// placed and it must not change underneath a body that was already wrapped. A
+/// body wrapped for the rung the person left is the clipped-text defect, and a
+/// rung read only at startup is that defect arriving from the other side: the
+/// size is changed in Settings while this screen is alive, and a rung nobody
+/// re-reads shows up -- if at all -- on the next cold open. Once per wake is one
+/// settings query per frame of events, never one per glyph.
 ///
 /// WHY a read of the store rather than a hardcoded rung: the size belongs to the
 /// person, and it is the same value Settings writes when they move the slider.
 ///
 /// WHY nothing is allocated: the read is into a fixed buffer on this frame, the
 /// way the platform's own Settings surface reads it.
-fn publish_text_scale() {
+fn publish_text_scale() -> bool {
+    let before = level();
     let mut buf = [0u8; 32];
     if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
         if let Some(scale) = UserTextScale::from_settings_value(&buf[..n]) {
             DynamicType::new(scale).publish();
         }
     }
+    level() != before
 }
 
 // WHY checked here: the app's boxes are authored against the ladder, and the
@@ -4822,6 +4827,19 @@ pub extern "C" fn _start() -> ! {
     let _ = std::surface_flip();
 
     loop {
+        // WHY on every wake and not once at launch: the person changes the text
+        // size in Settings while this screen is alive. Reading it here is one
+        // settings query per wake, ahead of the work this loop does -- never one
+        // per glyph, which is the cost the note beside `publish_text_scale`
+        // refuses to pay.
+        let rung_moved = publish_text_scale();
+        if rung_moved {
+            // A moved rung is a different wrapping: the cards are placed, a wide
+            // line's rows are broken and the scroll range is solved from the
+            // rung's boxes, so the body is re-laid before anything measures or
+            // paints it this wake.
+            app.rebuild();
+        }
         // WHY the pipeline is drained before the wait, and not only after a
         // touch woke the app: a key press produces no touch event, so an
         // app that waits for a touch before it reads the pipeline never
@@ -4835,7 +4853,7 @@ pub extern "C" fn _start() -> ! {
             dy: 0,
             scale_milli: 1000,
         };
-        let mut dirty = Dirty::None;
+        let mut dirty = if rung_moved { Dirty::All } else { Dirty::None };
         let mut handled = false;
         while std::input_event_poll(&mut input).is_ok() {
             handled = true;

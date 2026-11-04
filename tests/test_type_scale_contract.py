@@ -366,11 +366,9 @@ def test_the_measurement_tool_measures_cap_heights():
 # is *exactly* once, so the screen that starts re-reading has to be moved out of
 # this list rather than left in it lying.
 #
-# Both of these are the same hole: `agent_manager` and `messages` open at the size
-# the person chose and keep drawing at it after Settings changes it, because
-# neither has a wake path that re-reads the setting. A size changed while one of
-# them is alive lands on the next cold open.
-PUBLISHES_AT_BUILD_ONLY = {"agent_manager", "messages"}
+# Empty is the claim that every screen which reads the size reads it again per
+# wake, because the size is changed in Settings while the screen is alive.
+PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 
 
 # The applications that carry the person's text size, each with the helper that
