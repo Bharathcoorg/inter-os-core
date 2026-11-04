@@ -61,7 +61,7 @@ pub use rag::{
     RAG_INDEX_MAGIC, RAG_INDEX_VERSION, RAG_VECTOR_DIM, STORAGE_SEARCH_DIRS,
 };
 pub use tokenizer::{
-    decode_sequence, decode_token, encode, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, TOKEN_UNK,
+    FileTokenizer, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, TOKEN_UNK,
 };
 pub use std::ai::{
     MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
@@ -1175,7 +1175,7 @@ fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
 const EMBED_TOKEN_IDS_MAX: usize = 32;
 
 /// Which of the three answers an embedding request gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum EmbeddingPlan {
     /// The installed file's tensors, read block by block and run over the token
     /// ids the caller supplied. Answers `STATUS_SUCCESS`.
@@ -1189,20 +1189,36 @@ enum EmbeddingPlan {
 }
 
 /// The gap that stopped an embedding reply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// WHY no `Eq`: `VocabularyRefused` carries a `TokenizerError`, which carries a
+/// `GgufError`, and that enum refuses the derive because a refusal can name a
+/// declared float. A gap is compared for the notice a test reads, not used as an
+/// equivalence class, so `PartialEq` is the whole of what it needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum EmbeddingGap {
     /// The caller demanded physical weights and the probe found no file.
     NoWeights,
-    /// The file is on the device and the caller demanded it, but the request
-    /// carries text and no ids. `tokenizer::encode` matches thirty hard-coded
-    /// subwords and otherwise emits `4 + byte`: an id table nothing ever checked
-    /// against the `tokenizer.ggml.tokens` array this file states, which the
-    /// reader deliberately does not walk. Running the graph on ids from that
-    /// guess would return real arithmetic over real weights for tokens that mean
-    /// something else, and label it the model's embedding of the prompt. The gap
-    /// is the vocabulary-backed mapping, and the reply says so instead of paying
-    /// it with a fabricated one.
+    /// Weights are on the device, the caller demanded them, and the text-to-id
+    /// mapping never produced a stream to run. Until now this was the whole story:
+    /// `tokenizer::encode` matched thirty hard-coded subwords at invented ids
+    /// against a file stating 262,144 tokens, so the gap was the mapping itself and
+    /// the reply said so instead of paying it with a fabricated one.
+    ///
+    /// The mapping now exists (`tokenizer::FileTokenizer` builds it from the
+    /// installed file's own `tokenizer.ggml.tokens`, scores, token types and special
+    /// ids), so this variant means the narrower and still real thing: the file was
+    /// there, the table was attempted, and it produced nothing. The notice says
+    /// which, because "no mapping" and "this file gave no usable mapping" have
+    /// different next moves -- install a model, or read the refusal's numbers.
     NoVocabTokenizer,
+    /// The table was built and the prompt segmented, but the segmentation is
+    /// `needed` positions and the run answers at most `bound`. Carries both numbers
+    /// rather than truncating: a cut-off id stream is a different prompt, and the
+    /// engine would return a real vector for it under a neural label.
+    IdStreamFull(usize, usize),
+    /// The table itself refused. Carries the `TokenizerError`, which already names
+    /// its own two numbers for every bound it enforces.
+    VocabularyRefused(tokenizer::TokenizerError),
 }
 
 /// Picks the branch from the inputs, before anything is opened.
@@ -1227,6 +1243,90 @@ fn plan_embedding_run(
     }
 }
 
+/// What the arm's attempt to map a text to the installed file's ids produced.
+///
+/// WHY a type rather than an `Option<TokenIds>`: "not attempted", "encoded", "too
+/// many positions" and "the file gave no table" are four different answers, and the
+/// status a reply carries has to follow whichever one actually happened. Collapsing
+/// them to `None` is how a lexical answer keeps a neural label -- the failure this
+/// crate's whole status discipline exists to stop.
+#[derive(Clone, Copy)]
+enum TextIds {
+    /// The caller sent its own ids, or sent no text, so no mapping was needed.
+    NotAttempted,
+    /// The installed file's own table segmented the text; `ids` are its ids.
+    ///
+    /// WHAT THIS IS EVIDENCE OF, AND WHAT IT IS NOT: the ids came out of a table
+    /// built from this file's declared vocabulary, so they address rows the file
+    /// has. It is NOT a claim that they are the ids this architecture's reference
+    /// tokenizer would have chosen -- `tokenizer.rs` states why that parity is not
+    /// measurable on this host, and nothing here says otherwise.
+    Encoded { ids: TokenIds },
+    /// The segmentation is `needed` positions against a run answering `bound`.
+    TooManyIds { needed: usize, bound: usize },
+    /// The file refused to yield a table.
+    Refused(tokenizer::TokenizerError),
+}
+
+impl TextIds {
+    fn ids(&self) -> Option<TokenIds> {
+        match *self {
+            Self::Encoded { ids } => Some(ids),
+            _ => None,
+        }
+    }
+}
+
+/// Folds what the mapping produced into the branch the reply will take.
+///
+/// WHY this is separate from `plan_embedding_run` and pure: the planner picks the
+/// branch from inputs a reader can check before anything is opened, and the mapping
+/// can only be attempted once a file is opened. Splitting the two keeps the
+/// contract gate's rule -- the decision is a function of its named inputs, no file
+/// access inside it -- and puts the one input the file can change, the mapping's
+/// result, in a function the host can prove from a table too.
+///
+/// The direction it can move a plan is one-way and it is only ever up-or-sideways
+/// from `LexicalBaseline`: an encoded stream earns the file-backed branch, and a
+/// refusal costs the strict-neural caller its answer. A caller who did not demand
+/// neural weights keeps the labelled baseline, because that is still an honest
+/// reply and refusing it would be a worse service, not a truer one.
+fn apply_file_vocabulary(plan: EmbeddingPlan, text: &TextIds) -> EmbeddingPlan {
+    match (plan, text) {
+        // The mapping answered with ids the installed file's own vocabulary
+        // declares, so the run it enables is the run both callers wanted: the one
+        // that never demanded weights takes it as a better labelled answer, and the
+        // one that demanded weights stops being refused for a mapping that no longer
+        // has to be invented.
+        (EmbeddingPlan::LexicalBaseline, TextIds::Encoded { .. }) => {
+            EmbeddingPlan::RunInstalledFile
+        }
+        (EmbeddingPlan::Refuse(EmbeddingGap::NoVocabTokenizer), TextIds::Encoded { .. }) => {
+            EmbeddingPlan::RunInstalledFile
+        }
+
+        // The strict caller is refused by the refusal that actually stopped it, with
+        // its numbers, instead of by the general "no mapping" the planner could only
+        // guess at before the file was opened.
+        (
+            EmbeddingPlan::Refuse(EmbeddingGap::NoVocabTokenizer),
+            TextIds::TooManyIds { needed, bound },
+        ) => EmbeddingPlan::Refuse(EmbeddingGap::IdStreamFull(*needed, *bound)),
+        (EmbeddingPlan::Refuse(EmbeddingGap::NoVocabTokenizer), TextIds::Refused(error)) => {
+            EmbeddingPlan::Refuse(EmbeddingGap::VocabularyRefused(*error))
+        }
+
+        // Anything else keeps the branch the inputs chose. A caller who never
+        // demanded weights is not deprived of the labelled baseline because this
+        // file's table was short, oversized or absent: that refusal would name a gap
+        // the caller does not care about and answer nothing where an honest answer
+        // was already available.
+        (EmbeddingPlan::RunInstalledFile, _) => EmbeddingPlan::RunInstalledFile,
+        (EmbeddingPlan::Refuse(gap), _) => EmbeddingPlan::Refuse(gap),
+        (EmbeddingPlan::LexicalBaseline, _) => EmbeddingPlan::LexicalBaseline,
+    }
+}
+
 /// A bounded token-id stream, held on the stack rather than the heap.
 #[derive(Clone, Copy)]
 struct TokenIds {
@@ -1237,6 +1337,39 @@ struct TokenIds {
 impl TokenIds {
     fn as_slice(&self) -> &[u32] {
         &self.ids[..self.len]
+    }
+}
+
+/// Maps a text to the installed file's own ids, from a table read out of that file.
+///
+/// WHY the table is built here and dropped when this returns: `FileTokenizer` holds
+/// a vocabulary on the heap -- five and a half megabytes for the installed file --
+/// and the `aid` loop has no place to keep one between requests without a lock,
+/// which the platform's rule says a request path does not take. So the mapping is
+/// paid for per request, its cost is bounded by `tokenizer::TOKENIZER_HEAP_BUDGET`,
+/// and its refusal names both numbers instead of half-building a table.
+///
+/// WHY `NotAttempted` before the file is even opened: the caller's own ids beat
+/// anything computed here, and an empty query has nothing to map. Reaching for a
+/// vocabulary in either case would open a file to answer a question not asked.
+fn encode_with_installed_file(path: &str, text: &[u8]) -> TextIds {
+    if path.is_empty() || text.is_empty() {
+        return TextIds::NotAttempted;
+    }
+    let table = match tokenizer::FileTokenizer::build_from_file(path) {
+        Ok(table) => table,
+        Err(error) => return TextIds::Refused(error),
+    };
+    let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];
+    match table.encode(text, &mut ids) {
+        // `encode` answers `Ok` only for a segmentation that fit the buffer, so no
+        // count here can exceed the array it was written into.
+        Ok(len) => TextIds::Encoded {
+            ids: TokenIds { ids, len },
+        },
+        Err(tokenizer::EncodeError::BeyondBuffer { needed, bound }) => {
+            TextIds::TooManyIds { needed, bound }
+        }
     }
 }
 
@@ -1556,13 +1689,120 @@ fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [
             STATUS_UNAVAILABLE
         }
         EmbeddingGap::NoVocabTokenizer => {
+            // WHY this still exists: the mapping is now read from the file, so
+            // nothing should land here -- but the planner can be handed a strict
+            // request whose text was never offered to the table, and an unreachable
+            // branch is not a reason to remove the one refusal that names the
+            // vocabulary gap in the words the contract gate reads. It says what the
+            // file is missing, and it does not claim the ids were ever guessed.
             notice.word(
-                b"Embedding refused: the strict-neural flag is set and this request carries text, not token ids. No mapping from text to this file's vocabulary is wired -- the vocabulary array is never walked and the built-in id table is a guess checked against nothing -- so the file's tensors cannot be run over this prompt. Send a token-id stream, or drop the flag and take the labelled lexical baseline.",
+                b"Embedding refused: the strict-neural flag is set and this request carries text, not token ids, and no ids were mapped from the installed file's own declared vocabulary. Send a token-id stream, or drop the flag and take the labelled lexical baseline.",
+            );
+            STATUS_UNSUPPORTED
+        }
+        EmbeddingGap::IdStreamFull(needed, bound) => {
+            notice.word(b"Embedding refused: this file's own vocabulary segments the text into ");
+            notice.byte_count(needed as u64);
+            notice.word(b" token ids and one embedding run answers at most ");
+            notice.byte_count(bound as u64);
+            notice.word(
+                b". Nothing was truncated -- a cut-off id stream is a different prompt, and its vector would be filed under this one. Send a shorter text, or a token-id stream of your own.",
+            );
+            STATUS_UNSUPPORTED
+        }
+        EmbeddingGap::VocabularyRefused(error) => {
+            // The table said why, in numbers, and both are relayed rather than
+            // flattened into one "unsupported": a 16 MiB budget and a 129-byte piece
+            // have different next moves.
+            notice.word(b"Embedding refused: the installed file yielded no vocabulary table -- ");
+            tokenizer_refusal_words(error, &mut notice);
+            notice.word(
+                b" Drop the strict-neural flag to take the labelled lexical baseline, or send a token-id stream.",
             );
             STATUS_UNSUPPORTED
         }
     };
     (status, notice.finish())
+}
+
+/// Renders one `TokenizerError` into a refusal notice, with the numbers it carries.
+///
+/// WHY a helper: three of these refusals name two numbers each, and a notice that
+/// said "too large" without them would leave the reader with nothing to act on --
+/// the same reason every other refusal in this file prints both.
+fn tokenizer_refusal_words<'a>(error: tokenizer::TokenizerError, notice: &mut Notice<'a>) {
+    use tokenizer::TokenizerError as E;
+    match error {
+        E::Reader(gguf::GgufError::UnsupportedVersion(v)) => {
+            notice.word(b"GGUF version ");
+            notice.byte_count(v as u64);
+            notice.word(b" is not one the reader walks.");
+        }
+        E::Reader(gguf::GgufError::CorruptedTensor) => {
+            notice.word(b"the metadata walk lost its place at a tensor descriptor.");
+        }
+        E::Reader(gguf::GgufError::BufferTooShort) => {
+            notice.word(b"the file stopped inside its own metadata.");
+        }
+        E::Reader(gguf::GgufError::InvalidMetadata) => {
+            notice.word(b"a metadata value is not the shape its key names.");
+        }
+        E::Reader(gguf::GgufError::ReadFailed) => {
+            notice.word(b"a positioned read of the metadata failed.");
+        }
+        E::Reader(_) => notice.word(b"the metadata reader refused the file."),
+        E::NoVocabulary => notice.word(
+            b"the file states no tokenizer.ggml.tokens the encoder is allowed to emit, and there is no built-in vocabulary to fall back to.",
+        ),
+        E::FileNotFound => {
+            notice.word(b"the file the probe named could not be opened when the table was built.")
+        }
+        E::VocabTooLarge(needed, budget) => {
+            notice.word(b"its declared vocabulary needs ");
+            notice.byte_count(needed as u64);
+            notice.word(b" bytes against a bound of ");
+            notice.byte_count(budget as u64);
+            notice.word(b"; it was refused before a single token was read.");
+        }
+        E::VocabHeldTooLarge(needed, budget) => {
+            notice.word(b"the table outgrew its estimate at ");
+            notice.byte_count(needed as u64);
+            notice.word(b" bytes against a bound of ");
+            notice.byte_count(budget as u64);
+            notice.word(b".");
+        }
+        E::PieceTooLong(id, stated, bound) => {
+            notice.word(b"token id ");
+            notice.number(id);
+            notice.word(b" states ");
+            notice.byte_count(stated as u64);
+            notice.word(b" bytes where the reader's window holds ");
+            notice.byte_count(bound as u64);
+            notice.word(b".");
+        }
+        E::ArrayLengthMismatch(key, found, expected) => {
+            notice.word(key.as_bytes());
+            notice.word(b" declares ");
+            notice.number(found);
+            notice.word(b" entries beside a vocabulary of ");
+            notice.number(expected);
+            notice.word(b".");
+        }
+        E::BadArrayShape(key, found) => {
+            notice.word(key.as_bytes());
+            notice.word(b" has element type ");
+            notice.number(found);
+            notice.word(b", which is not the kind that key names.");
+        }
+        E::Truncated(key) => {
+            notice.word(b"the file stopped inside ");
+            notice.word(key.as_bytes());
+            notice.word(b".");
+        }
+        E::ArithmeticOverflow => {
+            notice.word(b"a length in the file does not fit this device's address width.")
+        }
+    }
 }
 
 /// Answers an embedding request with the lexical projection, labelled as such.
@@ -2055,12 +2295,37 @@ pub fn handle_ipc_inference_query(
     }
 
     // The ids this request carries, if it carries any. Read before the branch is
-    // chosen, because the branch is chosen from them: `Some(_)` is the only input
-    // that lets the installed file run at all.
+    // chosen, because the branch is chosen from them: a whole id stream is what
+    // lets the installed file run without anything being computed first.
     let token_ids = if (request_flags & std::ai::FLAG_INPUT_TOKEN_IDS) != 0 {
         read_token_ids(query_text)
     } else {
         None
+    };
+
+    // What the caller's ids could not supply, this file can: a text request whose
+    // ids nobody sent is mapped through the vocabulary the installed file declares.
+    //
+    // WHY the attempt sits in the arm and not in `run_installed_embedding`: the
+    // contract gate that keeps the loader honest reads `run_installed_embedding`
+    // and refuses to find a tokenizer call inside it, because the version that ran
+    // there fed the graph invented ids. Mapping here keeps that gate meaningful --
+    // the loader still takes only ids someone proved the source of -- and the
+    // branch below still only runs on ids that came out of the file itself.
+    //
+    // WHY the caller's own ids win: they are what the caller asked to run, and a
+    // service that re-tokenized a token-id stream would be answering a different
+    // question than the one it was sent.
+    let text_ids = match (token_ids, request_flags & std::ai::FLAG_INPUT_TOKEN_IDS) {
+        (Some(_), _) => TextIds::NotAttempted,
+        (None, 0) => match probed_models.embedding {
+            Some((_hdr, path)) => encode_with_installed_file(path, query_text),
+            None => TextIds::NotAttempted,
+        },
+        // The flag was set and the bytes were not a stream: not a text to map, a
+        // malformed id payload, and `plan_embedding_run` already calls that a file
+        // request -- which is exactly why the baseline is still an honest answer.
+        (None, _) => TextIds::NotAttempted,
     };
 
     let start_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
@@ -2077,6 +2342,12 @@ pub fn handle_ipc_inference_query(
         token_ids.map(|ids| ids.len),
         strict_neural_required,
     );
+
+    // The plan's second input, the one only the file can supply: what the mapping
+    // of this text produced. `apply_file_vocabulary` is where a text request earns
+    // the file-backed branch or loses the strict one, and it is a pure function of
+    // `(plan, text_ids)` so the host can prove both directions.
+    let plan = apply_file_vocabulary(plan, &text_ids);
 
     let (report, dim, vector) = match plan {
         EmbeddingPlan::Refuse(gap) => {
@@ -2097,8 +2368,10 @@ pub fn handle_ipc_inference_query(
         EmbeddingPlan::RunInstalledFile => {
             // The plan asked for both of these. A pair that is not here answers
             // from the baseline rather than unwrapping, so no future change to the
-            // planner can turn this arm into a panic inside the service loop.
-            let (path, ids) = match (probed_models.embedding, token_ids) {
+            // planner can turn this arm into a panic inside the service loop. The
+            // ids may come from the caller or from this file's own vocabulary, and
+            // those two are told apart by `text_ids`, not by the pair.
+            let (path, ids) = match (probed_models.embedding, token_ids.or(text_ids.ids())) {
                 (Some((_hdr, path)), Some(ids)) => (path, ids),
                 _ => {
                     let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
@@ -2354,12 +2627,31 @@ mod tests {
     #[test]
     fn test_real_neural_forward_and_tokenizer_pipeline() {
         let text = b"The system battery status is ok";
-        let mut tokens = [0u32; 32];
-        let n_tokens = tokenizer::encode(text, &mut tokens, true);
-        assert!(n_tokens > 0);
 
+        // The ids come out of a walk over a file that has the installed model's
+        // shape, because the pipeline this test is named for starts at the file.
+        // Typed-in ids would let the graph certify an answer the tokenizer never
+        // produced, which is exactly the pairing the invented table made unverifiable.
+        let bytes = tokenizer::test_vocabulary::installed_shape();
+        let mut stream = gguf::GgufStream::from_slice(&bytes);
+        let table = tokenizer::FileTokenizer::build_from_stream(&mut stream)
+            .expect("the fixture vocabulary builds a table");
+        let mut tokens = [0u32; 32];
+        let n_tokens = table
+            .encode(text, &mut tokens)
+            .expect("this text segments inside thirty positions");
+        assert!(n_tokens > 0);
+        assert!(
+            tokens[..n_tokens]
+                .iter()
+                .all(|&id| (id as usize) < table.declared_vocab() as usize),
+            "the graph was fed an id this vocabulary never declared"
+        );
+
+        // Position zero is the bos the fixture's own `add_bos_token` asked for, so
+        // the round trip is asserted over the text-bearing tail.
         let mut decoded = [0u8; 64];
-        let n_bytes = tokenizer::decode_sequence(&tokens[1..n_tokens], &mut decoded);
+        let n_bytes = table.decode_sequence(&tokens[1..n_tokens], &mut decoded);
         assert_eq!(&decoded[..n_bytes], text);
 
         let config = inference::ModelConfig::default_test_config();
@@ -3307,6 +3599,82 @@ mod tests {
         }
     }
 
+    /// The fold, in a table: what the mapping proved is the only thing that may
+    /// move a plan, and it moves each plan exactly as far as that caller demanded.
+    ///
+    /// WHY pinned here rather than only at the arm: on the host no model file can be
+    /// opened, so the arm can only ever show a mapping that failed. Both directions
+    /// of the mistake are asserted -- a plan that would run on ids the table never
+    /// produced, and a labelled baseline taken away from a caller that never asked
+    /// for weights.
+    #[test]
+    fn test_the_fold_only_ever_moves_a_plan_as_far_as_the_mapping_proved() {
+        use {EmbeddingGap::*, EmbeddingPlan::*, TextIds::*};
+        fn mapped() -> TextIds {
+            let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];
+            ids[0] = 2;
+            ids[1] = 4;
+            Encoded { ids: TokenIds { ids, len: 2 } }
+        }
+        let failures = [
+            (
+                TooManyIds { needed: 40, bound: 32 },
+                "a segmentation past the bound",
+            ),
+            (
+                Refused(tokenizer::TokenizerError::NoVocabulary),
+                "a table the file refused to yield",
+            ),
+            (NotAttempted, "a mapping nobody attempted"),
+        ];
+
+        // The file's own ids turn both text callers into a run: the one content with
+        // a projection, and the one that demanded weights and was refused only
+        // because the mapping used to be invented.
+        assert_eq!(apply_file_vocabulary(LexicalBaseline, &mapped()), RunInstalledFile);
+        assert_eq!(
+            apply_file_vocabulary(Refuse(NoVocabTokenizer), &mapped()),
+            RunInstalledFile,
+            "ids this file's own vocabulary declared were refused anyway"
+        );
+
+        for (failure, name) in failures {
+            // A caller who never demanded weights keeps the honest answer whatever
+            // this file's table did.
+            assert_eq!(
+                apply_file_vocabulary(LexicalBaseline, &failure),
+                LexicalBaseline,
+                "{name} cost a non-strict caller its labelled baseline"
+            );
+            // The strict caller is refused, and by the refusal that actually stopped
+            // the table rather than by the general gap the planner could only guess.
+            let moved = apply_file_vocabulary(Refuse(NoVocabTokenizer), &failure);
+            if !matches!(failure, NotAttempted) {
+                assert_ne!(
+                    moved,
+                    Refuse(NoVocabTokenizer),
+                    "the notice still blames a mapping that was attempted and failed: {name}"
+                );
+            } else {
+                assert_eq!(moved, Refuse(NoVocabTokenizer), "{name} moved a refusal");
+            }
+        }
+
+        // No mapping outcome conjures a file that was never found, and none demotes
+        // a run the caller's own ids already earned.
+        for plan in [Refuse(NoWeights), RunInstalledFile] {
+            for (text, name) in [
+                (mapped(), "ids the file's own vocabulary declared"),
+                (
+                    TooManyIds { needed: 40, bound: 32 },
+                    "a segmentation past the bound",
+                ),
+            ] {
+                assert_eq!(apply_file_vocabulary(plan, &text), plan, "{name} moved {plan:?}");
+            }
+        }
+    }
+
     /// The defect this closes, stated as one assertion: a file on the device must
     /// not become a neural answer on its own.
     #[test]
@@ -3383,7 +3751,14 @@ mod tests {
     }
 
     /// Strict neural, a file on the device, and text: the arm refuses and names
-    /// the missing vocabulary mapping instead of quietly answering.
+    /// what stopped the mapping instead of quietly answering.
+    ///
+    /// WHAT THE NOTICE SAYS NOW: on the host the probe's path cannot be opened, so
+    /// the refusal is the file's own reader error rather than the older "no mapping
+    /// exists from text to token ids" -- which was true only while the mapping was
+    /// invented. A device that can read the file answers this request by running it,
+    /// and `test_the_fold_only_ever_moves_a_plan_as_far_as_the_mapping_proved` is
+    /// where that branch is pinned, because no host case can open a model.
     #[test]
     fn test_strict_neural_with_text_refuses_and_names_the_tokenizer_gap() {
         let mut tx_buf = [0u8; 1024];
@@ -3399,8 +3774,14 @@ mod tests {
         assert_ne!(resp.status, STATUS_BASELINE_LEXICAL, "it answered instead of refusing");
         let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
         let notice = core::str::from_utf8(notice).expect("the refusal is text");
-        assert!(notice.contains("token ids"), "the refusal lost the gap: {notice}");
-        assert!(notice.contains("vocabulary"), "the refusal no longer names what is missing");
+        assert!(
+            notice.contains("no vocabulary table"),
+            "the refusal stopped naming the table it could not build: {notice}"
+        );
+        assert!(
+            notice.contains("Drop the strict-neural flag"),
+            "the refusal no longer names the two moves the caller has: {notice}"
+        );
     }
 
     /// Strict neural with no file: refused as unavailable, as it always was --

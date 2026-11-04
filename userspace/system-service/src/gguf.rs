@@ -2257,8 +2257,23 @@ pub fn probe_all_models() -> ProbedModels {
     }
 }
 
+/// The fixture writers below, reachable from another module's tests.
+///
+/// WHY this bridge exists: `tokenizer.rs` builds whole GGUF fixtures inside its own
+/// `#[cfg(test)]` module, and the writers that make a byte-correct file are already
+/// written and tested here. A second copy of them next door is how a fixture drifts
+/// away from the format one reader is careful about. This re-exports them rather
+/// than moving them, so `gguf.rs`'s own tests keep calling them the same way.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_writers {
+    pub(crate) use super::tests::{
+        begin_file, put_bool, put_count, put_f32_array, put_i32_array, put_key, put_string,
+        put_u32_at, put_u64_at, put_vocab,
+    };
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2592,23 +2607,23 @@ mod tests {
         assert_eq!(t.offset, 16384);
     }
 
-    fn put_u32_at(buf: &mut [u8], off: &mut usize, value: u32) {
+    pub(crate) fn put_u32_at(buf: &mut [u8], off: &mut usize, value: u32) {
         buf[*off..*off + 4].copy_from_slice(&value.to_le_bytes());
         *off += 4;
     }
 
-    fn put_u64_at(buf: &mut [u8], off: &mut usize, value: u64) {
+    pub(crate) fn put_u64_at(buf: &mut [u8], off: &mut usize, value: u64) {
         buf[*off..*off + 8].copy_from_slice(&value.to_le_bytes());
         *off += 8;
     }
 
-    fn put_key(buf: &mut [u8], off: &mut usize, key: &[u8]) {
+    pub(crate) fn put_key(buf: &mut [u8], off: &mut usize, key: &[u8]) {
         put_u64_at(buf, off, key.len() as u64);
         buf[*off..*off + key.len()].copy_from_slice(key);
         *off += key.len();
     }
 
-    fn put_string(buf: &mut [u8], off: &mut usize, key: &[u8], value: &[u8]) {
+    pub(crate) fn put_string(buf: &mut [u8], off: &mut usize, key: &[u8], value: &[u8]) {
         put_key(buf, off, key);
         put_u32_at(buf, off, 8);
         put_u64_at(buf, off, value.len() as u64);
@@ -2616,13 +2631,26 @@ mod tests {
         *off += value.len();
     }
 
-    fn put_count(buf: &mut [u8], off: &mut usize, key: &[u8], value: u32) {
+    pub(crate) fn put_count(buf: &mut [u8], off: &mut usize, key: &[u8], value: u32) {
         put_key(buf, off, key);
         put_u32_at(buf, off, 4);
         put_u32_at(buf, off, value);
     }
 
-    fn put_float(buf: &mut [u8], off: &mut usize, key: &[u8], value: f32) {
+    /// A type-7 boolean: one key, one declared type, one byte, and no padding.
+    ///
+    /// WHY a writer of its own: a flag is the one value in GGUF whose payload is a
+    /// single byte the reader must not reinterpret, so a fixture that wants to write
+    /// a byte that is neither 0 nor 1 -- to prove a reader refuses it -- needs the
+    /// ordinary shape available separately from the abnormal one.
+    pub(crate) fn put_bool(buf: &mut [u8], off: &mut usize, key: &[u8], value: bool) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 7);
+        buf[*off] = u8::from(value);
+        *off += 1;
+    }
+
+    pub(crate) fn put_float(buf: &mut [u8], off: &mut usize, key: &[u8], value: f32) {
         put_key(buf, off, key);
         put_u32_at(buf, off, 6);
         put_u32_at(buf, off, value.to_bits());
@@ -2630,7 +2658,7 @@ mod tests {
 
     /// Writes a string array declaring `count` elements, whose element bytes the
     /// caller may leave unwritten when the reader is expected to stop at it.
-    fn put_vocab(buf: &mut [u8], off: &mut usize, key: &[u8], count: u64, tokens: &[&[u8]]) {
+    pub(crate) fn put_vocab(buf: &mut [u8], off: &mut usize, key: &[u8], count: u64, tokens: &[&[u8]]) {
         put_key(buf, off, key);
         put_u32_at(buf, off, 9);
         put_u32_at(buf, off, 8);
@@ -2642,14 +2670,38 @@ mod tests {
         }
     }
 
+    /// A `tokenizer.ggml.scores`-shaped f32 array: element type 6, then the count,
+    /// then four bytes per value.
+    pub(crate) fn put_f32_array(buf: &mut [u8], off: &mut usize, key: &[u8], values: &[f32]) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 9);
+        put_u32_at(buf, off, 6);
+        put_u64_at(buf, off, values.len() as u64);
+        for value in values {
+            put_u32_at(buf, off, value.to_bits());
+        }
+    }
+
+    /// A `tokenizer.ggml.token_type`-shaped i32 array: element type 5, then the
+    /// count, then four bytes per value.
+    pub(crate) fn put_i32_array(buf: &mut [u8], off: &mut usize, key: &[u8], values: &[i32]) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 9);
+        put_u32_at(buf, off, 5);
+        put_u64_at(buf, off, values.len() as u64);
+        for value in values {
+            put_u32_at(buf, off, value.cast_unsigned());
+        }
+    }
+
     /// Starts a metadata-only GGUF file with `kv_count` pairs to follow.
-    fn begin_file(buf: &mut [u8], kv_count: u64) -> usize {
+    pub(crate) fn begin_file(buf: &mut [u8], kv_count: u64) -> usize {
         begin_gguf(buf, kv_count, 0)
     }
 
     /// Starts a GGUF file that declares `kv_count` metadata pairs and then
     /// `tensor_count` tensor descriptors.
-    fn begin_gguf(buf: &mut [u8], kv_count: u64, tensor_count: u64) -> usize {
+    pub(crate) fn begin_gguf(buf: &mut [u8], kv_count: u64, tensor_count: u64) -> usize {
         let header = GgufHeader {
             magic: GGUF_MAGIC,
             version: 3,
