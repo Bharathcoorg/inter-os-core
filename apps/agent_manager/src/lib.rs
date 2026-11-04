@@ -3049,6 +3049,557 @@ pub fn format_u32(value: u32, buf: &mut [u8]) -> usize {
     n
 }
 
+// -----------------------------------------------------------------------------
+// The row of equal-width controls, and the one place its geometry is written
+// -----------------------------------------------------------------------------
+
+/// A row of controls of equal width, laid out across one content column.
+///
+/// WHY a type and not numbers at each point of use: the agent manager's action
+/// bar paints a button from `(content - (live - 1) * gap) / live` and answers a
+/// tap on the same expression. The tab row carried two copies of exactly this
+/// arithmetic once, wrote the gap count down in one of them, and the sixth tab
+/// ended up painted in one place and pressed in another. A row that is described
+/// once cannot disagree with itself, and both the painter and the hit test read
+/// the description rather than recomputing it.
+#[derive(Clone, Copy, Debug)]
+pub struct ControlRow {
+    /// The column's first column.
+    pub x: usize,
+    /// The column's width.
+    pub w: usize,
+    /// The row's first row.
+    pub y: usize,
+    /// The row's height, which is also its tap band's height.
+    pub h: usize,
+    /// The air every pair of neighbours keeps between itself.
+    pub gap: usize,
+    /// How many controls the row holds; a control with nothing to say is not
+    /// drawn and does not answer, so it is not counted here.
+    pub live: usize,
+}
+
+impl ControlRow {
+    /// The slot the index-th live control takes.
+    pub const fn slot(self, index: usize) -> interos_std::design::primitives::Rect {
+        let width = self.slot_width();
+        interos_std::design::primitives::Rect::new(
+            self.x + index * (width + self.gap),
+            self.y,
+            width,
+            self.h,
+        )
+    }
+
+    /// How wide one live control is.
+    pub const fn slot_width(self) -> usize {
+        if self.live == 0 {
+            return 0;
+        }
+        (self.w - (self.live - 1) * self.gap) / self.live
+    }
+
+    /// Which live control a point landed on, or none.
+    ///
+    /// WHY this walks the slots instead of dividing the offset by a stride: the
+    /// division would make the air between two neighbours answer as the control
+    /// on its right, and a strip nobody drew is not a button. A point is on a
+    /// control when it is inside the very rect that control was painted on, so
+    /// the band this answers and the plate the reader saw are one plate.
+    pub const fn tapped(self, ux: usize, uy: usize) -> Option<usize> {
+        if uy < self.y || uy >= self.y + self.h {
+            return None;
+        }
+        let mut index = 0;
+        while index < self.live {
+            let slot = self.slot(index);
+            if ux >= slot.x && ux < slot.x + slot.w {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The embedding probe
+//
+// WHAT THIS SECTION IS FOR: the screen where the agent manager already asks the
+// platform's inference service for retrieval can also ask it for one embedding.
+// Everything the probe holds is a field the reply carried or an interval the app
+// itself timed, and nothing is inferred from what the app hoped the service would
+// say. The probe's own state names whether an answer has been read at all, so a
+// waiting request is never painted as a completed one.
+// -----------------------------------------------------------------------------
+
+/// The most bytes one mailbox message can carry.
+///
+/// WHY the number is written down: the kernel builds every message through
+/// `IpcMessage::new`, which takes `data.len().min(IPC_MAX_PAYLOAD)` and says
+/// nothing when it cuts (`kernel/src/ipc/mod.rs:34` and `:65`). A reply wider
+/// than this reaches the app shortened, and the only witness left that it was is
+/// the length the service wrote into its own header -- which is why the probe
+/// keeps the arrived count beside the offered one instead of trusting either.
+pub const MAILBOX_PAYLOAD_MAX: usize = 64;
+
+/// The width of the inference service's reply header.
+pub const REPLY_HEADER_BYTES: usize =
+    core::mem::size_of::<interos_std::ai::AiInferenceResponse>();
+
+/// The width of the request header this app writes.
+pub const REQUEST_HEADER_BYTES: usize =
+    core::mem::size_of::<interos_std::ai::AiInferenceRequest>();
+
+/// The most payload bytes one embedding reply can hand the app.
+pub const PROBE_PAYLOAD_MAX: usize = MAILBOX_PAYLOAD_MAX - REPLY_HEADER_BYTES;
+
+/// The most text bytes one embedding request can carry to the service.
+///
+/// WHY it is the mailbox's width minus this app's own header: the kernel copies a
+/// message into a fixed slot and cuts the tail without saying so, so text past
+/// this count would reach the service shorter than the header the app wrote --
+/// `input_len` would claim more bytes than arrived. The app does the cutting, at
+/// this number, and is therefore able to say how much of the typed text it sent.
+pub const PROBE_REQUEST_TEXT_MAX: usize = MAILBOX_PAYLOAD_MAX - REQUEST_HEADER_BYTES;
+
+/// How many leading values the screen lists.
+///
+/// WHY eight: the row's value column fits about forty bytes, and eight signed
+/// components is the most that can be shown without the painter cutting the last
+/// one -- a list that stops mid-number reads as a different list.
+pub const PROBE_VALUES_SHOWN: usize = 8;
+
+/// The longest text one embedding request carries.
+///
+/// WHY it is the composer's own length: the probe sends what the person typed,
+/// and a request wider than the composer can hold would be a request whose text
+/// the screen cannot show back to them.
+pub const PROBE_TEXT_MAX: usize = CHAT_PROMPT_MAX;
+
+/// Where the embedding probe stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeState {
+    /// Nothing has been asked.
+    Idle,
+    /// The request is with the platform and no reply has been read yet.
+    Awaiting,
+    /// A reply was read, and the probe's fields hold what it carried.
+    Answered,
+    /// A reply arrived and is not one this app can read.
+    ///
+    /// WHY it is not folded into `Answered`: a status of zero is the platform's
+    /// own code for success, and a probe that filled its reply fields with
+    /// zeroes would report a refusal it never saw.
+    Unreadable,
+    /// The app's wait ran out and the platform sent nothing.
+    NoReply,
+}
+
+/// The fields one embedding reply actually carried.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbedReply {
+    /// The status code the reply stamped itself.
+    pub status: u32,
+    /// The reply's own `output_dim` field.
+    ///
+    /// WHY it is kept raw: the service puts a dimension in this field when it
+    /// sends vector components and the byte count of a sentence when it sends one
+    /// (`userspace/system-service/src/lib.rs:562-586`), so the number only means
+    /// something beside the status that sent it.
+    pub output_dim: u32,
+    /// The reply's own `latency_micros` field.
+    pub latency: u64,
+    /// The bytes that arrived after the header, kept as the signed values the
+    /// service's Q7 vectors are made of.
+    pub payload: [i8; PROBE_PAYLOAD_MAX],
+    /// How many of them arrived.
+    pub payload_len: u8,
+}
+
+impl EmbedReply {
+    /// Whether this reply is a vector the service says it produced.
+    ///
+    /// WHY the status decides it and not the bytes: `aid` appends embedding
+    /// components to a reply on two arms only -- the lexical baseline, which
+    /// stamps `STATUS_BASELINE_LEXICAL` (`userspace/system-service/src/lib.rs:1583`),
+    /// and the file-backed run, which stamps `STATUS_SUCCESS` (`:2159`). Every
+    /// other embedding answer goes through `emit_response_as`, whose tail is the
+    /// service's own sentence. A status outside those two therefore names words,
+    /// and printing those bytes as numbers would invent a vector out of a refusal.
+    ///
+    /// WHY the first reply after the request is the one to read: on the file-backed
+    /// branch the service sends the vector first (`:2172`) and its measurement
+    /// sentence second (`:2196`), and the app empties any embedding reply that was
+    /// already queued before it asks, so a message it reads after sending cannot
+    /// predate the request.
+    pub const fn carries_vector(&self) -> bool {
+        self.status == interos_std::ai::STATUS_SUCCESS
+            || self.status == interos_std::ai::STATUS_BASELINE_LEXICAL
+    }
+
+    /// The attribution this reply's own status supports.
+    pub const fn attribution(&self) -> Option<&'static [u8]> {
+        embed_attribution(self.status)
+    }
+
+    /// The payload as bytes, for a screen that is showing the service's sentence.
+    ///
+    /// WHY it is kept signed: the same bytes are a vector's components on one
+    /// status and the service's sentence on another, and the only difference is
+    /// how the screen reads them. `EmbedProbe::sentence_bytes` does that reading,
+    /// and a caller that wants the numbers reads the field directly.
+    pub fn payload_bytes(&self) -> &[i8] {
+        &self.payload[..self.payload_len as usize]
+    }
+}
+
+/// The attribution an embedding status supports, in the app's existing vocabulary,
+/// or nothing when the status supports none.
+///
+/// WHY these two words and no others: the app already attributes an answer to one
+/// of two sources -- `[Neural RAG]` when the platform's hit says physical weights
+/// were used and `[Lexical RAG]` when it says they were not (`main.rs`, and
+/// `interos_std::ai::AiSearchHit::is_neural`). An embedding reply carries no
+/// retrieval, so the words stand without the "RAG": the SDK defines
+/// `STATUS_BASELINE_LEXICAL` as the lexical projection with "no tensor of any
+/// model file ... read to make it", and `STATUS_SUCCESS` as the answer that is not
+/// that projection (`sdk/rust/interos-std/src/ai.rs:103-125`).
+///
+/// WHY `None` is not spelled `[Unknown]`: a refusal reply says in its own sentence
+/// why nothing ran. Attributing it here would be the app's guess about a branch it
+/// did not observe, and the sentence is the observation.
+pub const fn embed_attribution(status: u32) -> Option<&'static [u8]> {
+    if status == interos_std::ai::STATUS_SUCCESS {
+        Some(b"[Neural]")
+    } else if status == interos_std::ai::STATUS_BASELINE_LEXICAL {
+        Some(b"[Lexical]")
+    } else {
+        None
+    }
+}
+
+/// Reads one embedding reply, or reports that the bytes are not one.
+///
+/// WHY `None` and not a zeroed reply: a message shorter than the header names no
+/// status and no dimension, and a screen built on zeroes would report the
+/// platform as having answered `0` when it answered nothing at all.
+pub fn read_embed_reply(bytes: &[u8]) -> Option<EmbedReply> {
+    if bytes.len() < REPLY_HEADER_BYTES {
+        return None;
+    }
+    // WHY unaligned: the reply arrives in a byte buffer the mailbox filled, and
+    // the header is read the same way the service wrote it.
+    let header = unsafe {
+        core::ptr::read_unaligned(
+            bytes.as_ptr() as *const interos_std::ai::AiInferenceResponse,
+        )
+    };
+    let tail = &bytes[REPLY_HEADER_BYTES..];
+    let take = tail.len().min(PROBE_PAYLOAD_MAX);
+    let mut payload = [0i8; PROBE_PAYLOAD_MAX];
+    let mut index = 0;
+    while index < take {
+        payload[index] = tail[index] as i8;
+        index += 1;
+    }
+    Some(EmbedReply {
+        status: header.status,
+        output_dim: header.output_dim,
+        latency: header.latency_micros,
+        payload,
+        payload_len: take as u8,
+    })
+}
+
+/// What the app asked the platform to embed, and what the reply carried back.
+#[derive(Clone, Copy, Debug)]
+pub struct EmbedProbe {
+    /// Where the request stands.
+    pub state: ProbeState,
+    /// The text the app sent, kept so the screen can show what was asked.
+    pub text: [u8; PROBE_TEXT_MAX],
+    /// How much of it was sent.
+    pub text_len: u16,
+    /// How much the person had typed when the request went out.
+    ///
+    /// WHY it is kept beside `text_len`: the two differ whenever the composer held
+    /// more than one request can carry, and a screen that showed only the sent
+    /// count would read as though nothing had been cut.
+    pub typed_bytes: u16,
+    /// The dimension the request asked for, as the request carried it.
+    pub asked_dim: u32,
+    /// Whether the app named a dimension at all. `false` means it sent `0`, which
+    /// is the request that leaves the service's own default standing.
+    pub asked_named_dim: bool,
+    /// How many bytes the request was.
+    pub request_bytes: u16,
+    /// The tick the request went out on.
+    pub sent_at_tick: u64,
+    /// The interval the app measured around the send call.
+    pub send_ticks: u64,
+    /// The interval between the request and the reply the app read.
+    pub reply_ticks: u64,
+    /// The tick by which the platform must have answered.
+    pub deadline: u64,
+    /// The status the reply carried.
+    pub status: u32,
+    /// The reply's `output_dim` field, raw.
+    pub reply_dim: u32,
+    /// The reply's `latency_micros` field, raw.
+    pub reply_latency: u64,
+    /// Whether the reply carried vector components.
+    pub reply_is_vector: bool,
+    /// The attribution the reply's status supported, if any.
+    pub attributed: bool,
+    /// The bytes that arrived after the reply's header.
+    pub payload: [i8; PROBE_PAYLOAD_MAX],
+    /// How many of them arrived.
+    pub payload_len: u8,
+    /// How many bytes the reply said its payload was, from its own header.
+    pub offered: u32,
+}
+
+impl EmbedProbe {
+    /// A probe that has asked for nothing.
+    pub const fn new() -> Self {
+        Self {
+            state: ProbeState::Idle,
+            text: [0; PROBE_TEXT_MAX],
+            text_len: 0,
+            typed_bytes: 0,
+            asked_dim: 0,
+            asked_named_dim: false,
+            request_bytes: 0,
+            sent_at_tick: 0,
+            send_ticks: 0,
+            reply_ticks: 0,
+            deadline: 0,
+            status: 0,
+            reply_dim: 0,
+            reply_latency: 0,
+            reply_is_vector: false,
+            attributed: false,
+            payload: [0; PROBE_PAYLOAD_MAX],
+            payload_len: 0,
+            offered: 0,
+        }
+    }
+
+    /// Records what the platform sent, on the tick the app read it.
+    pub fn record(&mut self, reply: &EmbedReply, replied_at_tick: u64) {
+        self.status = reply.status;
+        self.reply_dim = reply.output_dim;
+        self.reply_latency = reply.latency;
+        self.reply_is_vector = reply.carries_vector();
+        self.attributed = reply.attribution().is_some();
+        self.payload = reply.payload;
+        self.payload_len = reply.payload_len;
+        self.offered = reply.output_dim;
+        self.reply_ticks = replied_at_tick.wrapping_sub(self.sent_at_tick);
+        self.deadline = 0;
+        self.state = ProbeState::Answered;
+    }
+
+    /// Records the request the app is about to send, and forgets the last reply.
+    ///
+    /// WHY the previous reply is cleared here and not left standing: the screen
+    /// shows what the platform sent back, and a card that still held the earlier
+    /// answer while a second request was in flight would report a number the
+    /// person had not asked for again.
+    ///
+    /// WHY `send_ticks` is the caller's: the interval is measured around the send
+    /// call itself, in the app, the same way `send_prompt` measures the one it
+    /// makes; a model layer that slept would be measuring its own arithmetic.
+    pub fn start_request(
+        &mut self,
+        sent: &[u8],
+        typed_len: usize,
+        asked_dim: Option<u32>,
+        request_bytes: usize,
+        sent_at_tick: u64,
+        send_ticks: u64,
+        wait_ticks: u64,
+    ) {
+        let len = sent.len().min(PROBE_TEXT_MAX);
+        let mut index = 0;
+        while index < PROBE_TEXT_MAX {
+            self.text[index] = 0;
+            index += 1;
+        }
+        let mut copy = 0;
+        while copy < len {
+            self.text[copy] = sent[copy];
+            copy += 1;
+        }
+        self.text_len = len as u16;
+        self.typed_bytes = typed_len.min(u16::MAX as usize) as u16;
+        self.asked_dim = asked_dim.unwrap_or(0);
+        self.asked_named_dim = asked_dim.is_some();
+        self.request_bytes = request_bytes as u16;
+        self.sent_at_tick = sent_at_tick;
+        self.send_ticks = send_ticks;
+        self.reply_ticks = 0;
+        self.deadline = sent_at_tick.saturating_add(wait_ticks);
+        self.status = 0;
+        self.reply_dim = 0;
+        self.reply_latency = 0;
+        self.reply_is_vector = false;
+        self.attributed = false;
+        self.payload = [0; PROBE_PAYLOAD_MAX];
+        self.payload_len = 0;
+        self.offered = 0;
+        self.state = ProbeState::Awaiting;
+    }
+
+    /// Records that the wait ran out and the platform sent nothing.
+    ///
+    /// WHY it is a state of its own: the app knows it asked and knows it got no
+    /// answer, which is a fact about this exchange -- unlike `Idle`, which knows
+    /// nothing was asked at all.
+    pub fn report_no_reply(&mut self, gave_up_at_tick: u64) {
+        self.deadline = 0;
+        self.reply_ticks = gave_up_at_tick.wrapping_sub(self.sent_at_tick);
+        self.state = ProbeState::NoReply;
+    }
+
+    /// Records that a reply arrived and this app cannot read it.
+    ///
+    /// WHY the reply fields stay empty: `read_embed_reply` refused the bytes, so
+    /// the app holds no status, no dimension and no payload from them. Filling in
+    /// zeroes would report the platform's answer as `STATUS_SUCCESS`, which is the
+    /// one code it may not have sent.
+    pub fn report_unreadable(&mut self, replied_at_tick: u64) {
+        self.deadline = 0;
+        self.reply_ticks = replied_at_tick.wrapping_sub(self.sent_at_tick);
+        self.state = ProbeState::Unreadable;
+    }
+
+    /// The text the app sent.
+    pub fn sent_text(&self) -> &[u8] {
+        &self.text[..self.text_len as usize]
+    }
+
+    /// The reply's payload as the bytes of the service's own sentence.
+    ///
+    /// WHY a copy into the caller's buffer: the payload is held as the signed
+    /// values a vector is made of, and a sentence is the same bytes read as
+    /// unsigned ones -- `as u8` on an `i8` is a defined reinterpretation, where
+    /// casting a slice's type would not be.
+    pub fn sentence_bytes(&self, out: &mut [u8]) -> usize {
+        let take = (self.payload_len as usize).min(out.len());
+        let mut index = 0;
+        while index < take {
+            out[index] = self.payload[index] as u8;
+            index += 1;
+        }
+        take
+    }
+
+    /// How many vector components reached the app.
+    pub fn values_arrived(&self) -> usize {
+        self.payload_len as usize
+    }
+
+    /// Writes the leading vector components the reply carried, and reports how
+    /// many of them fit.
+    ///
+    /// WHY the reply has to be a vector: on a refusal the same bytes are the
+    /// service's sentence, and `101` for `e` printed under a "values" label is a
+    /// vector nobody sent. The caller checks the state the reply's own status put
+    /// the probe in before it calls this.
+    ///
+    /// WHY a number is never written part-way: a list that stops mid-digit reads
+    /// as a different list, so a component whose digits do not fit ends the list,
+    /// and the returned count says where it ended.
+    pub fn leading_values(&self, out: &mut [u8]) -> (usize, usize) {
+        let show = self.values_arrived().min(PROBE_VALUES_SHOWN);
+        let mut written = 0usize;
+        let mut count = 0usize;
+        let mut digits = [0u8; 8];
+        let mut index = 0;
+        while index < show {
+            let len = format_i16(self.payload[index] as i16, &mut digits);
+            let need = len + if count == 0 { 0 } else { 2 };
+            if written + need > out.len() {
+                break;
+            }
+            if count > 0 {
+                out[written] = b',';
+                out[written + 1] = b' ';
+                written += 2;
+            }
+            let mut copy = 0;
+            while copy < len {
+                out[written] = digits[copy];
+                written += 1;
+                copy += 1;
+            }
+            count += 1;
+            index += 1;
+        }
+        (written, count)
+    }
+}
+
+/// Builds one embedding request: the service's own header, then the text.
+///
+/// WHY the header and not the bare text: a payload the service cannot read as a
+/// header is taken as a prompt whole, which would make the requested dimension a
+/// guess. Filling the header is what lets the app state the dimension it asked
+/// for and have the reply name the dimension that came back.
+///
+/// WHY `model_id` is zero and no name is attached to it: the embedding arm of the
+/// service reads no model out of a request -- it answers from the one file its
+/// probe found, or from the baseline -- so naming a model here would be the app
+/// claiming a choice the platform does not make.
+///
+/// WHY no token-id flag is set: the request carries text, and the flag that
+/// promises ids (`interos_std::ai::FLAG_INPUT_TOKEN_IDS`) would send this text as
+/// though its bytes were vocabulary ids. The service's own planning function
+/// routes text with no ids to a labelled answer, and the probe reports whichever
+/// answer comes back.
+///
+/// WHY the text is cut here, at the buffer's own width: the mailbox would cut it
+/// at sixty-four bytes and leave the header claiming more text than arrived. A
+/// caller that writes this far into `out` knows exactly how many typed bytes went
+/// -- `out.len() - REQUEST_HEADER_BYTES` -- and so can say so on the screen.
+pub fn build_embed_request(
+    text: &[u8],
+    asked_dim: Option<u32>,
+    out: &mut [u8],
+) -> Option<usize> {
+    let header_bytes = core::mem::size_of::<interos_std::ai::AiInferenceRequest>();
+    if out.len() < header_bytes {
+        return None;
+    }
+    let len = text.len().min(out.len() - header_bytes).min(PROBE_TEXT_MAX);
+    let request = interos_std::ai::AiInferenceRequest {
+        model_id: 0,
+        target_dim: asked_dim.unwrap_or(0),
+        input_len: len as u32,
+        flags: 0,
+        input_offset: 0,
+    };
+    let header = unsafe {
+        core::slice::from_raw_parts(
+            &request as *const interos_std::ai::AiInferenceRequest as *const u8,
+            header_bytes,
+        )
+    };
+    let mut index = 0;
+    while index < header_bytes {
+        out[index] = header[index];
+        index += 1;
+    }
+    let mut tail = 0;
+    while tail < len {
+        out[header_bytes + tail] = text[tail];
+        tail += 1;
+    }
+    Some(header_bytes + len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4241,5 +4792,363 @@ mod tests {
         assert_eq!(provider.package_version(&device), Some((2, 4, 1)));
         assert_eq!(provider.package_lifecycle_state(&device), Some(RegistryPackageState::Active));
         assert_eq!(provider.install_state(&device), InstallState::Installed);
+    }
+
+    // ---------------------------------------------------------------------------
+    // The embedding probe
+    // ---------------------------------------------------------------------------
+
+    /// The agent manager's action bar as `main.rs` describes it.
+    ///
+    /// WHY the numbers are written out here: they are the row the probe control
+    /// is registered in, and a gate that read them from the app would be reading
+    /// the app's own claim back to it. Writing them down is what makes the two
+    /// copies agree in the open; `main.rs` carries a compile-time gate that the
+    /// row it builds is these numbers, so they cannot drift apart quietly.
+    const ACTION_BAR: ControlRow = ControlRow {
+        x: 24,
+        w: 672,
+        y: 1300,
+        h: 52,
+        gap: 8,
+        live: 2,
+    };
+
+    /// The index the embedding probe is registered at in that row.
+    const PROBE_SLOT: usize = 1;
+
+    #[test]
+    fn the_probe_control_answers_the_band_it_is_painted_on() {
+        // WHAT THIS IS FOR: the probe's control is painted from `slot` and
+        // answered from `tapped`, and a control that is drawn in one plate and
+        // pressed in another is a dead affordance the reader can see. The
+        // arithmetic is spelled out below rather than called, so a wrong
+        // derivation in the row itself fails here instead of on the screen.
+        let painted_width = (ACTION_BAR.w - (ACTION_BAR.live - 1) * ACTION_BAR.gap)
+            / ACTION_BAR.live;
+        let painted_x = ACTION_BAR.x + PROBE_SLOT * (painted_width + ACTION_BAR.gap);
+        let painted = ACTION_BAR.slot(PROBE_SLOT);
+        assert_eq!(painted.x, painted_x, "the row's plate is not where the column puts it");
+        assert_eq!(painted.w, painted_width);
+        assert_eq!(painted.y, ACTION_BAR.y);
+        assert_eq!(painted.h, ACTION_BAR.h);
+
+        // The tap band is the painted rect: every point inside it answers, and
+        // the plate's own centre is the point a finger on the plate lands on.
+        assert_eq!(
+            ACTION_BAR.tapped(painted.x + painted.w / 2, painted.y + painted.h / 2),
+            Some(PROBE_SLOT),
+            "the probe's plate does not answer the tap it was drawn for"
+        );
+        assert_eq!(
+            ACTION_BAR.tapped(painted.x, painted.y),
+            Some(PROBE_SLOT),
+            "the plate's first pixel is not the plate"
+        );
+        assert_eq!(
+            ACTION_BAR.tapped(painted.x + painted.w - 1, painted.y + painted.h - 1),
+            Some(PROBE_SLOT),
+            "the plate's last pixel is not the plate"
+        );
+        // And nothing outside it is: the row above, the row below, and the strip
+        // of air the plate keeps from its neighbour.
+        assert_eq!(ACTION_BAR.tapped(painted.x + painted.w / 2, painted.y - 1), None);
+        assert_eq!(
+            ACTION_BAR.tapped(painted.x + painted.w / 2, painted.y + painted.h),
+            None
+        );
+        assert_eq!(ACTION_BAR.tapped(painted.x - 1, painted.y + painted.h / 2), None);
+    }
+
+    #[test]
+    fn the_probe_control_clears_the_platforms_touch_floor() {
+        // WHAT THIS IS FOR: the platform's minimum target is for fingers, and a
+        // plate the reader cannot hit is a control that does not exist.
+        let painted = ACTION_BAR.slot(PROBE_SLOT);
+        assert!(
+            painted.h >= interos_std::design::touch::MIN_TARGET,
+            "the probe's band is {} rows, under the platform's {}-row floor",
+            painted.h,
+            interos_std::design::touch::MIN_TARGET,
+        );
+        assert!(painted.w >= interos_std::design::touch::MIN_TARGET);
+    }
+
+    #[test]
+    fn the_action_bar_loses_no_live_control_when_a_button_has_nothing_to_say() {
+        // WHAT THIS IS FOR: the row counts only the controls it drew, so a third
+        // plate cannot shrink the probe's own out from under its tap band. This
+        // is the drift that put the sixth tab in the wrong place once.
+        let one = ControlRow { live: 1, ..ACTION_BAR };
+        assert_eq!(one.slot(0).w, ACTION_BAR.w);
+        assert_eq!(one.slot(0).x, ACTION_BAR.x);
+        assert_eq!(one.tapped(ACTION_BAR.x + ACTION_BAR.w - 1, ACTION_BAR.y), Some(0));
+        let two = ControlRow { live: 2, ..ACTION_BAR };
+        assert_eq!(two.slot(1).w, two.slot_width());
+        assert_eq!(two.slot(1).x + two.slot(1).w, ACTION_BAR.x + ACTION_BAR.w);
+    }
+
+    /// A reply laid out the way the inference service writes one.
+    ///
+    /// WHY the offsets are written by hand: they are the ABI. `AiInferenceResponse`
+    /// is `repr(C)` with two `u32`s and two `u64`s, so the status stands at zero
+    /// and the payload starts where the header ends. A test that spelled the
+    /// offsets out catches a layout that moved underneath the app.
+    fn a_reply(
+        status: u32,
+        output_dim: u32,
+        latency: u64,
+        payload: &[i8],
+    ) -> [u8; MAILBOX_PAYLOAD_MAX] {
+        let mut bytes = [0u8; MAILBOX_PAYLOAD_MAX];
+        bytes[0..4].copy_from_slice(&status.to_le_bytes());
+        bytes[4..8].copy_from_slice(&output_dim.to_le_bytes());
+        bytes[8..16].copy_from_slice(&latency.to_le_bytes());
+        bytes[16..24].copy_from_slice(&24u64.to_le_bytes());
+        let take = payload.len().min(MAILBOX_PAYLOAD_MAX - REPLY_HEADER_BYTES);
+        let mut index = 0;
+        while index < take {
+            bytes[REPLY_HEADER_BYTES + index] = payload[index] as u8;
+            index += 1;
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_lexical_baseline_reply_is_attributed_lexical_and_not_neural() {
+        // WHAT THIS IS FOR: the status is the only thing the reply carries that
+        // says which arithmetic ran, and a screen that showed a baseline vector as
+        // the model's is the defect the platform added this status to stop.
+        let bytes = a_reply(
+            interos_std::ai::STATUS_BASELINE_LEXICAL,
+            256,
+            1_000,
+            &[3, -4, 12, -127, 127],
+        );
+        // WHY the slice stops where the service's send stopped: the mailbox hands
+        // the app the bytes that arrived, not the width of the buffer it arrived
+        // into, and a reader that walked the whole buffer would report values the
+        // platform never sent.
+        let reply = read_embed_reply(&bytes[..REPLY_HEADER_BYTES + 5]).expect("the bytes are a reply");
+        assert_eq!(reply.status, interos_std::ai::STATUS_BASELINE_LEXICAL);
+        assert_eq!(reply.output_dim, 256);
+        assert!(reply.carries_vector());
+        assert_eq!(reply.attribution(), Some(&b"[Lexical]"[..]));
+        assert_eq!(reply.payload_len, 5);
+        assert_eq!(reply.payload[1], -4);
+        assert_eq!(reply.payload[4], 127);
+    }
+
+    #[test]
+    fn a_file_backed_reply_is_attributed_neural() {
+        let bytes = a_reply(interos_std::ai::STATUS_SUCCESS, 128, 2_000, &[1, 2, 3]);
+        let reply = read_embed_reply(&bytes).expect("the bytes are a reply");
+        assert!(reply.carries_vector());
+        assert_eq!(reply.attribution(), Some(&b"[Neural]"[..]));
+    }
+
+    #[test]
+    fn a_refusal_reply_is_words_and_claims_no_dimension() {
+        // WHAT THIS IS FOR: on a refusal the reply's `output_dim` is the byte
+        // count of the platform's sentence, not a vector's dimension
+        // (`emit_response_as`). Printing it under a "dimension" label would be the
+        // app inventing a shape the service never produced.
+        //
+        // WHY the sentence is longer than what reaches the app: the service's own
+        // refusals run past the mailbox's cut, so this also proves the probe keeps
+        // the words that arrived rather than the words the service meant to send.
+        let sentence =
+            b"Embedding refused: the strict-neural flag is set and no weights file.";
+        let mut wire = [0u8; 128];
+        wire[..REPLY_HEADER_BYTES].copy_from_slice(
+            &a_reply(interos_std::ai::STATUS_UNSUPPORTED, sentence.len() as u32, 0, &[])
+                [..REPLY_HEADER_BYTES],
+        );
+        let mut index = 0;
+        while index < sentence.len() {
+            wire[REPLY_HEADER_BYTES + index] = sentence[index];
+            index += 1;
+        }
+        // The kernel hands the app the first sixty-four bytes of that, and no more.
+        let arrived = &wire[..MAILBOX_PAYLOAD_MAX];
+        let reply = read_embed_reply(arrived).expect("the bytes are a reply");
+        assert_eq!(reply.status, interos_std::ai::STATUS_UNSUPPORTED);
+        assert!(!reply.carries_vector());
+        assert_eq!(reply.attribution(), None);
+        assert_eq!(reply.payload_len as usize, PROBE_PAYLOAD_MAX);
+        assert_eq!(reply.output_dim as usize, sentence.len());
+        let mut probe = EmbedProbe::new();
+        probe.record(&reply, 40);
+        let mut out = [0u8; 96];
+        let len = probe.sentence_bytes(&mut out);
+        assert_eq!(len, PROBE_PAYLOAD_MAX);
+        assert_eq!(&out[..len], &sentence[..PROBE_PAYLOAD_MAX]);
+        // The sentence the platform wrote is longer than the sentence the app was
+        // handed, and the probe holds both numbers so the screen can say so.
+        assert!(probe.values_arrived() < probe.offered as usize);
+    }
+
+    #[test]
+    fn a_message_shorter_than_a_header_is_refused_rather_than_read_as_zeroes() {
+        // WHAT THIS IS FOR: a decode that fell back to zeroes would let the screen
+        // report that the platform answered with status 0 and dimension 0 when it
+        // answered with nothing this app can attribute.
+        assert!(read_embed_reply(&[]).is_none());
+        assert!(read_embed_reply(&[0u8; REPLY_HEADER_BYTES - 1]).is_none());
+        assert!(read_embed_reply(&a_reply(0, 0, 0, &[])).is_some());
+    }
+
+    #[test]
+    fn the_probe_keeps_the_bytes_that_arrived_beside_the_ones_the_reply_offered() {
+        // WHAT THIS IS FOR: the mailbox cuts a reply at sixty-four bytes and says
+        // nothing, so a 256-component vector arrives as forty bytes and the only
+        // witness that the rest did not is the number in the header. A screen that
+        // showed forty values as "the embedding" would be reporting a whole the
+        // app was never handed.
+        let vector = [7i8; 768];
+        let bytes = a_reply(interos_std::ai::STATUS_BASELINE_LEXICAL, 256, 1_000, &vector);
+        let reply = read_embed_reply(&bytes).expect("the bytes are a reply");
+        let mut probe = EmbedProbe::new();
+        probe.sent_at_tick = 1_500;
+        probe.record(&reply, 1_503);
+        assert_eq!(probe.values_arrived(), PROBE_PAYLOAD_MAX);
+        assert_eq!(probe.offered, 256);
+        assert_eq!(probe.reply_ticks, 3);
+        assert_eq!(probe.deadline, 0);
+        assert_eq!(probe.state, ProbeState::Answered);
+        assert!(probe.attributed);
+    }
+
+    #[test]
+    fn the_request_names_the_text_and_carries_no_token_ids() {
+        // WHAT THIS IS FOR: the flag that promises a token-id stream would make
+        // the service read these bytes as vocabulary ids. The probe sends text, so
+        // the reply it gets is the answer the platform gives to text.
+        let text = b"storage";
+        let mut request = [0u8; 256];
+        let len = build_embed_request(text, Some(256), &mut request).expect("it fits");
+        let header = core::mem::size_of::<interos_std::ai::AiInferenceRequest>();
+        assert_eq!(len, header + text.len());
+        assert_eq!(&request[header..len], text);
+        assert_eq!(u32::from_le_bytes([request[4], request[5], request[6], request[7]]), 256);
+        assert_eq!(u32::from_le_bytes([request[8], request[9], request[10], request[11]]), 7);
+        assert_eq!(u32::from_le_bytes([request[12], request[13], request[14], request[15]]), 0);
+        assert_eq!(
+            u32::from_le_bytes([request[0], request[1], request[2], request[3]]),
+            0,
+            "the request named a model the platform does not choose from it"
+        );
+        // The flag is bit 4 of `flags`, and the request sets no flag.
+        let flags = u32::from_le_bytes([request[12], request[13], request[14], request[15]]);
+        assert_eq!(flags & interos_std::ai::FLAG_INPUT_TOKEN_IDS, 0);
+    }
+
+    #[test]
+    fn a_request_takes_the_cut_the_app_can_see_and_not_the_one_the_kernel_hides() {
+        // WHAT THIS IS FOR: the mailbox copies a message into a fixed slot and
+        // shortens it without a word, so a header that promised more text than
+        // arrived would leave the service reading a prompt shorter than the one the
+        // screen says was asked. The app cuts at its own buffer instead, which is
+        // the same line the kernel would have drawn, and can name the number.
+        let typed = [b'x'; 160];
+        let mut request = [0u8; MAILBOX_PAYLOAD_MAX];
+        let len = build_embed_request(&typed, None, &mut request).expect("a header fits");
+        assert_eq!(len, MAILBOX_PAYLOAD_MAX);
+        assert_eq!(len - REQUEST_HEADER_BYTES, PROBE_REQUEST_TEXT_MAX);
+        assert_eq!(
+            u32::from_le_bytes([request[8], request[9], request[10], request[11]]),
+            PROBE_REQUEST_TEXT_MAX as u32,
+            "the header's own count must equal the text bytes that are actually there"
+        );
+
+        // A buffer with no room after the header carries a header and no text, and
+        // a buffer too narrow for the header is refused rather than half-written.
+        let mut header_only = [0u8; REQUEST_HEADER_BYTES];
+        assert_eq!(
+            build_embed_request(b"storage", None, &mut header_only),
+            Some(REQUEST_HEADER_BYTES)
+        );
+        let mut too_small = [0u8; REQUEST_HEADER_BYTES - 1];
+        assert!(build_embed_request(b"storage", None, &mut too_small).is_none());
+    }
+
+    #[test]
+    fn the_probe_before_a_reply_claims_nothing_about_the_platform() {
+        // WHAT THIS IS FOR: the probe is built before anything is asked, and a
+        // screen that painted its zeroed fields would report status 0 -- the
+        // platform's own code for success -- from a request nobody made.
+        let probe = EmbedProbe::new();
+        assert_eq!(probe.state, ProbeState::Idle);
+        assert!(probe.sent_text().is_empty());
+        assert_eq!(probe.payload_len, 0);
+        assert!(!probe.reply_is_vector);
+        assert!(!probe.attributed);
+    }
+
+    #[test]
+    fn asking_again_forgets_the_last_reply_and_keeps_the_ticks_the_app_measured() {
+        // WHAT THIS IS FOR: a card that still held the earlier answer while a
+        // second request was in flight would paint a number the person had not
+        // asked for again, and the interval is the app's own measurement around
+        // its own send call, so it belongs to the new request alone.
+        let mut probe = EmbedProbe::new();
+        let bytes = a_reply(interos_std::ai::STATUS_BASELINE_LEXICAL, 256, 1_000, &[9, 8, 7]);
+        let reply = read_embed_reply(&bytes).expect("the bytes are a reply");
+        probe.sent_at_tick = 1_000;
+        probe.record(&reply, 1_004);
+        assert_eq!(probe.state, ProbeState::Answered);
+
+        probe.start_request(b"second", 6, None, 30, 2_000, 3, 40);
+        assert_eq!(probe.state, ProbeState::Awaiting);
+        assert_eq!(probe.sent_text(), b"second");
+        assert_eq!(probe.typed_bytes, 6);
+        assert_eq!(probe.request_bytes, 30);
+        assert_eq!(probe.asked_dim, 0);
+        assert!(!probe.asked_named_dim);
+        assert_eq!(probe.send_ticks, 3);
+        assert_eq!(probe.deadline, 2_040);
+        assert_eq!(probe.reply_dim, 0);
+        assert_eq!(probe.status, 0);
+        assert_eq!(probe.payload_len, 0);
+        assert!(!probe.attributed);
+        assert!(!probe.reply_is_vector);
+
+        // A request that could not carry everything the person had typed holds
+        // both numbers, so the screen can name the difference instead of hiding it.
+        probe.start_request(&[b'y'; PROBE_REQUEST_TEXT_MAX], 160, Some(512), 64, 3_000, 2, 40);
+        assert_eq!(probe.text_len as usize, PROBE_REQUEST_TEXT_MAX);
+        assert_eq!(probe.typed_bytes, 160);
+        assert!(probe.asked_named_dim);
+    }
+
+    #[test]
+    fn the_leading_values_are_the_replys_own_bytes_and_stop_at_the_buffers_edge() {
+        // WHAT THIS IS FOR: the values shown must be the components that arrived,
+        // spelled by the app's existing signed formatter, and a list the buffer
+        // could not hold has to end between numbers rather than inside one.
+        let mut probe = EmbedProbe::new();
+        assert_eq!(probe.leading_values(&mut [0u8; 32]), (0, 0));
+
+        let bytes = a_reply(
+            interos_std::ai::STATUS_BASELINE_LEXICAL,
+            256,
+            1_000,
+            &[3, -4, 0, -127, 127],
+        );
+        let reply = read_embed_reply(&bytes[..REPLY_HEADER_BYTES + 5]).expect("a reply");
+        probe.record(&reply, 10);
+        assert!(probe.reply_is_vector);
+        let mut line = [0u8; 32];
+        let (written, count) = probe.leading_values(&mut line);
+        assert_eq!(count, 5);
+        assert_eq!(&line[..written], b"3, -4, 0, -127, 127");
+
+        // The fourth value ends the list at byte fourteen and the fifth would need
+        // nineteen, so a buffer of thirteen holds three whole numbers and no more.
+        let mut tight = [0u8; 13];
+        let (cut, cut_count) = probe.leading_values(&mut tight);
+        assert_eq!(cut_count, 3);
+        assert_eq!(&tight[..cut], b"3, -4, 0");
+        assert_eq!(cut, 8);
     }
 }

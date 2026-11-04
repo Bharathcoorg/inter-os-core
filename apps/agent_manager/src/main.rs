@@ -45,15 +45,16 @@ use std::design::scroll::ScrollState;
 use agent_manager::theme::THEME;
 
 use agent_manager::{
-    format_threshold, format_u32, granted_capability_count, load_saved_provider,
-    probe_capability_grants, providers, resolve_inference_service, save_preferred_provider,
-    service_name, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole, ChatSession,
-    ConsentOutcome, DeviceState, InstallState, ModelProbeStatus, PackageInstallOutcome,
-    PackageRemoveOutcome, ProbeStatus, Provider, RegistryPackageState, RuntimeBinding,
-    RuntimeDiagnostics, SearchConfiguration, SelfTest, ServiceState,
-    Surface, ToolAuthority, transact_package_install, transact_package_remove,
-    CAPABILITY_COUNT, CHAT_PROMPT_MAX, CHAT_TEXT_MAX,
-    MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
+    build_embed_request, embed_attribution, format_threshold, format_u32, granted_capability_count,
+    load_saved_provider, probe_capability_grants, providers, read_embed_reply,
+    resolve_inference_service, save_preferred_provider, service_name, AgentTool, AgentToolOutcome,
+    CapabilityGrant, ChatRole, ChatSession, ConsentOutcome, DeviceState, EmbedProbe, InstallState,
+    ModelProbeStatus, PackageInstallOutcome, PackageRemoveOutcome, ProbeState, ProbeStatus,
+    Provider, RegistryPackageState, RuntimeBinding, RuntimeDiagnostics, SearchConfiguration,
+    SelfTest, ServiceState, Surface, ToolAuthority, transact_package_install,
+    transact_package_remove, CAPABILITY_COUNT, CHAT_PROMPT_MAX, CHAT_TEXT_MAX,
+    MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, PROBE_PAYLOAD_MAX,
+    PROBE_REQUEST_TEXT_MAX, REQUEST_HEADER_BYTES, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
 // -----------------------------------------------------------------------------
@@ -350,6 +351,54 @@ const BUTTON_Y: usize = 1300;
 const BUTTON_H: usize = 52;
 const BUTTON_GAP: usize = 8;
 const RESULT_Y: usize = 1364;
+
+/// The action bar's row, described once from the numbers above.
+///
+/// WHY a description and not two copies of the arithmetic: the bar painted a
+/// button at `GUTTER + index * (width + BUTTON_GAP)` with
+/// `width = (CONTENT_W - (live - 1) * BUTTON_GAP) / live`, and its hit test
+/// recomputed both. That is the same shape of mistake the tab row made before
+/// `test_the_tab_row_derives_its_geometry_from_the_surface_count` closed it -- two
+/// places holding one geometry, and the plate the reader saw and the strip that
+/// answered a tap drifted apart. The row is now written once and read by the
+/// painter and by the tap, so the embedding probe's control cannot be drawn
+/// somewhere its press does not answer.
+const fn action_row(live: usize) -> agent_manager::ControlRow {
+    agent_manager::ControlRow {
+        x: GUTTER,
+        w: CONTENT_W,
+        y: BUTTON_Y,
+        h: BUTTON_H,
+        gap: BUTTON_GAP,
+        live,
+    }
+}
+
+/// Which live plate in the bar the embedding probe takes.
+///
+/// WHY an index and not a label match: the bar's plates are laid out in the order
+/// the surface lists them, and the tap returns that same order, so the probe's
+/// plate is the one the surface put at this position. The gate below checks the
+/// two derivations land on it.
+const PROBE_BUTTON: usize = 1;
+
+/// WHY checked here: the probe's control is only a control if the plate the
+/// painter drew is the plate the tap answers, and a phone control a finger cannot
+/// hit is a control that does not exist. The Search surface holds two live plates
+/// -- re-read the configuration, and the probe -- so this is the row it is drawn
+/// in, at the height the bar actually uses.
+const fn probe_band_agrees() -> bool {
+    let row = action_row(2);
+    let plate = row.slot(PROBE_BUTTON);
+    match row.tapped(plate.x + plate.w / 2, plate.y + plate.h / 2) {
+        Some(PROBE_BUTTON) => true,
+        _ => false,
+    }
+}
+const _: () = assert!(probe_band_agrees());
+const _: () = assert!(action_row(2).slot(PROBE_BUTTON).h >= std::design::touch::MIN_TARGET);
+const _: () = assert!(action_row(2).slot(PROBE_BUTTON).w >= std::design::touch::MIN_TARGET);
+const _: () = assert!(action_row(2).slot(PROBE_BUTTON).y == BUTTON_Y);
 
 /// The home indicator: the mark the shell paints, and the box that answers a
 /// press on it.
@@ -1060,6 +1109,8 @@ pub enum Action {
     Send,
     /// Stop/cancel active streaming token generation.
     CancelStream,
+    /// Ask the platform to embed the text in the composer.
+    ProbeEmbed,
     /// Empty the conversation and the prompt.
     ClearChat,
     /// Go to the conversation.
@@ -1152,6 +1203,15 @@ pub struct AgentManagerApp {
     pub clock: [u8; CLOCK_LEN],
     /// Whether the RTC answered at all. When it did not, the lane stays blank.
     pub clock_ok: bool,
+    /// The last embedding the app asked the platform for, and what came back.
+    ///
+    /// WHY it is held rather than printed at the moment it arrives: the reply
+    /// lands whenever the service gets to it, and a surface that only showed it
+    /// inside the breath it arrived on would be a surface whose measurement
+    /// disappears when the person looks for it. The probe's own state names
+    /// whether an answer has been read, so a request that is still standing is
+    /// never painted as one that was answered.
+    pub probe: EmbedProbe,
 }
 
 // WHY at compile time: the app is a stack local in `_start`, and the user
@@ -1215,6 +1275,7 @@ impl AgentManagerApp {
             install_deadline: 0,
             clock: [b' '; CLOCK_LEN],
             clock_ok: false,
+            probe: EmbedProbe::new(),
         };
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
@@ -2330,6 +2391,17 @@ impl AgentManagerApp {
                 }
                 Ok((_, std::ipc::MSG_INPUT_EVENT, _))
                 | Ok((_, std::ipc::MSG_WINDOW_FOCUSED, _)) => continue,
+                Ok((_, std::ai::MSG_TYPE_EMBED, len)) => {
+                    // WHY the probe is read here and the drain carries on: this
+                    // card is built while an embedding reply may be the next
+                    // message in the queue, and a drain that stopped at a message
+                    // of another type would lose the reply and the search answer
+                    // with it. Reading it here is what keeps the probe's answer
+                    // from vanishing between the platform sending it and the
+                    // screen being built.
+                    self.take_embedding_reply(&doc_buf[..len]);
+                    continue;
+                }
                 _ => break,
             }
         }
@@ -2409,6 +2481,188 @@ impl AgentManagerApp {
                 }
             }
         }
+
+        // WHY the probe is the card this surface ends on: everything above is what
+        // the platform says its retrieval is configured to do, and this is the one
+        // answer the platform actually sent to this app.
+        self.add_embedding_probe_card();
+    }
+
+    /// Paints the embedding probe: what was sent, and only what the reply carried.
+    ///
+    /// WHY every line here is read off the probe's own fields: the platform answers
+    /// an embedding request from one of three places -- the installed file's
+    /// tensors, its labelled lexical projection, or a sentence that says why
+    /// neither ran -- and the app cannot tell them apart from anything but the
+    /// status the reply stamped itself. A card that showed a vector for a refusal,
+    /// or the baseline's arithmetic under the installed model's name, would be this
+    /// app's invention rather than a reading of the bytes.
+    ///
+    /// WHY there is no length figure of the app's own: the reply's header is
+    /// `status`, `output_dim`, `latency_micros` and `output_offset`
+    /// (`interos_std::ai::AiInferenceResponse`), and none of them is a norm, so the
+    /// screen names the components that arrived and the count the reply offered and
+    /// leaves the arithmetic to whoever reads them.
+    fn add_embedding_probe_card(&mut self) {
+        // WHY the probe is copied out: the builder mutates the body while it walks
+        // the reply, and the reply belongs to the app.
+        let probe = self.probe;
+        self.begin_card(b"Embedding probe", Tone::Plain);
+        match probe.state {
+            ProbeState::Idle => {
+                self.add_wide(
+                    b"Nothing asked yet. EMBED TEXT sends the text typed in the chat's composer.",
+                    Tone::Muted,
+                );
+                return;
+            }
+            ProbeState::Awaiting => {
+                self.add_wide(
+                    b"Embed request sent: the app has read no reply from the platform yet.",
+                    Tone::Muted,
+                );
+            }
+            ProbeState::NoReply => {
+                self.add_wide(
+                    b"The inference service sent no answer. The app's own wait ran out.",
+                    Tone::Unavailable,
+                );
+            }
+            ProbeState::Unreadable => {
+                self.add_wide(b"A reply arrived that this app cannot read.", Tone::Unavailable);
+            }
+            ProbeState::Answered => {}
+        }
+
+        // WHAT WAS ASKED, as far as the request could carry it.
+        if probe.text_len > 0 {
+            let mut value = [0u8; VALUE_MAX];
+            let sent = probe.sent_text();
+            let take = sent.len().min(VALUE_MAX);
+            value[..take].copy_from_slice(&sent[..take]);
+            self.add_line(b"Sent text", &value[..take], Tone::Plain);
+            if probe.typed_bytes as usize > take {
+                // WHY the file's own wording for a cut: this is the sentence
+                // `close_answer` and `take_install_report` already use when a
+                // platform message reaches the app shorter than it was sent, and
+                // the composer held more text than one mailbox message carries.
+                let mut line = [0u8; 64];
+                let mut n = 0;
+                put(&mut line, &mut n, b"Cut in transit: ");
+                n += format_u32(take as u32, &mut line[n..]);
+                put(&mut line, &mut n, b" of ");
+                n += format_u32(probe.typed_bytes as u32, &mut line[n..]);
+                put(&mut line, &mut n, b" typed bytes reached the request.");
+                self.add_wide(&line[..n], Tone::Unavailable);
+            }
+        }
+
+        if probe.state == ProbeState::Answered {
+            if probe.reply_is_vector {
+                // WHY the chip is the status's word and not the bytes': the reply
+                // says which arithmetic ran, and only that. The app's two
+                // attributions are the ones the search card already uses.
+                if let Some(attribution) = embed_attribution(probe.status) {
+                    self.add_chip(b"Attribution", attribution, Tone::Good);
+                }
+                self.add_wide(
+                    if probe.status == std::ai::STATUS_BASELINE_LEXICAL {
+                        b"The reply stamped the lexical baseline: a projection of the prompt's bytes, with no tensor of any model file read to make it."
+                    } else {
+                        b"The reply stamped the service's success code, which on this request means the installed file's tensors were read and stepped."
+                    },
+                    Tone::Muted,
+                );
+                let mut value = [0u8; VALUE_MAX];
+                let n = format_u32(probe.reply_dim, &mut value);
+                self.add_line(b"Reply dimension", &value[..n], Tone::Plain);
+                let mut line = [0u8; 64];
+                let (written, shown) = probe.leading_values(&mut line);
+                if shown > 0 {
+                    let mut head = [0u8; VALUE_MAX];
+                    let mut k = 0;
+                    k += format_u32(shown as u32, &mut head[k..]);
+                    for byte in b" of " {
+                        head[k] = *byte;
+                        k += 1;
+                    }
+                    k += format_u32(probe.values_arrived() as u32, &mut head[k..]);
+                    for byte in b" arrived" {
+                        head[k] = *byte;
+                        k += 1;
+                    }
+                    self.add_chip(b"Leading values", &line[..written], Tone::Plain);
+                    self.add_line(b"Values listed", &head[..k], Tone::Muted);
+                }
+                if probe.values_arrived() < probe.offered as usize {
+                    // WHY both numbers: the mailbox cut the reply at
+                    // MAILBOX_PAYLOAD_MAX without a word, so the header is the only
+                    // witness that the vector went on past what the app was handed.
+                    let mut line = [0u8; 64];
+                    let mut n = 0;
+                    put(&mut line, &mut n, b"Cut in transit: ");
+                    n += format_u32(probe.values_arrived() as u32, &mut line[n..]);
+                    put(&mut line, &mut n, b" of ");
+                    n += format_u32(probe.offered, &mut line[n..]);
+                    put(&mut line, &mut n, b" bytes reached the app.");
+                    self.add_wide(&line[..n], Tone::Unavailable);
+                }
+            } else {
+                // WHY the words come out as the platform wrote them: a refusal
+                // names the branch that did not run, and that sentence is the
+                // observation -- the same thing `send_prompt` does with
+                // `availability.reason()`. Nothing here is attributed to a model.
+                let mut words = [0u8; PROBE_PAYLOAD_MAX];
+                let arrived = probe.sentence_bytes(&mut words);
+                self.add_wide(&words[..arrived], Tone::Unavailable);
+                let mut value = [0u8; VALUE_MAX];
+                let mut n = format_u32(probe.offered, &mut value);
+                for byte in b" bytes" {
+                    if n < value.len() {
+                        value[n] = *byte;
+                        n += 1;
+                    }
+                }
+                // WHY the count is called a sentence's length and not a dimension:
+                // `emit_response_as` puts the byte count of its own sentence in the
+                // field a vector reply puts its dimension in.
+                self.add_line(b"Reply sentence", &value[..n], Tone::Muted);
+                if arrived < probe.offered as usize {
+                    let mut line = [0u8; 64];
+                    let mut n = 0;
+                    put(&mut line, &mut n, b"Cut in transit: ");
+                    n += format_u32(arrived as u32, &mut line[n..]);
+                    put(&mut line, &mut n, b" of ");
+                    n += format_u32(probe.offered, &mut line[n..]);
+                    put(&mut line, &mut n, b" bytes reached the app.");
+                    self.add_wide(&line[..n], Tone::Unavailable);
+                }
+            }
+        }
+
+        // THE INTERVALS THE APP MEASURED, in ticks of the platform's own clock.
+        if probe.state != ProbeState::Idle {
+            let mut value = [0u8; VALUE_MAX];
+            let n = format_u32(probe.send_ticks.min(u32::MAX as u64) as u32, &mut value);
+            self.add_line(b"Send call, ticks", &value[..n], Tone::Plain);
+            // WHY the second interval waits for an answer: the span from the
+            // request to the reply only exists once a reply -- or the app's own
+            // wait -- has ended, and a zero read out here would look like a
+            // measurement of an instant rather than of nothing at all.
+            if probe.state != ProbeState::Awaiting {
+                let mut value = [0u8; VALUE_MAX];
+                let n = format_u32(probe.reply_ticks.min(u32::MAX as u64) as u32, &mut value);
+                self.add_line(b"Ask to answer, ticks", &value[..n], Tone::Plain);
+            }
+        }
+
+        // WHY the reply's own latency field is not shown: the service fills it with
+        // zero on every sentence reply and with a tick difference multiplied up on a
+        // vector reply, and neither is a measurement this app took or can check.
+        self.add_wide(
+            b"Numbers above are the reply's own fields and this app's own clock.",
+            Tone::Muted,
+        );
     }
 
     /// Builds the chat surface.
@@ -2737,9 +2991,189 @@ impl AgentManagerApp {
         true
     }
 
+    /// Asks the platform to embed the text the composer holds.
+    ///
+    /// WHY the composer's text is what goes out: this is the only text a person
+    /// types into this app, and a probe that sent a query written here would be
+    /// reporting the platform's answer to something nobody asked for. The card
+    /// names the bytes that left, which is the shortest text the request can carry
+    /// when the composer holds more than one mailbox message can hold.
+    ///
+    /// WHY the request carries no dimension: `target_dim` of zero is the request
+    /// that leaves the service's own default standing, and a number chosen here
+    /// would be this app deciding the shape of an answer it has not yet been given.
+    ///
+    /// WHY the queue is emptied of embedding replies first: on the file-backed
+    /// branch the service answers a single request twice -- the vector, then the
+    /// sentence that says what the run measured -- and a probe that read the
+    /// leftover sentence of the previous request would stamp the words of an older
+    /// answer as this one's.
+    pub fn run_embedding_probe(&mut self) {
+        if self.chat.is_streaming || self.install_deadline != 0 {
+            // WHY the plate stands aside: an answer is already being waited for,
+            // and a second reader of the same queue would take the message that
+            // belongs to the exchange in flight.
+            self.set_action(b"An answer is already being waited for.", Tone::Muted);
+            return;
+        }
+        let typed = self.chat.prompt_text();
+        let typed_len = typed.len();
+        if typed_len == 0 {
+            self.set_action(b"Nothing typed to embed.", Tone::Muted);
+            return;
+        }
+        let availability = resolve_inference_service(&self.device.services);
+        if !availability.is_available() {
+            // WHY the platform's reason is the whole answer: nothing was sent, so
+            // there is no reply to report, and the app has no statement to make
+            // about an embedding it did not ask for. The words are the same
+            // `send_prompt` gives a prompt the device cannot answer.
+            self.probe = EmbedProbe::new();
+            self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
+            self.rebuild();
+            return;
+        }
+        // WHY the text is copied before the send: the composer belongs to the
+        // conversation, and the request outlives the borrow of it.
+        let mut text = [0u8; PROBE_REQUEST_TEXT_MAX];
+        let take = typed_len.min(PROBE_REQUEST_TEXT_MAX);
+        text[..take].copy_from_slice(&typed[..take]);
+        let mut request = [0u8; MAILBOX_PAYLOAD_MAX];
+        let Some(len) = build_embed_request(&text[..take], None, &mut request) else {
+            // WHY this cannot happen and is still answered: the buffer is built
+            // from the same constant the writer cuts against, so reaching here
+            // means the two have come apart -- and an app that fell through would
+            // send a request it had not measured.
+            self.probe = EmbedProbe::new();
+            self.set_action(b"EMBED: this app could not build the request.", Tone::Unavailable);
+            self.rebuild();
+            return;
+        };
+        self.discard_stale_embeddings();
+        let t0 = std::get_ticks().unwrap_or(0);
+        let sent = std::ipc_send(
+            std::ai::SERVICE_INFERENCE_TASK_ID,
+            std::ai::MSG_TYPE_EMBED,
+            &request[..len],
+        );
+        let t1 = std::get_ticks().unwrap_or(t0);
+        if sent.is_err() {
+            self.probe = EmbedProbe::new();
+            self.set_action(
+                b"EMBED: the inference service would not take the request.",
+                Tone::Unavailable,
+            );
+            self.rebuild();
+            return;
+        }
+        // WHY the interval is measured around the call and not reported after it:
+        // this is the same reading `send_prompt` takes of its own send, and what it
+        // costs to hand a message to the kernel is a fact about this device rather
+        // than a number the platform publishes.
+        self.probe.start_request(
+            &text[..len - REQUEST_HEADER_BYTES],
+            typed_len,
+            None,
+            len,
+            t0,
+            t1.saturating_sub(t0),
+            ANSWER_TIMEOUT_TICKS,
+        );
+        self.set_action(
+            b"Embedding requested: waiting for the platform's answer.",
+            Tone::Accent,
+        );
+        self.rebuild();
+    }
+
+    /// Throws away an embedding reply that arrived after the app stopped reading.
+    ///
+    /// WHY the type is checked before the body is kept: the mailbox also holds the
+    /// kernel's copy of every input event dispatched to this window, and a touch
+    /// copy is twenty-four bytes -- the width of an inference header -- so a drain
+    /// that took whatever came next would throw away a real reply or keep a
+    /// coordinate.
+    fn discard_stale_embeddings(&mut self) {
+        let mut rx = [0u8; MAILBOX_PAYLOAD_MAX];
+        for _ in 0..MAILBOX_DRAIN {
+            match std::ipc::receive_any(&mut rx) {
+                Err(_) => break,
+                Ok((_, std::ai::MSG_TYPE_EMBED, _)) => continue,
+                Ok((_, std::ipc::MSG_INPUT_EVENT, _)) => continue,
+                Ok((_, std::ipc::MSG_WINDOW_FOCUSED, _)) => continue,
+                Ok(_) => break,
+            }
+        }
+    }
+
+    /// Advances the embedding probe by whatever the platform has answered.
+    ///
+    /// WHY only a reply of this app's own message type is taken: the generation
+    /// wait and the install wait read the same queue, and the event loop asks this
+    /// only while neither of them holds one.
+    pub fn step_embedding_reply(&mut self) -> bool {
+        if self.probe.state != ProbeState::Awaiting {
+            return false;
+        }
+        let mut rx = [0u8; MAILBOX_PAYLOAD_MAX];
+        match std::ipc::receive_any(&mut rx) {
+            Err(_) => {
+                let now = std::get_ticks().unwrap_or(0);
+                if now < self.probe.deadline {
+                    let _ = std::event_poll(
+                        std::EVENT_IPC_MSG | std::EVENT_SHM_READABLE | std::EVENT_TOUCH_INPUT,
+                        ANSWER_POLL_TICKS,
+                    );
+                    return false;
+                }
+                self.probe.report_no_reply(now);
+                self.set_action(b"No embedding reply within the wait.", Tone::Unavailable);
+                self.rebuild();
+                true
+            }
+            Ok((_, std::ai::MSG_TYPE_EMBED, len)) => {
+                self.take_embedding_reply(&rx[..len]);
+                self.rebuild();
+                true
+            }
+            Ok(_) => false,
+        }
+    }
+
+    /// Reads one embedding reply into the probe and says what it supports saying.
+    fn take_embedding_reply(&mut self, bytes: &[u8]) {
+        if self.probe.state != ProbeState::Awaiting {
+            // WHY the second reply of a file-backed run is left unread: the
+            // service sends the vector and then the sentence that measures the run,
+            // and the first is the answer this card reports. Reading the second
+            // into the probe would stamp the sentence's byte count as a dimension.
+            return;
+        }
+        let now = std::get_ticks().unwrap_or(0);
+        match read_embed_reply(bytes) {
+            Some(reply) => {
+                self.probe.record(&reply, now);
+                if reply.carries_vector() {
+                    self.set_action(b"Embedding reply read.", Tone::Good);
+                } else {
+                    // WHY the strip does not repeat the sentence: the platform's own
+                    // words are on the card, and the strip only has to say that the
+                    // request was refused -- the same division `close_answer` makes.
+                    self.set_action(b"The inference service refused the request.", Tone::Unavailable);
+                }
+            }
+            None => {
+                self.probe.report_unreadable(now);
+                self.set_action(
+                    b"Unreadable reply from the inference service.",
+                    Tone::Unavailable,
+                );
+            }
+        }
+    }
+
     /// Empties the conversation and the prompt.
-    pub fn clear_chat(&mut self) {
-        if self.chat.is_streaming {
+    pub fn clear_chat(&mut self) {        if self.chat.is_streaming {
             self.cancel_streaming();
         }
         self.chat = ChatSession::new();
@@ -2883,9 +3317,14 @@ impl AgentManagerApp {
                     enabled: true,
                 },
                 ActionButton {
-                    label: "",
-                    action: Action::Refresh,
-                    enabled: false,
+                    label: "EMBED TEXT",
+                    action: Action::ProbeEmbed,
+                    // WHY the plate is live before anything is typed: pressing it
+                    // is how a reader finds out that the composer is what this
+                    // control sends, and the answer is a sentence, not a button
+                    // that does nothing -- the same reason SEND stays live with no
+                    // model on the device.
+                    enabled: true,
                 },
                 ActionButton {
                     label: "",
@@ -3990,53 +4429,54 @@ fn action_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
 
     let buttons = app.actions();
     let live = buttons.iter().filter(|button| !button.label.is_empty()).count();
-    if live > 0 {
-        let width = (CONTENT_W - (live - 1) * BUTTON_GAP) / live;
-        let mut index = 0usize;
-        for button in buttons.iter() {
-            if button.label.is_empty() {
-                continue;
-            }
-            let bx = GUTTER + index * (width + BUTTON_GAP);
-            let rect = Rect::new(bx, BUTTON_Y, width, BUTTON_H);
-            if rect.contains(x, y) {
-                let (fill, ink) = if !button.enabled {
-                    (THEME.surface_container, THEME.muted)
-                } else if index == 0 {
-                    (THEME.primary, THEME.on_primary)
-                } else {
-                    (THEME.surface_container_high, THEME.on_surface)
-                };
-                // WHY the primary button has no hairline: a light line
-                // around a black button is a seam, and a seam on the one
-                // control a person is meant to press is a thing that looks
-                // like a mistake.
-                colour = monochrome::chip_px(
-                    x,
-                    y,
-                    rect,
-                    fill,
-                    if index == 0 { None } else { Some(THEME.border) },
-                )
-                .unwrap_or(fill);
-                let text_w = measure_cap(button.label.as_bytes(), cap_caption());
-                let text_x = bx + width.saturating_sub(text_w) / 2;
-                if let Some(c) = text(
-                    x,
-                    y,
-                    text_x,
-                    BUTTON_Y + (BUTTON_H - line_caption()) / 2,
-                    cap_caption(),
-                    button.label.as_bytes(),
-                    ink,
-                    fill,
-                    true,
-                ) {
-                    colour = c;
-                }
-            }
-            index += 1;
+    let row = action_row(live);
+    let mut index = 0usize;
+    for button in buttons.iter() {
+        if button.label.is_empty() {
+            continue;
         }
+        // WHY the row answers for the plate: the rect painted here is the rect the
+        // tap reads, from one description of the bar. The arithmetic used to be
+        // written twice -- once here and once in the hit test -- and the two copies
+        // are how a plate and its press part company.
+        let rect = row.slot(index);
+        if rect.contains(x, y) {
+            let (fill, ink) = if !button.enabled {
+                (THEME.surface_container, THEME.muted)
+            } else if index == 0 {
+                (THEME.primary, THEME.on_primary)
+            } else {
+                (THEME.surface_container_high, THEME.on_surface)
+            };
+            // WHY the primary button has no hairline: a light line
+            // around a black button is a seam, and a seam on the one
+            // control a person is meant to press is a thing that looks
+            // like a mistake.
+            colour = monochrome::chip_px(
+                x,
+                y,
+                rect,
+                fill,
+                if index == 0 { None } else { Some(THEME.border) },
+            )
+            .unwrap_or(fill);
+            let text_w = measure_cap(button.label.as_bytes(), cap_caption());
+            let text_x = rect.x + rect.w.saturating_sub(text_w) / 2;
+            if let Some(c) = text(
+                x,
+                y,
+                text_x,
+                BUTTON_Y + (BUTTON_H - line_caption()) / 2,
+                cap_caption(),
+                button.label.as_bytes(),
+                ink,
+                fill,
+                true,
+            ) {
+                colour = c;
+            }
+        }
+        index += 1;
     }
 
     // The last action's result.
@@ -4225,41 +4665,43 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     }
 
     // The bottom action bar.
-    if uy >= BUTTON_Y && uy < BUTTON_Y + BUTTON_H {
-        let buttons = app.actions();
-        let live = buttons.iter().filter(|button| !button.label.is_empty()).count();
-        if live > 0 {
-            let width = (CONTENT_W - (live - 1) * BUTTON_GAP) / live;
-            let mut index = 0usize;
-            for button in buttons.iter() {
-                if button.label.is_empty() {
-                    continue;
-                }
-                let bx = GUTTER + index * (width + BUTTON_GAP);
-                if ux >= bx && ux < bx + width {
-                    if !button.enabled {
-                        return Tap::None;
-                    }
-                    match button.action {
-                        Action::Refresh => app.refresh(),
-                        Action::Install => app.install_selected(),
-                        Action::Remove => app.remove_selected(),
-                        Action::RunTest => app.run_self_test(),
-                        Action::RunTools => app.run_tools(),
-                        Action::CancelStream => app.cancel_streaming(),
-                        Action::Send => app.send_prompt(),
-                        Action::ClearChat => app.clear_chat(),
-                        Action::OpenChat => {
-                            app.surface = Surface::Chat;
-                            app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
-                            app.rebuild();
-                        }
-                    }
-                    return Tap::Redraw;
-                }
-                index += 1;
+    //
+    // WHY the row is asked rather than the arithmetic redone: the plates were
+    // measured here from `BUTTON_Y` and a width computed a second time from the
+    // live count, and a band that answers a row the painter never drew is the
+    // defect the tab row already carried. One description, two readers.
+    let buttons = app.actions();
+    let live = buttons.iter().filter(|button| !button.label.is_empty()).count();
+    if let Some(index) = action_row(live).tapped(ux, uy) {
+        let Some(button) = buttons
+            .iter()
+            .filter(|button| !button.label.is_empty())
+            .nth(index)
+        else {
+            return Tap::None;
+        };
+        if !button.enabled {
+            return Tap::None;
+        }
+        match button.action {
+            Action::Refresh => app.refresh(),
+            Action::Install => app.install_selected(),
+            Action::Remove => app.remove_selected(),
+            Action::RunTest => app.run_self_test(),
+            Action::RunTools => app.run_tools(),
+            Action::CancelStream => app.cancel_streaming(),
+            Action::Send => app.send_prompt(),
+            Action::ProbeEmbed => app.run_embedding_probe(),
+            Action::ClearChat => app.clear_chat(),
+            Action::OpenChat => {
+                app.surface = Surface::Chat;
+                app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
+                app.rebuild();
             }
         }
+        return Tap::Redraw;
+    }
+    if uy >= BUTTON_Y && uy < BUTTON_Y + BUTTON_H {
         return Tap::None;
     }
 
@@ -4455,6 +4897,13 @@ pub extern "C" fn _start() -> ! {
             // that slept through the wait would show a file it had just been told
             // about as though nothing had happened.
             if app.step_install_reply() {
+                dirty = Dirty::All;
+            }
+        } else if app.probe.state == ProbeState::Awaiting {
+            // WHY the probe waits in the same place: the embedding answer is the
+            // platform's, and an app that painted its card before the reply landed
+            // would say "nothing asked yet" while an answer was one poll away.
+            if app.step_embedding_reply() {
                 dirty = Dirty::All;
             }
         } else if !handled {
