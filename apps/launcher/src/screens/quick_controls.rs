@@ -452,15 +452,25 @@ fn build_values(state: &LauncherState) -> [Value; ALL_ROWS.len()] {
 // ---------------------------------------------------------------------------
 
 /// One run of text, measured and ink-resolved, ready for the pixel path.
+///
+/// WHY the box is resolved here and not in the pixel path: `pixel_aa` runs once
+/// per pixel in the band the label covers, and all it needs is the run's own
+/// box. Deriving that box per pixel meant re-measuring the whole string -- and
+/// `text::measure` walks every byte through the advance table -- twice over for
+/// every pixel of every tile, row and section label on the shade, which is
+/// order a million measure calls for one repaint. `place` already measured the
+/// run to decide where to lay it out, so the answer is stored and the per-pixel
+/// path reads two fields instead. Nothing about the placement changes: the
+/// stored `x0` is the same value `place` used to position the outline run.
 struct LabelRun {
-    align: Align,
-    rect: Rect,
     scale: usize,
     len: usize,
     buf: [u8; 128],
     ink: u32,
     em: u32,
     w: usize,
+    x0: usize,
+    y0: usize,
     top: usize,
     box_h: usize,
     outline: Option<launcher::outline_text::OutlineRun>,
@@ -474,14 +484,14 @@ enum Align {
 
 impl LabelRun {
     const EMPTY: LabelRun = LabelRun {
-        align: Align::Left,
-        rect: Rect::new(0, 0, 0, 0),
         scale: 1,
         len: 0,
         buf: [0u8; 128],
         ink: 0,
         em: 0,
         w: 0,
+        x0: 0,
+        y0: 0,
         top: 0,
         box_h: 0,
         outline: None,
@@ -518,49 +528,38 @@ impl LabelRun {
             Align::Left => rect.x,
             Align::Right => rect.x + rect.w.saturating_sub(w),
         };
+        // The bitmap fallback centres the run on this row; the outline path
+        // never reads it, but the stored box has to stay the same box either
+        // way, so it is resolved from the same two inputs.
+        let y0 = rect.y + rect.h.saturating_sub(line_h) / 2;
         let outline = if len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(x0, baseline, em, &buf[..len])
         } else {
             None
         };
         LabelRun {
-            align,
-            rect,
             scale,
             len,
             buf,
             ink,
             em,
             w,
+            x0,
+            y0,
             top,
             box_h: (baseline + desc as usize).saturating_sub(top),
             outline,
         }
     }
 
-    fn x0(&self) -> usize {
-        let w = text::measure(&self.buf[..self.len], self.scale).max(self.w);
-        match self.align {
-            Align::Left => self.rect.x,
-            Align::Right => self.rect.x + self.rect.w.saturating_sub(w),
-        }
-    }
-
-    fn y0(&self) -> usize {
-        let h = launcher::font::line_height(self.scale);
-        self.rect.y + self.rect.h.saturating_sub(h) / 2
-    }
-
     fn pixel_aa(&self, x: usize, y: usize, ink: u32, bg: u32) -> Option<u32> {
-        let y0 = self.y0();
-        let x0 = self.x0();
-        if x < x0 || x - x0 >= self.w || y < self.top || y - self.top >= self.box_h {
+        if x < self.x0 || x - self.x0 >= self.w || y < self.top || y - self.top >= self.box_h {
             return None;
         }
         if let Some(ref run) = self.outline {
             return run.pixel(x, y, ink, bg);
         }
-        crate::test_text_aa(x, y, x0, y0, self.scale, &self.buf[..self.len], ink, bg)
+        crate::test_text_aa(x, y, self.x0, self.y0, self.scale, &self.buf[..self.len], ink, bg)
     }
 
     fn pixel_on(&self, x: usize, y: usize, bg: u32) -> Option<u32> {
@@ -771,7 +770,7 @@ impl QuickControlsFrame {
             Rect::new(power_icon_x + ICON + space::MD, POWER_BTN.y, POWER_BTN.w, POWER_BTN.h),
             VALUE_SCALE,
             b"Power menu",
-            0xFFF8FAFC,
+            theme.on_surface,
         );
 
         QuickControlsFrame {
@@ -921,7 +920,6 @@ pub fn invalidate_frame_cache() {
 
 #[inline(never)]
 pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let theme = THEME;
     let cached = unsafe {
         let slot: *mut Option<QuickControlsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
         if (x == 0 && y == 0) || (*slot).is_none() {
@@ -929,10 +927,14 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
         }
         (*slot).as_ref()
     };
+    // WHY a reference to the theme: `Theme` is four hundred and sixty-four bytes
+    // of colour roles, and this function is called once per pixel. Copying it per
+    // call put half a gigabyte of stack traffic through one shade repaint for no
+    // colour change at all; the roles read identically from the const.
     let Some(frame) = cached else {
-        return theme.surface;
+        return THEME.surface;
     };
-    quick_controls_pixel(x, y, frame, &theme)
+    quick_controls_pixel(x, y, frame, &THEME)
 }
 
 fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
@@ -1107,13 +1109,13 @@ fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) ->
         return theme.surface;
     }
     if !round_contains(&POWER_BTN.inset(1), POWER_BTN.h / 2 - 1, x, y) {
-        return 0xFFEF4444;
+        return theme.error;
     }
-    let bg = 0xFF201518;
+    let bg = theme.error_container;
     if icon_hits(QcIcon::Power, frame.power_icon_x, frame.power_icon_y, x, y) {
-        return 0xFFEF4444;
+        return theme.error;
     }
-    if let Some(c) = frame.power_label.pixel_aa(x, y, 0xFFF8FAFC, bg) {
+    if let Some(c) = frame.power_label.pixel_aa(x, y, theme.on_surface, bg) {
         return c;
     }
     bg
