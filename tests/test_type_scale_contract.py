@@ -28,7 +28,7 @@ numbers put this device's body at 2.50% of the panel and its caption at
 same roles. The bands below are the ones the ladder now draws inside: 2.08%
 and 2.78% for caption and body, which is where a phone's text sits.
 
-These contracts pin four things:
+These contracts pin five things:
 
 1. the SDK's rungs are the document's cap heights, and each rung is the
    height named above;
@@ -38,7 +38,11 @@ These contracts pin four things:
 3. every application can reach every rung, so a screen that wants a page
    title has one to reach for;
 4. the host-side copy of the ladder the measurement tool carries is the
-   ladder, rung for rung.
+   ladder, rung for rung;
+5. which applications carry the person's text size into what they draw, and
+   which of them state plainly that they do not -- a ladder nobody climbs is
+   not a ladder, and a screen that ignores the setting is the difference
+   between a device that adjusts and one that only claims to.
 
 The behavioural check is a device measurement: `tools/measure_type.py`
 reads a capture and reports the cap height of every run of text on it.
@@ -353,4 +357,163 @@ def test_the_measurement_tool_measures_cap_heights():
         assert str(ladder[rung]) in docstring, (
             f"the tool's docstring never names the {ladder[rung]}px height its "
             f"{name} rung draws at"
+        )
+
+
+# The applications that read the size once, before their first frame, and never
+# again while the screen is alive. A name here is a smaller gap than the column
+# above -- the rung arrives, it just arrives once -- and the gate below insists it
+# is *exactly* once, so the screen that starts re-reading has to be moved out of
+# this list rather than left in it lying.
+#
+# Both of these are the same hole: `agent_manager` and `messages` open at the size
+# the person chose and keep drawing at it after Settings changes it, because
+# neither has a wake path that re-reads the setting. A size changed while one of
+# them is alive lands on the next cold open.
+PUBLISHES_AT_BUILD_ONLY = {"agent_manager", "messages"}
+
+
+# The applications that carry the person's text size, each with the helper that
+# publishes it. A name here is a claim with three parts, every one of them
+# checked below: the app asks the platform for the rung, it names a publisher,
+# and it calls that publisher at least twice -- once before its first frame is
+# laid out, so the opening screen is not drawn at a rung the person has already
+# left, and once per wake, because the size is changed in Settings while the
+# screen is alive. An app named in `PUBLISHES_AT_BUILD_ONLY` is checked against
+# the weaker claim it can actually meet.
+RUNG_AWARE_APPS = {
+    "agent_manager": "publish_text_scale",
+    "calculator": "publish_text_scale",
+    "dialer": "publish_text_scale",
+    "file_manager": "publish_text_scale",
+    "messages": "publish_user_text_scale",
+    "settings": "publish_text_scale",
+    "video_player": "publish_text_scale",
+}
+
+# The applications that lay words on the panel and still lay them out at the rung
+# the machine was built at. WHY the gaps are written down instead of left off a
+# list: an absent name is indistinguishable from a screen nobody looked at, and
+# this is the part of the work that is not done.
+#
+# `compositor` and `webview_demo` are on no list: the first paints no pixels of
+# its own and the second draws its chrome through the SDK, so neither has a text
+# lane of its own to carry a rung into. The gap the second one names lives in
+# `sdk/rust/interos-std/src/webview.rs`, which renders the document's type at the
+# platform rung whatever the person chose.
+RUNG_BLIND_APPS = {
+    "browser",
+    "calendar",
+    "camera",
+    "gallery",
+    "launcher",
+    "music",
+    "notes",
+    "vault",
+}
+
+# The stems of the calls that put a run of text on the panel -- `test_text`, its
+# anti-aliased arm, the outline face's `place_run`, the kit's centred labels and
+# the app-side wrappers named after them. A stem rather than a full name because
+# an app that grew a `test_text_aa_user` is still drawing text.
+TEXT_DRAW_STEMS = ("test_text", "place_run", "draw_text", "run_text", "text_centered", "draw_label")
+
+SCALE_KEY = '"display.text_scale"'
+
+
+def _without_comments(text: str) -> str:
+    """`text` with its comments out and its string literals left in.
+
+    WHY the strings survive: the setting's own key is a string, and a check that
+    strips literals cannot see the one call this contract is about. WHY the
+    comments do not: an app that only *explains* the text size in a doc comment
+    has not read it, and whether it read it is exactly the claim on the table.
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"^[ \t]*//.*$", " ", text, flags=re.M)
+
+
+def _app_code(app: Path) -> str:
+    return "\n".join(
+        _without_comments(source.read_text(encoding="utf-8"))
+        for source in sorted((app / "src").rglob("*.rs"))
+    )
+
+
+def _draws_text(code: str) -> bool:
+    """Whether the app puts words on the panel at all.
+
+    WHY a definition does not count: a screen's `#[test] fn test_text_editor_...`
+    is a host test, not a run of ink, and a suite that read it as text-on-screen
+    would call an app that draws nothing a drawer.
+    """
+    pattern = r"\b\w*(?:" + "|".join(TEXT_DRAW_STEMS) + r")\w*\s*\("
+    for match in re.finditer(pattern, code):
+        if code[: match.start()].rstrip().endswith("fn"):
+            continue
+        return True
+    return False
+
+
+def _asks_for_the_rung(code: str) -> bool:
+    """Whether the app reads the size the person chose.
+
+    Either half counts: the setting's key, which a publisher reads, and the font
+    module's `user_text_scale`, which is the rung the renderer already holds.
+    """
+    return SCALE_KEY in code or "user_text_scale()" in code
+
+
+def test_the_apps_that_carry_the_persons_text_size_are_named():
+    """A screen either climbs the ladder or says plainly that it does not.
+
+    Every box on the rung-aware screens is derived from the rung the renderer
+    holds, so a screen that never asks for it lays out at the platform rung
+    whatever the person chooses in Settings -- and Settings' "Text size" then
+    changes nothing the person can see on that screen. No host test can watch a
+    person choose a size, so this is pinned as a named set instead: membership is
+    read out of the sources, both lists are compared against what the code
+    actually does, and an app can join either column only by the code changing.
+    """
+    aware: set[str] = set()
+    blind: set[str] = set()
+    assert PUBLISHES_AT_BUILD_ONLY <= set(RUNG_AWARE_APPS), (
+        "a screen written down as reading the size once has to be a screen that "
+        "reads it at all -- the gap list names members of the rung-aware list"
+    )
+    for app in _app_dirs():
+        code = _app_code(app)
+        if not _draws_text(code):
+            continue
+        (aware if _asks_for_the_rung(code) else blind).add(app.name)
+    assert aware == set(RUNG_AWARE_APPS), (
+        f"the apps that read the person's text size are {sorted(aware)}, which is "
+        f"not the named set {sorted(RUNG_AWARE_APPS)} -- an app that stopped "
+        "reading it shows nothing until Settings is opened again, and an app that "
+        "started has to be named here so the gap list stays the truth"
+    )
+    assert blind == RUNG_BLIND_APPS, (
+    f"the apps that draw words at the rung the machine was built at are "
+    f"{sorted(blind)}, not the {sorted(RUNG_BLIND_APPS)} this file states as "
+    "unfinished -- move a name out of the gap list when its screen reads the size"
+    )
+    for name, helper in RUNG_AWARE_APPS.items():
+        code = _app_code(APPS / name)
+        assert f"fn {helper}" in code, (
+            f"{name} reads the text size without a publisher, so nothing hands "
+            "the rung to the code that lays the screen out"
+        )
+        calls = len(re.findall(r"(?<!fn )" + re.escape(helper) + r"\(\s*\)", code))
+        if name in PUBLISHES_AT_BUILD_ONLY:
+            assert calls == 1, (
+                f"{name} is written down as a screen that publishes the rung once, "
+                f"before its first frame, and it now publishes it {calls} times -- "
+                "move it out of `PUBLISHES_AT_BUILD_ONLY` if it has started "
+                "re-reading the size per wake"
+            )
+            continue
+        assert calls >= 2, (
+            f"{name} publishes the rung {calls} time(s); a screen has to read it "
+            "before its first frame and again per wake, because the size is "
+            "changed in Settings while the screen is alive"
         )
