@@ -380,6 +380,10 @@ def test_a_cut_run_says_so_rather_than_disappearing():
         "`fitted_run` stopped cutting a refused trim to the lane, so the whole "
         "label is handed back to a container that cannot hold it"
     )
+    assert "buf[..fit].copy_from_slice(&label[..fit]);" in fitted, (
+        "the cut is read straight back out of a buffer the refusal never wrote, so "
+        "a refused trim would ink the plate's stale bytes instead of the label's front"
+    )
     assert "let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);" in trim, (
         "the trim and the hard cut no longer spend the lane's width in one walk"
     )

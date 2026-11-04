@@ -2785,7 +2785,11 @@ pub fn fitted_run<'a>(
     if label.is_empty() || scale == 0 {
         return label;
     }
+    // WHY the bytes are copied here: a refusal is the one answer `ellipsize_run`
+    // gives without writing, so a cut returned straight from the buffer would be
+    // the stale zeros the caller zeroed it to, not the label's own front.
     let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());
+    buf[..fit].copy_from_slice(&label[..fit]);
     &buf[..fit]
 }
 
@@ -4910,6 +4914,11 @@ mod tests {
     /// is the branch the platform's own trim took one glyph past, and the mark's
     /// copy then wrote past the slice's end -- a panic in the painter, not a pixel
     /// in the wrong place.
+    ///
+    /// WHY the bytes themselves are pinned beside the length: a refusal is the one
+    /// answer `ellipsize_run` gives without writing, so a cut read back from a
+    /// buffer measured only by its length can be all the zeros it was zeroed to --
+    /// the label gone, and no width or length assertion the wiser.
     #[test]
     fn a_short_buffer_is_filled_to_its_end_and_never_past_it() {
         let long = [b'e'; MAX_PATH_LEN - 1];
@@ -4926,6 +4935,17 @@ mod tests {
                 "a run cut for a {}-byte buffer came back {} bytes long",
                 room,
                 cut.len()
+            );
+            let body = cut.strip_suffix(b"...").unwrap_or(cut);
+            assert!(
+                long.starts_with(body),
+                "a {}-byte buffer was handed bytes its label never had",
+                room
+            );
+            assert!(
+                room < 1 || !cut.is_empty(),
+                "a lane this wide lost a glyph into a {}-byte buffer",
+                room
             );
         }
     }
