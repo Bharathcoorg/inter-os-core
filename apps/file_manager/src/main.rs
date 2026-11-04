@@ -80,7 +80,8 @@ use file_manager::{
     // run is trimmed to, and the scales themselves.
     cap_at, category_caption_dy, category_y0,
     category_y1, crumb_hit, crumb_rows, crumb_y, drawn_w, draw_level, empty_headline_y,
-    empty_subline_y, ellipsize_run, entry_glyph_dy, entry_row_h_max, entries_card,
+    empty_subline_y, ellipsize_run, entry_glyph_dy, entry_row_h_max, entry_search_name_dy,
+    entry_search_path_dy, entries_card,
     entries_card_at, grid_cell_h_max, grid_glyph_dy, grown,
     GLYPH_COLS, GLYPH_ROWS, GRID_GLYPH_X,
     header_h, header_readout_line1_y, header_readout_line2_y,
@@ -3132,7 +3133,6 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
     }
     let offset = app.scroll.offset;
     let card = entries_card();
-    let lvl = draw_level();
     let is_video_ctx = app.current_path_str().starts_with("/storage/videos");
     for index in 0..count {
         if !row_is_visible(card, index, offset) {
@@ -3187,7 +3187,9 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             // like the same result. Both runs answer the row's own lane --
             // `ENTRY_NAME_LANE`, the row's width less the text column it starts
             // in and the air before its right edge -- at the caption rung, so
-            // the trim the row applies is the trim the gate measures.
+            // the trim the row applies is the trim the gate measures. The two
+            // runs stand on the row's own offsets, whose lower band is the bound
+            // `entry_row_h_at` sizes this plate by.
             let mut name_buf = [0u8; 48];
             let name_len = ellipsize_run(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf);
             if name_len > 0 {
@@ -3196,7 +3198,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
                     ROW_BUFFER_W,
                     row_h,
                     ENTRY_TEXT_X,
-                    grown(6, ENTRY_SUB_SCALE, lvl),
+                    entry_search_name_dy(),
                     ENTRY_SUB_SCALE,
                     &name_buf[..name_len],
                     THEME.on_surface,
@@ -3217,7 +3219,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
                         ROW_BUFFER_W,
                         row_h,
                         ENTRY_TEXT_X,
-                        grown(28, ENTRY_SUB_SCALE, lvl),
+                        entry_search_path_dy(),
                         ENTRY_SUB_SCALE,
                         &path_buf[..shown],
                         THEME.on_surface_variant,

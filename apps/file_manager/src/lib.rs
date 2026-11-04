@@ -2147,7 +2147,14 @@ const _: () = assert!(browse_stack_holds_at_every_level());
 /// scrolls inside the card instead of growing past the bottom of the screen.
 pub const ENTRIES_CARD: Rect = Rect::new(36, 364, 648, 920);
 /// The height of one entry row.
-pub const ENTRY_ROW_H: usize = 56;
+///
+/// WHY 58 and not the 56 the row was drawn with: a search row stacks two caption
+/// lines inside the plate, and the lower one's box reached row 58 at the size the
+/// layout was authored for. The row was 56, so the painter was handed a buffer
+/// two rows shorter than the ink it was asked to carry, and clipped the
+/// found-in path's own bottom away. The buffer the row is blitted out of is
+/// sized from the same derivation, so it grew with it.
+pub const ENTRY_ROW_H: usize = 58;
 
 /// The list viewport at a level: it starts the row the toolbar's foot clears, and
 /// it ends where the status line starts, so a stack of taller rows narrows the
@@ -2189,8 +2196,20 @@ pub const fn entries_card_at(level: u8) -> Rect {
 /// identity gates proves that box and [`rows_at`] are the same number at every
 /// rung on offer -- and the buffer beside it is sized at the largest rung the
 /// ladder offers, so no raised row is ever cut by the buffer that carries it.
+///
+/// WHY the search stack is a second bound: the plate above is the name's own box
+/// plus the air it was drawn with, but a search row inks two caption lines inside
+/// the same plate, and at every rung they grow by *two* caption boxes while the
+/// name's plate grows by one body box. The taller of the two is the only plate
+/// that both the name and the found-in line stand on -- and the row's rect, the
+/// buffer it is blitted through and the hit test that divides by it all read this
+/// one number, so a plate that is short is ink that never reaches the screen
+/// rather than a row that is merely taller.
 pub const fn entry_row_h_at(level: u8) -> usize {
-    plate_at(ENTRY_ROW_H, ENTRY_NAME_SCALE, level)
+    later(
+        plate_at(ENTRY_ROW_H, ENTRY_NAME_SCALE, level),
+        entry_search_ink_bottom_at(level),
+    )
 }
 /// A grid cell's plate at a level: the cell carries its name at the grid's own
 /// rung, and the glyph above it keeps the room it was drawn with.
@@ -2688,9 +2707,43 @@ const _: () = assert!(entry_glyph_dy_at(PLATFORM_LEVEL) == ENTRY_GLYPH_DY);
 const _: () = assert!(grid_glyph_dy_at(PLATFORM_LEVEL) == GRID_GLYPH_DY);
 const _: () = assert!(GRID_GLYPH_X == 83);
 
-/// Truth gate, swept: each of the four offsets this app used to add inside the
-/// branch that inked it still puts its mark inside the plate that carries it, and
-/// runs forwards with the rung rather than drifting up toward the plate's top.
+/// The two rows a search result's runs stand on: the document's name, and the
+/// folder it was found in directly under it.
+///
+/// WHY faces and not the numbers added inside the branch: the painter wrote
+/// `grown(6, ..)` and `grown(28, ..)` beside the `draw_buffer_text` call, so the
+/// offset moved with the rung while nothing else in the app knew those two runs
+/// were the tallest ink the row carries. [`entry_row_h_at`] bounds its plate by
+/// the lower of them, and a plate that bounded an offset no gate could read would
+/// have been checking a stack the painter was free to move at any time.
+const ENTRY_SEARCH_NAME_DY: usize = 6;
+const ENTRY_SEARCH_PATH_DY: usize = 28;
+
+pub const fn entry_search_name_dy_at(level: u8) -> usize {
+    grown(ENTRY_SEARCH_NAME_DY, ENTRY_SUB_SCALE, level)
+}
+pub const fn entry_search_path_dy_at(level: u8) -> usize {
+    grown(ENTRY_SEARCH_PATH_DY, ENTRY_SUB_SCALE, level)
+}
+/// The row a search result's lower run reaches, measured from its plate's top.
+pub const fn entry_search_ink_bottom_at(level: u8) -> usize {
+    entry_search_path_dy_at(level) + rows_at(ENTRY_SUB_SCALE, level)
+}
+
+#[inline]
+pub fn entry_search_name_dy() -> usize {
+    entry_search_name_dy_at(draw_level())
+}
+#[inline]
+pub fn entry_search_path_dy() -> usize {
+    entry_search_path_dy_at(draw_level())
+}
+const _: () = assert!(entry_search_name_dy_at(PLATFORM_LEVEL) == ENTRY_SEARCH_NAME_DY);
+const _: () = assert!(entry_search_path_dy_at(PLATFORM_LEVEL) == ENTRY_SEARCH_PATH_DY);
+
+/// Truth gate, swept: each of the offsets this app used to add inside the branch
+/// that inked it still puts its mark inside the plate that carries it, and runs
+/// forwards with the rung rather than drifting up toward the plate's top.
 const fn authored_paint_pixels_hold_at_every_level() -> bool {
     let mut level = 0;
     while level <= MAX_LEVEL {
@@ -2706,6 +2759,12 @@ const fn authored_paint_pixels_hold_at_every_level() -> bool {
         if search_glyph_dy_at(level) + GLYPH_ROWS > search_field_at(level).h {
             return false;
         }
+        if entry_search_ink_bottom_at(level) > entry_row_h_at(level) {
+            return false;
+        }
+        if entry_search_path_dy_at(level) <= entry_search_name_dy_at(level) {
+            return false;
+        }
         let block = HOME_RECENTS_VISIBLE * home_recent_row_h_at(level);
         if home_recents_note_dy_at(level) + rows_at(LABEL_RUNG, level) > block {
             return false;
@@ -2718,6 +2777,9 @@ const fn authored_paint_pixels_hold_at_every_level() -> bool {
                 return false;
             }
             if search_glyph_dy_at(level) <= search_glyph_dy_at(PLATFORM_LEVEL) {
+                return false;
+            }
+            if entry_search_path_dy_at(level) <= entry_search_path_dy_at(PLATFORM_LEVEL) {
                 return false;
             }
             if home_recents_note_dy_at(level) <= home_recents_note_dy_at(PLATFORM_LEVEL) {
@@ -5233,6 +5295,29 @@ mod tests {
             run_w_at(kept, DETAILS_LINE_SCALE, lvl) <= DETAILS_LINE_LANE,
             "a cut details line still overflowed the card's lane"
         );
+    }
+
+    /// A search row's two caption lines both stand inside the plate the row is
+    /// drawn, scrolled and tapped at -- at every rung the ladder offers.
+    ///
+    /// WHY measured from the plate and not the buffer: `draw_buffer_text` clips a
+    /// run to the buffer it is handed, and the buffer is `entry_row_h_max()` rows
+    /// deep while the row's *rect* is `entry_row_h()` tall. A plate shorter than
+    /// the ink stacked inside it is therefore not a taller row with a trimmed
+    /// bottom -- it is a row whose lower lines are quietly never painted, and the
+    /// hit test still says the row is only that tall.
+    #[test]
+    fn the_two_caption_lines_of_a_search_row_stand_inside_its_plate() {
+        for level in 0..=MAX_LEVEL {
+            let path_bottom = entry_search_ink_bottom_at(level);
+            assert!(
+                path_bottom <= entry_row_h_at(level),
+                "rung {} stacks its found-in line to row {}, but the row's plate ends at {}",
+                level,
+                path_bottom,
+                entry_row_h_at(level)
+            );
+        }
     }
 
     /// Builds one indexed document for the ordering and scope tests.

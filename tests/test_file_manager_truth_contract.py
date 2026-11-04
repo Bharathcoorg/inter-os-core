@@ -629,6 +629,111 @@ def test_the_paint_pixel_contract_can_fail():
     assert any(f.startswith("paint.sweep:") for f in faults), faults
 
 
+# The two rows a search result stacks inside one list row, and the plate that has
+# to carry both. The painter used to add each offset beside the call that inked
+# it, while the plate was the *name's* box -- so the lower run grew by a caption
+# box the plate never measured, and `draw_buffer_text` clipped the found-in path's
+# own bottom away at every rung, including the one the layout was drawn at.
+_ROW_SEARCH_FACES = (
+    ("grown(6, ENTRY_SUB_SCALE, lvl),", "entry_search_name_dy(),"),
+    ("grown(28, ENTRY_SUB_SCALE, lvl),", "entry_search_path_dy(),"),
+)
+_ROW_GATE_CHECK = (
+    "        if entry_search_ink_bottom_at(level) > entry_row_h_at(level) {\n"
+    "            return false;\n"
+    "        }\n"
+)
+
+
+def _fn_body(lib: str, signature: str) -> str:
+    """One function's own text, so a pin cannot be met by an identical line elsewhere."""
+    if signature not in lib:
+        return ""
+    start = lib.index(signature)
+    rest = lib[start:]
+    return rest[: rest.index("\n}\n") + 3]
+
+
+def _row_plate_faults(lib: str, main: str) -> list[str]:
+    """Every way a search row's ink can outrun the plate that carries it again."""
+    faults: list[str] = []
+    plate = _fn_body(lib, "pub const fn entry_row_h_at(level: u8) -> usize {")
+    if not plate:
+        return ["plate.missing: the library no longer owns the list row's plate"]
+    bottom = _fn_body(lib, "pub const fn entry_search_ink_bottom_at(level: u8) -> usize {")
+    if not bottom:
+        faults.append("plate.missing: the library no longer names the search stack's own foot")
+
+    if "plate_at(ENTRY_ROW_H, ENTRY_NAME_SCALE, level)" not in plate:
+        faults.append("plate.name: the row's plate stopped carrying the name's own box")
+    if "entry_search_ink_bottom_at(level)" not in plate:
+        faults.append("plate.bound: the row's plate stopped measuring the search stack it carries")
+    if "later(" not in plate:
+        faults.append("plate.later: the row's plate takes one bound, not the taller of two")
+    if bottom and "rows_at(ENTRY_SUB_SCALE, level)" not in bottom:
+        faults.append("plate.stack: the plate's bound is the run's offset alone, not the box it inks")
+
+    code = code_only(main)
+    for remembered, derived in _ROW_SEARCH_FACES:
+        if remembered in code:
+            faults.append(
+                f"plate.literal: {remembered!r} is added inside the branch again, so the "
+                "run moves while nothing else in the app knows the row grew"
+            )
+        if derived not in code:
+            faults.append(f"plate.face: {derived!r} is no longer the row the painter stacks on")
+
+    gate = _fn_body(lib, "const fn authored_paint_pixels_hold_at_every_level() -> bool {")
+    if _ROW_GATE_CHECK not in gate:
+        faults.append("plate.sweep: the library no longer proves the search stack holds its "
+                      "plate at every rung")
+    return faults
+
+
+def test_the_search_stack_stands_inside_the_plate_that_carries_it():
+    """A list row's plate is the taller of the name's box and the search stack's foot.
+
+    Both are the same row: a browsing row inks one name at the body rung, a search
+    row inks two runs at the caption rung, and `entry_row_h_at` answers for both --
+    it is the row's rect, the buffer it is blitted through and the divisor the hit
+    test taps with. A plate sized from the name alone was two rows short at the
+    rung the layout was authored for and up to ten short at the largest, so the
+    found-in path lost its own bottom to the clip and the tap band still answered
+    the shorter row.
+    """
+    faults = _row_plate_faults(fm_lib(), fm_main())
+    assert not faults, faults
+
+
+def test_the_row_plate_contract_can_fail():
+    """Each way the defect comes back is refused by the pin that replaced it."""
+    lib, main = fm_lib(), fm_main()
+    assert not _row_plate_faults(lib, main)
+
+    def arm(needle: str, replacement: str, tag: str, *, in_main: bool = False):
+        source = main if in_main else lib
+        assert source.count(needle) == 1, f"{needle!r} is not the one line the arm replaces"
+        mutated = source.replace(needle, replacement)
+        assert mutated != source, f"{tag}: the arm changed nothing"
+        faults = _row_plate_faults(lib if in_main else mutated, mutated if in_main else main)
+        assert any(f.startswith(f"{tag}:") for f in faults), (
+            f"{tag} left the contract blind: {faults}"
+        )
+
+    for remembered, derived in _ROW_SEARCH_FACES:
+        arm(derived, remembered, "plate.literal", in_main=True)
+    # The plate goes back to the name's box alone, and the bound stops measuring
+    # the box the lower run inks.
+    arm("        entry_search_ink_bottom_at(level),\n", "", "plate.bound")
+    arm(
+        "    entry_search_path_dy_at(level) + rows_at(ENTRY_SUB_SCALE, level)",
+        "    entry_search_path_dy_at(level)",
+        "plate.stack",
+    )
+    # The swept gate that proves it at the three rungs nobody draws by default.
+    arm(_ROW_GATE_CHECK, "", "plate.sweep")
+
+
 
 def test_the_crumb_row_painted_is_the_crumb_row_tapped():
     """The crumb strip laid its runs out at one rung and its tap handler measured
