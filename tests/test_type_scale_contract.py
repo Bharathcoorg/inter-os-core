@@ -380,18 +380,25 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # screen is alive. An app named in `PUBLISHES_AT_BUILD_ONLY` is checked against
 # the weaker claim it can actually meet.
 #
-# What the list cannot see is how far a rung travels once it arrives. Three of
+# What the list cannot see is how far a rung travels once it arrives. Four of
 # these screens are only part-way, and each says so in its own file: Notes reads
 # the rung and lays its empty-state card from it, while its chips, PIN filter,
 # note rows and editor still stand on authored pixels; Gallery lays its four
 # album cards from the rung while its header, filter chips, media cells, timeline
-# rows, empty states and viewer plate keep the pixels they were drawn with; and
+# rows, empty states and viewer plate keep the pixels they were drawn with;
 # Calendar lays its agenda cards, while its month grid, header, tabs, weekday
 # row, section band, month list, week and day views, details modal and create
-# sheet keep theirs. Moving the rest means moving each painter and its tap
-# handlers in the same change. `tests/test_notes_truth_contract.py`,
-# `tests/test_gallery_truth_contract.py` and
-# `tests/test_calendar_truth_contract.py` are the files that say how far each is
+# sheet keep theirs; and Music lays the queue's track rows -- plate, run origins,
+# reorder centres, stride, divider, scroll extent and the press that answers them
+# -- and the list's empty state from it, while the artwork card and its caption,
+# the now-playing stack, the search row, the sort and import controls, the
+# availability caption, the timeline, the volume row, the transport discs, the
+# queue header, the publish/ringtone/add controls and the add editor keep the
+# pixels they were drawn with. Moving the rest means moving each painter and its
+# tap handlers in the same change. `tests/test_notes_truth_contract.py`,
+# `tests/test_gallery_truth_contract.py`,
+# `tests/test_calendar_truth_contract.py` and
+# `tests/test_music_truth_contract.py` are the files that say how far each is
 # carried.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
@@ -401,6 +408,7 @@ RUNG_AWARE_APPS = {
     "file_manager": "publish_text_scale",
     "gallery": "publish_text_scale",
     "messages": "publish_user_text_scale",
+    "music": "publish_text_scale",
     "notes": "publish_text_scale",
     "settings": "publish_text_scale",
     "video_player": "publish_text_scale",
@@ -420,7 +428,6 @@ RUNG_BLIND_APPS = {
     "browser",
     "camera",
     "launcher",
-    "music",
     "vault",
 }
 

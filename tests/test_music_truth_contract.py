@@ -283,3 +283,656 @@ def test_a_capability_slot_is_resolved_by_its_type():
     # naming it keeps the difference visible at the call site.
     assert "const MEDIA_KEY_SLOT: u32 = 1;" in source
     assert "std::keystore_derive(MEDIA_KEY_SLOT," in source
+
+
+# -----------------------------------------------------------------------------
+# The person's text size on the queue's rows
+# -----------------------------------------------------------------------------
+
+# The queue's geometry, authored at one hundred per cent, each paired with the
+# anchor its derivation is proved against in the crate. The left-hand names are
+# refused in the binary -- a painter that read them would size a row at a rung it
+# never asked for -- and the right-hand names stay declared, because a refusal
+# that only passes because the number was deleted forbids nothing.
+#
+# `LIST_TITLE_Y` and `LIST_SUB_Y` are the empty-state card's two lines, refused
+# here for the same reason as the row's five numbers.
+AUTHORED_QUEUE_BOXES = (
+    ("TRACKLIST_ROW_H", "AUTHORED_ROW_H"),
+    ("ROW_INK_H", "AUTHORED_ROW_INK_H"),
+    ("ROW_CTRL_CY", "AUTHORED_ROW_CTRL_CY"),
+    ("LIST_TITLE_Y", "AUTHORED_LIST_EMPTY_TITLE_Y"),
+    ("LIST_SUB_Y", "AUTHORED_LIST_EMPTY_SUB_Y"),
+)
+
+# The faces the queue's rows are derived with. None of them may appear in a
+# region this slice did not adopt: ink that grew while its box stayed authored is
+# ink clipped by the box.
+RUNG_FACES = (
+    "music::draw_level()",
+    "music::row_h_at(",
+    "music::row_ink_h_at(",
+    "music::row_ctrl_cy_at(",
+    "music::row_title_dy_at(",
+    "music::row_sub_dy_at(",
+    "music::row_divider_dy_at(",
+    "music::list_empty_title_y_at(",
+    "music::list_empty_sub_y_at(",
+    "row_line_text(",
+    "list_centred_text(",
+)
+
+
+def flat(source: str) -> str:
+    """Return `source` with every run of whitespace collapsed to one space.
+
+    WHY: a Rust statement the project's own formatter wrapped over three lines is
+    the same statement written on one, and a gate that only accepts one shape is a
+    gate that fails on formatting.
+    """
+    return " ".join(source.split())
+
+
+def music_lib() -> str:
+    return read("apps/music/src/lib.rs")
+
+
+def lib_prose() -> str:
+    """The crate's comments as one flat run of prose.
+
+    WHY: the boundary this file checks is a *sentence*, and a sentence the source
+    wrapped over three comment lines is the same sentence. A gate that only matched
+    one line length would be a gate that failed on wording, not on the promise.
+    """
+    comments = "\n".join(re.findall(r"//[^\n]*", music_lib()))
+    comments = comments.replace("//", " ")
+    return " ".join(comments.split())
+
+
+def painter_head(code: str) -> str:
+    """The player's pixels above the queue: art, now-playing, search, transport.
+
+    Starts at the renderer and stops at the one rung read the queue's rows take,
+    so the assertions below are about the regions this slice left at the ladder.
+    """
+    start = code.index("fn get_music_pixel(")
+    return code[start : code.index("let lvl = music::draw_level();", start)]
+
+
+def queue_band(code: str) -> str:
+    """The list's rows and its empty state, as the painter lays them out."""
+    start = code.index("let lvl = music::draw_level();")
+    return code[start : code.index("fn handle_tap(", start)]
+
+
+def tap_head(code: str) -> str:
+    """The presses outside the queue: transport, art, search, editor controls."""
+    start = code.index("fn handle_tap(")
+    return code[start : code.index("let lvl = music::draw_level();", start)]
+
+
+def row_tap(code: str) -> str:
+    """The press bands of the rows themselves, as `handle_tap` answers them."""
+    start = code.index("let lvl = music::draw_level();", code.index("fn handle_tap("))
+    return code[start : code.index("Tap::None", start)]
+
+
+def test_the_app_publishes_the_persons_text_size() -> None:
+    """A ladder the binary never reads is a ladder nobody climbs.
+
+    The queue's rows are derived from the rung the renderer holds, so an app that
+    never published Settings' "Text size" would lay them out at the platform rung
+    forever and the person's choice would change nothing here. The helper existing
+    was never the failure -- calling it was. Both call sites are pinned because no
+    host test can tell a rung that was read from one left at its default.
+    """
+    code = code_only(music_main())
+    body = code[code.index("fn _start"):]
+    boot = body[: body.index("loop {")]
+    # Before the first frame is laid out -- and before the scroll extent is solved,
+    # because the extent is the row stride times the library's length.
+    assert "publish_text_scale();" in boot, "the rung is read after the first frame"
+    assert boot.index("publish_text_scale();") < boot.index("music.sync_list_extent();"), (
+        "the scroll extent is solved at a rung the app has not published yet"
+    )
+    assert boot.index("publish_text_scale();") < boot.index("render_music_ui(surface, &music);"), (
+        "the first frame is presented before the rung is published"
+    )
+    # Re-read at every wake, because the size changes in Settings while this screen
+    # is alive, and a rung that moved repaints the whole surface: the plate, its two
+    # run origins, the reorder centre, the stride, the divider, the extent and the
+    # bands a press answers all move with it, so a band repaint would leave part of
+    # the chain at the rung the person left.
+    loop = body[body.index("loop {"):]
+    assert "if publish_text_scale() && surface > 0 {" in loop, (
+        "the loop stopped re-reading the setting"
+    )
+    assert flat(
+        "if publish_text_scale() && surface > 0 {\n"
+        "            music.sync_list_extent();\n"
+        "            render_music_ui(surface, &music);\n"
+        "            let _ = std::surface_flip();"
+    ) in flat(loop), "a moved rung no longer re-solves the extent and redraws the screen"
+    assert loop.index("if publish_text_scale()") < loop.index(
+        "match std::event_poll(interest_mask, 150)"
+    ), "the rung is only re-read after the event it should have resized for"
+
+
+def test_the_rung_is_read_on_the_stack_and_an_unread_setting_resets_nothing() -> None:
+    """Two ways this could quietly lie.
+
+    First, zero heap: the app is `#![no_std]` with no allocator and the read runs on
+    the edge of the event loop, so the settings buffer is a fixed stack array, not a
+    `String`. Second, an unread setting must not fall back to one hundred per cent:
+    when the store is busy, the rung the process already holds is the honest answer,
+    otherwise the screen resizes under a reader who never touched the setting. And
+    the publish answers whether the rung actually moved, so a frame that changed no
+    pixel does not repaint the surface.
+    """
+    source = music_main()
+    assert "use interos_std::design::accessibility::{DynamicType, UserTextScale};" in source
+    fn = source[source.index("fn publish_text_scale()"):]
+    assert 'std::settings_get("display.text_scale", &mut buf)' in fn, (
+        "the app stopped asking the platform for the person's text size"
+    )
+    assert "let mut buf = [0u8; 32];" in fn, "the settings buffer left the stack"
+    assert "want = UserTextScale::from_settings_value(&buf[..n]);" in fn, (
+        "the app stopped using the shared parser, so a spelling the store accepts "
+        "would read as unset"
+    )
+    assert "let next = want.unwrap_or(before);" in fn, (
+        "an unread setting fell back to the platform rung instead of the held one"
+    )
+    assert "DynamicType::new(next).publish() != before" in fn, (
+        "the publish stopped answering whether the rung actually moved"
+    )
+
+
+def test_no_pixel_costs_a_settings_call_and_only_the_clamp_sizes_a_row() -> None:
+    """What the paint path may ask the platform for, and what it may not.
+
+    The surface is answered one pixel at a time from `get_music_pixel`, so the claim
+    worth pinning is not that the rung arrives rarely -- it arrives once for every
+    pixel of the queue's band, from a relaxed load of the published rung plus a
+    downward walk over this crate's own const arithmetic -- but that no pixel costs a
+    syscall. The setting is read in exactly one place, the wake path, and published.
+
+    The second claim is that a row may only ever be sized by the clamped answer.
+    `user_text_scale` is the rung before this app has refused what the band cannot
+    carry, so a binary that read it directly would paint a row that walks through the
+    home box. The ink faces take the rung as an argument rather than asking again.
+    """
+    code = code_only(music_main())
+    main = music_main()
+    assert code.count("let lvl = music::draw_level();") == 2, (
+        "the rung stopped being read where a band is laid out; either a band lost "
+        "its read or the read moved somewhere that cannot size one"
+    )
+    assert main.count('std::settings_get("display.text_scale"') == 1, (
+        "the platform is being asked for the text size in more than one place"
+    )
+    assert "user_text_scale()" not in code, (
+        "the binary reads the published rung directly, bypassing the clamp that "
+        "refuses a rung the queue's band cannot carry"
+    )
+    # The extent the person scrolls against is the stride the screen draws.
+    assert "let content_h = self.order_len * music::row_h_at(music::draw_level());" in main, (
+        "the scroll extent stopped being solved at the rung's row stride"
+    )
+    for name in ("fn rung_run_pixel(", "fn rung_fit_run", "fn row_line_text(",
+                 "fn list_centred_text("):
+        start = code.index(name)
+        face = code[start : code.index("\nfn ", start + 1)]
+        assert "lvl: u8," in face, f"{name} stopped receiving the rung as an argument"
+        assert "draw_level()" not in face, f"{name} started asking the ladder itself"
+        assert "settings_get" not in face, f"{name} put a syscall in the paint path"
+
+
+def test_the_queue_rows_are_sized_inked_and_tapped_from_the_rung() -> None:
+    """The slice only counts if the plate, the ink and the press band move together.
+
+    The painter answers `music::row_ink_h_at(lvl)` for the plate it clips,
+    `music::row_h_at(lvl)` for the stride, `music::row_title_dy_at(lvl)` and
+    `music::row_sub_dy_at(lvl)` for the two run origins, `music::row_ctrl_cy_at(lvl)`
+    for the centre the three reorder plates stand on and
+    `music::row_divider_dy_at(lvl)` for the hairline under the row; the empty-state
+    card answers its two lines from the same family. `handle_tap` divides by the very
+    same stride and refuses outside the very same plate -- a row that grew took its
+    press band with it, and a tap that landed on the row the last frame drew is a tap
+    on the row that opens.
+
+    At the authored level every branch delegates to the painters this app already
+    used, in the same order, so a reader who left the setting alone gets byte-for-byte
+    the pixels the screen drew before this change existed.
+    """
+    code = code_only(music_main())
+    paint = queue_band(code)
+    tap = row_tap(code)
+
+    for rung_face in (
+        "let lvl = music::draw_level();",
+        "let row_h = music::row_h_at(lvl);",
+        "let ink_h = music::row_ink_h_at(lvl);",
+        "let ctrl_cy = music::row_ctrl_cy_at(lvl);",
+        "music::row_title_dy_at(lvl)",
+        "music::row_sub_dy_at(lvl)",
+        "music::row_divider_dy_at(lvl)",
+        "music::list_empty_title_y_at(lvl)",
+        "music::list_empty_sub_y_at(lvl)",
+        "music::ROW_TITLE_RUNG",
+        "music::ROW_SUB_RUNG",
+        "music::LIST_EMPTY_RUNG",
+    ):
+        assert rung_face in paint, f"the queue stopped using its rung face: {rung_face}"
+
+    # The plate the row is clipped to and the pitch the chain walks at are the rung's.
+    assert "let row_y = LIST_TOP + i * row_h - scroll;" in paint
+    assert "if row_y + row_h <= LIST_TOP {" in paint
+    assert "let row_bottom = (row_y + ink_h).min(LIST_HIT_Y1);" in paint, (
+        "the row's plate stopped being the rung's plate, so the clip and the press "
+        "band disagree with the ink"
+    )
+    assert paint.count("row_line_text(") == 2, (
+        "one of the row's two runs left the rung-aware ink face"
+    )
+    assert paint.count("list_centred_text(") == 2, (
+        "one of the empty state's two lines left the rung-aware ink face"
+    )
+
+    # The press answers the geometry the screen painted, at the same rung.
+    assert "let row_h = music::row_h_at(lvl);" in tap, "the press stopped using the rung's stride"
+    assert "let idx = ry / row_h;" in tap and "let coff = ry % row_h;" in tap, (
+        "the tap handler is still dividing the list at the authored pitch"
+    )
+    assert "coff < music::row_ink_h_at(lvl)" in tap, (
+        "the press band stopped being the plate the painter clipped the row to"
+    )
+    assert "let control_y = coff as isize - music::row_ctrl_cy_at(lvl) as isize;" in tap, (
+        "the reorder controls' hit bands stopped following the centre the ink drew"
+    )
+
+    # The authored ink path may not come back inside a rung-derived plate.
+    assert "font::ellipsize(t.title()" not in paint, (
+        "the row's title is trimmed at the ladder again while its plate is derived "
+        "from the rung"
+    )
+    assert "text(x, y, MARGIN + ROW.pad, row_y + 50" not in paint, (
+        "the row's duration is inked at an authored row again"
+    )
+
+    # The byte-for-byte passthrough at the authored level.
+    assert flat(
+        "if lvl == music::PLATFORM_LEVEL {\n"
+        "        let n = font::ellipsize(label, scale, lane, &mut buf);\n"
+        "        return text(x, y, x0, y0, scale, &buf[..n], color, bg);"
+    ) in flat(code), "the row's ink stopped delegating to the authored painters"
+    assert flat(
+        "if lvl == music::PLATFORM_LEVEL {\n"
+        "        return if bold {\n"
+        "            text_centered_bold(x, y, y0, scale, label, color, bg)\n"
+        "        } else {\n"
+        "            text_centered(x, y, y0, scale, label, color, bg)"
+    ) in flat(code), "the empty state stopped delegating whole to the authored centred faces"
+
+
+def test_the_authored_queue_boxes_are_refused_in_the_binary() -> None:
+    """A derived box and its authored literal cannot both describe one row.
+
+    These are the numbers the queue was drawn with at one hundred per cent. They are
+    refused in the binary -- a painter or a press that read them would size a row at a
+    rung it never asked for -- and each still exists in the crate as the anchor its
+    derivation is proved against, which is what makes the refusal mean something
+    rather than merely record an absence.
+    """
+    main = code_only(music_main())
+    lib = music_lib()
+
+    for authored, anchor in AUTHORED_QUEUE_BOXES:
+        assert re.search(r"\b" + authored + r"\b", main) is None, (
+            f"{authored} -- the box authored at the platform rung -- is back in the "
+            "binary, while the queue derives its geometry from the person's rung"
+        )
+        assert anchor in lib, (
+            f"{anchor} was deleted instead of refused: an anchor the derivation of "
+            f"{authored} cannot be proved against forbids nothing"
+        )
+
+    # The band the rows are clipped against is one number stated in two files, and
+    # the binary pins both equalities rather than re-typing either row.
+    assert "const _: () = assert!(music::LIST_BAND_TOP == LIST_TOP);" in main
+    assert "const _: () = assert!(music::LIST_BAND_BOTTOM == LIST_HIT_Y1);" in main, (
+        "the foot the fit gate refuses against is no longer the foot the painter "
+        "clips the rows to"
+    )
+
+
+def test_the_row_geometry_anchors_to_the_authored_pixels() -> None:
+    """The derivations are faithful only if the authored rung answers the authored number.
+
+    A queue row was drawn as an 84-row plate holding its title at 14 and its duration
+    at 50, its three reorder plates on a 24-row centre, its hairline at 88 and the next
+    row 96 rows after it, and its empty state stood at 1170 and 1210. Every one of
+    those is the right-hand side of an anchor over the derivation, so a change that
+    moved a pixel for a reader who never opened Settings fails the build. The air
+    between the runs and the plate's foot is solved from the authored pair rather than
+    invented, which is what makes the floor, the stride and the hairline three answers
+    to one plate.
+    """
+    lib = music_lib()
+
+    # The restated metrics answer the ladder's own faces at the platform level.
+    for ladder_face in (
+        "const _: () = assert!(rows_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::outline_text::row_band(0, ROW_TITLE_RUNG).1);",
+        "const _: () = assert!(rows_at(ROW_SUB_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::outline_text::row_band(0, ROW_SUB_RUNG).1);",
+        "const _: () = assert!(rows_at(LIST_EMPTY_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::outline_text::row_band(0, LIST_EMPTY_RUNG).1);",
+        "const _: () = assert!(line_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::font::line_height(ROW_TITLE_RUNG));",
+        "const _: () = assert!(cap_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::font::cap_for_scale(ROW_TITLE_RUNG));",
+        "const _: () = assert!(ascent_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::font::ascent_for_scale(ROW_TITLE_RUNG));",
+        "const _: () = assert!(em_at(ROW_SUB_RUNG, PLATFORM_LEVEL)\n"
+        "    == std::design::font::em_for_scale(ROW_SUB_RUNG));",
+    ):
+        assert flat(ladder_face) in flat(lib), (
+            f"a rung-derived metric stopped being proved against the platform's own face: "
+            f"{ladder_face[:60]}"
+        )
+
+    # The pixels this screen has always drawn.
+    for anchor in (
+        "const _: () = assert!(row_title_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_TITLE_DY);",
+        "const _: () = assert!(row_sub_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_SUB_DY);",
+        "const _: () = assert!(row_ctrl_cy_at(PLATFORM_LEVEL) == AUTHORED_ROW_CTRL_CY);",
+        "const _: () = assert!(row_ink_h_at(PLATFORM_LEVEL) == AUTHORED_ROW_INK_H);",
+        "const _: () = assert!(row_h_at(PLATFORM_LEVEL) == AUTHORED_ROW_H);",
+        "const _: () = assert!(row_divider_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_DIVIDER_DY);",
+        "const _: () = assert!(list_empty_title_y_at(PLATFORM_LEVEL) == AUTHORED_LIST_EMPTY_TITLE_Y);",
+        "const _: () = assert!(list_empty_sub_y_at(PLATFORM_LEVEL) == AUTHORED_LIST_EMPTY_SUB_Y);",
+        "const _: () = assert!(AUTHORED_ROW_BOTTOM_AIR == 4);",
+        "const _: () = assert!(AUTHORED_ROW_GAP == 12);",
+        "const _: () = assert!(AUTHORED_ROW_DIVIDER_AIR == 4);",
+    ):
+        assert flat(anchor) in flat(lib), f"an authored pixel stopped being anchored: {anchor}"
+
+    # The authored literals themselves, so a relaxed anchor cannot be satisfied by
+    # moving the number it is proved against.
+    for literal in (
+        "pub const AUTHORED_ROW_TITLE_DY: usize = 14;",
+        "pub const AUTHORED_ROW_SUB_DY: usize = 50;",
+        "pub const AUTHORED_ROW_CTRL_CY: usize = 24;",
+        "pub const AUTHORED_ROW_INK_H: usize = 84;",
+        "pub const AUTHORED_ROW_H: usize = 96;",
+        "pub const AUTHORED_ROW_DIVIDER_DY: usize = 88;",
+        "pub const AUTHORED_LIST_EMPTY_TITLE_Y: usize = 1170;",
+        "pub const AUTHORED_LIST_EMPTY_SUB_Y: usize = 1210;",
+    ):
+        assert literal in lib, f"an authored pixel left the crate: {literal}"
+
+    # Every raised face is the authored stride plus the rows the rung's box gained --
+    # a face that invented its own arithmetic would not be a derivation of the anchor.
+    for derivation in (
+        "grown(AUTHORED_ROW_SUB_DY, ROW_TITLE_RUNG, level)",
+        "grown(AUTHORED_ROW_CTRL_CY, ROW_TITLE_RUNG, level)",
+        "grown(AUTHORED_LIST_EMPTY_SUB_Y, LIST_EMPTY_RUNG, level)",
+        "row_ink_h_at(level) + AUTHORED_ROW_GAP",
+        "row_ink_h_at(level) + AUTHORED_ROW_DIVIDER_AIR",
+    ):
+        assert derivation in lib, f"a row face stopped being derived from its anchor: {derivation}"
+
+
+def test_the_ladder_sweeps_every_rung_the_ladder_can_be_handed() -> None:
+    """A derivation proved only at the rung it was written from is unproven elsewhere.
+
+    The gates sweep the clamp, not the raw rung, because the clamp is what the painter
+    is handed, and they run to `MAX_LEVEL` because a sweep over a level no renderer can
+    receive would be no sweep at all. The clamp must never raise a rung the band cannot
+    carry, must never touch the authored one -- otherwise the app resizes the screen for
+    a reader who asked for nothing -- and every rung it hands back must still hold its
+    two runs, its three reorder plates and its empty state inside the band it is drawn in.
+    """
+    lib = music_lib()
+
+    assert "pub const PLATFORM_LEVEL: u8 = std::design::font::TEXT_SCALE_NORMAL;" in lib
+    assert "pub const MAX_LEVEL: u8 = 3;" in lib, (
+        "the sweep's ceiling moved away from the ladder's largest selectable level"
+    )
+
+    assert "const _: () = assert!(draw_level_holds_at_every_level());" in lib
+    assert "const _: () = assert!(queue_rows_hold_at_every_level());" in lib
+    assert "while want <= MAX_LEVEL {" in lib, "the clamp is no longer swept to the top rung"
+    assert "while level <= MAX_LEVEL as usize {" in lib, (
+        "the queue's rows are no longer swept to the top rung"
+    )
+
+    gate = lib[lib.index("const fn draw_level_holds_at_every_level()"):]
+    assert "if draw_level_at(PLATFORM_LEVEL) != PLATFORM_LEVEL {" in gate, (
+        "the clamp could move the authored rung, so a reader who never opened "
+        "Settings would get a resized screen"
+    )
+    assert "if chosen > want {" in gate, "the clamp could raise a rung the band cannot carry"
+    assert "if !list_holds_at(chosen) {" in gate, (
+        "the sweep stopped checking the fit at the rung the clamp actually hands back"
+    )
+
+    # The clamp walks down, because the plate grows with the rung and never shrinks.
+    walk = lib[lib.index("pub const fn draw_level_at("):]
+    assert "while level > 0 && !list_holds_at(level) {" in walk
+    assert "level -= 1;" in walk[:300], "the clamp no longer walks down to a rung that fits"
+
+
+def test_the_row_never_shrinks_below_the_authored_plate_and_stays_inside_its_band() -> None:
+    """Adoption may only ever grow a box, never shrink one it was drawn with.
+
+    The plate is also the row's press band and the clip the painter cuts it against, so
+    a rung below the authored one may draw smaller ink but must not shorten the reach of
+    the row it selects -- the platform's own 44-pixel floor holds at every rung. And the
+    plate grows without limit if nothing refuses it, so the fit gate and the sweep both
+    refuse a row whose plate would walk past the home box the list is clipped to, and an
+    empty state whose second line would land below it.
+    """
+    lib = music_lib()
+
+    ink = lib[lib.index("pub const fn row_ink_h_at(") : lib.index("pub const fn row_h_at(")]
+    assert "later(\n        AUTHORED_ROW_INK_H," in ink[:400], (
+        "row_ink_h_at stopped flooring at the authored plate, so a lower rung could "
+        "draw the row shorter than the screen was built with"
+    )
+    # The plate is the two runs and their air, not one of them: a plate that stopped
+    # reserving the duration run's own rows would let a raised rung ink past the bottom
+    # of the row it was cut for, and the press band is that same bottom.
+    assert "row_sub_dy_at(level) + row_sub_rows_at(level) + AUTHORED_ROW_BOTTOM_AIR" in ink, (
+        "the plate stopped reserving the duration run's rows, so the rung's ink could "
+        "outrun the plate and the press band built on it"
+    )
+
+    fits = lib[lib.index("const fn row_band_fits("):]
+    assert "row_ctrl_cy_at(level) >= std::design::touch::MIN_TARGET / 2" in fits[:900], (
+        "the fit gate stopped refusing reorder plates that ride above the band's ceiling"
+    )
+    assert "row_ctrl_cy_at(level) + std::design::touch::MIN_TARGET / 2 <= ink_h" in fits[:900], (
+        "a control's plate could hang out of the row it belongs to"
+    )
+    assert "ink_h >= std::design::touch::MIN_TARGET" in fits[:900], (
+        "the fit gate stopped refusing a plate below the platform's touch floor"
+    )
+    assert "ink_h <= LIST_BAND_BOTTOM - LIST_BAND_TOP" in fits[:900], (
+        "the fit gate stopped refusing a row that does not fit the band it is drawn in"
+    )
+    # The two runs of a row may not be refused for overlapping *bands*: the duration
+    # line begins under the title's baseline, and the authored row already answered
+    # that, so the gate is walked on baselines rather than box edges.
+    assert "row_title_dy_at(level) + ascent_at(ROW_TITLE_RUNG, level) <= row_sub_dy_at(level)" in fits[:900], (
+        "the row's fit gate stopped being the baseline-preserving one the authored row meets"
+    )
+
+    sweep = lib[lib.index("const fn queue_rows_hold_at_every_level()"):]
+    assert "if row_ink_h_at(lvl) < std::design::touch::MIN_TARGET {" in sweep, (
+        "the sweep stopped checking the touch floor at every rung"
+    )
+    assert "if row_ink_h_at(lvl) > LIST_BAND_BOTTOM - LIST_BAND_TOP {" in sweep, (
+        "the sweep stopped checking the band at every rung"
+    )
+    assert "if row_divider_dy_at(lvl) >= row_h_at(lvl) {" in sweep, (
+        "a hairline could be drawn on the next row's plate instead of in the gap"
+    )
+    assert "if list_empty_sub_y_at(lvl) + rows_at(LIST_EMPTY_RUNG, lvl) > LIST_BAND_BOTTOM {" in sweep, (
+        "the empty state's second line is no longer refused below the band's foot"
+    )
+
+    # The floor is the platform's, not a number this app remembers.
+    assert "pub const MIN_TARGET: usize = 44;" in read("sdk/rust/interos-std/src/design/mod.rs")
+
+
+def test_measured_runs_are_runtime_faces_and_ladder_geometry_is_const() -> None:
+    """The E0015 trap this slice had to avoid, pinned as a shape.
+
+    A box whose width comes from a measured run can only be asked at run time: the
+    SDK's glyph advance tables are ordinary functions, so a `const fn` that reached for
+    a measured lane would not compile -- and a compile-time anchor over such a face
+    fails at const-eval instead. Every measured face is therefore a runtime `fn`, and
+    the refusals below catch a regression that re-declared one `const`. The ladder's
+    own vertical metrics *are* compile-time, so the geometry faces that use only those
+    stay `const fn` and the per-rung sweeps can prove them.
+
+    The measured faces fall back to the ladder at the authored rung, byte for byte, and
+    a run whose trim cannot fit its mark is refused with 0 and answered with a hard cut
+    whose bytes are copied into the caller's buffer -- never the untouched label, and
+    never a slice read back out of a buffer the refusal never wrote.
+    """
+    lib = music_lib()
+
+    for runtime in ("run_w_at", "ellipsize_run", "longest_fit"):
+        assert f"pub fn {runtime}" in lib, f"`{runtime}` must be a runtime face"
+        assert f"pub const fn {runtime}" not in lib, (
+            f"`{runtime}` measures a run and cannot be `const` -- the advance tables "
+            "are not compile-time, so this would not compile"
+        )
+    for geo in (
+        "later",
+        "cap_at",
+        "line_at",
+        "ascent_at",
+        "em_at",
+        "rows_at",
+        "grown",
+        "row_title_rows_at",
+        "row_sub_rows_at",
+        "row_title_dy_at",
+        "row_sub_dy_at",
+        "row_ctrl_cy_at",
+        "row_ink_h_at",
+        "row_h_at",
+        "row_divider_dy_at",
+        "list_empty_title_y_at",
+        "list_empty_sub_y_at",
+        "draw_level_at",
+    ):
+        assert f"pub const fn {geo}" in lib, f"`{geo}` is ladder geometry and must be const"
+
+    # The ladder's own answers, at the authored rung.
+    assert "return std::design::font::measure(text, scale);" in lib, (
+        "run_w_at stopped delegating to the ladder's own measure at the authored rung"
+    )
+    assert "return std::design::font::ellipsize(text, scale, max_w, out_buf);" in lib, (
+        "ellipsize_run stopped delegating to the ladder's own ellipsize at the "
+        "authored rung, so the default screen would trim a run differently than it "
+        "always did"
+    )
+    trim = lib[lib.index("pub fn ellipsize_run("):]
+    assert "if dots_w > max_w || out_buf.len() < 3 {" in trim
+    assert "return 0;" in trim[:400], (
+        "a run the trim cannot cut inside its lane is being inked anyway, past the "
+        "edge of the row it was trimmed for"
+    )
+    assert "let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);" in trim, (
+        "the trim's own walk stopped charging the mark's three bytes, so a cut run "
+        "could be written past the end of the buffer the painter was handed"
+    )
+    # The rung arrives as an argument, so the trim never asks the platform for it.
+    assert "pub fn ellipsize_run(\n    text: &[u8],\n    scale: usize,\n    max_w: usize,\n    lvl: u8," in lib, (
+        "ellipsize_run started reading the rung itself instead of receiving it, so "
+        "the paint path would ask the platform per run"
+    )
+
+    # The refusal is answered with the run's own bytes, copied into the caller's buffer.
+    main = music_main()
+    fit = main[main.index("fn rung_fit_run"):]
+    fit = fit[: fit.index("\nfn ", 1)]
+    assert "let n = music::ellipsize_run(label, scale, lane, lvl, buf);" in fit
+    assert "let fit = music::longest_fit(label, music::em_at(scale, lvl), lane, buf.len());" in fit, (
+        "a refused trim is handing the painter the whole run again, so a title wider "
+        "than its lane prints past the row that framed it"
+    )
+    assert "buf[..fit].copy_from_slice(&label[..fit]);" in fit, (
+        "the cut is read straight back out of a buffer the refusal never wrote, so a "
+        "refused row would ink the stack's stale bytes instead of the run's front"
+    )
+    assert "&buf[..fit]" in fit, (
+        "the hard cut is not what the caller is handed back"
+    )
+
+    # The ink faces ask the rung for their cap, their band and their placement, and
+    # grow the bitmap band with the level so a scaled run keeps its descenders.
+    ink = main[main.index("fn rung_run_pixel("):]
+    ink = ink[: ink.index("\nfn ", 1)]
+    assert "let cap = music::cap_at(scale, lvl);" in ink
+    assert "outline_text::place_run_cap(x0, y0, cap, fitted, None, bold)" in ink
+    assert "y0 + music::rows_at(scale, lvl)" in ink, (
+        "the bitmap fallback stopped growing its band with the rung, so an enlarged "
+        "run would lose its descenders at the authored cell's edge"
+    )
+    assert "std::design::monochrome::text_px(" in ink
+    assert "let mut buf = [0u8; 48];" in main[main.index("fn row_line_text("):], (
+        "the row's trim buffer left the stack"
+    )
+
+
+def test_the_rung_stops_at_the_slice_this_app_declared() -> None:
+    """The scope of this change is stated, and the boxes outside it are proved untouched.
+
+    Only the queue's rows and the list's empty state were adopted, because only there
+    does a plate have vertical slack the person's rung can spend. The artwork card and
+    its caption, the now-playing stack, the search row, the sort and import controls,
+    the availability caption, the timeline, the volume row, the transport discs, the
+    queue header, the publish/ringtone/add controls and the add editor keep the pixels
+    they were drawn with, and their press bands keep them too -- a region whose ink grew
+    while its box stayed authored is a region that clips what it enlarged.
+    """
+    code = code_only(music_main())
+
+    for region, body in (
+        ("the renderer above the queue", painter_head(code)),
+        ("the presses outside the queue", tap_head(code)),
+    ):
+        for face in RUNG_FACES:
+            assert face not in body, (
+                f"{region} now derives geometry from the person's rung, but its boxes "
+                "were authored at the ladder: adopt the region end to end or leave its "
+                "ink at the ladder too"
+            )
+
+    # The row's lane is still authored arithmetic: the three reorder plates are the
+    # platform's floor-sized squares and a person's text size does not widen the
+    # columns they stand in.
+    assert "const ROW_TITLE_LANE: usize = CONTENT_W - 220;" in code, (
+        "the row's text lane started moving with the rung while the plates it clears "
+        "are authored"
+    )
+
+    # And the crate states the boundary rather than leaving it to be inferred.
+    prose = lib_prose()
+    assert "SCOPE, stated rather than hidden" in prose, (
+        "the library no longer states which regions of the player the rung reaches"
+    )
+    assert "keep the pixels they were drawn with" in prose, (
+        "the library stopped naming the regions left at the authored ladder"
+    )
+    assert "the publish/ringtone/add controls and the add editor" in prose, (
+        "the stated boundary stopped naming the controls it leaves at the ladder"
+    )
+    assert "pub const ROW_TITLE_RUNG: usize = crate::theme::type_scale::BODY;" in music_lib()
+    assert "pub const ROW_SUB_RUNG: usize = crate::theme::type_scale::CAPTION;" in music_lib()

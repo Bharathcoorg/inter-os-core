@@ -47,6 +47,7 @@ use std::design::components;
 use std::design::font;
 use std::design::outline_text;
 use std::design::primitives::{draw_circle, draw_pill, draw_rounded_rect, Rect};
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 
 /// Synthesizer audio waveform.
 #[allow(dead_code)]
@@ -353,7 +354,12 @@ impl MusicApp {
     /// would let the list scroll past its last row.
     pub fn sync_list_extent(&mut self) {
         self.rebuild_order();
-        let content_h = self.order_len * TRACKLIST_ROW_H;
+        // WHY the rung is asked here: the content height is the library's length times
+        // the row stride the screen draws, so an extent solved at the ladder would let a
+        // person scroll past the last row of a taller list -- or refuse them the rows a
+        // shorter one still holds. This is a relaxed load and a walk of the crate's own
+        // const arithmetic, not a platform call.
+        let content_h = self.order_len * music::row_h_at(music::draw_level());
         self.list_scroll = std::design::scroll::ScrollState::new(
             content_h,
             LIST_VIEWPORT_H,
@@ -1311,19 +1317,31 @@ const LIST_HIT_Y1: usize = HOME_HIT.y;
 const LIST_TOP: usize = 1124;
 /// The height of the visible track-list band.
 const LIST_VIEWPORT_H: usize = LIST_HIT_Y1 - LIST_TOP;
-const LIST_TITLE_Y: usize = 1170;
-const LIST_SUB_Y: usize = 1210;
 
-/// Track-list row pitch and the pitch body of each row.
-const TRACKLIST_ROW_H: usize = 96;
-/// The rows a row inks, and the row inside it its three reorder plates stand on.
+// WHY the row's plate, its two run origins, its reorder centre, its stride and the
+// empty state's two lines are no longer numbers here: they are the person's text size
+// first, derived by `music::row_ink_h_at` / `music::row_sub_dy_at` /
+// `music::row_ctrl_cy_at` / `music::row_h_at` / `music::row_divider_dy_at` /
+// `music::list_empty_title_y_at` / `music::list_empty_sub_y_at` at the rung the
+// renderer holds. Each one answers the row this screen has always drawn at the level it
+// was authored at, and the crate keeps those numbers as the anchors of the derivation --
+// see `music::AUTHORED_ROW_*`.
+//
+// WHY one derivation and not four literals: the painter clipped every row's plate at
+// `row_y + 84` and the press answered `coff < 84`, and both placed its glyphs at
+// `row_y + 24` while the press answered `coff - 24`. Two sites, four literals, no proof
+// they were the same four. The row now answers one derivation in both places, at the
+// rung the screen inked.
+const _: () = assert!(music::LIST_BAND_TOP == LIST_TOP);
+const _: () = assert!(music::LIST_BAND_BOTTOM == LIST_HIT_Y1);
+
+/// The column a row's title run is trimmed to: the content column less the three
+/// reorder plates and the air they hold.
 ///
-/// WHY named: the painter clipped every row's plate at `row_y + 84` and the
-/// press answered `coff < 84`, and both placed its glyphs at `row_y + 24` while
-/// the press answered `coff - 24`. Two sites, four literals, no proof they were
-/// the same four. The row answers the plate it inks and nothing else.
-const ROW_INK_H: usize = 84;
-const ROW_CTRL_CY: usize = 24;
+/// WHY it stays authored: the plates are the platform's floor-sized squares, and a
+/// person's text size does not widen the columns they stand in. What moves with the rung
+/// is the em the run is cut at and the em it is inked at -- see [`row_line_text`].
+const ROW_TITLE_LANE: usize = CONTENT_W - 220;
 /// The half-extent of each reorder plate, read off the platform's floor, and the
 /// three centres in the order the press asks them: move up, move down, delete.
 const ROW_CTRL_HALF: usize = interos_std::design::touch::MIN_TARGET / 2;
@@ -1428,9 +1446,10 @@ const _: () = {
         assert!(ROW_CTRL_CXS[c + 1] - ROW_CTRL_CXS[c] == MIN_TARGET);
         c += 1;
     }
-    assert!(ROW_CTRL_CY + ROW_CTRL_HALF <= ROW_INK_H);
-    assert!(ROW_INK_H <= TRACKLIST_ROW_H);
-    assert!(TRACKLIST_ROW_H >= MIN_TARGET);
+    assert!(music::row_ctrl_cy_at(music::PLATFORM_LEVEL) + ROW_CTRL_HALF
+        <= music::AUTHORED_ROW_INK_H);
+    assert!(music::AUTHORED_ROW_INK_H <= music::AUTHORED_ROW_H);
+    assert!(music::AUTHORED_ROW_H >= MIN_TARGET);
     // The back control is the platform's, and its plate clears the floor.
     assert!(std::design::back_button::SIZE >= MIN_TARGET);
     assert!(VOL_METER_Y0 >= VOL_MINUS.y && VOL_METER_Y1 <= VOL_PLUS.y + VOL_PLUS.h);
@@ -1636,6 +1655,167 @@ fn text_in_rect_centered(
     let w = font::measure(s, scale);
     let x0 = rect.x + rect.w.saturating_sub(w) / 2;
     text(x, y, x0, y0, scale, s, color, bg)
+}
+
+// -----------------------------------------------------------------------------
+// The person's text size: read once per wake, published, and carried by the runs
+// -----------------------------------------------------------------------------
+
+/// Publishes Settings' "Text size" for this process, from the store the app already
+/// polls.
+///
+/// Returns whether the rung the last frame was laid out with actually moved, which is
+/// the caller's signal that the whole surface has to be repainted and not just the band
+/// something else dirtied: the row's plate, its two run origins, the reorder centre, the
+/// stride between rows, the count the band holds and the rows a press answers all move
+/// with the rung.
+///
+/// WHY the shared parser and not this app's own chain of compares: the store accepts
+/// both the digit and the word for a level, and a reader that understood fewer spellings
+/// than the writer produces would read an existing preference as "unset" and quietly
+/// reset the rung.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame that
+/// fell back to one hundred per cent because the store was busy would resize the screen
+/// under a person who never touched the setting.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a level
+    // above the ladder's largest setting is clamped on the way in, and a caller that
+    // repaints because "the level changed" should be wrong about that only when the
+    // pixels really did move.
+    DynamicType::new(next).publish() != before
+}
+
+/// One pixel of a run inked at the rung `lvl` names, inside the lane `lane` trims it to.
+///
+/// WHY the refusal is answered with a cut and not with the run itself:
+/// `music::ellipsize_run` answers 0 when even the three-byte mark will not sit in the
+/// lane, and painting the untouched run then puts words past the plate that framed them
+/// -- the same answer the lane gives when it does have room, minus the mark.
+///
+/// WHY the run's own bytes are put into the buffer before the cut is read back: a
+/// refusal is the one answer `ellipsize_run` gives without writing, so a cut read
+/// straight back out of `buf` would be the stack's stale bytes, not the front of the run.
+#[inline(always)]
+fn rung_run_pixel(
+    x: usize,
+    y: usize,
+    lvl: u8,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    fitted: &[u8],
+    lane: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    if scale == 0 || fitted.is_empty() || x < x0 || x >= x0 + lane {
+        return None;
+    }
+    let cap = music::cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, fitted, None, bold) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. The band grows with the level: a run
+    // fitted to a scaled em walks taller than the unscaled cell, so the ladder's band
+    // would cut the descenders of the very run it enlarged.
+    if y >= y0 && y < y0 + music::rows_at(scale, lvl) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, fitted, color, bg, bold);
+    }
+    None
+}
+
+/// Cuts `label` to `lane` at the rung `lvl` names and hands the caller's buffer back.
+///
+/// WHY the cut, and why the copy: see [`rung_run_pixel`]'s note on a refused trim --
+/// `music::ellipsize_run` writes nothing when it refuses, so the hard cut is fitted here
+/// and its bytes are copied before the run is read.
+fn rung_fit_run<'a>(label: &[u8], scale: usize, lane: usize, lvl: u8, buf: &'a mut [u8]) -> &'a [u8] {
+    let n = music::ellipsize_run(label, scale, lane, lvl, buf);
+    if n > 0 {
+        return &buf[..n];
+    }
+    let fit = music::longest_fit(label, music::em_at(scale, lvl), lane, buf.len());
+    buf[..fit].copy_from_slice(&label[..fit]);
+    &buf[..fit]
+}
+
+/// One line of a queue row, inked at the rung this process draws at.
+///
+/// WHY a separate face and not the shared [`text`]: only the queue's rows are derived
+/// from the rung so far, so only their runs may grow. The artwork caption, the
+/// now-playing stack, the search row, the availability caption, the volume row, the
+/// queue header, the row controls and the add editor still lay out at the authored
+/// ladder, and growing their ink before their boxes would clip them. At the authored
+/// level this trims with `font::ellipsize` and hands the result to [`text`] -- the very
+/// calls the row made before this face existed, in the same order.
+#[inline(always)]
+fn row_line_text(
+    x: usize,
+    y: usize,
+    lvl: u8,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    label: &[u8],
+    lane: usize,
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let mut buf = [0u8; 48];
+    if lvl == music::PLATFORM_LEVEL {
+        let n = font::ellipsize(label, scale, lane, &mut buf);
+        return text(x, y, x0, y0, scale, &buf[..n], color, bg);
+    }
+    let fitted = rung_fit_run(label, scale, lane, lvl, &mut buf);
+    rung_run_pixel(x, y, lvl, x0, y0, scale, fitted, lane, color, bg, false)
+}
+
+/// One centred line of the list's empty state, at the rung this process draws at.
+///
+/// WHY the authored branch delegates whole: [`text_centered`] measures the run, cuts it
+/// to the content column and centres what survives -- all at the ladder -- and the row
+/// the screen drew with those pixels has to keep them exactly. Above the authored level
+/// the same three steps are asked of the rung: the cut comes from `music::ellipsize_run`,
+/// the centring from `music::run_w_at`, and the ink from [`rung_run_pixel`].
+#[inline(always)]
+fn list_centred_text(
+    x: usize,
+    y: usize,
+    lvl: u8,
+    y0: usize,
+    scale: usize,
+    label: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    if lvl == music::PLATFORM_LEVEL {
+        return if bold {
+            text_centered_bold(x, y, y0, scale, label, color, bg)
+        } else {
+            text_centered(x, y, y0, scale, label, color, bg)
+        };
+    }
+    let mut buf = [0u8; 96];
+    let fitted = rung_fit_run(label, scale, CONTENT_W, lvl, &mut buf);
+    // A bold outline run is one pixel wider than the run it was measured from, so the
+    // centring charges that pixel too.
+    let drawn = music::run_w_at(fitted, scale, lvl) + usize::from(bold && !fitted.is_empty());
+    let x0 = MARGIN + CONTENT_W.saturating_sub(drawn) / 2;
+    rung_run_pixel(x, y, lvl, x0, y0, scale, fitted, CONTENT_W, color, bg, bold)
 }
 
 /// Decimal `v` into `out`, no leading zeros. Returns the byte count.
@@ -2505,6 +2685,17 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         return THEME.surface;
     }
 
+    // WHY the rung is read here and handed down: the plate, the two run origins, the
+    // reorder centre, the stride and the divider all come from the same `*_at(lvl)`
+    // faces `handle_tap` answers below, so a rung that grew a row moved the row it opens.
+    // The read this pixel pays is a relaxed load of the rung the wake path published and
+    // a downward walk over this crate's own const arithmetic; the platform call that
+    // would not belong in a pixel -- `settings_get` -- is answered once per wake, above.
+    let lvl = music::draw_level();
+    let row_h = music::row_h_at(lvl);
+    let ink_h = music::row_ink_h_at(lvl);
+    let ctrl_cy = music::row_ctrl_cy_at(lvl);
+
     if app.order_len == 0 {
         // WHY the empty state follows the store's own state: the old copy
         // said the search had found no audio files in local storage, which
@@ -2544,10 +2735,30 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 ),
             }
         };
-        if let Some(c) = text_centered_bold(x, y, LIST_TITLE_Y, 1, title, THEME.on_surface, THEME.surface) {
+        if let Some(c) = list_centred_text(
+            x,
+            y,
+            lvl,
+            music::list_empty_title_y_at(lvl),
+            music::LIST_EMPTY_RUNG,
+            title,
+            THEME.on_surface,
+            THEME.surface,
+            true,
+        ) {
             return c;
         }
-        if let Some(c) = text_centered(x, y, LIST_SUB_Y, 1, subline, THEME.on_surface_variant, THEME.surface) {
+        if let Some(c) = list_centred_text(
+            x,
+            y,
+            lvl,
+            music::list_empty_sub_y_at(lvl),
+            music::LIST_EMPTY_RUNG,
+            subline,
+            THEME.on_surface_variant,
+            THEME.surface,
+            false,
+        ) {
             return c;
         }
         return THEME.surface;
@@ -2555,11 +2766,11 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
 
     let scroll = app.list_scroll.offset;
     for i in 0..app.order_len {
-        let row_y = LIST_TOP + i * TRACKLIST_ROW_H - scroll;
+        let row_y = LIST_TOP + i * row_h - scroll;
         if row_y >= LIST_HIT_Y1 {
             break;
         }
-        if row_y + TRACKLIST_ROW_H <= LIST_TOP {
+        if row_y + row_h <= LIST_TOP {
             continue;
         }
         let Some(store_idx) = app.store_index_at(i) else {
@@ -2567,7 +2778,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         };
         let t = app.store.get(store_idx).unwrap();
         // WHY clipped: a row that inked past the band's foot promises a press the gesture answers.
-        let row_bottom = (row_y + ROW_INK_H).min(LIST_HIT_Y1);
+        let row_bottom = (row_y + ink_h).min(LIST_HIT_Y1);
         if y >= row_y && y < row_bottom {
             let selected = store_idx == app.current_track_idx;
             // The platform's list-row treatment: the fill of the row the tap
@@ -2588,34 +2799,38 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                 // WHY the marker is a shape and not only a colour: the
                 // design document asks for the current track to be marked
                 // without relying on colour alone.
-                if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + 24) {
+                if selected && play_glyph(x, y, MARGIN + ROW.pad - 8, row_y + ctrl_cy) {
                     return THEME.on_surface;
                 }
                 // The queue's reorder affordances. The three controls sit on
                 // 44 px centres, so each hit region is a 44 px target with no
                 // overlap (the platform's minimum is 44 px).
-                if up_glyph(x, y, ROW_CTRL_CXS[0], row_y + ROW_CTRL_CY) {
+                //
+                // WHY their centre follows the rung: the cluster marks the row's title
+                // line, and `music::row_ctrl_cy_at` is the centre that line's box grew
+                // to -- the same face the press answers below.
+                if up_glyph(x, y, ROW_CTRL_CXS[0], row_y + ctrl_cy) {
                     return THEME.muted;
                 }
-                if down_glyph(x, y, ROW_CTRL_CXS[1], row_y + ROW_CTRL_CY) {
+                if down_glyph(x, y, ROW_CTRL_CXS[1], row_y + ctrl_cy) {
                     return THEME.muted;
                 }
                 // Delete affordance, matching its hit region in the tap handler.
                 let del_x = ROW_CTRL_CXS[2];
                 let ddx = x as isize - del_x as isize;
-                let ddy = y as isize - (row_y + ROW_CTRL_CY) as isize;
+                let ddy = y as isize - (row_y + ctrl_cy) as isize;
                 if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
                     return THEME.muted;
                 }
-                let mut buf = [0u8; 48];
-                let n = font::ellipsize(t.title(), 2, CONTENT_W - 220, &mut buf);
-                if let Some(c) = text(
+                if let Some(c) = row_line_text(
                     x,
                     y,
+                    lvl,
                     MARGIN + ROW.pad,
-                    row_y + 14,
-                    2,
-                    &buf[..n],
+                    row_y + music::row_title_dy_at(lvl),
+                    music::ROW_TITLE_RUNG,
+                    t.title(),
+                    ROW_TITLE_LANE,
                     if selected { THEME.on_surface } else { THEME.on_surface_variant },
                     row_fill,
                 ) {
@@ -2630,14 +2845,28 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                     db[..5].copy_from_slice(b"--:--");
                     5
                 };
-                if let Some(c) = text(x, y, MARGIN + ROW.pad, row_y + 50, 1, &db[..dn], THEME.muted, row_fill) {
+                if let Some(c) = row_line_text(
+                    x,
+                    y,
+                    lvl,
+                    MARGIN + ROW.pad,
+                    row_y + music::row_sub_dy_at(lvl),
+                    music::ROW_SUB_RUNG,
+                    &db[..dn],
+                    ROW_TITLE_LANE,
+                    THEME.muted,
+                    row_fill,
+                ) {
                     return c;
                 }
                 return row_fill;
             }
         }
-        // Row-gap divider at +88 (see the gate note above the text runs).
-        if y == row_y + 88 && y < LIST_HIT_Y1 && x >= MARGIN && x < MARGIN + CONTENT_W {
+        // Row-gap divider: the row's own plate plus its authored air, at the rung.
+        if y == row_y + music::row_divider_dy_at(lvl) && y < LIST_HIT_Y1
+            && x >= MARGIN
+            && x < MARGIN + CONTENT_W
+        {
             return ROW.divider;
         }
     }
@@ -3124,11 +3353,20 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         // scrolled position, so the row under the finger is the one whose
         // index is the offset-adjusted position divided by the row height.
         // Without it, a tap on a scrolled row selected the wrong track.
+        //
+        // WHY the rung is read here: the pitch, the plate and the control centre the
+        // screen just drew are this press's own geometry, so a rung that grew a row
+        // moved the row it opens instead of leaving the tap on the authored pitch.
+        let lvl = music::draw_level();
+        let row_h = music::row_h_at(lvl);
         let ry = y.saturating_sub(LIST_TOP) + app.list_scroll.offset;
-        let idx = ry / TRACKLIST_ROW_H;
-        let coff = ry % TRACKLIST_ROW_H;
-        if idx < app.order_len && coff < ROW_INK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
-            let control_y = coff as isize - ROW_CTRL_CY as isize;
+        let idx = ry / row_h;
+        let coff = ry % row_h;
+        if idx < app.order_len && coff < music::row_ink_h_at(lvl)
+            && x >= MARGIN
+            && x < MARGIN + CONTENT_W
+        {
+            let control_y = coff as isize - music::row_ctrl_cy_at(lvl) as isize;
             let in_control = |centre: usize| {
                 (x as isize - centre as isize).abs() <= ROW_CTRL_HALF as isize
                     && control_y.abs() <= ROW_CTRL_HALF as isize
@@ -3350,6 +3588,12 @@ pub extern "C" fn _start() -> ! {
     let mut music = MusicApp::new();
     let mut laps = Laps::start();
 
+    // WHY the rung is published before the first layout: Settings' "Text size" is
+    // already chosen when this app opens, so the queue must not be laid out at the
+    // authored pitch, scrolled a frame later and resized again -- the row height the
+    // scroll extent solves below is the row height the screen is going to draw.
+    publish_text_scale();
+
     // Load the real, persisted local library before the first frame so the
     // playlist and the now-playing row reflect what storage actually holds.
     music.store = store::TrackStore::load();
@@ -3420,6 +3664,17 @@ pub extern "C" fn _start() -> ! {
     // 6. Asynchronous Event Reactor Loop
     let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
+        // WHY re-read at every wake: the size is changed in Settings while this screen
+        // is alive, so a rung that moved has to repaint the whole surface -- the row's
+        // plate, the two run origins, the reorder centre, the divider, the pitch the
+        // scroll extent solves and the bands the press answers all move with it, and a
+        // band repaint would leave part of the chain at the rung the person left.
+        if publish_text_scale() && surface > 0 {
+            music.sync_list_extent();
+            render_music_ui(surface, &music);
+            let _ = std::surface_flip();
+        }
+
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {

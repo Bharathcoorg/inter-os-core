@@ -20,6 +20,491 @@ pub mod art;
 
 use library::ImportOutcome;
 
+// -----------------------------------------------------------------------------
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box in the queue's track list was authored as the
+// platform's type ladder read at one hundred per cent. The ladder's own faces --
+// `font::line_height`, `font::ascent_for_scale`, `outline_text::row_band` -- are
+// `const fn`s of a rung, so a layout built from them cannot see the setting a
+// person changes in Settings: the list laid itself out at the platform rung
+// whatever size was chosen, and "Text size" moved nothing here. Settings writes
+// the level, `DynamicType::publish` hands it to the renderer, and the faces under
+// [`rows_at`] answer at it. A layout that moves its ink and keeps its box clips
+// the run it enlarged -- a row whose title grew inside the 84-row plate it was
+// drawn with prints through the duration line and the row under it; a layout that
+// moves its box to a rung the renderer never got resizes the screen under a reader
+// who asked for nothing. Both are refused here: the rung is read from the one cell
+// the renderer draws from, every box is derived twice -- once as a `const fn` of a
+// level so the compile-time gates can sweep all four selectable levels, once at run
+// time through that rung -- and every authored number survives as the anchor of its
+// derivation, so the platform rung paints byte for byte the list it painted before.
+//
+// SCOPE, stated rather than hidden: the faces below drive the queue's track rows --
+// the row's plate, its two run origins, the reorder controls that stand on them, the
+// stride between rows, the divider each row draws, the scroll extent the rows are
+// measured against and the empty-state card's two lines -- together with the tap
+// bands that answer those rows. The artwork card and its caption, the now-playing
+// title/artist/state stack, the search field, the sort and import controls, the
+// availability caption, the timeline, the volume row, the transport discs, the queue
+// header, the publish/ringtone/add controls and the add editor keep the pixels they
+// were drawn with: adopting any of those means moving its painter and its tap
+// handlers to the same rung-aware faces in one change, because one published rung
+// has to size a region end to end or not at all.
+// -----------------------------------------------------------------------------
+
+/// The text-size level every box in this app was authored against.
+///
+/// WHY it is named: each box is derived twice -- once as a `const fn` of a level, so
+/// the compile-time gates can sweep all four selectable levels, and once at run time
+/// through the published rung, so the pixels a person gets follow the setting they
+/// chose. The identity checks beside each derivation say the level-aware form answers
+/// the authored number at *this* level, which is what keeps the list's Normal-size
+/// pixels exactly the pixels it drew before it read the setting at all.
+pub const PLATFORM_LEVEL: u8 = std::design::font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep to.
+/// [`std::design::accessibility::UserTextScale::from_u8`] clamps anything above it, so
+/// a sweep past this rung would be a sweep over a level no renderer can be handed.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The rung a queue row's title is set in.
+///
+/// WHY named here: the derivations below are functions of a rung as well as a level,
+/// and a plate grown for the wrong rung is a plate that clips the run it was cut for.
+pub const ROW_TITLE_RUNG: usize = crate::theme::type_scale::BODY;
+
+/// The rung a queue row's duration is set in.
+pub const ROW_SUB_RUNG: usize = crate::theme::type_scale::CAPTION;
+
+/// The rung the list's empty-state card sets both of its lines in.
+pub const LIST_EMPTY_RUNG: usize = crate::theme::type_scale::CAPTION;
+
+/// The rows the track list is drawn between: its own top, and the first row of the
+/// platform's home box, which is the foot the rows are clipped against.
+///
+/// WHY they live here: the fit gate below refuses a rung whose row does not fit the
+/// band, and a band this app's painter and this app's gate read from two different
+/// files is a band that drifts. The binary pins both numbers against its own.
+pub const LIST_BAND_TOP: usize = 1124;
+pub const LIST_BAND_BOTTOM: usize = std::design::home_band::HIT.y;
+
+// --- The pixels the list was drawn with, kept as the anchors of their derivations --
+/// A row's title run origin inside the row, at the level the row was authored at.
+pub const AUTHORED_ROW_TITLE_DY: usize = 14;
+/// A row's duration run origin inside the row, at the authored level.
+pub const AUTHORED_ROW_SUB_DY: usize = 50;
+/// The centre of the three reorder plates inside a row, at the authored level.
+pub const AUTHORED_ROW_CTRL_CY: usize = 24;
+/// The rows one row inks -- its plate and its press band -- at the authored level.
+pub const AUTHORED_ROW_INK_H: usize = 84;
+/// The stride between two rows at the authored level.
+pub const AUTHORED_ROW_H: usize = 96;
+/// The row inside a plate where the divider under it is drawn, at the authored level.
+pub const AUTHORED_ROW_DIVIDER_DY: usize = 88;
+/// The empty-state headline's row at the authored level.
+pub const AUTHORED_LIST_EMPTY_TITLE_Y: usize = 1170;
+/// The empty-state notice's row at the authored level.
+pub const AUTHORED_LIST_EMPTY_SUB_Y: usize = 1210;
+
+/// The air between a duration run's box and the bottom of the plate it is inked in --
+/// solved from the authored pair rather than invented, so the authored plate is exactly
+/// [`AUTHORED_ROW_INK_H`] at the authored level.
+pub const AUTHORED_ROW_BOTTOM_AIR: usize =
+    AUTHORED_ROW_INK_H - AUTHORED_ROW_SUB_DY - rows_at(ROW_SUB_RUNG, PLATFORM_LEVEL);
+/// The gap one row's plate leaves before the next row's plate begins.
+pub const AUTHORED_ROW_GAP: usize = AUTHORED_ROW_H - AUTHORED_ROW_INK_H;
+/// The air between a plate's foot and the divider drawn under that row.
+pub const AUTHORED_ROW_DIVIDER_AIR: usize = AUTHORED_ROW_DIVIDER_DY - AUTHORED_ROW_INK_H;
+
+/// The later of two rows or columns: the max the union bands are walked with.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    std::design::font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`: [`std::design::outline_text::row_band`]'s
+/// union of the outline line box and the bitmap cell, asked at a level rather than at
+/// the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is the platform's own answer and it is
+/// a `const fn` of the ladder, so a plate sized from it can never see the setting. The
+/// arithmetic below is the same walk -- the lower of the two faces' baselines, the
+/// deeper of the two faces' bottoms -- with every metric read through the
+/// `*_user_scale` faces, and the gate beside it refuses the day the two answers
+/// disagree at the level they were authored at.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) = std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// An authored vertical stride between two stacked runs, grown by the rows the rung's
+/// box gained above the level the stride was authored at.
+///
+/// WHY this form: a stride is the space one run's box plus its air, and the only honest
+/// way to keep the authored pixels at Normal *and* carry a raised rung is to add exactly
+/// the growth the box took. It never shrinks a stride, and at the authored level it is
+/// the stride itself.
+pub const fn grown(stride: usize, scale: usize, level: u8) -> usize {
+    stride + rows_at(scale, level).saturating_sub(rows_at(scale, PLATFORM_LEVEL))
+}
+
+/// The rows a level's row reserves for its title run.
+pub const fn row_title_rows_at(level: u8) -> usize {
+    rows_at(ROW_TITLE_RUNG, level)
+}
+
+/// The rows a level's row reserves for its duration run.
+pub const fn row_sub_rows_at(level: u8) -> usize {
+    rows_at(ROW_SUB_RUNG, level)
+}
+
+/// Where a row's title run begins inside the row.
+///
+/// WHY the level is unused here: the title is the row's topmost run, so its origin is
+/// the row's own authored air and never moves with the rung; the plate grows below it.
+/// The level stays in the signature so the row's faces read as one family, exactly as
+/// Notes' empty-state headline does.
+pub const fn row_title_dy_at(_level: u8) -> usize {
+    AUTHORED_ROW_TITLE_DY
+}
+
+/// Where a row's duration run begins inside the row, at a level: the authored stride
+/// from the row's top, grown by the title box above it.
+pub const fn row_sub_dy_at(level: u8) -> usize {
+    grown(AUTHORED_ROW_SUB_DY, ROW_TITLE_RUNG, level)
+}
+
+/// The centre the three reorder plates stand on, at a level: the authored centre grown
+/// by the title box they ride.
+///
+/// WHY it grows: the plates mark the row's title line, and a control that stayed at
+/// `24` while the line it marks moved down is a control that sits over the run it
+/// belongs to rather than beside it.
+pub const fn row_ctrl_cy_at(level: u8) -> usize {
+    grown(AUTHORED_ROW_CTRL_CY, ROW_TITLE_RUNG, level)
+}
+
+/// The rows one row inks at a level: its two run boxes and their authored air, and
+/// never shorter than the plate the screen was built with.
+///
+/// WHY the floor: the plate is also the row's press band and the clip the painter cuts
+/// it against, so a rung below the authored one may draw smaller ink but never shorten
+/// the reach of the row it selects.
+pub const fn row_ink_h_at(level: u8) -> usize {
+    later(
+        AUTHORED_ROW_INK_H,
+        row_sub_dy_at(level) + row_sub_rows_at(level) + AUTHORED_ROW_BOTTOM_AIR,
+    )
+}
+
+/// The stride between two rows at a level: the rung's plate plus the authored gap.
+pub const fn row_h_at(level: u8) -> usize {
+    row_ink_h_at(level) + AUTHORED_ROW_GAP
+}
+
+/// The row inside the plate where the divider under a row is drawn, at a level.
+pub const fn row_divider_dy_at(level: u8) -> usize {
+    row_ink_h_at(level) + AUTHORED_ROW_DIVIDER_AIR
+}
+
+/// The empty-state headline's row at a level.
+///
+/// WHY the level is unused: as with the row's title, it is the topmost run of its stack.
+pub const fn list_empty_title_y_at(_level: u8) -> usize {
+    AUTHORED_LIST_EMPTY_TITLE_Y
+}
+
+/// The empty-state notice's row at a level: the authored stride grown by the headline
+/// box above it.
+pub const fn list_empty_sub_y_at(level: u8) -> usize {
+    grown(AUTHORED_LIST_EMPTY_SUB_Y, LIST_EMPTY_RUNG, level)
+}
+
+/// Whether a level's row keeps its two runs on their own boxes, keeps its reorder
+/// plates inside its plate, keeps the whole row inside the band it is drawn in, and
+/// keeps a plate a finger can land on.
+const fn row_band_fits(level: u8) -> bool {
+    let ink_h = row_ink_h_at(level);
+    // The duration line begins below the title's baseline, which is where the authored
+    // row put it: the two *bands* overlap by the title's descender tail, and a gate that
+    // refused that overlap would refuse the authored level itself.
+    row_title_dy_at(level) + ascent_at(ROW_TITLE_RUNG, level) <= row_sub_dy_at(level)
+        && row_sub_dy_at(level) + row_sub_rows_at(level) <= ink_h
+        && row_ctrl_cy_at(level) >= std::design::touch::MIN_TARGET / 2
+        && row_ctrl_cy_at(level) + std::design::touch::MIN_TARGET / 2 <= ink_h
+        && ink_h >= std::design::touch::MIN_TARGET
+        && ink_h <= LIST_BAND_BOTTOM - LIST_BAND_TOP
+        && row_h_at(level) >= std::design::touch::MIN_TARGET
+}
+
+/// Whether a level's empty-state card keeps both lines inside the list's band.
+const fn empty_state_fits(level: u8) -> bool {
+    list_empty_title_y_at(level) + rows_at(LIST_EMPTY_RUNG, level)
+        <= list_empty_sub_y_at(level)
+        && list_empty_sub_y_at(level) + rows_at(LIST_EMPTY_RUNG, level) <= LIST_BAND_BOTTOM
+}
+
+/// Whether a level is one this app can paint: its rows inside the band they are
+/// clipped to, and its empty state inside the same band.
+const fn list_holds_at(level: u8) -> bool {
+    row_band_fits(level) && empty_state_fits(level)
+}
+
+/// The largest rung this app can paint, at or below `want`.
+///
+/// WHY a clamp at all: growing every box to the person's rung is the right half of this
+/// change; the other half is refusing a rung the list cannot carry rather than letting a
+/// row's plate walk through the home box under it. The walk is downward because the
+/// plate grows with the rung and never shrinks.
+pub const fn draw_level_at(want: u8) -> u8 {
+    let mut level = want;
+    while level > 0 && !list_holds_at(level) {
+        level -= 1;
+    }
+    level
+}
+
+/// The rung this process draws at: the person's level, clamped to what the queue's rows
+/// and the list's empty state can carry.
+#[inline]
+pub fn draw_level() -> u8 {
+    draw_level_at(std::design::font::user_text_scale())
+}
+
+/// The advance a run takes at `scale` on the level `lvl` names.
+///
+/// WHY not const: the SDK's glyph advance tables are ordinary functions, so a measured
+/// width can only be asked at run time -- which is why every box whose width depends on
+/// a measured run is a runtime face rather than a `const fn`.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return std::design::font::measure(text, scale);
+    }
+    let w = std::design::font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// `font::ellipsize` at the rung `lvl` names.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in the
+/// ladder's em, so a run cut to a lane at one rung and inked at another is an ellipsis
+/// past the edge of the row it was trimmed for. At the authored level this *is*
+/// `font::ellipsize`, byte for byte.
+///
+/// WHY the level is an argument: this face is reached from the queue's painter, which is
+/// asked one pixel at a time, so every call would otherwise walk the clamp again for a
+/// rung that only the wake path can move. The painter reads the rung once for the pixel
+/// it is answering and hands that answer to every run the pixel tests.
+pub fn ellipsize_run(
+    text: &[u8],
+    scale: usize,
+    max_w: usize,
+    lvl: u8,
+    out_buf: &mut [u8],
+) -> usize {
+    if lvl == PLATFORM_LEVEL {
+        return std::design::font::ellipsize(text, scale, max_w, out_buf);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = run_w_at(dots, scale, lvl);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`, given
+/// `room` bytes of the caller's buffer for them.
+///
+/// WHY one decision, not one per byte: the width the painter then answers with is
+/// `typeface::text_advance_px`, and that function validates the *whole* run once --
+/// decoding it and charging one advance per codepoint, or, when the slice is not UTF-8 at
+/// all, charging every byte the bitmap face's own. A walk that decided per suffix would
+/// charge a valid word sitting behind one undecodable byte as a codepoint while the
+/// painter charged its bytes, which is a run trimmed narrower than the run inked.
+///
+/// WHY this is public: the ink face reaches the lane through the refusal path, which has
+/// to answer with the same arithmetic rather than with the run the lane refused.
+pub fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+    let decodes = core::str::from_utf8(text).is_ok();
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    let mut next = 0usize;
+    while next < text.len() {
+        let (adv, step) = if decodes {
+            match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => (
+                    std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                    ch.len_utf8(),
+                ),
+                None => break,
+            }
+        } else {
+            (std::design::typeface::advance_px(text[next], em) as usize, 1)
+        };
+        if current_w + adv > max_w || fit_len + step > room {
+            break;
+        }
+        current_w += adv;
+        fit_len = next + step;
+        next = fit_len;
+    }
+    fit_len
+}
+
+// WHY the derivations above are pinned to the ladder at the level they were authored at:
+// they are only a faithful restatement of it if every rung answers the platform's own
+// number there.
+const _: () = assert!(rows_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)
+    == std::design::outline_text::row_band(0, ROW_TITLE_RUNG).1);
+const _: () = assert!(rows_at(ROW_SUB_RUNG, PLATFORM_LEVEL)
+    == std::design::outline_text::row_band(0, ROW_SUB_RUNG).1);
+const _: () = assert!(rows_at(LIST_EMPTY_RUNG, PLATFORM_LEVEL)
+    == std::design::outline_text::row_band(0, LIST_EMPTY_RUNG).1);
+const _: () = assert!(line_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)
+    == std::design::font::line_height(ROW_TITLE_RUNG));
+const _: () = assert!(cap_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)
+    == std::design::font::cap_for_scale(ROW_TITLE_RUNG));
+const _: () = assert!(ascent_at(ROW_TITLE_RUNG, PLATFORM_LEVEL)
+    == std::design::font::ascent_for_scale(ROW_TITLE_RUNG));
+const _: () = assert!(em_at(ROW_SUB_RUNG, PLATFORM_LEVEL)
+    == std::design::font::em_for_scale(ROW_SUB_RUNG));
+
+// WHY these anchors hold to the pixels on the screen: a queue row was drawn as an
+// 84-row plate holding its title at 14 and its duration at 50, its reorder plates on a
+// 24-row centre, its divider at 88 and the next row 96 rows after it, and the empty
+// state stood at 1170 and 1210 -- all at the level it was authored at, so adopting the
+// setting must move no pixel for a reader who left it alone.
+const _: () = assert!(row_title_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_TITLE_DY);
+const _: () = assert!(row_sub_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_SUB_DY);
+const _: () = assert!(row_ctrl_cy_at(PLATFORM_LEVEL) == AUTHORED_ROW_CTRL_CY);
+const _: () = assert!(row_ink_h_at(PLATFORM_LEVEL) == AUTHORED_ROW_INK_H);
+const _: () = assert!(row_h_at(PLATFORM_LEVEL) == AUTHORED_ROW_H);
+const _: () = assert!(row_divider_dy_at(PLATFORM_LEVEL) == AUTHORED_ROW_DIVIDER_DY);
+const _: () = assert!(list_empty_title_y_at(PLATFORM_LEVEL) == AUTHORED_LIST_EMPTY_TITLE_Y);
+const _: () = assert!(list_empty_sub_y_at(PLATFORM_LEVEL) == AUTHORED_LIST_EMPTY_SUB_Y);
+const _: () = assert!(AUTHORED_ROW_BOTTOM_AIR == 4);
+const _: () = assert!(AUTHORED_ROW_GAP == 12);
+const _: () = assert!(AUTHORED_ROW_DIVIDER_AIR == 4);
+
+// WHY swept against the clamp rather than the raw rung: the clamp only earns its place
+// if every selectable level answers the list once the clamp has had it, and the authored
+// level must be untouched by it -- otherwise the app would resize the screen for a reader
+// who asked for nothing.
+const fn draw_level_holds_at_every_level() -> bool {
+    if draw_level_at(PLATFORM_LEVEL) != PLATFORM_LEVEL {
+        return false;
+    }
+    let mut want = 0;
+    while want <= MAX_LEVEL {
+        let chosen = draw_level_at(want);
+        if chosen > want {
+            return false;
+        }
+        if !list_holds_at(chosen) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(draw_level_holds_at_every_level());
+
+// WHY a sweep and not the authored check alone: the whole point of the derivations is the
+// rungs above the authored one, and each claim below is a fit gate the screen already
+// needs, asked at every level the ladder can be handed -- the duration lands inside the
+// plate, the plate holds its reorder plates, the plate stays inside the band the list
+// draws into, and a row never answers a press outside the band the painter clipped it to.
+const fn queue_rows_hold_at_every_level() -> bool {
+    let mut level = 0usize;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        if row_sub_dy_at(lvl) + row_sub_rows_at(lvl) > row_ink_h_at(lvl) {
+            return false;
+        }
+        if row_title_dy_at(lvl) + ascent_at(ROW_TITLE_RUNG, lvl) > row_sub_dy_at(lvl) {
+            return false;
+        }
+        if row_ctrl_cy_at(lvl) < std::design::touch::MIN_TARGET / 2 {
+            return false;
+        }
+        if row_ctrl_cy_at(lvl) + std::design::touch::MIN_TARGET / 2 > row_ink_h_at(lvl) {
+            return false;
+        }
+        if row_divider_dy_at(lvl) >= row_h_at(lvl) {
+            return false;
+        }
+        if row_ink_h_at(lvl) > LIST_BAND_BOTTOM - LIST_BAND_TOP {
+            return false;
+        }
+        if row_ink_h_at(lvl) < std::design::touch::MIN_TARGET {
+            return false;
+        }
+        if list_empty_sub_y_at(lvl) + rows_at(LIST_EMPTY_RUNG, lvl) > LIST_BAND_BOTTOM {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(queue_rows_hold_at_every_level());
+
+/// WHY pinned here rather than remembered in the binary: the band the rows are clipped
+/// against and the band the gate refuses against are one number stated in two files.
+const _: () = assert!(LIST_BAND_BOTTOM > LIST_BAND_TOP);
+const _: () = assert!(AUTHORED_LIST_EMPTY_TITLE_Y > LIST_BAND_TOP);
+
 /// Capacity of the now-playing time line.
 pub const CAPTION_MAX: usize = 24;
 
