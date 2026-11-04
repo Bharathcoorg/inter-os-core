@@ -64,9 +64,9 @@ pub use tokenizer::{
     FileTokenizer, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, TOKEN_UNK,
 };
 pub use std::ai::{
-    MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT,
-    MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK,
-    MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
+    MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_EMBED_CHUNK, MSG_TYPE_GENERATE,
+    MSG_TYPE_GENERATE_ALT, MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_INSTALL,
+    MSG_TYPE_INSTALL_CHUNK, MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
     STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
@@ -613,21 +613,15 @@ fn stream_answer(sender_task_id: u64, status: u32, notice_type: u32, message: &[
         None => return false,
     };
 
-    let total = message.len();
-    let mut streamed = 0usize;
-    while streamed < total {
-        let end = (streamed + std::ai::ANSWER_SLOT_BYTES).min(total);
-        if std::shm_pipe_transfer(pipe_id, &message[streamed..end], 0).is_err() {
-            break;
-        }
-        streamed = end;
-    }
+    let streamed = stream_in_slots(message, std::ai::ANSWER_SLOT_BYTES, |chunk| {
+        std::shm_pipe_transfer(pipe_id, chunk, 0).is_ok()
+    });
 
     let notice = std::ai::AiStreamNotice {
         status,
         pipe_id,
         streamed_len: streamed as u32,
-        total_len: total as u32,
+        total_len: message.len() as u32,
     };
     let mut wire = [0u8; std::ai::AiStreamNotice::WIRE_LEN];
     if notice.to_bytes(&mut wire) == 0 {
@@ -636,10 +630,72 @@ fn stream_answer(sender_task_id: u64, status: u32, notice_type: u32, message: &[
     if std::ipc_send(sender_task_id, notice_type, &wire).is_err() {
         return false;
     }
-    if streamed != total {
+    if streamed != message.len() {
         let _ = std::log("[aid] answer channel filled before the whole answer streamed.");
     }
     true
+}
+
+/// Hands `message` to `write_slot` in pieces of at most `slot_bytes`, stopping at
+/// the first piece the transport refuses, and returns how many bytes it accepted.
+///
+/// WHY a function of its own: this is the drain every answer and refusal runs
+/// through on the write side, and the reader on the other end drains slots until
+/// the same count arrives, so the number of bytes a notice carries is decided here
+/// and nowhere else. A loop that stopped after one slot would hand the reader a
+/// fragment and still let the notice report it as the whole; keeping the drain in
+/// one place is what lets a host test watch the tail either arrive or be named as
+/// short, without a device or a running channel.
+fn stream_in_slots<W>(message: &[u8], slot_bytes: usize, mut write_slot: W) -> usize
+where
+    W: FnMut(&[u8]) -> bool,
+{
+    let mut streamed = 0usize;
+    while streamed < message.len() {
+        let end = (streamed + slot_bytes).min(message.len());
+        if !write_slot(&message[streamed..end]) {
+            break;
+        }
+        streamed = end;
+    }
+    streamed
+}
+
+/// The bytes of a notice that survive the inline mailbox route.
+///
+/// WHY this number is written down: the kernel's mailbox payload is sixty-four
+/// bytes (`IPC_MAX_PAYLOAD`) and every inline reply first lays a
+/// twenty-four-byte `AiInferenceResponse` header, so a notice sent by mailbox keeps
+/// sixty-four minus twenty-four, forty bytes, and the rest is cut with no word of
+/// it. A refusal the service builds runs past forty, so a notice longer than this
+/// must travel on the channel `stream_answer` writes; a shorter one fits inline
+/// honestly. The delivery itself is decided by `IPC_MAX_PAYLOAD` in the kernel, so
+/// this is the bound the tests name -- not a value the service branches on, and not
+/// a value to be raised.
+#[cfg(test)]
+const MAILBOX_NOTICE_ROOM: usize =
+    64 - core::mem::size_of::<std::ai::AiInferenceResponse>();
+
+/// Delivers one embedding refusal so its whole sentence reaches the reader.
+///
+/// WHY the channel and not the mailbox: the notice the service builds names its
+/// numbers -- the tensor, the byte counts, the bound -- and runs past the forty
+/// bytes a mailbox keeps. Sent inline, the reader sees a sentence cut mid-word and
+/// cannot tell whether the model ran, the file is missing, or the read was refused,
+/// which is the worst way for a refusal to fail. The whole notice goes on the
+/// answer channel under [`MSG_TYPE_EMBED_CHUNK`]; only when no channel is free does
+/// the inline route run, and there the header's `output_dim` still names the
+/// notice's true length so a reader can see it was cut rather than be handed a
+/// fragment as though it were whole.
+fn emit_embed_notice(
+    sender_task_id: u64,
+    status: u32,
+    notice: &[u8],
+    tx_buf: &mut [u8; 1024],
+) {
+    if !stream_answer(sender_task_id, status, MSG_TYPE_EMBED_CHUNK, notice) {
+        emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+    }
 }
 
 /// Claims one of the dynamic answer channels for this service-and-app pair.
@@ -2411,7 +2467,7 @@ pub fn handle_ipc_inference_query(
         let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
         let (status, notice) =
             embedding_gap_notice(EmbeddingGap::InputTruncated(declared, arrived), &mut scratch);
-        emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+        emit_embed_notice(sender_task_id, status, notice, tx_buf);
         return;
     }
 
@@ -2474,7 +2530,7 @@ pub fn handle_ipc_inference_query(
         EmbeddingPlan::Refuse(gap) => {
             let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
             let (status, notice) = embedding_gap_notice(gap, &mut scratch);
-            emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+            emit_embed_notice(sender_task_id, status, notice, tx_buf);
             return;
         }
         EmbeddingPlan::LexicalBaseline => {
@@ -2525,7 +2581,7 @@ pub fn handle_ipc_inference_query(
                 Err(error) => {
                     let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
                     let (status, notice) = file_embed_notice(&error, &mut scratch);
-                    emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+                    emit_embed_notice(sender_task_id, status, notice, tx_buf);
                     return;
                 }
             }
@@ -3494,8 +3550,138 @@ mod tests {
         );
     }
 
-    /// The sentence this host's own model file is answered with.
+    /// The whole loader refusal the notice builder produces for one error.
     ///
+    /// WHY a helper: three of the pins below run against the same real sentence the
+    /// device sends, and a length taken from a fixture that drifted would let a
+    /// shortened notice pass a guard meant to refuse it.
+    fn a_loader_refusal_notice() -> alloc::vec::Vec<u8> {
+        let mut out = [0u8; NOTICE_WINDOW_BYTES];
+        let (_status, notice) = file_embed_notice(
+            &FileEmbedError::Load(weights::LoadError::ShortRead(4096, 816, 512)),
+            &mut out,
+        );
+        notice.to_vec()
+    }
+
+    /// The defect this guards: the notice builder writes a sentence of well past
+    /// forty bytes, and the inline mailbox route (a 64-byte payload with a 24-byte
+    /// reply header ahead of it) delivers forty and drops the tail without a word.
+    /// The answer channel keeps the whole sentence, so a long refusal is handed to
+    /// the drain and every byte arrives. This test reassembles the bytes a reader
+    /// recovers from the channel drain and refuses anything but the notice whole.
+    #[test]
+    fn the_drain_delivers_a_whole_loader_refusal_the_mailbox_would_cut() {
+        let notice = a_loader_refusal_notice();
+
+        // The notice must be longer than what the mailbox keeps, or there is no tail
+        // to lose and the whole guard is idle. Pinning this is also the guard against
+        // the wrong fix -- shortening the refusal to forty bytes to make it fit.
+        assert!(
+            notice.len() > MAILBOX_NOTICE_ROOM,
+            "the loader refusal is now only {} bytes, at or under the {}-byte room a mailbox \
+             keeps, so it no longer exercises the tail the channel carries",
+            notice.len(),
+            MAILBOX_NOTICE_ROOM,
+        );
+        assert_eq!(
+            MAILBOX_NOTICE_ROOM,
+            40,
+            "the mailbox payload is 64 bytes and the reply header 24, so an inline notice has \
+             40 bytes of room -- if this bound moved, the truncation arithmetic below is stale"
+        );
+
+        // The reader's drain: hand the notice to slots of the channel's width and
+        // reassemble exactly what the transport accepted, the way the app reads the
+        // answer pipe slot by slot.
+        let mut reassembled = alloc::vec::Vec::new();
+        let streamed =
+            stream_in_slots(&notice, std::ai::ANSWER_SLOT_BYTES, |chunk| {
+                reassembled.extend_from_slice(chunk);
+                true
+            });
+
+        assert_eq!(
+            streamed,
+            notice.len(),
+            "the drain handed {} of the notice's {} bytes to the channel",
+            streamed,
+            notice.len(),
+        );
+        assert_eq!(
+            reassembled, notice,
+            "the bytes a reader reassembles from the channel are not the whole notice"
+        );
+
+        // And the shape of the bug, stated as a number: an inline send would have
+        // reached this screen with only the first forty bytes and no sign of a cut.
+        assert_eq!(
+            notice.len().min(MAILBOX_NOTICE_ROOM),
+            MAILBOX_NOTICE_ROOM,
+            "an inline delivery is supposed to lose the tail of a notice this long"
+        );
+        assert!(
+            notice.len() > MAILBOX_NOTICE_ROOM,
+            "a whole notice is longer than what an inline delivery keeps"
+        );
+    }
+
+    /// Every notice the service can build fits one channel slot, so the drain never
+    /// strands a reader that holds a single slot and the bound the fix relies on is
+    /// provably reachable. WHY the arithmetic is written down rather than assumed:
+    /// the answer channel's slot and the service's notice window are two constants in
+    /// two files, and if the window ever grew past the slot the reader would need a
+    /// multi-slot drain it may not run -- so the raise is only safe while this holds.
+    #[test]
+    fn the_notice_window_fits_one_channel_slot() {
+        assert!(
+            NOTICE_WINDOW_BYTES <= std::ai::ANSWER_SLOT_BYTES,
+            "the {NOTICE_WINDOW_BYTES}-byte notice window no longer fits the {}-byte channel \
+             slot: a refusal this service writes could span two slots and a reader holding one \
+             would get only the head",
+            std::ai::ANSWER_SLOT_BYTES,
+        );
+    }
+
+    /// A slot the transport refuses is a shortfall the notice reports, not a silent
+    /// cut: `stream_in_slots` returns the bytes actually accepted and stops, so the
+    /// `streamed_len` the notice carries is short and the reader can say so. This is
+    /// the "existing bound enforced as a refusal rather than a silent cut" the drain
+    /// exists for. The fixture uses a slot width under a synthetic message so the
+    /// shortfall needs more than one slot and is a real decision, not an artifact.
+    #[test]
+    fn a_refused_slot_reports_a_shortfall_not_a_silent_cut() {
+        let message: alloc::vec::Vec<u8> = (0..300u32).map(|n| (n % 251) as u8).collect();
+        const SLOT: usize = 100;
+
+        // A transport that accepts two slots and refuses the third: the drain must
+        // hand back 200 and not claim the whole 300.
+        let mut accepted = alloc::vec::Vec::new();
+        let mut slots = 0usize;
+        let streamed = stream_in_slots(&message, SLOT, |chunk| {
+            if slots >= 2 {
+                return false;
+            }
+            slots += 1;
+            accepted.extend_from_slice(chunk);
+            true
+        });
+
+        assert_eq!(
+            streamed, 200,
+            "a transport that refused the third slot was counted as though it took the whole \
+             message ({streamed} of 300)"
+        );
+        assert_eq!(
+            accepted, message[..200],
+            "the bytes a short drain handed over are not the message's head"
+        );
+        assert_ne!(
+            streamed,
+            message.len(),
+            "a refused slot was reported as a whole answer"
+        );
+    }
     /// WHY this exists next to the widest-fixture guard: that guard sizes the window
     /// against what the reader *can* report, and nothing in it proves the identity
     /// clause quotes a file that really exists. A real Gemma leaves its vocabulary

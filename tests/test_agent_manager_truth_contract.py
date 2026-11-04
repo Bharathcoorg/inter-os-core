@@ -841,6 +841,115 @@ def test_the_search_card_reads_a_frame_the_service_streamed():
         )
 
 
+def _body_if(source: str, signature: str) -> str:
+    """`_body` for a source that may not hold the function at all.
+
+    WHY the difference matters: the gate below is also run over synthetic
+    sources that put one fault back, and a synthetic source that deleted a whole
+    function has to be reported as the fault it is rather than raising before the
+    detector says anything.
+    """
+    try:
+        return _body(source, signature)
+    except AssertionError:
+        return ""
+
+
+def _embed_notice_faults(lib: str, main: str) -> list:
+    """Every way an app still drops a refusal the service streamed.
+
+    WHY these six shapes and not a general rule: the service stopped squeezing an
+    embedding refusal into a mailbox message -- the reply header leaves forty of
+    its sixty-four bytes, and a refusal naming the tensor, the counts and the
+    bound runs past that -- and streams the sentence onto an answer channel,
+    posting only the sixteen-byte notice. Each fault below is one link in the
+    chain that then has to hold: the wait has to take the notice's message type,
+    the reader has to decode it and drain the channel it names to the length the
+    notice declared, the words have to land where a mailbox refusal's already
+    land, the card has to read from whichever route carried them rather than the
+    mailbox tail alone, a stale notice has to be thrown away rather than left to
+    be read as the next request's answer, and a sentence must never be stamped as
+    a vector.
+    """
+    faults = []
+    step = _body_if(main, "fn step_embedding_reply")
+    reader = _body_if(main, "fn take_streamed_embed_notice")
+    card = _body_if(main, "fn add_embedding_probe_card")
+    discard = _body_if(main, "fn discard_stale_embeddings")
+    record = _body_if(lib, "fn record_streamed")
+
+    if not step:
+        faults.append("the app has no embedding reply reader at all")
+    elif "std::ai::MSG_TYPE_EMBED_CHUNK" not in step:
+        faults.append(
+            "the embedding wait ignores the notice that names a streamed refusal"
+        )
+
+    if not reader:
+        faults.append("nothing reads the streamed embedding refusal off the channel")
+    else:
+        if "std::ai::AiStreamNotice::from_bytes" not in reader:
+            faults.append("the streamed refusal reader does not decode the notice")
+        if "std::shm_pipe_receive(notice.pipe_id" not in reader:
+            faults.append(
+                "the streamed refusal is taken from somewhere other than the "
+                "channel the notice named"
+            )
+        if "notice.streamed_len" not in reader or "notice.total_len" not in reader:
+            faults.append(
+                "the drain is not bounded by the length the notice itself declares"
+            )
+        if "record_streamed(" not in reader:
+            faults.append("the streamed refusal's words never reach the embedding card")
+        if "ChatRole::Assistant" in reader:
+            faults.append(
+                "the platform's refusal sentence is painted in the model's voice"
+            )
+
+    if not card:
+        faults.append("the app has no embedding probe card")
+    elif "[0u8; PROBE_PAYLOAD_MAX]" in card or "probe.sentence_bytes(" in card:
+        faults.append(
+            "the card reads the refusal from the mailbox tail alone, which is the "
+            "forty-byte cut the channel was opened to avoid"
+        )
+    elif "probe.notice_words(" not in card:
+        faults.append("the card does not read the refusal from whichever route carried it")
+
+    if "MSG_TYPE_EMBED_CHUNK" not in discard:
+        faults.append(
+            "a stale streamed refusal notice is left in the queue to be read as "
+            "the next request's answer"
+        )
+
+    if "self.reply_is_vector = false" not in record:
+        faults.append("a streamed sentence can be stamped as a vector the app never got")
+    return faults
+
+
+def test_the_embedding_card_reads_a_refusal_the_service_streamed():
+    """An app that never drains the channel drops the refusal it was given.
+
+    The service builds an embedding refusal as a sentence -- which branch did not
+    run, how many bytes the header declared, how many arrived, what bound the
+    engine is compiled to -- and posts it on the answer channel, because the
+    mailbox keeps forty bytes of it after the reply header and cuts the rest
+    without a word. Reading only the mailbox left this app reporting "No embedding
+    reply within the wait" for a refusal the platform had already spent a channel
+    delivering: the sentence the service went to the trouble of streaming was
+    dropped, and the reader was told the service had said nothing.
+
+    WHY the words go where a mailbox refusal's already go: the transport is the
+    service's choice and the observation is the platform's sentence, so the card
+    shows what arrived either way and names the shortfall beside it. Nothing here
+    is attributed to a model, and a notice carries no dimension and no latency, so
+    the probe keeps neither.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        faults = _embed_notice_faults(lib, main)
+        assert not faults, f"{path}: {faults}"
+
+
 def test_an_install_is_reported_as_the_platforms_own_words():
     """INSTALL asks the inference service and paints its answer, not the app's.
 
@@ -1134,6 +1243,110 @@ def test_the_contract_can_fail():
         _code('self.set_action(b"Streaming generation active...", Tone::Accent);'),
         r"streaming generation active",
     ), "the streaming detector does not catch a per-token stream the service keeps"
+
+
+    # The streamed-embedding-refusal detector, over an app that reads the notice
+    # whole and over each app that drops a link of the chain. The honest source is
+    # checked first: a detector that fires on it would fire on the real app too,
+    # and the gate above would pass only because the detector was never run.
+    honest_notice_app = (
+        "fn step_embedding_reply(&mut self) -> bool {\n"
+        "    match std::ipc::receive_any(&mut rx) {\n"
+        "        Ok((_, std::ai::MSG_TYPE_EMBED_CHUNK, len)) =>\n"
+        "            self.take_streamed_embed_notice(&rx[..len]),\n"
+        "        _ => false,\n    }\n}\n"
+        "fn take_streamed_embed_notice(&mut self, notice_bytes: &[u8]) -> bool {\n"
+        "    let notice = std::ai::AiStreamNotice::from_bytes(notice_bytes)?;\n"
+        "    let streamed = (notice.streamed_len as usize).min(notice.total_len as usize);\n"
+        "    let read = std::shm_pipe_receive(notice.pipe_id, &mut slot).ok()?;\n"
+        "    self.probe.record_streamed(notice.status, &words[..read], notice.total_len, now);\n"
+        "    true\n}\n"
+        "fn add_embedding_probe_card(&mut self) {\n"
+        "    let mut words = [0u8; EMBED_NOTICE_TEXT_MAX];\n"
+        "    let arrived = self.probe.notice_words(&mut words);\n"
+        "    self.add_wide(&words[..arrived], Tone::Unavailable);\n}\n"
+        "fn discard_stale_embeddings(&mut self) {\n"
+        "    match std::ipc::receive_any(&mut rx) {\n"
+        "        Ok((_, std::ai::MSG_TYPE_EMBED_CHUNK, _)) => continue,\n"
+        "        _ => break,\n    }\n}\n"
+    )
+    honest_notice_lib = (
+        "fn record_streamed(&mut self) {\n    self.reply_is_vector = false;\n}\n"
+    )
+    assert not _embed_notice_faults(honest_notice_lib, honest_notice_app), (
+        f"the streamed-refusal detector fires on an app that reads the notice "
+        f"whole: {_embed_notice_faults(honest_notice_lib, honest_notice_app)}"
+    )
+    notice_cases = [
+        (
+            "an app that still reads only the mailbox reply",
+            honest_notice_lib,
+            honest_notice_app.replace("std::ai::MSG_TYPE_EMBED_CHUNK", "std::ai::MSG_TYPE_EMBED"),
+        ),
+        (
+            "an app that decodes the notice but never opens the channel",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "    let read = std::shm_pipe_receive(notice.pipe_id, &mut slot).ok()?;\n", ""
+            ),
+        ),
+        (
+            "an app that drains the channel to no bound of the notice's own",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "let streamed = (notice.streamed_len as usize).min(notice.total_len as usize);",
+                "let streamed = 4096;",
+            ),
+        ),
+        (
+            "an app that reads the notice and throws the words away",
+            honest_notice_lib,
+            honest_notice_app.replace("self.probe.record_streamed(", "let _ = ("),
+        ),
+        (
+            "an app that paints the platform's refusal in the model's voice",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "    true\n}\n",
+                "    self.chat.push(ChatRole::Assistant, words);\n    true\n}\n",
+                1,
+            ),
+        ),
+        (
+            "a card sized to the mailbox tail the channel was opened to escape",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "let mut words = [0u8; EMBED_NOTICE_TEXT_MAX];\n"
+                "    let arrived = self.probe.notice_words(&mut words);",
+                "let mut words = [0u8; PROBE_PAYLOAD_MAX];\n"
+                "    let arrived = self.probe.sentence_bytes(&mut words);",
+            ),
+        ),
+        (
+            "an app that leaves a stale notice in the queue for the next request",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "        Ok((_, std::ai::MSG_TYPE_EMBED_CHUNK, _)) => continue,\n", ""
+            ),
+        ),
+        (
+            "a probe that stamps a streamed sentence's byte count as a vector",
+            honest_notice_lib.replace("self.reply_is_vector = false;", "self.reply_is_vector = true;"),
+            honest_notice_app,
+        ),
+        (
+            "an app whose reader was deleted outright",
+            honest_notice_lib,
+            honest_notice_app.replace(
+                "fn take_streamed_embed_notice(&mut self, notice_bytes: &[u8]) -> bool {",
+                "fn take_mailbox_only(&mut self, notice_bytes: &[u8]) -> bool {",
+            ),
+        ),
+    ]
+    for label, lib, main in notice_cases:
+        assert _embed_notice_faults(lib, main), (
+            f"the streamed-refusal detector does not catch {label}"
+        )
 
 
 def main() -> int:

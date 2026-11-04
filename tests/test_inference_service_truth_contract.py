@@ -657,6 +657,90 @@ def test_a_retrieval_frame_reaches_the_reader_whole_or_reports_short():
     assert "pub const MSG_TYPE_SEARCH: u32 = 0x5352_4348;" in sdk
 
 
+# The inline mailbox route: a 64-byte payload (`IPC_MAX_PAYLOAD`) with a 24-byte
+# `AiInferenceResponse` header ahead of the text, so forty bytes of a notice reach
+# the screen and the rest is cut with no word of it.
+MAILBOX_NOTICE_ROOM = 40
+
+
+def test_an_embedding_refusal_reaches_the_reader_whole_or_reports_short():
+    """A loader refusal runs past a hundred bytes; the mailbox keeps forty of them.
+
+    The service built a sentence naming the tensor, the byte counts and the bound,
+    then posted it with `emit_response_as`, whose `ipc_send` the kernel cuts at
+    `IPC_MAX_PAYLOAD` (64). After the 24-byte reply header that leaves forty bytes,
+    so the Agent Manager painted half a refusal and the reader could not tell
+    whether the model ran, the file was missing, or the read was refused. The whole
+    notice now goes on the answer channel the other replies use -- the same route
+    the search frame and the install report took -- and the mailbox is reached only
+    when no channel is free, where the header's `output_dim` still names the true
+    length so a cut is a reported shortfall rather than a silent one.
+    """
+    lib = lib_source()
+    arm = without_comments(embedding_arm(lib))
+
+    # A refusal is no longer posted through the mailbox, where the tail is dropped.
+    assert (
+        "emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf)" not in arm
+    ), "an embedding refusal is still sent inline, where the mailbox keeps 40 bytes and cuts it"
+
+    # The arm hands every refusal to the channel-route helper instead.
+    assert "emit_embed_notice(" in arm, "the refusal lost its route through the answer channel"
+
+    # The helper streams the notice whole and only then falls back to the mailbox.
+    helper = function_body(lib, "fn emit_embed_notice")
+    assert "stream_answer(" in helper, "the refusal helper no longer claims the answer channel"
+    assert "MSG_TYPE_EMBED_CHUNK" in helper, "the refusal notice travels on no type of its own"
+    assert (
+        "emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf)" in helper
+    ), "the refusal has no inline fallback for the case where no channel is free"
+
+    # The bound that decides the cut is written down as arithmetic, not a magic word.
+    assert (
+        "const MAILBOX_NOTICE_ROOM: usize =" in lib
+    ), "the 64-minus-24 room an inline notice has is no longer named where it is used"
+
+    # The refusal chunk is a type of its own, distinct from the vector reply, so a
+    # reader cannot stamp a sentence's byte count as an embedding dimension.
+    sdk = (ROOT / "sdk" / "rust" / "interos-std" / "src" / "ai.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "pub const MSG_TYPE_EMBED_CHUNK: u32 = 0x454D_434B;" in sdk
+    assert "MSG_TYPE_EMBED_CHUNK, MSG_TYPE_EMBED," not in sdk
+    assert "pub const MSG_TYPE_EMBED: u32 = 0x454D_4244;" in sdk
+
+
+def test_the_embedding_transport_contract_can_fail():
+    """A gate nobody has seen fail is a comment.
+
+    Each block puts one fault back into a copy of the source and runs the same
+    detector the gate above runs, so the shape the gate watches is proved to still
+    be there and the check is proved to fire on it.
+    """
+    lib = lib_source()
+
+    # 1. The silent cut restored: every refusal posted back through the mailbox.
+    inline = lib.replace(
+        "emit_embed_notice(sender_task_id, status, notice, tx_buf)",
+        "emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf)",
+    )
+    assert inline != lib, "the refusal call sites moved; this fixture no longer matches them"
+    cut_arm = without_comments(embedding_arm(inline))
+    assert (
+        "emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf)" in cut_arm
+    ), "restoring the inline route did not put a mailbox-cuttable refusal back in the arm"
+    assert "emit_embed_notice(" not in cut_arm, "the guard would not see the helper being bypassed"
+
+    # 2. The channel route gutted: the helper answers only by mailbox.
+    no_channel = lib.replace(
+        "    if !stream_answer(sender_task_id, status, MSG_TYPE_EMBED_CHUNK, notice) {\n"
+        "        emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);\n"
+        "    }",
+        "    emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);",
+    )
+    assert no_channel != lib, "the refusal helper's channel-first shape moved; fixture is stale"
+    gutted = function_body(no_channel, "fn emit_embed_notice")
+    assert "stream_answer(" not in gutted, "the guard would not see the answer channel dropped"
 def test_an_install_moves_only_a_file_whose_header_parsed():
     """A model file is copied by the storage service, and only after its own
     header has been read.

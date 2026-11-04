@@ -53,7 +53,7 @@ use agent_manager::{
     Provider, RegistryPackageState, RuntimeBinding, RuntimeDiagnostics, SearchConfiguration,
     SelfTest, ServiceState, Surface, ToolAuthority, transact_package_install,
     transact_package_remove, CAPABILITY_COUNT, CHAT_PROMPT_MAX, CHAT_TEXT_MAX,
-    MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT, PROBE_PAYLOAD_MAX,
+    EMBED_NOTICE_TEXT_MAX, MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT,
     PROBE_REQUEST_TEXT_MAX, REQUEST_HEADER_BYTES, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
 };
 
@@ -2617,8 +2617,14 @@ impl AgentManagerApp {
                 // names the branch that did not run, and that sentence is the
                 // observation -- the same thing `send_prompt` does with
                 // `availability.reason()`. Nothing here is attributed to a model.
-                let mut words = [0u8; PROBE_PAYLOAD_MAX];
-                let arrived = probe.sentence_bytes(&mut words);
+                //
+                // WHY the buffer is the notice's width and not the mailbox tail's:
+                // the service streams the sentence whole when a channel is free and
+                // sends it inline when one is not, and both routes land in
+                // `notice_words`. Sizing this to `PROBE_PAYLOAD_MAX` would re-cut at
+                // forty bytes the refusal the channel was opened to carry.
+                let mut words = [0u8; EMBED_NOTICE_TEXT_MAX];
+                let arrived = probe.notice_words(&mut words);
                 self.add_wide(&words[..arrived], Tone::Unavailable);
                 let mut value = [0u8; VALUE_MAX];
                 let mut n = format_u32(probe.offered, &mut value);
@@ -3104,6 +3110,7 @@ impl AgentManagerApp {
             match std::ipc::receive_any(&mut rx) {
                 Err(_) => break,
                 Ok((_, std::ai::MSG_TYPE_EMBED, _)) => continue,
+                Ok((_, std::ai::MSG_TYPE_EMBED_CHUNK, _)) => continue,
                 Ok((_, std::ipc::MSG_INPUT_EVENT, _)) => continue,
                 Ok((_, std::ipc::MSG_WINDOW_FOCUSED, _)) => continue,
                 Ok(_) => break,
@@ -3116,6 +3123,12 @@ impl AgentManagerApp {
     /// WHY only a reply of this app's own message type is taken: the generation
     /// wait and the install wait read the same queue, and the event loop asks this
     /// only while neither of them holds one.
+    ///
+    /// WHY two types are this app's own: the service answers an embedding with the
+    /// vector inline under `MSG_TYPE_EMBED`, and answers a refusal by streaming the
+    /// sentence and posting the pointer under `MSG_TYPE_EMBED_CHUNK`. Both are the
+    /// reply to this request, and a wait that read only the first would time out on
+    /// a refusal the platform had already spent a channel delivering.
     pub fn step_embedding_reply(&mut self) -> bool {
         if self.probe.state != ProbeState::Awaiting {
             return false;
@@ -3140,6 +3153,16 @@ impl AgentManagerApp {
                 self.take_embedding_reply(&rx[..len]);
                 self.rebuild();
                 true
+            }
+            Ok((_, std::ai::MSG_TYPE_EMBED_CHUNK, len)) => {
+                // WHY the notice is copied before the channel is read: the sentence
+                // lands in the same buffer the mailbox message was received into,
+                // and the channel is only named inside it -- the same reason the
+                // install reader copies its notice out first.
+                let mut notice_bytes = [0u8; std::ai::AiStreamNotice::WIRE_LEN];
+                let take = len.min(notice_bytes.len());
+                notice_bytes[..take].copy_from_slice(&rx[..take]);
+                self.take_streamed_embed_notice(&notice_bytes)
             }
             Ok(_) => false,
         }
@@ -3175,6 +3198,72 @@ impl AgentManagerApp {
                 );
             }
         }
+    }
+
+    /// Reads the refusal the service placed on the channel its notice named.
+    ///
+    /// WHY the words come off a channel at all: a refusal names its numbers -- the
+    /// tensor, the byte counts, the bound -- and runs past the forty bytes a mailbox
+    /// message leaves after the reply header, so the service streams it and posts
+    /// only the pointer. Until this read the pointer, that sentence was dropped on
+    /// the floor and the screen said only that no reply came.
+    ///
+    /// WHY the drain stops at the notice's own count: the channel hands a slot of
+    /// `ANSWER_SLOT_BYTES` at a time and the notice says how many bytes the service
+    /// actually filled, so the app takes that many and no more -- and the card,
+    /// which keeps the arrived count beside the length the notice declared, says so
+    /// when the app's own buffer was the thing that stopped it.
+    ///
+    /// WHY the words land where a mailbox refusal's land: they are the platform's
+    /// sentence either way, and a card that showed the streamed one somewhere else
+    /// would make the transport decide what the reader is told.
+    fn take_streamed_embed_notice(&mut self, notice_bytes: &[u8]) -> bool {
+        let now = std::get_ticks().unwrap_or(0);
+        let Some(notice) = std::ai::AiStreamNotice::from_bytes(notice_bytes) else {
+            self.probe.report_unreadable(now);
+            self.set_action(
+                b"Unreadable reply from the inference service.",
+                Tone::Unavailable,
+            );
+            self.rebuild();
+            return true;
+        };
+        let streamed = (notice.streamed_len as usize).min(notice.total_len as usize);
+        let mut slot = [0u8; std::ai::ANSWER_SLOT_BYTES];
+        let mut words = [0u8; EMBED_NOTICE_TEXT_MAX];
+        let mut collected = 0usize;
+        while collected < streamed && collected < words.len() {
+            let read = match std::shm_pipe_receive(notice.pipe_id, &mut slot) {
+                Ok(read) if read > 0 => read,
+                _ => break,
+            };
+            let take = read
+                .min(streamed - collected)
+                .min(words.len() - collected);
+            words[collected..collected + take].copy_from_slice(&slot[..take]);
+            collected += take;
+        }
+        if collected == 0 {
+            // WHY this is not an empty sentence on the card: the notice named bytes
+            // and the channel handed none, so the app holds no words of the
+            // platform's to show, and printing a blank in the place a refusal was
+            // promised would read as though the service had refused for no reason.
+            self.probe.report_unreadable(now);
+            self.set_action(
+                b"Unreadable reply from the inference service.",
+                Tone::Unavailable,
+            );
+            self.rebuild();
+            return true;
+        }
+        self.probe
+            .record_streamed(notice.status, &words[..collected], notice.total_len, now);
+        // WHY the strip does not repeat the sentence: the platform's own words are on
+        // the card, and the strip only has to say that the request was refused -- the
+        // same division `take_embedding_reply` makes.
+        self.set_action(b"The inference service refused the request.", Tone::Unavailable);
+        self.rebuild();
+        true
     }
 
     /// Empties the conversation and the prompt.

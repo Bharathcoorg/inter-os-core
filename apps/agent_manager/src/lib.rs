@@ -3177,6 +3177,23 @@ pub const PROBE_VALUES_SHOWN: usize = 8;
 /// the screen cannot show back to them.
 pub const PROBE_TEXT_MAX: usize = CHAT_PROMPT_MAX;
 
+/// The longest refusal sentence one streamed embedding notice hands the app.
+///
+/// WHY it is wider than the mailbox's tail: the service stopped squeezing a
+/// refusal into a mailbox message -- where the reply header leaves
+/// `PROBE_PAYLOAD_MAX` bytes and the kernel cuts the rest without a word -- and
+/// streams the whole notice onto an answer channel instead, posting only the
+/// sixteen-byte pointer by mailbox (`userspace/system-service/src/lib.rs`,
+/// `emit_embed_notice`). A reader still bounded by forty bytes would re-cut the
+/// very sentence the channel was chosen to deliver whole.
+///
+/// WHY two hundred and fifty-six: it is the width this app already drains a
+/// streamed install sentence into (`main.rs`, `step_install_reply`), so the two
+/// notices the service streams are held to one bound rather than two. The
+/// service builds its own notices into a wider window, so a refusal long enough
+/// to be cut here is reported by the card as a shortfall, not silently trimmed.
+pub const EMBED_NOTICE_TEXT_MAX: usize = 256;
+
 /// Where the embedding probe stands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProbeState {
@@ -3358,6 +3375,16 @@ pub struct EmbedProbe {
     pub payload_len: u8,
     /// How many bytes the reply said its payload was, from its own header.
     pub offered: u32,
+    /// The refusal sentence the service streamed onto the channel its notice named.
+    ///
+    /// WHY it is kept beside `payload` and not inside it: `payload` is the mailbox
+    /// tail, which is the vector's components on one status and half a sentence on
+    /// another, and it is forty bytes wide. A notice read off a channel is neither,
+    /// and putting its words there would make the card's own `values_arrived` count
+    /// sentence bytes as components.
+    pub notice_text: [u8; EMBED_NOTICE_TEXT_MAX],
+    /// How many bytes of it the channel actually handed the app.
+    pub notice_len: u16,
 }
 
 impl EmbedProbe {
@@ -3383,6 +3410,8 @@ impl EmbedProbe {
             payload: [0; PROBE_PAYLOAD_MAX],
             payload_len: 0,
             offered: 0,
+            notice_text: [0; EMBED_NOTICE_TEXT_MAX],
+            notice_len: 0,
         }
     }
 
@@ -3396,6 +3425,51 @@ impl EmbedProbe {
         self.payload = reply.payload;
         self.payload_len = reply.payload_len;
         self.offered = reply.output_dim;
+        self.reply_ticks = replied_at_tick.wrapping_sub(self.sent_at_tick);
+        self.deadline = 0;
+        self.state = ProbeState::Answered;
+    }
+
+    /// Records the refusal sentence the service streamed onto an answer channel.
+    ///
+    /// WHY this is `record`'s sibling and not another call to it: a streamed
+    /// notice carries no reply header, so there is no `output_dim` to stamp and no
+    /// `latency_micros` to keep, and inventing either from the notice's own numbers
+    /// would put fields in the card that the platform never sent. The offered count
+    /// is the length the notice declares for the sentence, which is the number the
+    /// screen sets beside the bytes it holds.
+    ///
+    /// WHY `reply_is_vector` is false whatever the status says: the components of an
+    /// embedding still come by mailbox under `MSG_TYPE_EMBED`; what comes on the
+    /// channel under `MSG_TYPE_EMBED_CHUNK` is words, and a vector built from them
+    /// would be the app's arithmetic rather than the service's.
+    pub fn record_streamed(
+        &mut self,
+        status: u32,
+        words: &[u8],
+        offered: u32,
+        replied_at_tick: u64,
+    ) {
+        let len = words.len().min(EMBED_NOTICE_TEXT_MAX);
+        let mut index = 0;
+        while index < EMBED_NOTICE_TEXT_MAX {
+            self.notice_text[index] = 0;
+            index += 1;
+        }
+        let mut copy = 0;
+        while copy < len {
+            self.notice_text[copy] = words[copy];
+            copy += 1;
+        }
+        self.notice_len = len as u16;
+        self.status = status;
+        self.reply_dim = 0;
+        self.reply_latency = 0;
+        self.reply_is_vector = false;
+        self.attributed = false;
+        self.payload = [0; PROBE_PAYLOAD_MAX];
+        self.payload_len = 0;
+        self.offered = offered;
         self.reply_ticks = replied_at_tick.wrapping_sub(self.sent_at_tick);
         self.deadline = 0;
         self.state = ProbeState::Answered;
@@ -3449,6 +3523,12 @@ impl EmbedProbe {
         self.payload = [0; PROBE_PAYLOAD_MAX];
         self.payload_len = 0;
         self.offered = 0;
+        let mut clear = 0;
+        while clear < EMBED_NOTICE_TEXT_MAX {
+            self.notice_text[clear] = 0;
+            clear += 1;
+        }
+        self.notice_len = 0;
         self.state = ProbeState::Awaiting;
     }
 
@@ -3491,6 +3571,32 @@ impl EmbedProbe {
         let mut index = 0;
         while index < take {
             out[index] = self.payload[index] as u8;
+            index += 1;
+        }
+        take
+    }
+
+    /// The refusal sentence, from whichever route the service chose to send it.
+    ///
+    /// WHY one reader for both routes: the service streams the whole notice when an
+    /// answer channel is free and posts it inline when one is not, and the inline
+    /// copy reaches the app cut at `PROBE_PAYLOAD_MAX`. The card shows the bytes
+    /// that arrived and names the shortfall beside them either way, so it must not
+    /// have to know which transport carried them -- and a card that asked the
+    /// mailbox tail alone would print the half sentence the channel was opened to
+    /// avoid.
+    ///
+    /// WHY an empty notice falls back rather than reporting nothing: a reply read
+    /// through the mailbox fills `payload` and leaves `notice_len` zero, and those
+    /// are the platform's words too.
+    pub fn notice_words(&self, out: &mut [u8]) -> usize {
+        if self.notice_len == 0 {
+            return self.sentence_bytes(out);
+        }
+        let take = (self.notice_len as usize).min(out.len());
+        let mut index = 0;
+        while index < take {
+            out[index] = self.notice_text[index];
             index += 1;
         }
         take
@@ -4986,6 +5092,122 @@ mod tests {
         // The sentence the platform wrote is longer than the sentence the app was
         // handed, and the probe holds both numbers so the screen can say so.
         assert!(probe.values_arrived() < probe.offered as usize);
+    }
+
+    /// A notice laid out the way the inference service posts one.
+    ///
+    /// WHY the offsets are written by hand: `AiStreamNotice` is the wire, and its
+    /// four `u32`s stand at zero, four, eight and twelve
+    /// (`interos_std::ai::AiStreamNotice::to_bytes`). A test that spelled them out
+    /// catches a notice whose layout moved underneath the reader.
+    fn a_notice(status: u32, pipe_id: u32, streamed_len: u32, total_len: u32) -> [u8; 16] {
+        let mut wire = [0u8; 16];
+        wire[0..4].copy_from_slice(&status.to_le_bytes());
+        wire[4..8].copy_from_slice(&pipe_id.to_le_bytes());
+        wire[8..12].copy_from_slice(&streamed_len.to_le_bytes());
+        wire[12..16].copy_from_slice(&total_len.to_le_bytes());
+        wire
+    }
+
+    #[test]
+    fn a_streamed_refusal_is_kept_whole_and_claims_no_dimension() {
+        // WHAT THIS IS FOR: the service streams the refusal because the sentence is
+        // longer than a mailbox tail, and the reader that keeps it must not stamp
+        // the sentence's byte count as an embedding dimension or claim a latency the
+        // notice never carried.
+        let sentence = b"Embedding refused: the prompt was cut in transit -- \
+                        the header declared 210 input bytes and 64 reached the service.";
+        let notice = a_notice(
+            interos_std::ai::STATUS_UNSUPPORTED,
+            5,
+            sentence.len() as u32,
+            sentence.len() as u32,
+        );
+        let decoded = interos_std::ai::AiStreamNotice::from_bytes(&notice).expect("a notice");
+        assert_eq!(decoded.status, interos_std::ai::STATUS_UNSUPPORTED);
+
+        let mut probe = EmbedProbe::new();
+        probe.sent_at_tick = 1_000;
+        probe.record_streamed(decoded.status, sentence, decoded.total_len, 1_040);
+        assert_eq!(probe.state, ProbeState::Answered);
+        assert_eq!(probe.status, interos_std::ai::STATUS_UNSUPPORTED);
+        assert!(!probe.reply_is_vector, "a streamed sentence is not a vector");
+        assert!(!probe.attributed, "a refusal names no arithmetic that ran");
+        assert_eq!(probe.offered, sentence.len() as u32);
+        assert_eq!(probe.reply_ticks, 40);
+        assert_eq!(probe.deadline, 0);
+
+        // The words come back whole, past the forty bytes the mailbox route holds,
+        // and the fields a header would have filled stay at nothing rather than
+        // borrow the notice's own numbers.
+        let mut out = [0u8; EMBED_NOTICE_TEXT_MAX];
+        let arrived = probe.notice_words(&mut out);
+        assert_eq!(arrived, sentence.len());
+        assert!(arrived > PROBE_PAYLOAD_MAX);
+        assert_eq!(&out[..arrived], sentence);
+        assert_eq!(probe.reply_dim, 0);
+        assert_eq!(probe.reply_latency, 0);
+        assert_eq!(probe.payload_len, 0);
+    }
+
+    #[test]
+    fn a_streamed_refusal_longer_than_the_buffer_is_kept_as_a_shortfall() {
+        // WHAT THIS IS FOR: the app's buffer is its own bound, and a sentence wider
+        // than it must be held as what arrived beside the length the notice
+        // declared -- the two numbers together are what let the card say the cut was
+        // the app's rather than the platform's.
+        let words = [b'w'; EMBED_NOTICE_TEXT_MAX + 40];
+        let mut probe = EmbedProbe::new();
+        probe.record_streamed(interos_std::ai::STATUS_ERROR, &words, 700, 10);
+        assert_eq!(probe.notice_len as usize, EMBED_NOTICE_TEXT_MAX);
+        assert_eq!(probe.offered, 700);
+        let mut out = [0u8; EMBED_NOTICE_TEXT_MAX];
+        assert_eq!(probe.notice_words(&mut out), EMBED_NOTICE_TEXT_MAX);
+        // A narrower reader gets a narrower copy, and never a byte past its end.
+        let mut small = [0u8; 8];
+        assert_eq!(probe.notice_words(&mut small), 8);
+    }
+
+    #[test]
+    fn the_notice_words_fall_back_to_the_mailbox_tail_when_nothing_streamed() {
+        // WHAT THIS IS FOR: the service posts the refusal inline when no channel is
+        // free, and the card reads one method for both routes. A fallback that read
+        // the streamed slot alone would print a blank exactly where the inline
+        // reply's forty bytes are.
+        let sentence = b"Embedding refused: no weights file.";
+        let mut wire = [0u8; MAILBOX_PAYLOAD_MAX];
+        wire[..REPLY_HEADER_BYTES].copy_from_slice(
+            &a_reply(interos_std::ai::STATUS_UNAVAILABLE, 96, 0, &[])[..REPLY_HEADER_BYTES],
+        );
+        let mut index = 0;
+        while index < sentence.len() {
+            wire[REPLY_HEADER_BYTES + index] = sentence[index];
+            index += 1;
+        }
+        let reply = read_embed_reply(&wire).expect("the bytes are a reply");
+        let mut probe = EmbedProbe::new();
+        probe.record(&reply, 40);
+        assert_eq!(probe.notice_len, 0);
+        let mut streamed = [0u8; EMBED_NOTICE_TEXT_MAX];
+        let mut inline = [0u8; EMBED_NOTICE_TEXT_MAX];
+        assert_eq!(
+            probe.notice_words(&mut streamed),
+            probe.sentence_bytes(&mut inline),
+            "a probe that streamed nothing must show the mailbox tail it was given"
+        );
+        assert_eq!(&streamed[..sentence.len()], sentence);
+        assert_eq!(reply.payload_len as usize, PROBE_PAYLOAD_MAX);
+        // The reply offered ninety-six bytes and the mailbox handed thirty-five, so
+        // the card has both numbers to set beside each other.
+        assert_eq!(probe.offered, 96);
+
+        // Asking again forgets both routes, so a second request is never painted
+        // with the first one's sentence.
+        probe.record_streamed(interos_std::ai::STATUS_ERROR, b"another notice", 14, 20);
+        probe.start_request(b"text", 4, None, 24, 100, 1, 40);
+        assert_eq!(probe.notice_len, 0);
+        let mut after = [0u8; EMBED_NOTICE_TEXT_MAX];
+        assert_eq!(probe.notice_words(&mut after), 0);
     }
 
     #[test]

@@ -56,6 +56,18 @@ pub const SERVICE_STORAGE_TASK_ID: u64 = 0xFFFF_0003;
 /// IPC message type for vector embedding queries: `0x454D_4244` (ASCII `b"EMBD"`).
 pub const MSG_TYPE_EMBED: u32 = 0x454D_4244;
 
+/// IPC message type naming an embedding refusal waiting on a shared-memory
+/// channel: `0x454D_434B` (ASCII `b"EMCK"`).
+///
+/// WHY it is a type of its own: an embedding refusal is a sentence of the
+/// service's own, and the mailbox cuts a message at sixty-four bytes -- after the
+/// twenty-four-byte reply header that leaves forty, less than the length a real
+/// refusal runs to. The words therefore go on the same channel a model's answer
+/// uses, and only this short pointer travels by mailbox. A reader that cannot tell
+/// a refusal notice from a vector would stamp a sentence's byte count as a
+/// dimension, so the two travel on different types.
+pub const MSG_TYPE_EMBED_CHUNK: u32 = 0x454D_434B;
+
 /// IPC message type for GGUF model metadata / header queries: `0x4747_5546` (ASCII `b"GGUF"`).
 pub const MSG_TYPE_GGUF: u32 = 0x4747_5546;
 
