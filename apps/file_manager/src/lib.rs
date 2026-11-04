@@ -1618,7 +1618,15 @@ pub const HOME_CATEGORY_TITLE_Y: usize = HOME_RECENTS_Y1;
 pub const CATEGORY_Y0: usize = HOME_CATEGORY_TITLE_Y + 52;
 /// The first category row is the storage row, which carries a caption under
 /// its label, so it is taller than the three that follow it.
-pub const CATEGORY_FIRST_ROW_H: usize = 100;
+///
+/// WHY this is the plate the ink needs and not the height first drawn: the row
+/// authored 100 rows while its own caption stands on row 72 and its box reaches
+/// 30 rows past that, so the second line of the storage sentence inked two rows
+/// onto the divider and into the next card -- at every rung, because the plate
+/// and the caption grew by the same boxes and only the air between them was
+/// authored. 111 is that plate with its own air restored: the label's 22 rows on
+/// top, the caption's box, and the nine rows the 100 was meant to leave below.
+pub const CATEGORY_FIRST_ROW_H: usize = 111;
 pub const CATEGORY_OTHER_ROW_H: usize = 70;
 
 /// A category row's plate at a level: the boxes its own runs ink, plus the air
@@ -1630,9 +1638,13 @@ pub const CATEGORY_OTHER_ROW_H: usize = 70;
 /// that proportion at every rung instead of pinning the plate to Normal.
 const CATEGORY_ROW_AIR: usize = 31;
 pub const fn category_first_row_h_at(level: u8) -> usize {
-    let content = line_at(CATEGORY_LABEL_SCALE, level)
+    // The caption's own foot, plus the air the row was authored to leave under
+    // its last box. Solving the plate from where the ink ends is the only form
+    // that can hold it: the authored sum of the two boxes and 31 rows of air was
+    // two rows short of the caption the same row paints, at every rung.
+    let content = category_caption_dy_at(level)
         + line_at(CATEGORY_CAPTION_SCALE, level)
-        + CATEGORY_ROW_AIR;
+        + (CATEGORY_ROW_AIR - CATEGORY_FIRST_LABEL_DY);
     later(CATEGORY_FIRST_ROW_H, content)
 }
 pub const fn category_other_row_h_at(level: u8) -> usize {
@@ -1696,7 +1708,13 @@ const CATEGORY_CAPTION_GAP: usize =
 /// whole label box under the label, so a label with a descender cannot ink into it.
 #[inline]
 pub fn category_caption_dy() -> usize {
-    CATEGORY_FIRST_LABEL_DY + run_line(CATEGORY_LABEL_SCALE) + CATEGORY_CAPTION_GAP
+    category_caption_dy_at(draw_level())
+}
+/// The same lane solved from the ladder rather than from the rung this process
+/// holds, so the plate that has to carry the caption can be checked against it at
+/// every rung.
+pub const fn category_caption_dy_at(level: u8) -> usize {
+    CATEGORY_FIRST_LABEL_DY + line_at(CATEGORY_LABEL_SCALE, level) + CATEGORY_CAPTION_GAP
 }
 #[inline]
 pub fn home_browse_btn() -> Rect {
@@ -1736,6 +1754,15 @@ const fn home_stack_holds_at_every_level() -> bool {
     while level <= MAX_LEVEL {
         let row = home_recent_row_h_at(level);
         if home_recent_time_dy_at(level) + line_at(HOME_RECENT_CAPTION_SCALE, level) + 1 > row {
+            return false;
+        }
+        // The category plate is named for the rows it carries, so the caption is
+        // checked against it here: the storage row's second line ends inside the
+        // box that row answers taps on, and not on the divider that closes it or
+        // in the card of the row beneath.
+        if category_caption_dy_at(level) + line_at(CATEGORY_CAPTION_SCALE, level)
+            > category_first_row_h_at(level)
+        {
             return false;
         }
         if row < theme::MIN_TOUCH_TARGET {
