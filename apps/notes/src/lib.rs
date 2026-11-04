@@ -181,6 +181,378 @@ const _: () = assert!(EDITOR_RULE_X0 + EDITOR_TEXT_COL_W == EDITOR_RULE_X1);
 const _: () = assert!(EDITOR_RULE_X1 <= interos_std::design::viewport::LOGICAL_WIDTH);
 const _: () = assert!(EDITOR_RULE_X0 + EDITOR_TITLE_LANE <= EDITOR_FIRST_TOOL_X0);
 
+// =============================================================================
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box above and beside it was authored as the
+// platform's type ladder read at one hundred per cent, so a person who raised
+// "Text size" in Settings got a *smaller* reading surface here -- the ink moves
+// through the runtime `*_user_scale` helpers, the plate does not move at all.
+// Settings writes the level, `DynamicType::publish` hands it to the renderer,
+// and the faces under [`rows_at`] answer at it. A layout that moves its ink but
+// keeps its box is the defect this screen had; a layout that moves its box to a
+// rung the renderer never got is the same defect mirrored, so the rung is read
+// from the one cell the renderer draws from.
+//
+// The authored numbers are kept as the anchor of each derivation rather than
+// replaced by it: every `_at` face below answers the number the screen was
+// drawn with at [`PLATFORM_LEVEL`], and the sweeps beside them refuse the day it
+// stops being true. That is what lets this app adopt the setting without moving
+// a pixel for the reader who never raised it.
+//
+// SCOPE, stated rather than hidden: the faces below drive the empty-state card
+// the list shows when the store has nothing to draw. The note-card rows, the
+// editor bands and the category chips are still authored -- adopting those needs
+// the whole painter and its tap handlers moved to the same rung-aware forms at
+// once, because one published rung must size a screen end to end. Those are the
+// next slice; the shared faces here are what they will build on.
+// =============================================================================
+
+/// The text-size level every box in this app was authored against.
+///
+/// WHY it is named: each box is derived twice -- once as a `const fn` of a level,
+/// so the compile-time gates can sweep all four selectable levels, and once at
+/// run time through the published rung, so the pixels a person gets follow the
+/// setting they chose.
+pub const PLATFORM_LEVEL: u8 = interos_std::design::font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep
+/// to. [`UserTextScale::from_u8`] clamps anything above it, so a sweep past this
+/// rung would be a sweep over a level no renderer can be handed.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The rung the empty-state headline is painted at, and the rung its subtitle is
+/// painted at.
+///
+/// WHY named here: the vertical derivations below are functions of a rung as well
+/// as a level, and a stride grown for the wrong rung is a stride that clips the
+/// run it was cut for.
+pub const CARD_RUNG: usize = crate::theme::type_scale::BODY;
+pub const LABEL_RUNG: usize = crate::theme::type_scale::CAPTION;
+
+/// The later of two rows or columns: the max the union bands are walked with.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`: [`interos_std::design::outline_text::row_band`]'s
+/// union of the outline line box and the bitmap cell, asked at a level rather
+/// than at the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is the platform's own answer and
+/// it is a `const fn` of the ladder, so a plate sized from it can never see the
+/// setting. The arithmetic below is the same walk -- the lower of the two faces'
+/// baselines, the deeper of the two faces' bottoms -- with every metric read
+/// through the `*_user_scale` faces, and the gate beside it refuses the day the
+/// two answers disagree at the level they were authored at.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) = interos_std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// An authored vertical stride between two stacked runs, grown by the rows the
+/// rung's box gained above the level the stride was authored at.
+///
+/// WHY this form: a stride is the space one run's box plus its air, and the only
+/// honest way to keep the authored pixels at Normal *and* carry a raised rung is
+/// to add exactly the growth the box took. It never shrinks a stride, and at the
+/// authored level it is the stride itself.
+pub const fn grown(stride: usize, scale: usize, level: u8) -> usize {
+    stride + rows_at(scale, level).saturating_sub(rows_at(scale, PLATFORM_LEVEL))
+}
+
+/// A plate that reserves a rung's box plus its authored air, never below the
+/// height it was drawn with.
+///
+/// WHY the floor: several of these heights are numbers the app's own fit gates
+/// read, so a plate may only ever grow -- at the authored level this is `authored`
+/// exactly, and the air is solved from the authored pair rather than invented.
+pub const fn plate_at(authored: usize, scale: usize, level: u8) -> usize {
+    let air = authored.saturating_sub(rows_at(scale, PLATFORM_LEVEL));
+    later(authored, rows_at(scale, level) + air)
+}
+
+/// The advance a run takes at `scale` on the level `lvl` names.
+///
+/// WHY not const: the SDK's glyph advance tables are ordinary functions, so a
+/// measured width can only be asked at run time -- which is why every box whose
+/// width depends on a measured run is a runtime face rather than a `const fn`.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::measure(text, scale);
+    }
+    let w = interos_std::design::font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// The advance a run takes at the rung this process draws at.
+#[inline]
+pub fn run_w(text: &[u8], scale: usize) -> usize {
+    run_w_at(text, scale, draw_level())
+}
+
+/// `font::ellipsize` at the rung this process draws at.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in
+/// the ladder's em, so a run cut to a lane at one rung and inked at another is an
+/// ellipsis past the edge of the plate it was trimmed for. At the authored level
+/// this *is* `font::ellipsize`, byte for byte.
+pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]) -> usize {
+    let lvl = draw_level();
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::ellipsize(text, scale, max_w, out_buf);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = run_w_at(dots, scale, lvl);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let budget = max_w - dots_w;
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    // WHY one decision, not one per byte: the width the painter then answers with
+    // is `typeface::text_advance_px`, which validates the whole run once and
+    // charges one advance per codepoint when the slice decodes. A byte walk would
+    // charge a multi-byte run's continuation bytes as glyphs the painter never
+    // inks, so it trims a run wider than the run it is measuring.
+    let decodes = core::str::from_utf8(text).is_ok();
+    let mut next = 0usize;
+    while next < text.len() {
+        let (adv, step) = if decodes {
+            match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => (
+                    interos_std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                    ch.len_utf8(),
+                ),
+                None => break,
+            }
+        } else {
+            (interos_std::design::typeface::advance_px(text[next], em) as usize, 1)
+        };
+        if current_w + adv > budget || fit_len + step + 3 > out_buf.len() {
+            break;
+        }
+        current_w += adv;
+        fit_len = next + step;
+        next = fit_len;
+    }
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// The run a plate actually gets: `label` when the trim refuses, the buffer's
+/// prefix when it fits.
+///
+/// WHY the fallback is the label and not nothing: `ellipsize_run` answers `0` when
+/// even the ellipsis will not sit in the lane, and a caller that painted `&buf[..0]`
+/// would show a plate with no words in it at all.
+pub fn fitted_run<'a>(label: &'a [u8], scale: usize, lane: usize, buf: &'a mut [u8]) -> &'a [u8] {
+    let len = ellipsize_run(label, scale, lane, buf);
+    if len == 0 {
+        return label;
+    }
+    &buf[..len]
+}
+
+/// The column a centred run starts at, measured at this app's rung.
+///
+/// WHY a restatement of `font::center_x`: the kit centres on the ladder's advance,
+/// which is the width a raised rung no longer inks -- so its label sits left of the
+/// middle of the plate it was drawn on.
+pub fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
+    let w = run_w(text, scale);
+    x0 + if w >= available { 0 } else { (available - w) / 2 }
+}
+
+// -----------------------------------------------------------------------------
+// The rung this process draws at, and the empty state that carries it
+// -----------------------------------------------------------------------------
+
+/// The empty-state card's authored height: the box the screen has always drawn.
+pub const AUTHORED_EMPTY_CARD_H: usize = EMPTY_CARD_H;
+/// The headline's authored inset from the card's top (500 - 440).
+pub const EMPTY_TITLE_INSET: usize = 500 - EMPTY_CARD_Y;
+/// The subtitle's authored stride below the headline (560 - 500).
+pub const EMPTY_SUBTITLE_STRIDE: usize = 60;
+/// Air between the subtitle's box and the card's bottom edge, chosen so the
+/// authored plate is exactly [`AUTHORED_EMPTY_CARD_H`] at the authored level.
+pub const EMPTY_BOTTOM_AIR: usize = 90;
+
+/// The headline's run origin at a level.
+///
+/// WHY the level is unused here: the headline is the topmost run, so its origin is
+/// the card's top plus the fixed inset and never moves with the rung; the level is
+/// kept in the signature so the three empty-state faces read as one family.
+pub const fn empty_title_y_at(_level: u8) -> usize {
+    EMPTY_CARD_Y + EMPTY_TITLE_INSET
+}
+
+/// The subtitle's run origin at a level.
+pub const fn empty_subtitle_y_at(level: u8) -> usize {
+    empty_title_y_at(level) + grown(EMPTY_SUBTITLE_STRIDE, CARD_RUNG, level)
+}
+
+/// The empty-state card's height at a level: never below the box it was drawn
+/// with, and tall enough for the rung's headline stride and subtitle box.
+pub const fn empty_card_h_at(level: u8) -> usize {
+    later(
+        AUTHORED_EMPTY_CARD_H,
+        EMPTY_TITLE_INSET
+            + grown(EMPTY_SUBTITLE_STRIDE, CARD_RUNG, level)
+            + rows_at(LABEL_RUNG, level)
+            + EMPTY_BOTTOM_AIR,
+    )
+}
+
+/// Whether a level's empty state keeps its two runs inside the card and the card
+/// inside the panel.
+const fn empty_state_fits(level: u8) -> bool {
+    empty_subtitle_y_at(level) + rows_at(LABEL_RUNG, level)
+        <= EMPTY_CARD_Y + empty_card_h_at(level)
+        && EMPTY_CARD_Y + empty_card_h_at(level)
+            <= interos_std::design::viewport::LOGICAL_HEIGHT
+        && empty_title_y_at(level) + rows_at(CARD_RUNG, level) <= empty_subtitle_y_at(level)
+}
+
+/// The largest rung the empty state can carry, at or below `want`.
+///
+/// WHY a clamp at all: growing every box to the person's rung is the right half
+/// of this change; the other half is refusing a rung the panel cannot carry rather
+/// than letting the card's notice walk off the bottom of the screen. The walk is
+/// downward because the state's height grows with the rung and never shrinks.
+pub const fn draw_level_at(want: u8) -> u8 {
+    let mut level = want;
+    while level > 0 && !empty_state_fits(level) {
+        level -= 1;
+    }
+    level
+}
+
+/// The rung this process draws at: the person's level, clamped to what the empty
+/// state can carry.
+#[inline]
+pub fn draw_level() -> u8 {
+    draw_level_at(interos_std::design::font::user_text_scale())
+}
+
+// WHY the derivations above are pinned to the ladder at the level they were
+// authored at: they are only a faithful restatement of it if every rung answers
+// the platform's own number there.
+const _: () = assert!(rows_at(LABEL_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, LABEL_RUNG).1);
+const _: () = assert!(rows_at(CARD_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, CARD_RUNG).1);
+const _: () = assert!(line_at(CARD_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::line_height(CARD_RUNG));
+const _: () = assert!(cap_at(CARD_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::cap_for_scale(CARD_RUNG));
+const _: () = assert!(ascent_at(LABEL_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::ascent_for_scale(LABEL_RUNG));
+const _: () = assert!(em_at(CARD_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::em_for_scale(CARD_RUNG));
+
+// WHY these anchors hold to the numbers on the screen: the empty state is drawn
+// at 500 / 560 on a 240-tall card at the level it was authored at, so adopting
+// the setting must move no pixel for a reader who left it alone.
+const _: () = assert!(empty_title_y_at(PLATFORM_LEVEL) == 500);
+const _: () = assert!(empty_subtitle_y_at(PLATFORM_LEVEL) == 560);
+const _: () = assert!(empty_card_h_at(PLATFORM_LEVEL) == AUTHORED_EMPTY_CARD_H);
+
+// WHY swept against the clamp rather than the raw rung: the clamp only earns its
+// place if every selectable level answers the panel once the clamp has had it, and
+// the authored level must be untouched by it -- otherwise the app would resize the
+// screen for a reader who asked for nothing.
+const fn draw_level_holds_at_every_level() -> bool {
+    if draw_level_at(PLATFORM_LEVEL) != PLATFORM_LEVEL {
+        return false;
+    }
+    let mut want = 0;
+    while want <= MAX_LEVEL {
+        let chosen = draw_level_at(want);
+        if chosen > want {
+            return false;
+        }
+        if !empty_state_fits(chosen) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(draw_level_holds_at_every_level());
+
+// WHY a sweep and not the authored check alone: the whole point of the derivations
+// is the rungs above the authored one, and each claim below is the fit gate the
+// screen already needs, asked at every level the ladder can be handed -- the
+// subtitle's box lands inside the plate, and the headline never crowds the
+// subtitle.
+const fn empty_card_holds_its_notice() -> bool {
+    let mut level = 0usize;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        if empty_subtitle_y_at(lvl) + rows_at(LABEL_RUNG, lvl)
+            > EMPTY_CARD_Y + empty_card_h_at(lvl)
+        {
+            return false;
+        }
+        if empty_title_y_at(lvl) + rows_at(CARD_RUNG, lvl) > empty_subtitle_y_at(lvl) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(empty_card_holds_its_notice());
+
 /// On-disk header. The version byte is `3`.
 ///
 /// WHY version 3: versions 1 and 2 stored the two timestamp slots as Unix

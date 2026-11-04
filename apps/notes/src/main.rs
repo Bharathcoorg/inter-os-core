@@ -27,6 +27,7 @@ use interos_std as std;
 use notes::theme::THEME;
 use interos_std::design::components;
 use interos_std::design::outline_text;
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::scroll::ScrollState;
 use notes::chrome;
 use notes::keyboard::{self, KeyAction};
@@ -48,7 +49,7 @@ use notes::{
     LIST_CARD_CHECK_SNIPPET_LANE, LIST_CARD_INNER_X0, LIST_CARD_INNER_X1, LIST_CARD_RAIL_X,
     LIST_CARD_SNIPPET_LANE, LIST_CARD_TEXT_X, LIST_CARD_TITLE_LANE,
     LIST_CARD_TITLE_LANE_PINNED, LIST_CARD_W, LIST_CARD_X0, LIST_CARD_X1, PIN_GLYPH_CX,
-    EMPTY_CARD_H, EMPTY_CARD_W, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_SUBTITLE_LANE,
+    EMPTY_CARD_W, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_SUBTITLE_LANE,
 };
 
 const RULE_X0: usize = notes::EDITOR_RULE_X0;
@@ -447,6 +448,79 @@ static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 /// instead of magnifying the 16x24 bitmap fallback face, so it stays sharp
 /// at every size.
 ///
+/// Reads the platform's text-size setting and hands the rung to the renderer.
+///
+/// Returns whether the rung the last frame was laid out with actually moved,
+/// which is the caller's signal that the whole screen has to be repainted and not
+/// just the band something else dirtied.
+///
+/// WHY the shared parser and not this app's own chain of compares: the store
+/// accepts both the digit and the word for a level, and a reader that understood
+/// fewer spellings than the writer produces would read an existing preference as
+/// "unset" and quietly reset the rung.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame
+/// that fell back to one hundred per cent because the store was busy would resize
+/// the screen under a person who never touched the setting.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a
+    // level above the ladder's largest setting is clamped on the way in, and a
+    // caller that repaints because "the level changed" should be wrong about that
+    // only when the pixels really did move.
+    DynamicType::new(next).publish() != before
+}
+
+/// The empty state's headline and subtitle, inked at the rung this process draws
+/// at.
+///
+/// WHY a separate face and not the shared [`test_text`]: only the empty state's
+/// plates are derived from the rung so far, so only its runs may grow. The note
+/// cards, the editor and the chips still lay out at the authored ladder, and
+/// growing their ink before their boxes would clip them. At the authored level
+/// this delegates straight to [`test_text`] and moves no pixel.
+#[inline(always)]
+fn empty_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    let lvl = notes::draw_level();
+    if lvl == notes::PLATFORM_LEVEL {
+        return test_text(x, y, x0, y0, scale, text, color, bg, bold);
+    }
+    if scale == 0 || text.is_empty() || x < x0 || x >= W {
+        return None;
+    }
+    let cap = notes::cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, text, None, bold) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. The band grows with the level:
+    // a run fitted to a scaled em walks taller than the unscaled cell, so the
+    // ladder's band would cut the descenders of the very run it enlarged.
+    if y >= y0 && y < y0 + notes::rows_at(scale, lvl) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, text, color, bg, bold);
+    }
+    None
+}
+
 /// WHY the box test comes first: the run's own arguments decide which face
 /// is used, so the pixel under the cursor never gets to choose. The box is
 /// the union of the two faces' boxes -- the outline face's box sits one or
@@ -1190,15 +1264,19 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
         let visible_count = state.filtered_indices(&mut filtered);
 
         if visible_count == 0 {
-            // Empty state card
-            if in_rounded_rect(x, y, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_CARD_W, EMPTY_CARD_H, 24) {
+            // Empty state card, sized and inked at the person's text rung.
+            let lvl = notes::draw_level();
+            let card_h = notes::empty_card_h_at(lvl);
+            let title_y = notes::empty_title_y_at(lvl);
+            let sub_y = notes::empty_subtitle_y_at(lvl);
+            if in_rounded_rect(x, y, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_CARD_W, card_h, 24) {
                 if !in_rounded_rect(
                     x,
                     y,
                     EMPTY_CARD_X + CARD_HAIRLINE,
                     EMPTY_CARD_Y + CARD_HAIRLINE,
                     EMPTY_CARD_W - 2 * CARD_HAIRLINE,
-                    EMPTY_CARD_H - 2 * CARD_HAIRLINE,
+                    card_h - 2 * CARD_HAIRLINE,
                     22,
                 ) {
                     return CARD_BORDER;
@@ -1239,14 +1317,30 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // sentence the user cannot finish reading.
                 const CARD_X: usize = EMPTY_CARD_X;
                 const CARD_W: usize = EMPTY_CARD_W;
-                let title_x = CARD_X + std::design::font::center_x(title, 2, CARD_W);
-                if let Some(c) = test_text(x, y, title_x, 500, 2, title, THEME.on_surface, THEME.surface_container, true) {
+                // The headline is centred on the run the plate actually inks, and
+                // the subtitle is trimmed to the card's inner lane at that run's
+                // advances. At the authored level both are the ladder's own calls,
+                // byte for byte.
+                let title_x = if lvl == notes::PLATFORM_LEVEL {
+                    CARD_X + std::design::font::center_x(title, 2, CARD_W)
+                } else {
+                    notes::centered_x(title, 2, CARD_X, CARD_W)
+                };
+                if let Some(c) = empty_text(x, y, title_x, title_y, 2, title, THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
                 let mut sub_buf = [0u8; 96];
-                let sub_len = std::design::font::ellipsize(subtitle, 1, EMPTY_SUBTITLE_LANE, &mut sub_buf);
-                let sub_x = CARD_X + std::design::font::center_x(&sub_buf[..sub_len], 1, CARD_W);
-                if let Some(c) = test_text(x, y, sub_x, 560, 1, &sub_buf[..sub_len], THEME.on_surface_variant, THEME.surface_container, false) {
+                let sub_len = if lvl == notes::PLATFORM_LEVEL {
+                    std::design::font::ellipsize(subtitle, 1, EMPTY_SUBTITLE_LANE, &mut sub_buf)
+                } else {
+                    notes::ellipsize_run(subtitle, 1, EMPTY_SUBTITLE_LANE, &mut sub_buf)
+                };
+                let sub_x = if lvl == notes::PLATFORM_LEVEL {
+                    CARD_X + std::design::font::center_x(&sub_buf[..sub_len], 1, CARD_W)
+                } else {
+                    notes::centered_x(&sub_buf[..sub_len], 1, CARD_X, CARD_W)
+                };
+                if let Some(c) = empty_text(x, y, sub_x, sub_y, 1, &sub_buf[..sub_len], THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
                 return CARD.fill;
@@ -2807,7 +2901,11 @@ pub extern "C" fn _start() -> ! {
     refresh_clock(&mut state);
     state.publish_notes();
 
-    // Initial frame presentation
+    // Initial frame presentation. WHY the rung is published before the first
+    // frame is laid out: Settings' "Text size" is already chosen when this app
+    // opens, so the opening screen must not be drawn at the ladder and resized a
+    // frame later.
+    publish_text_scale();
     render_notes_ui(surface, &state);
     let _ = std::surface_flip();
 
@@ -2830,6 +2928,13 @@ pub extern "C" fn _start() -> ! {
     // Interactive Event Loop
     loop {
         let mut needs_redraw = false;
+
+        // WHY re-read every poll: the size is changed in Settings while this
+        // screen is alive, so a rung that moved must repaint the whole surface --
+        // the empty state's card, its headline and its subtitle all move with it.
+        if publish_text_scale() {
+            needs_redraw = true;
+        }
 
         if let Ok(_) = std::event_poll(std::EVENT_TOUCH_INPUT, 50) {
             while std::input_event_poll(&mut input).is_ok() {

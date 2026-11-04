@@ -379,12 +379,20 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # left, and once per wake, because the size is changed in Settings while the
 # screen is alive. An app named in `PUBLISHES_AT_BUILD_ONLY` is checked against
 # the weaker claim it can actually meet.
+#
+# What the list cannot see is how far a rung travels once it arrives. Notes is
+# the screen that is only part-way: it reads the rung and lays its empty-state
+# card from it, while its chips, PIN filter, note rows and editor still stand on
+# authored pixels, because moving those means moving each painter and its tap
+# handlers in the same change. `tests/test_notes_truth_contract.py` is the file
+# that says how far it is carried.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
     "calculator": "publish_text_scale",
     "dialer": "publish_text_scale",
     "file_manager": "publish_text_scale",
     "messages": "publish_user_text_scale",
+    "notes": "publish_text_scale",
     "settings": "publish_text_scale",
     "video_player": "publish_text_scale",
 }
@@ -406,7 +414,6 @@ RUNG_BLIND_APPS = {
     "gallery",
     "launcher",
     "music",
-    "notes",
     "vault",
 }
 
