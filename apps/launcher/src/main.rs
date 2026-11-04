@@ -270,7 +270,23 @@ pub struct LauncherState {
     /// user reads as the state of their device.
     pub date_line: [u8; LOCK_DATE_TEXT_LEN],
     pub notifications: [NotificationRecord; 8],
+    /// How many records the store holds for this account, as the store itself says.
+    ///
+    /// WHY this is not the length of the cache above: the cache keeps eight rows and
+    /// the buffer they are parsed from keeps what fit in 2048 bytes, so a device
+    /// holding thirty notices would be reported as a device holding eight -- and the
+    /// surfaces that state a number (the home subtitle, the Today card, the dashboard
+    /// card) draw no record at all and so have no reason to state the cache's size.
     pub notification_count: usize,
+    /// How many rows the cache above actually holds from the answer just read.
+    ///
+    /// WHY the feed needs this separate figure: it can only draw rows it has records
+    /// for, and the store's total says nothing about that. A refused record read
+    /// leaves this at zero while the total may say thirty, which is the difference
+    /// between a feed that is empty and a feed that could not be filled -- and
+    /// drawing the previous answer as though it were the current one is what the
+    /// single old figure let the shade do.
+    pub notification_records_held: usize,
     /// Fingerprint of the store answer the cache was last filled from.
     ///
     /// WHY the shell carries one: an open shade is painted from the records read
@@ -415,6 +431,7 @@ impl LauncherState {
             date_line: [b' '; LOCK_DATE_TEXT_LEN],
             notifications: [NotificationRecord::EMPTY; 8],
             notification_count: 0,
+            notification_records_held: 0,
             notification_store_fingerprint: 0,
             notification_store_changed: false,
         feed_filter: 0,
@@ -1073,12 +1090,12 @@ fn refresh_notifications(state: &mut LauncherState) -> usize {
     let locked = std::user_get_lock_state(uid).map(|s| s != std::UserLockState::Unlocked).unwrap_or(true);
     let mut buf = [0u8; 2048];
     let mut written = 0usize;
-    let seen = if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
+    let mut held = 0usize;
+    if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
         written = n;
-        state.notification_count = 0;
         state.notifications = [NotificationRecord::EMPTY; 8];
         for line in buf[..n].split(|b| *b == b'\n') {
-            if line.is_empty() || state.notification_count >= state.notifications.len() {
+            if line.is_empty() || held >= state.notifications.len() {
                 continue;
             }
             let mut parts = line.split(|b| *b == b'|');
@@ -1111,15 +1128,23 @@ fn refresh_notifications(state: &mut LauncherState) -> usize {
             rec.body_len = body_bytes.len().min(64) as u8;
             rec.body[..rec.body_len as usize].copy_from_slice(&body_bytes[..rec.body_len as usize]);
 
-            state.notifications[state.notification_count] = rec;
-            state.notification_count += 1;
+            state.notifications[held] = rec;
+            held += 1;
         }
-        store_fingerprint(&buf[..n], state.notification_count)
-    } else {
-        state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
-        // Nothing to hash but the count, and the count is what this branch paints.
-        store_fingerprint(&[], state.notification_count)
-    };
+    }
+    // WHY a refused record read leaves this at zero and the old rows undrawn: the
+    // cache then holds an answer the store has not just given, and a feed that
+    // paints it says the device still has those notices.
+    state.notification_records_held = held;
+    // WHY the count is asked for beside the records rather than read off them: the
+    // records are bounded by this shell's eight-row cache and by the bytes that fit
+    // the buffer, so their length is a figure about the cache, not about the device.
+    // The two arms are two reads, and a notice can be cancelled between them, so the
+    // count is never allowed to fall below the rows this poll is about to draw --
+    // a feed of eight cards under a "0 notifications" headline is the same lie the
+    // cache length used to tell in the other direction.
+    state.notification_count = std::notification_query(uid, locked).unwrap_or(0).max(held);
+    let seen = store_fingerprint(&buf[..written], state.notification_count);
     state.notification_store_changed = seen != state.notification_store_fingerprint;
     state.notification_store_fingerprint = seen;
     written
@@ -1186,7 +1211,7 @@ fn open_notifications_shade(surface: u32, state: &mut LauncherState, origin: &st
         let _ = write!(
             line,
             "[LAUNCHER] Notifications shade opened via {} (uid={} read {} bytes into {} records)",
-            origin, uid, bytes, state.notification_count
+            origin, uid, bytes, state.notification_records_held
         );
     }
     std::log(line.as_str()).ok();
@@ -4630,6 +4655,7 @@ pub extern "C" fn _start() -> ! {
                                     let _ = std::notification_cancel("", 0);
                                     state.notifications = [NotificationRecord::EMPTY; 8];
                                     state.notification_count = 0;
+                                    state.notification_records_held = 0;
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     surface_flip_display();

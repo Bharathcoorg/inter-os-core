@@ -406,6 +406,171 @@ def test_events_header_does_not_print_platform_diagnostics_to_the_reader():
     assert "Recent activity from your apps and system." in joined
 
 
+def _store_bound(kernel_src: str) -> int:
+    """How many notification records the store will hold at once.
+
+    WHY read from the kernel rather than written down here: the figures every
+    notification surface states are bounded by that ceiling, and a gate that typed
+    "64" would still pass the day the store grew and the shell's runs started
+    clipping their own headline number.
+    """
+    match = re.search(r"max_active:\s*(\d+)", kernel_src)
+    assert match, "the notification store no longer bounds what it holds"
+    return int(match.group(1))
+
+
+def _count_figure_defects(shell: str, home: str, widgets: str, shade: str) -> list:
+    """Where the shell's notification arithmetic says one number and means another.
+
+    WHY this is a rule with a gate behind it: the shell cached eight records and
+    carried one figure for both the store's total and the rows it could draw, so the
+    home subtitle clamped that figure to eight while the Today card and the dashboard
+    card printed it raw -- three surfaces of one device, and none of them wrong in
+    the same way. The feed then measured what it had hidden against the cache, so a
+    device holding thirty notices and showing eight said nothing about the other
+    twenty-two. A person reads a count on the home screen as a fact about their
+    device; it has to be the store's own answer, and the feed has to say which of
+    those answers it actually drew.
+    """
+    defects = []
+    refresh = _code_only(_rust_fn(shell, "refresh_notifications"))
+    if "state.notification_records_held = held;" not in refresh:
+        defects.append("the poll keeps one figure for both the store's total and the rows it can draw")
+    if "state.notification_count = std::notification_query(uid, locked).unwrap_or(0).max(held);" not in refresh:
+        defects.append("the count every surface states is not the store's own answer")
+    for name, source in (("the home screen", home), ("the dashboard", widgets),
+                         ("the shade", shade), ("the shell", shell)):
+        if "notification_count.min(" in _code_only(source):
+            defects.append(f"{name} clamps the store's count to the shell's own cache before stating it")
+    if "let count = state.notification_records_held;" not in _code_only(shade):
+        defects.append("the feed decides how many rows to draw from a figure that can exceed its records")
+    if "state.notification_count.saturating_sub(row_count)" not in _code_only(shade):
+        defects.append("the shade measures its 'more records not shown' figure against the cache, "
+                       "so a store larger than the cache reports nothing hidden")
+    if "if state.notification_count == 0 {" not in _code_only(shade):
+        defects.append("the shade calls itself empty because its cache is empty, not because the store is")
+    for name, source, needle in (
+        ("home subtitle", home, "push_decimal(&mut subtitle_buf, 0, state.notification_count)"),
+        ("Today card", home, "push_decimal(out, 0, state.notification_count)"),
+        ("dashboard card", widgets, "push_dec(&mut notif_buf, 0, state.notification_count as u64)"),
+    ):
+        if needle not in _code_only(source):
+            defects.append(f"the {name} no longer states the store's own count, so it is free to "
+                           "disagree with the shade that lists the same records")
+    return defects
+
+
+def test_the_notification_count_is_the_same_figure_on_every_surface():
+    """Home, dashboard and shade all state the store's total, and the feed draws its cache.
+
+    WHY a source gate: the shell is `#![no_main]` and its bin target carries
+    `test = false`, so no `#[cfg(test)]` module over these painters ever runs on the
+    host. Which field a run is formatted from is the detectable fact.
+    """
+    defects = _count_figure_defects(
+        read("apps/launcher/src/main.rs"),
+        read("apps/launcher/src/screens/home.rs"),
+        read("apps/launcher/src/screens/live_widgets.rs"),
+        read("apps/launcher/src/screens/notifications.rs"),
+    )
+    assert not defects, defects
+
+
+def test_the_widest_count_the_store_can_state_fits_the_runs_that_state_it():
+    """The digit budget of every count run is measured against the store's own ceiling.
+
+    WHY now, and not when it breaks: the count used to be clamped to eight, which is
+    one glyph, and the home subtitle formatted it with `b'0' + cnt as u8` -- a
+    single byte that would have written a colon for ten. The figure is now the
+    store's total, so the widest total has to fit the buffer it is written into and
+    the card lines that carry it.
+    """
+    home = read("apps/launcher/src/screens/home.rs")
+    widgets = read("apps/launcher/src/screens/live_widgets.rs")
+    widest = _store_bound(read("kernel/src/notification/mod.rs"))
+
+    subtitle_words = re.findall(r'b"(\d* ?notifications? waiting)"', home)
+    assert subtitle_words, "the home subtitle no longer states a notification count in words"
+    subtitle_room = re.search(r"let mut subtitle_buf = \[0u8; (\d+)\];", home)
+    assert subtitle_room, "the home subtitle no longer formats into a fixed stack buffer"
+    longest_subtitle = max(len(f"{widest}{run}") for run in subtitle_words)
+    assert longest_subtitle <= int(subtitle_room.group(1)), (
+        f"the widest notification count the store can state, plus {subtitle_words!r}, is "
+        f"{longest_subtitle} bytes and the subtitle buffer holds {subtitle_room.group(1)}"
+    )
+
+    card_words = re.findall(r'b"( ?unread notifications)"', home)
+    assert card_words, "the Today card no longer states a notification count in words"
+    card_room = _const_usize(home, "CARD_DETAIL_CAP")
+    longest_card = max(len(f"{widest}{run}") for run in card_words)
+    assert longest_card <= card_room, (
+        f"the widest count the store can state is {longest_card} bytes on the Today card, "
+        f"whose detail line holds {card_room}"
+    )
+    reading_room = re.search(r"let mut notif_buf = \[0u8; (\d+)\];", widgets)
+    assert reading_room, "the dashboard's alert-channel card no longer formats into a fixed buffer"
+    assert len(f"{widest} active") <= int(reading_room.group(1)), (
+        "the dashboard card clips its own count"
+    )
+
+
+def test_the_count_detector_catches_the_one_figure_it_exists_for():
+    """Every arm that puts the two figures back into one is refused, and prose is not.
+
+    WHY the gate tests itself: a pin nobody has seen fail is a pin that may be
+    asserting nothing. Each arm below is the code this shell actually used to carry,
+    put back by hand one line at a time.
+    """
+    shell = read("apps/launcher/src/main.rs")
+    home = read("apps/launcher/src/screens/home.rs")
+    widgets = read("apps/launcher/src/screens/live_widgets.rs")
+    shade = read("apps/launcher/src/screens/notifications.rs")
+    live = (shell, home, widgets, shade)
+    assert not _count_figure_defects(*live), "the detector fires on the shell as it stands"
+    # A comment inside the very body the detector scans, quoting the figure it
+    # forbids in code, must not read as the fault -- and must not read as the fix.
+    prose = shell.replace(
+        "// WHY a refused record read leaves this at zero and the old rows undrawn: the",
+        "// notification_count.min(state.notifications.len()) -- WHY a refused read leaves this zero, the",
+    )
+    assert prose != shell, "the prose control no longer matches the shell it edits"
+    assert not _count_figure_defects(prose, home, widgets, shade), (
+        "the detector reads a comment as the arithmetic it explains"
+    )
+
+    # Each arm is one line of the arithmetic put back the way this shell used to
+    # write it. The needle is asserted before the replace so an arm that has drifted
+    # away from the source it claims to edit fails here instead of passing silently.
+    for label, name, needle, replacement in (
+        ("the poll folding the cache length back over its own figure", "shell",
+         "state.notification_records_held = held;", "state.notification_count = held;"),
+        ("the count read off the records instead of asked of the store", "shell",
+         "state.notification_count = std::notification_query(uid, locked).unwrap_or(0).max(held);",
+         "state.notification_count = held;"),
+        ("the home subtitle clamped to the cache again", "home",
+         "push_decimal(&mut subtitle_buf, 0, state.notification_count);",
+         "push_decimal(&mut subtitle_buf, 0, state.notification_count.min(8));"),
+        ("the feed drawn from a figure that outruns its records", "shade",
+         "let count = state.notification_records_held;",
+         "let count = state.notification_count.min(state.notifications.len());"),
+        ("the shade hiding its overflow in cache terms", "shade",
+         "state.notification_count.saturating_sub(row_count)",
+         "cached.saturating_sub(row_count)"),
+        ("the shade calling an unread cache empty", "shade",
+         "if state.notification_count == 0 {", "if cached == 0 {"),
+        ("the dashboard card inventing its own figure", "widgets",
+         "push_dec(&mut notif_buf, 0, state.notification_count as u64);",
+         "push_dec(&mut notif_buf, 0, state.app_count as u64);"),
+    ):
+        current = {"shell": shell, "home": home, "widgets": widgets, "shade": shade}[name]
+        assert current.count(needle) == 1, f"the arm for {label!r} does not match the source it edits"
+        mutated = {**{"shell": shell, "home": home, "widgets": widgets, "shade": shade},
+                   name: current.replace(needle, replacement)}
+        assert _count_figure_defects(
+            mutated["shell"], mutated["home"], mutated["widgets"], mutated["shade"]
+        ), f"the detector does not catch {label}"
+
+
 def test_recents_cards_show_the_real_pixels_or_say_why_there_are_none():
     """Recents must not paint a picture it never received.
 

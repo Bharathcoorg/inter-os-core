@@ -919,15 +919,21 @@ fn build(state: &LauncherState) -> Paint {
     let subtitle_bytes: &[u8] = if state.user_status_len > 0 {
         &state.user_status[..state.user_status_len]
     } else if state.notification_count > 0 {
-        let cnt = state.notification_count.min(8);
-        if cnt == 1 {
-            b"1 notification waiting"
-        } else {
-            subtitle_buf[0] = b'0' + (cnt as u8);
-            let rest = b" notifications waiting";
-            subtitle_buf[1..1 + rest.len()].copy_from_slice(rest);
-            &subtitle_buf[..1 + rest.len()]
-        }
+        // WHY the figure is written as decimal and not as one digit: this is the
+        // store's own total, which the platform bounds well above nine records, and a
+        // single digit could only ever have been the eight-row cache dressed up as a
+        // count -- the number the shade then contradicted.
+        let mut at = push_decimal(&mut subtitle_buf, 0, state.notification_count);
+        at = put(
+            &mut subtitle_buf,
+            at,
+            if state.notification_count == 1 {
+                b" notification waiting"
+            } else {
+                b" notifications waiting"
+            },
+        );
+        &subtitle_buf[..at]
     } else if state.task0_done {
         b"Primary task completed"
     } else if state.clock_source_ok && state.date_line[0] != b' ' {

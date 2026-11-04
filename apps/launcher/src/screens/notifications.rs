@@ -1052,17 +1052,23 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     );
 
     // 3. Category Filter Counts
-    let count = state.notification_count.min(state.notifications.len());
+    //
+    // WHY the feed draws the cache's length and not `notification_count`: the store
+    // can hold more records than this shell caches, and a row is only paintable when
+    // the record behind it is on hand. The count the screen states about the device
+    // is `notification_count`, which is the store's own answer -- see the note on
+    // that field in the shell's state.
+    let count = state.notification_records_held;
     let mut order = [0usize; 8];
-    let mut total = 0usize;
+    let mut cached = 0usize;
     for i in (0..count).rev() {
-        order[total] = i;
-        total += 1;
+        order[cached] = i;
+        cached += 1;
     }
 
     let mut counts = [0usize; 4];
-    counts[0] = total;
-    for k in 0..total {
+    counts[0] = cached;
+    for k in 0..cached {
         match category_of(&state.notifications[order[k]], state) {
             Category::Unlisted => {}
             cat => counts[category_slot(cat)] += 1,
@@ -1103,14 +1109,6 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         pill_x += w + PILL_GAP;
     }
 
-    let mut matched = 0usize;
-    for k in 0..total {
-        let cat = category_of(&state.notifications[order[k]], state);
-        if in_category(cat, filter) {
-            matched += 1;
-        }
-    }
-
     // 4. Notification Rows
     let mut rows = [RowPlan::EMPTY; 8];
     let mut sections = [SectionPlan::EMPTY; 4];
@@ -1120,7 +1118,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let mut feed_end = SECTION_HEAD_Y;
     let mut current_bucket = usize::MAX;
 
-    for k in 0..total {
+    for k in 0..cached {
         let rec = state.notifications[order[k]];
         let cat = category_of(&rec, state);
         if !in_category(cat, filter) {
@@ -1152,7 +1150,12 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         y = row_y + ROW_PITCH;
     }
 
-    let hidden = matched.saturating_sub(row_count);
+    // WHY the note counts from the store's own total: the records this screen did
+    // not draw are the records it holds minus the rows it inked, and the shell holds
+    // fewer than the store has. Measuring from the cache alone could say "nothing
+    // hidden" over a device with twenty notices the person never sees, which is the
+    // difference this whole line exists to tell them about.
+    let hidden = state.notification_count.saturating_sub(row_count);
     let mut more = [0u8; 32];
     let more_len = if hidden > 0 {
         let mut n = 1usize;
@@ -1173,7 +1176,12 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let more_note = LabelRun::new(36, note_y, type_scale::CAPTION, &more[..more_len], theme.on_surface_variant);
 
     // 5. Empty State
-    let (empty_head, empty_body) = if total == 0 {
+    //
+    // WHY the store's total and not the rows: "No new notifications" is a claim
+    // about the device, and a feed that could not read its records -- or that drew
+    // none of them under a filter -- is a feed with something on it, not an empty
+    // one. The note above is what tells the reader how much is not here.
+    let (empty_head, empty_body) = if state.notification_count == 0 {
         (
             LabelRun::centred(ROW_X, 420, ROW_W, type_scale::HEADING, b"No new notifications", theme.on_surface),
             // WHY the outline box and not `text::line_height`: the heading draws
