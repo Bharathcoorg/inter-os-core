@@ -2496,6 +2496,163 @@ def test_the_loader_no_longer_claims_the_service_never_calls_it():
     )
 
 
+# ---------------------------------------------------------------------------
+# The tensor reader's own count of the quantisations it can lay a row out for.
+# ---------------------------------------------------------------------------
+
+# The sentence `weights.rs` puts above its loader error type, naming how many
+# quantisations the arithmetic knows. It is required to exist: a loader whose
+# capability is unnumbered is a loader no reader can check.
+QUANTISATION_CLAIM = re.compile(
+    r"(\w+)\s+quantisations\s+`gemv` and\s+`embedding_row_into` know"
+)
+
+WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+
+def mapped_dtype_ids(inference: str) -> list:
+    """The GGML dtype ids `quantised_row_bytes` gives a row layout to.
+
+    WHY the arms are read out of the `match` and not counted from a comment: that
+    match is the function the loader calls to size every tensor row, so its arm
+    list is the number a refusal is actually made of.
+    """
+    body = function_body(inference, "pub fn quantised_row_bytes(")
+    arms = body[body.index("match dtype {"):]
+    return [int(n) for n in re.findall(r"^[ \t]+(\d+) =>", arms, re.M)]
+
+
+def quantisation_claim(weights: str) -> tuple:
+    """`(count, paragraph)` for the sentence naming the reader's quantisations.
+
+    The paragraph is the whole `///` block the sentence opens, because the ids it
+    lists and the refusal it promises live in the lines under it.
+    """
+    lines = weights.splitlines()
+    for index, line in enumerate(lines):
+        match = QUANTISATION_CLAIM.search(line)
+        if not match:
+            continue
+        paragraph = []
+        for follow in lines[index:]:
+            if not follow.lstrip().startswith("///"):
+                break
+            paragraph.append(follow.lstrip()[3:].strip())
+        word = match.group(1).lower()
+        count = int(word) if word.isdigit() else WORD_NUMBERS.get(word)
+        return count, " ".join(part for part in paragraph if part)
+    raise AssertionError(
+        "the tensor reader no longer states how many quantisations it knows the "
+        "byte layout of, so nothing can check the claim against the engine"
+    )
+
+
+def ids_named(paragraph: str, ids: list) -> list:
+    """Which of `ids` the paragraph names, by number rather than by adjective."""
+    return [dtype for dtype in ids if re.search(rf"\b{dtype}\b", paragraph)]
+
+
+def test_the_reader_names_the_quantisations_the_engine_maps():
+    """`weights.rs` claims eight quantisations; the engine sizes a row for five.
+
+    The ids `quantised_row_bytes` maps are 0 F32, 1 F16, 2 Q4_0, 8 Q8_0 and 12
+    Q4_K, and every other dtype is refused by its number --
+    `InferenceError::UnsupportedQuantization` and `LoadError::UnsupportedDtype`.
+    Q4_1, Q5_K and Q6_K are not implemented anywhere in this service. A count of
+    eight is therefore a capability the build does not have, printed in the one
+    file a reader opens to learn what the loader can read: the defect the
+    Platform Truth Contract exists to stop, and a doc-only fix.
+    """
+    inference = read("inference.rs")
+    ids = mapped_dtype_ids(inference)
+    claimed, paragraph = quantisation_claim(read("weights.rs"))
+
+    assert claimed is not None, "the reader's quantisation count is not a number"
+    assert claimed == len(ids), (
+        f"the reader claims {claimed} quantisations; `quantised_row_bytes` maps "
+        f"{len(ids)}: {ids}"
+    )
+    # A count alone is still a number no reader can verify, so the same block has
+    # to name the ids it counted.
+    assert ids_named(paragraph, ids) == ids, (
+        f"the claim counts {len(ids)} quantisations without naming all of {ids}"
+    )
+    # And it has to say what happens to a dtype it has not mapped: refused by its
+    # number, never read as a neighbour's layout.
+    assert "number" in paragraph, (
+        "the claim no longer says an unmapped dtype is refused by its number"
+    )
+
+
+def test_the_quantisation_claim_gate_can_fail():
+    """A gate nobody has seen fail is a comment.
+
+    Each block puts one fault back into a copy of the two files and runs the
+    *same* detector the gate above runs, so the count, the enumeration and the
+    refusal are each proved still to be observable.
+    """
+    inference = read("inference.rs")
+    weights = read("weights.rs")
+    ids = mapped_dtype_ids(inference)
+
+    # 1. The claim as it shipped: eight named over a five-id engine.
+    inflated = weights.replace("The five quantisations", "The eight quantisations", 1)
+    assert inflated != weights, "the reader's count sentence moved; this fixture is stale"
+    claimed, _ = quantisation_claim(inflated)
+    assert claimed != len(ids), (
+        "claiming eight over the ids the engine maps no longer parts the two numbers"
+    )
+
+    # 2. The engine gains a row layout and the comment is not told. The gate has
+    # to see the two numbers part company from this side too, or it only ever
+    # checks that nobody re-typed a word.
+    widened = inference.replace(
+        "        8 => blocks(32, 34),",
+        "        8 => blocks(32, 34),\n        3 => blocks(32, 144),",
+        1,
+    )
+    assert widened != inference, "the dtype match moved; this fixture no longer matches it"
+    grown = mapped_dtype_ids(widened)
+    assert len(grown) == len(ids) + 1, "the detector stopped counting the match's arms"
+    claimed, _ = quantisation_claim(weights)
+    assert claimed != len(grown), (
+        "a sixth arm would keep a five-id claim passing"
+    )
+
+    # 3. The count stays right while the enumeration goes: the reader would be
+    # back to asserting a number a reader cannot check.
+    unlisted = weights.replace(
+        "dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0) and 12 (Q4_K)",
+        "the dtype ids the engine names",
+        1,
+    )
+    assert unlisted != weights, "the reader's id list moved; this fixture is stale"
+    _, paragraph = quantisation_claim(unlisted)
+    assert ids_named(paragraph, ids) != ids, (
+        "the gate would pass a claim that names none of the ids it counts"
+    )
+
+    # 4. The refusal sentence dropped, so the paragraph implies a guess instead
+    # of a refusal.
+    unrefused = weights.replace(
+        "naming the tensor and the number.", "naming the tensor.", 1
+    )
+    assert unrefused != weights, "the refusal sentence moved; this fixture is stale"
+    _, paragraph = quantisation_claim(unrefused)
+    assert "number" not in paragraph, (
+        "the gate would pass a claim that no longer says an unmapped dtype is refused"
+    )
+
+    # None of those faults are in the service as it stands.
+    claimed, paragraph = quantisation_claim(weights)
+    assert claimed == len(ids) == 5 and ids == [0, 1, 2, 8, 12]
+    assert ids_named(paragraph, ids) == ids
+    assert "number" in paragraph
+
+
 def mutate_function(source: str, signature: str, old: str, new: str) -> str:
     """`source` with one occurrence of `old` inside the named function replaced.
 
@@ -2712,6 +2869,290 @@ def test_the_embedding_contract_can_fail():
     assert "rag::RagIndex::new(false)" in search_arm(without_comments(lib))
     assert "is_neural: m.is_neural as u8" in search_arm(without_comments(lib))
     assert len(set(status_codes(sdk))) == len(status_codes(sdk))
+
+
+# ---------------------------------------------------------------------------
+# The embedding id stream: one bound, printed as the number the code enforces.
+# ---------------------------------------------------------------------------
+
+# The single place the run's id-stream ceiling is written down. It has to be a
+# named constant on one line, because every other site that needs the bound is
+# checked below for naming *it* rather than repeating its value.
+ID_STREAM_BOUND = re.compile(r"const EMBED_TOKEN_IDS_MAX: usize = (\d+);")
+
+# A `b"..."` literal is a sentence a notice prints. A digit inside one is a bound
+# no constant owns, which is exactly how a raised ceiling keeps telling callers
+# about the old one.
+BYTE_LITERAL = re.compile(r'b"(?:[^"\\]|\\.)*"')
+
+# Prose in the service's own headers that restates the bound, so a reader who
+# never opens `lib.rs` cannot be handed a number the code stopped enforcing.
+PROSE_BOUND = re.compile(r"bounded at (\d+) positions")
+
+
+def id_stream_bound(lib: str) -> int:
+    """The bound `EMBED_TOKEN_IDS_MAX` states, or `AssertionError` if it is gone."""
+    match = ID_STREAM_BOUND.search(lib)
+    assert match is not None, (
+        "EMBED_TOKEN_IDS_MAX is no longer `const ... : usize = <number>;`, so the "
+        "number a refusal prints has nothing to be compared against"
+    )
+    return int(match.group(1))
+
+
+def id_stream_prose_sources() -> dict:
+    """Every inference-service source, by file name, for the prose sweep below."""
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(SERVICE.glob("*.rs"))
+    }
+
+
+def literals_with_digits(fragment: str) -> list:
+    """The byte literals in `fragment` that contain a digit."""
+    return [
+        literal
+        for literal in BYTE_LITERAL.findall(fragment)
+        if any(character.isdigit() for character in literal)
+    ]
+
+
+def _id_stream_bound_faults(lib: str, tokenizer: str, prose: dict) -> list:
+    """Every way the id-stream refusal can drift from the bound the array enforces."""
+    faults = []
+    match = ID_STREAM_BOUND.search(lib)
+    if match is None:
+        return [
+            "EMBED_TOKEN_IDS_MAX is no longer a named constant on one line, so the "
+            "number the refusal prints has nothing to be compared against"
+        ]
+    bound = int(match.group(1))
+
+    # The buffer and the guard both have to name the constant: an array sized by a
+    # literal would enforce one bound while the notice printed another, and the
+    # refusal's whole claim is that the two are the same number.
+    struct_body = tolerant_body(lib, "struct TokenIds {")
+    if "ids: [u32; EMBED_TOKEN_IDS_MAX]," not in struct_body:
+        faults.append("TokenIds no longer holds EMBED_TOKEN_IDS_MAX positions")
+
+    reader = tolerant_body(lib, "fn read_token_ids(")
+    if "if count > EMBED_TOKEN_IDS_MAX {" not in reader:
+        faults.append("read_token_ids no longer refuses a stream at EMBED_TOKEN_IDS_MAX")
+    if "let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];" not in reader:
+        faults.append("read_token_ids sizes its own buffer with something other than EMBED_TOKEN_IDS_MAX")
+
+    mapper = tolerant_body(lib, "fn encode_with_installed_file(")
+    if "let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];" not in mapper:
+        faults.append("the vocabulary mapping buffers something other than EMBED_TOKEN_IDS_MAX ids")
+
+    # The two numbers the caller is shown have to be the segmentation's own, not
+    # recomputed here: a refusal that guesses how many ids were needed is a refusal
+    # that cannot be checked against the file.
+    planner = tolerant_body(lib, "fn apply_file_vocabulary(")
+    if "EmbeddingGap::IdStreamFull(*needed, *bound)" not in planner:
+        faults.append("the refusal no longer carries the segmentation's own two numbers")
+    if "IdStreamFull(usize, usize)," not in lib:
+        faults.append("IdStreamFull no longer carries a pair of numbers")
+
+    # The sentence the caller reads: both figures printed from the values handed to
+    # the arm, the bound named in words, and nothing cut silently.
+    notice = tolerant_body(lib, "fn embedding_gap_notice<'a>(")
+    arm = tolerant_body(notice, "EmbeddingGap::IdStreamFull(needed, bound) =>")
+    if not arm:
+        faults.append("the id-stream refusal no longer has an arm of its own")
+    else:
+        for printed in ("notice.byte_count(needed as u64);", "notice.byte_count(bound as u64);"):
+            if printed not in arm:
+                faults.append(f"the refusal no longer prints the number from {printed!r}")
+        if "one embedding run answers at most " not in arm:
+            faults.append("the refusal no longer says what the bound is a bound on")
+        if "Nothing was truncated" not in arm:
+            faults.append("the refusal no longer says it truncated nothing")
+        if "STATUS_UNSUPPORTED" not in arm:
+            faults.append("the id-stream refusal answers with no status of its own")
+        if "STATUS_SUCCESS" in arm:
+            faults.append("a run that answered no vector reports success")
+        numbered = literals_with_digits(arm)
+        if numbered:
+            faults.append(
+                "the refusal hard-codes a count inside its own sentence, so the number "
+                f"a caller reads is not the number the array enforces: {numbered}"
+            )
+
+    # `encode` reports the bound as the buffer's length, which is the constant: if
+    # it ever reported a remembered number the pins above would agree with a lie.
+    encoder = tolerant_body(tokenizer, "pub fn encode(&self, text: &[u8], out: &mut [u32])")
+    if "if needed > out.len() {" not in encoder:
+        faults.append("encode no longer measures a segmentation against the buffer it was handed")
+    if "bound: out.len()," not in encoder:
+        faults.append("encode reports a bound that is not the length of the buffer")
+
+    # Prose restating the ceiling, in any header a reader opens instead of lib.rs.
+    for name, text in sorted(prose.items()):
+        for stated in PROSE_BOUND.findall(text):
+            if int(stated) != bound:
+                faults.append(
+                    f"{name} tells its reader the run is bounded at {stated} positions "
+                    f"while EMBED_TOKEN_IDS_MAX is {bound}"
+                )
+
+    # The gate's own proof: a host test that formats the notice and reads the figure
+    # back, so the agreement is executed rather than only asserted about source shape.
+    host = tolerant_body(
+        lib, "fn test_the_id_stream_refusal_prints_the_bound_the_service_enforces("
+    )
+    if "b\"answers at most \"" not in host or "EMBED_TOKEN_IDS_MAX" not in host:
+        faults.append(
+            "no host test formats the id-stream refusal and compares the number it "
+            "prints to EMBED_TOKEN_IDS_MAX"
+        )
+    return faults
+
+
+def test_the_id_stream_refusal_prints_the_bound_the_run_enforces():
+    """The 32-position bound is one number, and the caller is told exactly that one.
+
+    The refusal at `EmbeddingGap::IdStreamFull` is the only place a person learns
+    how long a stream the embedding run answers, and the array in `TokenIds` is the
+    only thing that decides whether a stream fits. If those two can be made to say
+    different numbers -- by typing a literal into the sentence, by resizing the
+    array alone, or by re-typing the ceiling into a module header -- the service
+    would refuse requests it could have answered, or promise room it does not have.
+    Either is a false capability claim, so the constant, the buffer, the guard, the
+    printed pair and the prose are pinned to each other here, and executed against
+    each other by the host test this gate requires.
+
+    WHY this does not also pin the value to the model's declared context: 32 ids is
+    already 128 bytes and an IPC message carries 64 (`kernel/src/ipc/mod.rs:34`),
+    24 of which the request header takes, so at most 10 ids reach this service whole
+    today. Raising `EMBED_TOKEN_IDS_MAX` moves the wall from the run onto the
+    transport without moving the caller; the bound stays where the transport puts it
+    until the ids have a pipe to travel in on.
+    """
+    lib = lib_source()
+    faults = _id_stream_bound_faults(lib, read("tokenizer.rs"), id_stream_prose_sources())
+    assert not faults, faults
+
+
+def test_the_id_stream_bound_gate_can_fail():
+    """A bound nobody watched drift is a bound nobody moved on purpose.
+
+    Each block puts one fault back into a copy and runs the *same* detector the gate
+    above runs. The last two blocks are the ones that matter for a raised ceiling:
+    the detector must fire on a hard-coded number, and must stay silent when a
+    different bound is stated consistently everywhere.
+    """
+    lib = lib_source()
+    tokenizer = read("tokenizer.rs")
+    prose = id_stream_prose_sources()
+
+    clean = _id_stream_bound_faults(lib, tokenizer, prose)
+    assert not clean, f"the bound detector fires on the service as it stands: {clean}"
+    assert id_stream_bound(lib) == 32, "the shipped bound moved without this fixture being re-read"
+
+    # 1. The printed bound frozen to today's number while the constant moves. This
+    # is the exact drift this gate exists to stop: the notice keeps saying 32, the
+    # array keeps getting bigger, and the caller is told to shorten a text that
+    # already fit.
+    frozen = mutate_function(
+        lib,
+        "fn embedding_gap_notice<'a>(",
+        'notice.word(b" token ids and one embedding run answers at most ");\n'
+        "            notice.byte_count(bound as u64);",
+        'notice.word(b" token ids and one embedding run answers at most ");\n'
+        "            notice.byte_count(32);",
+    )
+    faults = _id_stream_bound_faults(frozen, tokenizer, prose)
+    assert any(
+        "notice.byte_count(bound as u64);" in f for f in faults
+    ), f"a frozen bound in the notice passes the gate: {faults}"
+
+    # 2. The count typed into the sentence itself, leaving the dynamic print in
+    # place -- a half-fix that puts an unverifiable number in front of the caller.
+    typed = mutate_function(
+        lib,
+        "fn embedding_gap_notice<'a>(",
+        'notice.word(b" token ids and one embedding run answers at most ");',
+        'notice.word(b" token ids and one embedding run answers at most 64 ids ");',
+    )
+    faults = _id_stream_bound_faults(typed, tokenizer, prose)
+    assert any("hard-codes a count" in f for f in faults), (
+        f"a digit inside the refusal's own sentence passes the gate: {faults}"
+    )
+
+    # 3. The guard moved to a literal, so the array and the refusal part company
+    # from the enforcement side.
+    ungated = mutate_function(
+        lib, "fn read_token_ids(", "if count > EMBED_TOKEN_IDS_MAX {", "if count > 10 {"
+    )
+    faults = _id_stream_bound_faults(ungated, tokenizer, prose)
+    assert any(
+        "read_token_ids no longer refuses a stream at EMBED_TOKEN_IDS_MAX" in f for f in faults
+    ), f"a literal read guard passes the gate: {faults}"
+
+    # 4. The vocabulary buffer narrowed to the transport's reach while the printed
+    # bound stayed at the run's: a caller told 32 would be refused at 10 by a
+    # segmentation number that never reached the notice.
+    narrowed = mutate_function(
+        lib,
+        "fn encode_with_installed_file(",
+        "let mut ids = [0u32; EMBED_TOKEN_IDS_MAX];",
+        "let mut ids = [0u32; 10];",
+    )
+    faults = _id_stream_bound_faults(narrowed, tokenizer, prose)
+    assert any(
+        "buffers something other than EMBED_TOKEN_IDS_MAX" in f for f in faults
+    ), f"a mapping buffer sized by a literal passes the gate: {faults}"
+
+    # 5. Prose in the tokenizer's own header left behind by a raised ceiling.
+    moved = {
+        name: (
+            text.replace("bounded at 32 positions", "bounded at 512 positions", 1)
+            if name == "tokenizer.rs"
+            else text
+        )
+        for name, text in prose.items()
+    }
+    assert moved["tokenizer.rs"] != prose["tokenizer.rs"], (
+        "the tokenizer header no longer restates the bound; this fixture is stale"
+    )
+    faults = _id_stream_bound_faults(lib, tokenizer, moved)
+    assert any(
+        "while EMBED_TOKEN_IDS_MAX is 32" in f for f in faults
+    ), f"prose claiming 512 positions passes the gate: {faults}"
+
+    # 6. The host proof of the agreement deleted: the source shapes still line up,
+    # but nothing any more runs the notice and reads its digits back.
+    unproved = lib.replace(
+        "fn test_the_id_stream_refusal_prints_the_bound_the_service_enforces(",
+        "fn retired_the_id_stream_bound_proof(",
+        1,
+    )
+    faults = _id_stream_bound_faults(unproved, tokenizer, prose)
+    assert any("no host test formats" in f for f in faults), (
+        f"the gate passes with the notice never formatted: {faults}"
+    )
+
+    # 7. A raised bound, stated consistently everywhere, must PASS. Without this
+    # the detector would be pinning the number 32 rather than the agreement between
+    # the number and the bound, and the day a pipe carries the ids it would be the
+    # gate itself that refuses the raise.
+    raised_lib = lib.replace(
+        "const EMBED_TOKEN_IDS_MAX: usize = 32;",
+        "const EMBED_TOKEN_IDS_MAX: usize = 512;",
+        1,
+    )
+    raised_prose = {
+        name: (
+            text.replace("bounded at 32 positions", "bounded at 512 positions", 1)
+            if name == "tokenizer.rs"
+            else text
+        )
+        for name, text in prose.items()
+    }
+    raised = _id_stream_bound_faults(raised_lib, tokenizer, raised_prose)
+    assert not raised, f"the gate freezes the value at 32 instead of the agreement: {raised}"
+    assert id_stream_bound(raised_lib) == 512
 
 
 def main() -> int:

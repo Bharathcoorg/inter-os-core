@@ -75,13 +75,18 @@ use core::mem::size_of;
 /// the descriptors: a name wider than the reader's own window is not comparable.
 pub const MAX_NAME_BYTES: usize = crate::gguf::MAX_TENSOR_NAME_LEN;
 
-/// The eight quantisations `gemv` and `embedding_row_into` know the byte layout of.
+/// The five quantisations `gemv` and `embedding_row_into` know the byte layout of:
+/// dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0) and 12 (Q4_K).
 ///
 /// WHY a list and not a table in this module: the engine's arithmetic is the
 /// authority, and a loader that carried its own size table could disagree with it
 /// about a block's width without either one saying so. The sizes are asked for
 /// through `quantised_row_bytes`, which returns `None` for anything else, and `None`
-/// becomes `LoadError::UnsupportedDtype` naming the tensor and the number.
+/// becomes `LoadError::UnsupportedDtype` naming the tensor and the number. A dtype
+/// outside those five -- Q4_1, Q5_K and Q6_K are the ones the GGML format names and
+/// this engine has no row layout for -- is refused outright rather than read with a
+/// neighbour's scale bytes, so the count above is what this build can read and not
+/// what the format has room for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoadError {
     /// The reader's own failure, kept whole: a truncated descriptor table and a

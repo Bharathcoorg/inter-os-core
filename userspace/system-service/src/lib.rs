@@ -1269,6 +1269,17 @@ fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
 /// WHY a bound: the streamed run steps the whole graph once per position, so an
 /// unbounded stream is an unbounded request -- and `aid` answers every other
 /// query from the same loop that request blocks.
+///
+/// WHY the bound is not also what a caller can send: the ids reach this service in
+/// the tail of an IPC message, and the kernel cuts a message at the payload cap in
+/// `kernel/src/ipc/mod.rs`; the request header takes the first bytes of that cap, so
+/// a caller today delivers ten ids whole and no more, however large the number below
+/// is. A request past that point arrives cut and is refused as `InputTruncated`
+/// before this ceiling is ever reached. Moving this number therefore says nothing
+/// about what the device can actually ask for: it only becomes reachable when the ids
+/// travel on the shared-memory pipe the answers already use, and the notice that
+/// offers a caller "a token-id stream of your own" is offering the ten the mailbox
+/// carries until then.
 const EMBED_TOKEN_IDS_MAX: usize = 32;
 
 /// Which of the three answers an embedding request gets.
@@ -4206,6 +4217,68 @@ mod tests {
         );
         let at_the_bound = [0u8; EMBED_TOKEN_IDS_MAX * 4];
         assert_eq!(read_token_ids(&at_the_bound).map(|i| i.len), Some(EMBED_TOKEN_IDS_MAX));
+    }
+
+    /// The refusal that names the id-stream bound prints the bound this build
+    /// enforces, and no figure written into the sentence.
+    ///
+    /// WHY the printed digits are read back: `IdStreamFull`'s `bound` reaches the
+    /// notice from `tokenizer::encode`'s `BeyondBuffer { bound: out.len() }`, and the
+    /// `out` that call is handed is the array `EMBED_TOKEN_IDS_MAX` sizes. That chain
+    /// is the only reason a caller's refusal and the service's ceiling are one number,
+    /// and every link of it is a place a literal could be typed instead -- a refusal
+    /// quoting a bound the code does not apply is the same defect as a tensor reader
+    /// advertising quantisations it cannot lay out. So the digits come out of the
+    /// rendered notice and are compared with the constant that refuses the stream at
+    /// the door, which is read from `read_token_ids` on the same turn.
+    #[test]
+    fn test_the_id_stream_refusal_prints_the_bound_the_service_enforces() {
+        fn figure_after(notice: &[u8], lead: &[u8]) -> Option<usize> {
+            let start = notice.windows(lead.len()).position(|w| w == lead)? + lead.len();
+            let mut value = 0usize;
+            let mut seen = false;
+            for &byte in &notice[start..] {
+                if byte.is_ascii_digit() {
+                    value = value.saturating_mul(10) + (byte - b'0') as usize;
+                    seen = true;
+                } else if seen {
+                    break;
+                }
+            }
+            seen.then_some(value)
+        }
+
+        let needed = EMBED_TOKEN_IDS_MAX + 1;
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) =
+            embedding_gap_notice(EmbeddingGap::IdStreamFull(needed, EMBED_TOKEN_IDS_MAX), &mut scratch);
+        assert_eq!(status, STATUS_UNSUPPORTED, "an over-long id stream was called unavailable");
+        let text = core::str::from_utf8(notice).expect("the refusal is text");
+
+        assert_eq!(
+            figure_after(notice, b"answers at most "),
+            Some(EMBED_TOKEN_IDS_MAX),
+            "the bound the caller is told is not the bound the array is sized by: {text}"
+        );
+        assert_eq!(
+            figure_after(notice, b"segments the text into "),
+            Some(needed),
+            "the count the caller is told it exceeded is not the one that was refused: {text}"
+        );
+
+        // The same constant is the ceiling that refuses a stream at the door, so the
+        // figure in the sentence and the read that produced the refusal cannot be two
+        // different numbers while this test passes.
+        assert_eq!(
+            read_token_ids(&[0u8; EMBED_TOKEN_IDS_MAX * 4]).map(|ids| ids.len),
+            Some(EMBED_TOKEN_IDS_MAX),
+            "the arm no longer reads a stream of the length its notice promises"
+        );
+        assert_eq!(
+            read_token_ids(&[0u8; (EMBED_TOKEN_IDS_MAX + 1) * 4]).map(|ids| ids.len),
+            None,
+            "a stream one past the printed bound was accepted, so the notice is a claim"
+        );
     }
 
     /// The arm, end to end, with a file installed and a text query: the baseline
