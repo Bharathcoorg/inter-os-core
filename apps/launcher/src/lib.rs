@@ -18,6 +18,7 @@
 //! * [`nav`] — the bottom navigation bar's one geometry: the three bands a tap is
 //!   answered from and the three marks that are painted inside them.
 //! * [`text`] — glyph metrics, so centring and wrapping agree with the rasteriser.
+//! * [`scale`] — the person's text size, and the boxes that follow it.
 //! * [`search`] — the one index the search runs against, and the ranking seam a
 //!   model-backed ranker plugs into.
 //! * [`recents`] — the task switcher's card model: what a running task is
@@ -41,6 +42,7 @@ pub mod icons;
 pub mod layout;
 pub mod nav;
 pub mod recents;
+pub mod scale;
 pub use interos_std::design::outline_text;
 pub mod search;
 pub mod text;

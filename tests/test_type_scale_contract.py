@@ -380,7 +380,7 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # screen is alive. An app named in `PUBLISHES_AT_BUILD_ONLY` is checked against
 # the weaker claim it can actually meet.
 #
-# What the list cannot see is how far a rung travels once it arrives. Four of
+# What the list cannot see is how far a rung travels once it arrives. Five of
 # these screens are only part-way, and each says so in its own file: Notes reads
 # the rung and lays its empty-state card from it, while its chips, PIN filter,
 # note rows and editor still stand on authored pixels; Gallery lays its four
@@ -388,18 +388,24 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # rows, empty states and viewer plate keep the pixels they were drawn with;
 # Calendar lays its agenda cards, while its month grid, header, tabs, weekday
 # row, section band, month list, week and day views, details modal and create
-# sheet keep theirs; and Music lays the queue's track rows -- plate, run origins,
+# sheet keep theirs; Music lays the queue's track rows -- plate, run origins,
 # reorder centres, stride, divider, scroll extent and the press that answers them
 # -- and the list's empty state from it, while the artwork card and its caption,
 # the now-playing stack, the search row, the sort and import controls, the
 # availability caption, the timeline, the volume row, the transport discs, the
 # queue header, the publish/ringtone/add controls and the add editor keep the
-# pixels they were drawn with. Moving the rest means moving each painter and its
+# pixels they were drawn with; and the shell lays the app drawer's catalogue
+# names and its empty state from the rung, while the drawer's chips, search
+# field, icon badges and status clock and the home grid, shade, lock, recents,
+# search surface and widget cards keep theirs -- each of those sits in a pill or
+# band authored to the run inside it, so its painter, its plate and its tap test
+# have to move in one stroke. Moving the rest means moving each painter and its
 # tap handlers in the same change. `tests/test_notes_truth_contract.py`,
 # `tests/test_gallery_truth_contract.py`,
-# `tests/test_calendar_truth_contract.py` and
-# `tests/test_music_truth_contract.py` are the files that say how far each is
-# carried.
+# `tests/test_calendar_truth_contract.py`,
+# `tests/test_music_truth_contract.py` and
+# `tests/test_launcher_dirty_band_contract.py` are the files that say how far each
+# is carried.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
     "calculator": "publish_text_scale",
@@ -407,6 +413,7 @@ RUNG_AWARE_APPS = {
     "dialer": "publish_text_scale",
     "file_manager": "publish_text_scale",
     "gallery": "publish_text_scale",
+    "launcher": "publish_text_scale",
     "messages": "publish_user_text_scale",
     "music": "publish_text_scale",
     "notes": "publish_text_scale",
@@ -427,7 +434,6 @@ RUNG_AWARE_APPS = {
 RUNG_BLIND_APPS = {
     "browser",
     "camera",
-    "launcher",
     "vault",
 }
 

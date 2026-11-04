@@ -20,8 +20,9 @@
 //! sixteen-app grid whatever the registry held. Nothing in this file knows how
 //! many apps exist.
 
-use crate::{test_text_aa, LauncherState};
+use crate::{test_text_aa_level, LauncherState};
 use launcher::layout::{self, Rect};
+use launcher::scale;
 use launcher::text;
 use launcher::theme::{space, type_scale, Theme, CONTENT_PADDING, STATUS_BAR_HEIGHT};
 
@@ -57,6 +58,68 @@ const TILE_LABEL_BOX_H: usize = launcher::font::line_height(LABEL_SCALE);
 
 /// The rows the empty-state heading reserves on the outline face at its rung.
 const EMPTY_HEAD_BOX_H: usize = launcher::font::line_height(type_scale::TITLE);
+
+/// The rows an app name reserves at `level`.
+///
+/// WHY a face and not the constant above: [`TILE_LABEL_BOX_H`] is the ladder read at
+/// one hundred per cent, and the person's rung is not always that one. A tile centres
+/// its icon-and-name group in the cell, so the group has to be measured with the box
+/// the name is actually inked at -- a group sized at the ladder under a raised name is
+/// the name walking out of the cell it was centred in.
+const fn name_box_at(level: u8) -> usize {
+    scale::line_at(LABEL_SCALE, level)
+}
+
+/// The rows the empty-state heading reserves at `level`.
+const fn empty_head_box_at(level: u8) -> usize {
+    scale::line_at(type_scale::TITLE, level)
+}
+
+/// WHY the two numbers agree: [`scale::drawer_level_holds`] refuses a rung whose
+/// icon-plus-name group will not close inside a tile cell, and it can only do that if
+/// the disc, the gap and the band it measures are the ones this file lays out with.
+/// They are duplicated rather than imported because the library cannot reach the
+/// binary, and a copy nobody checks is a clamp that quietly stops meaning anything.
+const _: () = assert!(scale::DRAWER_ICON_D == TILE_ICON_D);
+const _: () = assert!(scale::DRAWER_ICON_NAME_GAP == TILE_ICON_LABEL_GAP);
+const _: () = assert!(scale::DRAWER_ROWS == DRAWER_ROWS);
+const _: () = assert!(scale::DRAWER_GUTTER == TILE_GUTTER);
+const _: () = assert!(scale::DRAWER_CELL_H == TILE_CELL_H);
+
+/// WHY swept: the clamp hands this screen the largest rung its cells carry, and the
+/// group it carries is the one built here. A rung the clamp said yes to and the layout
+/// could not hold is a name painted past its cell.
+const _: () = assert!(name_box_group_fits_at_every_level());
+const fn name_box_group_fits_at_every_level() -> bool {
+    let mut level = 0usize;
+    while level <= scale::MAX_LEVEL as usize {
+        if TILE_ICON_D + TILE_ICON_LABEL_GAP + name_box_at(level as u8) > TILE_CELL_H {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+
+/// WHY swept beside the tile gate: the empty state is the one stack of two rungs this
+/// screen makes, so it is the one place a raised heading can push a caption off the
+/// grid band rather than off its own cell. [`scale::draw_level_at`] clamps against the
+/// tile; this gate is what says the clamp never let the stack outgrow the band.
+const _: () = assert!(empty_stack_fits_at_every_level());
+const fn empty_stack_fits_at_every_level() -> bool {
+    let mut level = 0usize;
+    while level <= scale::MAX_LEVEL as usize {
+        let stack = EMPTY_HEAD_INSET
+            + empty_head_box_at(level as u8)
+            + EMPTY_BODY_GAP
+            + name_box_at(level as u8);
+        if stack > GRID_H {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
 
 /// WHY these two gates state a relationship and not the row count they used to pin
 /// (32 and 59): the boxes are the ladder's own, so a rung that moves must move the box
@@ -587,7 +650,7 @@ struct Run {
     /// Top row of the box this run reserves, on the outline face.
     ///
     /// WHY the outline's box and not a union with the cell: the rung decides which
-    /// face paints, and `pixel_on` asks the outline run `placed_styled` builds
+    /// face paints, and `pixel_on` asks the outline run `placed_styled_at` builds
     /// whenever the rasteriser accepted the bytes. At the body rung that run's box is
     /// its own 29 rows of ascent above the baseline plus 7 of descent below it -- 36
     /// rows, `font::line_height(2)` -- from the origin, while the bitmap cell is
@@ -599,6 +662,14 @@ struct Run {
     top: usize,
     /// Height of that outline box.
     box_h: usize,
+    /// The text-size rung this run's bytes were measured, trimmed and rasterised at.
+    ///
+    /// WHY carried rather than re-read: a run is planned once, when the frame is
+    /// built, and then asked about every pixel of the surface. Re-reading the setting
+    /// per pixel would let a frame that started at one rung finish at another, and the
+    /// plate the layout derived and the ink the painter laid down would be sized by two
+    /// different answers.
+    level: u8,
     bytes: [u8; RUN_CAP],
     outline: Option<launcher::outline_text::OutlineRun>,
 }
@@ -615,6 +686,7 @@ impl Run {
         em: 0,
         top: 0,
         box_h: 0,
+        level: launcher::scale::PLATFORM_LEVEL,
         bytes: [0u8; RUN_CAP],
         outline: None,
     };
@@ -622,8 +694,21 @@ impl Run {
     /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit` --
     /// what the old painters did per pixel.
     fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, fit);
-        Run::placed(x, y, scale, buf, len, ink)
+        Run::fitted_at(x, y, scale, fit, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`Run::fitted`], measured and trimmed at `level`.
+    fn fitted_at(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Run {
+        let (buf, len) = launcher::scale::ellipsize_at(bytes, scale, fit, level);
+        Run::placed_at(x, y, scale, buf, len, ink, level)
     }
 
     /// As [`Run::fitted`], centred across `centre` from `x`.
@@ -643,9 +728,28 @@ impl Run {
         bytes: &[u8],
         ink: u32,
     ) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, fit);
-        let inset = text::center_x_painted(&buf[..len], scale, centre, true);
-        Run::placed(x + inset, y, scale, buf, len, ink)
+        Run::centred_at(x, y, scale, fit, centre, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`Run::centred`], measured, trimmed and centred at `level`.
+    ///
+    /// WHY the three travel together: the tile fits its name to one width, centres it
+    /// across another, and then inks it -- and each of those three reads a different
+    /// face of the same measurement. Splitting the level across them is a name trimmed
+    /// at one rung, centred for another and painted at a third.
+    fn centred_at(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Run {
+        let (buf, len) = launcher::scale::ellipsize_at(bytes, scale, fit, level);
+        let inset = launcher::scale::center_x_painted_at(&buf[..len], scale, centre, true, level);
+        Run::placed_at(x + inset, y, scale, buf, len, ink, level)
     }
 
     /// A run drawn whole, with no truncation step, centred across `centre` from `x`.
@@ -661,28 +765,62 @@ impl Run {
         bytes: &[u8],
         ink: u32,
     ) -> Run {
+        Run::centred_whole_at(
+            x,
+            y,
+            scale,
+            centre,
+            bytes,
+            ink,
+            launcher::scale::PLATFORM_LEVEL,
+        )
+    }
+
+    /// As [`Run::centred_whole`], measured and centred at `level`.
+    #[allow(dead_code)]
+    fn centred_whole_at(
+        x: usize,
+        y: usize,
+        scale: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Run {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let inset = text::center_x_painted(&buf[..len], scale, centre, true);
-        Run::placed(x + inset, y, scale, buf, len, ink)
+        let inset = launcher::scale::center_x_painted_at(&buf[..len], scale, centre, true, level);
+        Run::placed_at(x + inset, y, scale, buf, len, ink, level)
     }
 
     /// A run drawn whole, with no truncation step -- for the badge word, which the
     /// old painter sized the type scale to fit and then handed straight to
     /// `test_text`.
     fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        Run::whole_at(x, y, scale, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`Run::whole`], measured at `level`.
+    fn whole_at(
+        x: usize,
+        y: usize,
+        scale: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Run {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        Run::placed(x, y, scale, buf, len, ink)
+        Run::placed_at(x, y, scale, buf, len, ink, level)
     }
 
-    /// A run from an already-resolved buffer.
+    /// A run from an already-resolved buffer, measured at `level`.
     ///
     /// WHY the width is the wider of the two faces: the run has two renderers --
     /// the outline run built here and the bitmap pen it falls back to -- and
-    /// `text::measure` follows the face the run is drawn with, so above rung 1 it
+    /// `scale::measure_at` follows the face the run is drawn with, so above rung 1 it
     /// answers the outline and reports the cell's step only for bytes the outline has
     /// no glyph for. Taking the max of that measure and the outline advance costs
     /// nothing here -- it runs once per frame per run -- and keeps the box honest
@@ -696,20 +834,28 @@ impl Run {
     /// em used to be, and the outline answered 206px and a cell-only box clipped it.
     /// Which face wins is the ladder's decision, so neither one is trusted with the
     /// width alone.
-    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
-        Self::placed_styled(x, y, scale, buf, len, ink, true)
+    fn placed_at(
+        x: usize,
+        y: usize,
+        scale: usize,
+        buf: [u8; RUN_CAP],
+        len: usize,
+        ink: u32,
+        level: u8,
+    ) -> Run {
+        Self::placed_styled_at(x, y, scale, buf, len, ink, true, level)
     }
 
-    fn placed_styled(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool) -> Run {
+    fn placed_styled_at(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32, bold: bool, level: u8) -> Run {
         let text = &buf[..len];
         // WHY the rung's own em and not a hardcoded one: the run is measured with
         // the outline face at `text::run_em`, so drawing it at any other size put
         // a wider face on the screen than the centring had been computed from --
         // the chips sat a pixel or two right of the middle of their pills, and a
         // title was drawn at the size of a section heading.
-        let em = text::run_em(scale);
+        let em = launcher::scale::em_at(scale, level);
         let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
+        let baseline = (y + launcher::scale::ascent_at(scale, level)).max(asc as usize);
         let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize + if bold { 1 } else { 0 };
         let top = baseline.saturating_sub(asc as usize);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
@@ -720,13 +866,14 @@ impl Run {
         Run {
             x,
             y,
-            w: text::measure(text, scale).max(outline_advance),
+            w: launcher::scale::measure_at(text, scale, level).max(outline_advance),
             scale,
             len,
             ink,
             em,
             top,
             box_h: (baseline + desc as usize).saturating_sub(top),
+            level,
             bytes: buf,
             outline,
         }
@@ -745,7 +892,17 @@ impl Run {
         if let Some(ref outline) = self.outline {
             return outline.pixel(px, py, self.ink, bg);
         }
-        test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink, bg)
+        test_text_aa_level(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+            bg,
+            self.level,
+        )
     }
 }
 
@@ -832,6 +989,13 @@ struct Paint {
 fn build(state: &LauncherState) -> Paint {
     let theme = launcher::theme::SHELL;
     let f = frame();
+    // The rung every name on this page is measured, trimmed, centred and inked at.
+    // WHY once per frame: see [`Run::level`] -- a plan that read the setting per pixel
+    // could start at one rung and finish at another, and that read is the hottest call
+    // in the shell. A rung change reaches this plan the way every other change does:
+    // the repaint that follows one starts at (`0`, `0`) and [`paint`] rebuilds there, so
+    // the level is never a term in the per-pixel cache test.
+    let name_level = launcher::scale::draw_level();
 
     let status = StatusPlan {
         clock: if state.clock_source_ok {
@@ -931,7 +1095,7 @@ fn build(state: &LauncherState) -> Paint {
             continue;
         };
         let icon_d = TILE_ICON_D;
-        let group_h = icon_d + TILE_ICON_LABEL_GAP + TILE_LABEL_BOX_H;
+        let group_h = icon_d + TILE_ICON_LABEL_GAP + name_box_at(name_level);
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
         let badge = app_badge(state, index);
@@ -961,7 +1125,7 @@ fn build(state: &LauncherState) -> Paint {
             hue,
             icon: icon_kind,
             badge: badge_run,
-            label: Run::centred(
+            label: Run::centred_at(
                 cell.x,
                 top + TILE_ICON_D + TILE_ICON_LABEL_GAP,
                 LABEL_SCALE,
@@ -969,6 +1133,7 @@ fn build(state: &LauncherState) -> Paint {
                 cell.w,
                 label,
                 theme.on_surface,
+                name_level,
             ),
         };
     }
@@ -989,11 +1154,25 @@ fn build(state: &LauncherState) -> Paint {
             }
         };
         let head_y = f.grid.y + EMPTY_HEAD_INSET;
-        let body_y = head_y + EMPTY_HEAD_BOX_H + EMPTY_BODY_GAP;
+        let body_y = head_y + empty_head_box_at(name_level) + EMPTY_BODY_GAP;
         Some(EmptyPlan {
-            head: Run::whole(f.grid.x, head_y, type_scale::TITLE, head_bytes, theme.on_surface),
+            head: Run::whole_at(
+                f.grid.x,
+                head_y,
+                type_scale::TITLE,
+                head_bytes,
+                theme.on_surface,
+                name_level,
+            ),
             body: [
-                Run::whole(f.grid.x, body_y, type_scale::BODY, body_bytes, theme.on_surface_variant),
+                Run::whole_at(
+                    f.grid.x,
+                    body_y,
+                    type_scale::BODY,
+                    body_bytes,
+                    theme.on_surface_variant,
+                    name_level,
+                ),
                 Run::EMPTY,
             ],
             body_count: 1,

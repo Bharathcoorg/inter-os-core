@@ -13,6 +13,9 @@ use launcher::nav::{self, NavTarget};
 use launcher::theme::*;
 // Wallpaper catalogue shared with the Settings app that writes it.
 use std::design::walls;
+// The rung the person's "Text size" setting names, and the publish that hands it to
+// this process's renderer. See [`publish_text_scale`].
+use std::design::accessibility::{DynamicType, UserTextScale};
 // The box a home tap is answered in, and the mark that says so. The shell paints
 // it on four of its own surfaces and every application is told to copy that one;
 // the tap rules in the input loop below ask the same box, so the ink and the
@@ -161,6 +164,61 @@ pub fn test_text_aa(
         }
     }
     interos_std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+}
+
+/// [`test_text_aa`] at a text-size rung named in the call rather than taken from
+/// the ladder.
+///
+/// WHY the rung is an argument and not a read of `font::user_text_scale()`: a plan
+/// resolves its runs once, when the frame is built, and then asks each of them about
+/// every pixel of the surface. A painter that re-read the published cell per pixel
+/// would let a frame that started at one rung finish at another, and the plate the
+/// layout derived would be sized by a different answer than the ink inside it.
+///
+/// WHY the identity branch comes first: at the platform's own rung this must be the
+/// function it replaced, byte for byte, so a reader who never raised "Text size"
+/// cannot see a moved pixel here.
+#[inline(always)]
+pub fn test_text_aa_level(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+    level: u8,
+) -> Option<u32> {
+    if level == launcher::scale::PLATFORM_LEVEL {
+        return test_text_aa(x, y, x0, y0, scale, text, color, bg);
+    }
+    if scale >= 2 && text.len() <= launcher::outline_text::KEY_MAX {
+        let em = launcher::scale::em_at(scale, level);
+        let (ascent, _) = interos_std::design::typeface::line_metrics(em);
+        let baseline = (y0 + launcher::scale::ascent_at(scale, level)).max(ascent as usize);
+        if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, text) {
+            let (bx, by, bw, bh) = run.bounds();
+            if x >= bx && x < bx + bw && y >= by && y < by + bh {
+                return run.pixel(x, y, color, bg);
+            }
+            return None;
+        }
+    }
+    // The bitmap face, at the cap this rung's ladder answers for. WHY not
+    // `font::test_text_aa_user`: that face reads the published cell, and the cell
+    // holds the rung the person *asked* for, not the one this shell's clamp carried.
+    interos_std::design::monochrome::text_px(
+        x,
+        y,
+        x0,
+        y0,
+        launcher::scale::cap_at(scale, level),
+        text,
+        color,
+        bg,
+        false,
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -593,6 +651,38 @@ fn read_setting(key: &str, buf: &mut [u8]) -> Option<usize> {
         Ok(n) => Some(n),
         Err(_) => None,
     }
+}
+
+/// Hands the person's "Text size" setting to this process's renderer.
+///
+/// Reads the platform's text-size setting and publishes the rung it names, returning
+/// whether the rung actually moved -- the caller's signal that the whole screen has to
+/// be repainted rather than only the band something else dirtied.
+///
+/// WHY here and not in the library: publishing is a settings read, and the read needs
+/// this shell's capability table. [`launcher::scale`] is the geometry that follows the
+/// published cell, so the two halves stay one contract with one writer.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame that
+/// fell back to one hundred per cent because the store was busy would resize the shell
+/// under a person who never touched the setting.
+///
+/// WHY the shared parser and not this shell's own chain of compares: the store accepts
+/// both the digit and the word for a level, and a reader that understood fewer spellings
+/// than the writer produces would read an existing preference as unset.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Some(n) = read_setting("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a level
+    // above the ladder's largest setting is clamped on the way in, and a caller that
+    // repaints because "the level changed" should be wrong about that only when the
+    // pixels really did move.
+    DynamicType::new(next).publish() != before
 }
 
 /// WHY the slot is resolved by type and not written down: the kernel
@@ -3020,6 +3110,11 @@ pub extern "C" fn _start() -> ! {
     refresh_wallpapers(&mut state);
     refresh_user_profile(&mut state);
     refresh_schedule(&mut state);
+    // WHY before the first frame: the rung a name is centred, trimmed and inked at is
+    // read when the plan is built, and the plan is built at the first pixel of the
+    // first frame. A shell that published after `render_view` would draw one frame at
+    // one hundred per cent for a person who had long since asked for another.
+    publish_text_scale();
     // WHY the count is reported: an empty catalogue is indistinguishable from a
     // refused read at the call site, because `refresh_package_catalog` maps a
     // permission error to `app_count = 0` and returns. That made a kernel-side
@@ -3076,6 +3171,15 @@ pub extern "C" fn _start() -> ! {
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
     refresh_schedule(&mut state);
+                        // WHY on the same wake as the wallpaper re-read: the text-size
+                        // setting is written by the application that just held the
+                        // foreground, and this is the first point the shell can learn
+                        // it moved. A rung that moved re-plans the drawer, because the
+                        // names in it were centred and trimmed at the old one; the
+                        // `render_view` below is the repaint that carries them.
+                        if publish_text_scale() {
+                            screens::app_drawer::invalidate_app_drawer_frame();
+                        }
                         if let Ok(lock_st) = std::user_get_lock_state(1000) {
                             state.lock_state = lock_st;
                         }
@@ -3111,6 +3215,13 @@ pub extern "C" fn _start() -> ! {
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
     refresh_schedule(&mut state);
+                        // WHY here and not only on the clean reap: this path is the
+                        // other half of "the foreground application is gone", taken
+                        // when the child was already gone by the time it was reaped.
+                        // The setting it may have written still has to reach the shell.
+                        if publish_text_scale() {
+                            screens::app_drawer::invalidate_app_drawer_frame();
+                        }
                         state.current_view = if state.lock_state == std::UserLockState::Unlocked {
                             ViewMode::HomeScreen
                         } else {
