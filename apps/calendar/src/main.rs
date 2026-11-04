@@ -27,6 +27,7 @@ use calendar::theme::{radius, type_scale, THEME};
 use core::panic::PanicInfo;
 
 use interos_std::design::components;
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::outline_text;
 
 pub use calendar::{
@@ -699,50 +700,19 @@ const _: () = assert!(BADGE_X0 + BADGE_W <= W);
 const _: () = assert!(GRID_START_Y + GRID_ROWS * ROW_PITCH <= SECTION_BAND_Y0);
 const _: () = assert!(SECTION_BAND_Y1 <= MONTH_LIST_Y0);
 
-/// The top of the Agenda view's chronological cards.
-const AGENDA_CARDS_Y0: usize = 232;
-
-/// The line box every run in an Agenda card reserves.
-const AGENDA_LINE_H: usize = std::design::font::line_height(2);
-
-/// The air above and below the three lines inside the card.
-const AGENDA_LINE_PAD: usize = 4;
-
-/// The height of an Agenda view card: the three lines it carries, plus the air
-/// around them. WHY derived: the card was a remembered 104 while the ladder's
-/// body rung grew its three boxes to 108, and the centring arithmetic below
-/// underflows the moment the content outgrows the frame -- which is the same
-/// overflow, stated the other way, that used to draw the third line across the
-/// card's own bottom border.
-const AGENDA_CARD_H: usize = AGENDA_LINE_H * 3 + AGENDA_LINE_PAD * 2;
-
-/// The inset that puts an Agenda card's three lines inside its own border.
+/// The Agenda view's chronological cards are laid out from the person's text rung
+/// by the faces in `calendar` (`agenda_card_h_at`, `agenda_line_y_at`,
+/// `agenda_card_pitch_at`, `agenda_card_max_at`), with the pixels this screen was
+/// drawn with held beside them as compile-time anchors.
 ///
-/// WHY it is derived: the three lines used to sit at remembered offsets of 8,
-/// 40 and 72, so the last one's box ran to row 103 of a 104-row card -- exactly
-/// the two rows its bottom border is drawn in. The descenders of the storage
-/// label's two `g`s inked that hairline on every card in the list.
-const AGENDA_LINE_STACK_Y: usize = 2 + (AGENDA_CARD_H - 4 - AGENDA_LINE_H * 3) / 2;
-
-/// Where the card's second line -- its title -- begins.
-const AGENDA_TITLE_Y: usize = AGENDA_LINE_STACK_Y + AGENDA_LINE_H;
-
-const _: () = assert!(AGENDA_LINE_STACK_Y + AGENDA_LINE_H * 3 <= AGENDA_CARD_H - 2);
-
-/// The gap between one Agenda card's bottom border and the next's top.
-const AGENDA_CARD_GAP: usize = 12;
-
-/// The stride between two Agenda view cards.
-const AGENDA_CARD_PITCH: usize = AGENDA_CARD_H + AGENDA_CARD_GAP;
-
-/// How many Agenda view cards fit above the action button.
-const AGENDA_CARD_MAX: usize =
-    (ACTION_BTN_Y0 - AGENDA_CARDS_Y0 - AGENDA_CARD_H) / AGENDA_CARD_PITCH + 1;
-
-const _: () = assert!(AGENDA_CARD_H <= ACTION_BTN_Y0 - AGENDA_CARDS_Y0);
-const _: () = assert!(
-    (AGENDA_CARD_MAX - 1) * AGENDA_CARD_PITCH + AGENDA_CARD_H <= ACTION_BTN_Y0 - AGENDA_CARDS_Y0
-);
+/// WHY they live in the library and not here: the painter and `handle_tap` answer
+/// the same cards, and a rung-aware plate inked from one copy of the arithmetic
+/// and tapped from another is the drift this app's own gates keep refusing.
+///
+/// WHY the band's floor is pinned here as well: the chain is measured against the
+/// row the action button starts on, and the two statements of that row have to be
+/// one number.
+const _: () = assert!(ACTION_BTN_Y0 == calendar::AGENDA_LIST_Y1);
 
 /// The air between the section band's bottom edge and the list under it.
 ///
@@ -904,6 +874,109 @@ fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
     let w = outline_text::drawn_advance(text, scale, Some(available))
         .unwrap_or_else(|| std::design::font::measure(text, scale));
     x0 + if w >= available { 0 } else { (available - w) / 2 }
+}
+
+/// Reads the platform's text-size setting and hands the rung to the renderer.
+///
+/// Returns whether the rung the last frame was laid out with actually moved,
+/// which is the caller's signal that the whole screen has to be repainted and not
+/// just the band something else dirtied.
+///
+/// WHY the shared parser and not this app's own chain of compares: the store
+/// accepts both the digit and the word for a level, and a reader that understood
+/// fewer spellings than the writer produces would read an existing preference as
+/// "unset" and quietly reset the rung.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame
+/// that fell back to one hundred per cent because the store was busy would resize
+/// the screen under a person who never touched the setting.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a
+    // level above the ladder's largest setting is clamped on the way in, and a
+    // caller that repaints because "the level changed" should be wrong about that
+    // only when the pixels really did move.
+    DynamicType::new(next).publish() != before
+}
+
+/// One line of an Agenda card, inked at the rung this process draws at.
+///
+/// WHY a separate face and not the shared [`test_text`]: only the Agenda cards'
+/// plates are derived from the rung so far, so only their runs may grow. The
+/// header, the tabs, the month grid's lattice, the section band, the month list,
+/// the week and day views and both modals still lay out at the authored ladder,
+/// and growing their ink before their boxes would clip them. At the authored level
+/// this delegates straight to [`test_text`]/[`test_text_bold`] and moves no pixel.
+///
+/// WHY the rung arrives as an argument: the pixel face reads the ladder once and
+/// hands that answer to every run in the card, so no glyph costs a read of the
+/// setting. The read the pixel does pay is a relaxed load and a downward walk over
+/// the crate's own const arithmetic -- the syscall that would not belong in the
+/// paint path is `settings_get`, and that one lives only in the wake path.
+#[inline(always)]
+fn agenda_line_text(
+    x: usize,
+    y: usize,
+    lvl: u8,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    max_w: usize,
+    color: u32,
+    bg: u32,
+    bold: bool,
+) -> Option<u32> {
+    if lvl == calendar::PLATFORM_LEVEL {
+        return if bold {
+            test_text_bold(x, y, x0, y0, scale, text, max_w, color, bg)
+        } else {
+            test_text(x, y, x0, y0, scale, text, max_w, color, bg)
+        };
+    }
+    if scale == 0 || text.is_empty() || x < x0 || x >= x0 + max_w {
+        return None;
+    }
+    // The run is cut to the lane at the rung's own advances, so a wider face
+    // ellipsises inside the box it was trimmed for instead of walking past it.
+    let mut buf = [0u8; 96];
+    let n = calendar::ellipsize_run(text, scale, max_w, lvl, &mut buf);
+    // WHY the refusal is answered with a cut and not with the run itself:
+    // `ellipsize_run` answers 0 when even the three-byte mark will not sit in the
+    // lane, and painting the untouched run then puts words past the plate that
+    // framed them -- the same answer the lane gives when it does have room, minus
+    // the mark.
+    let fitted = if n > 0 {
+        &buf[..n]
+    } else {
+        // WHY the run's own bytes are put into the buffer first: a refusal is the
+        // one answer `ellipsize_run` gives without writing, so a cut read straight
+        // back would be the zeroed buffer, not the front of the run.
+        let fit = calendar::longest_fit(text, calendar::em_at(scale, lvl), max_w, buf.len());
+        buf[..fit].copy_from_slice(&text[..fit]);
+        &buf[..fit]
+    };
+    let cap = calendar::cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, fitted, None, bold) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. The band grows with the level:
+    // a run fitted to a scaled em walks taller than the unscaled cell, so the
+    // ladder's band would cut the descenders of the very run it enlarged.
+    if y >= y0 && y < y0 + calendar::rows_at(scale, lvl) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, fitted, color, bg, bold);
+    }
+    None
 }
 
 fn get_month_abbr(month: u8) -> &'static [u8] {
@@ -2043,11 +2116,27 @@ fn agenda_view_pixel(
         }
     } else {
         // Chronological cards: only the ones that end above the action button.
-        for (i, item) in all_items[..total.min(AGENDA_CARD_MAX)].iter().enumerate() {
-            let card_y = AGENDA_CARDS_Y0 + i * AGENDA_CARD_PITCH;
-            if y >= card_y && y < card_y + AGENDA_CARD_H && x >= 24 && x < W - 24 {
+        //
+        // WHY the rung is read here and handed down: the plate, the three run
+        // origins, the stride and the count the band holds all come from the same
+        // `*_at(lvl)` faces `handle_tap` answers below, so a rung that grew a card
+        // moved the row it opens. The read is a relaxed load and a downward walk
+        // over this crate's const arithmetic; the platform call that would not
+        // belong in a pixel -- `settings_get` -- is answered once per wake.
+        let lvl = calendar::draw_level();
+        let card_h = calendar::agenda_card_h_at(lvl);
+        let rows = calendar::agenda_rows_at(lvl);
+        let dt_y = calendar::agenda_line_y_at(0, lvl);
+        let title_y = calendar::agenda_line_y_at(1, lvl);
+        let label_y = calendar::agenda_line_y_at(2, lvl);
+        for (i, item) in all_items[..total.min(calendar::agenda_card_max_at(lvl))]
+            .iter()
+            .enumerate()
+        {
+            let card_y = calendar::AGENDA_CARDS_Y0 + i * calendar::agenda_card_pitch_at(lvl);
+            if y >= card_y && y < card_y + card_h && x >= 24 && x < W - 24 {
                 let rx = (x - 24).min(W - 25 - x);
-                let ry = (y - card_y).min(card_y + AGENDA_CARD_H - 1 - y);
+                let ry = (y - card_y).min(card_y + card_h - 1 - y);
                 if rx < R_SOFT && ry < R_SOFT {
                     let cdx = (R_SOFT - rx) as isize;
                     let cdy = (R_SOFT - ry) as isize;
@@ -2067,17 +2156,17 @@ fn agenda_view_pixel(
                 dt_buf[dn + 1] = b' ';
                 let tn = fmt_time(&mut dt_buf[dn + 2..], item.hour, item.minute);
                 let full_dt = &dt_buf[..dn + 2 + tn];
-                if let Some(c) = test_text_bold(x, y, 48, card_y + AGENDA_LINE_STACK_Y, 2, full_dt, 550, THEME.primary, THEME.surface_container_high) {
+                if let Some(c) = agenda_line_text(x, y, lvl, 48, card_y + dt_y, calendar::AGENDA_LINE_RUNG, full_dt, 550, THEME.primary, THEME.surface_container_high, true) {
                     return c;
                 }
 
                 // Title line
-                if let Some(c) = test_text_bold(x, y, 48, card_y + AGENDA_TITLE_Y, 2, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high) {
+                if let Some(c) = agenda_line_text(x, y, lvl, 48, card_y + title_y, calendar::AGENDA_LINE_RUNG, item.title_bytes(), 550, THEME.on_surface, THEME.surface_container_high, true) {
                     return c;
                 }
 
                 // Storage label
-                if let Some(c) = test_text(x, y, 48, card_y + AGENDA_TITLE_Y + AGENDA_LINE_H, 2, b"Sovereign Settings Store", 550, THEME.on_surface_variant, THEME.surface_container_high) {
+                if let Some(c) = agenda_line_text(x, y, lvl, 48, card_y + label_y, calendar::AGENDA_LINE_RUNG, b"Sovereign Settings Store", 550, THEME.on_surface_variant, THEME.surface_container_high, false) {
                     return c;
                 }
 
@@ -2086,8 +2175,12 @@ fn agenda_view_pixel(
                 // WHY it goes through chevron_pixel: the arm test here measured
                 // dx to the right of a left-hand apex, which drew a '<' on a
                 // row that opens forward.
-                if x >= 644 && x < 664 && y >= card_y + AGENDA_TITLE_Y && y < card_y + AGENDA_TITLE_Y + AGENDA_LINE_H {
-                    if chevron_pixel(x, y, 658, (card_y + AGENDA_TITLE_Y + AGENDA_LINE_H / 2) as isize, ChevronDir::Right) {
+                //
+                // WHY its band follows the plate: the arrow sits on the title
+                // line's box, so a card that grew at a raised rung moves the mark
+                // that says the row opens, instead of leaving it over the line.
+                if x >= 644 && x < 664 && y >= card_y + title_y && y < card_y + title_y + rows {
+                    if chevron_pixel(x, y, 658, (card_y + title_y + rows / 2) as isize, ChevronDir::Right) {
                         return THEME.on_surface_variant;
                     }
                 }
@@ -3546,9 +3639,19 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
             let mut all_items = [EventRecord::EMPTY; MAX_EVENTS];
             let total = app.store.all_events_sorted(&mut all_items);
 
-            for (i, item) in all_items[..total.min(AGENDA_CARD_MAX)].iter().enumerate() {
-                let card_y = AGENDA_CARDS_Y0 + i * AGENDA_CARD_PITCH;
-                if y >= card_y && y < card_y + AGENDA_CARD_H && x >= 24 && x < W - 24 {
+            // WHY the chain is answered from the same faces the painter inked: the
+            // rung sizes the plate and its stride, so a card that grew took its
+            // press band with it. Answering the authored stride under a rung-aware
+            // plate would open the event two rows above the one the finger landed
+            // on, and a band that shrank would cost the row its reachability.
+            let lvl = calendar::draw_level();
+            let card_h = calendar::agenda_card_h_at(lvl);
+            for (i, item) in all_items[..total.min(calendar::agenda_card_max_at(lvl))]
+                .iter()
+                .enumerate()
+            {
+                let card_y = calendar::AGENDA_CARDS_Y0 + i * calendar::agenda_card_pitch_at(lvl);
+                if y >= card_y && y < card_y + card_h && x >= 24 && x < W - 24 {
                     app.details_event = Some(*item);
                     return Tap::Redraw(Dirty::CONTENT);
                 }
@@ -3619,6 +3722,10 @@ pub extern "C" fn _start() {
     }
 
     if surface > 0 {
+        // WHY the rung is published before the first frame is laid out: Settings'
+        // "Text size" is already chosen when this app opens, so the opening screen
+        // must not be drawn at the ladder and resized a frame later.
+        publish_text_scale();
         render_calendar_ui(surface, &calendar);
         let _ = std::surface_flip();
         std::log("[CALENDAR APP] Calendar canvas presented to scanout buffer.").ok();
@@ -3627,6 +3734,17 @@ pub extern "C" fn _start() {
     // 5. Sovereign Asynchronous Event Reactor Loop
     let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
+        // WHY re-read at every wake: the size is changed in Settings while this
+        // screen is alive, so a rung that moved has to repaint the whole surface --
+        // the Agenda cards' plates, their stride, the count the band holds and the
+        // rows they answer all move with it, and a band repaint would leave part of
+        // the chain at the rung the person has already left. There is no scroll
+        // extent to re-solve here: every view recomputes its list per frame.
+        if publish_text_scale() && surface > 0 {
+            render_calendar_ui(surface, &calendar);
+            let _ = std::surface_flip();
+        }
+
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {

@@ -380,17 +380,26 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # screen is alive. An app named in `PUBLISHES_AT_BUILD_ONLY` is checked against
 # the weaker claim it can actually meet.
 #
-# What the list cannot see is how far a rung travels once it arrives. Notes is
-# the screen that is only part-way: it reads the rung and lays its empty-state
-# card from it, while its chips, PIN filter, note rows and editor still stand on
-# authored pixels, because moving those means moving each painter and its tap
-# handlers in the same change. `tests/test_notes_truth_contract.py` is the file
-# that says how far it is carried.
+# What the list cannot see is how far a rung travels once it arrives. Three of
+# these screens are only part-way, and each says so in its own file: Notes reads
+# the rung and lays its empty-state card from it, while its chips, PIN filter,
+# note rows and editor still stand on authored pixels; Gallery lays its four
+# album cards from the rung while its header, filter chips, media cells, timeline
+# rows, empty states and viewer plate keep the pixels they were drawn with; and
+# Calendar lays its agenda cards, while its month grid, header, tabs, weekday
+# row, section band, month list, week and day views, details modal and create
+# sheet keep theirs. Moving the rest means moving each painter and its tap
+# handlers in the same change. `tests/test_notes_truth_contract.py`,
+# `tests/test_gallery_truth_contract.py` and
+# `tests/test_calendar_truth_contract.py` are the files that say how far each is
+# carried.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
     "calculator": "publish_text_scale",
+    "calendar": "publish_text_scale",
     "dialer": "publish_text_scale",
     "file_manager": "publish_text_scale",
+    "gallery": "publish_text_scale",
     "messages": "publish_user_text_scale",
     "notes": "publish_text_scale",
     "settings": "publish_text_scale",
@@ -409,9 +418,7 @@ RUNG_AWARE_APPS = {
 # platform rung whatever the person chose.
 RUNG_BLIND_APPS = {
     "browser",
-    "calendar",
     "camera",
-    "gallery",
     "launcher",
     "music",
     "vault",

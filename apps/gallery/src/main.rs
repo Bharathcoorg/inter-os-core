@@ -38,6 +38,7 @@ use interos_std::design::scroll::ScrollState;
 use core::panic::PanicInfo;
 use interos_std as std;
 use gallery::theme::THEME;
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use std::design::font;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 use std::design::radius;
@@ -566,6 +567,47 @@ const ALBUM_CELLS: usize = 4;
 const ALBUM_ROWS: usize = ALBUM_CELLS / 2;
 const _: () = assert!(ALBUM_CELLS % 2 == 0);
 
+/// The album card's two runs: how far inside the card they start, and the lane
+/// they may be trimmed to.
+///
+/// WHY derived from the card's width and not typed: the card is two columns wide
+/// whatever the rung, so a name that gets longer than its lane has to be trimmed
+/// to this lane rather than walk over the card's edge into the column beside it.
+const ALBUM_TEXT_X: usize = 16;
+const ALBUM_TEXT_LANE: usize = VIDEO_COL_W - 2 * ALBUM_TEXT_X;
+
+// The album cards' plates are now cut from the rung the person chose, in
+// `gallery::album_card_h_at` / `gallery::album_stride_at`. WHY the ties are
+// checked here as well as in the library: the library owns the derivation and
+// this binary owns the band the cards are laid out in, and a card grown at the
+// top rung that walks past `GRID_BOTTOM` is an empty state the grid band answers
+// underneath it. The authored pixels are the anchor -- the platform rung paints
+// 112 / 146 on a 180-row plate at a 200-row stride, exactly as it painted before.
+const _: () = assert!(gallery::album_title_inset_at(gallery::PLATFORM_LEVEL) == 112);
+const _: () = assert!(gallery::album_count_inset_at(gallery::PLATFORM_LEVEL) == 146);
+const _: () = assert!(gallery::album_card_h_at(gallery::PLATFORM_LEVEL) == 180);
+const _: () = assert!(gallery::album_stride_at(gallery::PLATFORM_LEVEL) == 200);
+const _: () = assert!(ALBUM_TEXT_LANE > 0);
+/// WHY swept rather than checked once: the stride is what both the painter and
+/// the press divide a content offset by, so it has to stay a whole number of rows
+/// inside the band at every rung the ladder can be handed -- and the floor the
+/// cards clear is the platform's touch minimum, which does not move with the rung.
+const fn album_grid_fits_the_band() -> bool {
+    let mut level = 0usize;
+    while level <= gallery::MAX_LEVEL as usize {
+        let lvl = level as u8;
+        if ALBUM_ROWS * gallery::album_stride_at(lvl) > GRID_BOTTOM - GRID_TOP {
+            return false;
+        }
+        if gallery::album_card_h_at(lvl) < touch::MIN_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(album_grid_fits_the_band());
+
 // -----------------------------------------------------------------------------
 // The touch floor, stated once against the plates the painter inks.
 //
@@ -777,6 +819,81 @@ fn text_centered_bold(
         (s, drawn)
     };
     text_bold(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s_disp, color, bg)
+}
+
+// -----------------------------------------------------------------------------
+// The person's text size, and the album cards that carry it
+// -----------------------------------------------------------------------------
+
+/// Reads the platform's text-size setting and hands the rung to the renderer.
+///
+/// Returns whether the rung the last frame was laid out with actually moved,
+/// which is the caller's signal that the whole screen has to be repainted and not
+/// just the band something else dirtied.
+///
+/// WHY the shared parser and not this app's own chain of compares: the store
+/// accepts both the digit and the word for a level, and a reader that understood
+/// fewer spellings than the writer produces would read an existing preference as
+/// "unset" and quietly reset the rung.
+///
+/// WHY the rung the process already holds when the store does not answer: a frame
+/// that fell back to one hundred per cent because the store was busy would resize
+/// the screen under a person who never touched the setting.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    // WHY the answer is the rung actually stored and not the one asked for: a
+    // level above the ladder's largest setting is clamped on the way in, and a
+    // caller that repaints because "the level changed" should be wrong about that
+    // only when the pixels really did move.
+    DynamicType::new(next).publish() != before
+}
+
+/// An album card's run, inked at the rung this process draws at.
+///
+/// WHY a separate face and not the shared [`text`]: only the album cards' plates
+/// are derived from the rung so far, so only their runs may grow. The header, the
+/// chips, the tab row, the media cells and the viewer still lay out at the
+/// authored ladder, and growing their ink before their boxes would clip them. At
+/// the authored level this delegates straight to [`text`] and moves no pixel.
+#[inline(always)]
+fn album_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let lvl = gallery::draw_level();
+    if lvl == gallery::PLATFORM_LEVEL {
+        return text(x, y, x0, y0, scale, s, color, bg);
+    }
+    if scale == 0 || s.is_empty() || x < x0 || x >= W {
+        return None;
+    }
+    let cap = gallery::cap_at(scale, lvl);
+    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, s, None, false) {
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        return None;
+    }
+    // The bitmap face, at the rung it is asked for. The band grows with the level:
+    // a run fitted to a scaled em walks taller than the unscaled cell, so the
+    // ladder's band would cut the descenders of the very run it enlarged.
+    if y >= y0 && y < y0 + gallery::rows_at(scale, lvl) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, s, color, bg, false);
+    }
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -2246,7 +2363,10 @@ impl GalleryApp {
         match self.tab {
             GalleryTab::Photos => self.grid_plan.content_h,
             GalleryTab::Videos => self.grid_rows() * VIDEO_ROW_H,
-            GalleryTab::Albums => self.grid_rows() * 200,
+            // WHY the stride is derived here too: the scroll travels over the
+            // content the grid actually lays out, so a taller card has to mean
+            // a longer grid or the bottom row would sit past the travel limit.
+            GalleryTab::Albums => self.grid_rows() * gallery::album_stride_at(gallery::draw_level()),
             _ => self.grid_rows() * ROW_STRIDE,
         }
     }
@@ -2280,6 +2400,17 @@ impl GalleryApp {
             GRID_BOTTOM - GRID_TOP,
             self.scroll.offset,
         );
+    }
+
+    /// Puts the grid back in step with a text size that has just moved.
+    ///
+    /// WHY the scroll is re-solved and not rebuilt from zero: the album rows
+    /// are taller or shorter than they were, so the content length changes
+    /// while the reader is looking at it. Keeping the pixel offset they were
+    /// at and clamping it to the new extent is what the SDK's scroll state is
+    /// for; starting over would throw them back to the top of the grid.
+    pub fn relayout_for_rung(&mut self) {
+        self.sync_scroll();
     }
 
     pub fn photo_at(&self, mut index: usize) -> Option<Media> {
@@ -3498,16 +3629,25 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.surface);
     };
 
+    // The card's plate, the stride between two cards and both runs' boxes all
+    // come from the rung the renderer holds -- and the press path in `handle_tap`
+    // reads the same two faces, which is the whole point of deriving them here:
+    // a card that grew while its tap band stayed authored would be pressable
+    // under its own count line and dead above it.
+    let lvl = gallery::draw_level();
+    let card_h = gallery::album_card_h_at(lvl);
+    let stride = gallery::album_stride_at(lvl);
+
     let rel_y = y - GRID_TOP + app.scroll.offset;
-    let row = rel_y / 200;
-    if row >= ALBUM_ROWS || rel_y % 200 >= 180 {
+    let row = rel_y / stride;
+    if row >= ALBUM_ROWS || rel_y % stride >= card_h {
         return Some(THEME.surface);
     }
 
     let album_idx = row * 2 + col;
     let x0 = VIDEO_COL_X[col];
-    let y0 = GRID_TOP + row * 200 - app.scroll.offset;
-    let card_rect = Rect::new(x0, y0, VIDEO_COL_W, 180);
+    let y0 = GRID_TOP + row * stride - app.scroll.offset;
+    let card_rect = Rect::new(x0, y0, VIDEO_COL_W, card_h);
 
     let Some(shape) = draw_rounded_rect(x, y, card_rect, radius::SMALL, THEME.surface_container, Some(THEME.border), 1) else {
         return Some(THEME.surface);
@@ -3516,7 +3656,10 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         return Some(THEME.border);
     }
 
-    let banner_h = 100;
+    // WHY the banner is the library's authored height and not a local number: it
+    // is a picture, not type, so no rung of the ladder sizes it. Everything the
+    // card grows, it grows below the banner's rule.
+    let banner_h = gallery::ALBUM_BANNER_H;
     if y < y0 + banner_h {
         let t = ((y - y0) * 255 / banner_h).min(255);
         // WHY the banner's own gradient and not the platform's roles: the
@@ -3556,14 +3699,33 @@ fn albums_grid_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         _ => (b"Built-in Set", walls::SCENES.len()),
     };
 
-    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 12, 2, title, THEME.on_surface, THEME.surface_container) {
+    // At the platform rung both runs are painted exactly as they always were: the
+    // raw label, no trim, the ladder's own box. Above it the run is trimmed to the
+    // card's lane at that rung's advances, because a name grown past the column
+    // edge would print over the card beside it -- the lane is authored, the ink
+    // inside it is not, and the trim is what keeps the two honest with each other.
+    let title_y = y0 + gallery::album_title_inset_at(lvl);
+    let mut title_trim = [0u8; 32];
+    let title_run = if lvl == gallery::PLATFORM_LEVEL {
+        title
+    } else {
+        gallery::fitted_run(title, gallery::ALBUM_TITLE_RUNG, ALBUM_TEXT_LANE, &mut title_trim)
+    };
+    if let Some(c) = album_text(x, y, x0 + ALBUM_TEXT_X, title_y, gallery::ALBUM_TITLE_RUNG, title_run, THEME.on_surface, THEME.surface_container) {
         return Some(c);
     }
 
+    let count_y = y0 + gallery::album_count_inset_at(lvl);
     let mut count_buf = [0u8; 32];
     let mut cn = append_u64(&mut count_buf, 0, count as u64);
     cn = append(&mut count_buf, cn, if album_idx == 3 { b" built-in scenes" } else { b" items" });
-    if let Some(c) = text(x, y, x0 + 16, y0 + banner_h + 46, 1, &count_buf[..cn], THEME.on_surface_variant, THEME.surface_container) {
+    let mut count_trim = [0u8; 48];
+    let count_run = if lvl == gallery::PLATFORM_LEVEL {
+        &count_buf[..cn]
+    } else {
+        gallery::fitted_run(&count_buf[..cn], gallery::ALBUM_COUNT_RUNG, ALBUM_TEXT_LANE, &mut count_trim)
+    };
+    if let Some(c) = album_text(x, y, x0 + ALBUM_TEXT_X, count_y, gallery::ALBUM_COUNT_RUNG, count_run, THEME.on_surface_variant, THEME.surface_container) {
         return Some(c);
     }
 
@@ -5609,9 +5771,16 @@ fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
             }
             GalleryTab::Albums => {
                 if let Some(col) = video_col_of(x) {
+                    // WHY the band comes off the same derivations the painter
+                    // uses: the card a reader sees is the card they press, so a
+                    // rung that grew the plate has to move the cut with it or
+                    // the last rows of every card would answer to nothing.
+                    let lvl = gallery::draw_level();
+                    let stride = gallery::album_stride_at(lvl);
+                    let card_h = gallery::album_card_h_at(lvl);
                     let rel_y = y - GRID_TOP + app.scroll.offset;
-                    let row = rel_y / 200;
-                    if row < ALBUM_ROWS && rel_y % 200 < 180 {
+                    let row = rel_y / stride;
+                    if row < ALBUM_ROWS && rel_y % stride < card_h {
                         let album_idx = row * 2 + col;
                         match album_idx {
                             0 => {
@@ -5690,6 +5859,13 @@ pub extern "C" fn _start() -> ! {
     );
 
 
+    // The person's text size is read once here, before any pixel is written, so
+    // the first frame already carries the rung the setting names and the scroll
+    // extent is solved against the card heights that rung produces.
+    if publish_text_scale() {
+        app.relayout_for_rung();
+    }
+
     // Allocate client surface (z=200)
     let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(id) => {
@@ -5709,6 +5885,24 @@ pub extern "C" fn _start() -> ! {
     loop {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            // WHY once per wake and never per glyph: the read below is a
+            // syscall, so calling it where the labels are laid out would cost
+            // a kernel crossing for every run of text in every frame. One call
+            // settles the rung for the whole wake, and the only work it can
+            // cause is a re-solved scroll extent and one full repaint.
+            //
+            // The repaint is deliberate even though a tick or a tap further
+            // down may paint again: a moved rung changes the album geometry,
+            // and a screen still showing the old one is the defect this gate
+            // exists to refuse. The rung moves when a person changes a
+            // setting, which is not a per-frame event.
+            if publish_text_scale() {
+                app.relayout_for_rung();
+                if surface > 0 {
+                    render_gallery_ui(surface, &app);
+                    let _ = std::surface_flip();
+                }
+            }
             let mut tick_dirty = false;
             if (triggered & std::EVENT_TIMER_TICK) != 0 {
                 if app.toast_ticks > 0 {

@@ -149,6 +149,414 @@ pub fn step_selected_day(day: u8, arrow: DayArrow, days_in_month: u8) -> Option<
     }
 }
 
+// =============================================================================
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box in this app was authored as the platform's
+// type ladder read at one hundred per cent. The ladder's own faces --
+// `font::line_height`, `font::ascent_for_scale`, `outline_text::row_band` -- are
+// `const fn`s of a rung, so a layout built from them cannot see the setting a
+// person changes in Settings: the screen laid itself out at the platform rung
+// whatever size was chosen, and "Text size" moved nothing here. Settings writes
+// the level, `DynamicType::publish` hands it to the renderer, and the faces under
+// [`rows_at`] answer at it. A layout that moves its ink and keeps its box clips
+// the run it enlarged; a layout that moves its box to a rung the renderer never
+// got resizes the screen under a reader who asked for nothing. Both are refused
+// here: the rung is read from the one cell the renderer draws from, every box is
+// derived twice -- once as a `const fn` of a level so the compile-time gates can
+// sweep all four selectable levels, once at run time through that rung -- and
+// every authored number survives as the anchor of its derivation, so the
+// platform rung paints byte for byte the screen it painted before.
+//
+// SCOPE, stated rather than hidden: the faces below drive the Agenda view's
+// chronological event cards -- the plate, its three run origins, the stride
+// between cards, how many cards the band holds and the chevron band that opens a
+// row -- together with the tap bands that answer those cards. The month grid is a
+// fixed lattice (`COL_W`/`COL_PITCH`/`ROW_H`/`ROW_PITCH`/`GRID_ROWS`): a cell
+// that grew either broke the week row or walked six rows off the band its
+// neighbours claim first, so the grid stays authored. So do the header row, the
+// segmented tabs, the weekday row, the section band and its count pill, the month
+// list's cards and both empty-state cards, the week and day views, the details
+// modal, the create-event sheet with its keyboard, and the "+ New Event" button:
+// adopting any of those means moving its painter and its tap handlers to the same
+// rung-aware faces in one change, because one published rung has to size a region
+// end to end or not at all.
+// =============================================================================
+
+/// The text-size level every box in this app was authored against.
+///
+/// WHY it is named: each box is derived twice -- once as a `const fn` of a level,
+/// so the compile-time gates can sweep all four selectable levels, and once at
+/// run time through the published rung, so the pixels a person gets follow the
+/// setting they chose.
+pub const PLATFORM_LEVEL: u8 = interos_std::design::font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep
+/// to. [`interos_std::design::accessibility::UserTextScale::from_u8`] clamps
+/// anything above it, so a sweep past this rung would be a sweep over a level no
+/// renderer can be handed.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The rung the Agenda card's three lines are set in.
+///
+/// WHY named here: the derivations below are functions of a rung as well as a
+/// level, and a plate grown for the wrong rung is a plate that clips the run it
+/// was cut for.
+pub const AGENDA_LINE_RUNG: usize = crate::theme::type_scale::BODY;
+
+/// The row the Agenda view's chronological cards start on, and the row the
+/// "+ New Event" button's band starts on -- the floor that chain is measured
+/// against.
+pub const AGENDA_CARDS_Y0: usize = 232;
+pub const AGENDA_LIST_Y1: usize = 800;
+
+/// The air above and below the three lines inside a card, the inset the stack of
+/// lines is centred from, and the gap between one card's bottom border and the
+/// next card's top.
+pub const AGENDA_LINE_PAD: usize = 4;
+pub const AGENDA_STACK_AIR: usize = 2;
+pub const AGENDA_CARD_GAP: usize = 12;
+
+/// The line box the three runs reserve at the level the screen was authored at.
+pub const AUTHORED_AGENDA_LINE_H: usize =
+    interos_std::design::font::line_height(AGENDA_LINE_RUNG);
+/// The plate an Agenda card was drawn with: its three lines and the air around
+/// them.
+pub const AUTHORED_AGENDA_CARD_H: usize =
+    AUTHORED_AGENDA_LINE_H * 3 + AGENDA_LINE_PAD * 2;
+/// The inset the authored stack of three lines sits at inside that plate.
+pub const AUTHORED_AGENDA_STACK_Y: usize = AGENDA_STACK_AIR
+    + (AUTHORED_AGENDA_CARD_H - AGENDA_LINE_PAD - AUTHORED_AGENDA_LINE_H * 3) / 2;
+/// Where the authored card's second line -- its title -- begins.
+pub const AUTHORED_AGENDA_TITLE_Y: usize = AUTHORED_AGENDA_STACK_Y + AUTHORED_AGENDA_LINE_H;
+/// Where the authored card's third line begins.
+pub const AUTHORED_AGENDA_LABEL_Y: usize =
+    AUTHORED_AGENDA_STACK_Y + AUTHORED_AGENDA_LINE_H * 2;
+/// The authored stride between two Agenda cards.
+pub const AUTHORED_AGENDA_PITCH: usize = AUTHORED_AGENDA_CARD_H + AGENDA_CARD_GAP;
+/// How many authored cards the band above the action button holds.
+pub const AUTHORED_AGENDA_CARD_MAX: usize =
+    (AGENDA_LIST_Y1 - AGENDA_CARDS_Y0 - AUTHORED_AGENDA_CARD_H) / AUTHORED_AGENDA_PITCH + 1;
+
+/// The later of two rows or columns: the max the union bands are walked with.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`: [`interos_std::design::outline_text::row_band`]'s
+/// union of the outline line box and the bitmap cell, asked at a level rather
+/// than at the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is the platform's own answer and
+/// it is a `const fn` of the ladder, so a plate sized from it can never see the
+/// setting. The arithmetic below is the same walk -- the lower of the two faces'
+/// baselines, the deeper of the two faces' bottoms -- with every metric read
+/// through the `*_user_scale` faces, and the gate beside it refuses the day the
+/// two answers disagree at the level they were authored at.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) = interos_std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// The rows one Agenda card line reserves at a level.
+pub const fn agenda_rows_at(level: u8) -> usize {
+    rows_at(AGENDA_LINE_RUNG, level)
+}
+
+/// An Agenda card's plate at a level: the three lines the rung draws plus their
+/// authored air, and never shorter than the plate the screen was built with.
+///
+/// WHY the floor: the plate is also the tap band, so a rung below the authored one
+/// may shrink the ink but never the reach of the row it opens.
+pub const fn agenda_card_h_at(level: u8) -> usize {
+    later(
+        AUTHORED_AGENDA_CARD_H,
+        agenda_rows_at(level) * 3 + AGENDA_LINE_PAD * 2,
+    )
+}
+
+/// The inset the card's three-line stack sits at, centred inside the plate the
+/// level draws -- the authored arithmetic, asked of the rung's own boxes.
+pub const fn agenda_stack_y_at(level: u8) -> usize {
+    AGENDA_STACK_AIR
+        + (agenda_card_h_at(level) - AGENDA_LINE_PAD - agenda_rows_at(level) * 3) / 2
+}
+
+/// Where a level's card puts its first, second and third line.
+pub const fn agenda_line_y_at(index: usize, level: u8) -> usize {
+    agenda_stack_y_at(level) + agenda_rows_at(level) * index
+}
+
+/// The stride between two cards at a level.
+pub const fn agenda_card_pitch_at(level: u8) -> usize {
+    agenda_card_h_at(level) + AGENDA_CARD_GAP
+}
+
+/// How many cards a level's chain holds above the action button's band.
+///
+/// WHY a count and not a clip: the band is authored, so a rung that draws taller
+/// cards shows fewer of them rather than running one through the control under
+/// it. Zero answers a band that cannot hold even one plate, which the fit gate
+/// below refuses before the painter ever asks.
+pub const fn agenda_card_max_at(level: u8) -> usize {
+    let band = AGENDA_LIST_Y1 - AGENDA_CARDS_Y0;
+    let card_h = agenda_card_h_at(level);
+    if card_h > band {
+        return 0;
+    }
+    (band - card_h) / agenda_card_pitch_at(level) + 1
+}
+
+/// Whether a level's Agenda cards keep all three lines inside their plate, keep
+/// the plate above the floor of its band, keep at least one card in the chain and
+/// keep the plate a band a finger can land on.
+const fn agenda_band_fits(level: u8) -> bool {
+    let rows = agenda_rows_at(level);
+    let card_h = agenda_card_h_at(level);
+    agenda_stack_y_at(level) + rows * 3 <= card_h - 2
+        && card_h <= AGENDA_LIST_Y1 - AGENDA_CARDS_Y0
+        && card_h >= crate::theme::MIN_TOUCH_TARGET
+        && agenda_card_max_at(level) >= 1
+}
+
+/// The largest rung the Agenda cards can carry, at or below `want`.
+///
+/// WHY a clamp at all: growing every box to the person's rung is the right half
+/// of this change; the other half is refusing a rung the band cannot hold rather
+/// than letting a card walk through the control under it. The walk is downward
+/// because the plate grows with the rung and never shrinks.
+pub const fn draw_level_at(want: u8) -> u8 {
+    let mut level = want;
+    while level > 0 && !agenda_band_fits(level) {
+        level -= 1;
+    }
+    level
+}
+
+/// The rung this process draws at: the person's level, clamped to what the Agenda
+/// cards can carry.
+#[inline]
+pub fn draw_level() -> u8 {
+    draw_level_at(interos_std::design::font::user_text_scale())
+}
+
+/// The advance a run takes at `scale` on the level `lvl` names.
+///
+/// WHY not const: the SDK's glyph advance tables are ordinary functions, so a
+/// measured width can only be asked at run time -- which is why every box whose
+/// width depends on a measured run is a runtime face rather than a `const fn`.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::measure(text, scale);
+    }
+    let w = interos_std::design::font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// `font::ellipsize` at the rung `lvl` names.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in
+/// the ladder's em, so a run cut to a lane at one rung and inked at another is an
+/// ellipsis past the edge of the plate it was trimmed for. At the authored level
+/// this *is* `font::ellipsize`, byte for byte.
+///
+/// WHY the level is an argument: the pixel face reads the ladder once and hands
+/// that answer down, so trimming a run never reads the setting itself and a glyph
+/// never costs a walk of the clamp.
+pub fn ellipsize_run(
+    text: &[u8],
+    scale: usize,
+    max_w: usize,
+    lvl: u8,
+    out_buf: &mut [u8],
+) -> usize {
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::ellipsize(text, scale, max_w, out_buf);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = run_w_at(dots, scale, lvl);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+/// given `room` bytes of the caller's buffer for them.
+///
+/// WHY one decision, not one per byte: the width the painter then answers with is
+/// `typeface::text_advance_px`, which validates the whole run once and charges one
+/// advance per codepoint when the slice decodes. A byte walk would charge a
+/// multi-byte run's continuation bytes as glyphs the painter never inks, so it
+/// trims a run wider than the run it is measuring.
+///
+/// WHY this is public: the ink face reaches the lane through [`fitted_run`], whose
+/// refusal path has to answer with the same arithmetic rather than with the run
+/// the lane refused.
+pub fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+    let decodes = core::str::from_utf8(text).is_ok();
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    let mut next = 0usize;
+    while next < text.len() {
+        let (adv, step) = if decodes {
+            match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => (
+                    interos_std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                    ch.len_utf8(),
+                ),
+                None => break,
+            }
+        } else {
+            (interos_std::design::typeface::advance_px(text[next], em) as usize, 1)
+        };
+        if current_w + adv > max_w || fit_len + step > room {
+            break;
+        }
+        current_w += adv;
+        fit_len = next + step;
+        next = fit_len;
+    }
+    fit_len
+}
+
+// WHY the derivations above are pinned to the ladder at the level they were
+// authored at: they are only a faithful restatement of it if every rung answers
+// the platform's own number there.
+const _: () = assert!(agenda_rows_at(PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, AGENDA_LINE_RUNG).1);
+const _: () = assert!(line_at(AGENDA_LINE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::line_height(AGENDA_LINE_RUNG));
+const _: () = assert!(cap_at(AGENDA_LINE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::cap_for_scale(AGENDA_LINE_RUNG));
+const _: () = assert!(ascent_at(AGENDA_LINE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::ascent_for_scale(AGENDA_LINE_RUNG));
+const _: () = assert!(em_at(AGENDA_LINE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::em_for_scale(AGENDA_LINE_RUNG));
+
+// WHY these anchors hold to the pixels on the screen: the Agenda card was drawn
+// as a 125-row plate holding its three lines at offsets 4, 43 and 82 on a 137-row
+// stride, four deep, at the level it was authored at, so adopting the setting must
+// move no pixel for a reader who left it alone.
+const _: () = assert!(agenda_rows_at(PLATFORM_LEVEL) == AUTHORED_AGENDA_LINE_H);
+const _: () = assert!(agenda_card_h_at(PLATFORM_LEVEL) == AUTHORED_AGENDA_CARD_H);
+const _: () = assert!(agenda_card_h_at(PLATFORM_LEVEL) == 125);
+const _: () = assert!(agenda_stack_y_at(PLATFORM_LEVEL) == 4);
+const _: () = assert!(agenda_line_y_at(0, PLATFORM_LEVEL) == 4);
+const _: () = assert!(agenda_line_y_at(1, PLATFORM_LEVEL) == 43);
+const _: () = assert!(agenda_line_y_at(2, PLATFORM_LEVEL) == 82);
+const _: () = assert!(agenda_card_pitch_at(PLATFORM_LEVEL) == 137);
+const _: () = assert!(agenda_card_max_at(PLATFORM_LEVEL) == 4);
+
+// WHY swept against the clamp rather than the raw rung: the clamp only earns its
+// place if every selectable level answers the band once the clamp has had it, and
+// the authored level must be untouched by it -- otherwise the app would resize the
+// screen for a reader who asked for nothing.
+const fn draw_level_holds_at_every_level() -> bool {
+    if draw_level_at(PLATFORM_LEVEL) != PLATFORM_LEVEL {
+        return false;
+    }
+    let mut want = 0;
+    while want <= MAX_LEVEL {
+        let chosen = draw_level_at(want);
+        if chosen > want {
+            return false;
+        }
+        if !agenda_band_fits(chosen) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(draw_level_holds_at_every_level());
+
+// WHY a sweep and not the authored check alone: the whole point of the derivations
+// is the rungs above the authored one, and each claim below is a fit gate the
+// screen already needs, asked at every level the ladder can be handed -- the three
+// lines land inside the plate, no line crowds the next, and the whole chain stops
+// above the action button.
+const fn agenda_chain_holds_at_every_level() -> bool {
+    let mut level = 0usize;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        if agenda_card_max_at(lvl) < 1 {
+            return false;
+        }
+        if agenda_stack_y_at(lvl) + agenda_rows_at(lvl) * 3 > agenda_card_h_at(lvl) - 2 {
+            return false;
+        }
+        if agenda_line_y_at(1, lvl) + agenda_rows_at(lvl) > agenda_line_y_at(2, lvl) {
+            return false;
+        }
+        if agenda_line_y_at(2, lvl) + agenda_rows_at(lvl) > agenda_card_h_at(lvl) - 2 {
+            return false;
+        }
+        let chain = (agenda_card_max_at(lvl) - 1) * agenda_card_pitch_at(lvl)
+            + agenda_card_h_at(lvl);
+        if chain > AGENDA_LIST_Y1 - AGENDA_CARDS_Y0 {
+            return false;
+        }
+        if agenda_card_h_at(lvl) < crate::theme::MIN_TOUCH_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(agenda_chain_holds_at_every_level());
+
 /// One calendar event as it is stored: a civil date, a wall-clock time and a
 /// bounded title.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

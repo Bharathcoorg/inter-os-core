@@ -1338,6 +1338,391 @@ pub use interos_std::image::{
     encode_ppm, qoi_color_hash,
 };
 
+// =============================================================================
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box in this app was authored as the platform's
+// type ladder read at one hundred per cent, so a reader who raised "Text size"
+// in Settings got the same plates around *larger* words and the same reading
+// surface as before -- the ink moves through the SDK's runtime `*_user_scale`
+// faces while the boxes under it do not move at all. Settings writes the level,
+// `DynamicType::publish` hands it to the renderer, and the faces under
+// [`rows_at`] answer at it. A layout that moves its ink but keeps its box is the
+// clipped-text defect this repository gates against; a layout that moves its box
+// to a rung the renderer never got is the same defect mirrored, so the rung is
+// read from the one cell the renderer draws from.
+//
+// The authored numbers are kept as the anchor of each derivation rather than
+// replaced by it: every `_at` face below answers the number the screen was drawn
+// with at [`PLATFORM_LEVEL`], and the sweeps beside them refuse the day it stops
+// being true. That is what lets this app adopt the setting without moving a
+// pixel for the reader who never raised it.
+//
+// WHAT MEASURES A RUN cannot be a `const fn`: the SDK's glyph advance tables are
+// ordinary functions, so an advance, a trim or a centred x asked for at compile
+// time fails to evaluate. Every box below whose *width* comes from a measured
+// run is therefore a runtime face, and only the ladder's own vertical metrics --
+// cap, em, ascent, line box -- are derived as `const fn` of a level, which is
+// what lets the compile-time gates sweep all four selectable rungs.
+//
+// SCOPE, stated rather than hidden: the faces below drive the album cards the
+// Albums destination lays out -- the card's plate, the row stride between two
+// cards, the two runs' boxes and the lanes they are trimmed to. The painter and
+// the press both read [`album_card_h_at`] and [`album_stride_at`], which is the
+// point of doing it here: the tap band moves with the ink instead of being left
+// under a card that has grown out from under it. The header, the filter chips,
+// the tab row, the media cells and their captions, the timeline section rows, the
+// empty states, the inspection bar and the viewer's caption scrim are still
+// authored -- adopting those means moving each painter and its hit region in the
+// same change, and several of their plates are pinned between two neighbouring
+// rows that do not move with them.
+// =============================================================================
+
+/// The text-size level every box in this app was authored against.
+///
+/// WHY it is named: each box is derived twice -- once as a `const fn` of a level,
+/// so the compile-time gates can sweep all four selectable levels, and once at
+/// run time through the published rung, so the pixels a person gets follow the
+/// setting they chose.
+pub const PLATFORM_LEVEL: u8 = interos_std::design::font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep
+/// to. The SDK clamps anything above it on the way in, so a sweep past this rung
+/// would be a sweep over a level no renderer can be handed.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The rung an album card's name is painted at, and the rung its count line is.
+///
+/// WHY named here: the vertical derivations below are functions of a rung as well
+/// as a level, and a stride grown for the wrong rung is a stride that clips the
+/// run it was cut for.
+pub const ALBUM_TITLE_RUNG: usize = crate::theme::type_scale::BODY;
+pub const ALBUM_COUNT_RUNG: usize = crate::theme::type_scale::CAPTION;
+
+/// The later of two edges or boxes: the max the union bands are walked with.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`:
+/// [`interos_std::design::outline_text::row_band`]'s union of the outline line
+/// box and the bitmap cell, asked at a level rather than at the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is the platform's own answer and
+/// it is a `const fn` of the ladder, so a plate sized from it can never see the
+/// setting. The arithmetic below is the same walk -- the lower of the two faces'
+/// baselines, the deeper of the two faces' bottoms -- with every metric read
+/// through the `*_user_scale` faces, and the gate beside it refuses the day the
+/// two answers disagree at the level they were authored at.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) = interos_std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// An authored vertical stride between two stacked runs, grown by the rows the
+/// rung's box gained above the level the stride was authored at.
+///
+/// WHY this form: a stride is the space one run's box plus its air, and the only
+/// honest way to keep the authored pixels at the platform level *and* carry a
+/// raised rung is to add exactly the growth the box took. It never shrinks a
+/// stride, and at the authored level it is the stride itself.
+pub const fn grown(stride: usize, scale: usize, level: u8) -> usize {
+    stride + rows_at(scale, level).saturating_sub(rows_at(scale, PLATFORM_LEVEL))
+}
+
+/// A plate that reserves the run it carries, at that run's rung, plus its
+/// authored air -- and never less than the height the screen was drawn with.
+///
+/// WHY the floor: the card's height is a number its own fit gates and the press
+/// path both read, so a plate may only ever grow. At the authored level this is
+/// `authored` exactly, and the air is the authored distance from the run's box to
+/// the plate's foot rather than an invented number.
+pub const fn plate_at(authored: usize, inset: usize, scale: usize, level: u8, air: usize) -> usize {
+    later(authored, inset + rows_at(scale, level) + air)
+}
+
+/// The advance a run takes at `scale` on the level `lvl` names.
+///
+/// WHY not `const`: the SDK's glyph advance tables are ordinary functions, so a
+/// measured width can only be asked at run time -- which is why every box whose
+/// width depends on a measured run is a runtime face rather than a `const fn`.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::measure(text, scale);
+    }
+    let w = interos_std::design::font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// `font::ellipsize` at a rung.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in
+/// the ladder's em, so a run cut to a lane at one rung and inked at another is an
+/// ellipsis past the edge of the plate it was trimmed for. At the authored level
+/// this *is* `font::ellipsize`, byte for byte.
+pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]) -> usize {
+    let lvl = draw_level();
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::ellipsize(text, scale, max_w, out_buf);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out_buf.len());
+        out_buf[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    let dots = b"...";
+    let dots_w = run_w_at(dots, scale, lvl);
+    if dots_w > max_w || out_buf.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+/// given `room` bytes of the caller's buffer for them.
+///
+/// WHY one decision, not one per byte: the width the painter then answers with
+/// is `typeface::text_advance_px`, which validates the whole run once and
+/// charges one advance per codepoint when the slice decodes. A byte walk would
+/// charge a multi-byte run's continuation bytes as glyphs the painter never
+/// inks, so it trims a run wider than the run it is measuring.
+fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+    let decodes = core::str::from_utf8(text).is_ok();
+    let mut current_w = 0usize;
+    let mut fit_len = 0usize;
+    let mut next = 0usize;
+    while next < text.len() {
+        let (adv, step) = if decodes {
+            match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                Some(ch) => (
+                    interos_std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                    ch.len_utf8(),
+                ),
+                None => break,
+            }
+        } else {
+            (interos_std::design::typeface::advance_px(text[next], em) as usize, 1)
+        };
+        if current_w + adv > max_w || fit_len + step > room {
+            break;
+        }
+        current_w += adv;
+        fit_len = next + step;
+        next = fit_len;
+    }
+    fit_len
+}
+
+/// The run a plate actually gets: the trimmed prefix when the lane took the mark,
+/// the label whole when it never needed cutting, and a hard cut when it refused.
+///
+/// WHY a cut and not the label: `ellipsize_run` answers `0` when even the
+/// ellipsis will not sit in the lane, and handing the caller the untouched label
+/// then inks a run past the plate that framed it -- the words a reader was
+/// promised in a card that cannot hold them. The cut is the same answer the lane
+/// gives when it does have room, minus the mark.
+pub fn fitted_run<'a>(label: &'a [u8], scale: usize, lane: usize, buf: &'a mut [u8]) -> &'a [u8] {
+    let len = ellipsize_run(label, scale, lane, buf);
+    if len > 0 {
+        return &buf[..len];
+    }
+    if label.is_empty() || scale == 0 {
+        return label;
+    }
+    // WHY the bytes are copied here: a refusal is the one answer `ellipsize_run`
+    // gives without writing, so a cut returned straight from the buffer would be
+    // the stale zeros the caller zeroed it to, not the label's own front.
+    let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());
+    buf[..fit].copy_from_slice(&label[..fit]);
+    &buf[..fit]
+}
+
+// -----------------------------------------------------------------------------
+// The album cards: the plate, the stride and the two runs, all at the rung
+// -----------------------------------------------------------------------------
+
+/// The album card's authored height: the box the screen has always drawn.
+pub const AUTHORED_ALBUM_CARD_H: usize = 180;
+/// The authored distance from one album row's top to the next.
+pub const AUTHORED_ALBUM_STRIDE: usize = 200;
+/// The banner every album card carries. It is a picture, not type, so no rung of
+/// the ladder ever moves it and the card's growth is all below it.
+pub const ALBUM_BANNER_H: usize = 100;
+/// The title's line-box top inside a card, measured from the card's own top.
+pub const ALBUM_TITLE_INSET: usize = ALBUM_BANNER_H + 12;
+/// The count line's line-box top inside a card, from the card's own top.
+pub const ALBUM_COUNT_INSET: usize = ALBUM_BANNER_H + 46;
+/// The authored stride from the title's box to the count line's.
+pub const ALBUM_COUNT_STRIDE: usize = ALBUM_COUNT_INSET - ALBUM_TITLE_INSET;
+/// Air between the count line's box and the card's bottom edge, solved from the
+/// authored pair so the authored plate is exactly [`AUTHORED_ALBUM_CARD_H`] at
+/// the authored level rather than a number remembered beside it.
+pub const ALBUM_BOTTOM_AIR: usize =
+    AUTHORED_ALBUM_CARD_H - (ALBUM_COUNT_INSET + rows_at(ALBUM_COUNT_RUNG, PLATFORM_LEVEL));
+/// Air between one card's foot and the next card's head.
+pub const ALBUM_ROW_AIR: usize = AUTHORED_ALBUM_STRIDE - AUTHORED_ALBUM_CARD_H;
+
+/// The title's line-box top inside a card, at a level.
+///
+/// WHY the level is unused here: the title sits directly under the banner, and
+/// the banner is a picture the ladder never sizes, so the title's top is the
+/// card's top plus a fixed inset and never moves with the rung. The level is kept
+/// in the signature so the three album faces read as one family.
+pub const fn album_title_inset_at(_level: u8) -> usize {
+    ALBUM_TITLE_INSET
+}
+
+/// The count line's line-box top inside a card, at a level: the title's box grown
+/// by the rows the rung took, and nothing else.
+pub const fn album_count_inset_at(level: u8) -> usize {
+    album_title_inset_at(level) + grown(ALBUM_COUNT_STRIDE, ALBUM_TITLE_RUNG, level)
+}
+
+/// The card's height at a level: never below the plate it was drawn with, and tall
+/// enough for the rung's count line and its authored air.
+pub const fn album_card_h_at(level: u8) -> usize {
+    plate_at(
+        AUTHORED_ALBUM_CARD_H,
+        album_count_inset_at(level),
+        ALBUM_COUNT_RUNG,
+        level,
+        ALBUM_BOTTOM_AIR,
+    )
+}
+
+/// The distance from one album row's top to the next, at a level: the card the
+/// rung drew plus the authored air between two of them.
+pub const fn album_stride_at(level: u8) -> usize {
+    album_card_h_at(level) + ALBUM_ROW_AIR
+}
+
+/// The rung this process draws at: the level the renderer was handed, clamped to
+/// the ladder's largest setting so a gate can never sweep a level no face answers.
+#[inline]
+pub fn draw_level() -> u8 {
+    let want = interos_std::design::font::user_text_scale();
+    if want > MAX_LEVEL {
+        MAX_LEVEL
+    } else {
+        want
+    }
+}
+
+// WHY the derivations above are pinned to the ladder at the level they were
+// authored at: they are only a faithful restatement of it if every rung answers
+// the platform's own number there.
+const _: () = assert!(rows_at(ALBUM_TITLE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, ALBUM_TITLE_RUNG).1);
+const _: () = assert!(rows_at(ALBUM_COUNT_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, ALBUM_COUNT_RUNG).1);
+const _: () = assert!(line_at(ALBUM_TITLE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::line_height(ALBUM_TITLE_RUNG));
+const _: () = assert!(line_at(ALBUM_COUNT_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::line_height(ALBUM_COUNT_RUNG));
+const _: () = assert!(cap_at(ALBUM_TITLE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::cap_for_scale(ALBUM_TITLE_RUNG));
+const _: () = assert!(ascent_at(ALBUM_COUNT_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::ascent_for_scale(ALBUM_COUNT_RUNG));
+const _: () = assert!(em_at(ALBUM_TITLE_RUNG, PLATFORM_LEVEL)
+    == interos_std::design::font::em_for_scale(ALBUM_TITLE_RUNG));
+
+// WHY these anchors hold to the numbers on the screen: the album card has always
+// been 180 rows with its name at 112 and its count at 146, so adopting the
+// setting must move no pixel for a reader who left it alone.
+const _: () = assert!(album_title_inset_at(PLATFORM_LEVEL) == 112);
+const _: () = assert!(album_count_inset_at(PLATFORM_LEVEL) == 146);
+const _: () = assert!(album_card_h_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_CARD_H);
+const _: () = assert!(album_stride_at(PLATFORM_LEVEL) == AUTHORED_ALBUM_STRIDE);
+
+/// Whether a level's album card holds both of its runs and both fit under the
+/// plate the press path cuts.
+const fn album_card_holds_its_runs(level: u8) -> bool {
+    album_title_inset_at(level) + rows_at(ALBUM_TITLE_RUNG, level) <= album_card_h_at(level)
+        && album_count_inset_at(level) + rows_at(ALBUM_COUNT_RUNG, level)
+            <= album_card_h_at(level)
+        && album_card_h_at(level) <= album_stride_at(level)
+}
+
+/// WHY a sweep and not the authored check alone: the whole point of the
+/// derivations is the rungs above the authored one, and each claim below is the
+/// gate the screen already needs, asked at every level the ladder can be handed
+/// -- the card holds its two runs, the stride is never shallower than the card it
+/// separates, the plate never falls below the box it was drawn with, and the
+/// card's short edge stays above the platform's touch floor at every rung.
+const fn album_grid_holds_at_every_level() -> bool {
+    if album_card_h_at(PLATFORM_LEVEL) != AUTHORED_ALBUM_CARD_H {
+        return false;
+    }
+    if album_stride_at(PLATFORM_LEVEL) != AUTHORED_ALBUM_STRIDE {
+        return false;
+    }
+    let mut level = 0usize;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        if !album_card_holds_its_runs(lvl) {
+            return false;
+        }
+        if album_card_h_at(lvl) < AUTHORED_ALBUM_CARD_H {
+            return false;
+        }
+        if level > 0 && album_card_h_at(lvl) < album_card_h_at((level - 1) as u8) {
+            return false;
+        }
+        if album_card_h_at(lvl) < interos_std::design::touch::MIN_TARGET {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(album_grid_holds_at_every_level());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2142,6 +2527,75 @@ mod tests {
         assert!(t.valid);
         assert_eq!(t.src_w, 64);
         assert_eq!(t.src_h, 48);
+    }
+
+    /// The album card stacks its name and its count 34 rows apart while the name's
+    /// own line box is 39 rows deep at the authored rung, so the count line's box
+    /// opens five rows inside the name's. That is the layout the screen has always
+    /// been drawn with, and this change is about the rung rather than about it, so
+    /// what is pinned here is what the ladder does to it: every rung above the
+    /// authored one grows the name's box and the stride below it by the same rows,
+    /// which leaves the overlap exactly as it was found, and the rung below the
+    /// authored one keeps the authored stride rather than shrinking it, which
+    /// separates the two boxes instead of pushing the count line up into a name.
+    /// The five-row overlap itself is unfinished work, not a contract.
+    #[test]
+    fn the_album_runs_keep_their_gap_at_every_rung() {
+        let gap_at = |lvl: u8| {
+            album_count_inset_at(lvl) as isize
+                - (album_title_inset_at(lvl) + rows_at(ALBUM_TITLE_RUNG, lvl)) as isize
+        };
+        let authored = gap_at(PLATFORM_LEVEL);
+        assert_eq!(
+            authored, -5,
+            "the album name's box and its count line moved against each other at the \
+             authored rung, where the card was drawn 34 rows apart behind a 39-row band"
+        );
+        for lvl in PLATFORM_LEVEL..=MAX_LEVEL {
+            assert_eq!(
+                gap_at(lvl),
+                authored,
+                "rung {} changed the overlap between the album name's box and its count line",
+                lvl
+            );
+        }
+        assert!(
+            gap_at(0) >= 0,
+            "the smallest rung put the count line {} rows inside the album name's box",
+            -gap_at(0)
+        );
+    }
+
+    /// A plate too small to hold the three-byte mark is the one refusal
+    /// `ellipsize_run` answers without writing a byte, and the card still has to be
+    /// handed bytes its own name says: the cut copied into the caller's buffer,
+    /// never whatever that buffer was holding before.
+    ///
+    /// WHY the refusal is reached through the plate and not the lane: no album card
+    /// is narrower than the mark -- the gate beside `ALBUM_TEXT_LANE` refuses the
+    /// day one is -- so a lane cut is the app's own case, while a one- or two-byte
+    /// plate is the only way to make the trim say no inside a test.
+    #[test]
+    fn a_refused_trim_copies_its_cut_into_the_plate_it_was_given() {
+        let long = [b'e'; 240];
+        // Wide enough for a glyph or two at every rung, far short of the whole run,
+        // so the plate alone is what makes the trim refuse.
+        let lane = 200usize;
+        for room in [1usize, 2] {
+            let mut backing = [0u8; 2];
+            let cut = fitted_run(&long, ALBUM_TITLE_RUNG, lane, &mut backing[..room]);
+            assert!(
+                !cut.is_empty() && cut.len() <= room,
+                "a {}-byte plate was answered with {} bytes",
+                room,
+                cut.len()
+            );
+            assert!(
+                long.starts_with(cut),
+                "a {}-byte plate was handed bytes its label never had",
+                room
+            );
+        }
     }
 }
 
