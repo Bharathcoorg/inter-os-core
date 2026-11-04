@@ -45,10 +45,11 @@ use std::design::scroll::ScrollState;
 use agent_manager::theme::THEME;
 
 use agent_manager::{
-    build_embed_request, embed_attribution, format_threshold, format_u32, granted_capability_count,
-    load_saved_provider, probe_capability_grants, providers, read_embed_reply,
-    resolve_inference_service, save_preferred_provider, service_name, AgentTool, AgentToolOutcome,
-    CapabilityGrant, ChatRole, ChatSession, ConsentOutcome, DeviceState, EmbedProbe, InstallState,
+    build_embed_request, embed_attribution, format_threshold, format_u32, generation_answer,
+    granted_capability_count, load_saved_provider, probe_capability_grants, providers,
+    read_embed_reply, resolve_inference_service, save_preferred_provider, service_name,
+    write_refusal_without_words, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole,
+    ChatSession, ConsentOutcome, DeviceState, EmbedProbe, GenerationAnswer, InstallState,
     ModelProbeStatus, PackageInstallOutcome, PackageRemoveOutcome, ProbeState, ProbeStatus,
     Provider, RegistryPackageState, RuntimeBinding, RuntimeDiagnostics, SearchConfiguration,
     SelfTest, ServiceState, Surface, ToolAuthority, transact_package_install,
@@ -833,15 +834,12 @@ fn chat_role_ink(role: ChatRole) -> Tone {
 
 /// The voice an answer arrives in, given what the service said about it.
 ///
-/// WHY a refusal is a notice and not the model's words: an answer that says the
-/// platform could not answer is the platform speaking, and putting it in the
-/// assistant's bubble would let the transcript claim a model said it.
+/// WHY the decision lives in the library and not here: the chat and the embedding
+/// card read the same status codes, and a voice decided twice is a voice that can
+/// disagree about whether the platform spoke or the model did. The rule -- a refusal
+/// is the platform's notice, never the model's words -- is `agent_manager::answer_role`.
 fn answer_role(status: u32) -> ChatRole {
-    if status == std::ai::STATUS_SUCCESS {
-        ChatRole::Assistant
-    } else {
-        ChatRole::Notice
-    }
+    agent_manager::answer_role(status)
 }
 
 /// Takes the retrieval frame off the channel a search notice named.
@@ -2967,9 +2965,7 @@ impl AgentManagerApp {
             put(&mut line, &mut n, b" bytes reached the app.");
             self.set_action(&line[..n], Tone::Unavailable);
         } else if arrived == 0 {
-            self.chat
-                .push(ChatRole::Notice, b"The service answered with no bytes at all.");
-            self.set_action(b"Empty answer from the inference service.", Tone::Unavailable);
+            self.report_wordless_answer(status, offered);
         } else if kept < arrived {
             let mut line = [0u8; 64];
             let mut n = 0;
@@ -2989,6 +2985,42 @@ impl AgentManagerApp {
         }
         self.rebuild();
         true
+    }
+
+    /// Reports a reply that reached the app with no words in it.
+    ///
+    /// WHY this is not one line for every such reply: the sentence this arm used to
+    /// print -- "The service answered with no bytes at all." -- is true of an answer
+    /// that came back empty, and false of a refusal. A refusal from this platform is
+    /// a sentence naming why nothing ran; when the transport loses that sentence and
+    /// only the status survives, the honest thing left to say is whose refusal it
+    /// was and how much of it arrived, which is what `generation_answer` decides and
+    /// `write_refusal_without_words` writes. Nothing here speaks for the model.
+    fn report_wordless_answer(&mut self, status: u32, offered: u32) {
+        match generation_answer(status, &[], offered) {
+            GenerationAnswer::Refusal {
+                status,
+                arrived,
+                offered,
+            } => {
+                let mut line = [0u8; 192];
+                let n = write_refusal_without_words(status, arrived, offered, &mut line);
+                self.chat.push(ChatRole::Notice, &line[..n]);
+                self.set_action(b"The inference service refused the request.", Tone::Unavailable);
+            }
+            GenerationAnswer::EmptyAnswer => {
+                self.chat
+                    .push(ChatRole::Notice, b"The service answered with no bytes at all.");
+                self.set_action(b"Empty answer from the inference service.", Tone::Unavailable);
+            }
+            // Chosen only by a reply that has words, and this arm is reached with
+            // none, so the bubble it fills is the platform's text whatever it is --
+            // shown rather than argued with, and never with a panic in a draw pass.
+            GenerationAnswer::Words { role, text } => {
+                self.chat.push(role, text);
+                self.set_action(b"The inference service refused the request.", Tone::Unavailable);
+            }
+        }
     }
 
     /// Says that a reply arrived and is not one this app can read.

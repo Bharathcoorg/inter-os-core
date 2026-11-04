@@ -538,6 +538,144 @@ impl ChatSession {
 }
 
 // -----------------------------------------------------------------------------
+// What the chat shows for an answer the platform sent
+// -----------------------------------------------------------------------------
+
+/// The voice an answer arrives in, given what the platform said about it.
+///
+/// WHY a refusal is a notice and not the model's words: an answer that says the
+/// platform could not answer is the platform speaking, and putting it in the
+/// assistant's bubble would let the transcript claim a model said it.
+///
+/// WHY it lives here rather than beside the reader in `main.rs`: this is the second
+/// route that has to decide it (the embedding card attributes from the same
+/// statuses), and a decision the transcript and the card make separately is two
+/// decisions that can disagree about whether the platform spoke or the model did.
+pub const fn answer_role(status: u32) -> ChatRole {
+    if status == interos_std::ai::STATUS_SUCCESS {
+        ChatRole::Assistant
+    } else {
+        ChatRole::Notice
+    }
+}
+
+/// The platform's own name for one status code.
+///
+/// WHY the name and not the number: a bare `3` on a screen tells the reader nothing
+/// to act on, and the difference between "the platform would not run this" and "the
+/// platform could not" is the difference between re-sending and installing. These
+/// are the SDK's definitions of its own codes
+/// (`sdk/rust/interos-std/src/ai.rs`, `STATUS_*`), not categories this app invented.
+pub const fn status_word(status: u32) -> &'static [u8] {
+    match status {
+        interos_std::ai::STATUS_SUCCESS => b"answered",
+        interos_std::ai::STATUS_UNAVAILABLE => b"unavailable",
+        interos_std::ai::STATUS_ERROR => b"an execution error",
+        interos_std::ai::STATUS_UNSUPPORTED => b"unsupported",
+        interos_std::ai::STATUS_CANCELLED => b"cancelled",
+        interos_std::ai::STATUS_BASELINE_LEXICAL => b"the lexical baseline",
+        _ => b"a status this app does not know",
+    }
+}
+
+/// What the chat shows for one generation reply, decided from what reached the app.
+///
+/// WHY a decision of the status and the bytes rather than a chain of `if`s at the
+/// reader: `close_answer` used to hand every zero-byte reply the same line -- "The
+/// service answered with no bytes at all." -- and on a refusal that line is wrong
+/// twice over. The platform did not answer, and it is not the service's silence
+/// that stopped the reader from seeing a reason: the reason exists, it is the
+/// service's own sentence, and it was the transport that lost it. Naming the status
+/// and both byte counts is the most this app can honestly say about a refusal whose
+/// words it never received, and it is a different sentence from the one an empty
+/// success deserves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenerationAnswer<'a> {
+    /// The platform's words arrived, so the transcript shows them and says nothing
+    /// of its own.
+    ///
+    /// WHY there is no rewording here: this app's whole discipline is that a refusal
+    /// is reported in the platform's words, and a summary written at the reader
+    /// would be this app's claim about a branch it did not observe.
+    Words { role: ChatRole, text: &'a [u8] },
+    /// The platform refused and none of its sentence reached the app.
+    ///
+    /// `offered` is the length the reply declared for itself and `arrived` the bytes
+    /// the app holds of it, which on this arm is zero: the two together are the only
+    /// part of the refusal that survived, and the reader is owed even those.
+    Refusal {
+        status: u32,
+        arrived: u32,
+        offered: u32,
+    },
+    /// The platform answered, and its answer carried no bytes.
+    EmptyAnswer,
+}
+
+/// Decides what the chat shows, from the status the reply carried and the words of
+/// it that arrived.
+///
+/// WHY the refusal arm is chosen by the status and not by the emptiness: a success
+/// that carries nothing is an empty answer, and a refusal that carries nothing is
+/// still a refusal -- the two have different next moves, and reading them from
+/// `text.is_empty()` alone would call a lost sentence an empty reply.
+pub const fn generation_answer(
+    status: u32,
+    text: &[u8],
+    offered: u32,
+) -> GenerationAnswer<'_> {
+    if text.len() > 0 {
+        GenerationAnswer::Words {
+            role: answer_role(status),
+            text,
+        }
+    } else if status == interos_std::ai::STATUS_SUCCESS {
+        GenerationAnswer::EmptyAnswer
+    } else {
+        GenerationAnswer::Refusal {
+            status,
+            arrived: 0,
+            offered,
+        }
+    }
+}
+
+/// Writes the app's own sentence for a refusal whose words did not arrive.
+///
+/// WHY the counts are the app's rather than the platform's: they are measurements
+/// the app took of its own buffer and of the length the reply declared, which is
+/// what every other shortfall line here prints. WHY the status is named in words:
+/// the code is the one thing that did survive a cut, and a reader who cannot tell a
+/// refusal from an error has no next move to make.
+pub fn write_refusal_without_words(
+    status: u32,
+    arrived: u32,
+    offered: u32,
+    out: &mut [u8],
+) -> usize {
+    let mut n = 0usize;
+    put_line(out, &mut n, b"The platform refused this generation: ");
+    put_line(out, &mut n, status_word(status));
+    put_line(out, &mut n, b". Its refusal declared ");
+    n += format_u32(offered, &mut out[n..]);
+    put_line(out, &mut n, b" bytes and ");
+    n += format_u32(arrived, &mut out[n..]);
+    put_line(out, &mut n, b" reached this app; the reason it gave is not here.");
+    n
+}
+
+/// Appends `text` to a bounded line, stopping at the buffer's edge.
+///
+/// WHY a word is never written part-way in the helpers above: a sentence that stops
+/// inside a number reads as a different number, and a reader cannot tell where the
+/// app's own buffer ended from where the transport did.
+fn put_line(out: &mut [u8], at: &mut usize, text: &[u8]) {
+    let take = text.len().min(out.len().saturating_sub(*at));
+    out[*at..*at + take].copy_from_slice(&text[..take]);
+    *at += take;
+}
+
+// -----------------------------------------------------------------------------
 // Providers
 // -----------------------------------------------------------------------------
 
@@ -4400,6 +4538,126 @@ mod tests {
         chat.push(ChatRole::Assistant, &long);
         assert_eq!(chat.last_text_len(), CHAT_TEXT_MAX);
         assert_eq!(chat.append_chunk(b"tail"), 0, "a full bubble holds nothing more");
+    }
+
+    #[test]
+    fn a_generative_refusal_is_shown_in_the_platform_s_own_words() {
+        // WHAT THIS IS FOR: the service refuses a prompt the transport cut with a
+        // sentence naming both byte counts, and the transcript has to carry that
+        // sentence -- in the platform's voice, unaltered. An app that summarized it
+        // would be reporting its own guess about a branch it did not observe, and an
+        // app that painted it as the model's words would be putting a refusal in a
+        // model's mouth.
+        let words: &[u8] =
+            b"Generation refused: this request declares 300 prompt bytes and the transport delivered 40.";
+        for status in [
+            interos_std::ai::STATUS_UNAVAILABLE,
+            interos_std::ai::STATUS_ERROR,
+            interos_std::ai::STATUS_UNSUPPORTED,
+            interos_std::ai::STATUS_CANCELLED,
+            interos_std::ai::STATUS_BASELINE_LEXICAL,
+            99,
+        ] {
+            assert_eq!(
+                generation_answer(status, words, 300),
+                GenerationAnswer::Words {
+                    role: ChatRole::Notice,
+                    text: &words[..]
+                },
+                "status {status} was shown in something other than the platform's voice"
+            );
+        }
+        // The one status that is the model's voice is the one where the platform says
+        // it ran.
+        assert_eq!(
+            generation_answer(interos_std::ai::STATUS_SUCCESS, words, 300),
+            GenerationAnswer::Words {
+                role: ChatRole::Assistant,
+                text: &words[..]
+            }
+        );
+        // And the words are the reply's bytes, not a copy the app edited.
+        if let GenerationAnswer::Words { text, .. } = generation_answer(
+            interos_std::ai::STATUS_UNSUPPORTED,
+            words,
+            words.len() as u32,
+        ) {
+            assert_eq!(text, &words[..], "the refusal was reworded on the way to the screen");
+        } else {
+            panic!("a refusal that arrived was not treated as arriving");
+        }
+    }
+
+    #[test]
+    fn a_refusal_that_lost_its_words_is_not_reported_as_an_empty_answer() {
+        // WHAT THIS IS FOR: the refusal travels on an answer channel because a
+        // mailbox message keeps forty bytes of it, and a reader that prints "The
+        // service answered with no bytes at all." for a reply whose status says the
+        // request was refused gets two things wrong at once -- the platform did not
+        // answer, and its reason exists whether or not this app received it. The
+        // app's own line says whose refusal it was and how much of it survived, and
+        // says nothing that could be read as the model's.
+        let refused = generation_answer(interos_std::ai::STATUS_UNSUPPORTED, &[], 460);
+        assert_eq!(
+            refused,
+            GenerationAnswer::Refusal {
+                status: interos_std::ai::STATUS_UNSUPPORTED,
+                arrived: 0,
+                offered: 460,
+            },
+            "a refusal with no bytes was decided as something other than a refusal"
+        );
+        assert_ne!(
+            refused,
+            GenerationAnswer::EmptyAnswer,
+            "a refusal was decided as an answer that came back empty"
+        );
+        // An answer that really did come back empty keeps its own line: the two are
+        // different events, and reading them from the emptiness alone conflates them.
+        assert_eq!(
+            generation_answer(interos_std::ai::STATUS_SUCCESS, &[], 0),
+            GenerationAnswer::EmptyAnswer
+        );
+
+        let mut line = [0u8; 192];
+        let n = write_refusal_without_words(
+            interos_std::ai::STATUS_UNSUPPORTED,
+            0,
+            460,
+            &mut line,
+        );
+        let shown = core::str::from_utf8(&line[..n]).expect("the line is text");
+        assert!(shown.contains("refused"), "the refusal was not named as one: {shown}");
+        assert!(
+            shown.contains("unsupported"),
+            "the refusal did not name the status that survived: {shown}"
+        );
+        assert!(shown.contains("460") && shown.contains("0"), "both counts are missing: {shown}");
+        for bytes in line[..n].windows(b"answered".len()) {
+            assert_ne!(bytes, &b"answered"[..], "a refusal was reported as an answer: {shown}");
+        }
+        // Every status the platform can stamp gets its own word, and none of them is
+        // spelled as a success this app decided for itself.
+        for status in [
+            interos_std::ai::STATUS_UNAVAILABLE,
+            interos_std::ai::STATUS_ERROR,
+            interos_std::ai::STATUS_UNSUPPORTED,
+            interos_std::ai::STATUS_CANCELLED,
+        ] {
+            let mut one = [0u8; 192];
+            let taken = write_refusal_without_words(status, 0, 460, &mut one);
+            assert!(taken > 0, "status {status} rendered no line at all");
+            let text = core::str::from_utf8(&one[..taken]).expect("the line is text");
+            assert!(
+                text.contains(core::str::from_utf8(status_word(status)).unwrap()),
+                "status {status} lost its own name: {text}"
+            );
+            assert_ne!(
+                status_word(status),
+                b"answered".as_slice(),
+                "a refusal borrowed the vocabulary of a success"
+            );
+        }
     }
 
     #[test]

@@ -950,6 +950,191 @@ def test_the_embedding_card_reads_a_refusal_the_service_streamed():
         assert not faults, f"{path}: {faults}"
 
 
+def _wordless_answer_faults(lib: str, main: str) -> list:
+    """Every way a reply that arrives with no words in it stops being a refusal.
+
+    WHY this is a contract and not a sentence in a comment: the app used to print
+    one line for every zero-byte reply -- "The service answered with no bytes at
+    all." -- and a refusal is not a service that answered. The platform's reason
+    was written, streamed, and lost in the transport; the status and the two byte
+    counts are all of it that survived. Reporting that as the service's silence
+    tells the reader nothing went wrong, and reporting it in the assistant's
+    bubble tells the reader a model spoke when nothing ran.
+    """
+    faults = []
+
+    role = _body_if(main, "fn answer_role(")
+    if "agent_manager::answer_role(status)" not in role:
+        faults.append("the reader decides the voice again instead of asking the library")
+    if "STATUS_SUCCESS" in role:
+        faults.append(
+            "the app's own voice rule is back, where the chat and the embedding card "
+            "can disagree about whether the platform spoke or the model did"
+        )
+
+    decided = _body_if(lib, "pub const fn generation_answer(")
+    for shape in ("GenerationAnswer::Words", "GenerationAnswer::EmptyAnswer", "GenerationAnswer::Refusal"):
+        if shape not in decided:
+            faults.append(f"the answer decision no longer has a {shape} case")
+    if "status == interos_std::ai::STATUS_SUCCESS" not in decided:
+        faults.append(
+            "a wordless reply is read from its emptiness alone, so a refusal whose "
+            "sentence was lost is reported as an empty answer"
+        )
+
+    closer = _body_if(main, "fn close_answer(")
+    if "self.report_wordless_answer(status, offered)" not in closer:
+        faults.append("the zero-byte arm does not ask what a wordless reply was")
+    if '"The service answered with no bytes at all."' in closer:
+        faults.append("the zero-byte arm prints the empty-answer line for every reply again")
+
+    wordless = _body_if(main, "fn report_wordless_answer(")
+    if "write_refusal_without_words(status, arrived, offered" not in wordless:
+        faults.append("a refusal with no words reaches the screen as a summary written here")
+    if "self.chat.push(ChatRole::Notice, &line[..n]);" not in wordless:
+        faults.append("the app's sentence for a lost refusal is not painted as the platform's")
+
+    line = _body_if(lib, "pub fn write_refusal_without_words(")
+    for part in (
+        "status_word(status)",
+        "format_u32(offered",
+        "format_u32(arrived",
+        'b" reached this app; the reason it gave is not here."',
+    ):
+        if part not in line:
+            faults.append(f"the refusal line no longer carries {part!r}")
+    if "put_line(out, &mut n," not in line:
+        faults.append("the refusal line writes somewhere other than the caller's fixed buffer")
+
+    words = _body_if(lib, "pub const fn status_word(")
+    if "a status this app does not know" not in words:
+        faults.append("an unknown status code is given a name this app invented")
+    if "STATUS_CANCELLED" not in words:
+        faults.append("the status words are no longer the SDK's own codes")
+    return faults
+
+
+def test_a_refusal_that_arrives_without_words_is_still_a_refusal():
+    """Zero bytes with a refusal on it is not the service having said nothing.
+
+    The service's generative refusals are sentences -- both byte counts for a
+    prompt the transport cut, the file's own geometry for a model the engine
+    cannot build -- and they travel on the answer channel because the mailbox
+    keeps forty bytes of them. When none of those bytes reach this app, the only
+    things left are the status the reply carried and the length it declared, and
+    the app owes the reader both: which refusal it was, how much of it arrived,
+    and that the reason it gave is not here. An empty *success* is a different
+    event and gets its own line, because nothing was refused.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        faults = _wordless_answer_faults(lib, main)
+        assert not faults, f"{path}: {faults}"
+
+
+def test_the_wordless_answer_contract_can_fail():
+    """A contract nobody has seen fail is a comment.
+
+    WHY these arms mutate the app's real source rather than a fixture: every rule
+    above is about which of this app's functions decides what the transcript says,
+    and a fixture would only prove that the detector reads the shape it was
+    written for. Each fault is the defect as it shipped, put back into one copy of
+    the source; the detector has to catch it, and `str.replace` refusing to find
+    its target is itself the failure this file exists to catch.
+    """
+    for lib, main, _theme in SOURCES.values():
+        assert not _wordless_answer_faults(lib, main), (
+            "the wordless-answer detector fires on the app as it stands: "
+            f"{_wordless_answer_faults(lib, main)}"
+        )
+
+    cases = [
+        (
+            "a reader that decides the voice for itself again",
+            lambda lib, main: (
+                lib,
+                main.replace(
+                    "    agent_manager::answer_role(status)",
+                    "    if status == std::ai::STATUS_SUCCESS { ChatRole::Assistant } "
+                    "else { ChatRole::Notice }",
+                    1,
+                ),
+            ),
+        ),
+        (
+            "an emptiness that decides what a wordless reply was",
+            lambda lib, main: (
+                lib.replace(
+                    "    } else if status == interos_std::ai::STATUS_SUCCESS {",
+                    "    } else if text.len() == 0 {",
+                    1,
+                ),
+                main,
+            ),
+        ),
+        (
+            "a zero-byte arm that prints one line for every reply",
+            lambda lib, main: (
+                lib,
+                main.replace(
+                    "            self.report_wordless_answer(status, offered);",
+                    '            self.chat.push(ChatRole::Notice, b"The service answered '
+                    'with no bytes at all.");',
+                    1,
+                ),
+            ),
+        ),
+        (
+            "a refusal summarised by the app instead of measured by it",
+            lambda lib, main: (
+                lib,
+                main.replace(
+                    "                let n = write_refusal_without_words(status, arrived, offered, &mut line);",
+                    "                let n = 0;",
+                    1,
+                ),
+            ),
+        ),
+        (
+            "the app's own sentence painted in the model's voice",
+            lambda lib, main: (
+                lib,
+                main.replace(
+                    "                self.chat.push(ChatRole::Notice, &line[..n]);",
+                    "                self.chat.push(ChatRole::Assistant, &line[..n]);",
+                    1,
+                ),
+            ),
+        ),
+        (
+            "a refusal line that drops the counts it took itself",
+            lambda lib, main: (
+                lib.replace("    n += format_u32(arrived, &mut out[n..]);", "    let _ = arrived;", 1),
+                main,
+            ),
+        ),
+        (
+            "a status this app has no word for, given one anyway",
+            lambda lib, main: (
+                lib.replace(
+                    '        _ => b"a status this app does not know",',
+                    '        _ => b"cancelled",',
+                    1,
+                ),
+                main,
+            ),
+        ),
+    ]
+    for label, mutate in cases:
+        for path, (lib, main, _theme) in SOURCES.items():
+            mutated_lib, mutated_main = mutate(lib, main)
+            assert (mutated_lib, mutated_main) != (lib, main), (
+                f"{label} found nothing to change in {path}: the fault has nowhere to go"
+            )
+            assert _wordless_answer_faults(mutated_lib, mutated_main), (
+                f"{label} went unnoticed in {path}"
+            )
+
+
 def test_an_install_is_reported_as_the_platforms_own_words():
     """INSTALL asks the inference service and paints its answer, not the app's.
 
