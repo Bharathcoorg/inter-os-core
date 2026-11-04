@@ -92,3 +92,15 @@ emulator/frame_section_*.png
 !emulator/icon-*.png
 .pytest_cache/
 
+# One-time local probe and capture scripts. Each of these was written to answer a
+# question about one build; none is referenced by a gate, a doc or another tool,
+# so a committed copy is a file nobody can explain. Run them from a local copy.
+tools/capture_playwright.py
+tools/capture_studio.py
+tools/font_specimen.py
+tools/split_screens.py
+tools/test_focus_and_power.py
+tools/test_interaction.py
+tools/test_studio_aesthetic.py
+tools/verify_surfaces.py
+
