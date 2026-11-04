@@ -712,3 +712,162 @@ impl Results {
         (hit.score << 8) | (hit.kind.order() as u32)
     }
 }
+
+// -----------------------------------------------------------------------------
+// The lines the search surface may ink
+// -----------------------------------------------------------------------------
+
+/// How many rows the search surface's list region can ink.
+///
+/// WHY this reads [`crate::layout::SEARCH_MAX_ROWS`] and not its own number: the
+/// row the painter inks and the row a tap resolves are the same rectangle only
+/// while both read one count, and the band a keystroke repaints is measured
+/// against the layout's number by `apps/launcher/src/tests.rs`.
+pub const MAX_LIST_ROWS: usize = crate::layout::SEARCH_MAX_ROWS;
+
+/// The one hint the query field carries while nobody has typed a needle.
+///
+/// WHY the copy lives here: it is a *hint*, not a result, and the rule that keeps
+/// it a hint -- inked only while the field is empty, and only inside the field --
+/// has to be in one place a host test can reach. A surface that writes its own
+/// copy of that rule is a surface that can ink it in a row slot.
+pub const FIELD_HINT: &[u8] = b"Search apps, settings and files";
+
+/// One row the list region holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListRow {
+    /// The rank of the hit this row paints; a tap on the row opens this hit.
+    pub rank: usize,
+    /// Where the entry this row names sits in the index.
+    pub entry: usize,
+}
+
+/// The rows the list region holds for one answer.
+///
+/// WHY a type and not a loop in the painter: the surface used to walk the ranking
+/// inside its own `build`, stop at the first hit the index could not name, and
+/// hand the tap path a *different* number -- the ranking's own count -- to hit-test
+/// against. So the panel inked two rows, answered taps on six, and the slots under
+/// the ink held nothing but whatever the last frame left there. One list, built
+/// from the answer and the index together, is the only arrangement where the paint
+/// and the tap cannot disagree about which rows exist.
+#[derive(Clone, Copy)]
+pub struct ListRows {
+    rows: [Option<ListRow>; MAX_LIST_ROWS],
+    len: usize,
+}
+
+impl ListRows {
+    /// A list with nothing in it.
+    pub const fn none() -> ListRows {
+        ListRows {
+            rows: [None; MAX_LIST_ROWS],
+            len: 0,
+        }
+    }
+
+    /// The rows the surface has to ink for this answer.
+    ///
+    /// WHY a hit whose entry the index cannot name is skipped rather than taken as
+    /// the end of the list: the hits under it are still the answer the ranking
+    /// returned, and a list that stops at a hole hides results behind it -- and
+    /// WHY it is skipped rather than inked with a stale entry: a row painted from
+    /// an entry the index no longer holds is ink standing over a region the service
+    /// gave nothing for, which is the one thing this surface must not do.
+    pub fn build(results: &Results, index: &Index) -> ListRows {
+        let mut list = ListRows::none();
+        let mut rank = 0usize;
+        while rank < results.count && list.len < MAX_LIST_ROWS {
+            let Some(hit) = results.hit(rank) else {
+                break;
+            };
+            if index.get(hit.index as usize).is_some() {
+                list.rows[list.len] = Some(ListRow {
+                    rank,
+                    entry: hit.index as usize,
+                });
+                list.len += 1;
+            }
+            rank += 1;
+        }
+        list
+    }
+
+    /// How many rows the list holds.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the list holds no row at all.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The row in the list's `slot`th place.
+    pub fn get(&self, slot: usize) -> Option<ListRow> {
+        if slot < self.len {
+            self.rows[slot]
+        } else {
+            None
+        }
+    }
+
+    /// The rank of the row (`x`, `y`) lands on, or `None` for a slot the list does
+    /// not hold.
+    ///
+    /// WHY the rank and not the slot: the two are the same number only while every
+    /// hit names an entry. Once a hit is skipped the third inked row is the answer
+    /// to the person's *third* result, and opening the hit at slot three would open
+    /// something else.
+    pub fn row_at(&self, x: usize, y: usize) -> Option<usize> {
+        let mut slot = 0usize;
+        while slot < self.len {
+            if row_rect(slot).contains(x, y) {
+                return self.get(slot).map(|row| row.rank);
+            }
+            slot += 1;
+        }
+        None
+    }
+}
+
+/// The rectangle of the list's `slot`th row.
+///
+/// WHY the slot and not the rank: the list is inked top-down in the slots it holds,
+/// so the third inked row sits in the third slot whatever rank the ranking gave it
+/// -- and the tap has to be answered from the same slot the painter filled.
+pub fn row_rect(slot: usize) -> crate::layout::Rect {
+    crate::layout::Rect::new(
+        crate::layout::SEARCH_FIELD.x,
+        crate::layout::search_row_top(slot),
+        crate::layout::SEARCH_FIELD.w,
+        crate::layout::SEARCH_ROW_H - 8,
+    )
+}
+
+/// The field's hint: the copy it carries while nobody has typed a needle.
+///
+/// WHY `None` the moment a needle exists: a hint inked behind a typed query reads
+/// as a suggestion the person did not ask for, sitting on top of what they typed.
+pub const fn field_hint(needle_len: usize) -> Option<&'static [u8]> {
+    if needle_len == 0 {
+        Some(FIELD_HINT)
+    } else {
+        None
+    }
+}
+
+/// Whether the line under the verdict card may be inked.
+///
+/// WHAT that line says: "Tap a result to open it. Backspace edits the query." Both
+/// halves are promises about state the surface may not hold -- a row to tap, and a
+/// query to edit -- so the line is inked only while both are true.
+///
+/// WHY it is not inked in the empty state at all: the alternative is to invent a
+/// sentence for the region the answer left empty, and an invented sentence over
+/// dead space is what the person reads as a result they did not get. The headline
+/// above the list already says the one thing the surface knows -- "Type to search"
+/// while nobody has typed, "No results" when a needle brought nothing back.
+pub const fn foot_line_applies(needle_len: usize, rows: usize) -> bool {
+    needle_len > 0 && rows > 0
+}

@@ -4920,9 +4920,10 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                if let Some(rank) =
-                                    screens::search::result_at(x, y, state.search_results.count)
-                                {
+                                // WHY the row comes from the list this surface would ink and
+                                // not from the ranking's count: see `screens::search::result_at`.
+                                let tapped = screens::search::result_at(x, y, &state);
+                                if let Some(rank) = tapped {
                                     if open_search_result(&mut state, rank) {
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log("[LAUNCHER] Opened a search result.").ok();

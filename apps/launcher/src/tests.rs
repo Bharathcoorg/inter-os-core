@@ -1603,3 +1603,172 @@ fn the_search_band_holds_every_box_a_query_can_move() {
         crate::nav::BAND_TOP
     );
 }
+
+// ---------------------------------------------------------------------------
+// The search surface's list: only the lines the answer returned
+//
+// WHY these are pinned here and not only in the surface: `apps/launcher/src/
+// screens/search.rs` is part of a `#![no_main]` binary, so no host process can
+// paint it -- which is exactly how "the search screen showed me rows I had not
+// asked for" stayed a screenshot nobody could reproduce. The three rules that
+// decide what the list region inks (which hits become rows, whether the line
+// under the verdict card is owed to the person, and whether the field's hint is
+// still standing there once a needle exists) are moved into `crate::search` for
+// that reason, and the surface reads them from there.
+// ---------------------------------------------------------------------------
+
+/// The search surface's list, and the field's hint, as the surface reads them.
+use crate::search::{field_hint, foot_line_applies, row_rect, ListRows, MAX_LIST_ROWS, FIELD_HINT};
+use crate::search::Hit as SearchHit;
+
+/// An answer whose ranks name index slots, some of which the index may not hold.
+///
+/// WHY built by hand and not by `Index::search`: the ranking cannot produce a hit
+/// for an entry the index does not hold, and the hole is the case that decides
+/// whether the list paints ink it has no answer behind. It arrives when the index
+/// is rebuilt under an answer that was ranked against the previous one.
+fn answer(ranks: &[usize]) -> crate::search::Results {
+    let mut results = crate::search::Results::new();
+    for (rank, &entry) in ranks.iter().enumerate() {
+        results.hits[rank] = SearchHit {
+            index: entry as u16,
+            score: 1_000 - rank as u32,
+            kind: SearchKind::App,
+        };
+        results.count += 1;
+    }
+    results
+}
+
+fn one_entry_index() -> search::Index {
+    let mut index = search::Index::new();
+    index.push(Entry::new(
+        SearchKind::App,
+        b"Messages",
+        b"Tools",
+        b"org.interos.messages",
+    ));
+    index
+}
+
+#[test]
+fn an_answer_with_nothing_in_it_lists_no_rows() {
+    let index = sample_index();
+
+    // The needle was typed and nothing came back.
+    let nothing = index.search(b"zzzzz", &ExactMatch);
+    assert_eq!(nothing.count, 0, "the premise: the answer is empty");
+    assert!(
+        ListRows::build(&nothing, &index).is_empty(),
+        "an empty answer has to leave the list region empty, or whatever is inked there is a row the search never returned"
+    );
+
+    // Nobody typed anything yet, so no search ran to have found anything.
+    let waiting = index.search(b"", &ExactMatch);
+    assert!(
+        ListRows::build(&waiting, &index).is_empty(),
+        "the empty field must not be shown as a list of things to tap"
+    );
+}
+
+#[test]
+fn no_placeholder_line_survives_a_typed_needle() {
+    // The hint is the field's, and only while the field is empty.
+    assert_eq!(
+        field_hint(0),
+        Some(FIELD_HINT),
+        "an empty field has to say what it is for"
+    );
+    assert_eq!(
+        field_hint(1),
+        None,
+        "one byte typed is a needle, and a hint inked over it is a second query nobody asked"
+    );
+    assert_eq!(field_hint(b"messages".len()), None, "the hint has to stay gone");
+
+    // And it is visibly a hint: the muted ink, never the needle's own.
+    assert_ne!(
+        crate::theme::SHELL.on_surface_variant,
+        crate::theme::SHELL.on_surface,
+        "the hint and a typed needle would be drawn in one ink, so nothing on the field says which is which"
+    );
+
+    // Nothing the hint can be placed on sits in the list region: every row the
+    // list could ink begins below the field the hint belongs to.
+    let field_bottom = SEARCH_FIELD.y + SEARCH_FIELD.h;
+    for slot in 0..MAX_LIST_ROWS {
+        assert!(
+            row_rect(slot).y >= field_bottom,
+            "row {slot} starts at {}, inside the query field's rows {}, so a hint inked there would read as a result",
+            row_rect(slot).y,
+            field_bottom
+        );
+    }
+}
+
+#[test]
+fn the_list_holds_every_hit_the_index_can_name_and_only_those() {
+    let index = one_entry_index();
+    // Rank 1 names slot 7, which the index does not hold; ranks 0 and 2 name the
+    // entry it does.
+    let rows = ListRows::build(&answer(&[0, 7, 0]), &index);
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "a hit whose entry the index cannot name is not a row, but stopping at it drops the results under it too"
+    );
+    for slot in 0..rows.len() {
+        let row = rows.get(slot).expect("the list holds the slots it counts");
+        assert!(
+            index.get(row.entry).is_some(),
+            "row {slot} names index slot {}, which the index does not hold, so the surface would ink a row with no entry behind it",
+            row.entry
+        );
+    }
+    assert_eq!(
+        rows.get(rows.len()).map(|row| row.rank),
+        None,
+        "the list must not count a slot it has no row for"
+    );
+}
+
+#[test]
+fn a_tap_opens_the_rank_its_row_was_returned_for() {
+    let index = one_entry_index();
+    let rows = ListRows::build(&answer(&[0, 7, 0]), &index);
+
+    // The second inked row is rank 2, because rank 1 named an entry that is gone.
+    let second = row_rect(1);
+    assert_eq!(
+        rows.row_at(second.x + 8, second.y + 8),
+        Some(2),
+        "a tap has to open the hit the row it landed on was ranked for, not the slot it happened to sit in"
+    );
+
+    // And below the last inked row there is nothing to open.
+    let past = row_rect(rows.len());
+    assert_eq!(
+        rows.row_at(past.x + 8, past.y + 8),
+        None,
+        "a tap on the panel below the list answers a result the surface never painted"
+    );
+}
+
+#[test]
+fn the_line_under_the_card_promises_only_what_the_list_can_keep() {
+    // The foot line reads "Tap a result to open it. Backspace edits the query."
+    // Both halves are promises about state the surface may not have.
+    assert!(
+        !foot_line_applies(0, 0),
+        "nothing was typed and the list is empty, so the line promises a result to tap and a query to edit that are both not there"
+    );
+    assert!(
+        !foot_line_applies(b"zzzzz".len(), 0),
+        "a needle that brought nothing back has no result to tap, so the line is inked over the dead space the answer left"
+    );
+    assert!(
+        foot_line_applies(b"messages".len(), 2),
+        "with rows in the list the line is the instruction it claims to be"
+    );
+}

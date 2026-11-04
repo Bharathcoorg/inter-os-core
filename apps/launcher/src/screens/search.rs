@@ -19,7 +19,7 @@
 use crate::LauncherState;
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
-use launcher::search::{CategoryStatus, SearchKind};
+use launcher::search::{CategoryStatus, ListRows, SearchKind};
 use launcher::text::Label;
 use launcher::theme::{radius, space, type_scale, Theme, STATUS_BAR_HEIGHT};
 
@@ -35,16 +35,23 @@ const THEME: Theme = launcher::theme::SHELL;
 const NAV_INK: [u32; launcher::nav::MARK_SLOTS] = [THEME.on_surface_variant; launcher::nav::MARK_SLOTS];
 
 /// How many results the list shows.
-const MAX_ROWS: usize = launcher::layout::SEARCH_MAX_ROWS;
+///
+/// WHY read from the list model and not from the layout directly: the model sizes
+/// the rows it can hand back by this number, and a painter that inked more slots
+/// than the list holds would be back to answering taps on rows it never drew.
+const MAX_ROWS: usize = launcher::search::MAX_LIST_ROWS;
 
-/// The query field, the list's first row and one row's height.
+/// The query field and the box the hint is centred in.
 ///
 /// WHY these are read from `launcher::layout` and not typed here: the rows a
 /// keystroke repaints ([`query_band`]) are computed from the same rectangles, and
 /// `apps/launcher/src/tests.rs` checks the two against each other. A copy in this
 /// file would be a number no host test could tie to the band.
+///
+/// WHY one row's height is not among them: the row's rectangle is the list model's
+/// to hand out ([`launcher::search::row_rect`]), because the painter and the tap
+/// path have to be told the same geometry about the same slot.
 const FIELD: Rect = launcher::layout::SEARCH_FIELD;
-const ROW_H: usize = launcher::layout::SEARCH_ROW_H;
 const FIELD_X: usize = FIELD.x;
 const FIELD_Y: usize = FIELD.y;
 const FIELD_W: usize = FIELD.w;
@@ -102,6 +109,14 @@ struct Plan {
     hint: Label,
     /// The state this plan was built from.
     cached_query_len: usize,
+    /// The needle's bytes, not only their count.
+    ///
+    /// WHY both: the cache is read on a banded repaint, which never passes through
+    /// `(0, 0)`, and a length alone lets `browel` and `browser` share a plan -- the
+    /// rows under the field would then keep inking the previous needle's answer
+    /// while the headline counts the new one. The drawer already carries its query
+    /// bytes for this reason.
+    cached_query: [u8; 32],
     cached_result_count: usize,
     cached_index_len: usize,
 }
@@ -129,6 +144,7 @@ fn plan(x: usize, y: usize, state: &LauncherState) -> &'static Plan {
                 // last query would keep being drawn for the new one.
                 (x == 0 && y == 0)
                     || p.cached_query_len != state.search_query_len
+                    || p.cached_query != state.search_query
                     || p.cached_result_count != state.search_results.count
                     || p.cached_index_len != state.search_index.len()
             }
@@ -191,28 +207,38 @@ fn build(state: &LauncherState) -> Plan {
         ],
         hint: Label::EMPTY,
         cached_query_len: state.search_query_len,
+        cached_query: state.search_query,
         cached_result_count: state.search_results.count,
         cached_index_len: state.search_index.len(),
     };
 
-    // The query field's text.
+    // The query field's text: the needle, or the hint that says what the field is
+    // for while nobody has typed one.
+    //
+    // WHY the hint comes from `launcher::search::field_hint`: the rule that keeps a
+    // hint a hint -- no needle, and inside the field only -- is one rule, and the
+    // surface cannot enforce it from a copy of the literal. Once a needle exists the
+    // model answers `None` and the field's only ink is what was typed.
     let field_text_y = FIELD_Y + (FIELD_H - FIELD_TEXT_BOX_H) / 2;
-    if state.search_query_len > 0 {
-        plan.query = Label::at(
-            FIELD_X + 56,
-            field_text_y,
-            type_scale::BODY,
-            &state.search_query[..state.search_query_len],
-            theme.on_surface,
-        );
-    } else {
-        plan.placeholder = Label::at(
-            FIELD_X + 56,
-            field_text_y,
-            type_scale::BODY,
-            b"Search apps, settings and files",
-            theme.on_surface_variant,
-        );
+    match launcher::search::field_hint(state.search_query_len) {
+        None => {
+            plan.query = Label::at(
+                FIELD_X + 56,
+                field_text_y,
+                type_scale::BODY,
+                &state.search_query[..state.search_query_len],
+                theme.on_surface,
+            );
+        }
+        Some(hint) => {
+            plan.placeholder = Label::at(
+                FIELD_X + 56,
+                field_text_y,
+                type_scale::BODY,
+                hint,
+                theme.on_surface_variant,
+            );
+        }
     }
 
     // The headline: how many results the query found.
@@ -237,14 +263,26 @@ fn build(state: &LauncherState) -> Plan {
         theme.on_surface,
     );
 
-    // The result rows.
+    // The result rows: every row the list holds for this answer, and nothing else.
+    //
+    // WHY the list is built by `launcher::search::ListRows` and walked here: the
+    // rows painted, the count the tap path resolves and the slots the band repaints
+    // are one question -- which results does this answer actually hold -- and the
+    // surface used to answer it twice, once from the ranking's count and once from
+    // the rows it had entries for. Whatever the two answers disagreed about was
+    // inked, or tapped, over dead space.
+    let rows = ListRows::build(&state.search_results, &state.search_index);
     let mut row = 0usize;
-    while row < MAX_ROWS {
-        let Some(hit) = state.search_results.hit(row) else {
+    while row < rows.len() {
+        let Some(list_row) = rows.get(row) else {
             break;
         };
-        let Some(entry) = state.search_index.get(hit.index as usize) else {
-            break;
+        let Some(entry) = state.search_index.get(list_row.entry) else {
+            // Unreachable: the list only holds rows whose entry resolves. The slot
+            // is left un-inked rather than filled from anything else, so a row that
+            // cannot be named paints the panel and not a guess.
+            row += 1;
+            continue;
         };
         let y = launcher::layout::search_row_top(row);
         let mut badge = [0u8; 4];
@@ -357,8 +395,25 @@ fn build(state: &LauncherState) -> Plan {
         waiting,
     );
 
-    // The hint line, from the same call the band is measured against.
-    plan.hint = launcher::layout::search_hint_label(theme.on_surface_variant);
+    // The line under the verdict card. It reads "Tap a result to open it. Backspace
+    // edits the query." -- a promise about a row to tap and a query to edit -- so it
+    // is inked only while the list actually holds both.
+    //
+    // WHY `Label::EMPTY` otherwise: this is the empty state, and the state the
+    // surface is in is the state the surface says. Writing a different sentence for
+    // the same region would be the same mistake in another font: an example of what
+    // a list could do, standing in the space the answer left empty. The headline
+    // above the rows already says the one thing that is true here -- "Type to search"
+    // while nobody has typed, "No results" when a needle brought nothing back.
+    //
+    // WHY the repaint band still covers the box (see `query_band`): the line is gone
+    // only if the rows it used to sit on are re-inked; a band that stopped above it
+    // would leave the old promise standing there.
+    plan.hint = if launcher::search::foot_line_applies(state.search_query_len, rows.len()) {
+        launcher::layout::search_hint_label(theme.on_surface_variant)
+    } else {
+        Label::EMPTY
+    };
 
     plan
 }
@@ -442,28 +497,26 @@ fn reason_text(reason: &str, buf: &mut [u8]) -> usize {
     len
 }
 
-/// The row of the result at `rank`.
+/// The row of the result at `slot`.
 ///
 /// WHY the shell hit-tests with this and not with its own numbers: the row the
 /// painter drew and the row the tap resolves have to be the same row, and
-/// there is only one place that knows where a row is.
-pub fn result_rect(rank: usize) -> Rect {
-    Rect::new(
-        FIELD_X,
-        launcher::layout::search_row_top(rank),
-        FIELD_W,
-        ROW_H - 8,
-    )
+/// there is only one place that knows where a row is -- `launcher::search`, which
+/// both this surface and [`result_at`] read.
+pub fn result_rect(slot: usize) -> Rect {
+    launcher::search::row_rect(slot)
 }
 
-/// The result at (`x`, `y`).
-pub fn result_at(x: usize, y: usize, count: usize) -> Option<usize> {
-    for rank in 0..count.min(MAX_ROWS) {
-        if result_rect(rank).contains(x, y) {
-            return Some(rank);
-        }
-    }
-    None
+/// The rank of the result at (`x`, `y`) among the rows this surface would ink for
+/// the state in front of it.
+///
+/// WHY the list and not the ranking's count: the shell used to hit-test
+/// `0..state.search_results.count` slots while the painter stopped at the rows it
+/// could name, so a tap below the last inked row resolved a rank the person had
+/// never seen and opened a result that was not on the panel. Both halves now read
+/// the one list, and a slot the list does not hold answers nothing.
+pub fn result_at(x: usize, y: usize, state: &LauncherState) -> Option<usize> {
+    ListRows::build(&state.search_results, &state.search_index).row_at(x, y)
 }
 
 /// Rows a keystroke in the query field can move.
