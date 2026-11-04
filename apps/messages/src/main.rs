@@ -760,21 +760,76 @@ fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) 
     // `measure_bold` folds the renderer's one-column dilation into the width it
     // returns, so the dots already carry it and the budget below needs no weight
     // term: the finished run is `sum + dots`, which the bound keeps inside `max_w`.
+    //
+    // WHY the mark's three bytes come off the plate before the walk spends it: the
+    // copy below writes them at the end of whatever the lane took, so a bound that
+    // left room for the dots alone lets one more glyph in and the mark lands past
+    // the caller's end -- a panic in the painter, not a pixel in the wrong place.
     let em = std::design::font::em_for_scale_user(scale);
     let budget = max_w - dots;
+    let fit_len = longest_fit(text, em, budget, out.len() - 3);
+    out[..fit_len].copy_from_slice(&text[..fit_len]);
+    out[fit_len..fit_len + 3].copy_from_slice(DOTS);
+    fit_len + 3
+}
+
+/// The em the trim above spends its lane in: the ladder's at the default rung,
+/// the published one everywhere else -- the same face `fit_run` reads.
+fn trim_em(scale: usize) -> u32 {
+    if draws_at_ladder() {
+        std::design::font::em_for_scale(scale)
+    } else {
+        std::design::font::em_for_scale_user(scale)
+    }
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+/// given `room` bytes of the caller's plate for them.
+///
+/// WHY the walk is the trim's own: the lane and the mark are the same width spent
+/// twice, and a cut walked differently from the ellipsis disagrees with it about
+/// what a glyph costs -- which is how a refused run ended up past its plate.
+fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
     let mut current_w = 0usize;
     let mut fit_len = 0usize;
     for (i, &c) in text.iter().enumerate() {
         let adv = typeface::advance_px(c, em) as usize;
-        if current_w + adv > budget || fit_len + 3 > out.len() {
+        if current_w + adv > max_w || fit_len + 1 > room {
             break;
         }
         current_w += adv;
         fit_len = i + 1;
     }
-    out[..fit_len].copy_from_slice(&text[..fit_len]);
-    out[fit_len..fit_len + 3].copy_from_slice(DOTS);
-    fit_len + 3
+    fit_len
+}
+
+/// The run a container hands its painter: `fit_run`'s answer when the lane took
+/// the mark, and a hard cut to the lane when the lane refused it.
+///
+/// WHY a cut and not the label: `fit_run` answers `0` when even the ellipsis will
+/// not sit in the lane, and handing the caller the untouched label then inks a run
+/// past the plate that framed it -- the words a reader was promised in a card that
+/// cannot hold them. The cut is the same answer the lane gives when it does have
+/// room, minus the mark, and the bytes are copied into the caller's plate first:
+/// a refusal is the one answer that writes nothing, so a cut read straight back out
+/// of the buffer would be the stale zeros it was zeroed to.
+fn fitted_run<'a>(
+    text: &'a [u8],
+    scale: usize,
+    max_w: usize,
+    bold: bool,
+    out: &'a mut [u8],
+) -> &'a [u8] {
+    let len = fit_run(text, scale, max_w, bold, out);
+    if len > 0 {
+        return &out[..len];
+    }
+    if text.is_empty() || scale == 0 {
+        return text;
+    }
+    let fit = longest_fit(text, trim_em(scale), max_w, out.len());
+    out[..fit].copy_from_slice(&text[..fit]);
+    &out[..fit]
 }
 
 /// The advance of the run `fit_run` would actually draw.
@@ -2433,9 +2488,8 @@ fn card_row_pixel(
         // to `font::ellipsize` itself, which is the trim every report row and
         // every picker row was screenshot with.
         let mut lbl_buf = [0u8; 64];
-        let lbl_len =
-            fit_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);
-        let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };
+        let lbl_disp =
+            fitted_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);
         if let Some(t) = test_text(
             x,
             y,
@@ -2449,8 +2503,7 @@ fn card_row_pixel(
             return Some(t);
         }
         let mut val_buf = [0u8; 96];
-        let val_len = fit_run(value, layout::ROW_BODY_RUNG, max_w, false, &mut val_buf);
-        let val_disp = if val_len > 0 { &val_buf[..val_len] } else { value };
+        let val_disp = fitted_run(value, layout::ROW_BODY_RUNG, max_w, false, &mut val_buf);
         if let Some(t) = test_text(
             x,
             y,

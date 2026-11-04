@@ -355,15 +355,32 @@ pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
         return 0;
     }
     let em = em_at(scale, lvl);
-    let budget = max_w - dots_w;
+    // WHY the mark's three bytes are held back before the walk spends the plate:
+    // the copy below writes them at the end of whatever the lane took, so a bound
+    // that left room for the dots alone lets one more glyph in and the mark lands
+    // past the caller's end.
+    let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);
+    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
+    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
+    fit_len + 3
+}
+
+/// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+/// given `room` bytes of the caller's plate for them.
+///
+/// WHY one decision, not one per byte: the width the painter then answers with
+/// is `typeface::text_advance_px`, which validates the whole run once and charges
+/// one advance per codepoint when the slice decodes. A byte walk would charge a
+/// multi-byte run's continuation bytes as glyphs the painter never inks, so it
+/// trims a run wider than the run it is measuring.
+///
+/// WHY it is shared by the trim and the hard cut: the two answers are the same
+/// lane spent twice, and a walk each would disagree about what a glyph costs --
+/// which is the defect this helper exists to kill.
+fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+    let decodes = core::str::from_utf8(text).is_ok();
     let mut current_w = 0usize;
     let mut fit_len = 0usize;
-    // WHY one decision, not one per byte: the width the painter then answers with
-    // is `typeface::text_advance_px`, which validates the whole run once and
-    // charges one advance per codepoint when the slice decodes. A byte walk would
-    // charge a multi-byte run's continuation bytes as glyphs the painter never
-    // inks, so it trims a run wider than the run it is measuring.
-    let decodes = core::str::from_utf8(text).is_ok();
     let mut next = 0usize;
     while next < text.len() {
         let (adv, step) = if decodes {
@@ -377,30 +394,67 @@ pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out_buf: &mut [u8]
         } else {
             (interos_std::design::typeface::advance_px(text[next], em) as usize, 1)
         };
-        if current_w + adv > budget || fit_len + step + 3 > out_buf.len() {
+        if current_w + adv > max_w || fit_len + step > room {
             break;
         }
         current_w += adv;
         fit_len = next + step;
         next = fit_len;
     }
-    out_buf[..fit_len].copy_from_slice(&text[..fit_len]);
-    out_buf[fit_len..fit_len + 3].copy_from_slice(dots);
-    fit_len + 3
+    fit_len
 }
 
-/// The run a plate actually gets: `label` when the trim refuses, the buffer's
-/// prefix when it fits.
+/// The run a plate actually gets: the trimmed prefix when the lane took the mark,
+/// the label whole when it never needed cutting, and a hard cut when it refused.
 ///
-/// WHY the fallback is the label and not nothing: `ellipsize_run` answers `0` when
-/// even the ellipsis will not sit in the lane, and a caller that painted `&buf[..0]`
-/// would show a plate with no words in it at all.
+/// WHY a cut and not the label: `ellipsize_run` answers `0` when even the ellipsis
+/// will not sit in the lane, and handing the caller the untouched label then inks a
+/// run past the plate that framed it -- the words a reader was promised in a card
+/// that cannot hold them. The cut is the same answer the lane gives when it does
+/// have room, minus the mark.
 pub fn fitted_run<'a>(label: &'a [u8], scale: usize, lane: usize, buf: &'a mut [u8]) -> &'a [u8] {
     let len = ellipsize_run(label, scale, lane, buf);
-    if len == 0 {
+    if len > 0 {
+        return &buf[..len];
+    }
+    if label.is_empty() || scale == 0 {
         return label;
     }
-    &buf[..len]
+    // WHY the bytes are copied here: a refusal is the one answer `ellipsize_run`
+    // gives without writing, so a cut returned straight from the buffer would be
+    // the stale zeros the caller zeroed it to, not the label's own front.
+    let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());
+    buf[..fit].copy_from_slice(&label[..fit]);
+    &buf[..fit]
+}
+
+/// [`fitted_run`] for a plate whose ink is the ladder's own face.
+///
+/// WHY a second face and not the rung-aware one: several of this app's list and
+/// editor runs are still painted by `test_text`, which places the run at the
+/// ladder whatever the person chose, and trimmed by `font::ellipsize` beside it.
+/// Cutting such a plate at the published em would take a glyph the ladder em still
+/// holds -- a pixel moved on a screen this change did not adopt. The trim stays
+/// `font::ellipsize` byte for byte; only its refusal answer changes.
+pub fn ladder_fitted_run<'a>(
+    label: &'a [u8],
+    scale: usize,
+    lane: usize,
+    buf: &'a mut [u8],
+) -> &'a [u8] {
+    let len = interos_std::design::font::ellipsize(label, scale, lane, buf);
+    if len > 0 {
+        return &buf[..len];
+    }
+    if label.is_empty() || scale == 0 {
+        return label;
+    }
+    // WHY the bytes are copied here: the refusal writes nothing to the plate, so
+    // the cut has to be put in before it is read back.
+    let em = interos_std::design::font::em_for_scale(scale);
+    let fit = longest_fit(label, em, lane, buf.len());
+    buf[..fit].copy_from_slice(&label[..fit]);
+    &buf[..fit]
 }
 
 /// The column a centred run starts at, measured at this app's rung.
@@ -2659,6 +2713,71 @@ mod tests {
             chrome::swatch_band_at(false).y + chrome::swatch_band_at(false).h
                 <= chrome::READING_DOCK.y
         );
+    }
+
+    /// A plate too small to hold the three-byte mark is the one refusal
+    /// `ellipsize_run` answers without writing a byte, and the card still has to be
+    /// handed bytes its own label says: the cut copied into the caller's plate,
+    /// never whatever that plate was holding before.
+    ///
+    /// WHY the refusal is reached through the plate and not the lane: no lane this
+    /// app fits a run into is narrower than the mark -- the gates beside
+    /// `LIST_CARD_TITLE_LANE` and `EDITOR_TITLE_LANE` refuse the day one is -- so a
+    /// one- or two-byte plate is the only way to make the trim say no inside a
+    /// test. A length-only assertion cannot see the defect: a plate of NULs is
+    /// still within its own length, and the title has simply gone.
+    #[test]
+    fn a_refused_trim_copies_its_cut_into_the_plate_it_was_given() {
+        let long = [b'e'; 240];
+        // Wide enough for a glyph or two at every rung, far short of the whole run,
+        // so the plate alone is what makes the trim refuse.
+        let lane = 200usize;
+        for room in [1usize, 2] {
+            let mut backing = [0u8; 2];
+            let cut = fitted_run(&long, CARD_RUNG, lane, &mut backing[..room]);
+            assert!(
+                !cut.is_empty() && cut.len() <= room,
+                "a {}-byte plate was answered with {} bytes",
+                room,
+                cut.len()
+            );
+            assert!(
+                long.starts_with(cut),
+                "a {}-byte plate was handed bytes its label never had",
+                room
+            );
+        }
+    }
+
+    /// The ladder face of the same promise: the list card and the editor title are
+    /// inked by the ladder whatever rung the person chose, so their refusal answer
+    /// is cut at the ladder's own em -- and the whole label is never handed back.
+    #[test]
+    fn the_ladder_plate_also_answers_a_refusal_with_its_own_front() {
+        use interos_std::design::font;
+        let long = [b'e'; 240];
+        let lane = 200usize;
+        for room in [1usize, 2] {
+            let mut backing = [0u8; 2];
+            let cut = ladder_fitted_run(&long, CARD_RUNG, lane, &mut backing[..room]);
+            assert!(
+                !cut.is_empty() && cut.len() <= room,
+                "a {}-byte ladder plate was answered with {} bytes",
+                room,
+                cut.len()
+            );
+            assert!(
+                long.starts_with(cut),
+                "a {}-byte ladder plate was handed bytes its label never had",
+                room
+            );
+            assert!(
+                font::measure(cut, CARD_RUNG) <= lane,
+                "a refused trim put {} columns of ink past a {}-column lane",
+                font::measure(cut, CARD_RUNG),
+                lane
+            );
+        }
     }
 }
 

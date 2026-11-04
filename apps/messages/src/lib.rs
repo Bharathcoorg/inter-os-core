@@ -371,21 +371,70 @@ pub mod layout {
     pub const UNREAD_COUNT_WIDEST: &[u8] = b"255";
 
     /// The run a container hands its painter: `label` whole when the container
-    /// holds it, otherwise the same label cut to `lane` with an ellipsis on it.
+    /// holds it, otherwise the same label cut to `lane` with an ellipsis on it --
+    /// and when the lane cannot even carry the ellipsis, the leading glyphs the
+    /// lane does hold, cut hard rather than spilled past the container.
     ///
     /// WHY it lives in the model: every call site is a per-pixel branch this
     /// app's binary cannot test, and the claim a fit gate is worth making -- a run
     /// this app draws is either whole or visibly cut, never silently missing --
     /// has to be checked against the same function the painter calls. A lane
     /// narrower than the ellipsis itself answers `font::ellipsize` with nothing,
-    /// which is the one case where a word would vanish rather than be trimmed; the
-    /// gates below refuse that for every lane in this module.
+    /// and nothing used to be answered with `label` whole: the run the container
+    /// had just said it could not hold, inked past the edge that framed it. The
+    /// hard cut keeps the bound the container asked for; the gate below is what
+    /// refuses a lane so narrow that the cut loses its mark.
     pub fn fitted_run<'a>(label: &'a [u8], rung: usize, lane: usize, buf: &'a mut [u8]) -> &'a [u8] {
         let len = interos_std::design::font::ellipsize(label, rung, lane, buf);
-        if len == 0 {
+        if len > 0 {
+            return &buf[..len];
+        }
+        if label.is_empty() || rung == 0 {
             return label;
         }
-        &buf[..len]
+        // WHY the bytes are copied here: a refusal is the one answer `ellipsize`
+        // gives without writing, so a cut returned straight from the buffer would
+        // be the stale zeros the caller zeroed it to, not the label's own front.
+        let em = interos_std::design::font::em_for_scale(rung);
+        let fit = longest_fit(label, em, lane, buf.len());
+        buf[..fit].copy_from_slice(&label[..fit]);
+        &buf[..fit]
+    }
+
+    /// How many leading bytes of `text` a painter can ink inside `max_w` at `em`,
+    /// given `room` bytes of the caller's plate for them.
+    ///
+    /// WHY it agrees with the trim it backs: `font::ellipsize` walks `text` one
+    /// byte at a time charging `typeface::advance_px`, and that face is defined as
+    /// `advance_codepoint(byte as u32, em)`. For the single-byte runs every lane of
+    /// this app carries the two walks answer the same number; for a multi-byte run
+    /// the walk below charges the codepoint the painter actually inks rather than
+    /// its continuation bytes, which is the width the renderer answers with.
+    fn longest_fit(text: &[u8], em: u32, max_w: usize, room: usize) -> usize {
+        let decodes = core::str::from_utf8(text).is_ok();
+        let mut current_w = 0usize;
+        let mut fit_len = 0usize;
+        let mut next = 0usize;
+        while next < text.len() {
+            let (adv, step) = if decodes {
+                match core::str::from_utf8(&text[next..]).ok().and_then(|s| s.chars().next()) {
+                    Some(ch) => (
+                        interos_std::design::typeface::advance_codepoint(ch as u32, em) as usize,
+                        ch.len_utf8(),
+                    ),
+                    None => break,
+                }
+            } else {
+                (interos_std::design::typeface::advance_px(text[next], em) as usize, 1)
+            };
+            if current_w + adv > max_w || fit_len + step > room {
+                break;
+            }
+            current_w += adv;
+            fit_len = next + step;
+            next = fit_len;
+        }
+        fit_len
     }
 
     /// Truth gates: every lane is a lane -- it owns room of its own, it is not
@@ -1190,7 +1239,12 @@ mod tests {
         let card_w = 672;
         let max_w = card_w - 48; // 624
         let len = font::ellipsize(long_val, 2, max_w, &mut buf);
-        let disp = if len > 0 { &buf[..len] } else { long_val.as_slice() };
+        // WHY the answer is read through `layout::fitted_run` below and not out of
+        // this length: the fallback is the half this app owns, and a test that
+        // re-writes `if len > 0 { plate } else { the whole label }` pins the very
+        // defect it is meant to catch.
+        let disp = layout::fitted_run(long_val, 2, max_w, &mut buf);
+        assert!(len > 0 || long_val.is_empty());
         assert!(font::measure(disp, 2) <= max_w);
         assert!(disp.ends_with(b"...") || disp == long_val.as_slice());
 
@@ -1288,6 +1342,63 @@ mod tests {
                 content_top >= bubble
             );
         }
+    }
+
+    /// A plate too small to hold the three-byte mark is the one refusal
+    /// `font::ellipsize` answers without writing a byte, and the row still has to
+    /// be handed bytes its own label says: the cut copied into the caller's plate,
+    /// never whatever that plate was holding before.
+    ///
+    /// WHY the refusal is reached through the plate and not the lane: no lane of
+    /// this module is narrower than the mark -- the const gates beside
+    /// `PEER_NAME_LANE` refuse the day one is -- so a one- or two-byte plate is the
+    /// only way to make the trim say no inside a test. A length-only assertion
+    /// cannot see the defect: a plate of NULs sits within its own length, and the
+    /// word has simply gone.
+    #[test]
+    fn a_refused_trim_copies_its_cut_into_the_plate_it_was_given() {
+        use interos_std::design::font;
+        let long = [b'e'; 240];
+        // Wide enough for a glyph or two, far short of the whole run, so the plate
+        // alone is what makes the trim refuse.
+        let lane = 200usize;
+        for room in [1usize, 2] {
+            let mut backing = [0u8; 2];
+            let cut = layout::fitted_run(&long, layout::ROW_BODY_RUNG, lane, &mut backing[..room]);
+            assert!(
+                !cut.is_empty() && cut.len() <= room,
+                "a {}-byte plate was answered with {} bytes",
+                room,
+                cut.len()
+            );
+            assert!(
+                long.starts_with(cut),
+                "a {}-byte plate was handed bytes its label never had",
+                room
+            );
+            assert!(
+                font::measure(cut, layout::ROW_BODY_RUNG) <= lane,
+                "a refused trim put {} columns of ink past a {}-column lane",
+                font::measure(cut, layout::ROW_BODY_RUNG),
+                lane
+            );
+        }
+    }
+
+    /// The other answer a refusal used to have: the label whole, which is exactly
+    /// the run the plate has said it cannot hold. Pinned from the side the reader
+    /// sees -- a wide label handed to a narrow plate must come back shorter than
+    /// the label, never past its end.
+    #[test]
+    fn a_refused_trim_never_hands_back_the_whole_label() {
+        let long = [b'e'; 240];
+        let mut backing = [0u8; 2];
+        let cut = layout::fitted_run(&long, layout::ROW_BODY_RUNG, 200, &mut backing[..2]);
+        assert!(
+            cut.len() < long.len(),
+            "a two-byte plate was handed the label's whole {} bytes",
+            cut.len()
+        );
     }
 }
 

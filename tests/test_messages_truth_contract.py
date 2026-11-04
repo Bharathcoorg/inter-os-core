@@ -10,8 +10,27 @@ and each one is a rule that has to keep holding.
 """
 
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
+
+_COMMENT_OR_LITERAL = re.compile(
+    r"//[^\n]*"
+    r"|/\*.*?\*/"
+    r'|"(?:[^"\\]|\\.)*"'
+    r'|(?:b|br|r#*)"(?:[^"\\]|\\.)*"#*',
+    re.DOTALL,
+)
+
+
+def _code_only(source: str) -> str:
+    """`source` with its comments and string literals dropped.
+
+    WHY a refusal is looked for in the code alone: a comment that quotes the defect
+    is a note about it, not the defect, and it must neither trip a pin nor satisfy
+    one.
+    """
+    return _COMMENT_OR_LITERAL.sub(" ", source)
 
 
 def read(path: str) -> str:
@@ -294,3 +313,204 @@ def test_the_send_reports_what_happened_instead_of_a_fixed_summary():
     transport = source.split("fn attempt_transport(")[1].split("\nfn ")[0]
     assert "The telephony service accepted the composed message" in transport
     assert "The recipient is not a dialable number" in transport
+
+
+def _refused_trim_faults(lib: str, main: str) -> list[str]:
+    """Every half of the refused-trim rule, as faults rather than as asserts.
+
+    `font::ellipsize` answers `0` when the lane cannot even hold its three-byte
+    mark, and the answer to that refusal has to be the leading glyphs the lane does
+    hold, copied into the caller's plate. The old answer was the label whole -- the
+    run the plate had just said it could not hold, inked past its own edge.
+
+    WHY the walks are pinned: the cut and the trim spend the same lane, and two
+    walks disagree about what a glyph costs, which is how a cut landed past the
+    buffer the painter was handed.
+    """
+    faults: list[str] = []
+
+    def block(source: str, start: str, end: str, tag: str) -> str:
+        """The slice between two markers, or nothing plus a named fault.
+
+        WHY a fault instead of an exception: a marker that moved is the same news as
+        a needle that went -- the gate can no longer see the shape it watches -- and
+        a crash hides which one it was.
+        """
+        at = source.find(start)
+        if at < 0:
+            faults.append(f"{tag}: `{start}` is gone, so the block this pin reads is not there")
+            return ""
+        after = source.find(end, at + len(start))
+        if after < 0:
+            faults.append(f"{tag}: `{end}` is gone, so the block this pin reads has no end")
+            return ""
+        return source[at:after]
+
+    def needle(block_text: str, text: str, tag: str, why: str) -> None:
+        if text not in block_text:
+            faults.append(f"{tag}: {why}")
+
+    fitted = block(lib, "pub fn fitted_run", "fn longest_fit(", "lib")
+    needle(
+        fitted,
+        "let len = interos_std::design::font::ellipsize(label, rung, lane, buf);",
+        "lib.trim",
+        "the fitted run no longer asks the trim whose refusal it answers",
+    )
+    needle(
+        fitted,
+        "let fit = longest_fit(label, em, lane, buf.len());",
+        "lib.cut",
+        "a refused trim is handing the caller the whole label again, so a name wider "
+        "than its row prints past the plate that framed it instead of into it",
+    )
+    needle(
+        fitted,
+        "let em = interos_std::design::font::em_for_scale(rung);",
+        "lib.em",
+        "the cut no longer charges the advances of the trim it backs, so the lane is "
+        "spent twice at two different widths",
+    )
+    needle(
+        fitted,
+        "buf[..fit].copy_from_slice(&label[..fit]);",
+        "lib.copy",
+        "the cut is read straight back out of a buffer the refusal never wrote, so a "
+        "refused trim would ink the plate's stale bytes instead of the label's front",
+    )
+
+    # The binary's report rows answered their own refusal the same way, and the
+    # walk that cuts them has to hold the mark's three bytes back out of the plate
+    # before it spends it -- the bound the platform's own trim was fixed to.
+    plain = _code_only(main)
+    if "} else { label };" in plain:
+        faults.append("main.whole: a card row hands back the whole label when its trim refuses")
+    if "} else { value };" in plain:
+        faults.append("main.whole: a card row hands back the whole value when its trim refuses")
+    needle(
+        main,
+        "fitted_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);",
+        "main.label-call",
+        "the row's label stopped going through the fitted run, so its refusal answer "
+        "is the label again",
+    )
+    needle(
+        main,
+        "fitted_run(value, layout::ROW_BODY_RUNG, max_w, false, &mut val_buf);",
+        "main.value-call",
+        "the row's value stopped going through the fitted run, so its refusal answer "
+        "is the value again",
+    )
+    trim = block(main, "fn fit_run(", "fn trim_em(", "main.trim")
+    needle(
+        trim,
+        "let fit_len = longest_fit(text, em, budget, out.len() - 3);",
+        "main.walk",
+        "the trim and the hard cut no longer spend the lane in one walk",
+    )
+    walk = block(main, "fn longest_fit(", "fn fitted_run<'a>(", "main.walk")
+    needle(
+        walk,
+        "if current_w + adv > max_w || fit_len + 1 > room {",
+        "main.room",
+        "the walk charges the plate before taking the glyph, so the mark's three "
+        "bytes are copied past the end of the buffer the painter was handed",
+    )
+    cut = block(main, "fn fitted_run<'a>(", "fn fitted_run_w(", "main.cut")
+    needle(
+        cut,
+        "let fit = longest_fit(text, trim_em(scale), max_w, out.len());",
+        "main.cut",
+        "a refused row trim is handing the painter nothing at all or the label whole "
+        "again, instead of the leading glyphs the lane holds",
+    )
+    needle(
+        cut,
+        "out[..fit].copy_from_slice(&text[..fit]);",
+        "main.copy",
+        "the row's cut is read straight back out of a buffer the refusal never wrote",
+    )
+    return faults
+
+
+def test_a_refused_trim_is_cut_to_the_lane_and_never_handed_back_whole():
+    """A lane too narrow for the three-byte mark makes the trim answer 0.
+
+    The old answer to that refusal was the label whole -- precisely the run the
+    container had just said it could not hold, inked past the plate that framed it.
+    Both halves of the new answer are pinned: the cut is walked in the same
+    arithmetic as the trim, and its bytes are copied into the caller's plate before
+    they are read back, because a refusal is the one answer that writes nothing.
+    """
+    faults = _refused_trim_faults(messages_lib(), messages_main())
+    assert not faults, faults
+
+
+def test_the_refused_trim_contract_can_fail():
+    """A gate nobody has seen fail is a comment.
+
+    Each arm puts one half of the old answer back into a copy of the honest source
+    and runs the same detector the gate above runs, so the check is proved to fire
+    on the defect it exists for -- and an arm that no longer matches its source is
+    refused, because a drifted arm would otherwise go quiet.
+    """
+    lib = messages_lib()
+    main = messages_main()
+    honest = _refused_trim_faults(lib, main)
+    assert not honest, f"the detector fires on the app as it stands: {honest}"
+
+    old_label_row = (
+        "let lbl_len =\n"
+        "            fit_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);\n"
+        "        let lbl_disp = if lbl_len > 0 { &lbl_buf[..lbl_len] } else { label };"
+    )
+    arms = (
+        (
+            "hands the caller the whole label back",
+            lib,
+            "let fit = longest_fit(label, em, lane, buf.len());",
+            "return label;",
+            "lib.cut",
+        ),
+        (
+            "cuts the plate's front out of the buffer it never wrote",
+            lib,
+            "buf[..fit].copy_from_slice(&label[..fit]);",
+            "",
+            "lib.copy",
+        ),
+        (
+            "spends the row's lane in a second walk",
+            main,
+            "let fit_len = longest_fit(text, em, budget, out.len() - 3);",
+            "let mut fit_len = 0;\n"
+            "    while fit_len < text.len() && fit_len + 3 < out.len() {\n"
+            "        fit_len += 1;\n"
+            "    }",
+            "main.walk",
+        ),
+        (
+            "walks the plate before taking the glyph",
+            main,
+            "if current_w + adv > max_w || fit_len + 1 > room {",
+            "if current_w + adv > max_w || fit_len + 3 > room + 2 {",
+            "main.room",
+        ),
+        (
+            "answers a refused row with the label whole",
+            main,
+            "let lbl_disp =\n"
+            "            fitted_run(label, layout::ROW_CAPTION_RUNG, max_w, false, &mut lbl_buf);",
+            old_label_row,
+            "main.whole",
+        ),
+    )
+    for label, source, marker, replacement, tag in arms:
+        assert source.count(marker) == 1, (
+            f"the arm that {label} no longer matches its source once, so it proves nothing"
+        )
+        arm = source.replace(marker, replacement)
+        faults = _refused_trim_faults(arm, main) if source is lib else _refused_trim_faults(lib, arm)
+        assert any(f.startswith(f"{tag}:") for f in faults), (
+            f"the detector does not catch a source that {label}: {faults}"
+        )

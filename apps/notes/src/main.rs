@@ -1422,8 +1422,13 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     LIST_CARD_TITLE_LANE
                 };
                 let mut title_buf = [0u8; 96];
-                let title_len = std::design::font::ellipsize(title, 2, max_title_w, &mut title_buf);
-                let title_disp = if title_len > 0 { &title_buf[..title_len] } else { title };
+                // WHY a fitted run and not the bare trim: `font::ellipsize` answers a
+                // lane that cannot even hold its mark with nothing written, and the
+                // old answer to that refusal was the label whole -- the exact run the
+                // card had just said it could not hold, inked past the plate's edge.
+                // The cut is the same lane spent without the mark.
+                let title_disp =
+                    notes::ladder_fitted_run(title, 2, max_title_w, &mut title_buf);
                 if let Some(c) = test_text(x, y, LIST_CARD_TEXT_X, uy0 + 20, 2, title_disp, theme.title_ink, theme.fill, true) {
                     return c;
                 }

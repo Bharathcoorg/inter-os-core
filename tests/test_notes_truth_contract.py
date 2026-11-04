@@ -472,6 +472,142 @@ def test_the_empty_state_anchors_to_the_authored_pixels_at_every_level() -> None
     assert "if !empty_state_fits(chosen) {" in gate
 
 
+def _block(source: str, start: str, end: str | None, tag: str, faults: list[str]) -> str:
+    """The slice of `source` between two markers, or nothing plus a named fault.
+
+    WHY a fault instead of an exception: a marker that has moved is the same kind of
+    news as a needle that has gone -- the gate can no longer see the shape it
+    watches -- and a crash hides which one it was.
+    """
+    at = source.find(start)
+    if at < 0:
+        faults.append(f"{tag}: `{start}` is gone, so the block this pin reads is not there")
+        return ""
+    if end is None:
+        return source[at:]
+    after = source.find(end, at + len(start))
+    if after < 0:
+        faults.append(f"{tag}: `{end}` is gone, so the block this pin reads has no end")
+        return ""
+    return source[at:after]
+
+
+def _needle(block: str, text: str, tag: str, why: str, faults: list[str]) -> None:
+    if text not in block:
+        faults.append(f"{tag}: {why}")
+
+
+def _refused_trim_faults(lib: str, main: str) -> list[str]:
+    """Every half of the refused-trim rule, as faults rather than as asserts.
+
+    A trim answers `0` when the lane cannot even hold its three-byte mark, and the
+    answer to that refusal has to be the leading glyphs the lane does hold, copied
+    into the caller's plate. The old answer was the label whole -- the run the
+    plate had just said it could not hold, inked past its own edge.
+
+    WHY the walk is pinned too: the cut and the trim spend the same lane, and two
+    walks disagree about what a glyph costs, which is how a cut ended up past the
+    buffer the painter was handed.
+    """
+    faults: list[str] = []
+
+    trim = _block(lib, "pub fn ellipsize_run(", "fn longest_fit", "trim", faults)
+    _needle(
+        trim,
+        "if dots_w > max_w || out_buf.len() < 3 {",
+        "trim.refusal",
+        "the trim no longer refuses a lane that cannot hold its mark, so a run is "
+        "inked past the plate that framed it",
+        faults,
+    )
+    if "return 0;" not in trim:
+        faults.append("trim.refusal: the trim has stopped answering 0 where it cannot cut")
+    _needle(
+        trim,
+        "let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);",
+        "trim.walk",
+        "the trim and the hard cut no longer spend the lane in one walk, so the two "
+        "answers can disagree about what a glyph costs",
+        faults,
+    )
+
+    fitted = _block(lib, "pub fn fitted_run", "pub fn ladder_fitted_run", "fitted", faults)
+    _needle(
+        fitted,
+        "let len = ellipsize_run(label, scale, lane, buf);",
+        "fitted.trim",
+        "the fitted run no longer asks this app's own trim, so the rung the ink uses "
+        "and the rung the cut is measured at can part",
+        faults,
+    )
+    _needle(
+        fitted,
+        "let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());",
+        "fitted.cut",
+        "a refused trim is handing the caller the whole label again, so a title wider "
+        "than its card prints past the plate that framed it instead of into it",
+        faults,
+    )
+    _needle(
+        fitted,
+        "buf[..fit].copy_from_slice(&label[..fit]);",
+        "fitted.copy",
+        "the cut is read straight back out of a buffer the refusal never wrote, so a "
+        "refused trim would ink the plate's stale bytes instead of the label's front",
+        faults,
+    )
+
+    # The list card and the editor title are inked by the ladder whatever the person
+    # chose, so their refusal answer is cut at the ladder's em -- and the plate's
+    # bytes are still copied before they are handed back.
+    ladder = _block(lib, "pub fn ladder_fitted_run", "pub fn centered_x", "ladder", faults)
+    _needle(
+        ladder,
+        "let len = interos_std::design::font::ellipsize(label, scale, lane, buf);",
+        "ladder.trim",
+        "the ladder plate no longer asks the ladder's own trim it is inked with",
+        faults,
+    )
+    _needle(
+        ladder,
+        "let fit = longest_fit(label, em, lane, buf.len());",
+        "ladder.cut",
+        "the ladder plate stopped cutting a refused trim at all",
+        faults,
+    )
+    _needle(
+        ladder,
+        "interos_std::design::font::em_for_scale(scale)",
+        "ladder.em",
+        "the ladder plate's cut no longer charges the ladder's own advances, so it "
+        "takes or loses a glyph the plate's ink does not",
+        faults,
+    )
+    _needle(
+        ladder,
+        "buf[..fit].copy_from_slice(&label[..fit]);",
+        "ladder.copy",
+        "the ladder plate's cut is read back out of a buffer its refusal never wrote",
+        faults,
+    )
+
+    # The pinned defect itself: the list card answered a refusal with `title`
+    # whole, so the untrimmed run walked off the card that had asked for a bound.
+    _needle(
+        main,
+        "notes::ladder_fitted_run(title, 2, max_title_w, &mut title_buf);",
+        "card.call",
+        "the list card's title stopped going through the fitted run, so its refusal "
+        "answer is the label again",
+        faults,
+    )
+    if "} else { title };" in code_only(main):
+        faults.append(
+            "card.whole: a refused trim in the binary hands back the whole title once more"
+        )
+    return faults
+
+
 def test_measured_runs_are_runtime_faces_and_ladder_geometry_is_const() -> None:
     """The E0015 trap this slice had to avoid, pinned as a shape.
 
@@ -484,13 +620,21 @@ def test_measured_runs_are_runtime_faces_and_ladder_geometry_is_const() -> None:
     gates can prove them at every level.
 
     The measured faces also have to fall back to the ladder at the authored rung,
-    byte for byte, and `fitted_run` must hand the caller the whole label when the
-    trim refuses rather than paint an empty plate.
+    byte for byte, and a trim the ladder refuses has to answer with a cut to the
+    lane -- never with the whole label, which is the run the plate has already said
+    it cannot hold.
     """
     lib = notes_lib()
 
     # Measured-width faces are runtime functions, never `const fn`.
-    for runtime in ("run_w_at", "run_w", "ellipsize_run", "fitted_run", "centered_x"):
+    for runtime in (
+        "run_w_at",
+        "run_w",
+        "ellipsize_run",
+        "fitted_run",
+        "ladder_fitted_run",
+        "centered_x",
+    ):
         assert f"pub fn {runtime}" in lib, f"`{runtime}` must be a runtime face"
         assert f"pub const fn {runtime}" not in lib, (
             f"`{runtime}` measures a run and cannot be `const` -- the advance "
@@ -508,16 +652,72 @@ def test_measured_runs_are_runtime_faces_and_ladder_geometry_is_const() -> None:
         "ellipsize_run stopped delegating to the ladder's own ellipsize at the authored rung"
     )
     # A run the trim cannot cut is refused (0) rather than inked past the lane, and
-    # `fitted_run` answers such a refusal with the whole label, not an empty plate.
-    trim = lib[lib.index("pub fn ellipsize_run("):]
-    assert "if dots_w > max_w || out_buf.len() < 3 {" in trim
-    assert "return 0;" in trim[: trim.index("pub fn fitted_run")]
-    fitted = lib[lib.index("pub fn fitted_run"):]
-    assert "let len = ellipsize_run(label, scale, lane, buf);" in fitted
-    assert "return label;" in fitted, (
-        "fitted_run stopped falling back to the whole label, so a refused trim "
-        "would paint an empty plate"
+    # a refused trim answers with a cut to that lane -- never with the whole label,
+    # which is the run the plate has already said it cannot hold.
+    faults = _refused_trim_faults(lib, notes_main())
+    assert not faults, faults
+
+
+def test_the_refused_trim_contract_can_fail():
+    """A gate nobody has seen fail is a comment.
+
+    Each arm puts one half of the old answer back into a copy of the honest source
+    and runs the same detector the gate above runs, so the check is proved to fire
+    on the defect it exists for -- and each substitution is refused when it no
+    longer matches, which is how a drifted arm would otherwise go quiet.
+    """
+    lib = notes_lib()
+    main = notes_main()
+    honest = _refused_trim_faults(lib, main)
+    assert not honest, f"the detector fires on the app as it stands: {honest}"
+
+    arms = (
+        (
+            "hands the caller the whole label back",
+            lib,
+            "let fit = longest_fit(label, em_at(scale, draw_level()), lane, buf.len());",
+            "return label;",
+            "fitted.cut",
+        ),
+        (
+            "cuts the plate's front out of the buffer it never wrote",
+            lib,
+            "buf[..fit].copy_from_slice(&label[..fit]);\n    &buf[..fit]\n}\n\n/// [`fitted_run`]",
+            "&buf[..fit]\n}\n\n/// [`fitted_run`]",
+            "fitted.copy",
+        ),
+        (
+            "spends the lane in a second walk",
+            lib,
+            "let fit_len = longest_fit(text, em, max_w - dots_w, out_buf.len() - 3);",
+            "let mut fit_len = 0;\n    while fit_len < text.len() && fit_len + 3 < out_buf.len() {\n        fit_len += 1;\n    }",
+            "trim.walk",
+        ),
+        (
+            "cuts the ladder plate at the published em",
+            lib,
+            "let em = interos_std::design::font::em_for_scale(scale);",
+            "let em = interos_std::design::font::em_for_scale_user(scale);",
+            "ladder.em",
+        ),
+        (
+            "answers the list card's refusal with the title whole",
+            main,
+            "let title_disp =\n                    notes::ladder_fitted_run(title, 2, max_title_w, &mut title_buf);",
+            "let title_len = std::design::font::ellipsize(title, 2, max_title_w, &mut title_buf);\n"
+            "                let title_disp = if title_len > 0 { &title_buf[..title_len] } else { title };",
+            "card.call",
+        ),
     )
+    for label, source, needle, replacement, tag in arms:
+        assert source.count(needle) == 1, (
+            f"the arm that {label} no longer matches its source once, so it proves nothing"
+        )
+        arm = source.replace(needle, replacement)
+        faults = _refused_trim_faults(arm, main) if source is lib else _refused_trim_faults(lib, arm)
+        assert any(f.startswith(f"{tag}:") for f in faults), (
+            f"the detector does not catch a source that {label}: {faults}"
+        )
 
     # The empty state's own ink is a runtime face that asks the rung for its cap,
     # its band and its outline placement -- and delegates to the shared painter at
