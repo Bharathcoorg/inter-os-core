@@ -168,6 +168,48 @@ pub static MEMO_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::Atom
 #[cfg(test)]
 pub static TABLE_PROBES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// Counters that make the *coverage work* the pool does observable to a test.
+///
+/// WHY they exist beside the memo counts: the memo counts answer "was this
+/// placement already remembered", which is not the question the paint cost
+/// asks. The question that decides a frame's cost is how many times the
+/// rasteriser ran -- `RASTERISES` -- and how much of that came from a slot
+/// being reclaimed out from under a run that was still being painted
+/// (`REPLACES`, `EVICTIONS`). Both are invisible in the output: a re-rasterise
+/// and a cache hit put the same pixels down, which is precisely why the miss
+/// rate had to be counted before anyone could say whether the row-in-key cost
+/// anything at all.
+///
+/// WHY `cfg(test)` and not the guest: they are a measurement, not a feature.
+/// They compile out of the guest entirely, exactly as the memo counts above do,
+/// so a probe cannot change what anyone draws.
+#[cfg(test)]
+pub static PLACEMENT_ASKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static RASTERISES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static REPLACES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static EVICTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static BOX_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub static BOX_MEASURES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Zeroes every measurement counter. Test-only; see the counters above.
+#[cfg(test)]
+pub fn reset_counters() {
+    use core::sync::atomic::Ordering::Relaxed;
+    PLACEMENT_ASKS.store(0, Relaxed);
+    RASTERISES.store(0, Relaxed);
+    REPLACES.store(0, Relaxed);
+    EVICTIONS.store(0, Relaxed);
+    BOX_HITS.store(0, Relaxed);
+    BOX_MEASURES.store(0, Relaxed);
+    MEMO_HITS.store(0, Relaxed);
+    TABLE_PROBES.store(0, Relaxed);
+}
+
 /// How many gate boxes are remembered.
 ///
 /// WHY as many as the coverage pool: a frame that paints one pixel at a time
@@ -375,6 +417,14 @@ fn find_or_alloc_slot(em: u32, x: usize, y: usize, text: &[u8], bold: bool) -> (
                 }
             }
         }
+        // WHY the counter sits on this branch and not the free-slot one above:
+        // a pool that still has room costs a rasterisation for the new run and
+        // nothing else. A pool that is full costs that rasterisation *and* the
+        // eviction of a run somebody may still be painting -- and the painting
+        // of an evicted run re-rasterises it, which is the difference between
+        // one raster per run and one per pixel. Only the second is a storm.
+        #[cfg(test)]
+        EVICTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         (victim, false)
     }
 }
@@ -697,6 +747,11 @@ impl OutlineRun {
         if em == 0 || text.is_empty() || text.len() > KEY_MAX {
             return None;
         }
+        // WHY counted after the guard and before the resident lookup: a refused
+        // run never reaches the pool at all, so counting it here would say a
+        // frame asked the cache for more than it did.
+        #[cfg(test)]
+        PLACEMENT_ASKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // WHY the resident run is looked up before the walk below: a caller
         // that paints a frame one pixel at a time asks for the same run once
         // per pixel of it, and the walk costs a character's worth of work each
@@ -746,6 +801,14 @@ impl OutlineRun {
         // slots for this same key and did not find it, so this call only has to
         // choose where the new run goes.
         let (slot, _is_cached) = find_or_alloc_slot(em, x, y, text, bold);
+
+        // THE measurement: this line is reached once per coverage buffer the
+        // rasteriser actually writes. A repeat placement answered from the memo
+        // or the table never reaches it, so the gap between this count and the
+        // number of placement asks is exactly the work the caches saved -- and
+        // the number itself is the work a frame pays for.
+        #[cfg(test)]
+        RASTERISES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         let buf = unsafe { &mut *core::ptr::addr_of_mut!(COVERAGE) };
         let cov = &mut buf[slot][..w * line_h];
@@ -865,6 +928,8 @@ impl OutlineRun {
         // the eviction only cascades once through the plan), which is time
         // the frame pays. Losing the pixel was the answer no reader forgives.
         if !self.resident() {
+            #[cfg(test)]
+            REPLACES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let fresh = Self::place_styled(self.x, self.y, self.em, self.text(), self.bold)?;
             // The re-placed run answers from a slot that holds its own key,
             // so this read passes the residency check and cannot recurse.
@@ -895,6 +960,8 @@ impl OutlineRun {
         // WHY the re-place: same contract as [`OutlineRun::pixel`] -- degrade
         // in speed, never in pixels, and never read a foreign slot's glyphs.
         if !self.resident() {
+            #[cfg(test)]
+            REPLACES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let fresh = Self::place_styled(self.x, self.y, self.em, self.text(), self.bold)?;
             return fresh.pixel_binary(px, py, ink);
         }
@@ -1009,8 +1076,12 @@ pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize
     // function of the four arguments, so a remembered answer is not an
     // approximation of the measured one -- it is the measured one.
     if let Some(remembered) = cached_box(x0, y0, scale, text) {
+        #[cfg(test)]
+        BOX_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return remembered;
     }
+    #[cfg(test)]
+    BOX_MEASURES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let measured = measure_box(x0, y0, scale, text);
     remember_box(x0, y0, scale, text, measured);
     measured
@@ -1872,6 +1943,715 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // =========================================================================
+    // The coverage-cache miss rate, measured on the host.
+    //
+    // WHAT THIS PROBE IS FOR: the change this work points at splits the placement
+    // key so a run's coverage is cached apart from the row it sits on, and until
+    // someone counts what a row inside the key costs, that change is a guess. Two
+    // things had to be settled before anyone tuned a cache: does the row-in-key
+    // actually cost rasterisations, and is the rasteriser where a frame's time
+    // goes at all -- because `LAST_PLACED` may already be absorbing the repaint
+    // and the real cost may be the per-pixel ask itself.
+    //
+    // WHY THE MODEL AND NOT A RUNNING APP: this crate compiles and tests on the
+    // host, and a device figure would have to come from a running guest. So this
+    // paints a band the way `render_calculator_band` and `render_music_band` do -- one pixel at
+    // a time, every run of the screen asked about every pixel -- through the
+    // same `design::monochrome::text_px` face those painters call. The counts
+    // are the SDK's own; the *shape* of the walk is the app's. Nothing here is a
+    // device latency figure, and it must not be read as one.
+    //
+    // WHY IT RUNS SERIALISED: the pool, the memo and the box table are
+    // process-global, so this takes the same `POOL_LOCK` the other cache tests
+    // take and the saved output was produced with `--test-threads=1`. Exact
+    // counts under a concurrent harness would be somebody else's work.
+
+    /// One run of the modelled screen, in the shape a band painter holds: a
+    /// column, a line top inside the band, a cap height from the ladder, its
+    /// bytes and its bold flag.
+    #[derive(Clone, Copy)]
+    struct Modelled {
+        x: usize,
+        y0: usize,
+        cap: u32,
+        text: &'static [u8],
+        bold: bool,
+    }
+
+    /// The surface width the guest paints at, and the band height a dirty-band
+    /// repaint of a heading, five list rows and a caption costs.
+    const PROBE_W: usize = 720;
+    const PROBE_BAND_H: usize = 400;
+    /// The band's first row, chosen so no run's ascender is ever refused for
+    /// sitting above the surface -- a refusal here would make the two models
+    /// disagree for a reason that has nothing to do with the cache.
+    const PROBE_TOP: usize = 400;
+    /// The deepest line top below `PROBE_TOP + run.y0` that any frame of any
+    /// scenario places, and the largest offset this probe scrolls by. Together
+    /// they must keep every run's line top inside the band: a run whose top
+    /// falls outside it is never asked, and then "every run of the band
+    /// re-rasterised" is a claim about runs nobody painted.
+    const PROBE_MAX_OFFSET: i32 = 53;
+    const INK: u32 = 0xFF_000000;
+    const BG: u32 = 0xFF_FF_FFFF;
+
+    /// A list screen's worth of runs: a heading, five rows carrying a title and
+    /// a measure, and a caption -- twelve distinct strings at four sizes on a
+    /// 48 px row pitch, which is the density of Music's queue or the drawer's
+    /// page, not a worst case.
+    const SCREEN: [Modelled; 12] = [
+        Modelled { x: 48, y0: 0, cap: 30, text: b"Recents", bold: true },
+        Modelled { x: 48, y0: 64, cap: 18, text: b"Morning Run", bold: false },
+        Modelled { x: 620, y0: 64, cap: 16, text: b"04:12", bold: false },
+        Modelled { x: 48, y0: 112, cap: 18, text: b"Studio Notes", bold: false },
+        Modelled { x: 620, y0: 112, cap: 16, text: b"11:38", bold: false },
+        Modelled { x: 48, y0: 160, cap: 18, text: b"Kernel Boot Trace", bold: false },
+        Modelled { x: 620, y0: 160, cap: 16, text: b"00:57", bold: false },
+        Modelled { x: 48, y0: 208, cap: 18, text: b"TLS Chain Audit", bold: false },
+        Modelled { x: 620, y0: 208, cap: 16, text: b"02:21", bold: false },
+        Modelled { x: 48, y0: 256, cap: 18, text: b"Tap Latency Bench", bold: false },
+        Modelled { x: 620, y0: 256, cap: 16, text: b"00:14", bold: false },
+        Modelled { x: 48, y0: 304, cap: 13, text: b"5 items", bold: false },
+    ];
+
+    /// The whole modelled screen really does sit inside the band at every offset
+    /// the probe uses. Without this the geometry claim below is unfalsifiable,
+    /// because a run the band never reaches looks exactly like a run the cache
+    /// never needed.
+    #[test]
+    fn every_modelled_run_is_inside_the_band_at_every_offset_probed() {
+        let deepest = SCREEN.iter().map(|r| r.y0).max().unwrap_or(0);
+        assert!(
+            (deepest + PROBE_MAX_OFFSET as usize) < PROBE_BAND_H,
+            "the modelled screen reaches line top {} + scroll {}, outside a band {} rows tall",
+            deepest,
+            PROBE_MAX_OFFSET,
+            PROBE_BAND_H
+        );
+    }
+
+    /// Paints the band one pixel at a time and returns a checksum of every
+    /// answer, so two models of the same frame can be proved to draw the same
+    /// pixels rather than merely to cost different amounts.
+    ///
+    /// `scroll` moves the screen. `position_free` selects the counterfactual:
+    /// the run is placed at its unscrolled line and the *pixel* is moved instead
+    /// -- which is exactly what a key that names no row would do, and is only
+    /// legitimate because the coverage buffer is written from a pen that starts
+    /// at zero and never reads `x` or `y` (see the rasterise loop in
+    /// [`OutlineRun::place_styled`]).
+    ///
+    /// WHY the line top carries `PROBE_TOP`: [`monochrome::text_px`] gates a
+    /// pixel against the run's own coarse box before it asks the cache, so a
+    /// band that lives at rows 400.. must place its runs at rows 400.. as well.
+    /// Dropping the band's origin here rejects every pixel at the gate and the
+    /// probe reports a frame that never asked the cache a question.
+    fn paint_band(scroll: i32, position_free: bool) -> u64 {
+        let mut sum = 0u64;
+        for row in 0..PROBE_BAND_H {
+            let py = PROBE_TOP + row;
+            for px in 0..PROBE_W {
+                let mut answered = None;
+                for run in SCREEN.iter() {
+                    let (query_y, line_top) = if position_free {
+                        (
+                            (py as i32 - scroll) as usize,
+                            PROBE_TOP + run.y0,
+                        )
+                    } else {
+                        (
+                            py,
+                            (PROBE_TOP as i32 + run.y0 as i32 + scroll) as usize,
+                        )
+                    };
+                    if let Some(c) = crate::design::monochrome::text_px(
+                        px,
+                        query_y,
+                        run.x,
+                        line_top,
+                        run.cap,
+                        run.text,
+                        INK,
+                        BG,
+                        run.bold,
+                    ) {
+                        answered = Some(c);
+                        break;
+                    }
+                }
+                sum = sum
+                    .wrapping_mul(1000003)
+                    .wrapping_add(answered.unwrap_or(BG) as u64);
+            }
+        }
+        sum
+    }
+
+    /// Paints the same band from runs the caller placed once and kept, gating
+    /// each pixel against the run's own measured box instead of the loose
+    /// per-character box [`monochrome::text_px`] gates with.
+    ///
+    /// WHY this is a model and not a proposal: it is what a plan-holding painter
+    /// like the calculator's `PlannedRun::paint` already does, so the difference
+    /// between it and [`paint_band`] is the price of the ask path, measured on
+    /// work the SDK really does. It must paint the identical frame or it proves
+    /// nothing, and the test that runs it asserts exactly that.
+    fn paint_held(held: &[OutlineRun; 12]) -> u64 {
+        let mut sum = 0u64;
+        for row in 0..PROBE_BAND_H {
+            let py = PROBE_TOP + row;
+            for px in 0..PROBE_W {
+                let mut answered = None;
+                for run in held.iter() {
+                    let (bx, by, bw, bh) = run.bounds();
+                    if px >= bx && px < bx + bw && py >= by && py < by + bh {
+                        if let Some(c) = run.pixel(px, py, INK, BG) {
+                            answered = Some(c);
+                            break;
+                        }
+                    }
+                }
+                sum = sum
+                    .wrapping_mul(1000003)
+                    .wrapping_add(answered.unwrap_or(BG) as u64);
+            }
+        }
+        sum
+    }
+
+    /// Paints the shipped frame -- every pixel still calls
+    /// [`monochrome::text_px`], which still places the run per pixel -- but
+    /// pre-gates each pixel against the run's own measured box, moved by
+    /// `scroll`, instead of letting the loose per-character estimate through.
+    ///
+    /// WHY it is worth writing down: this is the candidate change itself,
+    /// measured rather than interpolated out of the two endpoints above. If its
+    /// checksum ever disagrees with the shipped frame, the measured box does not
+    /// hold the run's ink, and the change would lose pixels instead of ns.
+    fn paint_gated(scroll: i32, boxes: &[(usize, usize, usize, usize); 12]) -> u64 {
+        let mut sum = 0u64;
+        for row in 0..PROBE_BAND_H {
+            let py = PROBE_TOP + row;
+            for px in 0..PROBE_W {
+                let mut answered = None;
+                for (run, (bx, by, bw, bh)) in SCREEN.iter().zip(boxes.iter()) {
+                    let py_i = py as i32;
+                    if px >= *bx && px < bx + bw && py_i >= *by as i32 + scroll
+                        && py_i < *by as i32 + *bh as i32 + scroll
+                    {
+                        if let Some(c) = crate::design::monochrome::text_px(
+                            px,
+                            py,
+                            run.x,
+                            (PROBE_TOP as i32 + run.y0 as i32 + scroll) as usize,
+                            run.cap,
+                            run.text,
+                            INK,
+                            BG,
+                            run.bold,
+                        ) {
+                            answered = Some(c);
+                            break;
+                        }
+                    }
+                }
+                sum = sum
+                    .wrapping_mul(1000003)
+                    .wrapping_add(answered.unwrap_or(BG) as u64);
+            }
+        }
+        sum
+    }
+
+    /// The counters, taken as a snapshot so a scenario can report its own span.
+    #[derive(Clone, Copy, Default, Debug)]
+    struct Counts {
+        asks: usize,
+        rasterises: usize,
+        memo_hits: usize,
+        table_probes: usize,
+        replaces: usize,
+        evictions: usize,
+        box_hits: usize,
+        box_measures: usize,
+    }
+
+    use core::sync::atomic::Ordering::Relaxed;
+    fn read_counts() -> Counts {
+        Counts {
+            asks: PLACEMENT_ASKS.load(Relaxed),
+            rasterises: RASTERISES.load(Relaxed),
+            memo_hits: MEMO_HITS.load(Relaxed),
+            table_probes: TABLE_PROBES.load(Relaxed),
+            replaces: REPLACES.load(Relaxed),
+            evictions: EVICTIONS.load(Relaxed),
+            box_hits: BOX_HITS.load(Relaxed),
+            box_measures: BOX_MEASURES.load(Relaxed),
+        }
+    }
+
+    /// Printed under `#![no_std]` only through the test-only `extern crate std`,
+    /// so the macro has to be named rather than taken from a prelude this crate
+    /// does not have.
+    use std::println;
+
+    #[test]
+    fn measure_the_coverage_cache_miss_rate_across_a_scroll() {
+        let _pool: Option<_> = Some(reset_slots());
+        reset_counters();
+
+        println!(
+            "[TEXT CACHE PROBE] model: {} runs, band {}x{} = {} px per frame, painted one pixel \
+             at a time through monochrome::text_px; host build, opt-level=3, --test-threads=1",
+            SCREEN.len(),
+            PROBE_W,
+            PROBE_BAND_H,
+            PROBE_W * PROBE_BAND_H
+        );
+
+        // ---- A: the static repaint. Same frame, painted again. ----
+        // Warm it once so the pool holds every run of this row, then measure the
+        // repaint that follows. This is the case `LAST_PLACED` was built for.
+        let _ = paint_band(0, false);
+        reset_counters();
+        let a_start = std::time::Instant::now();
+        let a_checksum = paint_band(0, false);
+        let a_warm = read_counts();
+        let a_nanos = a_start.elapsed().as_nanos() as u64;
+        println!(
+            "A static repaint   : asks={} rasterises={} memo_hits={} table_probes={} evictions={} \
+             replaces={} box_hits={} box_measures={}",
+            a_warm.asks, a_warm.rasterises, a_warm.memo_hits, a_warm.table_probes, a_warm.evictions,
+            a_warm.replaces, a_warm.box_hits, a_warm.box_measures
+        );
+        println!(
+            "A cost             : {} ns for {} px = {:.2} ns/px, {:.1} ns per ask",
+            a_nanos,
+            PROBE_W * PROBE_BAND_H,
+            a_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64,
+            a_nanos as f64 / a_warm.asks.max(1) as f64
+        );
+
+        // ---- B: the scroll. The same twelve strings, one row lower. ----
+        // A decelerating flick: the cumulative offsets a drag actually presents,
+        // with the deltas shrinking frame to frame, and the deepest of them held
+        // equal to `PROBE_MAX_OFFSET` so the geometry test above keeps covering
+        // every run in this list.
+        let offsets = [14i32, 25, 34, 41, 46, 50, 53];
+        assert_eq!(
+            *offsets.last().unwrap(),
+            PROBE_MAX_OFFSET,
+            "the scroll list and the band geometry test have drifted apart"
+        );
+        let mut b_rasterises = [0usize; 7];
+        let mut b_asks = [0usize; 7];
+        let mut b_nanos = [0u64; 7];
+        let mut b_checksums = [0u64; 7];
+        let mut b_evictions = 0usize;
+        let mut b_replaces = 0usize;
+        for (i, off) in offsets.iter().enumerate() {
+            reset_counters();
+            let t = std::time::Instant::now();
+            b_checksums[i] = paint_band(*off, false);
+            let c = read_counts();
+            b_nanos[i] = t.elapsed().as_nanos() as u64;
+            b_rasterises[i] = c.rasterises;
+            b_asks[i] = c.asks;
+            b_evictions += c.evictions;
+            b_replaces += c.replaces;
+            println!(
+                "B scroll y+{:<3}    : asks={} rasterises={} memo_hits={} table_probes={} \
+                 evictions={} replaces={}",
+                off, c.asks, c.rasterises, c.memo_hits, c.table_probes, c.evictions, c.replaces
+            );
+        }
+        let mut b_total = 0usize;
+        let mut b_ns_total = 0u64;
+        for i in 0..offsets.len() {
+            b_total += b_rasterises[i];
+            b_ns_total += b_nanos[i];
+        }
+        println!(
+            "B scroll total     : {} rasterises over {} frames of {} runs each",
+            b_total,
+            offsets.len(),
+            SCREEN.len()
+        );
+
+        // ---- C: the counterfactual. A key that names no row. ----
+        // Same scrolled frames, but the run is placed once and the pixel is
+        // offset at read time. If this costs one pass of rasterisations and
+        // paints the same pixels, the row in the key is pure waste.
+        reset_counters();
+        let mut c_nanos = [0u64; 7];
+        let mut c_checksums = [0u64; 7];
+        for (i, off) in offsets.iter().enumerate() {
+            let t = std::time::Instant::now();
+            c_checksums[i] = paint_band(*off, true);
+            c_nanos[i] = t.elapsed().as_nanos() as u64;
+            let c = read_counts();
+            println!(
+                "C scroll y+{:<3} row-free key: cumulative rasterises={} memo_hits={} evictions={} replaces={}",
+                off, c.rasterises, c.memo_hits, c.evictions, c.replaces
+            );
+        }
+        let c_total = read_counts().rasterises;
+        let c_ns_total: u64 = c_nanos.iter().sum();
+        println!(
+            "C row-free total   : {} rasterises for the same {} frames",
+            c_total,
+            offsets.len()
+        );
+
+        // ---- D: the price of one rasterisation, measured alone. ----
+        // The same twelve runs the frames above paint, placed once into an empty
+        // pool, so the figure divides cleanly out of A and B.
+        //
+        // WHY a warm-up pass first: the first glyph this process rasterises also
+        // pays for the typeface's own tables, and quoting that as the price of a
+        // re-rasterisation would be the single most misleading number in this
+        // file. So the runs are placed once at rows this probe never times, and
+        // then two cold-pool passes are timed -- the second is the one quoted,
+        // with the first printed beside it so the spread is visible.
+        reset_slot_pool();
+        forget_last_placement();
+        for run in SCREEN.iter() {
+            let _ = place_run_cap(run.x, 1200 + run.y0, run.cap, run.text, None, run.bold);
+        }
+        let mut d_nanos = [0u64; 2];
+        let mut d_count = [0usize; 2];
+        for pass in 0..2 {
+            reset_slot_pool();
+            forget_last_placement();
+            reset_counters();
+            let t = std::time::Instant::now();
+            for (i, run) in SCREEN.iter().enumerate() {
+                assert!(
+                    place_run_cap(run.x, PROBE_TOP + run.y0, run.cap, run.text, None, run.bold)
+                        .is_some(),
+                    "run {i} refused to place on pass {pass}"
+                );
+            }
+            d_nanos[pass] = t.elapsed().as_nanos() as u64;
+            d_count[pass] = read_counts().rasterises;
+        }
+        println!(
+            "D isolated paint   : {} rasterises for {} fresh runs; cold-tables-first-pass is \
+             excluded, warm pass 1 = {} ns, pass 2 = {} ns ({:.0} ns per rasterise)",
+            d_count[1],
+            SCREEN.len(),
+            d_nanos[0],
+            d_nanos[1],
+            d_nanos[1] as f64 / d_count[1].max(1) as f64
+        );
+        let d_nanos = d_nanos[1];
+
+        // ---- E and F: the price of the ask itself, not of the rasterise. ----
+        // A and B say how many times the cache was asked; this says what those
+        // asks cost against the same frame painted from runs the caller placed
+        // once and held, gated on each run's own measured box. The two together
+        // locate the frame's time: re-rasterising, or asking.
+        reset_slot_pool();
+        forget_last_placement();
+        reset_counters();
+        let mut held = [OutlineRun::EMPTY; 12];
+        let mut tight_px = 0usize;
+        for (i, run) in SCREEN.iter().enumerate() {
+            let placed = place_run_cap(run.x, PROBE_TOP + run.y0, run.cap, run.text, None, run.bold)
+                .unwrap_or_else(|| panic!("run {i} refused to place for the held plan"));
+            let (bx, by, bw, bh) = placed.bounds();
+            // Clipped to the band, because a box the band does not reach is a
+            // pixel nobody asks about.
+            let x0c = bx.min(PROBE_W);
+            let x1c = (bx + bw).min(PROBE_W);
+            let y0c = by.min(PROBE_TOP + PROBE_BAND_H);
+            let y1c = (by + bh).min(PROBE_TOP + PROBE_BAND_H);
+            tight_px += (x1c.saturating_sub(x0c)) * (y1c.saturating_sub(y0c));
+            held[i] = placed;
+        }
+        let e_rasterises = read_counts().rasterises;
+        let f_start = std::time::Instant::now();
+        let f_checksum = paint_held(&held);
+        let f_nanos = f_start.elapsed().as_nanos() as u64;
+        let f = read_counts();
+        println!(
+            "E gate area      : the runs' own boxes hold {} px of the band against {} cache asks \
+             a frame from the loose gate; a tight gate asks {:.1}% of them ({} rasterises to get \
+             the boxes)",
+            tight_px, a_warm.asks,
+            tight_px as f64 * 100.0 / a_warm.asks.max(1) as f64,
+            e_rasterises
+        );
+        println!(
+            "F held plan      : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} ns \
+             at {:.2} ns/px",
+            f.asks,
+            f.rasterises,
+            f_nanos,
+            f_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64,
+            a_nanos,
+            a_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64
+        );
+
+        // ---- G: the candidate change, measured. ----
+        // The shipped walk -- every pixel still asks the cache through
+        // `monochrome::text_px` -- with only its gate tightened to each run's
+        // measured box. Compared against A, which is the same frame with the
+        // loose gate, this is what the gate alone is worth.
+        let mut boxes = [(0usize, 0usize, 0usize, 0usize); 12];
+        for (i, run) in held.iter().enumerate() {
+            boxes[i] = run.bounds();
+        }
+        reset_slot_pool();
+        forget_last_placement();
+        let _ = paint_band(0, false);
+        reset_counters();
+        let g_start = std::time::Instant::now();
+        let g_checksum = paint_gated(0, &boxes);
+        let g_nanos = g_start.elapsed().as_nanos() as u64;
+        let g = read_counts();
+        println!(
+            "G tight gate     : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} \
+             asks and {} ns -- {:.1}% of the frame's cost is pixels no run can ink",
+            g.asks,
+            g.rasterises,
+            g_nanos,
+            g_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64,
+            a_warm.asks,
+            a_nanos,
+            (a_nanos.saturating_sub(g_nanos)) as f64 * 100.0 / a_nanos.max(1) as f64
+        );
+
+        // ---- What the numbers say. ----
+        let per_raster = d_nanos as f64 / d_count[1].max(1) as f64;
+        let b_mean_ns = b_ns_total as f64 / offsets.len() as f64;
+        let c_mean_ns = c_ns_total as f64 / offsets.len() as f64;
+        let b_mean_raster = b_total as f64 / offsets.len() as f64;
+        println!(
+            "SUMMARY static repaint : rasterises={} of {} asks ({:.1} ns per ask, all answered \
+             from a cache)",
+            a_warm.rasterises,
+            a_warm.asks,
+            a_nanos as f64 / a_warm.asks.max(1) as f64
+        );
+        println!(
+            "SUMMARY scrolled frame : rasterises={:.1} of {} asks per frame, i.e. every run of \
+             the band re-rasterised ({} frames: evictions={} replaces={})",
+            b_mean_raster,
+            b_asks[0],
+            offsets.len(),
+            b_evictions,
+            b_replaces
+        );
+        println!(
+            "SUMMARY row-free key   : {} rasterises for the same {} frames, saving {}",
+            c_total,
+            offsets.len(),
+            b_total.saturating_sub(c_total)
+        );
+        println!(
+            "SUMMARY host cost      : scrolled frame {:.0} ns, row-free frame {:.0} ns, difference {:.0} ns/frame ({:.1}% of the frame)",
+            b_mean_ns,
+            c_mean_ns,
+            (b_mean_ns - c_mean_ns).abs(),
+            (b_mean_ns - c_mean_ns).abs() * 100.0 / b_mean_ns
+        );
+        println!(
+            "SUMMARY one rasterise  : {:.0} ns here; the {:.1} a scrolled frame pays are {:.1}% of its {:.0} ns",
+            per_raster,
+            b_mean_raster,
+            b_mean_raster * per_raster * 100.0 / b_mean_ns,
+            b_mean_ns
+        );
+        println!(
+            "SUMMARY where the ns go: a scrolled frame spends {:.1}% of its time on re-rasterising \
+             and the rest on the per-pixel ask itself -- {} asks at up to {:.0} ns each is the \
+             frame's floor, whether or not any glyph is ever drawn",
+            b_mean_raster * per_raster * 100.0 / b_mean_ns,
+            b_asks[0],
+            a_nanos as f64 / a_warm.asks.max(1) as f64
+        );
+        println!(
+            "SUMMARY the ask, not the glyph: a frame with every placement already cached still \
+             costs {} ns because it asks {} times; the same frame from a held plan gated on each \
+             run's own box costs {} ns ({} asks). The row in the key is worth {:.0} ns/frame; \
+             the ask path is worth {:.0} ns/frame.",
+            a_nanos,
+            a_warm.asks,
+            f_nanos,
+            f.asks,
+            b_mean_ns - c_mean_ns,
+            a_nanos.saturating_sub(f_nanos) as f64
+        );
+        println!(
+            "SUMMARY gate only  : same frame, same per-pixel placement calls, only the gate \
+             tightened: {} ns vs {} ns = {:.1}% of a cached frame is pixels no run can ink. The \
+             gate change alone is worth {:.0} ns/frame against the key change's {:.0} ns/frame.",
+            g_nanos,
+            a_nanos,
+            (a_nanos.saturating_sub(g_nanos)) as f64 * 100.0 / a_nanos.max(1) as f64,
+            (a_nanos.saturating_sub(g_nanos)) as f64,
+            (b_mean_ns - c_mean_ns).abs()
+        );
+        println!(
+            "SUMMARY these are HOST ratios, not device milliseconds. The guest's own per-frame cost is what `[MUSIC APP] FRAMEBREAK` and `[TAP FLIP]` print, and no device run was made for this probe."
+        );
+
+        // The structural claims, as opposed to the numbers printed above.
+        //
+        // A static repaint asks the cache for every pixel it paints and gets
+        // nowhere near one rasterisation per ask. Whether the count is exactly
+        // zero is the memo's business; that it is small is the finding.
+        assert!(
+            a_warm.rasterises < SCREEN.len(),
+            "a repaint of an unchanged frame rasterised {} times for {} runs -- the memo is not \
+             absorbing it: {:?}",
+            a_warm.rasterises,
+            SCREEN.len(),
+            a_warm
+        );
+        // A scroll to a row never asked before must re-rasterise every run of
+        // the band, because no cache in this module keys without a row.
+        for (i, off) in offsets.iter().enumerate() {
+            assert!(
+                b_rasterises[i] >= SCREEN.len(),
+                "scrolled to y+{off} and only {} of {} runs re-rasterised -- the row-in-key claim \
+                 would be wrong: {:?}",
+                b_rasterises[i],
+                SCREEN.len(),
+                b_rasterises
+            );
+        }
+        // The counterfactual is only evidence if it paints the same frame. This
+        // is the load-bearing check for the key split: coverage bits do not
+        // depend on the row, so a run placed once and read at an offset must be
+        // pixel-for-pixel the frame the shipped code draws.
+        for (i, off) in offsets.iter().enumerate() {
+            assert_eq!(
+                b_checksums[i],
+                c_checksums[i],
+                "scrolled to y+{off}: the row-free-key model painted a different frame, so the \
+                 model is not equivalent"
+            );
+        }
+        // And the unscrolled frame agrees too, which is the same claim with no
+        // offset in it at all.
+        assert_eq!(
+            a_checksum,
+            paint_band(0, true),
+            "at scroll 0 the row-free-key model painted a different frame"
+        );
+        // The held-plan model is evidence about the ask path only if it paints
+        // the shipped frame as well.
+        assert_eq!(
+            f_checksum, a_checksum,
+            "the held-plan model painted a different frame from the shipped one, so its cost \
+             is not comparable"
+        );
+        // The loose gate lets through at least four times the pixels a run can
+        // actually ink. If this ever stops holding, the gate is no longer the
+        // cost driver and the paragraph above needs re-reading.
+        assert!(
+            tight_px * 4 < a_warm.asks,
+            "the runs' own boxes hold {tight_px} px but the frame only made {} asks -- the loose \
+             gate is not the cost driver any more",
+            a_warm.asks
+        );
+        // And the ask path, not the rasteriser, is where a cached frame's time
+        // goes: gating on the measured box is worth more than half the frame.
+        assert!(
+            f_nanos * 2 < a_nanos,
+            "a held plan cost {f_nanos} ns against the shipped repaint's {a_nanos} ns -- the ask \
+             path is not the dominant share of a cached frame"
+        );
+        // The tight gate must not lose a single pixel of the frame, and it must
+        // not be slower. These two are the whole case for the candidate change.
+        assert_eq!(
+            g_checksum, a_checksum,
+            "gating on the runs' measured boxes painted a different frame -- the box does not \
+             hold their ink"
+        );
+        assert!(
+            g.asks < a_warm.asks,
+            "the tight gate made {} cache asks against the loose gate's {} -- it is not a filter",
+            g.asks,
+            a_warm.asks
+        );
+        assert!(
+            g_nanos < a_nanos,
+            "the tight gate cost {g_nanos} ns against the shipped walk's {a_nanos} ns on the \
+             same frame"
+        );
+    }
+
+    /// Measures the other failure the row-in-key causes: a frame plan with more
+    /// distinct placements than the pool holds.
+    ///
+    /// WHY this is a separate question from the count above: `OutlineRun::pixel`
+    /// re-places a run whose slot was reclaimed rather than losing its ink --
+    /// deliberately, because `a_shade_plan_bigger_than_the_pool_still_paints_its_first_run`
+    /// pins that. A plan that overflows therefore does not lose pixels, it pays
+    /// a re-rasterisation for every evicted run it goes on to paint. Whether the
+    /// row in the key is what pushes a plan over the line is what this measures.
+    #[test]
+    fn measure_the_cost_of_a_frame_plan_that_overflows_the_pool() {
+        let _pool: Option<_> = Some(reset_slots());
+        reset_counters();
+
+        const PLAN_MAX: usize = 48;
+        let mut text = [[b' '; 6]; PLAN_MAX];
+        // Distinct short runs: "run007" .. "run047". Built by hand because this
+        // crate has no allocator outside a test harness and the point of the
+        // probe is the pool, not a formatting dependency.
+        for i in 0..PLAN_MAX {
+            text[i][0] = b'r';
+            text[i][1] = b'u';
+            text[i][2] = b'n';
+            text[i][3] = b'0' + (i / 10) as u8;
+            text[i][4] = b'0' + (i % 10) as u8;
+            text[i][5] = b'!';
+        }
+
+        // 24 runs fit inside the pool's 32 slots; 40 does not, and that is the
+        // difference between a plan that paints and a plan that repaints itself.
+        for (label, n) in [("24 runs, under SLOTS", 24usize), ("40 runs, over SLOTS", 40usize)] {
+            reset_slot_pool();
+            forget_last_placement();
+            let mut held = [OutlineRun::EMPTY; PLAN_MAX];
+            for i in 0..n {
+                held[i] = OutlineRun::place(48, PROBE_TOP + 24 + i * 44, 18, &text[i])
+                    .unwrap_or_else(|| panic!("{label}: run {i} refused to place"));
+            }
+            reset_counters();
+            let start = std::time::Instant::now();
+            let mut inked = 0usize;
+            for row in 0..PROBE_BAND_H {
+                let py = PROBE_TOP + row;
+                for px in 0..PROBE_W {
+                    for r in held[..n].iter() {
+                        if r.pixel(px, py, INK, BG).is_some() {
+                            inked += 1;
+                        }
+                    }
+                }
+            }
+            let nanos = start.elapsed().as_nanos() as u64;
+            let c = read_counts();
+            println!(
+                "[TEXT CACHE PROBE] plan {label}: {n} runs held, {} px asked, rasterises={} \
+                 replaces={} evictions={} memo_hits={} table_probes={} inked={inked} cost={nanos} ns",
+                PROBE_W * PROBE_BAND_H * n,
+                c.rasterises,
+                c.replaces,
+                c.evictions,
+                c.memo_hits,
+                c.table_probes,
+            );
+            assert!(inked > 0, "{label}: the plan painted no ink at all");
         }
     }
 }
