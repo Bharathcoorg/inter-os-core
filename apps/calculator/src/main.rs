@@ -263,6 +263,97 @@ const WIDE_BTN_W: usize = BTN_W * 2 + (COL_X[1] - COL_X[0] - BTN_W);
 /// The x of the wide key in the last row's right half.
 const WIDE_BTN_X1: usize = COL_X[2];
 
+/// The columns the drawer's ledger lives in: the divider at the sheet's head,
+/// the row plates below it and the band a row answers from are all this width.
+///
+/// WHY named: they were the literals `40` and `680`, written five times across
+/// the painter, the plan and the press. A row that inked two columns wider than
+/// it answered is the disagreement a thumb feels as "the history entry did not
+/// open", and no gate could have caught it because there was nothing to compare.
+const HIST_ROW_X0: usize = 40;
+const HIST_ROW_X1: usize = 680;
+
+#[inline(always)]
+fn in_hist_row_columns(x: usize) -> bool {
+    x >= HIST_ROW_X0 && x < HIST_ROW_X1
+}
+
+/// The drawer's sheet: the band the painter rounds and fills, and the band the
+/// press dismisses from.
+///
+/// WHY named: they were the literals `110` and `1380`, written in the pixel path
+/// and again in the press, with `1379` as a third copy for the corner rounding.
+/// The sheet's bottom is already the chrome's own `DRAWER_SHEET_Y1` -- the number
+/// the ledger's visible rows are measured against -- so the dismiss band and the
+/// fill now move together.
+const SHEET_Y0: usize = HEADER_H;
+const SHEET_Y1: usize = chrome::DRAWER_SHEET_Y1;
+
+// -----------------------------------------------------------------------------
+// The touch floor, stated once against the plates this file inks.
+//
+// WHY here and not only in `calculator::chrome`: the chrome owns the header's
+// chips, the tape's scroll plate and the drawer's two pills, and it already holds
+// each of them to the floor. What it does not own is the keypad -- `COL_X` and
+// `ROW_Y` below are this file's -- nor the ledger column the drawer paints and
+// the press answers. The bin target is built `test = false`, so a `#[test]`
+// written beside these numbers would never run: these are build-time gates, and
+// a number that steps over the floor fails the build.
+// -----------------------------------------------------------------------------
+const _: () = {
+    use interos_std::design::touch::MIN_TARGET;
+
+    // A key is a `BTN_W` by `BTN_H` cap, and the wide keys are wider still.
+    assert!(BTN_W >= MIN_TARGET);
+    assert!(BTN_H >= MIN_TARGET);
+    assert!(WIDE_BTN_W >= BTN_W);
+
+    // The grid: the rect `key_rect` hands the painter is the rect `key_hit`
+    // hands the press, so what is checked is that rect -- on screen, floor-sized,
+    // and never touching its neighbour's.
+    let mut r = 0;
+    while r < ROW_Y.len() {
+        assert!(ROW_Y[r] >= KEYPAD_TOP);
+        assert!(ROW_Y[r] + BTN_H <= H - chrome::HOME_HIT.h);
+        if r + 1 < ROW_Y.len() {
+            assert!(ROW_Y[r] + BTN_H <= ROW_Y[r + 1]);
+        }
+        let mut c = 0;
+        while c < COL_X.len() {
+            assert!(COL_X[c] >= 16 && COL_X[c] + BTN_W <= W - 16);
+            if c + 1 < COL_X.len() {
+                assert!(COL_X[c] + BTN_W <= COL_X[c + 1]);
+            }
+            c += 1;
+        }
+        r += 1;
+    }
+
+    // The last row's two wide keys, which replace four cells of the grid.
+    assert!(COL_X[0] + WIDE_BTN_W <= WIDE_BTN_X1);
+    assert!(WIDE_BTN_X1 + WIDE_BTN_W <= W - 16);
+
+    // The ledger's column, and a row at the platform's own text size.
+    assert!(HIST_ROW_X0 >= DISPLAY_X0 && HIST_ROW_X1 <= DISPLAY_X1);
+    assert!(HIST_ROW_X1 - HIST_ROW_X0 >= MIN_TARGET);
+    assert!(chrome::history_row_h_at(std::design::font::TEXT_SCALE_NORMAL) >= MIN_TARGET);
+
+    // The sheet the press dismisses from is the sheet the painter fills, and it
+    // stops above the strip the home gesture answers from.
+    assert!(SHEET_Y1 > SHEET_Y0);
+    assert!(SHEET_Y1 - SHEET_Y0 >= MIN_TARGET);
+    assert!(HIST_LIST_Y0 >= SHEET_Y0);
+    assert!(SHEET_Y1 <= H);
+
+    // The chips the header answers with are the platform's and the chrome's own.
+    assert!(std::design::back_button::SIZE >= MIN_TARGET);
+    assert!(chrome::HOME_HIT.w >= MIN_TARGET && chrome::HOME_HIT.h >= MIN_TARGET);
+    assert!(chrome::HISTORY_PILL.w >= MIN_TARGET && chrome::HISTORY_PILL.h >= MIN_TARGET);
+    assert!(chrome::CLEAR_PILL.w >= MIN_TARGET && chrome::CLEAR_PILL.h >= MIN_TARGET);
+    assert!(chrome::CLOSE_PILL.w >= MIN_TARGET && chrome::CLOSE_PILL.h >= MIN_TARGET);
+    assert!(chrome::PILL_H >= MIN_TARGET);
+};
+
 fn draw_calc_badge_operator_glyph(x: usize, y: usize, cx: usize, cy: usize, op: char, color: u32) -> Option<u32> {
     let dx = (x as isize) - (cx as isize);
     let dy = (y as isize) - (cy as isize);
@@ -1147,9 +1238,9 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
 
     // 2. History Drawer / Overlay (Active when calc.show_history is true)
     if calc.show_history {
-        if y >= 110 && y < 1380 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+        if y >= SHEET_Y0 && y < SHEET_Y1 && x >= DISPLAY_X0 && x < DISPLAY_X1 {
             let rx = (x - DISPLAY_X0).min(DISPLAY_X1 - 1 - x);
-            let ry = (y - 110).min(1379 - y);
+            let ry = (y - SHEET_Y0).min(SHEET_Y1 - 1 - y);
             if rx < R_SHEET && ry < R_SHEET {
                 let cdx = (R_SHEET - rx) as isize;
                 let cdy = (R_SHEET - ry) as isize;
@@ -1215,7 +1306,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
             }
 
             // Separator line
-            if y == 182 && x >= 40 && x < 680 {
+            if y == 182 && in_hist_row_columns(x) {
                 return THEME.border;
             }
 
@@ -1244,8 +1335,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
             } else {
                 for i in 0..plan.drawer.row_count {
                     let row = &plan.drawer.rows[i];
-                    if y >= row.y0 && y < row.y1 && x >= 40 && x < 680 {
-                        let erx = (x - 40).min(679 - x);
+                    if y >= row.y0 && y < row.y1 && in_hist_row_columns(x) {
+                        let erx = (x - HIST_ROW_X0).min(HIST_ROW_X1 - 1 - x);
                         let ery = (y - row.y0).min(row.y1 - 1 - y);
                         if erx < row_style.radius && ery < row_style.radius {
                             let cdx = (row_style.radius - erx) as isize;
@@ -1803,14 +1894,14 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
         for i in 0..count.min(chrome::history_visible_rows()) {
             let row_y0 = HIST_LIST_Y0 + i * chrome::history_pitch();
             let row_y1 = row_y0 + chrome::history_row_h();
-            if y >= row_y0 && y < row_y1 && x >= 40 && x < 680 {
+            if y >= row_y0 && y < row_y1 && in_hist_row_columns(x) {
                 calc.load_history_entry(i);
                 calc.show_history = false;
                 return Tap::Redraw(Dirty::All);
             }
         }
         // Tapping outside closes drawer
-        if y >= 110 && y < 1380 {
+        if y >= SHEET_Y0 && y < SHEET_Y1 {
             calc.show_history = false;
             return Tap::Redraw(Dirty::All);
         }
