@@ -2192,5 +2192,101 @@ mod tests {
         assert!(chrome::READING_TAG.x + chrome::READING_TAG.w <= chrome::READING_DOCK.x + chrome::READING_DOCK.w);
         assert!(chrome::READING_TAG.y + chrome::READING_TAG.h <= chrome::READING_DOCK.y + chrome::READING_DOCK.h);
     }
+
+    /// The keyboard's accessory strip answers exactly the plates it inks, and
+    /// every plate clears the platform's floor on both of its edges.
+    ///
+    /// WHY this is pinned: the strip painted each button as a rounded rect of
+    /// `x, 920, w, 48` and pressed it as `ux >= x && ux <= x + w`, so every
+    /// plate's press reached past its own ink -- one column for the checklist,
+    /// three for each cursor step -- and the strip's band ran to row 974 while
+    /// its container ended its ink at 973. A press in the last column of a
+    /// button answered a key the person was not looking at, and a press on the
+    /// page below the strip pressed a key at all.
+    #[test]
+    fn the_accessory_strip_answers_exactly_the_plates_it_inks() {
+        use interos_std::design::touch::MIN_TARGET;
+        for (i, plate) in chrome::STRIP_PLATES.iter().enumerate() {
+            assert!(
+                plate.w >= MIN_TARGET && plate.h >= MIN_TARGET,
+                "strip plate {i} is {}x{}, under the {} floor",
+                plate.w,
+                plate.h,
+                MIN_TARGET
+            );
+            // Every pixel of the plate answers, and it answers as itself.
+            for y in plate.y..plate.y + plate.h {
+                for x in plate.x..plate.x + plate.w {
+                    assert_eq!(
+                        chrome::strip_plate_at(x, y),
+                        Some(i),
+                        "plate {i} inked ({x},{y}) that answers {:?}",
+                        chrome::strip_plate_at(x, y)
+                    );
+                }
+            }
+            // The plate stands inside the container the strip inks.
+            assert!(plate.x >= chrome::STRIP.x && plate.y >= chrome::STRIP.y);
+            assert!(plate.x + plate.w <= chrome::STRIP.x + chrome::STRIP.w);
+            assert!(plate.y + plate.h <= chrome::STRIP.y + chrome::STRIP.h);
+        }
+        // One column outside a plate answers nothing: the gap between two
+        // buttons is the strip's own surface, not a third key.
+        for pair in chrome::STRIP_PLATES.windows(2) {
+            let seam = (pair[0].x + pair[0].w + pair[1].x) / 2;
+            let mid_y = chrome::STRIP_BTN_Y + chrome::STRIP_BTN_H / 2;
+            assert_eq!(chrome::strip_plate_at(seam, mid_y), None);
+            assert_eq!(chrome::strip_plate_at(pair[0].x + pair[0].w, mid_y), None);
+            assert_eq!(chrome::strip_plate_at(pair[0].x - 1, mid_y), None);
+        }
+        // The band the strip owns stops at the keyboard's first row.
+        assert!(chrome::STRIP.y + chrome::STRIP.h <= crate::keyboard::KB_Y0);
+        assert_eq!(chrome::STRIP.h, 58);
+    }
+
+    /// The tone picker answers a floor-sized disc on the band the popover
+    /// paints, in both of the rows the keyboard can leave it in.
+    ///
+    /// WHY this is pinned: the popover's band and its swatch pitch were written
+    /// out twice, once in the renderer and once in the press, as the same `if
+    /// keyboard_visible { 852 } else { 1248 }` expression. Two copies agreed
+    /// today and nothing held them together.
+    #[test]
+    fn the_tone_picker_answers_the_band_the_popover_paints() {
+        use interos_std::design::touch::MIN_TARGET;
+        for keyboard_visible in [false, true] {
+            let band = chrome::swatch_band_at(keyboard_visible);
+            assert!(
+                band.h >= MIN_TARGET,
+                "the picker's band is {} rows, under the {} floor",
+                band.h,
+                MIN_TARGET
+            );
+            assert!(chrome::SWATCH_R * 2 >= MIN_TARGET);
+            let cy = chrome::swatch_cy(band);
+            for i in 0..NOTE_TONE_COUNT {
+                let cx = chrome::SWATCH_X0 + i * chrome::SWATCH_PITCH;
+                // The swatch's own plate answers, edge to edge of the disc.
+                assert_eq!(chrome::swatch_at(cx, cy, keyboard_visible), Some(i));
+                assert_eq!(chrome::swatch_at(cx - chrome::SWATCH_R, cy, keyboard_visible), Some(i));
+                assert_eq!(chrome::swatch_at(cx + chrome::SWATCH_R - 1, cy, keyboard_visible), Some(i));
+                assert_eq!(chrome::swatch_at(cx + chrome::SWATCH_R + 1, cy, keyboard_visible), None);
+                // Every swatch stands inside the band the popover inks.
+                assert!(cx - chrome::SWATCH_R >= band.x);
+                assert!(cx + chrome::SWATCH_R <= band.x + band.w);
+                assert!(cy - chrome::SWATCH_R >= band.y);
+                assert!(cy + chrome::SWATCH_R <= band.y + band.h);
+            }
+            // The row between two swatches is the popover's surface, not a key.
+            let seam = chrome::SWATCH_X0 + chrome::SWATCH_PITCH / 2;
+            assert_eq!(chrome::swatch_at(seam, cy, keyboard_visible), None);
+        }
+        // Neither band reaches into the chrome it sits above.
+        assert!(chrome::swatch_band_at(true).y + chrome::swatch_band_at(true).h <= chrome::STRIP.y);
+        assert!(
+            chrome::swatch_band_at(false).y + chrome::swatch_band_at(false).h
+                <= chrome::READING_DOCK.y
+        );
+    }
 }
 

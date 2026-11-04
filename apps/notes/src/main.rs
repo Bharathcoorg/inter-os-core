@@ -162,6 +162,27 @@ const CHIP_WS: [usize; 5] = [88, 88, 110, 88, 100];
 /// everybody's thumb does.
 const PIN_FILTER: (usize, usize, usize, usize) = (556, CHIP_Y0, 136, CHIP_H);
 
+// WHY these gates sit beside the numbers: the chip row and the pin filter are
+// painted and pressed from the arrays below, and both bands once ran one row
+// past the plate they inked. A floor that is only written in a comment is a
+// floor the next edit steps over.
+const _: () = assert!(CHIP_H >= interos_std::design::touch::MIN_TARGET);
+const _: () = {
+    let mut i = 0;
+    while i < CHIP_XS.len() {
+        assert!(CHIP_WS[i] >= interos_std::design::touch::MIN_TARGET);
+        assert!(CHIP_XS[i] + CHIP_WS[i] <= 720);
+        if i + 1 < CHIP_XS.len() {
+            assert!(CHIP_XS[i] + CHIP_WS[i] <= CHIP_XS[i + 1]);
+        }
+        i += 1;
+    }
+    assert!(PIN_FILTER.2 >= interos_std::design::touch::MIN_TARGET);
+    assert!(PIN_FILTER.3 >= interos_std::design::touch::MIN_TARGET);
+    assert!(CHIP_XS[CHIP_XS.len() - 1] + CHIP_WS[CHIP_WS.len() - 1] <= PIN_FILTER.0);
+    assert!(PIN_FILTER.0 + PIN_FILTER.2 <= 720);
+};
+
 /// The width the editor wraps a body line to: the distance between the rule's
 /// two edges, the column every line is drawn in.
 ///
@@ -1038,7 +1059,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
 
     // --- B. Category Filter Chips and the Pin Filter (y: CHIP_Y0..CHIP_Y1) ---
     // Clean 16px gap below search bar, >= 48px touch targets
-    if y >= CHIP_Y0 && y <= CHIP_Y1 {
+    if y >= CHIP_Y0 && y < CHIP_Y1 {
         let chip_names: [&[u8]; 5] = [
             CATEGORY_NAMES[0],
             CATEGORY_NAMES[1],
@@ -1558,28 +1579,29 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
     }
 
     // --- C. Tone Picker Popover Bar ---
-    let swatch_y0 = if state.keyboard_visible { 852 } else { 1248 };
-    let swatch_y1 = swatch_y0 + 62;
-    if state.swatch_picker_open && y >= swatch_y0 && y <= swatch_y1 {
-        if in_rounded_rect(x, y, 20, swatch_y0, 680, 62, 22) {
-            if !in_rounded_rect(x, y, 22, swatch_y0 + 2, 676, 58, 20) {
+    let swatch_band = notes::chrome::swatch_band_at(state.keyboard_visible);
+    if state.swatch_picker_open && swatch_band.contains(x, y) {
+        if in_rounded_rect(x, y, swatch_band.x, swatch_band.y, swatch_band.w, swatch_band.h, 22) {
+            if !in_rounded_rect(x, y, swatch_band.x + 2, swatch_band.y + 2, swatch_band.w - 4, swatch_band.h - 4, 20) {
                 return THEME.border;
             }
 
-            let cy = swatch_y0 + 31;
+            let cy = notes::chrome::swatch_cy(swatch_band);
             for i in 0..NOTE_TONE_COUNT {
-                let cx = 58 + i * 82;
+                let cx = notes::chrome::SWATCH_X0 + i * notes::chrome::SWATCH_PITCH;
                 let tone = NOTE_TONES[i];
 
                 // Active circle ring
                 if i == note.color_idx as usize {
-                    if in_circle(x, y, cx, cy, 22) && !in_circle(x, y, cx, cy, 18) {
+                    if in_circle(x, y, cx, cy, notes::chrome::SWATCH_R)
+                        && !in_circle(x, y, cx, cy, notes::chrome::SWATCH_R - 4)
+                    {
                         return THEME.on_surface;
                     }
                 }
 
-                if in_circle(x, y, cx, cy, 18) {
-                    if !in_circle(x, y, cx, cy, 16) {
+                if in_circle(x, y, cx, cy, notes::chrome::SWATCH_R - 4) {
+                    if !in_circle(x, y, cx, cy, notes::chrome::SWATCH_R - 6) {
                         // WHY the picker's ring is the platform's secondary
                         // ink and not the tone's own hairline: the four paper
                         // tones are all near-white, and a near-white swatch
@@ -1600,19 +1622,25 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
 
     // --- D. Keyboard Dock & Accessory Strip ---
     if state.keyboard_visible {
-        // Accessory Strip (y: 916..974, touch targets >= 48px)
-        if y >= 916 && y <= 974 {
-            if !in_rounded_rect(x, y, 16, 916, 688, 58, 18) {
+        // The accessory strip's container, and the seven plates it carries.
+        //
+        // WHY the band is `STRIP` and not `y >= 916 && y <= 974`: the container
+        // ends its ink at row 973 and the band ran one row past it, so a press
+        // on the page below the strip answered a button the strip never drew.
+        if notes::chrome::STRIP.contains(x, y) {
+            let strip = notes::chrome::STRIP;
+            if !in_rounded_rect(x, y, strip.x, strip.y, strip.w, strip.h, 18) {
                 return THEME.surface;
             }
 
-            // Checkbox button at x: 32..86 (54px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 32, 920, 54, 48, 10) {
+            // Checklist.
+            let p = notes::chrome::STRIP_PLATES[0];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
                 if let Some(c) = draw_checkbox_glyph(
                     x,
                     y,
-                    48,
-                    933,
+                    p.x + 16,
+                    p.y + 13,
                     false,
                     THEME.primary,
                     THEME.on_surface_variant,
@@ -1623,52 +1651,58 @@ fn render_note_editor(x: usize, y: usize, state: &AppState) -> u32 {
                 return THEME.surface_container;
             }
 
-            // Bullet button at x: 94..148 (54px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 94, 920, 54, 48, 10) {
-                if let Some(c) = test_text(x, y, 116, 935, 1, b"*", THEME.on_surface, THEME.surface_container, true) {
+            // Bullet.
+            let p = notes::chrome::STRIP_PLATES[1];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
+                if let Some(c) = test_text(x, y, p.x + 22, p.y + 15, 1, b"*", THEME.on_surface, THEME.surface_container, true) {
                     return c;
                 }
                 return THEME.surface_container;
             }
 
-            // Palette button at x: 156..210 (54px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 156, 920, 54, 48, 10) {
-                if let Some(c) = draw_palette_glyph(x, y, 183, 944, THEME.on_surface) {
+            // Palette.
+            let p = notes::chrome::STRIP_PLATES[2];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
+                if let Some(c) = draw_palette_glyph(x, y, p.x + 27, p.y + 24, THEME.on_surface) {
                     return c;
                 }
                 return THEME.surface_container;
             }
 
-            // Category Cycle Pill at x: 218..334 (116px wide x 48px tall >= 48px)
+            // Category cycle pill.
             let cat_name = CATEGORY_NAMES[note.category as usize % 5];
-            if in_rounded_rect(x, y, 218, 920, 116, 48, 10) {
+            let p = notes::chrome::STRIP_PLATES[3];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
                 let text_w = std::design::font::measure(cat_name, 1);
-                let text_x = 218 + (116usize.saturating_sub(text_w)) / 2;
-                if let Some(c) = test_text(x, y, text_x, 935, 1, cat_name, THEME.primary, THEME.surface_container, true) {
+                let text_x = p.x + (p.w.saturating_sub(text_w)) / 2;
+                if let Some(c) = test_text(x, y, text_x, p.y + 15, 1, cat_name, THEME.primary, THEME.surface_container, true) {
                     return c;
                 }
                 return THEME.surface_container;
             }
 
-            // Cursor Navigation: Left Step Button at x: 350..406 (56px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 350, 920, 56, 48, 10) {
-                if let Some(c) = draw_chevron_left(x, y, 378, 944, THEME.on_surface) {
+            // Cursor left.
+            let p = notes::chrome::STRIP_PLATES[4];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
+                if let Some(c) = draw_chevron_left(x, y, p.x + 28, p.y + 24, THEME.on_surface) {
                     return c;
                 }
                 return THEME.surface_container;
             }
 
-            // Cursor Navigation: Right Step Button at x: 418..474 (56px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 418, 920, 56, 48, 10) {
-                if let Some(c) = draw_chevron_right(x, y, 446, 944, THEME.on_surface) {
+            // Cursor right.
+            let p = notes::chrome::STRIP_PLATES[5];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
+                if let Some(c) = draw_chevron_right(x, y, p.x + 28, p.y + 24, THEME.on_surface) {
                     return c;
                 }
                 return THEME.surface_container;
             }
 
-            // Hide Keyboard Button at x: 626..688 (62px wide x 48px tall >= 48px)
-            if in_rounded_rect(x, y, 626, 920, 62, 48, 10) {
-                if let Some(c) = draw_chevron_down(x, y, 657, 944, THEME.primary) {
+            // Hide keyboard.
+            let p = notes::chrome::STRIP_PLATES[6];
+            if in_rounded_rect(x, y, p.x, p.y, p.w, p.h, 10) {
+                if let Some(c) = draw_chevron_down(x, y, p.x + 31, p.y + 24, THEME.primary) {
                     return c;
                 }
                 return THEME.surface_container;
@@ -2142,7 +2176,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
             }
 
             // Category Filter Chips Tap (y: CHIP_Y0..CHIP_Y1, touch target >= 48px)
-            if uy >= CHIP_Y0 && uy <= CHIP_Y1 {
+            if uy >= CHIP_Y0 && uy < CHIP_Y1 {
                 for i in 0..5 {
                     if ux >= CHIP_XS[i] && ux < CHIP_XS[i] + CHIP_WS[i] {
                         state.selected_category = i as u8;
@@ -2300,68 +2334,67 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                 return TapAction::Redraw;
             }
 
-            // Swatch Picker Popover Bar Taps
-            let swatch_y0 = if state.keyboard_visible { 852 } else { 1248 };
-            let swatch_y1 = swatch_y0 + 62;
-            if state.swatch_picker_open && uy >= swatch_y0 && uy <= swatch_y1 {
-                let cy = swatch_y0 + 31;
-                for i in 0..NOTE_TONE_COUNT {
-                    let cx = 58 + i * 82;
-                    if in_circle(ux, uy, cx, cy, chrome::TOOL_R) {
-                        if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
-                            note.set_color(i as u8);
-                        }
-                        return TapAction::Redraw;
+            // The tone picker's swatches, answered through the same band and
+            // the same pitch the popover paints.
+            if state.swatch_picker_open {
+                if let Some(i) = chrome::swatch_at(ux, uy, state.keyboard_visible) {
+                    if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
+                        note.set_color(i as u8);
                     }
+                    return TapAction::Redraw;
                 }
             }
 
             // When Keyboard is visible
             if state.keyboard_visible {
-                // Accessory Strip Taps (y: 916..974, touch targets >= 48px)
-                if uy >= 916 && uy <= 974 {
-                    // Checkbox button (x: 32..86, width 54px >= 48px)
-                    if ux >= 32 && ux <= 86 {
-                        state.editor_buf.insert_checklist_item();
-                        state.update_editor_layout();
-                        return TapAction::Redraw;
-                    }
-                    // Bullet button (x: 94..148, width 54px >= 48px)
-                    if ux >= 94 && ux <= 148 {
-                        state.editor_buf.insert_str("\n* ");
-                        state.update_editor_layout();
-                        return TapAction::Redraw;
-                    }
-                    // Palette button (x: 156..210, width 54px >= 48px)
-                    if ux >= 156 && ux <= 210 {
-                        state.swatch_picker_open = !state.swatch_picker_open;
-                        return TapAction::Redraw;
-                    }
-                    // Category cycle button (x: 218..334, width 116px >= 48px)
-                    if ux >= 218 && ux <= 334 {
-                        if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
-                            note.category = (note.category + 1) % 5;
-                            note.is_dirty = true;
+                // The accessory strip's seven plates.
+                //
+                // WHY the press is asked through `chrome::strip_plate_at`: the
+                // strip drew each plate as `x, 920, w, 48` and answered it as
+                // `ux >= x && ux <= x + w`, so every button's press reached one
+                // to three columns past its own ink -- the cursor steps, at
+                // 350..406 and 418..474 of plate, answered 350..408 and
+                // 418..476. The band itself ran to row 974 while the container
+                // ended its ink at 973, so a press on the page below the strip
+                // pressed a key. Both sides now read the same array.
+                if let Some(plate) = chrome::strip_plate_at(ux, uy) {
+                    match plate {
+                        0 => {
+                            state.editor_buf.insert_checklist_item();
+                            state.update_editor_layout();
+                            return TapAction::Redraw;
                         }
-                        return TapAction::Redraw;
-                    }
-                    // Cursor Navigation: Left Step (x: 350..408, 58px wide >= 48px)
-                    if ux >= 350 && ux <= 408 {
-                        state.editor_buf.move_cursor_left();
-                        state.update_editor_layout();
-                        return TapAction::Redraw;
-                    }
-                    // Cursor Navigation: Right Step (x: 418..476, 58px wide >= 48px)
-                    if ux >= 418 && ux <= 476 {
-                        state.editor_buf.move_cursor_right();
-                        state.update_editor_layout();
-                        return TapAction::Redraw;
-                    }
-                    // Dismiss keyboard button (x: 626..688, width 62px >= 48px)
-                    if ux >= 626 && ux <= 688 {
-                        state.keyboard_visible = false;
-                        state.swatch_picker_open = false;
-                        return TapAction::Redraw;
+                        1 => {
+                            state.editor_buf.insert_str("\n* ");
+                            state.update_editor_layout();
+                            return TapAction::Redraw;
+                        }
+                        2 => {
+                            state.swatch_picker_open = !state.swatch_picker_open;
+                            return TapAction::Redraw;
+                        }
+                        3 => {
+                            if let Some(note) = state.store.get_note_mut(state.selected_note_id) {
+                                note.category = (note.category + 1) % 5;
+                                note.is_dirty = true;
+                            }
+                            return TapAction::Redraw;
+                        }
+                        4 => {
+                            state.editor_buf.move_cursor_left();
+                            state.update_editor_layout();
+                            return TapAction::Redraw;
+                        }
+                        5 => {
+                            state.editor_buf.move_cursor_right();
+                            state.update_editor_layout();
+                            return TapAction::Redraw;
+                        }
+                        _ => {
+                            state.keyboard_visible = false;
+                            state.swatch_picker_open = false;
+                            return TapAction::Redraw;
+                        }
                     }
                 }
 

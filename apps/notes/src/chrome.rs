@@ -142,6 +142,111 @@ pub fn dock_tool_at(x: usize, y: usize) -> Option<usize> {
         .position(|&cx| x >= cx - DOCK_TOOL_W / 2 && x < cx + DOCK_TOOL_W / 2)
 }
 
+// ---------------------------------------------------------------------------
+// The keyboard's accessory strip.
+//
+// WHY one array of plates and not seven pairs of literals: the strip drew its
+// seven buttons as rounded rects at `32,920,54,48` and pressed them as
+// `x >= 32 && x <= 86`. The inclusive bound made the press one column wider
+// than the plate -- and for the two cursor steps, three (`350..406` inked,
+// `350..408` answered) -- while the strip's own band ran `916..974` against a
+// container that ends its ink at row 973. So the last column of every button
+// and the last row of the whole strip were page the press took as a key and
+// the painter had already let go of. The plates below are the shape, the
+// painter inks them and the press answers them, and no third site restates
+// the numbers.
+// ---------------------------------------------------------------------------
+
+/// The accessory strip's container plate, above the keyboard's first row.
+///
+/// WHY derived from the keyboard: the strip belongs to the dock it sits on, and
+/// the dock's own top edge is `keyboard::KB_Y0`. Authored as a bare `916` it
+/// would have to be re-measured every time the dock moved.
+pub const STRIP: Rect = Rect::new(16, crate::keyboard::KB_Y0 - 64, 688, 58);
+
+/// The height of every plate the strip carries, and the row its plates start
+/// on. Four rows of air above the plate and six below are the container's own
+/// inset, kept exactly as the strip has always drawn it.
+pub const STRIP_BTN_H: usize = 48;
+pub const STRIP_BTN_Y: usize = STRIP.y + 4;
+
+/// The seven plates the strip paints and answers, in the order the press asks
+/// them: checklist, bullet, palette, category cycle, cursor left, cursor right,
+/// hide keyboard.
+pub const STRIP_PLATES: [Rect; 7] = [
+    Rect::new(32, STRIP_BTN_Y, 54, STRIP_BTN_H),
+    Rect::new(94, STRIP_BTN_Y, 54, STRIP_BTN_H),
+    Rect::new(156, STRIP_BTN_Y, 54, STRIP_BTN_H),
+    Rect::new(218, STRIP_BTN_Y, 116, STRIP_BTN_H),
+    Rect::new(350, STRIP_BTN_Y, 56, STRIP_BTN_H),
+    Rect::new(418, STRIP_BTN_Y, 56, STRIP_BTN_H),
+    Rect::new(626, STRIP_BTN_Y, 62, STRIP_BTN_H),
+];
+
+/// The strip plate that holds the press, by its index in [`STRIP_PLATES`].
+pub fn strip_plate_at(x: usize, y: usize) -> Option<usize> {
+    STRIP_PLATES.iter().position(|plate| plate.contains(x, y))
+}
+
+// ---------------------------------------------------------------------------
+// The tone picker's popover.
+//
+// WHY a function here and not two identical `if` expressions in the renderer
+// and the press: both sites wrote `let swatch_y0 = if keyboard_visible { 852 }
+// else { 1248 }; let swatch_y1 = swatch_y0 + 62;`. Two copies of one band, in
+// two files' worth of reasoning, is the pattern this module exists to end --
+// and the day the keyboard moves, one of the two is updated and the picker
+// answers rows it does not ink.
+// ---------------------------------------------------------------------------
+
+/// The tone picker's band while the keyboard is up, and while it is not.
+///
+/// WHY the two rows are named separately: with the keyboard up the picker sits
+/// on the free rows above the accessory strip; without it, above the reading
+/// dock. Neither is the keyboard's own rows, and the press must not reach into
+/// them.
+pub const SWATCH_Y0_DOCKED: usize = 1248;
+pub const SWATCH_Y0_KEYBOARD: usize = STRIP.y - 64;
+/// The picker's container: its width, height and the swatch pitch inside it.
+pub const SWATCH_H: usize = 62;
+pub const SWATCH_PITCH: usize = 82;
+pub const SWATCH_X0: usize = 58;
+/// The swatch's press radius: the same floor-sized disc every other circular
+/// tool in this app answers, and the ring the active swatch inks.
+pub const SWATCH_R: usize = TOOL_R;
+
+/// The picker's band for the keyboard state the screen is in.
+#[inline]
+pub const fn swatch_band_at(keyboard_visible: bool) -> Rect {
+    let y0 = if keyboard_visible {
+        SWATCH_Y0_KEYBOARD
+    } else {
+        SWATCH_Y0_DOCKED
+    };
+    Rect::new(20, y0, 680, SWATCH_H)
+}
+
+/// The centre row of the picker's swatches, read off the band itself.
+#[inline]
+pub const fn swatch_cy(band: Rect) -> usize {
+    band.y + band.h / 2
+}
+
+/// The swatch the press lands on, or `None` when the press is on the picker's
+/// container rather than on one of its plates.
+pub fn swatch_at(x: usize, y: usize, keyboard_visible: bool) -> Option<usize> {
+    let band = swatch_band_at(keyboard_visible);
+    if !band.contains(x, y) {
+        return None;
+    }
+    let cy = swatch_cy(band);
+    (0..crate::NOTE_TONE_COUNT).find(|&i| {
+        let dx = x as i32 - (SWATCH_X0 + i * SWATCH_PITCH) as i32;
+        let dy = y as i32 - cy as i32;
+        dx * dx + dy * dy <= (SWATCH_R * SWATCH_R) as i32
+    })
+}
+
 const _: () = assert!(TOOL_R * 2 >= MIN_TARGET);
 const _: () = assert!(FAB_R * 2 >= MIN_TARGET);
 const _: () = assert!(SEARCH_CLEAR.w >= MIN_TARGET && SEARCH_CLEAR.h >= MIN_TARGET);
@@ -154,3 +259,35 @@ const _: () = assert!(HOME_PILL.x + HOME_PILL.w <= HOME_HIT.x + HOME_HIT.w);
 const _: () = assert!(SEARCH_CLEAR.x + SEARCH_CLEAR.w <= SEARCH_PILL.x + SEARCH_PILL.w);
 const _: () = assert!(READING_TAG.y >= READING_DOCK.y);
 const _: () = assert!(READING_TAG.y + READING_TAG.h <= READING_DOCK.y + READING_DOCK.h);
+
+// The accessory strip's floor, and the proof that its plates stand inside the
+// container the strip inks. WHY a sweep and not seven lines: a plate the strip
+// grows tomorrow has to clear the same floor as the seven it has today.
+const _: () = {
+    let mut i = 0;
+    while i < STRIP_PLATES.len() {
+        let p = STRIP_PLATES[i];
+        assert!(p.w >= MIN_TARGET && p.h >= MIN_TARGET);
+        assert!(p.x >= STRIP.x && p.y >= STRIP.y);
+        assert!(p.x + p.w <= STRIP.x + STRIP.w);
+        assert!(p.y + p.h <= STRIP.y + STRIP.h);
+        if i + 1 < STRIP_PLATES.len() {
+            assert!(p.x + p.w <= STRIP_PLATES[i + 1].x);
+        }
+        i += 1;
+    }
+    assert!(STRIP.y + STRIP.h <= crate::keyboard::KB_Y0);
+    assert!(STRIP_BTN_Y + STRIP_BTN_H <= STRIP.y + STRIP.h);
+};
+
+// The tone picker's floor: a band tall enough for a thumb, a press disc at the
+// platform's floor, and swatches that never merge into one another.
+const _: () = assert!(SWATCH_H >= MIN_TARGET);
+const _: () = assert!(SWATCH_R * 2 >= MIN_TARGET);
+const _: () = assert!(SWATCH_PITCH >= 2 * SWATCH_R);
+const _: () = assert!(
+    SWATCH_X0 + (crate::NOTE_TONE_COUNT - 1) * SWATCH_PITCH + SWATCH_R
+        <= swatch_band_at(false).x + swatch_band_at(false).w
+);
+const _: () = assert!(swatch_band_at(true).y + SWATCH_H <= STRIP.y);
+const _: () = assert!(swatch_band_at(false).y + SWATCH_H <= READING_DOCK.y);
