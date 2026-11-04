@@ -16,6 +16,33 @@ const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
 
 // ---------------------------------------------------------------------------
+// The width questions take the process's advance memo in turn
+// ---------------------------------------------------------------------------
+
+/// WHY this lock exists: `interos_std` remembers each run's whole advance in a table of
+/// thirty-two slots held in a `static mut` and written through raw pointers with nothing
+/// around it (`typeface::text_advance_px`). The harness runs these tests on several
+/// threads, so a publish into a slot another test is reading can land its number under
+/// the reader's own key: the entry is matched by bytes, but the width beside those bytes
+/// is not published atomically. That is a race inside the memo, not a disagreement
+/// between the two faces a test is comparing, and it made two of seventy runs of this
+/// suite fail on a width the shell never draws.
+///
+/// WHY the guard is here and not in the SDK: the table belongs to another crate, and the
+/// guest is single-threaded, so the hazard is one this harness creates by measuring the
+/// same words from several threads at once. Taking turns costs the tests that touch the
+/// memo their parallelism, and it keeps every assertion exactly as strong as it was.
+static ADVANCE_MEMO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the width questions in turn, and keeps going if one failed in another test.
+#[inline]
+fn advance_memo() -> std::sync::MutexGuard<'static, ()> {
+    ADVANCE_MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// ---------------------------------------------------------------------------
 // Grid
 // ---------------------------------------------------------------------------
 
@@ -341,6 +368,7 @@ fn themes_declare_the_same_metrics() {
 
 #[test]
 fn measurement_is_the_sum_of_real_advances() {
+    let _turn = advance_memo();
     // WHY this replaced a fixed-cell assertion: the face is proportional, so a
     // glyph's width depends on the character. The old test asserted
     // `measure == len * GLYPH_W * scale`, which is only true for a monospaced face
@@ -369,6 +397,7 @@ fn measurement_is_the_sum_of_real_advances() {
 
 #[test]
 fn digits_are_tabular_so_a_clock_does_not_jitter() {
+    let _turn = advance_memo();
     // WHY: the lock screen clock is built from digits. If they were proportional
     // the whole time string would shift horizontally on every tick, which reads as
     // a rendering fault rather than a clock.
@@ -385,6 +414,7 @@ fn digits_are_tabular_so_a_clock_does_not_jitter() {
 
 #[test]
 fn centring_places_text_symmetrically() {
+    let _turn = advance_memo();
     let s = b"Camera";
     let scale = 2usize;
     let available = 300usize;
@@ -396,6 +426,7 @@ fn centring_places_text_symmetrically() {
 
 #[test]
 fn centring_text_wider_than_the_space_does_not_underflow() {
+    let _turn = advance_memo();
     let s = b"Settings";
     let x = tm::center_x(s, 12, 40);
     assert_eq!(x, 0, "over-wide text clamps to the left edge instead of wrapping");
@@ -403,6 +434,7 @@ fn centring_text_wider_than_the_space_does_not_underflow() {
 
 #[test]
 fn wrapping_never_exceeds_the_line_budget() {
+    let _turn = advance_memo();
     let text = b"Running from the system package registry";
     for max_lines in 1..=3usize {
         for max_width in [64usize, 128, 300, 640] {
@@ -436,6 +468,7 @@ fn wrapping_never_exceeds_the_line_budget() {
 
 #[test]
 fn wrapping_short_text_yields_a_single_line() {
+    let _turn = advance_memo();
     let (breaks, n) = tm::wrap(b"Camera", 1, 640, 3);
     assert_eq!(n, 1);
     assert_eq!(breaks[0], 6);
@@ -443,6 +476,7 @@ fn wrapping_short_text_yields_a_single_line() {
 
 #[test]
 fn wrapping_a_single_unbreakable_word_falls_back_to_a_hard_break() {
+    let _turn = advance_memo();
     let (breaks, n) = tm::wrap(b"Supercalifragilistic", 1, 40, 3);
     assert!(n > 0, "an unbreakable word must still produce lines");
     for i in 0..n {
@@ -452,6 +486,7 @@ fn wrapping_a_single_unbreakable_word_falls_back_to_a_hard_break() {
 
 #[test]
 fn wrapping_a_zero_budget_is_safe() {
+    let _turn = advance_memo();
     let (breaks, n) = tm::wrap(b"hello", 1, 0, 3);
     assert_eq!(n, 0, "a zero width must not loop forever or divide by zero");
     assert_eq!(breaks[0], 0);
@@ -459,6 +494,7 @@ fn wrapping_a_zero_budget_is_safe() {
 
 #[test]
 fn ellipsize_appends_an_ellipsis_when_it_cuts() {
+    let _turn = advance_memo();
     let (out, n) = tm::ellipsize(b"Settings and configuration", 2, 160);
     // WHY measured width: the old assertion divided the result length by the cell
     // width, which is meaningless for a proportional face. What must hold is that
@@ -473,12 +509,14 @@ fn ellipsize_appends_an_ellipsis_when_it_cuts() {
 
 #[test]
 fn ellipsize_leaves_text_that_fits_alone() {
+    let _turn = advance_memo();
     let (out, n) = tm::ellipsize(b"Camera", 1, 640);
     assert_eq!(&out[..n], b"Camera");
 }
 
 #[test]
 fn ellipsize_refuses_rather_than_panicking_when_no_room_exists() {
+    let _turn = advance_memo();
     let (out, n) = tm::ellipsize(b"Settings", 12, 8);
     assert_eq!(n, 0, "no room for even an ellipsis must yield nothing, not underflow");
     assert_eq!(out[0], 0);
@@ -486,6 +524,7 @@ fn ellipsize_refuses_rather_than_panicking_when_no_room_exists() {
 
 #[test]
 fn a_package_id_humanises_into_a_readable_title() {
+    let _turn = advance_memo();
     let mut buf = [0u8; 64];
     assert_eq!(
         tm::humanise_package_id(b"org.interos.notes", &mut buf),
@@ -495,6 +534,7 @@ fn a_package_id_humanises_into_a_readable_title() {
 
 #[test]
 fn a_package_id_without_a_vendor_prefix_is_left_alone() {
+    let _turn = advance_memo();
     let mut buf = [0u8; 64];
     // WHY this case: `org` with nothing after the dot is an app named "org",
     // not a vendor segment. Dropping it would render a blank label, which is
@@ -504,6 +544,7 @@ fn a_package_id_without_a_vendor_prefix_is_left_alone() {
 
 #[test]
 fn a_package_id_keeps_only_its_final_segment() {
+    let _turn = advance_memo();
     let mut buf = [0u8; 64];
     // WHY the final segment and not the first: `org.interos` is the vendor and
     // `notes` is the app. Stripping only the first segment leaves
@@ -516,6 +557,7 @@ fn a_package_id_keeps_only_its_final_segment() {
 
 #[test]
 fn a_humanised_package_id_never_carries_a_trailing_separator() {
+    let _turn = advance_memo();
     let mut buf = [0u8; 64];
     let out = tm::humanise_package_id(b"org.interos.", &mut buf);
     assert!(
@@ -526,6 +568,7 @@ fn a_humanised_package_id_never_carries_a_trailing_separator() {
 
 #[test]
 fn a_humanised_package_id_stops_at_the_buffer_it_was_given() {
+    let _turn = advance_memo();
     let mut buf = [0u8; 6];
     let out = tm::humanise_package_id(b"org.interos.calculator", &mut buf);
     assert_eq!(out.len(), 6, "the result is bounded by the buffer, not by the id");
@@ -533,6 +576,7 @@ fn a_humanised_package_id_stops_at_the_buffer_it_was_given() {
 
 #[test]
 fn glyph_lookup_rejects_unprintable_bytes() {
+    let _turn = advance_memo();
     assert!(tm::glyph_index(b'A').is_some());
     assert!(tm::glyph_index(b' ').is_some());
     assert!(tm::glyph_index(31).is_none(), "control bytes have no glyph");
@@ -541,6 +585,7 @@ fn glyph_lookup_rejects_unprintable_bytes() {
 
 #[test]
 fn boot_typography_and_tagline_metrics() {
+    let _turn = advance_memo();
     let width = 720usize;
     let wordmark_text = b"InterOS";
     let wordmark_em = 52u32;
@@ -1016,6 +1061,7 @@ fn a_gesture_is_read_as_a_dismiss_or_as_a_scroll() {
 
 #[test]
 fn a_label_inks_the_pixels_it_was_placed_at() {
+    let _turn = advance_memo();
     // WHY this test exists: a label that is placed but never inks is a label
     // that is invisible, and the screen that draws it cannot tell the
     // difference between "there is no text" and "the text did not render".
@@ -1040,6 +1086,7 @@ fn a_label_inks_the_pixels_it_was_placed_at() {
 
 #[test]
 fn a_run_is_measured_with_the_face_it_is_drawn_with() {
+    let _turn = advance_memo();
     // WHY this is a test and not a convention: the app drawer measured its
     // labels with the outline face at the rung's em and drew them at a
     // hardcoded one, so the face on the screen was about four per cent wider
@@ -1059,6 +1106,7 @@ fn a_run_is_measured_with_the_face_it_is_drawn_with() {
 
 #[test]
 fn a_centred_label_is_centred_on_the_face_it_is_drawn_with() {
+    let _turn = advance_memo();
     // WHY the painted width and not the measured advance: a bold run is dilated
     // by a column when it is drawn, so it inks a pixel past its advance.
     for scale in 2..=6usize {
@@ -1091,6 +1139,7 @@ fn a_centred_label_is_centred_on_the_face_it_is_drawn_with() {
 
 #[test]
 fn a_cap_centred_label_sits_on_the_control_centre_line() {
+    let _turn = advance_memo();
     // WHY the cap box: a reader sees the cap box, and the line box carries the
     // face's ascent and descent above and below it.
     for scale in 1..=6usize {
@@ -1116,6 +1165,7 @@ fn a_cap_centred_label_sits_on_the_control_centre_line() {
 
 #[test]
 fn a_category_chip_label_is_centred_in_its_pill() {
+    let _turn = advance_memo();
     // WHY this test exists: the four category chips read as sitting low and a
     // little to the right of the middle of their pills, which is exactly what
     // a reader notices first on the screen.
@@ -1757,6 +1807,7 @@ fn a_tap_opens_the_rank_its_row_was_returned_for() {
 
 #[test]
 fn the_line_under_the_card_promises_only_what_the_list_can_keep() {
+    let _turn = advance_memo();
     // The foot line reads "Tap a result to open it. Backspace edits the query."
     // Both halves are promises about state the surface may not have.
     assert!(
@@ -1771,4 +1822,109 @@ fn the_line_under_the_card_promises_only_what_the_list_can_keep() {
         foot_line_applies(b"messages".len(), 2),
         "with rows in the list the line is the instruction it claims to be"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scale: the _at faces restate text.rs's rules, rung by rung
+// ---------------------------------------------------------------------------
+
+/// WHY swept over the whole word list rather than one string: the pen sum and the
+/// whole-run outline advance disagree by a size that depends on the run, so a
+/// single word can pass while the ladder's rule is broken for every other one.
+///
+/// WHY the last two are not ordinary names: where every byte of a run has an outline
+/// glyph, the per-byte steps and the whole-run advance are the SAME number -- swept
+/// over `System` and `Video Player` alone, a run measured by the pen and a run
+/// measured by the painted width answer identically, and the pin proves nothing. The
+/// two faces part company exactly where [`crate::scale::advance_at`] declines a byte
+/// and falls back to the bitmap cell: a control byte no glyph answers for, and the two
+/// bytes an accented name is shaped from, which the run counts once and the pen steps
+/// as two cells.
+const SAMPLES: &[&[u8]] = &[
+    b"System",
+    b"Settings",
+    b"Calculator",
+    b"a",
+    b"",
+    b"Video Player",
+    b"inter-os",
+    b"Files",
+    b"System\x01",
+    b"caf\xc3\xa9",
+];
+
+#[test]
+fn measure_at_is_the_pen_sum_at_every_rung() {
+    let _turn = advance_memo();
+    for level in 0..=crate::scale::MAX_LEVEL {
+        for scale in 1..=6usize {
+            for text in SAMPLES {
+                let mut pen = 0usize;
+                for &c in *text {
+                    pen += crate::scale::advance_at(c, scale, level);
+                }
+                assert_eq!(
+                    crate::scale::measure_at(text, scale, level),
+                    pen,
+                    "measure_at must be the sum of the rung's advances: {:?} scale {} level {}",
+                    text,
+                    scale,
+                    level
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn painted_width_at_is_the_wider_face_plus_the_bold_column() {
+    let _turn = advance_memo();
+    use interos_std::design::typeface;
+    for level in 0..=crate::scale::MAX_LEVEL {
+        for scale in 2..=6usize {
+            let em = crate::scale::em_at(scale, level);
+            for text in SAMPLES {
+                let outline = typeface::text_advance_px(text, em) as usize;
+                for bold in [false, true] {
+                    let want = crate::scale::measure_at(text, scale, level)
+                        .max(outline + usize::from(bold));
+                    assert_eq!(
+                        crate::scale::painted_width_at(text, scale, bold, level),
+                        want,
+                        "painted width of {:?} scale {} level {} bold {}",
+                        text,
+                        scale,
+                        level,
+                        bold
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_at_faces_answer_the_ladder_faces_at_the_authored_rung() {
+    let _turn = advance_memo();
+    // The identity that lets the shell adopt the setting at all: at the level the
+    // shell was drawn with, a raised-rung face must be the face it replaces.
+    for scale in 1..=6usize {
+        for text in SAMPLES {
+            assert_eq!(
+                crate::scale::measure_at(text, scale, crate::scale::PLATFORM_LEVEL),
+                tm::measure(text, scale)
+            );
+            for bold in [false, true] {
+                assert_eq!(
+                    crate::scale::painted_width_at(
+                        text,
+                        scale,
+                        bold,
+                        crate::scale::PLATFORM_LEVEL
+                    ),
+                    tm::painted_width(text, scale, bold)
+                );
+            }
+        }
+    }
 }

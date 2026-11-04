@@ -236,12 +236,16 @@ pub fn advance_at(c: u8, scale: usize, level: u8) -> usize {
     font::advance_of(c, false) * scale
 }
 
-/// The advance a run takes at `scale` on `level`.
+/// The advance a run steps by at `scale` on `level`: the sum of its bytes'
+/// [`advance_at`] steps, which is [`crate::text::measure`]'s rule read at the rung's
+/// em.
 ///
-/// WHY the wider of the two faces: a run has two renderers -- the outline the shell
-/// places and the bitmap pen it falls back to -- and `crate::text::measure` follows
-/// whichever the rung picks. Reserving only one of them is how a name's tail ended up
-/// past the cell it was centred in.
+/// WHY the pen sum and nothing wider: this is the number a run's tail lands at, and
+/// [`ellipsize_at`] below walks the very same advances and stops where this says the run
+/// ends. Comparing it against the whole-run outline advance here would make the trim
+/// answer a painted width instead of the step the pen takes, and a raised rung would
+/// drop a glyph early from every name whose two faces disagree. The whole-run comparison
+/// is the painted width's job, and it is in [`painted_width_at`], where the ink is sized.
 pub fn measure_at(text: &[u8], scale: usize, level: u8) -> usize {
     if level == PLATFORM_LEVEL {
         return crate::text::measure(text, scale);
@@ -249,16 +253,23 @@ pub fn measure_at(text: &[u8], scale: usize, level: u8) -> usize {
     if scale == 0 {
         return 0;
     }
-    let outline = typeface::text_advance_px(text, em_at(scale, level)) as usize;
     let mut pen = 0usize;
     for &c in text {
         pen += advance_at(c, scale, level);
     }
-    later(pen, outline)
+    pen
 }
 
-/// The width a run of `text` is painted at on `level`: the measured advance, plus the
-/// column a bold stroke dilates.
+/// The width a run of `text` is painted at on `level`: the wider of its measured
+/// advance and the whole-run outline advance plus the column a bold stroke dilates,
+/// which is [`crate::text::painted_width`]'s rule read at the rung's em.
+///
+/// WHY the wider of the two faces: the run has two renderers -- the outline the shell
+/// places as a whole run and the per-byte pen [`measure_at`] steps -- and they disagree
+/// by a size that depends on the run, because [`advance_at`] falls back to the bitmap
+/// cell for bytes the outline face has no glyph for. Reserving only one of them is how
+/// a name's tail ended up past the cell it was centred in, and the bold dilation is
+/// inked a column past the advance it is measured with.
 pub fn painted_width_at(text: &[u8], scale: usize, bold: bool, level: u8) -> usize {
     if level == PLATFORM_LEVEL {
         return crate::text::painted_width(text, scale, bold);
@@ -267,7 +278,8 @@ pub fn painted_width_at(text: &[u8], scale: usize, bold: bool, level: u8) -> usi
     if scale < 2 {
         return measured;
     }
-    measured + usize::from(bold)
+    let outline = typeface::text_advance_px(text, em_at(scale, level)) as usize;
+    later(measured, outline + usize::from(bold))
 }
 
 /// Left edge that centres `text` across `available` at `scale` on `level`.
