@@ -1598,6 +1598,24 @@ pub const HOME_RECENTS_Y1: usize = HOME_RECENTS_Y0 + HOME_RECENTS_VISIBLE * HOME
 pub const fn home_recents_y1_at(level: u8) -> usize {
     home_recents_y0_at(level) + HOME_RECENTS_VISIBLE * home_recent_row_h_at(level)
 }
+
+/// The air the recents block keeps above the notice it paints when the index gave
+/// it nothing to list.
+///
+/// WHY derived and not added at the branch that inks it: the block's own top came
+/// from [`home_recents_y0_at`], which moves with the rung, while the `8` the painter
+/// added to it did not. The notice replaces rows that each grew their own box, so a
+/// line left at the authored air floats to the top of a block the person just made
+/// taller -- the same half-moved layout the plates above it were written to fix.
+const HOME_RECENTS_NOTE_DY: usize = 8;
+pub const fn home_recents_note_dy_at(level: u8) -> usize {
+    grown(HOME_RECENTS_NOTE_DY, LABEL_RUNG, level)
+}
+#[inline]
+pub fn home_recents_note_dy() -> usize {
+    home_recents_note_dy_at(draw_level())
+}
+const _: () = assert!(home_recents_note_dy_at(PLATFORM_LEVEL) == HOME_RECENTS_NOTE_DY);
 pub const fn category_title_y_at(level: u8) -> usize {
     home_recents_y1_at(level)
 }
@@ -1861,6 +1879,22 @@ pub const SCOPE_ALL_PILL: Rect = Rect::new(560, BROWSE_STACK_Y + 58, 124, 48);
 const SEARCH_CLEAR_DY: usize = 4;
 const SCOPE_ROW_DY: usize = 58;
 const SCOPE_CAPTION_DY: usize = 62;
+/// The row the field's magnifier stands on, inside the field's own plate.
+///
+/// WHY derived and not written at the branch that inks it: the field's height is
+/// [`plate_at`]'s, so above the authored rung the box grew and the magnifier did
+/// not -- the lens and the needle beside it left one another, one moving with the
+/// rung and one pinned to the authored drop from the field's top.
+const SEARCH_GLYPH_DY: usize = 26;
+
+pub const fn search_glyph_dy_at(level: u8) -> usize {
+    grown(SEARCH_GLYPH_DY, SEARCH_TEXT_SCALE, level)
+}
+#[inline]
+pub fn search_glyph_dy() -> usize {
+    search_glyph_dy_at(draw_level())
+}
+const _: () = assert!(search_glyph_dy_at(PLATFORM_LEVEL) == SEARCH_GLYPH_DY);
 
 pub const fn search_field_at(level: u8) -> Rect {
     Rect::new(
@@ -2611,6 +2645,90 @@ pub const ENTRY_NAME_LANE: usize = ENTRIES_CARD.w - ENTRY_TEXT_X - ENTRY_RIGHT_A
 pub const GRID_TEXT_INSET: usize = 12;
 pub const GRID_NAME_SCALE: usize = theme::type_scale::CAPTION;
 pub const GRID_NAME_LANE: usize = GRID_CELL_W - 2 * GRID_TEXT_INSET;
+
+/// The pictogram box every entry glyph is drawn in.
+///
+/// WHY named at all: `paint_glyph` walked `0..26` and `0..34` inline, so the box
+/// was two numbers no gate could read and the sweep below could not ask whether
+/// the glyph still stands inside the plate that carries it. It is the artwork's
+/// own extent, not a layout figure, so it stays authored at every rung -- what
+/// must move is the row it stands on, which is the pair of faces under this.
+pub const GLYPH_COLS: usize = 34;
+pub const GLYPH_ROWS: usize = 26;
+
+/// The air a list row keeps above its glyph, and the column the grid's glyph
+/// stands in with the cell's own width taken from both sides.
+///
+/// WHY derived and not written at the branch that inks it: the row's and the
+/// cell's plates are [`plate_at`]'s, so above the authored rung the box grew
+/// while `16` and the hand-centred `83` did not -- the glyph stayed glued to the
+/// top of a plate the person just made taller, and the caption under it, which
+/// does move, closed on it. Centring is derived from the cell's width, so a cell
+/// that ever narrows keeps its glyph in the middle instead of off-centre.
+const ENTRY_GLYPH_DY: usize = 16;
+const GRID_GLYPH_DY: usize = 30;
+
+pub const fn entry_glyph_dy_at(level: u8) -> usize {
+    grown(ENTRY_GLYPH_DY, ENTRY_NAME_SCALE, level)
+}
+pub const fn grid_glyph_dy_at(level: u8) -> usize {
+    grown(GRID_GLYPH_DY, GRID_NAME_SCALE, level)
+}
+pub const GRID_GLYPH_X: usize = (GRID_CELL_W - GLYPH_COLS) / 2;
+
+#[inline]
+pub fn entry_glyph_dy() -> usize {
+    entry_glyph_dy_at(draw_level())
+}
+#[inline]
+pub fn grid_glyph_dy() -> usize {
+    grid_glyph_dy_at(draw_level())
+}
+const _: () = assert!(entry_glyph_dy_at(PLATFORM_LEVEL) == ENTRY_GLYPH_DY);
+const _: () = assert!(grid_glyph_dy_at(PLATFORM_LEVEL) == GRID_GLYPH_DY);
+const _: () = assert!(GRID_GLYPH_X == 83);
+
+/// Truth gate, swept: each of the four offsets this app used to add inside the
+/// branch that inked it still puts its mark inside the plate that carries it, and
+/// runs forwards with the rung rather than drifting up toward the plate's top.
+const fn authored_paint_pixels_hold_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        if entry_glyph_dy_at(level) + GLYPH_ROWS > entry_row_h_at(level) {
+            return false;
+        }
+        if grid_glyph_dy_at(level) + GLYPH_ROWS > grid_cell_h_at(level) {
+            return false;
+        }
+        if GRID_GLYPH_X + GLYPH_COLS > GRID_CELL_W {
+            return false;
+        }
+        if search_glyph_dy_at(level) + GLYPH_ROWS > search_field_at(level).h {
+            return false;
+        }
+        let block = HOME_RECENTS_VISIBLE * home_recent_row_h_at(level);
+        if home_recents_note_dy_at(level) + rows_at(LABEL_RUNG, level) > block {
+            return false;
+        }
+        if level > PLATFORM_LEVEL {
+            if entry_glyph_dy_at(level) <= entry_glyph_dy_at(PLATFORM_LEVEL) {
+                return false;
+            }
+            if grid_glyph_dy_at(level) <= grid_glyph_dy_at(PLATFORM_LEVEL) {
+                return false;
+            }
+            if search_glyph_dy_at(level) <= search_glyph_dy_at(PLATFORM_LEVEL) {
+                return false;
+            }
+            if home_recents_note_dy_at(level) <= home_recents_note_dy_at(PLATFORM_LEVEL) {
+                return false;
+            }
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(authored_paint_pixels_hold_at_every_level());
 
 /// The details card's inset, its two rungs and the two lanes they answer.
 ///
@@ -3460,6 +3578,77 @@ fn push_line(view: &mut DetailsView, index: usize, buf: &[u8], len: usize) {
     view.lines[index][..take].copy_from_slice(&buf[..take]);
     view.line_lens[index] = take;
     view.line_count = index + 1;
+}
+
+/// Fits one details slot to the lane its card owns, writing the answer back even
+/// when the trim refused to answer at all.
+///
+/// WHY it always writes: a refusal is the one answer `ellipsize_run` gives with a
+/// length of `0` and without writing a byte, and a caller that read `> 0` as
+/// "adopt this" left the slot's whole label in place -- the card then inked a run
+/// its own lane cannot hold, past the inset on both sides, over whatever is drawn
+/// under it. [`fitted_run`] is the only answer this slot may hold: the label whole
+/// when the lane carries it, the label with a visible mark when it does not, and
+/// the leading glyphs the lane does hold when even the mark will not fit. A run
+/// that needs no cutting is handed back untouched, because that is what
+/// [`fitted_run`] returns for it.
+///
+/// WHY the plate is the caller's and not a fixed array: the plate's own length is
+/// what makes `ellipsize_run` refuse (`out_buf.len() < 3`), and a slot whose test
+/// could only ever hand it a card-sized plate is a slot whose refusal no test can
+/// reach. Every real call site passes a plate as wide as the slot.
+///
+/// `next` is filled inside the block and assigned after it: the answer can be
+/// borrowed from the very slot being replaced -- a label the lane holds whole
+/// comes back as the label, not as plate bytes -- so the write-back has to wait
+/// for the read to end.
+fn fit_details_slot<const N: usize>(
+    slot: &mut [u8; N],
+    len: &mut usize,
+    scale: usize,
+    lane: usize,
+    plate: &mut [u8],
+) {
+    let mut next = [0u8; N];
+    let kept = {
+        let run = fitted_run(&slot[..*len], scale, lane, plate);
+        let take = run.len().min(N);
+        next[..take].copy_from_slice(&run[..take]);
+        take
+    };
+    *slot = next;
+    *len = kept;
+}
+
+/// Trims a details card's title and lines to what the card can draw.
+///
+/// WHY the two bounds are the library's: `fit_details` is the card's own text-fit
+/// gate, and the card's title rung and line rung live beside the card's box here
+/// in the model -- so the trim is checked against the lane the card actually owns
+/// rather than a width a painter remembered, and against the refusal the same
+/// lane answers with. That refusal is the reason this moved out of the binary:
+/// the card kept the whole label whenever the trim said nothing, and only the
+/// model can be reached by a test that hands a slot a plate too small for the
+/// mark it was going to cut with.
+pub fn fit_details(view: &mut DetailsView) {
+    let mut plate = [0u8; MAX_DETAILS_LINE];
+    fit_details_slot(
+        &mut view.title,
+        &mut view.title_len,
+        DETAILS_TITLE_SCALE,
+        DETAILS_TITLE_LANE,
+        &mut plate,
+    );
+    for index in 0..view.line_count {
+        let mut plate = [0u8; MAX_DETAILS_LINE];
+        fit_details_slot(
+            &mut view.lines[index],
+            &mut view.line_lens[index],
+            DETAILS_LINE_SCALE,
+            DETAILS_LINE_LANE,
+            &mut plate,
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -4948,6 +5137,102 @@ mod tests {
                 room
             );
         }
+    }
+
+    /// The details card's own fit, reached through a plate too small for the mark:
+    /// the slot comes back with the leading glyphs its lane holds, never with the
+    /// label its card refused.
+    ///
+    /// WHY the plate and not the lane carries the refusal here: the card's lanes
+    /// are 600px and no line the model builds can overflow the mark's own three
+    /// bytes, so the only honest way to make the details path answer a refusal is
+    /// the way it really happens in the trim -- `out_buf.len() < 3`. A 1- and a
+    /// 2-byte plate are that branch, and the slot is what the painter then inks.
+    ///
+    /// WHY this is a test of the model rather than of `fitted_run` again: the
+    /// defect was never the helper's fallback, it was a caller that read the
+    /// trim's `0` as "keep what you had" and left the whole label in the slot.
+    /// That caller cannot be reached from the binary at all -- the app is built
+    /// with `test = false` -- so the rule lives or dies on these two lines.
+    #[test]
+    fn a_refused_details_slot_keeps_a_cut_and_never_its_label() {
+        let lvl = draw_level();
+        let label = [b'W'; 64];
+        assert!(
+            run_w_at(&label, DETAILS_TITLE_SCALE, lvl) > DETAILS_TITLE_LANE,
+            "this fixture's label fits the card's lane, so its plate would never be refused"
+        );
+        for room in [1usize, 2] {
+            let mut slot = [0u8; 64];
+            slot.copy_from_slice(&label);
+            let mut len = label.len();
+            let mut backing = [0u8; 2];
+            fit_details_slot(
+                &mut slot,
+                &mut len,
+                DETAILS_TITLE_SCALE,
+                DETAILS_TITLE_LANE,
+                &mut backing[..room],
+            );
+            let kept = &slot[..len];
+            assert!(!kept.is_empty(), "a {}-byte plate lost the run whole", room);
+            assert!(
+                kept.len() < label.len(),
+                "a {}-byte plate left the details slot its whole label",
+                room
+            );
+            assert!(
+                label.starts_with(kept),
+                "the details slot came back with bytes its label never had"
+            );
+            assert!(
+                run_w_at(kept, DETAILS_TITLE_SCALE, lvl) <= DETAILS_TITLE_LANE,
+                "the run the card kept overflows its own lane by {}px",
+                run_w_at(kept, DETAILS_TITLE_SCALE, lvl).saturating_sub(DETAILS_TITLE_LANE)
+            );
+        }
+    }
+
+    /// The card's fit adopts an answer for every slot it owns -- title and lines
+    /// alike -- and a run the lane holds is handed on untouched, so the only thing
+    /// a slot may lose is the ink the card could not draw.
+    #[test]
+    fn the_details_fit_holds_a_short_run_and_cuts_an_over_wide_one() {
+        let lvl = draw_level();
+        let mut view = DetailsView::EMPTY;
+        let short = b"notes.txt";
+        view.title[..short.len()].copy_from_slice(short);
+        view.title_len = short.len();
+        let long = [b'W'; MAX_DETAILS_LINE];
+        assert!(
+            run_w_at(&long, DETAILS_LINE_SCALE, lvl) > DETAILS_LINE_LANE,
+            "this fixture's line fits the card's lane, so the fit would have nothing to cut"
+        );
+        view.lines[0].copy_from_slice(&long);
+        view.line_lens[0] = long.len();
+        view.line_count = 1;
+
+        fit_details(&mut view);
+
+        assert_eq!(
+            &view.title[..view.title_len],
+            short.as_slice(),
+            "a title the card holds was cut on its way to the screen"
+        );
+        let kept = &view.lines[0][..view.line_lens[0]];
+        assert!(
+            kept.len() < long.len(),
+            "the card kept a line whole that overflows its own lane by {}px",
+            run_w_at(kept, DETAILS_LINE_SCALE, lvl).saturating_sub(DETAILS_LINE_LANE)
+        );
+        assert!(
+            long.starts_with(kept.strip_suffix(b"...").unwrap_or(kept)),
+            "a cut details line came back with bytes its label never had"
+        );
+        assert!(
+            run_w_at(kept, DETAILS_LINE_SCALE, lvl) <= DETAILS_LINE_LANE,
+            "a cut details line still overflowed the card's lane"
+        );
     }
 
     /// Builds one indexed document for the ordering and scope tests.

@@ -338,11 +338,23 @@ def test_the_fit_gate_measures_at_the_rung_the_painter_inks():
     for painter_site in (
         "ellipsize_run(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf)",
         "ellipsize_run(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf)",
-        "ellipsize_run(\n        &view.title[..view.title_len],\n        DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
-        "ellipsize_run(\n            &view.lines[index][..view.line_lens[index]],\n            DETAILS_LINE_SCALE,\n            DETAILS_LINE_LANE,",
         "fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf)",
     ):
         assert painter_site in main, f"the painter stopped using the library's rung and lane: {painter_site}"
+
+    # The details card's two slots moved out of the binary and into the model, so
+    # the rungs they measure at are pinned there -- see
+    # `test_the_details_fit_cuts_when_its_lane_refuses` for why the model, and not
+    # the painter, owns this answer.
+    for slot_site in (
+        "fit_details_slot(\n        &mut view.title,\n        &mut view.title_len,\n"
+        "        DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
+        "fit_details_slot(\n            &mut view.lines[index],\n            &mut view.line_lens[index],\n"
+            "            DETAILS_LINE_SCALE,\n            DETAILS_LINE_LANE,",
+    ):
+        assert slot_site in lib, (
+            f"the details card stopped measuring at the rung its own card draws at: {slot_site}"
+        )
 
 
 def test_a_cut_run_says_so_rather_than_disappearing():
@@ -391,6 +403,231 @@ def test_a_cut_run_says_so_rather_than_disappearing():
     # The centred labels of this app go through the helper rather than straight
     # to the rasteriser.
     assert main.count("fitted_run(") >= 8
+
+
+# The details card's own fit, sliced out of the library so a pin cannot be
+# satisfied by some other function's identical line.
+def _slot_body(lib: str) -> str:
+    start = lib.index("fn fit_details_slot<const N: usize>(")
+    rest = lib[start:]
+    return rest[: rest.index("\n}\n") + 3]
+
+
+def _details_fit_faults(lib: str, main: str) -> list[str]:
+    """Every way the details card can go back to keeping a run its lane refused.
+
+    Tagged so the live test reports what it found and the self-test below can name
+    the fault each arm is meant to cause.
+    """
+    faults: list[str] = []
+    if "fn fit_details_slot<const N: usize>(" not in lib:
+        return ["slot.missing: the model no longer owns one fit for a details slot"]
+    body = _slot_body(lib)
+    code = code_only(body)
+
+    # The slot's answer comes from `fitted_run`, the one helper that cuts a
+    # refusal. A direct `ellipsize_run` call here is the defect: its `0` has no
+    # cut behind it.
+    if "fitted_run(&slot[..*len], scale, lane, plate)" not in body:
+        faults.append("slot.trim: the details slot no longer asks fitted_run its answer")
+    if "ellipsize_run(&slot[..*len]" in code:
+        faults.append("slot.raw-trim: the details slot calls the trim directly, so a "
+                      "refusal has no cut behind it")
+
+    # A refusal answered by keeping what the slot already held.
+    if "if n == 0 {\n            return;" in code or "return;" in code.split("fitted_run")[0]:
+        faults.append("slot.whole: an early return leaves the slot the label its lane refused")
+
+    # The answer is copied out before the slot is overwritten, and both halves of
+    # the slot are written back.
+    if "next[..take].copy_from_slice(&run[..take]);" not in body:
+        faults.append("slot.copy: the answer is not copied into the slot's own plate")
+    if "*slot = next;" not in body or "*len = kept;" not in body:
+        faults.append("slot.write-back: the fitted answer never reaches the slot the painter inks")
+
+    # The card fits its title and every line it holds, through the same slot fit.
+    fit = lib[lib.index("pub fn fit_details(view: &mut DetailsView)"):]
+    fit = fit[: fit.index("\n}\n\n")] if "\n}\n\n" in fit else fit
+    for rung_lane in (
+        "DETAILS_TITLE_SCALE,\n        DETAILS_TITLE_LANE,",
+        "DETAILS_LINE_SCALE,\n            DETAILS_LINE_LANE,",
+    ):
+        if rung_lane not in fit:
+            faults.append(f"fit.rung: the card stopped naming its own rung/lane pair: {rung_lane}")
+    if fit.count("let mut plate = [0u8; MAX_DETAILS_LINE];") != 2:
+        faults.append("fit.plate: a slot is fitted through a plate that is not the card's own width")
+
+    # The binary's job is to ask for the fit -- and the pre-fix shape, a trim
+    # adopted only `if len > 0` into a slot it rewrote by hand, must not come back.
+    if main.count("fit_details(&mut view);") < 2:
+        faults.append("painter.call: the painter no longer asks the model to fit the card")
+    main_code = code_only(main)
+    for pre_fix in ("if line_len > 0 {", "view.title = [0u8; 64];"):
+        if pre_fix in main_code:
+            faults.append(f"painter.whole: the binary fits the card again, adopting only "
+                          f"a non-zero trim: {pre_fix}")
+    return faults
+
+
+def test_the_details_fit_cuts_when_its_lane_refuses():
+    """A details slot is only ever handed an answer its own lane can draw.
+
+    `ellipsize_run` answers `0` on a refusal, and the card's fit used to read that
+    as "adopt nothing" -- so the slot kept the label the card had just said it
+    could not hold, and the painter inked it past both insets, over whatever the
+    page drew under the card. The rule is that the slot's content comes from
+    [`fitted_run`], which is the label whole when the lane carries it, the label
+    with a visible mark when it does not, and the leading glyphs the lane holds
+    when even the mark will not fit.
+
+    WHY it lives in the model rather than the binary: the app is built with
+    `test = false`, so the only place a refusal can be reached by a test is the
+    library -- and a refusal is reached by the plate, not the lane, because every
+    real lane of this card is wider than the three-byte mark.
+    """
+    faults = _details_fit_faults(fm_lib(), fm_main())
+    assert not faults, faults
+
+
+def test_the_details_fit_contract_can_fail():
+    """Each arm re-creates one lost half of the rule, and names its own fault.
+
+    A pin nobody has broken on purpose is a pin that has not been shown to watch
+    anything. Every arm is a mutation of the current source, each guarded by a
+    count so an arm cannot silently stop applying.
+    """
+    lib = fm_lib()
+    baseline = _details_fit_faults(lib, fm_main())
+    assert not baseline, baseline
+
+    def arm(needle: str, replacement: str, tag: str, expected: str, *,
+            main: bool = False, times: int = 1) -> None:
+        """Mutate one line of the model (or the binary) and require its fault."""
+        source = fm_main() if main else lib
+        assert source.count(needle) == times, f"{tag}: the arm's needle is no longer the source's"
+        mutated = source.replace(needle, replacement)
+        if not main:
+            # An arm that stops applying would leave the fault list empty and read
+            # as a blind spot rather than a mutation.
+            assert mutated != source, f"{tag}: the arm changed nothing"
+        faults = _details_fit_faults(mutated if not main else lib, mutated if main else fm_main())
+        assert any(fault.startswith(f"{expected}:") for fault in faults), (
+            f"{tag} left the contract blind: {faults}"
+        )
+
+    # The defect itself: the refusal adopted nothing, so the slot kept the label
+    # its lane had just refused.
+    arm(
+        "        let run = fitted_run(&slot[..*len], scale, lane, plate);\n",
+        "        let n = ellipsize_run(&slot[..*len], scale, lane, plate);\n"
+        "        if n == 0 {\n            return;\n        }\n"
+        "        let run = &plate[..n];\n",
+        "whole-label restore",
+        "slot.trim",
+    )
+    # The slot asks the trim directly instead of the helper that cuts.
+    arm(
+        "let run = fitted_run(&slot[..*len], scale, lane, plate);",
+        "let run = &plate[..ellipsize_run(&slot[..*len], scale, lane, plate)];",
+        "raw trim",
+        "slot.raw-trim",
+    )
+    # The answer is read out of a plate the refusal never wrote.
+    arm(
+        "next[..take].copy_from_slice(&run[..take]);",
+        "next[..take].fill(0);",
+        "no copy",
+        "slot.copy",
+    )
+    # The fitted answer is computed and thrown away.
+    arm(
+        "    *slot = next;\n    *len = kept;",
+        "    let _ = (next, kept);",
+        "no write-back",
+        "slot.write-back",
+    )
+    # The card's lines are fitted against a lane the card does not own.
+    arm(
+        "            DETAILS_LINE_SCALE,\n            DETAILS_LINE_LANE,",
+        "            DETAILS_LINE_SCALE,\n            ENTRY_NAME_LANE,",
+        "wrong lane",
+        "fit.rung",
+    )
+    # The painter stops asking the model to fit the card at all.
+    arm(
+        "fit_details(&mut view);",
+        "let _ = &mut view;",
+        "painter stops fitting",
+        "painter.call",
+        main=True,
+        times=2,
+    )
+
+
+# The offsets a painter adds to a box it did not measure, and the face that owns
+# each one now. Every pair is the authored rung's number on the left -- the number
+# the app used to write inside the branch that inked the mark.
+_GLYPH_OFFSETS = (
+    ("home_recents_y0() + 8,", "home_recents_y0() + home_recents_note_dy(),"),
+    ("field.y + 26;", "field.y + search_glyph_dy();"),
+    ("            16,\n            mime,", "            entry_glyph_dy(),\n            mime,"),
+    ("cell_h, 83, 30, mime, ink)", "cell_h, GRID_GLYPH_X, grid_glyph_dy(), mime, ink)"),
+    ("for dy in 0..26usize {", "for dy in 0..GLYPH_ROWS {"),
+    ("for dx in 0..34usize {", "for dx in 0..GLYPH_COLS {"),
+)
+
+
+def _paint_pixel_faults(lib: str, main: str) -> list[str]:
+    """Every offset that stopped moving with the plate it stands on."""
+    faults: list[str] = []
+    code = code_only(main)
+    for remembered, derived in _GLYPH_OFFSETS:
+        if remembered in code:
+            faults.append(
+                f"paint.pixel: {remembered!r} is added inside the branch again, so the "
+                "mark stays put while the plate it stands on grows with the rung"
+            )
+        if derived not in code:
+            faults.append(f"paint.face: {derived!r} is no longer what the painter adds")
+    if "const _: () = assert!(authored_paint_pixels_hold_at_every_level());" not in lib:
+        faults.append("paint.sweep: the library no longer proves each offset holds its "
+                      "plate at every rung")
+    return faults
+
+
+def test_the_marks_that_stand_on_a_grown_plate_move_with_it():
+    """A plate the ladder grew and an offset the ladder did not is a drifted layout.
+
+    The recents notice, the field's magnifier, the row's and the cell's glyph and
+    the glyph box itself were each placed by a number written beside the call that
+    inked them -- `+ 8`, `+ 26`, `16`, `83, 30`, `0..26`, `0..34`. The plates they
+    stand on are `plate_at`'s and `entry_row_h_at`'s, so above the authored rung the
+    box grew and the mark did not: the glyph glued to the top of a card the person
+    had just made taller, its caption -- which does move -- closing on it. Each one
+    now answers a `*_at(level)` face, and the library sweeps all four levels to
+    prove the mark still sits inside its plate and runs forwards with the rung.
+    """
+    faults = _paint_pixel_faults(fm_lib(), fm_main())
+    assert not faults, faults
+
+
+def test_the_paint_pixel_contract_can_fail():
+    """Each remembered literal, put back, is refused by the gate that replaced it."""
+    lib, main = fm_lib(), fm_main()
+    assert not _paint_pixel_faults(lib, main)
+    for remembered, derived in _GLYPH_OFFSETS:
+        assert main.count(derived) == 1, f"{derived!r} is no longer the painter's own line"
+        faults = _paint_pixel_faults(lib, main.replace(derived, remembered))
+        assert any(f.startswith("paint.pixel:") for f in faults), (
+            f"restoring {remembered!r} left the gate blind: {faults}"
+        )
+    # The sweep gate itself: without it the offsets are unproven at three rungs.
+    faults = _paint_pixel_faults(
+        lib.replace("const _: () = assert!(authored_paint_pixels_hold_at_every_level());", ""),
+        main,
+    )
+    assert any(f.startswith("paint.sweep:") for f in faults), faults
+
 
 
 def test_the_crumb_row_painted_is_the_crumb_row_tapped():

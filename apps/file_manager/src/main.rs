@@ -43,21 +43,20 @@ pub use file_manager::{
 use file_manager::{
     action_for_slot, action_slot_rect, action_supported, apply_search_scope, breadcrumb_crumbs,
     build_details_with_provenance, category_row_at, control_label_lane, crumb_step,
-    entry_at_point, entry_row_rect, format_mtime,
+    entry_at_point, entry_row_rect, fit_details, format_mtime,
     format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path, list_scroll,
     parse_indexed_documents, problem_text, row_is_visible, search_needle_is_usable,
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
     validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap,
     FileAction,
-    IndexedDocument, LayoutMode, MAX_DETAILS_LINE, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
+    IndexedDocument, LayoutMode, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
     SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
     ACTION_LABELS, ACTION_SLOT_W, BREADCRUMB_SCALE,
     CATEGORY_CAPTION_SCALE, CATEGORY_COUNT, CATEGORY_FIRST_LABEL_DY, CATEGORY_LABEL_LANE,
     CATEGORY_LABEL_SCALE, CATEGORY_LABEL_X, CATEGORY_OTHER_LABEL_DY, CATEGORY_ROW_X1,
     CRUMB_ROW_X0, CRUMB_ROW_X1,
-    CRUMB_SEP, DETAILS_INSET, DETAILS_LINE_LANE,
-    DETAILS_LINE_SCALE, DETAILS_TITLE_LANE,
-    DETAILS_TITLE_SCALE, EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE,
+    CRUMB_SEP, DETAILS_INSET,
+    DETAILS_LINE_SCALE, DETAILS_TITLE_SCALE, EMPTY_CARD_LANE, EMPTY_HEADLINE_SCALE,
     EMPTY_SUBLINE_SCALE, ENTRY_GLYPH_X, ENTRY_NAME_LANE, ENTRY_NAME_SCALE,
     ENTRY_RIGHT_AIR, ENTRY_SUB_SCALE, ENTRY_TEXT_X,
     fitted_run, GRID_CELL_W, GRID_NAME_LANE, GRID_NAME_SCALE,
@@ -81,13 +80,16 @@ use file_manager::{
     // run is trimmed to, and the scales themselves.
     cap_at, category_caption_dy, category_y0,
     category_y1, crumb_hit, crumb_rows, crumb_y, drawn_w, draw_level, empty_headline_y,
-    empty_subline_y, ellipsize_run, entry_row_h_max, entries_card, entries_card_at,
-    grid_cell_h_max, grown,
+    empty_subline_y, ellipsize_run, entry_glyph_dy, entry_row_h_max, entries_card,
+    entries_card_at, grid_cell_h_max, grid_glyph_dy, grown,
+    GLYPH_COLS, GLYPH_ROWS, GRID_GLYPH_X,
     header_h, header_readout_line1_y, header_readout_line2_y,
     header_title_y, home_browse_btn, home_card_line1_y,
     home_card_line2_y, home_card_title_y, home_category_title_y, home_note_y, home_recent_row_h,
-    home_recent_time_dy, home_recents_caption_y, home_recents_title_y, home_recents_y0,
-    home_storage_card, PLATFORM_LEVEL, rows_at, run_line, run_rows, run_w, search_clear, search_field,
+    home_recent_time_dy, home_recents_caption_y, home_recents_note_dy, home_recents_title_y,
+    home_recents_y0,
+    home_storage_card, PLATFORM_LEVEL, rows_at, run_line, run_rows, run_w, search_clear,
+    search_field, search_glyph_dy,
     scope_all_pill, scope_this_pill, scope_row_y1, scope_y, sheet,
     sheet_name_h, sheet_name_line_y, sheet_name_y, sheet_title_y, status_rows,
     status_y, details_card, details_close, details_line_y, details_open,
@@ -1733,42 +1735,6 @@ fn read_origin_url(path: &str, out: &mut [u8]) -> Option<usize> {
     Some(take)
 }
 
-/// Trims a details card's title and lines to what the card can draw.
-///
-/// WHY the two bounds are the library's: `fit_details` is the card's own text-fit
-/// gate, and the card's title rung and line rung live beside the card's box in
-/// the model -- so the trim is checked by `test_file_manager_ui_text_bounds_and_ellipsize`
-/// against the lane the card actually owns rather than a width this function
-/// remembered. A run that no longer fits is reported by that test, not hidden
-/// here.
-fn fit_details(view: &mut DetailsView) {
-    let mut title = [0u8; 64];
-    let title_len = ellipsize_run(
-        &view.title[..view.title_len],
-        DETAILS_TITLE_SCALE,
-        DETAILS_TITLE_LANE,
-        &mut title,
-    );
-    if title_len > 0 {
-        view.title = [0u8; 64];
-        view.title[..title_len].copy_from_slice(&title[..title_len]);
-        view.title_len = title_len;
-    }
-    for index in 0..view.line_count {
-        let mut line = [0u8; MAX_DETAILS_LINE];
-        let line_len = ellipsize_run(
-            &view.lines[index][..view.line_lens[index]],
-            DETAILS_LINE_SCALE,
-            DETAILS_LINE_LANE,
-            &mut line,
-        );
-        if line_len > 0 {
-            view.lines[index] = line;
-            view.line_lens[index] = line_len;
-        }
-    }
-}
-
 /// Hands the selected document to the package that declared a handler for
 /// its media type.
 ///
@@ -2124,7 +2090,7 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             x,
             y,
             HOME_ROW_X,
-            home_recents_y0() + 8,
+            home_recents_y0() + home_recents_note_dy(),
             LABEL_RUNG,
             line,
             ink,
@@ -2406,7 +2372,7 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return base;
         }
         let mx = field.x + 28;
-        let my = field.y + 26;
+        let my = field.y + search_glyph_dy();
         let dx = x as i32 - mx as i32;
         let dy = y as i32 - my as i32;
         let ring = dx * dx + dy * dy;
@@ -3210,7 +3176,7 @@ fn render_rows(surface: u32, app: &FileManagerApp) {
             ROW_BUFFER_W,
             row_h,
             ENTRY_GLYPH_X,
-            16,
+            entry_glyph_dy(),
             mime,
             ink,
         );
@@ -3358,7 +3324,7 @@ fn render_grid(surface: u32, app: &FileManagerApp) {
                 buffer[py * CELL_BUFFER_W + px] = color;
             }
         }
-        paint_glyph(buffer, CELL_BUFFER_W, cell_h, 83, 30, mime, ink);
+        paint_glyph(buffer, CELL_BUFFER_W, cell_h, GRID_GLYPH_X, grid_glyph_dy(), mime, ink);
 
         // The cell's own lane: `GRID_CELL_W` less the inset it stands on each
         // side. The name and the fact under it both answer that lane, so a long
@@ -3446,12 +3412,12 @@ fn paint_glyph(
     mime: FileMime,
     ink: u32,
 ) {
-    for dy in 0..26usize {
+    for dy in 0..GLYPH_ROWS {
         let py = icon_y + dy;
         if py >= height {
             break;
         }
-        for dx in 0..34usize {
+        for dx in 0..GLYPH_COLS {
             let px = icon_x + dx;
             if px >= width {
                 break;
