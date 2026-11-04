@@ -1628,10 +1628,67 @@ def test_the_embedding_branch_is_planned_from_inputs_and_proved_on_the_host():
         "fn test_strict_neural_with_text_refuses_and_names_the_tokenizer_gap",
         "fn test_strict_neural_with_no_file_is_refused_as_unavailable",
         "fn test_a_token_id_stream_takes_the_file_backed_branch_not_the_baseline",
+        "fn test_a_prompt_cut_in_transit_is_refused_with_both_byte_counts",
+        "fn test_a_token_id_stream_cut_in_transit_is_refused_before_it_is_read",
+        "fn test_the_cut_is_read_from_the_declaration_against_the_bytes",
         "fn test_a_loader_refusal_maps_to_the_status_that_names_it",
     )
     for proof in proofs:
         assert proof in lib, f"the branch-selection proof {proof!r} is gone"
+
+
+def test_a_request_cut_in_transit_is_refused_before_its_bytes_are_mapped():
+    """A message is cut at sixty-four bytes, and the half of a prompt that survives
+    is not the prompt.
+
+    WHY this needs a shape gate rather than only the host tests: the arm parses a
+    twenty-four byte `AiInferenceRequest` out of the payload and only trusts it when
+    the declared input length fits the bytes that arrived. A longer prompt therefore
+    arrives as a whole header plus a fragment, the header is not trusted, and the
+    fallback the arm has always had -- answer the whole payload as the query -- hands
+    the tokenizer the caller's `model_id`, `target_dim`, `input_len`, `flags` and
+    `input_offset` as if they were prose. On a device holding the model that is real
+    arithmetic over the wrong bytes, reported as this request's embedding, and the
+    host cannot see it happen because no host case can open the file. So the gate
+    pins the position: the cut is named before a single byte of the payload can be
+    read as ids or mapped as text.
+    """
+    lib = without_comments(lib_source())
+    arm = embedding_arm(lib)
+
+    guard = arm.index("declared_input_overrun(payload)")
+    assert guard < arm.index("read_token_ids(query_text)"), (
+        "the guard runs after the payload was already read as a token-id stream, so "
+        "a prefix of a caller's ids still runs as if it were the whole stream"
+    )
+    assert guard < arm.index("encode_with_installed_file("), (
+        "the guard runs after the mapping attempt, so the header's own bytes are "
+        "segmented into ids -- and a cut prompt then earns the file-backed branch"
+    )
+    assert "EmbeddingGap::InputTruncated(declared, arrived)" in arm, (
+        "the arm no longer refuses a request it could not have received whole"
+    )
+
+    refusal = function_body(lib, "fn embedding_gap_notice<'a>(")
+    assert "InputTruncated" in refusal, "the new gap has no words of its own"
+    cut = function_body(refusal, "EmbeddingGap::InputTruncated(declared, arrived) =>")
+    assert "byte_count(declared as u64)" in cut and "byte_count(arrived as u64)" in cut, (
+        "the refusal stopped naming both counts, which is the only thing the caller "
+        "can act on -- it knows its prompt's length and cannot see the transport's"
+    )
+    assert "STATUS_UNSUPPORTED" in cut, "a refusal invented a status of its own"
+    assert "STATUS_SUCCESS" not in cut, "a request that never arrived answered as one"
+
+    # One predicate, two users: the guard may only fire on a payload the arm's own
+    # parse would have trusted, or prose starts being refused for a header it never
+    # sent. Sharing the clauses is what keeps the pair from drifting apart.
+    shape = function_body(lib, "fn payload_is_header_shaped(")
+    assert "req.model_id <= 16" in shape, "the shape test no longer reads the model id"
+    parse = function_body(lib, "pub fn handle_ipc_inference_query(")
+    assert "payload_is_header_shaped(&req)" in parse, (
+        "the arm's parse grew its own copy of the clauses, so the guard and the "
+        "parse can disagree about which bytes are a request"
+    )
 
 
 def test_the_file_backed_branch_reaches_the_loader_it_was_written_for():

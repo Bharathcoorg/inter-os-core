@@ -1219,6 +1219,64 @@ enum EmbeddingGap {
     /// The table itself refused. Carries the `TokenizerError`, which already names
     /// its own two numbers for every bound it enforces.
     VocabularyRefused(tokenizer::TokenizerError),
+    /// The request declared `declared` input bytes and the transport delivered
+    /// `arrived`. A message is cut at sixty-four bytes by the kernel's own IPC
+    /// payload cap, so a prompt longer than the room left behind the header reaches
+    /// this service as a whole header plus a piece of the text.
+    ///
+    /// WHY this is a refusal rather than an answer from what arrived: the bytes in
+    /// front of the arm are then the caller's `model_id`, `target_dim`, `input_len`,
+    /// `flags` and `input_offset`, and a vocabulary segments header bytes exactly as
+    /// readily as prose. The vector that comes out is real arithmetic over the wrong
+    /// bytes, filed under this request -- which is the same harm `IdStreamFull`
+    /// exists to stop, one layer down, on the way in rather than in the segmentation.
+    /// Both counts go back to the caller because "shorten the prompt" is only
+    /// actionable if the caller can see how much room the transport leaves.
+    InputTruncated(usize, usize),
+}
+
+/// Do these bytes read as an `AiInferenceRequest`, setting length aside?
+///
+/// WHY the three are the test: the arm has always had to tell a request header from
+/// a raw text query, and it does it by asking whether the fields could have been
+/// written by the SDK -- a model id inside the table, a dimension the SDK names, a
+/// flag word that fits its own byte. `model_id` is the first four bytes, so any
+/// printable text fails it: `b"quer"` read little-endian is 1,919,251,825. The
+/// function is the arm's own three clauses, shared with `declared_input_overrun`
+/// below so the two cannot drift -- a guard that refused payloads the parse would
+/// never have accepted would start refusing prose.
+fn payload_is_header_shaped(req: &std::ai::AiInferenceRequest) -> bool {
+    (req.model_id <= 16)
+        && (req.target_dim == 0 || std::ai::MatryoshkaDim::from_u32(req.target_dim).is_some())
+        && (req.flags <= 255)
+}
+
+/// Was this payload a request whose input did not all arrive?
+///
+/// `Some((declared, arrived))` for a payload that is header-shaped and states an
+/// input length larger than the bytes holding it: the shape test is the arm's own,
+/// so this fires only on a payload the arm would otherwise have treated as a request.
+/// `arrived` is the input region the payload has, which is what the caller can
+/// compare against its own prompt; the header is not counted in it.
+///
+/// WHY a function rather than a clause inside the arm's parse: the parse's answer to
+/// an over-long declaration is to ignore the header, and ignoring it is what leaves
+/// the whole buffer -- header included -- as the query the arm then answers. The
+/// event has to be named, not defaulted around.
+fn declared_input_overrun(payload: &[u8]) -> Option<(usize, usize)> {
+    let hdr = core::mem::size_of::<std::ai::AiInferenceRequest>();
+    if payload.len() < hdr {
+        return None;
+    }
+    let req = unsafe {
+        core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiInferenceRequest)
+    };
+    let arrived = payload.len() - hdr;
+    if payload_is_header_shaped(&req) && (req.input_len as usize) > arrived {
+        Some((req.input_len as usize, arrived))
+    } else {
+        None
+    }
 }
 
 /// Picks the branch from the inputs, before anything is opened.
@@ -1719,6 +1777,20 @@ fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [
             notice.word(
                 b" Drop the strict-neural flag to take the labelled lexical baseline, or send a token-id stream.",
             );
+            STATUS_UNSUPPORTED
+        }
+        EmbeddingGap::InputTruncated(declared, arrived) => {
+            // Both counts, because the caller is the only party that knows how long
+            // its prompt was and cannot see what the transport did to it. A refusal
+            // that said only "too long" would leave it guessing what would have fit.
+            notice.word(b"Embedding refused: this request declares ");
+            notice.byte_count(declared as u64);
+            notice.word(b" input bytes and the transport delivered ");
+            notice.byte_count(arrived as u64);
+            notice.word(
+                b". Nothing was answered from the piece that arrived: the bytes in front of this service are the request's own header followed partway through the prompt, and a vector made from them would be filed under a request the device never received.",
+            );
+            notice.word(b" Re-send with an input no longer than the bytes that arrived.");
             STATUS_UNSUPPORTED
         }
     };
@@ -2271,9 +2343,7 @@ pub fn handle_ipc_inference_query(
         let req = unsafe {
             core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiInferenceRequest)
         };
-        let is_valid_req = (req.model_id <= 16)
-            && (req.target_dim == 0 || std::ai::MatryoshkaDim::from_u32(req.target_dim).is_some())
-            && (req.flags <= 255)
+        let is_valid_req = payload_is_header_shaped(&req)
             && ((req.input_len as usize) <= payload.len().saturating_sub(core::mem::size_of::<std::ai::AiInferenceRequest>()));
 
         if is_valid_req {
@@ -2292,6 +2362,28 @@ pub fn handle_ipc_inference_query(
                 query_text = &payload[start..];
             }
         }
+    }
+
+    // A header declaring more input than arrived is a request the transport cut, and
+    // this is the one place that can still say so: below here the arm has either
+    // ignored the header or answered from the buffer it came in. Refusing now, ahead
+    // of the id read and ahead of the mapping, is what keeps the header's own bytes
+    // from being segmented into ids and run over the installed file for a
+    // `STATUS_SUCCESS`. The host cannot see that happen -- nothing can open the file
+    // here, so the mapping only ever refuses -- which is why the position of this
+    // clause is pinned as a shape by the contract gate rather than left to be inferred
+    // from green tests.
+    //
+    // WHY the refusal is unconditional: a caller whose prompt never reached the device
+    // is owed the two counts whether or not it demanded neural weights. Answering the
+    // fragment with the labelled baseline would be honest about the arithmetic and
+    // still an answer to a question nobody asked.
+    if let Some((declared, arrived)) = declared_input_overrun(payload) {
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) =
+            embedding_gap_notice(EmbeddingGap::InputTruncated(declared, arrived), &mut scratch);
+        emit_response_as(sender_task_id, status, MSG_TYPE_EMBED, notice, tx_buf);
+        return;
     }
 
     // The ids this request carries, if it carries any. Read before the branch is
@@ -3800,6 +3892,136 @@ mod tests {
         assert_eq!(resp.status, STATUS_UNAVAILABLE);
         let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
         assert!(core::str::from_utf8(notice).unwrap().contains("no weights file"));
+    }
+
+    /// One message is cut at sixty-four bytes by the transport -- `IPC_MAX_PAYLOAD`
+    /// in the kernel's IPC module, which userspace does not read -- so a request
+    /// whose prompt is longer than the forty input bytes that survive reaches this
+    /// arm as a whole header plus a fragment, declaring a length the bytes do not
+    /// match. The header is then not trusted, and what the arm has left is the
+    /// payload's own first twenty-four bytes: `model_id`, `target_dim`, `input_len`,
+    /// `flags`, `input_offset`, followed by part of the prompt.
+    ///
+    /// WHY that is worth a refusal and a status rather than an answer: on a device
+    /// holding the model, the installed file's vocabulary segments those bytes with
+    /// no complaint -- they are bytes -- and the run returns a real vector, which the
+    /// arm files under `STATUS_SUCCESS` as this caller's embedding of a prompt that
+    /// never arrived. A host without the file answers the same wrong bytes as the
+    /// labelled baseline, which is honest about the arithmetic and still not an
+    /// answer to the request that was sent. Neither is a reply anyone can act on, and
+    /// the only thing that would help the caller is the two byte counts.
+    #[test]
+    fn test_a_prompt_cut_in_transit_is_refused_with_both_byte_counts() {
+        const MAILBOX_CUT: usize = 64;
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let mut payload = embedding_request_with(0x00, &[b'x'; 300]);
+        payload.truncate(MAILBOX_CUT);
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(
+            resp.status,
+            STATUS_UNSUPPORTED,
+            "a request whose prompt did not arrive was answered anyway (status {})",
+            resp.status
+        );
+        let notice = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let notice = core::str::from_utf8(notice).expect("the refusal is text");
+        // The whole sentence, not a substring: `Notice::word` appends with no
+        // separator of its own, so a fragment that forgot its space reads as one
+        // invented word, and a refusal nobody can parse is barely a refusal.
+        assert_eq!(
+            notice,
+            "Embedding refused: this request declares 300 input bytes and the transport \
+             delivered 40. Nothing was answered from the piece that arrived: the bytes in \
+             front of this service are the request's own header followed partway through \
+             the prompt, and a vector made from them would be filed under a request the \
+             device never received. Re-send with an input no longer than the bytes that \
+             arrived."
+        );
+    }
+
+    /// The same cut under the token-id flag, where the harm is smaller and the lie
+    /// is the same shape: the bytes that survive are ten and a half ids of a
+    /// thirty-id stream, and a prefix of an id stream is a different sequence than
+    /// the one sent. The request is refused before any of it is read as ids or as
+    /// text, so no branch of the arm can be reached with a payload it did not get.
+    #[test]
+    fn test_a_token_id_stream_cut_in_transit_is_refused_before_it_is_read() {
+        const MAILBOX_CUT: usize = 64;
+        let mut tx_buf = [0u8; 1024];
+        let models = probed_embedding_models();
+        let ids: alloc::vec::Vec<u8> = (0..30u32)
+            .map(|n| n + 100)
+            .flat_map(|id| id.to_le_bytes())
+            .collect();
+        let mut payload = embedding_request_with(0x10, &ids);
+        payload.truncate(MAILBOX_CUT);
+        handle_ipc_inference_query(0, MSG_TYPE_EMBED, &payload, &models, &mut tx_buf);
+
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(
+            resp.status,
+            STATUS_UNSUPPORTED,
+            "a prefix of an id stream was read as the stream"
+        );
+    }
+
+    /// The guard is a function of the payload and nothing else, and the direction it
+    /// does NOT fire in matters as much as the one it does: a prompt delivered whole
+    /// is not a cut prompt, and prose is not a header that lost its tail.
+    #[test]
+    fn test_the_cut_is_read_from_the_declaration_against_the_bytes() {
+        const MAILBOX_CUT: usize = 64;
+
+        // Declared exactly the room that a cut leaves, and delivered in full: the
+        // last byte the caller counts is the last byte the arm has.
+        let fits = embedding_request_with(0x00, &[b'y'; 40]);
+        assert_eq!(fits.len(), MAILBOX_CUT);
+        assert_eq!(declared_input_overrun(&fits), None, "a whole request was called a cut");
+
+        // Shorter still, and long past the header but under it.
+        assert_eq!(declared_input_overrun(&embedding_request_with(0x00, b"battery")), None);
+        let long = embedding_request_with(0x00, &[b'z'; 600]);
+        assert_eq!(
+            declared_input_overrun(&long),
+            None,
+            "a prompt that arrives whole is not refused for its length"
+        );
+
+        // The two cut shapes, with both counts in input bytes rather than payload
+        // bytes: the header is not something the caller sent as prompt.
+        let mut cut = embedding_request_with(0x00, &[b'x'; 300]);
+        cut.truncate(MAILBOX_CUT);
+        assert_eq!(declared_input_overrun(&cut), Some((300, 40)));
+        cut.truncate(core::mem::size_of::<std::ai::AiInferenceRequest>());
+        assert_eq!(
+            declared_input_overrun(&cut),
+            Some((300, 0)),
+            "a request that lost every input byte is the cuttest case there is"
+        );
+
+        // Prose is never a cut request, however long it is.
+        assert_eq!(declared_input_overrun(b"query: battery consumption profile"), None);
+        assert_eq!(
+            declared_input_overrun(&[b'w'; 900]),
+            None,
+            "raw text was refused for a header it never sent"
+        );
+
+        // And a payload that fails the shape test is prose too, even when its
+        // length clause would have failed: `model_id` 17 is outside the table, so
+        // the arm's own parse never trusted these bytes as a request to begin with.
+        let mut not_a_request = embedding_request_with(0x00, &[b'x'; 300]);
+        not_a_request[0] = 17;
+        not_a_request.truncate(MAILBOX_CUT);
+        assert_eq!(declared_input_overrun(&not_a_request), None);
     }
 
     /// Installing the file changes the branch the arm takes, proved by the reply
