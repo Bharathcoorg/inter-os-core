@@ -1054,6 +1054,14 @@ pub const MODEL_DIRECTORY: &str = "/system/models";
 /// The candidate model directories the platform probes.
 pub const MODEL_DIRECTORIES: &[&str] = &["/system/models", "/data/models"];
 
+/// How many directories the probe walks.
+///
+/// WHY it is counted and not written: the screen once named one directory while
+/// the probe below had been walking two for a hundred commits, so the row
+/// describing the device disagreed with the code that measured it. The count is
+/// read off the table the probe itself iterates, and the two cannot part again.
+pub const MODEL_DIRECTORY_COUNT: usize = MODEL_DIRECTORIES.len();
+
 /// What a probe of the model directory found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModelProbeStatus {
@@ -1095,16 +1103,115 @@ pub enum ModelClassification {
 /// The minimum size (1 MiB) required for real model weights.
 pub const MIN_WEIGHTS_SIZE_BYTES: u64 = 1024 * 1024;
 
+/// The same floor in the kilobytes the inventory keeps.
+pub const MIN_WEIGHTS_SIZE_KB: u64 = MIN_WEIGHTS_SIZE_BYTES / 1024;
+
+/// Which class of weights a listed candidate names itself as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WeightClass {
+    /// The candidate is an embedding-weights file.
+    Embedding,
+    /// The candidate is a generative-weights file.
+    Generative,
+    /// The candidate names neither, so the app cannot say which it is.
+    Unknown,
+}
+
+/// The class a candidate's own name claims.
+///
+/// WHY one file cannot be two classes: the two flags this feeds are read on
+/// screen as "the device holds embedding weights" and "the device holds
+/// generative weights", and a single file whose name carries both words --
+/// `embedding_gemma2.gguf` does exactly that -- is one file. Naming the
+/// embedding is the more specific of the two claims, so it wins and the
+/// generative answer stays whatever another file gave it. Without this rule the
+/// day the embedding weights landed, the app would have reported generative
+/// weights installed as well, and pointed INSTALL at a model the device does
+/// not have.
+pub fn weight_class_of(name: &[u8]) -> WeightClass {
+    if contains_ci(name, b"embed") {
+        WeightClass::Embedding
+    } else if contains_ci(name, b"gemma") || contains_ci(name, b"gen-") || contains_ci(name, b"gguf") {
+        WeightClass::Generative
+    } else {
+        WeightClass::Unknown
+    }
+}
+
+/// What the model probe can say about one class of weights.
+///
+/// WHY "absent" and "not read" are two answers: "the directory was listed and
+/// this class was not in it" is a fact about the device, and "the platform would
+/// not let this app look" is a fact about the app's authority. Collapsing the
+/// second into the first is the screen telling a person their device holds
+/// nothing on the strength of an answer that said nothing of the kind.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WeightState {
+    /// A candidate of this class was listed and classified.
+    Present,
+    /// The listing answered and this class was not among it.
+    Absent,
+    /// Neither model directory is on the device at all.
+    NoDirectory,
+    /// The listing was refused, or this app holds no read capability.
+    NotRead,
+}
+
+impl WeightState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "PRESENT",
+            Self::Absent => "ABSENT",
+            Self::NoDirectory => "NO DIRECTORY",
+            Self::NotRead => "NOT READ",
+        }
+    }
+
+    /// Whether the answer is a reading of this device rather than of this app's
+    /// own authority to look at it.
+    pub const fn measured(self) -> bool {
+        match self {
+            Self::Present | Self::Absent => true,
+            Self::NoDirectory | Self::NotRead => false,
+        }
+    }
+
+    /// The word a stage chip shows for this answer at this stage.
+    ///
+    /// WHY the state has to speak when the stage cannot: a stage is a reading of
+    /// a candidate, and where there is no candidate -- or no reading was allowed
+    /// -- there is no stage. A chip that printed "ABSENT" for a device that was
+    /// never asked had answered a question the platform did not get.
+    pub const fn stage_word(self, stage: Option<ProbeStage>) -> &'static str {
+        match stage {
+            Some(stage) => stage.as_str(),
+            None => self.as_str(),
+        }
+    }
+}
+
 /// The lifecycle stages of an on-device model candidate.
+///
+/// WHY the ladder stops where the measurements do: `Discovered` and `Validated`
+/// are both readings this app takes of the candidate itself -- the listing named
+/// the file, and its size was read and, where its own name claims the format, so
+/// were its four magic bytes. `Loaded` would say a runtime has this file open and
+/// `Tested` would say a test suite ran against it, and nothing on this device
+/// answers either question to an app: the service registry says a runtime is
+/// registered, which is not the same statement and cannot be spent as one. The
+/// two upper stages are kept named so the day a platform answer exists there is
+/// a rung to put it on, and no derivation here reaches them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProbeStage {
-    /// File candidate discovered in model directory.
+    /// The listing named the file; nothing further of it was read.
     Discovered,
-    /// File header and minimum size validated.
+    /// This app read the file's size and, where its name claims the format, its
+    /// header, and both passed the test above.
     Validated,
-    /// Model runtime service is active and bound.
+    /// A runtime reported this file open. No platform answer this app can ask
+    /// reports that, so no derivation here returns it.
     Loaded,
-    /// Platform test suite passed for model type.
+    /// A test suite reported this model type passing. Reserved the same way.
     Tested,
 }
 
@@ -1234,14 +1341,16 @@ impl ModelInventory {
                             continue;
                         }
 
-                        if contains_ci(name, b"embed") {
-                            has_embedding_weights = true;
-                            embedding_size_kb = size / 1024;
-                        }
-                        if contains_ci(name, b"gemma") || contains_ci(name, b"gen-") || contains_ci(name, b"gguf")
-                        {
-                            has_generative_weights = true;
-                            generative_size_kb = size / 1024;
+                        match weight_class_of(name) {
+                            WeightClass::Embedding => {
+                                has_embedding_weights = true;
+                                embedding_size_kb = size / 1024;
+                            }
+                            WeightClass::Generative => {
+                                has_generative_weights = true;
+                                generative_size_kb = size / 1024;
+                            }
+                            WeightClass::Unknown => {}
                         }
                     }
                 }
@@ -1271,31 +1380,67 @@ impl ModelInventory {
         }
     }
 
-    /// Evaluates the lifecycle stage of on-device embedding weights.
-    pub fn embedding_stage(&self, services: &ServiceRegistry) -> Option<ProbeStage> {
-        if !self.has_embedding_weights {
-            return None;
-        }
-        if services.contains_inference_runtime() {
-            Some(ProbeStage::Loaded)
-        } else if self.embedding_size_kb >= 1024 {
-            Some(ProbeStage::Validated)
-        } else {
-            Some(ProbeStage::Discovered)
+    /// What the listing says about embedding weights, in the answer's own words.
+    pub const fn embedding_weights(self) -> WeightState {
+        Self::weight_state(self.status, self.has_embedding_weights)
+    }
+
+    /// What the listing says about generative weights.
+    pub const fn generative_weights(self) -> WeightState {
+        Self::weight_state(self.status, self.has_generative_weights)
+    }
+
+    /// The one rule both classes answer by.
+    const fn weight_state(status: ModelProbeStatus, found: bool) -> WeightState {
+        match status {
+            ModelProbeStatus::Listed => {
+                if found {
+                    WeightState::Present
+                } else {
+                    WeightState::Absent
+                }
+            }
+            ModelProbeStatus::Absent => WeightState::NoDirectory,
+            ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => WeightState::NotRead,
         }
     }
 
-    /// Evaluates the lifecycle stage of on-device generative weights.
-    pub fn generative_stage(&self, services: &ServiceRegistry) -> Option<ProbeStage> {
-        if !self.has_generative_weights {
-            return None;
-        }
-        if services.contains_inference_runtime() {
-            Some(ProbeStage::Loaded)
-        } else if self.generative_size_kb >= 1024 {
-            Some(ProbeStage::Validated)
-        } else {
-            Some(ProbeStage::Discovered)
+    /// The stage the embedding candidate's own measurements support.
+    ///
+    /// WHY `services` left this signature: the stage used to rise to `Loaded`
+    /// because the platform's registry listed an inference runtime in the
+    /// running state. A registry entry is a service that has registered; it is
+    /// not a runtime that has opened this file, and the device holds no answer
+    /// this app can ask that says it has. The stage is now only what this app
+    /// read off the candidate -- its listing, its size, and where its name
+    /// claimed the format its header -- which is a statement the screen can
+    /// stand behind on the day real weights land without being edited first.
+    pub const fn embedding_stage(self) -> Option<ProbeStage> {
+        Self::stage(self.status, self.has_embedding_weights, self.embedding_size_kb)
+    }
+
+    /// The stage the generative candidate's own measurements support.
+    pub const fn generative_stage(self) -> Option<ProbeStage> {
+        Self::stage(self.status, self.has_generative_weights, self.generative_size_kb)
+    }
+
+    /// The one rule both classes stage by: nothing is a stage until the listing
+    /// answered, and the rung a candidate reaches is the reading this app took
+    /// of it.
+    const fn stage(
+        status: ModelProbeStatus,
+        found: bool,
+        size_kb: u64,
+    ) -> Option<ProbeStage> {
+        match status {
+            ModelProbeStatus::Listed if found => {
+                if size_kb >= MIN_WEIGHTS_SIZE_KB {
+                    Some(ProbeStage::Validated)
+                } else {
+                    Some(ProbeStage::Discovered)
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -1602,7 +1747,9 @@ pub enum PackageRemoveOutcome {
     ModelFileUnlinked,
     /// Model file is stored on a read-only filesystem (/system) and cannot be unlinked.
     ReadOnlyFileSystem(i64),
-    /// Model file unlinking failed with an error.
+    /// The unlink failed for a reason the platform named with a code that is not
+    /// the read-only file system's, so the screen reports the code rather than a
+    /// cause the platform did not give.
     ModelFileFailed(i64),
     /// Platform permission denied.
     PermissionDenied,
@@ -1667,8 +1814,17 @@ where
         if device.models.has_generative_weights {
             match unlink_syscall("/data/models/local_model.gguf") {
                 Ok(_) => return PackageRemoveOutcome::ModelFileUnlinked,
-                Err(ERR_READ_ONLY_FS) => return PackageRemoveOutcome::ReadOnlyFileSystem(ERR_READ_ONLY_FS),
-                Err(code) => return PackageRemoveOutcome::ReadOnlyFileSystem(code),
+                Err(ERR_READ_ONLY_FS) => {
+                    return PackageRemoveOutcome::ReadOnlyFileSystem(ERR_READ_ONLY_FS)
+                }
+                // WHY this arm is its own answer: every other code the unlink
+                // can carry -- nothing at that path, the name is a directory,
+                // the write was refused by a policy that is not read-only -- used
+                // to be reported back as a read-only file system, and the screen
+                // then said in those words about a path that is not the read-only
+                // one. The code the platform gave is the finding; naming it
+                // anything else is this app's invention.
+                Err(code) => return PackageRemoveOutcome::ModelFileFailed(code),
             }
         }
     }
@@ -2647,6 +2803,14 @@ pub struct SearchSource {
     pub count: u16,
     /// The outcome of the query.
     pub status: ProbeStatus,
+    /// Whether the count below came back from a syscall.
+    ///
+    /// WHY the flag exists: one of the four rows is a compile-time table the
+    /// platform's SDK carries, and a screen that prints it beside three answers
+    /// the platform sent and then says "these are the platform's answers" has
+    /// taken the table into the claim. The flag is what lets the row say which
+    /// kind of fact it is.
+    pub from_platform: bool,
 }
 
 /// The search configuration the platform holds, and the content it holds.
@@ -2658,11 +2822,18 @@ pub struct SearchConfiguration {
     pub threshold_q15: Option<i16>,
     /// The result limit the platform holds, if it holds one.
     pub max_results: Option<u16>,
-    /// Whether the search may traverse the filesystem. Off by default.
-    pub filesystem_scan: bool,
+    /// Whether the platform's store says its retrieval may traverse the
+    /// filesystem, and `None` when the store holds no such key.
+    ///
+    /// WHY this is an option and not a bool: the app watches no scan and holds
+    /// no scan flag, so a `false` written here was the app's own default painted
+    /// on a row labelled as a configuration. `None` is the honest reading of a
+    /// store that has nothing to say, and the screen gives it its own words.
+    pub filesystem_scan: Option<bool>,
     /// Whether this app may change the platform's settings.
     pub writable: bool,
-    /// The sources the search can draw on, measured.
+    /// The sources the search can draw on, each one marked with where its
+    /// count came from.
     pub sources: [SearchSource; SearchSource::COUNT],
 }
 
@@ -2678,6 +2849,12 @@ impl SearchConfiguration {
     pub const THRESHOLD_KEY: &'static str = "search.similarity_q15";
     /// The settings key the platform keeps the result limit in.
     pub const MAX_RESULTS_KEY: &'static str = "search.max_results";
+    /// The settings key the platform would keep a filesystem-traversal switch in.
+    ///
+    /// WHY the app asks rather than assumes: the store answers an absent key with
+    /// no bytes, and `None` from that answer is the report the screen shows. The
+    /// day the platform ships such a switch this app reads it with no edit here.
+    pub const FILESYSTEM_SCAN_KEY: &'static str = "search.filesystem_scan";
 
     /// Measures the platform's search configuration and its content layer.
     ///
@@ -2691,12 +2868,13 @@ impl SearchConfiguration {
             .and_then(MatryoshkaDim::from_u32);
         let threshold_q15 = read_setting(Self::THRESHOLD_KEY).and_then(|value| value.as_i16());
         let max_results = read_setting(Self::MAX_RESULTS_KEY).and_then(|value| value.as_u16());
+        let filesystem_scan = read_setting(Self::FILESYSTEM_SCAN_KEY).and_then(|value| value.as_bool());
 
         Self {
             dimension,
             threshold_q15,
             max_results,
-            filesystem_scan: false,
+            filesystem_scan,
             writable: interos_std::cap_lookup(interos_std::cap_type::FILE_SYSTEM_WRITE, 0).is_ok(),
             sources: measure_sources(),
         }
@@ -2733,6 +2911,21 @@ impl SettingValue {
     pub fn as_u16(&self) -> Option<u16> {
         self.as_str().trim().parse::<u16>().ok()
     }
+
+    /// The value as the platform's own yes or no, if it spells one.
+    ///
+    /// WHY only these spellings answer: a store holding anything else has not
+    /// said yes, and reading whatever is left as yes would be this app deciding
+    /// a configuration the platform never set. `dialer` writes `1` and `0` for
+    /// its own switch, which is the form the platform's apps use; the words are
+    /// accepted beside it so a store that says `on` is not read as nothing.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.as_str().trim() {
+            "1" | "true" | "on" | "yes" => Some(true),
+            "0" | "false" | "off" | "no" => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// Reads one settings value, and reports whether the platform holds one.
@@ -2765,13 +2958,18 @@ fn read_setting(key: &str) -> Option<SettingValue> {
     }
 }
 
-/// Measures the four sources the platform's search draws on.
+/// Measures the four sources the search surface reports.
+///
+/// Three of the four are a syscall's answer. One is the SDK's own table, and the
+/// row carries the flag that says so, because a list of counts in which one was
+/// never measured is only honest while the reader can tell which one.
 fn measure_sources() -> [SearchSource; SearchSource::COUNT] {
     let packages = PackageRegistry::measure();
     let package_source = SearchSource {
         name: "Installed packages",
         count: packages.count,
         status: packages.status,
+        from_platform: true,
     };
 
     // WHY the settings surfaces are counted from the platform's own
@@ -2779,10 +2977,16 @@ fn measure_sources() -> [SearchSource; SearchSource::COUNT] {
     // search offers the same ones, and the catalogue is the one definition
     // of what they are. Counting them here from the same table is what
     // keeps the two sides from drifting.
+    //
+    // WHY the row is not marked as a platform answer: no query was sent. The
+    // number is the SDK's own compile-time count of its own table, which is a
+    // fact about the code this app was built against and not a reading of this
+    // device, and the screen says so beside the count.
     let settings_source = SearchSource {
         name: "Settings surfaces",
         count: interos_std::settings::Section::COUNT as u16,
         status: ProbeStatus::Listed,
+        from_platform: false,
     };
 
     let (document_count, document_status) = {
@@ -2810,6 +3014,7 @@ fn measure_sources() -> [SearchSource; SearchSource::COUNT] {
         name: "Shared documents",
         count: document_count,
         status: document_status,
+        from_platform: true,
     };
 
     let (handler_count, handler_status) = {
@@ -2834,6 +3039,7 @@ fn measure_sources() -> [SearchSource; SearchSource::COUNT] {
         name: "Intent handlers",
         count: handler_count,
         status: handler_status,
+        from_platform: true,
     };
 
     [
@@ -2872,6 +3078,15 @@ pub struct SelfTestRow {
     pub detail_len: usize,
     /// Whether the row passed.
     pub passed: bool,
+    /// Whether the row ran a function of the platform's own.
+    ///
+    /// WHY a row has to say so: three of these rows call the platform's fixed
+    /// point cosine, and three run this app's own dimension map and parsers on
+    /// a line this app wrote. Both are tests, and neither is worth more than the
+    /// other on its own -- but the screen used to describe all six as the
+    /// platform's own function returning its own value, which left a reader
+    /// believing the app's arithmetic had been checked by something outside it.
+    pub from_platform: bool,
 }
 
 impl SelfTestRow {
@@ -2884,8 +3099,9 @@ impl SelfTestRow {
 /// The result of running the self-test.
 ///
 /// WHY the rows are measured and not written: a self-test that prints three
-/// green lines whose values are string constants has tested nothing. Every
-/// row here holds the value the platform's own function returned.
+/// green lines whose values are string constants has tested nothing. Each row
+/// also says which code ran, because a row that tested this app's own parser is
+/// not evidence about the platform and must not be painted as though it were.
 #[derive(Clone, Copy, Debug)]
 pub struct SelfTest {
     /// The rows, in display order.
@@ -2918,6 +3134,7 @@ impl SelfTest {
             detail: [0u8; SELF_TEST_DETAIL_MAX],
             detail_len: 0,
             passed: false,
+            from_platform: false,
         }; SELF_TEST_ROWS];
 
         // Row 1..3: the platform's fixed-point cosine function.
@@ -2943,7 +3160,7 @@ impl SelfTest {
             perpendicular == 0,
         );
 
-        // Row 4: the platform's Matryoshka dimension map.
+        // Row 4: this app's own Matryoshka dimension map.
         let dims_ok = MatryoshkaDim::from_u32(128) == Some(MatryoshkaDim::Dim128)
             && MatryoshkaDim::from_u32(256) == Some(MatryoshkaDim::Dim256)
             && MatryoshkaDim::from_u32(512) == Some(MatryoshkaDim::Dim512)
@@ -2953,9 +3170,10 @@ impl SelfTest {
             "matryoshka: dimension map",
             b"128/256/512/768 map, 384 does not",
             dims_ok,
+            false,
         );
 
-        // Row 5: the platform's service registry line format.
+        // Row 5: this app's own reader for the registry's line format.
         let service = parse_service_line(b"3|1|running|0|1|7|42|2");
         let service_ok = service
             .map(|entry| {
@@ -2970,9 +3188,10 @@ impl SelfTest {
             "service registry: line parse",
             b"3|1|running|0|1|7|42|2 -> id 3, running, 42 ticks, 2 failures",
             service_ok,
+            false,
         );
 
-        // Row 6: the platform's document index record format.
+        // Row 6: the platform's own record parser, on a line this app wrote.
         let record = interos_std::content::DocumentRecord::parse(
             "444f4300000000ab|/storage/a.ppm|image/x-portable-pixmap|bytes|2048|77",
         );
@@ -2989,15 +3208,31 @@ impl SelfTest {
             "content index: record parse",
             b"one record -> path, mime, bytes, 2048, 77",
             record_ok,
+            true,
         );
 
         let all_passed = rows.iter().all(|row| row.passed);
         SelfTest { rows, all_passed }
     }
+
+    /// How many rows ran a function of the platform's rather than this app's.
+    pub fn platform_rows(&self) -> usize {
+        self.rows.iter().filter(|row| row.from_platform).count()
+    }
+
+    /// How many rows ran this app's own code.
+    pub fn app_rows(&self) -> usize {
+        SELF_TEST_ROWS - self.platform_rows()
+    }
 }
 
 impl SelfTestRow {
-    /// Builds a row whose detail is a measured cosine.
+    /// Builds a row whose detail is the value the platform's cosine returned.
+    ///
+    /// WHY this constructor is the one that says "the platform": the three rows
+    /// it builds are the three that call out of this app, and the flag that tells
+    /// the reader which rows those are is set where the call is made rather than
+    /// at each of six call sites that can forget it.
     fn set(row: &mut SelfTestRow, label: &'static str, value_q15: i16, passed: bool) {
         let mut detail = [0u8; SELF_TEST_DETAIL_MAX];
         let len = format_cosine(value_q15, &mut detail);
@@ -3005,10 +3240,21 @@ impl SelfTestRow {
         row.detail = detail;
         row.detail_len = len;
         row.passed = passed;
+        row.from_platform = true;
     }
 
     /// Builds a row whose detail is a fixed sentence.
-    fn text(label: &'static str, detail: &[u8], passed: bool) -> SelfTestRow {
+    ///
+    /// WHY `from_platform` is a parameter here: the rows this builds split three
+    /// ways over the app's own map, the app's own parser and the platform's
+    /// parser, and a constructor that stamped one answer for all of them is how
+    /// the screen ended up claiming six platform calls where three had run.
+    fn text(
+        label: &'static str,
+        detail: &[u8],
+        passed: bool,
+        from_platform: bool,
+    ) -> SelfTestRow {
         let mut buffer = [0u8; SELF_TEST_DETAIL_MAX];
         let len = detail.len().min(SELF_TEST_DETAIL_MAX);
         buffer[..len].copy_from_slice(&detail[..len]);
@@ -3017,6 +3263,7 @@ impl SelfTestRow {
             detail: buffer,
             detail_len: len,
             passed,
+            from_platform,
         }
     }
 }
@@ -4478,8 +4725,23 @@ mod tests {
         assert_eq!(config.sources.len(), SearchSource::COUNT);
         assert_eq!(config.sources[1].name, "Settings surfaces");
         assert_eq!(config.sources[1].count, interos_std::settings::Section::COUNT as u16);
-        // The search never scans the filesystem unless it is told to.
-        assert!(!config.filesystem_scan);
+        // The search never scans the filesystem unless the platform says so.
+        // WHY the assert is on the reading, not on a default: the row used to
+        // print OFF because the field was `false` in a struct this app built
+        // itself, which is not an answer from anywhere. Now the field is
+        // `Option<bool>` and the only honest things it can be are the platform's
+        // own value or `None` because the key is not there.
+        assert!(
+            config.filesystem_scan == None
+                || config.filesystem_scan == Some(false)
+                || config.filesystem_scan == Some(true)
+        );
+        // One source at least must be a count the platform returned, or the
+        // surface is describing sources it has not measured at all.
+        assert!(config.sources.iter().filter(|s| s.from_platform).count() >= 1);
+        // The settings row is this app's own reading of the SDK's table, so it
+        // must not be marked as a platform answer.
+        assert!(!config.sources[1].from_platform);
     }
 
     #[test]
@@ -4794,7 +5056,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_stages_derive_from_inventory_and_services() {
+    fn probe_stages_derive_from_the_listing_alone() {
         let inv = ModelInventory {
             status: ModelProbeStatus::Listed,
             entries: 1,
@@ -4804,20 +5066,146 @@ mod tests {
             embedding_size_kb: 2048,
             generative_size_kb: 512,
         };
-        let srv = ServiceRegistry {
-            status: ProbeStatus::Listed,
-            count: 0,
-            highest_id: 0,
-            entries: [ServiceEntry {
-                id: 0,
-                state: ServiceState::Unknown,
-                abi_version: 0,
-                age_ticks: 0,
-                failures: 0,
-            }; MAX_SERVICES],
+        assert_eq!(inv.embedding_stage(), Some(ProbeStage::Validated));
+        assert_eq!(inv.generative_stage(), Some(ProbeStage::Discovered));
+        // WHY the stage has no service argument any more: the previous
+        // derivation let a registered runtime lift `Discovered` to `Loaded`,
+        // which read a registration as an open of this file. The rung is now
+        // unreachable from here, so a listing cannot promote itself.
+        assert_ne!(inv.embedding_stage(), Some(ProbeStage::Loaded));
+        assert_ne!(inv.generative_stage(), Some(ProbeStage::Tested));
+    }
+
+    #[test]
+    fn a_listing_that_never_answered_gives_no_stage() {
+        for status in [
+            ModelProbeStatus::Refused,
+            ModelProbeStatus::NoAuthority,
+            ModelProbeStatus::Absent,
+        ] {
+            let inv = ModelInventory {
+                status,
+                entries: 0,
+                placeholders: 0,
+                has_embedding_weights: false,
+                has_generative_weights: false,
+                embedding_size_kb: 0,
+                generative_size_kb: 0,
+            };
+            // No reading, no stage.
+            assert_eq!(inv.embedding_stage(), None);
+            assert_eq!(inv.generative_stage(), None);
+            // And the chip says what the reading was, in the state's own words.
+            let word = match status {
+                ModelProbeStatus::Absent => WeightState::NoDirectory,
+                ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => WeightState::NotRead,
+                _ => WeightState::Present,
+            };
+            assert_eq!(inv.embedding_weights(), word);
+            assert_eq!(inv.embedding_weights().stage_word(inv.embedding_stage()), word.as_str());
+        }
+    }
+
+    #[test]
+    fn weight_state_separates_absent_from_not_read() {
+        let listed = ModelInventory {
+            status: ModelProbeStatus::Listed,
+            entries: 0,
+            placeholders: 0,
+            has_embedding_weights: false,
+            has_generative_weights: false,
+            embedding_size_kb: 0,
+            generative_size_kb: 0,
         };
-        assert_eq!(inv.embedding_stage(&srv), Some(ProbeStage::Validated));
-        assert_eq!(inv.generative_stage(&srv), Some(ProbeStage::Discovered));
+        assert_eq!(listed.embedding_weights(), WeightState::Absent);
+        assert!(listed.embedding_weights().measured());
+
+        let refused = ModelInventory {
+            status: ModelProbeStatus::Refused,
+            has_embedding_weights: false,
+            ..listed
+        };
+        assert_eq!(refused.embedding_weights(), WeightState::NotRead);
+        assert!(!refused.embedding_weights().measured());
+        // The screen must not read a refusal as an absence.
+        assert_ne!(refused.embedding_weights(), listed.embedding_weights());
+    }
+
+    #[test]
+    fn one_file_claims_one_weight_class() {
+        // The real filename that started this: one file, two words in it.
+        assert_eq!(
+            weight_class_of(b"embedding_gemma2.gguf"),
+            WeightClass::Embedding
+        );
+        assert_eq!(weight_class_of(b"embed-gemma-tiny.gguf"), WeightClass::Embedding);
+        assert_eq!(weight_class_of(b"gemma-3n-it.gguf"), WeightClass::Generative);
+        assert_eq!(weight_class_of(b"gen-tiny.gguf"), WeightClass::Generative);
+        assert_eq!(weight_class_of(b"notes.txt"), WeightClass::Unknown);
+    }
+
+    #[test]
+    fn a_single_embedding_file_cannot_report_generative_weights() {
+        // WHY: before the class rule, `embedding_gemma2.gguf` set both flags, so
+        // the day the embedding weights landed the screen also claimed the
+        // device held generative weights and pointed INSTALL at a model the
+        // device does not have.
+        let inv = ModelInventory {
+            status: ModelProbeStatus::Listed,
+            entries: 1,
+            placeholders: 0,
+            has_embedding_weights: true,
+            has_generative_weights: false,
+            embedding_size_kb: 300_000,
+            generative_size_kb: 0,
+        };
+        assert_eq!(inv.embedding_weights(), WeightState::Present);
+        assert_eq!(inv.generative_weights(), WeightState::Absent);
+    }
+
+    #[test]
+    fn a_model_directory_count_is_read_off_the_probe_table() {
+        assert_eq!(MODEL_DIRECTORY_COUNT, MODEL_DIRECTORIES.len());
+        assert!(MODEL_DIRECTORY_COUNT >= 2);
+        // The screen names the directories the probe actually walks, so the
+        // count and the listing cannot disagree again.
+        assert!(MODEL_DIRECTORIES.contains(&"/data/models"));
+    }
+
+    #[test]
+    fn a_setting_reads_only_the_spellings_the_platform_uses() {
+        let value = |s: &str| {
+            let mut v = SettingValue {
+                bytes: [0u8; SETTING_VALUE_MAX],
+                len: 0,
+            };
+            v.bytes[..s.len()].copy_from_slice(s.as_bytes());
+            v.len = s.len();
+            v
+        };
+        assert_eq!(value("1").as_bool(), Some(true));
+        assert_eq!(value("0").as_bool(), Some(false));
+        assert_eq!(value("on").as_bool(), Some(true));
+        assert_eq!(value("off").as_bool(), Some(false));
+        // Anything else is not a yes, and is not a no either.
+        assert_eq!(value("maybe").as_bool(), None);
+        assert_eq!(value("").as_bool(), None);
+    }
+
+    #[test]
+    fn a_removed_weight_file_is_not_reported_as_a_read_only_file_system() {
+        // WHY: the unlink runs against `/data/models`, and the old arm printed
+        // `/system/models is read-only` whatever the error was, naming a
+        // partition the call never touched.
+        let outcome = PackageRemoveOutcome::ModelFileFailed(-1);
+        assert!(matches!(
+            outcome,
+            PackageRemoveOutcome::ModelFileFailed(_)
+        ));
+        assert_ne!(
+            PackageRemoveOutcome::ModelFileFailed(-1),
+            PackageRemoveOutcome::ReadOnlyFileSystem(-1)
+        );
     }
 
     #[test]

@@ -50,12 +50,14 @@ use agent_manager::{
     read_embed_reply, resolve_inference_service, save_preferred_provider, service_name,
     write_refusal_without_words, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole,
     ChatSession, ConsentOutcome, DeviceState, EmbedProbe, GenerationAnswer, InstallState,
-    ModelProbeStatus, PackageInstallOutcome, PackageRemoveOutcome, ProbeState, ProbeStatus,
-    Provider, RegistryPackageState, RuntimeBinding, RuntimeDiagnostics, SearchConfiguration,
-    SelfTest, ServiceState, Surface, ToolAuthority, transact_package_install,
-    transact_package_remove, CAPABILITY_COUNT, CHAT_PROMPT_MAX, CHAT_TEXT_MAX,
-    EMBED_NOTICE_TEXT_MAX, MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM, MAX_RESULTS_DEFAULT,
-    PROBE_REQUEST_TEXT_MAX, REQUEST_HEADER_BYTES, SIMILARITY_DEFAULT_Q15, TOOL_LABEL_MAX,
+    ModelProbeStatus, PackageInstallOutcome, PackageRemoveOutcome, ProbeStage, ProbeState,
+    ProbeStatus, Provider, RegistryPackageState, RuntimeBinding, RuntimeDiagnostics,
+    SearchConfiguration, SearchSource, SelfTest, ServiceState, Surface, ToolAuthority,
+    WeightState, transact_package_install, transact_package_remove, CAPABILITY_COUNT, CHAT_PROMPT_MAX,
+    CHAT_TEXT_MAX, EMBED_NOTICE_TEXT_MAX, MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM,
+    MAX_RESULTS_DEFAULT, MODEL_DIRECTORIES, MODEL_DIRECTORY_COUNT, PROBE_REQUEST_TEXT_MAX,
+    REQUEST_HEADER_BYTES, SELF_TEST_DETAIL_MAX, SERVICE_ABI_MAX_ID, SIMILARITY_DEFAULT_Q15,
+    TOOL_LABEL_MAX,
 };
 
 // -----------------------------------------------------------------------------
@@ -778,6 +780,16 @@ const ANSWER_POLL_TICKS: u32 = 50;
 /// into this app's queue, so a drain with no limit is a hang waiting on a queue
 /// that never empties.
 const MAILBOX_DRAIN: usize = 16;
+
+/// The term this app's retrieval card searches with.
+///
+/// WHY it is a named constant rather than a literal three lines deep in a
+/// builder: the card asks the platform one fixed question of its own choosing
+/// -- it is not the person's prompt, and nothing the person typed reaches it --
+/// and a screen that prints answers under a heading without saying what was
+/// asked leaves the reader to guess. The row now prints this term beside the
+/// results, so the question on the screen is the question that was sent.
+const SEARCH_PROBE_TERM: &[u8] = b"storage";
 
 // -----------------------------------------------------------------------------
 // The body model
@@ -1624,9 +1636,18 @@ impl AgentManagerApp {
                 self.set_action(b"REMOVE: /data/models/local_model.gguf unlinked.", Tone::Good);
             }
             PackageRemoveOutcome::ReadOnlyFileSystem(code) => {
-                let mut msg = [0u8; 64];
+                // WHY the path is not named as `/system/models` here: the unlink
+                // this outcome came back from was of `/data/models/...`, and the
+                // platform's code says only that the file system it is on will not
+                // take a write. Naming a different directory as the read-only one
+                // was this app's guess about which mount refused.
+                let mut msg = [0u8; 96];
                 let mut n = 0;
-                for &b in b"REMOVE: /system/models is read-only (code " { msg[n] = b; n += 1; }
+                for &b in b"REMOVE: the file system holding the weights refused the unlink (code "
+                {
+                    msg[n] = b;
+                    n += 1;
+                }
                 n += format_u32(code.unsigned_abs() as u32, &mut msg[n..]);
                 msg[n] = b')'; n += 1;
                 self.set_action(&msg[..n], Tone::Unavailable);
@@ -1920,7 +1941,28 @@ impl AgentManagerApp {
     fn build_models(&mut self) {
         let models = self.device.models;
         self.begin_card(b"Device model state", Tone::Plain);
-        self.add_line(b"Model directory", MODEL_DIRECTORY_LABEL, Tone::Plain);
+        // WHY the count is the probe's own table and the wide line names every
+        // entry of it: the row used to print one directory while the probe above
+        // had been listing two, so the screen described the device's model
+        // namespace with a note that no longer matched the code that measured it.
+        // These two lines are read off `MODEL_DIRECTORIES` itself.
+        let mut dirs_value = [0u8; VALUE_MAX];
+        let dn = format_u32(MODEL_DIRECTORY_COUNT as u32, &mut dirs_value);
+        self.add_line(b"Model directories", &dirs_value[..dn], Tone::Plain);
+        {
+            let mut listed = [0u8; 128];
+            let mut n = 0;
+            put(&mut listed, &mut n, b"This app lists: ");
+            let mut index = 0;
+            while index < MODEL_DIRECTORIES.len() {
+                if index > 0 {
+                    put(&mut listed, &mut n, b", ");
+                }
+                put(&mut listed, &mut n, MODEL_DIRECTORIES[index].as_bytes());
+                index += 1;
+            }
+            self.add_wide(&listed[..n], Tone::Muted);
+        }
         self.add_chip(
             b"Directory",
             models.status.as_str().as_bytes(),
@@ -1947,52 +1989,38 @@ impl AgentManagerApp {
                 sn += 1;
             }
             self.add_line(b"Disk capacity", &storage_buf[..sn], Tone::Plain);
-            let mut mounted_buf = [0u8; 32];
-            let mut mn = 0;
-            for &b in &storage_buf[..sn] {
-                mounted_buf[mn] = b;
-                mn += 1;
-            }
-            for &b in b" MOUNTED" {
-                mounted_buf[mn] = b;
-                mn += 1;
-            }
-            self.add_chip(b"Storage link", &mounted_buf[..mn], Tone::Good);
+            // WHY "MOUNTED" is gone: the query this number came back from reports
+            // a capacity, and it answers nothing about whether a filesystem is
+            // mounted where that capacity was read. The chip said the storage was
+            // mounted on the strength of a size, which is a claim about a mount
+            // this app has never measured.
+            self.add_chip(b"Storage read", &storage_buf[..sn], Tone::Plain);
         } else {
             self.add_line(b"Disk capacity", b"Unavailable", Tone::Muted);
-            self.add_chip(b"Storage link", b"NOT LINKED", Tone::Bad);
+            self.add_chip(b"Storage read", b"NOT REPORTED", Tone::Unavailable);
         }
+        // WHY these chips answer with four words and not two: "ABSENT" is a fact
+        // about this device, and it is only available as an answer when the
+        // listing actually answered. A probe that was refused, or that this app
+        // had no capability to make, has not said the weights are missing -- it
+        // has said this app may not know.
+        let embedding = models.embedding_weights();
         self.add_chip(
             b"Embedding weights",
-            if models.has_embedding_weights {
-                b"PRESENT"
-            } else {
-                b"ABSENT"
-            },
-            if models.has_embedding_weights {
-                Tone::Good
-            } else {
-                Tone::Muted
-            },
+            embedding.as_str().as_bytes(),
+            weight_tone(embedding),
         );
+        let generative = models.generative_weights();
         self.add_chip(
             b"Generative weights",
-            if models.has_generative_weights {
-                b"PRESENT"
-            } else {
-                b"ABSENT"
-            },
-            if models.has_generative_weights {
-                Tone::Good
-            } else {
-                Tone::Muted
-            },
+            generative.as_str().as_bytes(),
+            weight_tone(generative),
         );
-        let embed_stage = models.embedding_stage(&self.device.services);
+        let embed_stage = models.embedding_stage();
         self.add_chip(
             b"Embedding stage",
-            embed_stage.map(|s| s.as_str().as_bytes()).unwrap_or(b"ABSENT"),
-            if embed_stage.is_some() { Tone::Good } else { Tone::Muted },
+            embedding.stage_word(embed_stage).as_bytes(),
+            stage_tone(embed_stage),
         );
         if models.embedding_size_kb > 0 {
             let mut sbuf = [0u8; 24];
@@ -2001,11 +2029,11 @@ impl AgentManagerApp {
             self.add_line(b"Embedding size", &sbuf[..sn], Tone::Plain);
         }
 
-        let gen_stage = models.generative_stage(&self.device.services);
+        let gen_stage = models.generative_stage();
         self.add_chip(
             b"Generative stage",
-            gen_stage.map(|s| s.as_str().as_bytes()).unwrap_or(b"ABSENT"),
-            if gen_stage.is_some() { Tone::Good } else { Tone::Muted },
+            generative.stage_word(gen_stage).as_bytes(),
+            stage_tone(gen_stage),
         );
         if models.generative_size_kb > 0 {
             let mut sbuf = [0u8; 24];
@@ -2210,9 +2238,24 @@ impl AgentManagerApp {
         let mut highest = [0u8; 16];
         let n = format_u32(services.highest_id as u32, &mut highest);
         self.add_line(b"Highest service id", &highest[..n], Tone::Plain);
-        self.add_line(b"Service ABI range", b"1..=11", Tone::Plain);
+        // WHY the range is printed from `SERVICE_ABI_MAX_ID`: the row used to
+        // carry `1..=11`, which is the kernel's private service-registration
+        // bound, while the registry this app reads answers with ids up to 15
+        // and the table beside it names all sixteen. A constant copied from a
+        // different layer of the platform described a set the app never sees.
+        let mut abi = [0u8; 16];
+        let mut an = 0;
+        put(&mut abi, &mut an, b"0..=");
+        an += format_u32(SERVICE_ABI_MAX_ID as u32, &mut abi[an..]);
+        self.add_line(b"Service ids this app names", &abi[..an], Tone::Plain);
+        // WHY this is one sentence about a path and not three about a state:
+        // the app cannot measure the launcher-to-service path, the grant that
+        // would authorise it, or the retrieval behind it. When another team's
+        // wire lands this stays true until a measurement is added here, which
+        // is the property the constant it replaced did not have -- that one
+        // would still print its denial on a device that had grown the path.
         self.add_wide(
-            b"The launcher-to-service path, the authorisation and the retrieval are not wired up on this platform, so no system-wide integration is claimed.",
+            b"This app measures no launcher-to-service path, no authorisation for one, and no retrieval behind it, so it claims no system-wide integration.",
             Tone::Muted,
         );
 
@@ -2234,21 +2277,41 @@ impl AgentManagerApp {
             self.add_line(b"Physical RAM", b"Unavailable", Tone::Muted);
         }
 
+        // WHY the row is renamed and the "Active" arm is gone: the number is
+        // `t1 - t0` around one `ipc_send` call, so it is the interval the send
+        // itself took, not the latency of an exchange -- the answer arrives
+        // later, on a notice this app reads on a subsequent wake. And the
+        // `Active` arm printed a latency word from "the registry lists an
+        // inference runtime", which measures the presence of a service and
+        // says nothing at all about time.
         if self.ipc_latency_ticks > 0 {
             let mut lbuf = [0u8; 24];
             let mut ln = format_u32(self.ipc_latency_ticks as u32, &mut lbuf);
             for &b in b" ticks" { lbuf[ln] = b; ln += 1; }
-            self.add_line(b"IPC latency", &lbuf[..ln], Tone::Plain);
-        } else if self.device.services.contains_inference_runtime() {
-            self.add_line(b"IPC latency", b"Active", Tone::Good);
+            self.add_line(b"Send call interval", &lbuf[..ln], Tone::Plain);
         } else {
-            self.add_line(b"IPC latency", b"Unbound: no target", Tone::Muted);
+            self.add_line(b"Send call interval", b"NOT MEASURED", Tone::Muted);
         }
 
+        // WHY "stream" is out of both words: nothing arrives a token at a
+        // time -- the service fills the whole answer and then posts the notice
+        // that names it. What this flag genuinely tracks is this app's own
+        // wait: it is set when the app hands a prompt over and cleared when an
+        // answer, a refusal, a cancel or a timeout ends the wait. So the row
+        // says which of those two states the app is in, and claims no stream
+        // the platform never ran.
         self.add_line(
-            b"Generation stream",
-            if self.chat.is_streaming { b"Streaming active" } else { b"Idle" },
-            if self.chat.is_streaming { Tone::Accent } else { Tone::Plain },
+            b"App request wait",
+            if self.chat.is_streaming {
+                b"REQUEST HELD"
+            } else {
+                b"NONE HELD"
+            },
+            if self.chat.is_streaming {
+                Tone::Accent
+            } else {
+                Tone::Plain
+            },
         );
     }
 
@@ -2300,17 +2363,22 @@ impl AgentManagerApp {
         }
         self.add_line(b"Max results", &value[..n], Tone::Plain);
 
+        // WHY three answers and not two: the field used to be a `bool` this app
+        // set itself, so OFF printed on a device whose settings store had never
+        // been asked. `None` is the reading the store actually gave when the
+        // key is not there, and it is a word of its own on the screen.
+        let scan = search.filesystem_scan;
         self.add_line(
             b"Filesystem scan",
-            if search.filesystem_scan {
-                b"ON"
-            } else {
-                b"OFF"
+            match scan {
+                Some(true) => b"ON (platform)",
+                Some(false) => b"OFF (platform)",
+                None => b"NOT REPORTED",
             },
-            if search.filesystem_scan {
-                Tone::Good
-            } else {
-                Tone::Muted
+            match scan {
+                Some(true) => Tone::Good,
+                Some(false) => Tone::Muted,
+                None => Tone::Unavailable,
             },
         );
         self.add_line(
@@ -2334,15 +2402,28 @@ impl AgentManagerApp {
         }
 
         self.begin_card(b"Search sources", Tone::Plain);
+        let mut measured_sources = 0usize;
         for source in search.sources.iter() {
             let mut value = [0u8; VALUE_MAX];
-            let n = if source.status == ProbeStatus::Listed {
+            let mut n = if source.status == ProbeStatus::Listed {
                 format_u32(source.count as u32, &mut value)
             } else {
                 let text = b"REFUSED";
                 value[..text.len()].copy_from_slice(text);
                 text.len()
             };
+            // WHY the row marks its own origin: three of these four counts come
+            // back from a query this app sent, and one is a compile-time count
+            // of a table in the SDK this app was built against. Under the old
+            // heading -- "the counts above are the platform's answers" -- the
+            // fourth read as a device measurement. It is still a real number;
+            // it is a number about the code, and the row now says which.
+            if source.from_platform {
+                measured_sources += 1;
+                put(&mut value, &mut n, b" (device)");
+            } else {
+                put(&mut value, &mut n, b" (this app's table)");
+            }
             self.add_line(
                 source.name.as_bytes(),
                 &value[..n],
@@ -2356,18 +2437,37 @@ impl AgentManagerApp {
             b"A refused source is a capability the platform withheld, not an empty one.",
             Tone::Muted,
         );
+        // WHY the count is assembled from the rows above: the sentence used to
+        // assert that every count was the platform's answer, and it was one row
+        // short of true. Naming how many actually came from a query is the
+        // statement the loop can support.
+        {
+            let mut line = [0u8; 128];
+            let mut n = 0;
+            put(&mut line, &mut n, b"Counts read back from a platform query: ");
+            n += format_u32(measured_sources as u32, &mut line[n..]);
+            put(&mut line, &mut n, b" of ");
+            n += format_u32(SearchSource::COUNT as u32, &mut line[n..]);
+            put(&mut line, &mut n, b" rows.");
+            self.add_wide(&line[..n], Tone::Muted);
+        }
 
         self.begin_card(b"Content layer", Tone::Accent);
         self.add_wide(
-            b"The document index and the intent registry are the platform's own. The counts above are the platform's answers.",
+            b"The document index and the intent registry are the platform's own, and the counts marked (device) came from them.",
             Tone::Muted,
         );
 
         self.begin_card(b"Document retrieval", Tone::Plain);
+        // WHY the term is printed before the answers: this card asks the
+        // platform one fixed question of its own choosing, and a list of hits
+        // under a heading that does not say what was asked reads as retrieval
+        // over whatever the person in front of the screen had in mind.
+        self.add_line(b"Query sent", SEARCH_PROBE_TERM, Tone::Plain);
         let _ = std::ipc_send(
             std::ai::SERVICE_INFERENCE_TASK_ID,
             std::ai::MSG_TYPE_SEARCH,
-            b"storage",
+            SEARCH_PROBE_TERM,
         );
         let mut doc_buf = [0u8; 1024];
         let mut shown = 0;
@@ -2458,31 +2558,31 @@ impl AgentManagerApp {
             }
         }
         if shown == 0 {
-            let mut list_buf = [0u8; 512];
-            match std::fs_list("/storage", &mut list_buf) {
-                Ok(n) if n > 0 => {
-                    let payload = &list_buf[..n.min(list_buf.len())];
-                    for line in payload.split(|&b| b == b'\n') {
-                        if line.is_empty() || shown >= 3 {
-                            continue;
-                        }
-                        let mut parts = line.split(|&b| b == b'|');
-                        if let Some(name) = parts.next() {
-                            if !name.is_empty() {
-                                self.add_line(b"Ranked result", name, Tone::Plain);
-                                self.add_chip(b"Attribution", b"[Lexical RAG]", Tone::Good);
-                                shown += 1;
-                            }
-                        }
-                    }
-                    if shown == 0 {
-                        self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
-                    }
-                }
-                _ => {
-                    self.add_wide(b"Zero indexed documents reported by content service.", Tone::Muted);
-                }
+            // WHY the file listing is gone: this arm used to run `fs_list` on
+            // `/storage` and repaint every name it got back as a `Ranked
+            // result` wearing the service's own `[Lexical RAG]` attribution.
+            // A directory listing is not a ranking: nothing scored those names,
+            // nothing retrieved them for the query above, and the attribution
+            // chip credited them to a retrieval path that had never seen them.
+            // The line now says which of the two things that can actually have
+            // happened -- the service answered with no hits, or it sent nothing
+            // this app could read -- and claims no result for either.
+            let mut line = [0u8; 160];
+            let mut n = 0;
+            if reply_len > 0 {
+                put(
+                    &mut line,
+                    &mut n,
+                    b"The retrieval service answered with no ranked document for the query above.",
+                );
+            } else {
+                put(
+                    &mut line,
+                    &mut n,
+                    b"No retrieval reply reached this app, so it shows no results.",
+                );
             }
+            self.add_wide(&line[..n], Tone::Unavailable);
         }
 
         // WHY the probe is the card this surface ends on: everything above is what
@@ -3341,12 +3441,40 @@ impl AgentManagerApp {
                 if row.passed { b"PASS" } else { b"FAIL" },
                 if row.passed { Tone::Good } else { Tone::Bad },
             );
-            self.add_wide(row.detail_str().as_bytes(), Tone::Muted);
+            // WHY the row names whose code ran: three of these six call out of
+            // this app and three do not. A row that tested this app's own
+            // dimension map is a check that the map agrees with itself, and it
+            // is worth no more than that -- printed under a blanket claim about
+            // "the platform's own function" it read as evidence about the
+            // platform that it simply is not.
+            let mut detail = [0u8; SELF_TEST_DETAIL_MAX + 32];
+            let mut dn = 0;
+            put(&mut detail, &mut dn, row.detail_str().as_bytes());
+            put(
+                &mut detail,
+                &mut dn,
+                if row.from_platform {
+                    b"  (the platform's function)"
+                } else {
+                    b"  (this app's own code)"
+                },
+            );
+            self.add_wide(&detail[..dn], Tone::Muted);
         }
-        self.add_wide(
-            b"Every row above holds the value the platform's own function returned.",
-            Tone::Muted,
-        );
+        // WHY the count is derived: the sentence used to assert that every row
+        // held a platform value, and two of the six do not. Counting them off
+        // the rows' own flags is the only version of that line this app can
+        // stand behind, and it stays correct when a row is added or moved.
+        {
+            let mut line = [0u8; 160];
+            let mut n = 0;
+            put(&mut line, &mut n, b"Rows that ran a platform function: ");
+            n += format_u32(test.platform_rows() as u32, &mut line[n..]);
+            put(&mut line, &mut n, b". Rows that ran this app's own code: ");
+            n += format_u32(test.app_rows() as u32, &mut line[n..]);
+            put(&mut line, &mut n, b".");
+            self.add_wide(&line[..n], Tone::Muted);
+        }
 
         self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
         // WHY the chip reports the platform's answer and not the app's own
@@ -3591,15 +3719,39 @@ fn handle_chat_key(app: &mut AgentManagerApp, code: u32) -> ChatKey {
     }
 }
 
-/// The model directory, as the screen spells it.
-const MODEL_DIRECTORY_LABEL: &[u8] = b"/system/models";
-
 /// The tone for a model directory probe.
 fn model_tone(status: ModelProbeStatus) -> Tone {
     match status {
         ModelProbeStatus::Listed => Tone::Good,
         ModelProbeStatus::Absent => Tone::Muted,
         ModelProbeStatus::Refused | ModelProbeStatus::NoAuthority => Tone::Unavailable,
+    }
+}
+
+/// The tone for a weight-state chip.
+///
+/// WHY only `PRESENT` is positive ink: `ABSENT` is a measured answer, so it
+/// is quiet but certain, while `NO DIRECTORY` and `NOT READ` mean this app
+/// never got the listing that would let it speak about the weights at all.
+fn weight_tone(state: WeightState) -> Tone {
+    match state {
+        WeightState::Present => Tone::Good,
+        WeightState::Absent => Tone::Muted,
+        WeightState::NoDirectory => Tone::Muted,
+        WeightState::NotRead => Tone::Unavailable,
+    }
+}
+
+/// The tone for a readiness-stage chip.
+///
+/// WHY `None` is quiet ink: no stage is a statement that this app has
+/// nothing to say, which is the truth whenever the listing never answered.
+fn stage_tone(stage: Option<ProbeStage>) -> Tone {
+    match stage {
+        Some(ProbeStage::Discovered) => Tone::Plain,
+        Some(ProbeStage::Validated) => Tone::Plain,
+        Some(ProbeStage::Loaded | ProbeStage::Tested) => Tone::Good,
+        None => Tone::Muted,
     }
 }
 
