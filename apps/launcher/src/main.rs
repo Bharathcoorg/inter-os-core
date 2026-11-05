@@ -33,6 +33,15 @@ use screens::*;
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
 const POWER_TRANSITION_TICKS: u64 = 220;
+/// How long the volume HUD stays up after a level change.
+///
+/// The kernel's system tick is 1 kHz (`kernel/src/interrupts.rs`,
+/// `SYSTEM_TICK_HZ`), so this is a wall-clock budget in milliseconds: 1.5 s of
+/// dwell, long enough to read the bar and the number together. The value it
+/// replaces was 180 -- 180 ms -- which is under eleven frames at 60 Hz, so a
+/// person who stepped the volume and looked at the HUD saw it blink out before
+/// their eyes reached it.
+const VOLUME_HUD_TICKS: u64 = 1_500;
 const CHUNK: usize = 32768;
 static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
@@ -2596,7 +2605,7 @@ fn step_master_volume(state: &mut LauncherState, hud_surface: Option<u32>, ticks
     match std::audio_set_volume(requested) {
         Ok(volume) if volume <= 100 => {
             state.last_volume_percent = volume as u8;
-            state.volume_hud_until = ticks.saturating_add(180);
+            state.volume_hud_until = ticks.saturating_add(VOLUME_HUD_TICKS);
             if let Some(id) = hud_surface {
                 render_volume_hud(id, state.last_volume_percent);
                 let _ = std::window_set_geometry(id, 100, 220, 100, true);
@@ -5607,6 +5616,23 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
+            // WHY this retires the HUD on every wake: the budget is a wall-clock
+            // deadline, so it has to be compared against the clock somewhere the
+            // shell is certain to come back. It lived inside the timer branch
+            // below, and an idle shell at the home grid never enters it -- the
+            // same measurement that moved the lock read -- so the surface stayed
+            // visible long after its 180 ms budget had passed and only left when
+            // an animation happened to arm a tick. The poll's own 25 ms timeout is
+            // the wake this runs on, which puts the hide within 25 ms of the
+            // deadline instead of whenever a tick felt like arriving.
+            if state.volume_hud_until != 0 && current_ticks() >= state.volume_hud_until {
+                state.volume_hud_until = 0;
+                if let Some(id) = volume_surface {
+                    let _ = std::window_set_geometry(id, 100, 220, 100, false);
+                    surface_flip_display();
+                }
+            }
+
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 if let Ok(power_state) = std::device_power(5) {
@@ -5725,22 +5751,13 @@ pub extern "C" fn _start() -> ! {
                             state.volume_state_valid = true;
                         } else if volume_now != state.last_volume_percent {
                             state.last_volume_percent = volume_now;
-                            state.volume_hud_until = current_ticks().saturating_add(180);
+                            state.volume_hud_until = current_ticks().saturating_add(VOLUME_HUD_TICKS);
                             if let Some(id) = volume_surface {
                                 render_volume_hud(id, volume_now);
                                 let _ = std::window_set_geometry(id, 100, 220, 100, true);
                                 surface_flip_display();
                             }
                         }
-                    }
-                }
-                if state.volume_hud_until != 0
-                    && current_ticks() >= state.volume_hud_until
-                {
-                    state.volume_hud_until = 0;
-                    if let Some(id) = volume_surface {
-                        let _ = std::window_set_geometry(id, 100, 220, 100, false);
-                        surface_flip_display();
                     }
                 }
                 if refresh_ticks % 10 == 0 {
