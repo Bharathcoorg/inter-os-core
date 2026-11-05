@@ -127,6 +127,10 @@ pub fn reset_slot_pool() {
     // are untrustworthy should not have to reason about which of the two
     // tables it invalidated.
     reset_box_cache();
+    // WHY the shape table goes with them too: it is the third of the three
+    // tables a per-pixel painter asks, and a caller that declares the coverage
+    // stale has no way to say it means only two of them.
+    reset_shape_cache();
 }
 
 /// A run's placement, remembered so the next pixel asks the same question.
@@ -196,6 +200,31 @@ pub static BOX_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::Atomi
 #[cfg(test)]
 pub static BOX_MEASURES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+// Gate questions answered from the shape table, and the walks it had to do.
+//
+// WHY thread-local when the counts above are process-global: the claim these
+// answer is about a caller's own walk -- that a frame which paints the same
+// strings at a dozen offsets measures each of them once -- and the harness runs
+// other tests through the same table beside it. A global count would charge
+// their strings to the probe, which is why the typeface's advance scans are
+// counted the same way. Also `cfg(test)`, so nothing of it reaches the guest.
+#[cfg(test)]
+std::thread_local! {
+    static GATE: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
+}
+
+/// `(answers from the table, walks the table had to do)` for this thread.
+#[cfg(test)]
+pub fn gate_counts() -> (usize, usize) {
+    GATE.with(|c| c.get())
+}
+
+/// Zeroes the gate's own counts, so a scenario reports its own span.
+#[cfg(test)]
+pub fn reset_gate_counts() {
+    GATE.with(|c| c.set((0, 0)));
+}
+
 /// Zeroes every measurement counter. Test-only; see the counters above.
 #[cfg(test)]
 pub fn reset_counters() {
@@ -208,6 +237,7 @@ pub fn reset_counters() {
     BOX_MEASURES.store(0, Relaxed);
     MEMO_HITS.store(0, Relaxed);
     TABLE_PROBES.store(0, Relaxed);
+    reset_gate_counts();
 }
 
 /// How many gate boxes are remembered.
@@ -346,6 +376,205 @@ fn remember_box(
 pub fn reset_box_cache() {
     unsafe {
         for entry in (*core::ptr::addr_of_mut!(BOXES)).iter_mut() {
+            *entry = None;
+        }
+    }
+}
+
+/// How many run shapes the gate remembers.
+///
+/// WHY as many as the coverage pool: the gate is asked once per pixel per run,
+/// so a shape table that cannot hold a screen's distinct strings re-walks them
+/// on the per-pixel path it exists to get off. A string the table cannot hold
+/// still gets the right answer; it just costs the walk again.
+const SHAPE_SLOTS: usize = SLOTS;
+
+/// What the outline face makes of one string at one em.
+///
+/// WHY the shape and not the box: the box a pixel walk gates against is this
+/// shape with the run's own origin in front of it, because [`place_run_cap`]
+/// puts the baseline at `y0 + ascent` and [`OutlineRun::bounds`] then reports a
+/// box whose top-left is exactly (`x0`, `y0`). The width and the line height are
+/// a pure function of the bytes, the em and the bold flag, so they are the part
+/// worth remembering -- and remembering only them is what lets a frame that
+/// scrolls the same strings down the surface measure each of them once rather
+/// than once per row. [`Boxed`] cannot answer this question because its key
+/// names an origin, and an origin is precisely what the shape does not depend
+/// on.
+#[derive(Clone, Copy)]
+struct Shaped {
+    em: u32,
+    bold: bool,
+    len: u8,
+    used: u32,
+    key: [u8; KEY_MAX],
+    /// `None` is an answer, not a gap: a run carrying a codepoint the face has
+    /// no outline for refuses at every pixel, and a painter that has been told
+    /// once should not pay the walk to be told again on every one of them.
+    shape: Option<(usize, usize)>,
+}
+
+static mut SHAPES: [Option<Shaped>; SHAPE_SLOTS] = [None; SHAPE_SLOTS];
+
+/// Which shape slot a gate question lands in.
+///
+/// Mirrors [`box_slot_for`]: a hash of the key's cheap parts starts the probe,
+/// so a walk that repeats its few strings finds them without comparing the
+/// whole table.
+fn shape_slot_for(em: u32, len: usize, bold: bool) -> usize {
+    let mut h = (em as usize) ^ (len << 5) ^ (if bold { 0x0F0F } else { 0x0F0 });
+    h ^= (h >> 3) ^ (h >> 7);
+    h % SHAPE_SLOTS
+}
+
+/// The width and line height the outline face gives `text` at `em`, or `None`
+/// when the face refuses to draw it at all.
+///
+/// WHY this is a copy of the walk inside [`OutlineRun::place_styled`] rather
+/// than a call into it: the gate is asked before the placement, and the whole
+/// point of asking it is not to rasterise a run to find out where its ink can
+/// land. The two walks are the same arithmetic over the same `codepoint_at` and
+/// the same `advance_codepoint`, with the same width and line limits, so a shape
+/// here is a statement about what a placement would do -- and
+/// `the_gate_shape_is_the_box_the_placement_reports` pins it against the placed
+/// run instead of trusting that prose.
+fn measure_shape(em: u32, text: &[u8], bold: bool) -> Option<(usize, usize)> {
+    if em == 0 || text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    let mut pen = 0u32;
+    let mut i = 0usize;
+    while i < text.len() {
+        let (cp, next) = codepoint_at(text, i);
+        let adv = typeface::advance_codepoint(cp, em);
+        if adv == 0 {
+            return None;
+        }
+        pen += adv;
+        i = next;
+    }
+    let (ascent, descent) = typeface::line_metrics(em);
+    let line_h = (ascent + descent) as usize;
+    let w = pen as usize + if bold { 1 } else { 0 };
+    if w == 0 || w > RUN_W_MAX || line_h > RUN_H_MAX {
+        return None;
+    }
+    Some((w, line_h))
+}
+
+/// The shape a run at a cap height draws into, or `None` when the outline face
+/// refuses it and the caller is on the bitmap face.
+///
+/// WHY this is the face a painter gates on: a band painted one pixel at a time
+/// asks this question for every pixel of the band, and the answer decides
+/// whether the pixel is worth a placement. The estimate a caller used before
+/// this existed admitted four times the pixels a run can ink, and every one of
+/// those asked the placement pool a question it had already answered -- so the
+/// frame's floor was the number of pixels it looked at, not the number of
+/// glyphs it drew.
+pub fn run_shape_cap(cap_px: u32, text: &[u8], bold: bool) -> Option<(usize, usize)> {
+    if cap_px == 0 || text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    let em = em_for_cap_height(cap_px);
+    let base = shape_slot_for(em, text.len(), bold);
+    let hit = unsafe {
+        // SAFETY: the table is read through a raw pointer and no reference into
+        // it is live when the stamp below is taken.
+        let table = &*core::ptr::addr_of!(SHAPES);
+        let mut found = None;
+        for i in 0..SHAPE_SLOTS {
+            let slot = (base + i) % SHAPE_SLOTS;
+            if let Some(entry) = table[slot].as_ref() {
+                if entry.em == em
+                    && entry.bold == bold
+                    && entry.len as usize == text.len()
+                    && entry.key[..text.len()] == *text
+                {
+                    found = Some((slot, entry.shape));
+                    break;
+                }
+            }
+        }
+        found
+    };
+    if let Some((slot, shape)) = hit {
+        #[cfg(test)]
+        GATE.with(|c| {
+            let (hits, walks) = c.get();
+            c.set((hits + 1, walks));
+        });
+        unsafe {
+            if let Some(entry) = (*core::ptr::addr_of_mut!(SHAPES))[slot].as_mut() {
+                entry.used = next_stamp();
+            }
+        }
+        return shape;
+    }
+    #[cfg(test)]
+    GATE.with(|c| {
+        let (hits, walks) = c.get();
+        c.set((hits, walks + 1));
+    });
+    let shape = measure_shape(em, text, bold);
+    remember_shape(em, bold, text, shape);
+    shape
+}
+
+/// Remembers a shape, replacing the least recently asked-for one in its probe
+/// run when the run is full.
+fn remember_shape(
+    em: u32,
+    bold: bool,
+    text: &[u8],
+    shape: Option<(usize, usize)>,
+) {
+    if text.len() > KEY_MAX {
+        return;
+    }
+    let base = shape_slot_for(em, text.len(), bold);
+    let mut key = [0u8; KEY_MAX];
+    key[..text.len()].copy_from_slice(text);
+    // SAFETY: as above -- the table is written through a raw pointer and no
+    // borrow of it is live here.
+    unsafe {
+        let table = &mut *core::ptr::addr_of_mut!(SHAPES);
+        let mut target = base;
+        let mut oldest = u32::MAX;
+        for i in 0..SHAPE_SLOTS {
+            let slot = (base + i) % SHAPE_SLOTS;
+            match table[slot].as_ref() {
+                None => {
+                    target = slot;
+                    break;
+                }
+                Some(entry) => {
+                    if entry.used < oldest {
+                        oldest = entry.used;
+                        target = slot;
+                    }
+                }
+            }
+        }
+        table[target] = Some(Shaped {
+            em,
+            bold,
+            len: text.len() as u8,
+            used: next_stamp(),
+            key,
+            shape,
+        });
+    }
+}
+
+/// Forgets every remembered run shape.
+///
+/// WHY it is not public: nothing outside this module holds a shape, so a caller
+/// that invalidates the caches invalidates this one through
+/// [`reset_slot_pool`] with the rest of them.
+fn reset_shape_cache() {
+    unsafe {
+        for entry in (*core::ptr::addr_of_mut!(SHAPES)).iter_mut() {
             *entry = None;
         }
     }
@@ -2091,15 +2320,16 @@ mod tests {
         sum
     }
 
-    /// Paints the same band from runs the caller placed once and kept, gating
-    /// each pixel against the run's own measured box instead of the loose
-    /// per-character box [`monochrome::text_px`] gates with.
+    /// Paints the same band from runs the caller placed once and kept, so it
+    /// never asks the shape table what a pixel's run looks like: the box is
+    /// already in hand.
     ///
     /// WHY this is a model and not a proposal: it is what a plan-holding painter
     /// like the calculator's `PlannedRun::paint` already does, so the difference
-    /// between it and [`paint_band`] is the price of the ask path, measured on
-    /// work the SDK really does. It must paint the identical frame or it proves
-    /// nothing, and the test that runs it asserts exactly that.
+    /// between it and [`paint_band`] is the price of asking per pixel even after
+    /// the gate stopped guessing -- measured on work the SDK really does. It must
+    /// paint the identical frame or it proves nothing, and the test that runs it
+    /// asserts exactly that.
     fn paint_held(held: &[OutlineRun; 12]) -> u64 {
         let mut sum = 0u64;
         for row in 0..PROBE_BAND_H {
@@ -2123,40 +2353,376 @@ mod tests {
         sum
     }
 
-    /// Paints the shipped frame -- every pixel still calls
-    /// [`monochrome::text_px`], which still places the run per pixel -- but
-    /// pre-gates each pixel against the run's own measured box, moved by
-    /// `scroll`, instead of letting the loose per-character estimate through.
+    /// A pixel rule: the ten arguments a band painter hands
+    /// [`monochrome::text_px`], in that order, for one pixel of one run.
+    type PixelRule =
+        fn(usize, usize, usize, usize, u32, &[u8], u32, u32, bool) -> Option<u32>;
+
+    /// The line top `run` sits at in a band scrolled by `scroll`.
+    fn line_top(run: &Modelled, scroll: i32) -> usize {
+        (PROBE_TOP as i32 + run.y0 as i32 + scroll) as usize
+    }
+
+    /// The rule the pixel path followed before its gate knew where a run's ink
+    /// can land: the rung's estimate of the string's width, then a placement for
+    /// every pixel that estimate admitted, then the box the placement reported,
+    /// then the bitmap face for a run the outline refuses.
     ///
-    /// WHY it is worth writing down: this is the candidate change itself,
-    /// measured rather than interpolated out of the two endpoints above. If its
-    /// checksum ever disagrees with the shipped frame, the measured box does not
-    /// hold the run's ink, and the change would lose pixels instead of ns.
-    fn paint_gated(scroll: i32, boxes: &[(usize, usize, usize, usize); 12]) -> u64 {
+    /// WHY this is spelled out here now that the painter does not: it is the
+    /// reference the tightened gate has to be pixel-identical to, and a claim
+    /// about two gates can only be tested while both of them exist. Every branch
+    /// is the same primitive the shipped path calls -- [`place_run_cap`],
+    /// [`OutlineRun::bounds`], [`OutlineRun::pixel`], [`font::test_glyph_aa`] --
+    /// with the estimate's own arithmetic, so what separates this from
+    /// [`monochrome::text_px`] is which pixels reach a placement and nothing else.
+    fn by_estimate(
+        x: usize,
+        y: usize,
+        x0: usize,
+        y0: usize,
+        cap_px: u32,
+        text: &[u8],
+        ink: u32,
+        bg: u32,
+        bold: bool,
+    ) -> Option<u32> {
+        if text.is_empty() || cap_px == 0 {
+            return None;
+        }
+        let max_h = (cap_px as usize).saturating_mul(2) + 8;
+        if y < y0 || y >= y0 + max_h {
+            return None;
+        }
+        let max_w = text.len().saturating_mul((cap_px as usize).saturating_mul(2) + 4) + 16;
+        if x < x0 || x >= x0 + max_w {
+            return None;
+        }
+        if let Some(run) = place_run_cap(x0, y0, cap_px, text, None, bold) {
+            let (bx, by, bw, bh) = run.bounds();
+            if x >= bx && x < bx + bw && y >= by && y < by + bh {
+                return run.pixel(x, y, ink, bg);
+            }
+            return None;
+        }
+        let fallback = (font::em_for_cap_scale(cap_px) as usize / font::GLYPH_H).max(1);
+        if x < x0 || y < y0 || y >= y0 + font::GLYPH_H * fallback {
+            return None;
+        }
+        font::test_glyph_aa(x, y, x0, y0, fallback, text, ink, bg, bold)
+    }
+
+    /// A band painted one pixel at a time by `rule`, as the colour each pixel of
+    /// it ended up with.
+    ///
+    /// WHY the whole frame rather than a count: two gates are the same gate as a
+    /// reader is concerned only if the surface they produce is the same surface,
+    /// and a set of inked pixels that differs in one row of one descender is a
+    /// defect no counter here can see. The walk is the one a band painter does:
+    /// every run asked about every pixel, first answer wins.
+    fn band_pixels(runs: &[Modelled], scroll: i32, rule: PixelRule) -> std::vec::Vec<u32> {
+        let mut frame = std::vec::Vec::with_capacity(PROBE_W * PROBE_BAND_H);
+        for row in 0..PROBE_BAND_H {
+            let py = PROBE_TOP + row;
+            for px in 0..PROBE_W {
+                let mut answered = None;
+                for run in runs.iter() {
+                    if let Some(c) = rule(
+                        px,
+                        py,
+                        run.x,
+                        line_top(run, scroll),
+                        run.cap,
+                        run.text,
+                        INK,
+                        BG,
+                        run.bold,
+                    ) {
+                        answered = Some(c);
+                        break;
+                    }
+                }
+                frame.push(answered.unwrap_or(BG));
+            }
+        }
+        frame
+    }
+
+    /// The pixels two frames disagree on, up to the first `max`, as
+    /// `(index, left, right)`.
+    ///
+    /// WHY a bounded list: a failure here is 288,000 pixels wide, and the first
+    /// few differences -- with the row and column they landed on -- say more
+    /// than dumping both frames would.
+    fn disagreements(a: &[u32], b: &[u32], max: usize) -> std::vec::Vec<(usize, u32, u32)> {
+        let mut out = std::vec::Vec::new();
+        if a.len() != b.len() {
+            out.push((usize::MAX, a.len() as u32, b.len() as u32));
+            return out;
+        }
+        for (i, (l, r)) in a.iter().zip(b.iter()).enumerate() {
+            if l != r {
+                out.push((i, *l, *r));
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// A run too long to key. The outline refuses it at every pixel, so its
+    /// pixels belong to the bitmap face -- which is the branch where the
+    /// estimate, not the line box, is the only thing holding the ink.
+    const LONG: &[u8] = &[b'e'; KEY_MAX + 8];
+
+    /// A band that reaches every branch the gate has: a heading with a
+    /// descender, a multi-byte word, a run whose codepoints the face has no
+    /// outline for, a run too long to key at a cap height so small that the
+    /// bitmap cell it falls to is taller than the outline's line box would have
+    /// been, and a bold caption.
+    const MIXED: [Modelled; 5] = [
+        Modelled { x: 48, y0: 20, cap: 44, text: b"Typographies", bold: true },
+        Modelled {
+            x: 48,
+            y0: 96,
+            cap: 18,
+            text: b"D\xc3\xa9j\xc3\xa0 Vu glyphs",
+            bold: false,
+        },
+        Modelled { x: 48, y0: 150, cap: 20, text: b"\xf0\x9f\x98\x82", bold: false },
+        Modelled { x: 48, y0: 200, cap: 3, text: LONG, bold: false },
+        Modelled { x: 48, y0: 260, cap: 13, text: b"a page of falling letters", bold: true },
+    ];
+
+    /// Every pixel the shipped path paints is the pixel the estimate painted.
+    ///
+    /// WHY this is the gate on the change: the estimate already rejected every
+    /// pixel outside a run's ink, so tightening which pixels reach a placement
+    /// may only remove questions, never answers. A single differing pixel here
+    /// is a run whose remembered shape is not the box its placement reports --
+    /// a caption missing its descender on one screen and not the next, with
+    /// nothing in a return value to say so.
+    #[test]
+    fn the_tight_gate_paints_the_frame_the_estimate_painted() {
+        let _pool: Option<_> = Some(reset_slots());
+        let painted = crate::design::monochrome::text_px as PixelRule;
+        // The scrolls are the ones the counting scenario walks, so the geometry
+        // claim above covers the frames compared here.
+        for (name, runs) in [("SCREEN", &SCREEN[..]), ("MIXED", &MIXED[..])] {
+            for scroll in [0i32, 14, 53] {
+                let before = band_pixels(runs, scroll, by_estimate);
+                let after = band_pixels(runs, scroll, painted);
+                let inked_before = before.iter().filter(|p| **p != BG).count();
+                let inked_after = after.iter().filter(|p| **p != BG).count();
+                assert_eq!(
+                    inked_before, inked_after,
+                    "{name} at scroll {scroll}: the estimate inked {inked_before} pixels of the \
+                     band and the tight gate {inked_after}"
+                );
+                let diff = disagreements(&before, &after, 4);
+                assert!(
+                    diff.is_empty(),
+                    "{name} at scroll {scroll}: the two gates painted {} different pixels, of \
+                     which the first are {diff:?} (index, estimate, gate) -- the remembered \
+                     shape is not the box the placement reports",
+                    diff.len()
+                );
+                assert!(
+                    inked_before > 0,
+                    "{name} at scroll {scroll}: the band painted no ink at all, so the \
+                     comparison below proves nothing"
+                );
+            }
+        }
+    }
+
+    /// The identity check above can fail, and this is the mistake that makes it.
+    ///
+    /// WHY a deliberately wrong gate rather than a tweaked assertion: a frame
+    /// comparison that has only ever passed proves the two sides are equal or
+    /// proves nobody tried. Here the gate keeps the run's own width and takes its
+    /// height from the cap height instead of the line box -- the plausible
+    /// shortcut of assuming a run occupies the rows of its own capitals -- and the
+    /// check has to catch it, because at these sizes the ascender alone sits
+    /// above the cap band and every descender sits below it.
+    #[test]
+    fn a_gate_that_stops_at_the_cap_height_loses_the_ink_the_frame_has() {
+        let _pool: Option<_> = Some(reset_slots());
+        // The same rule the painter now runs, with one bound perturbed.
+        fn cap_height_gate(
+            x: usize,
+            y: usize,
+            x0: usize,
+            y0: usize,
+            cap_px: u32,
+            text: &[u8],
+            ink: u32,
+            bg: u32,
+            bold: bool,
+        ) -> Option<u32> {
+            let (w, _h) = run_shape_cap(cap_px, text, bold)?;
+            let h = cap_px as usize;
+            if x < x0 || y < y0 || x - x0 >= w || y - y0 >= h {
+                return None;
+            }
+            let run = place_run_cap(x0, y0, cap_px, text, None, bold)?;
+            run.pixel(x, y, ink, bg)
+        }
+        let painted = crate::design::monochrome::text_px as PixelRule;
+        let mut total_lost = 0usize;
+        let mut total_pixels = 0usize;
+        for (name, runs) in [("SCREEN", &SCREEN[..]), ("MIXED", &MIXED[..])] {
+            let before = band_pixels(runs, 0, painted);
+            let perturbed = band_pixels(runs, 0, cap_height_gate);
+            let diff = disagreements(&before, &perturbed, 4);
+            assert!(
+                !diff.is_empty(),
+                "{name}: a gate whose height is the cap height rather than the line box painted \
+                 the identical band, so the comparison that is supposed to catch it cannot"
+            );
+            total_pixels += disagreements(&before, &perturbed, usize::MAX).len();
+            total_lost += before
+                .iter()
+                .zip(perturbed.iter())
+                .filter(|(a, b)| **a != BG && **b == BG)
+                .count();
+        }
+        assert!(
+            total_lost > total_pixels / 4,
+            "the perturbed gate changed {total_pixels} pixels and lost only {total_lost} of \
+             them -- most of the change is pixels it added, which is not the failure this \
+             check is built to see"
+        );
+    }
+
+    /// The shape the gate answers with is the box the placement reports, or the
+    /// refusal the placement gives -- never anything in between.
+    ///
+    /// WHY across refusals as well as placements: `None` from the gate sends the
+    /// painter to the bitmap face, and `None` from the placement used to be the
+    /// only way that face was reached. A gate that said `Some` about a run the
+    /// face declines would drop its ink entirely, and a gate that declined a run
+    /// the face draws would draw it twice over at the wrong size.
+    #[test]
+    fn the_gate_shape_is_the_box_the_placement_reports() {
+        let _pool: Option<_> = Some(reset_slots());
+        let runs: [&[u8]; 7] = [
+            b"Recents",
+            b"Morning Run",
+            b"00:00 / 03:41",
+            b"D\xc3\xa9j\xc3\xa0 Vu glyphs",
+            b"\xf0\x9f\x98\x82",
+            LONG,
+            b"W",
+        ];
+        let mut refused = 0usize;
+        for cap in [1u32, 3, 13, 16, 18, 24, 30, 40, 56] {
+            for text in runs {
+                for bold in [false, true] {
+                    let shape = run_shape_cap(cap, text, bold);
+                    let placed = place_run_cap(48, 400 + cap as usize * 3, cap, text, None, bold);
+                    match (shape, placed) {
+                        (Some((w, h)), Some(run)) => {
+                            let (_bx, _by, bw, bh) = run.bounds();
+                            assert_eq!(
+                                (w, h),
+                                (bw, bh),
+                                "cap {cap}, bold {bold}, {:?}: the gate's shape is {:?} and the \
+                                 placed run reports {:?}",
+                                core::str::from_utf8(text).unwrap_or("<unkeyable>"),
+                                (w, h),
+                                (bw, bh)
+                            );
+                        }
+                        (None, None) => refused += 1,
+                        (shape, placed) => panic!(
+                            "cap {cap}, bold {bold}, {:?}: the gate says {shape:?} and the \
+                             placement says {:?}",
+                            core::str::from_utf8(text).unwrap_or("<unkeyable>"),
+                            placed.map(|r| r.bounds())
+                        ),
+                    }
+                }
+            }
+        }
+        assert!(
+            refused > 0,
+            "no run in this list is refused by both faces, so the refusal half of the gate was \
+             never compared"
+        );
+    }
+
+    /// A frame that scrolls the same strings asks the gate once per string.
+    ///
+    /// WHY this is worth its own test: the shape a gate needs is a function of
+    /// the bytes, the em and the bold flag, and not of the row -- which is what
+    /// lets a scroll down a list cost nothing at the gate. Table sizes and
+    /// eviction policy are this module's business, but a future key that named an
+    /// origin would be invisible in the pixels and obvious here.
+    #[test]
+    fn the_gate_measures_a_string_once_whatever_row_it_is_painted_at() {
+        let _pool: Option<_> = Some(reset_slots());
+        reset_gate_counts();
+        let offsets = [0i32, 14, 25, 34, 41, 46, 50, 53];
+        let mut asked = 0usize;
+        for off in offsets.iter() {
+            for run in SCREEN.iter() {
+                let y0 = line_top(run, *off);
+                let shape = run_shape_cap(run.cap, run.text, run.bold);
+                let (w, h) = shape.expect("every modelled run has an outline shape");
+                let (_bx, by, bw, bh) = place_run_cap(run.x, y0, run.cap, run.text, None, run.bold)
+                    .expect("every modelled run places")
+                    .bounds();
+                assert_eq!((bw, bh), (w, h), "the gate and the placement disagree at row {y0}");
+                assert_eq!(by, y0, "the box does not start at the line top");
+                asked += 1;
+            }
+        }
+        let (hits, walks) = gate_counts();
+        assert_eq!(
+            walks,
+            SCREEN.len(),
+            "eight passes over {} distinct strings cost {} walks -- the shape is keyed on \
+             something a scroll changes",
+            SCREEN.len(),
+            walks
+        );
+        assert_eq!(
+            hits + walks,
+            asked,
+            "the gate answered {hits} questions from the table and {walks} by walking, against \
+             {asked} asked"
+        );
+    }
+
+    /// Paints the band the way the shipped walk did before its gate knew a run's
+    /// own box: [`by_estimate`] for every pixel of it.
+    ///
+    /// WHY it is worth running beside the shipped frame: this is the candidate
+    /// change measured from the wrong side -- the same walk, the same cache
+    /// counters, only the estimate admitting the pixels. If its checksum ever
+    /// disagrees with the shipped frame, the measured box does not hold the run's
+    /// ink, and tightening the gate would lose pixels instead of ns.
+    fn paint_estimate(scroll: i32) -> u64 {
         let mut sum = 0u64;
         for row in 0..PROBE_BAND_H {
             let py = PROBE_TOP + row;
             for px in 0..PROBE_W {
                 let mut answered = None;
-                for (run, (bx, by, bw, bh)) in SCREEN.iter().zip(boxes.iter()) {
-                    let py_i = py as i32;
-                    if px >= *bx && px < bx + bw && py_i >= *by as i32 + scroll
-                        && py_i < *by as i32 + *bh as i32 + scroll
-                    {
-                        if let Some(c) = crate::design::monochrome::text_px(
-                            px,
-                            py,
-                            run.x,
-                            (PROBE_TOP as i32 + run.y0 as i32 + scroll) as usize,
-                            run.cap,
-                            run.text,
-                            INK,
-                            BG,
-                            run.bold,
-                        ) {
-                            answered = Some(c);
-                            break;
-                        }
+                for run in SCREEN.iter() {
+                    if let Some(c) = by_estimate(
+                        px,
+                        py,
+                        run.x,
+                        line_top(run, scroll),
+                        run.cap,
+                        run.text,
+                        INK,
+                        BG,
+                        run.bold,
+                    ) {
+                        answered = Some(c);
+                        break;
                     }
                 }
                 sum = sum
@@ -2167,7 +2733,7 @@ mod tests {
         sum
     }
 
-    /// The counters, taken as a snapshot so a scenario can report its own span.
+        /// The counters, taken as a snapshot so a scenario can report its own span.
     #[derive(Clone, Copy, Default, Debug)]
     struct Counts {
         asks: usize,
@@ -2178,10 +2744,13 @@ mod tests {
         evictions: usize,
         box_hits: usize,
         box_measures: usize,
+        gate_hits: usize,
+        gate_walks: usize,
     }
 
     use core::sync::atomic::Ordering::Relaxed;
     fn read_counts() -> Counts {
+        let (gate_hits, gate_walks) = gate_counts();
         Counts {
             asks: PLACEMENT_ASKS.load(Relaxed),
             rasterises: RASTERISES.load(Relaxed),
@@ -2191,6 +2760,8 @@ mod tests {
             evictions: EVICTIONS.load(Relaxed),
             box_hits: BOX_HITS.load(Relaxed),
             box_measures: BOX_MEASURES.load(Relaxed),
+            gate_hits,
+            gate_walks,
         }
     }
 
@@ -2216,6 +2787,12 @@ mod tests {
         // ---- A: the static repaint. Same frame, painted again. ----
         // Warm it once so the pool holds every run of this row, then measure the
         // repaint that follows. This is the case `LAST_PLACED` was built for.
+        //
+        // This is also the frame *after* the gate was tightened: the pixels that
+        // reach a placement are the pixels a run's own box holds, and the gate's
+        // own questions are answered from the shape table. G below is the same
+        // frame with the estimate in front of the placement again, which is what
+        // makes the two comparable.
         let _ = paint_band(0, false);
         reset_counters();
         let a_start = std::time::Instant::now();
@@ -2223,10 +2800,11 @@ mod tests {
         let a_warm = read_counts();
         let a_nanos = a_start.elapsed().as_nanos() as u64;
         println!(
-            "A static repaint   : asks={} rasterises={} memo_hits={} table_probes={} evictions={} \
-             replaces={} box_hits={} box_measures={}",
+            "A static repaint   : asks={} rasterises={} memo_hits={} table_probes={} \
+             evictions={} replaces={} box_hits={} box_measures={} gate_hits={} gate_walks={}",
             a_warm.asks, a_warm.rasterises, a_warm.memo_hits, a_warm.table_probes, a_warm.evictions,
-            a_warm.replaces, a_warm.box_hits, a_warm.box_measures
+            a_warm.replaces, a_warm.box_hits, a_warm.box_measures, a_warm.gate_hits,
+            a_warm.gate_walks
         );
         println!(
             "A cost             : {} ns for {} px = {:.2} ns/px, {:.1} ns per ask",
@@ -2379,12 +2957,9 @@ mod tests {
         let f_nanos = f_start.elapsed().as_nanos() as u64;
         let f = read_counts();
         println!(
-            "E gate area      : the runs' own boxes hold {} px of the band against {} cache asks \
-             a frame from the loose gate; a tight gate asks {:.1}% of them ({} rasterises to get \
-             the boxes)",
-            tight_px, a_warm.asks,
-            tight_px as f64 * 100.0 / a_warm.asks.max(1) as f64,
-            e_rasterises
+            "E gate area      : the runs' own boxes hold {} px of the band, and the shipped gate \
+             asked the placement about {} this frame ({} rasterises to get the boxes)",
+            tight_px, a_warm.asks, e_rasterises
         );
         println!(
             "F held plan      : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} ns \
@@ -2397,33 +2972,32 @@ mod tests {
             a_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64
         );
 
-        // ---- G: the candidate change, measured. ----
-        // The shipped walk -- every pixel still asks the cache through
-        // `monochrome::text_px` -- with only its gate tightened to each run's
-        // measured box. Compared against A, which is the same frame with the
-        // loose gate, this is what the gate alone is worth.
-        let mut boxes = [(0usize, 0usize, 0usize, 0usize); 12];
-        for (i, run) in held.iter().enumerate() {
-            boxes[i] = run.bounds();
-        }
+        // ---- G: the same frame with the estimate back in front of it. ----
+        // Every pixel of the band reaches a placement that the rung's estimate of
+        // its width admits, which is what the path did before it knew a run's own
+        // box. Compared against A, the same band on the same warm pool, this is
+        // what the gate is worth: the asks are the frame's floor, and the
+        // estimate set that floor four times above the ink.
         reset_slot_pool();
         forget_last_placement();
-        let _ = paint_band(0, false);
+        let _ = paint_estimate(0);
         reset_counters();
         let g_start = std::time::Instant::now();
-        let g_checksum = paint_gated(0, &boxes);
+        let g_checksum = paint_estimate(0);
         let g_nanos = g_start.elapsed().as_nanos() as u64;
         let g = read_counts();
         println!(
-            "G tight gate     : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} \
-             asks and {} ns -- {:.1}% of the frame's cost is pixels no run can ink",
+            "G estimate gate    : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} \
+             asks and {} ns -- the estimate asks {:.1}x the questions the run's own box needs, \
+             and {:.1}% of a cached frame was pixels no run can ink",
             g.asks,
             g.rasterises,
             g_nanos,
             g_nanos as f64 / (PROBE_W * PROBE_BAND_H) as f64,
             a_warm.asks,
             a_nanos,
-            (a_nanos.saturating_sub(g_nanos)) as f64 * 100.0 / a_nanos.max(1) as f64
+            g.asks as f64 / a_warm.asks.max(1) as f64,
+            (g_nanos.saturating_sub(a_nanos)) as f64 * 100.0 / g_nanos.max(1) as f64
         );
 
         // ---- What the numbers say. ----
@@ -2488,13 +3062,14 @@ mod tests {
             a_nanos.saturating_sub(f_nanos) as f64
         );
         println!(
-            "SUMMARY gate only  : same frame, same per-pixel placement calls, only the gate \
-             tightened: {} ns vs {} ns = {:.1}% of a cached frame is pixels no run can ink. The \
-             gate change alone is worth {:.0} ns/frame against the key change's {:.0} ns/frame.",
+            "SUMMARY gate only  : same frame, same per-pixel placement calls, the estimate put \
+             back in front of it: {} ns vs {} ns shipped = {:.1}% of that frame is pixels no run \
+             can ink. The gate change alone was worth {:.0} ns/frame against the key change's \
+             {:.0} ns/frame.",
             g_nanos,
             a_nanos,
-            (a_nanos.saturating_sub(g_nanos)) as f64 * 100.0 / a_nanos.max(1) as f64,
-            (a_nanos.saturating_sub(g_nanos)) as f64,
+            (g_nanos.saturating_sub(a_nanos)) as f64 * 100.0 / g_nanos.max(1) as f64,
+            (g_nanos.saturating_sub(a_nanos)) as f64,
             (b_mean_ns - c_mean_ns).abs()
         );
         println!(
@@ -2552,14 +3127,23 @@ mod tests {
             "the held-plan model painted a different frame from the shipped one, so its cost \
              is not comparable"
         );
-        // The loose gate lets through at least four times the pixels a run can
-        // actually ink. If this ever stops holding, the gate is no longer the
-        // cost driver and the paragraph above needs re-reading.
+        // The estimate admits at least four times the pixels a run can actually
+        // ink, and the shipped gate no longer does: a frame asks once per pixel
+        // of the runs' own boxes. These two are the same claim read from both
+        // sides -- if the shipped path ever goes back to guessing a width from
+        // the cap height, the second one is the check that says so.
         assert!(
-            tight_px * 4 < a_warm.asks,
-            "the runs' own boxes hold {tight_px} px but the frame only made {} asks -- the loose \
-             gate is not the cost driver any more",
-            a_warm.asks
+            tight_px * 4 < g.asks,
+            "the runs' own boxes hold {tight_px} px but even the estimate-gated frame made only \
+             {} asks -- neither walk is measuring this band any more",
+            g.asks
+        );
+        assert!(
+            a_warm.asks < g.asks,
+            "the shipped gate made {} cache asks against the estimate's {} -- it is not the \
+             tighter of the two",
+            a_warm.asks,
+            g.asks
         );
         // And the ask path, not the rasteriser, is where a cached frame's time
         // goes: gating on the measured box is worth more than half the frame.
@@ -2568,23 +3152,18 @@ mod tests {
             "a held plan cost {f_nanos} ns against the shipped repaint's {a_nanos} ns -- the ask \
              path is not the dominant share of a cached frame"
         );
-        // The tight gate must not lose a single pixel of the frame, and it must
-        // not be slower. These two are the whole case for the candidate change.
+        // The gate that shipped must not lose a single pixel of the frame, and
+        // it must not be slower than the estimate it replaced. These two are the
+        // whole case for the change, read after it landed.
         assert_eq!(
             g_checksum, a_checksum,
-            "gating on the runs' measured boxes painted a different frame -- the box does not \
-             hold their ink"
+            "the estimate and the runs' measured boxes painted different frames -- the box does \
+             not hold their ink"
         );
         assert!(
-            g.asks < a_warm.asks,
-            "the tight gate made {} cache asks against the loose gate's {} -- it is not a filter",
-            g.asks,
-            a_warm.asks
-        );
-        assert!(
-            g_nanos < a_nanos,
-            "the tight gate cost {g_nanos} ns against the shipped walk's {a_nanos} ns on the \
-             same frame"
+            a_nanos < g_nanos,
+            "the shipped walk cost {a_nanos} ns against the estimate's {g_nanos} ns on the same \
+             frame"
         );
     }
 

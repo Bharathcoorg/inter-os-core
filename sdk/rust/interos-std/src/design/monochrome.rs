@@ -379,7 +379,12 @@ pub fn text_px(
     if text.is_empty() || cap_px == 0 {
         return None;
     }
-    // Fast bounding box rejection to prevent expensive TTF outline evaluation on every pixel
+    // The rung's own estimate, kept because it is the box the *fallback* face is
+    // bounded by: a run the outline refuses is drawn by `font::test_glyph_aa` at
+    // the nearest whole cell, and that cell reaches rows a small cap height's
+    // line box does not. Rejecting outside it here is what the shipped path did,
+    // so removing the outline's line box from this branch costs no ink and
+    // removing this one would add some.
     let max_h = (cap_px as usize).saturating_mul(2) + 8;
     if y < y0 || y >= y0 + max_h {
         return None;
@@ -388,12 +393,38 @@ pub fn text_px(
     if x < x0 || x >= x0 + max_w {
         return None;
     }
-    if let Some(run) = outline_text::place_run_cap(x0, y0, cap_px, text, None, bold) {
-        let (bx, by, bw, bh) = run.bounds();
-        if x >= bx && x < bx + bw && y >= by && y < by + bh {
+    // Both subtractions below are safe because the two rejections above already
+    // hold the pixel inside the estimate, so neither origin is past the pixel.
+    let (dx, dy) = (x - x0, y - y0);
+    // WHY the run's own box rather than the estimate above: the estimate is a
+    // guess about the string's width made without looking at it, and a band
+    // painted one pixel at a time asks the placement pool about every pixel it
+    // guesses. Measured on a 720x400 list screen, it asked 187,364 times a frame
+    // about a band whose runs' own boxes hold 39,175 pixels -- so the frame's
+    // cost was the number of pixels it looked at, not the number of glyphs it
+    // drew. [`outline_text::run_shape_cap`] answers the exact box from the shape
+    // remembered for the string at this cap height, without a placement, which
+    // is the only reason the tight test is cheaper than the loose one: the box a
+    // run reports is otherwise only knowable after paying for the run.
+    //
+    // WHY nothing here changes a pixel: a shape of `Some((w, h))` means the
+    // outline face takes this run and lays it out at exactly `x0, y0, w, h`, so
+    // the placement asked for below cannot refuse and its reported bounds are
+    // these; a pixel outside them was rejected by the placement's own bounds test
+    // before, and answers `None` now. A shape of `None` means the face refuses,
+    // which is what the placement returning `None` used to mean, and the bitmap
+    // face below is reached the same way either way.
+    if let Some((w, h)) = outline_text::run_shape_cap(cap_px, text, bold) {
+        if dx >= w || dy >= h {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run_cap(x0, y0, cap_px, text, None, bold) {
             return run.pixel(x, y, ink, bg);
         }
-        return None;
+        // Reachable only if the two walks disagree about a run both of them
+        // walked, which `the_gate_shape_is_the_box_the_placement_reports` is
+        // there to make loud. The answer kept is the one the placement's own
+        // refusal gives: the bitmap face, not a missing pixel.
     }
     // The bitmap face draws in whole cells, so a run at a cap height it
     // cannot reach is drawn at the nearest cell it has.

@@ -230,16 +230,16 @@ struct Advanced {
 
 static mut ADVANCES: [Option<Advanced>; ADV_SLOTS] = [None; ADV_SLOTS];
 
-/// Counts the widths the table had to re-derive, for the thread that asked.
-///
-/// WHY a count: a cache hit and a cache miss draw the same pixels, so without
-/// one there is no test that fails while the table is too small or too
-/// narrow-keyed to hold what a pixel walk repeats.
-///
-/// WHY thread-local rather than a process global: the harness runs other tests
-/// beside this one, every one of them measuring widths through the same shared
-/// table, and a global count would charge their work to whichever test happened
-/// to be reading. It compiles out of the guest.
+// Counts the widths the table had to re-derive, for the thread that asked.
+//
+// WHY a count: a cache hit and a cache miss draw the same pixels, so without
+// one there is no test that fails while the table is too small or too
+// narrow-keyed to hold what a pixel walk repeats.
+//
+// WHY thread-local rather than a process global: the harness runs other tests
+// beside this one, every one of them measuring widths through the same shared
+// table, and a global count would charge their work to whichever test happened
+// to be reading. It compiles out of the guest.
 #[cfg(test)]
 std::thread_local! {
     static ADVANCE_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
