@@ -20,9 +20,10 @@
 //!   handler at all.
 //!
 //! Live vs. honestly-disabled controls (nothing here is drawn and inert any more):
-//! - The segmented tabs and the bottom dock are both live. Dial, Recents,
-//!   Contacts and Settings are four real sections; the dock's Favorites slot
-//!   opens the contacts list filtered to the contacts the user starred.
+//! - The segmented tab row is the app's only navigation bar, and all four of its
+//!   tabs are live: Dial, Recents, Contacts and Settings are four real sections.
+//!   The starred-contacts filter is a control of the Contacts section itself (the
+//!   FAVS / ALL disc), not a second bar competing with the row.
 //! - Recents is backed by a real ledger of every dial attempt this session made
 //!   and the outcome the telephony service actually returned for it.
 //! - Contacts is backed by a real, user-created store (`ContactStore`): browse,
@@ -134,11 +135,11 @@ pub enum CallState {
     CallEnded = 5,
 }
 
-/// Which content the tabs and the dock select.
+/// Which content the tab row selects.
 ///
 /// WHY `Contacts` exists now: the app owns a real contact store
-/// (`ContactStore`), so the tab and both dock slots that used to imply a
-/// contacts screen have something real behind them.
+/// (`ContactStore`), so the tab that used to imply a contacts screen has
+/// something real behind it.
 ///
 /// WHY `Settings` exists now: the dialer's design document asks for a
 /// settings surface, and the platform supports some of what it asks for: the
@@ -1134,13 +1135,6 @@ impl ContactStore {
             num.len() >= digits.len() && &num[..digits.len()] == digits
         })
     }
-
-    /// Number of starred contacts, for the dock's Favorites badge.
-    fn favourites(&self) -> usize {
-        (0..self.len as usize)
-            .filter(|&i| self.records[i].is_favourite())
-            .count()
-    }
 }
 
 /// Which field of the contact editor the caret is in.
@@ -1278,7 +1272,7 @@ pub struct DialerApp {
     pub calls_completed: u32,
     /// Whether the telephony service actually reported a baseband present.
     pub modem_present: bool,
-    /// Section the tabs and the dock select.
+    /// Section the tab row selects.
     pub section: DialerSection,
     /// Real outcome of the last call attempt.
     pub outcome: CallOutcome,
@@ -1316,9 +1310,9 @@ pub struct DialerApp {
     /// True when SAVE was pressed on an incomplete contact. Cleared on the
     /// next keystroke or when the editor opens; drives the on-screen hint.
     pub editor_error: bool,
-    /// True when the Contacts list shows only starred contacts. Set by the dock's
-    /// Favorites slot, so that slot opens something real rather than reporting
-    /// that no store exists.
+    /// True when the Contacts list shows only starred contacts. Set by that
+    /// section's own FAVS / ALL disc, so the filter is a control of the list it
+    /// changes rather than a second navigation bar.
     pub contacts_fav_only: bool,
     /// The name of the document the device's ringtone slot names.
     ///
@@ -2293,7 +2287,7 @@ impl DialerApp {
 /// Anti-aliased run draw, at the text-size level this app published.
 ///
 /// `bg` is the local fill the text actually sits on — a tab capsule, the SOS
-/// disc, the keypad disc, the dock plate — not the page background. Blending
+/// disc, the keypad disc, a recents row plate — not the page background. Blending
 /// every glyph edge toward one hardcoded colour tinted the AA fringe of any run
 /// drawn on a darker local fill.
 ///
@@ -2647,23 +2641,6 @@ const fn key_rungs_at(lvl: u8) -> (usize, usize) {
 /// The rungs the keypad draws at, at the level this app draws at.
 fn key_rungs() -> (usize, usize) {
     key_rungs_at(level())
-}
-
-/// The row the bottom dock's label starts on: its authored row, raised when the
-/// rung's own box would run past the dock plate.
-///
-/// WHY the label moves up rather than down: `DOCK_Y1` is the plate's last row and
-/// below it is the shell's home band, which this app does not own and must not
-/// resize. At one hundred per cent the box already ends inside the plate, so the
-/// authored row stands.
-fn dock_label_y0() -> usize {
-    let rows = run_rows(DOCK_LABEL_SCALE);
-    let last = DOCK_Y1.saturating_sub(rows);
-    if DOCK_LABEL_Y0 < last {
-        DOCK_LABEL_Y0
-    } else {
-        last.max(DOCK_Y0)
-    }
 }
 
 /// The text-size level this app draws at, read from the setting the person chose
@@ -3125,24 +3102,6 @@ const RECENTS_VIEWPORT_Y1: usize = LIB_RECENTS_VIEWPORT_Y1;
 const CONTENT_Y0: usize = 410;
 const CONTENT_Y1: usize = 1140;
 
-// Bottom navigation dock.
-const DOCK_Y0: usize = 1260;
-const DOCK_Y1: usize = 1380;
-const DOCK_ITEM_W: usize = 140;
-/// WHY these x positions: they are the four 140 px slots the previous renderer
-/// hard-coded its labels against, kept so the dock does not move.
-const DOCK_ITEM_X0: [usize; 4] = [48, 208, 368, 528];
-// WHY these four: the dock's icons are a star, a clock, a keypad grid and a
-// person, in that order. A label was once changed to "Voicemail" while the
-// person icon still opened the contact list, so the dock promised a service
-// the platform does not have and mislabeled two working destinations.
-const DOCK_LABELS: [&[u8]; 4] = [b"Favorites", b"Recents", b"Keypad", b"Contacts"];
-const DOCK_LABEL_Y0: usize = 1340;
-const DOCK_LABEL_SCALE: usize = type_scale::CAPTION;
-/// Icon band inside the dock plate: a scale-1 label below, a 36 px glyph above.
-const DOCK_ICON_Y0: usize = 1290;
-const DOCK_ICON_H: usize = 36;
-
 // Keypad layout constants
 const BTN_W: usize = 180;
 const BTN_H: usize = 124;
@@ -3200,7 +3159,7 @@ fn keypad_key_at(x: usize, y: usize) -> Option<(usize, usize)> {
 // The touch floor, stated once against the plates the renderer inks.
 //
 // WHY here and not only in `chrome`: `chrome` owns the card's controls and
-// already carries its own gates. The keypad, the action bar, the dock, the tab
+// already carries its own gates. The keypad, the action bar, the tab
 // row and the two lists below are the rest of what this app paints a person can
 // press, and until now nothing in the crate held any of them to the floor. The
 // bin target carries `test = false`, so a `#[test]` beside these numbers would
@@ -3263,19 +3222,6 @@ const _: () = {
     assert!(BACKSPACE_CX as i32 - BACKSPACE_R >= CALL_CX as i32 + CALL_PILL_HALF_SPINE);
     assert!(CALL_CX as i32 - CALL_PILL_HALF_SPINE - CALL_PILL_R >= SOS_CX as i32 + SOS_R);
     assert!(CONTACTS_CX as i32 + CONTACTS_R <= 696);
-    // The dock: four slots in the card's own columns, each floor-sized.
-    assert!(DOCK_Y1 - DOCK_Y0 >= MIN_TARGET);
-    assert!(DOCK_ITEM_W >= MIN_TARGET);
-    let mut s = 0;
-    while s < DOCK_ITEM_X0.len() {
-        assert!(DOCK_ITEM_X0[s] >= 24 && DOCK_ITEM_X0[s] + DOCK_ITEM_W <= 696);
-        assert!(DOCK_ICON_Y0 >= DOCK_Y0 && DOCK_ICON_Y0 + DOCK_ICON_H <= DOCK_Y1);
-        assert!(DOCK_LABEL_Y0 + line_at(DOCK_LABEL_SCALE, PLATFORM_LEVEL) <= DOCK_Y1);
-        if s + 1 < DOCK_ITEM_X0.len() {
-            assert!(DOCK_ITEM_X0[s] + DOCK_ITEM_W <= DOCK_ITEM_X0[s + 1]);
-        }
-        s += 1;
-    }
     // The segmented tab row: the band the pills are drawn on and answered from.
     assert!(TAB_BAND_H >= MIN_TARGET);
     assert!(TAB_W >= MIN_TARGET);
@@ -5460,15 +5406,38 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             (THEME.surface_container_high, THEME.muted)
         };
 
-        // Vector Phone Handset
+        // Vector Phone Handset.
+        //
+        // WHY this is the launcher's own `IconKind::Phone` pictogram: the tile a
+        // person taps on the home screen to open this app is that silhouette, so
+        // the call key has to name the same object, and the repository's rule is
+        // to reuse the UI kit rather than redraw it. The lines below are that
+        // branch's expressions and constants (`apps/launcher/src/icons.rs`,
+        // `eval_icon_subpixel`), in its own fixed-point frame, and the dialer's
+        // contract test reads them out of both files and refuses a drift.
+        //
+        // WHY the paint it replaces read as a stick: it put two 12-row discs
+        // exactly on the ends of an 11-row-wide straight diagonal band, so the
+        // union was one continuous diagonal blob whose two heads were barely
+        // wider than the bar carrying them, with no page between them. A handset
+        // reads as a handset only when the yoke curves and the ear and mouth
+        // pieces stand off that curve's ends with open page between them, which
+        // is what the annulus band and the two bulbs give.
+        //
+        // WHY five device pixels per fixed unit, and no more: the silhouette's
+        // own box is 265 fixed units across, so this scale stands it 54 rows tall
+        // inside the pill's 76 and leaves it twelve clear rows above and below.
+        // Nothing here clips -- ink outside the plate's rows is painted over by
+        // the plate drawn after it -- so the glyph is sized to the plate's height,
+        // not to the pill's 160-row width.
         if !in_call {
-            let n1 = (c_dx + 12) * (c_dx + 12) + (c_dy + 12) * (c_dy + 12);
-            let n2 = (c_dx - 12) * (c_dx - 12) + (c_dy - 12) * (c_dy - 12);
-            if n1 <= 36 || n2 <= 36 {
-                return glyph;
-            }
-            let diff = c_dx - c_dy;
-            if diff.abs() <= 5 && c_dx >= -12 && c_dx <= 12 && c_dy >= -12 && c_dy <= 12 {
+            let fx = 5 * c_dx - 8;
+            let fy = 5 * c_dy - 8;
+            let ear = (fx - 70) * (fx - 70) + (fy + 85) * (fy + 85) <= 3025;
+            let mouth = (fx + 85) * (fx + 85) + (fy - 70) * (fy - 70) <= 3025;
+            let d2 = (fx - 70) * (fx - 70) + (fy - 70) * (fy - 70);
+            let handle = d2 >= 18000 && d2 <= 42000 && fx <= 70 && fy <= 70 && fx + fy <= 20;
+            if ear || mouth || handle {
                 return glyph;
             }
         } else {
@@ -5523,134 +5492,6 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     THEME.surface
-}
-
-/// Bottom navigation dock. All four slots are live: Favorites opens the contacts
-/// list filtered to the contacts the user starred, and the other three select a
-/// section.
-fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    if !(DOCK_Y0..DOCK_Y1).contains(&y) {
-        return THEME.surface;
-    }
-    // Top hairline divider
-    if y == DOCK_Y0 {
-        return THEME.border;
-    }
-
-    let mut slot = 4usize;
-    for (i, x0) in DOCK_ITEM_X0.iter().enumerate() {
-        if x >= *x0 && x < *x0 + DOCK_ITEM_W {
-            slot = i;
-            break;
-        }
-    }
-    if slot == 4 {
-        return THEME.surface_container;
-    }
-
-    let active = match (slot, dialer.section) {
-        (1, DialerSection::Recents) | (2, DialerSection::Keypad) => true,
-        (0, DialerSection::Contacts) | (3, DialerSection::Contacts) => {
-            if slot == 0 {
-                dialer.contacts_fav_only
-            } else {
-                !dialer.contacts_fav_only
-            }
-        }
-        _ => false,
-    };
-
-    let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
-    let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
-
-    let ink = if active { THEME.primary } else { THEME.on_surface_variant };
-    let plate = THEME.surface_container;
-
-    // Icon band
-    if y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
-        match slot {
-            2 => {
-                // Keypad icon: a 3x3 dot grid.
-                let dot_dx = (x as i32) - cx as i32;
-                let dot_dy = (y as i32) - cy as i32;
-                if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
-                    if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
-                        return ink;
-                    }
-                }
-            }
-            1 => {
-                // Recents icon: a clock face with two hands.
-                let d2 = (x as i32 - cx as i32).pow(2) + (y as i32 - cy as i32).pow(2);
-                if (144..=169).contains(&d2) {
-                    return ink;
-                }
-                if y == cy && x >= cx - 7 && x <= cx {
-                    return ink;
-                }
-                if x == cx && y >= cy - 9 && y <= cy + 1 {
-                    return ink;
-                }
-            }
-            0 => {
-                // Favorites icon: a five-point star.
-                let sdx = x as i32 - cx as i32;
-                let sdy = y as i32 - cy as i32;
-                let on = sdy <= 0 && sdx.abs() as i32 <= 12 + sdy.abs() / 2
-                    || sdy > 0 && sdx.abs() as i32 <= 12 - sdy.abs();
-                if on && sdx.abs() <= 14 && sdy.abs() <= 13 {
-                    return if dialer.contacts.favourites() > 0 {
-                        THEME.warning
-                    } else {
-                        ink
-                    };
-                }
-            }
-            _ => {
-                // Contacts icon: a person silhouette.
-                let pdx = x as i32 - cx as i32;
-                let pdy = y as i32 - cy as i32;
-                if pdx * pdx + (pdy + 8) * (pdy + 8) <= 49 {
-                    return ink;
-                }
-                if pdy >= 2 && pdy <= 14 && pdx.abs() <= (pdy - 2) + 6 {
-                    return ink;
-                }
-            }
-        }
-    }
-
-    // Label band. The dock's four names are one rung apart from the plate's
-    // bottom edge, and the plate does not move, so the row the label starts on
-    // rises when the rung's box grows -- see `dock_label_y0`.
-    let dock_label_rung = fit_rung(DOCK_LABEL_SCALE, DOCK_Y1 - dock_label_y0());
-    let dock_label_row = dock_label_y0();
-    let label_x = DOCK_ITEM_X0[slot]
-        + center_x(DOCK_LABELS[slot], dock_label_rung, DOCK_ITEM_W);
-    if y >= dock_label_row && y < dock_label_row + run_rows(dock_label_rung) {
-        if let Some(c) = test_text(
-            x,
-            y,
-            label_x,
-            dock_label_row,
-            dock_label_rung,
-            DOCK_LABELS[slot],DOCK_ITEM_W,
-            ink,
-            plate,
-        ) {
-            return c;
-        }
-    }
-
-    // Active pill background under icon
-    if active {
-        let pill_rect = std::design::primitives::Rect::new(cx - 32, cy - 16, 64, 32);
-        if let Some(p_color) = std::design::primitives::draw_pill(x, y, pill_rect, THEME.primary_container, None) {
-            return p_color;
-        }
-    }
-
-    plate
 }
 
 #[inline(never)]
@@ -5753,7 +5594,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp, display: &DisplayPla
         };
     }
 
-    // 4b. Editor refusal hint in the free band above the dock.
+    // 4b. Editor refusal hint in the free band above the home gesture.
     //
     // WHY it exists: SAVE on an incomplete contact used to refuse with a log
     // line only, so the button looked dead. The hint names the two things the
@@ -5761,7 +5602,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp, display: &DisplayPla
     if dialer.section == DialerSection::Contacts
         && dialer.contact_edit.is_some()
         && dialer.editor_error
-        && (CONTENT_Y1..DOCK_Y0).contains(&y)
+        && (CONTENT_Y1..chrome::HOME_HIT.y).contains(&y)
     {
         let msg = b"A contact needs a name and a number";
         let w = run_w(msg, 1);
@@ -5772,14 +5613,22 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp, display: &DisplayPla
         return THEME.surface;
     }
 
-    // 5. Bottom navigation dock (y: 1260..1380)
-    if (DOCK_Y0..DOCK_Y1).contains(&y) {
-        return dock_pixel(x, y, dialer);
-    }
-
-    // 6. Home Gesture Pill. The ink is `chrome::HOME_PILL` and the strip that
+    // 5. Home Gesture Pill. The ink is `chrome::HOME_PILL` and the strip that
     // answers it is `chrome::HOME_HIT`, one declaration in the library, so the
     // page that answers is the page that was drawn.
+    //
+    // WHY there is no bar below the content band any more: the app used to paint
+    // a second navigation strip there -- four slots lettered Favorites, Recents,
+    // Keypad, Contacts -- beside the segmented row this dispatch already paints
+    // at Dial, Recents, Contacts, Settings. Two bars, two vocabularies, one
+    // section: the Keypad screen inked "Dial" selected at the top and "Keypad"
+    // selected at the bottom in the same frame, and the Settings screen inked one
+    // selected and none. The row above is the one the app's own geometry library
+    // lays out and the one that names all four sections, so it is the bar that
+    // stays. What only the lower strip offered was the starred-contacts filter,
+    // and that filter is not gone with it: the Contacts section's own action disc
+    // is lettered FAVS and ALL for exactly that state, and `handle_contacts_tap`
+    // still answers it.
     if chrome::HOME_PILL.contains(x, y) {
         return THEME.on_surface_variant;
     }
@@ -5955,9 +5804,10 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             }
             2 => {
                 // WHY the Contacts tab clears the favourites filter: the tab is
-                // the unfiltered contact list, while the Favorites dock slot is
-                // the filtered one. Carrying the filter over made both controls
-                // read active and left the tab showing a subset of its own list.
+                // the unfiltered contact list, while the FAVS disc inside that
+                // section is what asks for the filtered one. Carrying the filter
+                // over made both controls read active and left the tab showing a
+                // subset of its own list.
                 dialer.open_contacts(false);
                 let _ = std::audio_haptic_click();
                 return Tap::Redraw(Dirty::All);
@@ -5972,42 +5822,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         }
     }
 
-    // 3. Bottom dock. All four slots have a real destination.
-    if (DOCK_Y0..DOCK_Y1).contains(&y) && x >= 24 && x < 696 {
-        for slot in 0..4 {
-            let x0 = DOCK_ITEM_X0[slot];
-            if x < x0 || x >= x0 + DOCK_ITEM_W {
-                continue;
-            }
-            let _ = std::audio_haptic_click();
-            match slot {
-                // The slot order is the icon order: star, clock, keypad,
-                // person. Favorites and Contacts both open the contact list;
-                // Favorites filters it to the starred contacts.
-                0 => {
-                    dialer.open_contacts(true);
-                    std::log("[DIALER APP] Favorites: showing starred contacts.").ok();
-                    return Tap::Redraw(Dirty::All);
-                }
-                1 => {
-                    dialer.section = DialerSection::Recents;
-                    return Tap::Redraw(Dirty::All);
-                }
-                2 => {
-                    dialer.section = DialerSection::Keypad;
-                    return Tap::Redraw(Dirty::All);
-                }
-                _ => {
-                    dialer.open_contacts(false);
-                    return Tap::Redraw(Dirty::All);
-                }
-            }
-        }
-    }
-
-
-
-    // 5. Section content: the keypad and action row in the Keypad section, the
+    // 3. Section content: the keypad and action row in the Keypad section, the
     if dialer.section == DialerSection::Recents {
         // The ledger scrolls, so the row under the tap is the one at the
         // scrolled position, not the one at the unshifted position.
@@ -6226,11 +6041,9 @@ fn handle_ringtone_picker_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap
 /// keypad and the recents ledger together, and folding them into `handle_tap`
 /// would put one function two screens deep in branches.
 fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'static> {
-    // While the editor is open, the tab band and the dock still work, so the
-    // user is never trapped in a half-finished contact.
-    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y)
-        || ((DOCK_Y0..DOCK_Y1).contains(&y) && x >= 24 && x < 696)
-    {
+    // While the editor is open, the tab row still works, so the user is never
+    // trapped in a half-finished contact.
+    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         return handle_tap(dialer, x as u32, y as u32);
     }
 

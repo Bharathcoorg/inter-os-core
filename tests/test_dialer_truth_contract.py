@@ -10,6 +10,7 @@ assertion below pins a specific defect found by reading the app.
 """
 
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -143,3 +144,76 @@ def test_a_press_answers_only_the_pixels_the_pad_and_the_tab_row_ink():
     assert "assert!(KEY_RADIUS * 2 >= MIN_FINGER_PX);" in source
     assert "assert!(2 * KEY_RADIUS <= BTN_H);" in source
     assert "assert!(2 * KEY_RADIUS <= BTN_W);" in source
+
+
+def dialer_sections(source: str) -> list[str]:
+    """The section names the app actually has, read from its own enum."""
+    body = source.split("pub enum DialerSection {", 1)[1].split("\n}", 1)[0]
+    return re.findall(r"^    (\w+) = \d+,", body, re.M)
+
+
+def tab_row_labels(source: str) -> list[bytes]:
+    """The labels the single-sourced tab row lays out, from `lib.rs`."""
+    body = source.split("pub mod tab_row {", 1)[1]
+    count = re.search(r"pub const COUNT: usize = (\d+);", body)
+    items = re.search(r"pub const LABELS: \[&\[u8\]; (\w+)\] = \[([^\]]*)\];", body)
+    assert count and items, (
+        "the tab row no longer states its tab count and its labels as one "
+        "declaration each in `tab_row`, so this gate cannot compare the row "
+        "with the sections the app has"
+    )
+    assert items.group(1) == "COUNT", (
+        "the label array no longer length-checks itself against `COUNT`"
+    )
+    labels = re.findall(rb"b\"([A-Za-z ]+)\"", items.group(2).encode())
+    assert len(labels) == int(count.group(1)), (
+        f"`tab_row` declares {count.group(1)} tabs but letters {len(labels)}"
+    )
+    return labels
+
+
+def test_exactly_one_navigation_bar_letters_the_app():
+    """One screen, one selected tab.
+
+    The app used to paint two section switchers at once: the segmented row at
+    the top, lettered from `tab_row`, and a bottom dock lettered Favorites,
+    Recents, Keypad, Contacts. Both read `dialer.section`, so the Keypad screen
+    inked "Dial" selected at the top and "Keypad" selected at the bottom in the
+    same frame, and the Settings screen inked one selected and none -- the dock
+    had no slot for it. Two bars for one state is not a redundant control, it
+    is two answers to the same question.
+
+    The row wins: it names every section the enum has, its geometry is
+    single-sourced in `tab_row` with build-time ties, and its painter and its
+    press share one accessor. The dock is gone, and the one control only it
+    offered -- the starred-contacts filter -- is still answered by the Contacts
+    section's own disc, so nothing was lost with the bar.
+    """
+    source = dialer_main()
+    sections = dialer_sections(source)
+
+    # One switcher, and it is the one the library lays out.
+    assert len(tab_row_labels(dialer_lib())) == len(sections), (
+        "the tab row and the app's own section enum no longer agree on how many "
+        "sections there are: one bar letters a screen the other cannot reach"
+    )
+    assert source.count("return tabs_pixel(x, y, dialer);") == 1
+    assert source.count("fn tabs_pixel(") == 1
+
+    # The dock is not merely hidden: its painter, its geometry and its press are
+    # all absent, so no future screen can be added to one bar and not the other.
+    for name in ("dock_pixel", "dock_label_y0", "DOCK_Y0", "DOCK_Y1", "DOCK_ITEM_W",
+                 "DOCK_ITEM_X0", "DOCK_LABELS", "DOCK_ICON_Y0", "DOCK_ICON_H",
+                 "DOCK_SCALE"):
+        assert name not in source, f"the second navigation bar is still in the source: {name}"
+
+    # Nothing else claims the free band below the content: it belongs to the
+    # gesture area, so the app cannot grow a third bar into it.
+    assert "(CONTENT_Y1..chrome::HOME_HIT.y).contains(&y)" in source
+    assert "DOCK_Y0)" not in source
+
+    # The capability the dock held alone is still live: the starred filter is
+    # both lettered and answered inside the Contacts section.
+    assert 'b"FAVS"' in source and 'b"ALL"' in source
+    assert "dialer.contacts_fav_only = !dialer.contacts_fav_only;" in source
+
