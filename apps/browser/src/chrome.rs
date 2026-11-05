@@ -194,6 +194,37 @@ const _: () = assert!(ICON < MIN_TARGET);
 pub const SHEET_HEADER_Y0: usize = 120;
 pub const SHEET_HEADER_H: usize = 50;
 
+/// Whether `y` is a row of the band a sheet paints its header in.
+///
+/// WHY a function and not the band's two edges spelled out at each sheet: the
+/// ten sheets each inked their title, their close control and the strip behind
+/// them under `y >= 120 && y < 170` -- twenty literals beside the two this
+/// module already owns at [`SHEET_HEADER_Y0`] and [`SHEET_HEADER_H`]. The repo's
+/// rule is that a painted box and the band a press is measured against are the
+/// SAME expression, and a literal copied ten times is the way that rule gets
+/// broken one sheet at a time: the band edited here would leave ten sheets
+/// painting a header the close plate no longer sits inside.
+pub const fn in_sheet_header(y: usize) -> bool {
+    y >= SHEET_HEADER_Y0 && y < SHEET_HEADER_Y0 + SHEET_HEADER_H
+}
+
+/// How far inside the header band a sheet's title is inked, and the row that
+/// puts it there.
+///
+/// WHY derived from the band: the title row was a literal `134` at each of the
+/// nine call sites, and a band that moves leaves its ink behind on the row the
+/// sheet above it now owns.
+pub const SHEET_TITLE_DY: usize = 14;
+pub const SHEET_TITLE_Y: usize = SHEET_HEADER_Y0 + SHEET_TITLE_DY;
+
+const _: () = assert!(in_sheet_header(SHEET_HEADER_Y0));
+const _: () = assert!(!in_sheet_header(SHEET_HEADER_Y0 + SHEET_HEADER_H));
+const _: () = assert!(!in_sheet_header(SHEET_HEADER_Y0 - 1));
+const _: () = assert!(
+    font::line_height(crate::theme::type_scale::CAPTION) <= SHEET_HEADER_H - SHEET_TITLE_DY
+);
+const _: () = assert!(in_sheet_header(SHEET_TITLE_Y));
+
 /// The close control a sheet wears in the head of its header band.
 ///
 /// WHY a plate at all: the sheets drew a bare 17-row `X` and answered a press
@@ -264,21 +295,134 @@ pub const fn list_row_card(top: usize, h: usize) -> Rect {
     Rect::new(LIST_ROW_CARD_X, top, LIST_ROW_CARD_W, h)
 }
 
-const _: () = assert!(LIST_ROW_CARD_W == PANEL_W - 2 * SIDE_GUTTER);
-
-/// The rows the address field's suggestion cards are drawn in.
+/// The width a run inside a list-row card owns.
 ///
-/// WHY the pair: the press path tested `130..=198` and `208..=276` against cards
-/// painted 68 rows tall from 130 and from 208, so both bands claimed the first
-/// row of the gap under their card, and both tested `x <= W - 24` against a card
-/// that stops at that column.
-pub const SUGGEST_CARD_H: usize = 68;
+/// WHY a function and not the number each sheet typed: three sheets cut their
+/// run to a remembered width (`540`, `580`, `604`) that came from neither the
+/// card the painter fills nor the inset the ink sits at. A lane typed from
+/// memory is a lane that survives a card re-size by being wrong -- the run
+/// either stops short of the card it belongs to or walks out through its
+/// border, and the person sees the address lose its tail.
+///
+/// WHY both an inset and a gutter: the inset is where the ink starts inside the
+/// card's leading edge (its icon plate and its own air), and the gutter is what
+/// the run keeps from the trailing edge. A run cut to the card's whole remaining
+/// width can reach the border exactly, and a per-pixel painter has no clip: the
+/// last glyph then sits on the rounding the card itself is drawn with.
+pub const fn list_text_lane(inset: usize, gutter: usize) -> usize {
+    LIST_ROW_CARD_W.saturating_sub(inset).saturating_sub(gutter)
+}
+
+const _: () = assert!(LIST_ROW_CARD_W == PANEL_W - 2 * SIDE_GUTTER);
+const _: () = assert!(list_text_lane(0, 0) == LIST_ROW_CARD_W);
+const _: () =
+    assert!(list_text_lane(SIDE_GUTTER, SIDE_GUTTER) + 2 * SIDE_GUTTER == LIST_ROW_CARD_W);
+/// WHY a lane may never be the whole card: a run the width of its card has no
+/// edge left in it, and the gate below is what keeps a sheet from re-typing the
+/// card's width as a text width by accident.
+const _: () = assert!(list_text_lane(46, SIDE_GUTTER) < LIST_ROW_CARD_W);
+
+/// The rung a suggestion card's two runs are set at, and one run's line box.
+///
+/// WHY published: the row that inks these runs passes the rung to the text
+/// painter, so the height the card is built from and the face the ink is set in
+/// stay one fact rather than two.
+pub const SUGGEST_RUN_SCALE: usize = crate::theme::type_scale::CAPTION;
+const SUGGEST_LINE_BOX: usize = font::line_height(SUGGEST_RUN_SCALE);
+
+/// The air a suggestion card keeps above its first line and below its last.
+const SUGGEST_PAD_Y: usize = 4;
+
+/// The height of a suggestion card.
+///
+/// WHY it is derived from the two runs it holds: the card is 68 rows for exactly
+/// the reason the history card is -- two line boxes of the rung it sets its text
+/// at, plus the air above and below the block. Stating it as the sum is what
+/// makes the rows below it a derivation instead of two remembered numbers.
+pub const SUGGEST_CARD_H: usize = 2 * SUGGEST_LINE_BOX + 2 * SUGGEST_PAD_Y;
+
+/// The gap between the two suggestion cards.
+pub const SUGGEST_ROW_GAP: usize = 10;
+
 pub const SUGGEST_SEARCH: Rect = Rect::new(SIDE_GUTTER, 130, CARD_W, SUGGEST_CARD_H);
-pub const SUGGEST_NAVIGATE: Rect = Rect::new(SIDE_GUTTER, 208, CARD_W, SUGGEST_CARD_H);
+/// The second card, stacked off the first: its own last row, plus the gap.
+pub const SUGGEST_NAVIGATE: Rect = Rect::new(
+    SIDE_GUTTER,
+    SUGGEST_SEARCH.y + SUGGEST_CARD_H + SUGGEST_ROW_GAP,
+    CARD_W,
+    SUGGEST_CARD_H,
+);
 
 const _: () = assert!(SUGGEST_SEARCH.h >= MIN_TARGET && SUGGEST_SEARCH.w >= MIN_TARGET);
 const _: () = assert!(SUGGEST_SEARCH.y + SUGGEST_SEARCH.h <= SUGGEST_NAVIGATE.y);
 const _: () = assert!(SUGGEST_NAVIGATE.y + SUGGEST_NAVIGATE.h <= ACC_BAR_Y0);
+
+/// How far inside a suggestion card its two runs start.
+///
+/// WHY it is named here: the candidate's width is cut from this card before it
+/// reaches the painter, so the inset that decides the cut and the inset the ink
+/// is drawn at are two readings of one fact, in two files. A literal at each is
+/// a candidate that runs under the icon plate it was cut to clear.
+///
+/// WHY it is the plate plus its air: the run is set beside the card's mark, and
+/// the column it starts at is the mark's own trailing edge plus the gutter that
+/// separates a label from the glyph it labels.
+pub const SUGGEST_TEXT_AIR: usize = 14;
+pub const SUGGEST_TEXT_DX: usize = SUGGEST_ICON_DX + SUGGEST_ICON + SUGGEST_TEXT_AIR;
+
+/// The gutter a suggestion run keeps from the card's trailing edge.
+///
+/// WHY it exists at all: the run was cut to `SUGGESTION_TEXT_MAX = 604`, which
+/// is this card's width less the inset alone -- so a candidate long enough to
+/// fill the lane ended on the card's own border, and the last glyph sat on the
+/// rounding the card is drawn with. The gutter is the same [`SIDE_GUTTER`] the
+/// sheet keeps from the panel, so a row's ink keeps one edge measure everywhere.
+pub const SUGGEST_TEXT_GUTTER: usize = SIDE_GUTTER;
+
+/// The lane a suggestion card's run is cut to.
+pub const SUGGEST_TEXT_LANE: usize = SUGGEST_SEARCH.w - SUGGEST_TEXT_DX - SUGGEST_TEXT_GUTTER;
+
+/// The square the card's mark is drawn in, and how far inside the card it sits.
+///
+/// WHY the two offsets are separate: the plate's column is the card's own inset,
+/// while its row is what the block leaves over once the square is centred on it.
+/// They are the same number today, and the gate below is what says so -- a card
+/// that grows its air keeps its plate centred, and a plate whose row was read
+/// from its column would climb off the block it labels.
+pub const SUGGEST_ICON: usize = 40;
+pub const SUGGEST_ICON_DX: usize = 14;
+pub const SUGGEST_ICON_DY: usize = (SUGGEST_CARD_H - SUGGEST_ICON) / 2;
+
+/// The centre the plate is drawn round, as an offset from the card's own corner.
+pub const SUGGEST_ICON_CX: usize = SUGGEST_ICON_DX + SUGGEST_ICON / 2;
+pub const SUGGEST_ICON_CY: usize = SUGGEST_ICON_DY + SUGGEST_ICON / 2;
+
+/// The two rows a suggestion card inks, both measured from its own top.
+///
+/// WHY they are one block apart: the card used to ink its label at row 14 and
+/// its candidate at row 38, which are twenty-four rows apart while the rung both
+/// runs are set at reserves thirty. A per-pixel painter has no clip, so the two
+/// runs' line boxes overlapped by six rows -- and the candidate's box, at
+/// `38 + 30`, reached row 68 of a 68-row card, whose last painted row is 67: the
+/// descender of a `g` or a `p` in the address the card offers fell outside the
+/// card that offers it.
+pub const SUGGEST_LABEL_DY: usize = SUGGEST_PAD_Y;
+pub const SUGGEST_TEXT_DY: usize = SUGGEST_PAD_Y + SUGGEST_LINE_BOX;
+
+const _: () = assert!(SUGGEST_TEXT_DX > 0 && SUGGEST_TEXT_GUTTER > 0);
+const _: () = assert!(SUGGEST_SEARCH.x + SUGGEST_TEXT_DX + SUGGEST_TEXT_LANE + SUGGEST_TEXT_GUTTER
+    == SUGGEST_SEARCH.x + SUGGEST_SEARCH.w);
+const _: () = assert!(SUGGEST_TEXT_LANE == list_text_lane(SUGGEST_TEXT_DX, SUGGEST_TEXT_GUTTER));
+const _: () = assert!(SUGGEST_LABEL_DY < SUGGEST_TEXT_DY);
+const _: () = assert!(SUGGEST_LABEL_DY + SUGGEST_LINE_BOX == SUGGEST_TEXT_DY);
+const _: () = assert!(SUGGEST_TEXT_DY + SUGGEST_LINE_BOX + SUGGEST_PAD_Y == SUGGEST_CARD_H);
+/// The plate is the card's own square, centred on the block the two runs make.
+const _: () = assert!(SUGGEST_ICON_DY == SUGGEST_ICON_DX);
+/// WHY the air equals the plate's own inset: the row's ink is set one measure
+/// off the mark, the same measure the mark is set off the card's leading edge,
+/// so the plate, the air and the card are one rhythm rather than three numbers.
+const _: () = assert!(SUGGEST_TEXT_AIR == SUGGEST_ICON_DX);
+const _: () = assert!(SUGGEST_TEXT_DX == SUGGEST_ICON_DX + SUGGEST_ICON + SUGGEST_TEXT_AIR);
 
 /// The height of the action button the error, download and dismissal screens
 /// draw under their status badge.

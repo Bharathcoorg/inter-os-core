@@ -3746,11 +3746,24 @@ pub fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// The width the address bar's suggestion row gives its candidate string.
 ///
-/// WHY a constant and not the screen's width: the suggestion card is 48 px
-/// from each edge of the screen and its text starts 92 px in, so the string
-/// owns 604 px. A string that does not fit is cut inside that budget and
-/// marked, never past the edge of the row.
-pub const SUGGESTION_TEXT_MAX: usize = 604;
+/// WHY a constant and not the screen's width: the cut happens in
+/// `Frame::build`, before the painter runs, and the painter has no clip -- so
+/// the string's owner is the lane, and a lane that is not the painter's lane is
+/// a string drawn past the card it was cut for.
+///
+/// WHY it is derived and not written: it used to be the literal `604` under a
+/// comment that said the card sits 48 px from each edge and its text 92 px in.
+/// Neither is true -- the card keeps the sheet's 24 px gutter on both sides and
+/// its text starts 68 px inside it -- and the number happened to equal the
+/// card's width less the real inset, which left the run no trailing edge: a
+/// candidate long enough to fill the budget ended on the card's own border, over
+/// the rounding the card is drawn with. Both facts now come from
+/// [`chrome::SUGGEST_TEXT_LANE`], the lane the row that paints this string
+/// measures itself against, so the comment, the cut and the ink cannot disagree.
+pub const SUGGESTION_TEXT_MAX: usize = crate::chrome::SUGGEST_TEXT_LANE;
+
+const _: () = assert!(SUGGESTION_TEXT_MAX == 580);
+const _: () = assert!(SUGGESTION_TEXT_MAX < crate::chrome::SUGGEST_SEARCH.w);
 
 /// Fits a candidate string into the suggestion row's width.
 ///

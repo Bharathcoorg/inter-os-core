@@ -39,7 +39,7 @@ use browser::{
     parse_uri, perform_tls_handshake, scheme_mark, url_field, ConnectionFailure, DocLine,
     DocumentTokenizer, FetchErrorKind, LineKind, LoadingState, PageStatus, ProtocolFaultKind,
     TabSessionManager, TcpSocketStream, TransportFailure, UriScheme, MAX_DOC_LINES,
-    MAX_LINE_BYTES, MAX_TABS,
+    MAX_LINE_BYTES, MAX_TABS, MAX_TITLE_LEN, MAX_URL_LEN,
 };
 pub use browser::tls;
 use browser::chrome;
@@ -1197,10 +1197,37 @@ const _: () = assert!(back_button::Y + back_button::SIZE <= TOOLBAR_Y1);
 /// The tab switcher's "+ New Tab" control.
 ///
 /// WHY 44 and not 38: the design system's minimum touch target is 44 logical
-/// pixels and this button was 38. The tab switcher header band is 120..170, so
-/// the button now fills the band from its top to its bottom and the tab cards
-/// below, which start at 180, are untouched.
-const NEW_TAB_BTN: Rect = Rect::new(530, 126, 150, MIN_TOUCH_TARGET);
+/// pixels and this button was 38. The tab switcher's header band is the strip
+/// [`chrome::in_sheet_header`] answers, so the button now sits on the band's own
+/// last rows and the tab cards below, which start at `TAB_CARD_Y0`, are
+/// untouched.
+///
+/// WHY the top is derived from the band: the sheet paints this plate *inside*
+/// its header band -- the band's branch returns the surface for every row of it
+/// and the plate only while the rows agree -- so a plate written with a
+/// remembered `126` is a plate that can climb out of the band on the next edit
+/// to the band, and then it is ink a press cannot reach.
+const NEW_TAB_BTN: Rect = Rect::new(
+    530,
+    chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H - MIN_TOUCH_TARGET,
+    150,
+    MIN_TOUCH_TARGET,
+);
+
+/// How far inside the plate its label starts, and how far down it is inked.
+const NEW_TAB_LABEL_DX: usize = 30;
+const NEW_TAB_LABEL_DY: usize = 12;
+const NEW_TAB_LABEL_X: usize = NEW_TAB_BTN.x + NEW_TAB_LABEL_DX;
+const NEW_TAB_LABEL_Y: usize = NEW_TAB_BTN.y + NEW_TAB_LABEL_DY;
+
+const _: () = assert!(chrome::in_sheet_header(NEW_TAB_BTN.y));
+const _: () = assert!(
+    NEW_TAB_BTN.y + NEW_TAB_BTN.h == chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H
+);
+const _: () = assert!(NEW_TAB_BTN.x + NEW_TAB_BTN.w <= W - chrome::SIDE_GUTTER);
+const _: () = assert!(
+    NEW_TAB_LABEL_Y + font::line_height(type_scale::CAPTION) <= NEW_TAB_BTN.y + NEW_TAB_BTN.h
+);
 
 /// The tab switcher's card block: where the first card stands, how tall it is
 /// and the air between two of them.
@@ -1222,6 +1249,62 @@ const _: () = assert!(TAB_CARD_H >= MIN_TOUCH_TARGET);
 const _: () = assert!(TAB_CARD_Y0 >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
 const _: () = assert!(TAB_CLOSE_CENTER_Y + MIN_TOUCH_TARGET / 2 <= TAB_CARD_H);
 const _: () = assert!(TAB_CLOSE_CENTER_Y >= MIN_TOUCH_TARGET / 2);
+
+/// Where a tab card's two runs start.
+const TAB_TITLE_TEXT_X: usize = 78;
+const TAB_URL_TEXT_X: usize = 40;
+
+/// The rung both runs are set at, one run's line box, and the air between them.
+///
+/// WHY the rows are derived from the rung: the card inked its name at row 20 and
+/// its address at row 54 -- thirty-four rows apart at the one rung, which is a
+/// line box of thirty plus four rows of air. Written as the two literals, the
+/// pair reads correctly only while the rung stays where it is; written as the
+/// sum, a rung that grows carries the address with it instead of setting it on
+/// top of the name the same tab has.
+const TAB_RUN_SCALE: usize = type_scale::CAPTION;
+const TAB_RUN_LINE_BOX: usize = font::line_height(TAB_RUN_SCALE);
+const TAB_RUN_AIR: usize = 4;
+const TAB_TITLE_DY: usize = 20;
+const TAB_URL_DY: usize = TAB_TITLE_DY + TAB_RUN_LINE_BOX + TAB_RUN_AIR;
+
+/// The column a tab card's runs stop at, measured from the card's own left edge:
+/// the close plate's leading column, less the air a run keeps from a control.
+///
+/// WHY the limit is the plate and not the card: the plate is painted *over* the
+/// card's fill, so a run cut to the card's edge runs under a control the person
+/// can see -- the title of the tab they are aiming at, disappearing into the
+/// close box. `chrome::SUGGEST_TEXT_GUTTER` is the same rule one level out; this
+/// one is the rule applied to the object inside the row.
+const TAB_TEXT_LIMIT: usize =
+    TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2 - chrome::LIST_ROW_CARD_X - spacing::GRID_8;
+
+/// The lane each of the two runs owns, from its own inset to that limit.
+const TAB_TITLE_LANE: usize = TAB_TEXT_LIMIT - (TAB_TITLE_TEXT_X - chrome::LIST_ROW_CARD_X);
+const TAB_URL_LANE: usize = TAB_TEXT_LIMIT - (TAB_URL_TEXT_X - chrome::LIST_ROW_CARD_X);
+
+/// The buffers they are cut into: the longest record plus the platform's mark.
+const TAB_TITLE_BUF: usize = MAX_TITLE_LEN + 3;
+const TAB_URL_BUF: usize = MAX_URL_LEN + 3;
+
+const _: () = assert!(TAB_TEXT_LIMIT > 0);
+const _: () = assert!(TAB_URL_TEXT_X > chrome::LIST_ROW_CARD_X);
+const _: () = assert!(TAB_TITLE_TEXT_X > TAB_URL_TEXT_X);
+/// Neither run may leave the card it is inked on, and the second may not stand
+/// on the first's line box.
+const _: () = assert!(TAB_TITLE_DY + TAB_RUN_LINE_BOX <= TAB_URL_DY);
+const _: () = assert!(TAB_URL_DY + TAB_RUN_LINE_BOX <= TAB_CARD_H);
+/// The plate's leading column is inside the card it is painted on, and the run
+/// stops short of it, so no ink of the tab's own name hides under its close box.
+const _: () = assert!(
+    TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2 > chrome::LIST_ROW_CARD_X
+        && TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2
+            < chrome::LIST_ROW_CARD_X + chrome::LIST_ROW_CARD_W
+);
+const _: () = assert!(chrome::LIST_ROW_CARD_X + TAB_TEXT_LIMIT + spacing::GRID_8
+    == TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2);
+const _: () = assert!(TAB_TITLE_LANE < chrome::LIST_ROW_CARD_W
+    && TAB_URL_LANE < chrome::LIST_ROW_CARD_W);
 
 /// Omnibox Right Controls
 const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
@@ -1729,6 +1812,72 @@ const BOOKMARK_ROW_GAP: usize = 10;
 /// drawn for. Both sheets now test the box they paint.
 const BOOKMARK_CARD_H: usize = BOOKMARK_ROW_PITCH - BOOKMARK_ROW_GAP;
 
+/// The rung a bookmark row's two runs are set at.
+const BOOKMARK_RUN_SCALE: usize = type_scale::CAPTION;
+
+/// One run's line box.
+const BOOKMARK_LINE_BOX: usize = font::line_height(BOOKMARK_RUN_SCALE);
+
+/// The two runs a row reserves, as one block: the name the person saved and the
+/// address it opens.
+const BOOKMARK_BLOCK_H: usize = 2 * BOOKMARK_LINE_BOX;
+
+/// Where that block sits inside the card, and the two rows it puts its runs on.
+///
+/// WHY derived from the card instead of the `16` and `42` the sheet typed: a
+/// per-pixel painter has no clip, so the card's fill answered every row of the
+/// band it was drawn in -- and the address run, inked at row 42 of a 70-row card,
+/// reserved 30 rows and reached row 72. The descenders of `g`, `j`, `p`, `q` and
+/// `y` (the letters that make an address an address) were erased at the card's
+/// own bottom border. Setting the block as a block puts both runs inside the card
+/// with the same air above the first as below the second, which is how the
+/// history sheet already reads.
+const BOOKMARK_BLOCK_Y: usize = (BOOKMARK_CARD_H - BOOKMARK_BLOCK_H) / 2;
+const BOOKMARK_TITLE_Y: usize = BOOKMARK_BLOCK_Y;
+const BOOKMARK_URL_Y: usize = BOOKMARK_BLOCK_Y + BOOKMARK_LINE_BOX;
+
+/// Where the star sits, in the card: its centre column, its own half-width and
+/// the card's vertical middle.
+const BOOKMARK_STAR_CX: usize = 48;
+const BOOKMARK_STAR_HALF: usize = 9;
+const BOOKMARK_STAR_CY: usize = BOOKMARK_CARD_H / 2;
+
+/// Where a bookmark row's text starts, and the lane it owns.
+///
+/// WHY the start is derived from the star: the mark and the two runs are one
+/// row, and an ink column that is not the mark's edge plus its air is an ink
+/// column that can be walked over by the mark when either is re-sized.
+///
+/// WHY the lane is derived and not typed: a bookmark's address fills its record
+/// (128 bytes), and at this rung the widest advances are about fourteen columns
+/// to the byte -- over a thousand columns of ink in a card 672 columns wide. The
+/// name is page-supplied too, at 64 bytes. Both runs ran through the card's
+/// border and off the panel with no mark to say they continued. The download
+/// rows already cut theirs against their own card; these now do the same,
+/// against `chrome::list_text_lane` so the cut and the ink read one geometry.
+const BOOKMARK_TEXT_AIR: usize = 13;
+const BOOKMARK_TEXT_X: usize = BOOKMARK_STAR_CX + BOOKMARK_STAR_HALF + BOOKMARK_TEXT_AIR;
+const BOOKMARK_TEXT_INSET: usize = BOOKMARK_TEXT_X - chrome::LIST_ROW_CARD_X;
+const BOOKMARK_TEXT_GUTTER: usize = chrome::SIDE_GUTTER;
+const BOOKMARK_TEXT_LANE: usize =
+    chrome::list_text_lane(BOOKMARK_TEXT_INSET, BOOKMARK_TEXT_GUTTER);
+
+/// The buffers the two cut runs are written to: the longest record each one
+/// holds, plus the three bytes the platform's mark is made of.
+const BOOKMARK_TITLE_BUF: usize = MAX_TITLE_LEN + 3;
+const BOOKMARK_URL_BUF: usize = MAX_URL_LEN + 3;
+
+const _: () = assert!(BOOKMARK_BLOCK_Y + BOOKMARK_BLOCK_H <= BOOKMARK_CARD_H);
+const _: () = assert!(BOOKMARK_TITLE_Y < BOOKMARK_URL_Y);
+const _: () = assert!(BOOKMARK_STAR_CY + BOOKMARK_STAR_HALF <= BOOKMARK_CARD_H);
+const _: () = assert!(BOOKMARK_TEXT_X > BOOKMARK_STAR_CX + BOOKMARK_STAR_HALF);
+const _: () = assert!(BOOKMARK_TEXT_X == 70);
+const _: () = assert!(
+    BOOKMARK_TEXT_X + BOOKMARK_TEXT_LANE + BOOKMARK_TEXT_GUTTER
+        == chrome::LIST_ROW_CARD_X + chrome::LIST_ROW_CARD_W
+);
+const _: () = assert!(BOOKMARK_TEXT_LANE < chrome::LIST_ROW_CARD_W);
+
 // -----------------------------------------------------------------------------
 // The downloads sheet's rows
 //
@@ -1754,6 +1903,98 @@ const DOWNLOAD_CARD_H: usize = DOWNLOAD_ROW_PITCH - DOWNLOAD_ROW_GAP;
 const _: () = assert!(DOWNLOAD_CARD_H >= MIN_TOUCH_TARGET);
 const _: () = assert!(DOWNLOAD_ROW_GAP < DOWNLOAD_ROW_PITCH);
 const _: () = assert!(DOWNLOAD_ROW_Y0 >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
+
+/// Where the two runs of a download (and upload) row start, and the lane they
+/// own.
+///
+/// WHY a name for what was `r_rect.w - 40`: the arithmetic was right -- twenty
+/// columns of inset on each side of a card whose text is inked at column 44 --
+/// but it lived inside the row that paints one sheet's file names, so the sheet
+/// that lists the same files a different way could not read it, and the uploads
+/// row that grew up beside it typed `600` for the same lane instead.
+const LIST_TEXT_X: usize = 44;
+const LIST_TEXT_INSET: usize = LIST_TEXT_X - chrome::LIST_ROW_CARD_X;
+const LIST_TEXT_GUTTER: usize = LIST_TEXT_INSET;
+const LIST_TEXT_LANE: usize = chrome::list_text_lane(LIST_TEXT_INSET, LIST_TEXT_GUTTER);
+
+const _: () = assert!(LIST_TEXT_LANE == 632);
+const _: () = assert!(
+    LIST_TEXT_X + LIST_TEXT_LANE + LIST_TEXT_GUTTER
+        == chrome::LIST_ROW_CARD_X + chrome::LIST_ROW_CARD_W
+);
+
+/// The two runs a download row inks, as one block centred in its card.
+///
+/// WHY the block is centred and the rows no longer `12` and `40`: a per-pixel
+/// painter has no clip, and the card answers only the rows it is drawn over. The
+/// detail line inked at row 40 reserves the rung's thirty rows, so it reached row
+/// 70 of a 62-row card -- the descenders of `g`, `j`, `p`, `q` and `y` in the
+/// byte-count line fell on rows the card never paints, and they were erased --
+/// while standing two rows inside the name's own line box above it. The card
+/// carries two line boxes and two rows to spare, so the block goes between them
+/// and both runs are inside the card that offers them.
+const DOWNLOAD_RUN_SCALE: usize = type_scale::CAPTION;
+const DOWNLOAD_RUN_LINE_BOX: usize = font::line_height(DOWNLOAD_RUN_SCALE);
+const DOWNLOAD_BLOCK_H: usize = 2 * DOWNLOAD_RUN_LINE_BOX;
+const DOWNLOAD_BLOCK_Y: usize = (DOWNLOAD_CARD_H - DOWNLOAD_BLOCK_H) / 2;
+const DOWNLOAD_NAME_DY: usize = DOWNLOAD_BLOCK_Y;
+const DOWNLOAD_META_DY: usize = DOWNLOAD_BLOCK_Y + DOWNLOAD_RUN_LINE_BOX;
+
+const _: () = assert!(DOWNLOAD_BLOCK_Y + DOWNLOAD_BLOCK_H <= DOWNLOAD_CARD_H);
+const _: () = assert!(DOWNLOAD_NAME_DY < DOWNLOAD_META_DY);
+
+/// The longest name the row can be handed, plus the mark's three bytes.
+const DOWNLOAD_NAME_BUF: usize = DownloadEntry::EMPTY.path.len() + 3;
+
+// -----------------------------------------------------------------------------
+// The upload picker's rows
+//
+// WHY the geometry is constants and not the `84`, `220` and `W - 48` each walker
+// wrote inline: the painter drew the card from one copy of those numbers and the
+// press path from another, and both looked right on screen. The uploads sheet is
+// the same list shape as the downloads sheet -- a name and a line of detail
+// under it -- so it now reads the same boxes.
+// -----------------------------------------------------------------------------
+
+/// The first upload row's top edge, its stride, and the gap between two cards.
+const UPLOAD_ROW_Y0: usize = 220;
+const UPLOAD_ROW_PITCH: usize = 84;
+const UPLOAD_ROW_GAP: usize = 10;
+
+/// The height of an upload card: the box the painter fills and the press reads.
+const UPLOAD_CARD_H: usize = UPLOAD_ROW_PITCH - UPLOAD_ROW_GAP;
+
+/// The rung an upload row's two runs are set at, and the rows they sit on.
+const UPLOAD_RUN_SCALE: usize = type_scale::CAPTION;
+const UPLOAD_RUN_LINE_BOX: usize = font::line_height(UPLOAD_RUN_SCALE);
+const UPLOAD_NAME_DY: usize = 12;
+/// The detail line stands on the name's line box, so the two runs neither
+/// overlap nor leave a gap the eye reads as two separate rows.
+const UPLOAD_META_DY: usize = UPLOAD_NAME_DY + UPLOAD_RUN_LINE_BOX;
+
+/// The longest name the row composes and the longest detail line it composes,
+/// each with room for the platform's mark.
+///
+/// WHY the detail line gets a bound: it is the file's own media type -- the
+/// platform's index hands over the whole of the picked entry's field, forty
+/// bytes of it -- plus the separator, the longest decimal a length can be, and
+/// the unit. At this rung a full type name is a run of over five hundred
+/// columns, and a buffer that fills mid-word leaves no mark to say the text
+/// continued: the line ran past the card's border and off the panel.
+///
+/// WHY read off [`PickEntry`] and not typed: the two fields are what the row can
+/// be handed, and a bound written beside them is a bound that goes stale the day
+/// the entry grows.
+const UPLOAD_NAME_BUF: usize = PickEntry::EMPTY.path.len() + 3;
+const UPLOAD_META_BUF: usize = PickEntry::EMPTY.mime.len() + 2 + 20 + 6;
+const UPLOAD_META_LINE_BUF: usize = UPLOAD_META_BUF + 3;
+
+const _: () = assert!(UPLOAD_CARD_H >= MIN_TOUCH_TARGET);
+const _: () = assert!(UPLOAD_ROW_GAP < UPLOAD_ROW_PITCH);
+const _: () = assert!(UPLOAD_NAME_DY + UPLOAD_RUN_LINE_BOX <= UPLOAD_META_DY);
+const _: () = assert!(UPLOAD_META_DY + UPLOAD_RUN_LINE_BOX <= UPLOAD_CARD_H);
+const _: () = assert!(UPLOAD_NAME_BUF > PickEntry::EMPTY.path.len());
+const _: () = assert!(UPLOAD_ROW_Y0 >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
 
 // -----------------------------------------------------------------------------
 // The history sheet's rows
@@ -9285,16 +9526,36 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            // Tab Switcher Header (y 120..170)
-            if y >= 120 && y < 170 {
+            // Tab Switcher Header, in the band `chrome::in_sheet_header` owns.
+            if chrome::in_sheet_header(y) {
                 let header = b"Open Tabs";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    header,
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 // "+ New Tab" button in the header.
                 if let Some(c) = draw_rounded_rect(x, y, NEW_TAB_BTN, R_SMALL, THEME.primary, None, 0) {
                     let label = b"+ New Tab";
-                    if let Some(px) = text_px(x, y, 560, 138, 1, label, THEME.on_primary, c, true) {
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        NEW_TAB_LABEL_X,
+                        NEW_TAB_LABEL_Y,
+                        1,
+                        label,
+                        THEME.on_primary,
+                        c,
+                        true,
+                    ) {
                         return Some(px);
                     }
                     return Some(c);
@@ -9329,18 +9590,48 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         // URL are stored at their full length, and drawing
                         // them unmeasured let them run through the close glyph
                         // and off the card.
+                        //
+                        // WHY the two widths come from the card and the plate:
+                        // they used to be the literals `540` and `580`, cut
+                        // against a lane that was neither the card the painter
+                        // fills nor the close plate painted over it. The buffers
+                        // are the record's own length plus the mark's three
+                        // bytes: `font::ellipsize` writes its mark only into the
+                        // room the caller leaves it, so the room is stated here
+                        // rather than left to whatever the cut happened to be.
                         let title = tab_data.title_bytes();
-                        let mut tbuf = [0u8; 64];
-                        let tn = font::ellipsize(title, 1, 540, &mut tbuf);
-                        if let Some(px) = text_px(x, y, 78, card_y + 20, 1, &tbuf[..tn], THEME.on_surface, c, true) {
+                        let mut tbuf = [0u8; TAB_TITLE_BUF];
+                        let tn =
+                            font::ellipsize(title, TAB_RUN_SCALE, TAB_TITLE_LANE, &mut tbuf);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            TAB_TITLE_TEXT_X,
+                            card_y + TAB_TITLE_DY,
+                            TAB_RUN_SCALE,
+                            &tbuf[..tn],
+                            THEME.on_surface,
+                            c,
+                            true,
+                        ) {
                             return Some(px);
                         }
 
                         // Tab URL
                         let url = tab_data.url();
-                        let mut ubuf = [0u8; 128];
-                        let un = font::ellipsize(url, 1, 580, &mut ubuf);
-                        if let Some(px) = text_px(x, y, 40, card_y + 54, 1, &ubuf[..un], THEME.on_surface_variant, c, false) {
+                        let mut ubuf = [0u8; TAB_URL_BUF];
+                        let un = font::ellipsize(url, TAB_RUN_SCALE, TAB_URL_LANE, &mut ubuf);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            TAB_URL_TEXT_X,
+                            card_y + TAB_URL_DY,
+                            TAB_RUN_SCALE,
+                            &ubuf[..un],
+                            THEME.on_surface_variant,
+                            c,
+                            false,
+                        ) {
                             return Some(px);
                         }
 
@@ -9386,9 +9677,19 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return None;
             }
             // Bookmarks Header
-            if y >= 120 && y < 170 {
+            if chrome::in_sheet_header(y) {
                 let header = b"Saved Bookmarks";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    header,
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 // Close button 'X' at x=650, y=140
@@ -9431,13 +9732,47 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         let r_y = LIST_Y + shown * row_h;
                         let r_rect = chrome::list_row_card(r_y, BOOKMARK_CARD_H);
                         if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
-                            if star_glyph(x, y, 48, r_y + 35, true) {
+                            if star_glyph(x, y, BOOKMARK_STAR_CX, r_y + BOOKMARK_STAR_CY, true) {
                                 return Some(THEME.primary);
                             }
-                            if let Some(px) = text_px(x, y, 70, r_y + 16, 1, rec.title_bytes(), THEME.on_surface, c, true) {
+                            let mut tbuf = [0u8; BOOKMARK_TITLE_BUF];
+                            let tn = font::ellipsize(
+                                rec.title_bytes(),
+                                BOOKMARK_RUN_SCALE,
+                                BOOKMARK_TEXT_LANE,
+                                &mut tbuf,
+                            );
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                BOOKMARK_TEXT_X,
+                                r_y + BOOKMARK_TITLE_Y,
+                                BOOKMARK_RUN_SCALE,
+                                &tbuf[..tn],
+                                THEME.on_surface,
+                                c,
+                                true,
+                            ) {
                                 return Some(px);
                             }
-                            if let Some(px) = text_px(x, y, 70, r_y + 42, 1, rec.url_bytes(), THEME.on_surface_variant, c, false) {
+                            let mut ubuf = [0u8; BOOKMARK_URL_BUF];
+                            let un = font::ellipsize(
+                                rec.url_bytes(),
+                                BOOKMARK_RUN_SCALE,
+                                BOOKMARK_TEXT_LANE,
+                                &mut ubuf,
+                            );
+                            if let Some(px) = text_px(
+                                x,
+                                y,
+                                BOOKMARK_TEXT_X,
+                                r_y + BOOKMARK_URL_Y,
+                                BOOKMARK_RUN_SCALE,
+                                &ubuf[..un],
+                                THEME.on_surface_variant,
+                                c,
+                                false,
+                            ) {
                                 return Some(px);
                             }
                             return Some(c);
@@ -9459,9 +9794,19 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return None;
             }
             // History Header
-            if y >= 120 && y < 170 {
+            if chrome::in_sheet_header(y) {
                 let header = b"Navigation History";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    header,
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9567,9 +9912,19 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return None;
             }
             // Downloads Header
-            if y >= 120 && y < 170 {
+            if chrome::in_sheet_header(y) {
                 let header = b"Downloads";
-                if let Some(px) = text_px(x, y, 32, 134, 1, header, THEME.on_surface, THEME.surface, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    header,
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9596,16 +9951,28 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     if let Some(c) = draw_rounded_rect(x, y, r_rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
                         // WHY the path is ellipsized: the saved path fills its
                         // buffer, and drawing it unmeasured ran it through the
-                        // card and off the screen. The width is the card's inner
-                        // width: twenty pixels of inset on each side of the text
-                        // at x 44.
+                        // card and off the screen. The width is
+                        // `LIST_TEXT_LANE`: the card's own width less the inset
+                        // the ink stands at and the same air kept from its
+                        // trailing edge.
                         // WHY only the file name is shown: the directory is the
                         // same for every row, and printing it pushed the part
                         // that tells downloads apart into the ellipsis.
                         let shown = download_name(&entry.path[..entry.path_len]);
-                        let mut path = [0u8; 96];
-                        let n = font::ellipsize(shown, 1, r_rect.w - 40, &mut path);
-                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &path[..n], THEME.on_surface, c, true) {
+                        let mut path = [0u8; DOWNLOAD_NAME_BUF];
+                        let n =
+                            font::ellipsize(shown, DOWNLOAD_RUN_SCALE, LIST_TEXT_LANE, &mut path);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            LIST_TEXT_X,
+                            r_y + DOWNLOAD_NAME_DY,
+                            DOWNLOAD_RUN_SCALE,
+                            &path[..n],
+                            THEME.on_surface,
+                            c,
+                            true,
+                        ) {
                             return Some(px);
                         }
                         let mut size_buf = [0u8; 48];
@@ -9621,7 +9988,17 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                         );
                         n = append_u64_text(&mut size_buf, n, entry.length);
                         n = append_text(&mut size_buf, n, b" bytes");
-                        if let Some(px) = text_px(x, y, 44, r_y + 40, 1, &size_buf[..n], THEME.on_surface_variant, c, false) {
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            LIST_TEXT_X,
+                            r_y + DOWNLOAD_META_DY,
+                            DOWNLOAD_RUN_SCALE,
+                            &size_buf[..n],
+                            THEME.on_surface_variant,
+                            c,
+                            false,
+                        ) {
                             return Some(px);
                         }
                         return Some(c);
@@ -9641,8 +10018,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Tools", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Tools",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9691,8 +10078,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Settings", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Settings",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9741,8 +10138,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Upload a File", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Upload a File",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9769,23 +10176,50 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     return Some(px);
                 }
             } else {
-                let row_h = 84;
                 for i in 0..app.upload_count {
-                    let r_y = 220 + i * row_h;
+                    let r_y = UPLOAD_ROW_Y0 + i * UPLOAD_ROW_PITCH;
+                    let rect = chrome::list_row_card(r_y, UPLOAD_CARD_H);
                     let entry = &app.uploads[i];
-                    let rect = Rect::new(24, r_y, W - 48, row_h - 10);
                     if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
-                        let mut name = [0u8; 64];
-                        let n = font::ellipsize(&entry.path[..entry.path_len], 1, 600, &mut name);
-                        if let Some(px) = text_px(x, y, 44, r_y + 12, 1, &name[..n], THEME.on_surface, c, true) {
+                        let mut name = [0u8; UPLOAD_NAME_BUF];
+                        let n = font::ellipsize(
+                            &entry.path[..entry.path_len],
+                            UPLOAD_RUN_SCALE,
+                            LIST_TEXT_LANE,
+                            &mut name,
+                        );
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            LIST_TEXT_X,
+                            r_y + UPLOAD_NAME_DY,
+                            UPLOAD_RUN_SCALE,
+                            &name[..n],
+                            THEME.on_surface,
+                            c,
+                            true,
+                        ) {
                             return Some(px);
                         }
-                        let mut meta = [0u8; 72];
+                        let mut meta = [0u8; UPLOAD_META_BUF];
                         let m = append_text(&mut meta, 0, &entry.mime[..entry.mime_len]);
                         let m = append_text(&mut meta, m, b", ");
                         let m = append_u64_text(&mut meta, m, entry.length);
                         let m = append_text(&mut meta, m, b" bytes");
-                        if let Some(px) = text_px(x, y, 44, r_y + 42, 1, &meta[..m], THEME.on_surface_variant, c, false) {
+                        let mut line = [0u8; UPLOAD_META_LINE_BUF];
+                        let m =
+                            font::ellipsize(&meta[..m], UPLOAD_RUN_SCALE, LIST_TEXT_LANE, &mut line);
+                        if let Some(px) = text_px(
+                            x,
+                            y,
+                            LIST_TEXT_X,
+                            r_y + UPLOAD_META_DY,
+                            UPLOAD_RUN_SCALE,
+                            &line[..m],
+                            THEME.on_surface_variant,
+                            c,
+                            false,
+                        ) {
                             return Some(px);
                         }
                         return Some(c);
@@ -9854,8 +10288,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Speed Test", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Speed Test",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -9986,8 +10430,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Compatibility Lab", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Compatibility Lab",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -10073,8 +10527,18 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if y < TOOLBAR_Y1 || y >= NAV_BAR_Y0 {
                 return None;
             }
-            if y >= 120 && y < 170 {
-                if let Some(px) = text_px(x, y, 32, 134, 1, b"Test Files", THEME.on_surface, THEME.surface, true) {
+            if chrome::in_sheet_header(y) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    32,
+                    chrome::SHEET_TITLE_Y,
+                    1,
+                    b"Test Files",
+                    THEME.on_surface,
+                    THEME.surface,
+                    true,
+                ) {
                     return Some(px);
                 }
                 if let Some(px) = sheet_close_pixel(x, y) {
@@ -10086,15 +10550,35 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
-            let row_h = 84;
+            let row_h = UPLOAD_ROW_PITCH;
             for (index, (name, content_type)) in TEST_FIXTURES.iter().enumerate() {
-                let r_y = 220 + index * row_h;
-                let rect = Rect::new(24, r_y, W - 48, row_h - 10);
+                let r_y = UPLOAD_ROW_Y0 + index * row_h;
+                let rect = chrome::list_row_card(r_y, UPLOAD_CARD_H);
                 if let Some(c) = draw_rounded_rect(x, y, rect, R_CHIP, THEME.surface_container_high, Some(THEME.border), 1) {
-                    if let Some(px) = text_px(x, y, 44, r_y + 12, 1, name, THEME.on_surface, c, true) {
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        LIST_TEXT_X,
+                        r_y + UPLOAD_NAME_DY,
+                        UPLOAD_RUN_SCALE,
+                        name,
+                        THEME.on_surface,
+                        c,
+                        true,
+                    ) {
                         return Some(px);
                     }
-                    if let Some(px) = text_px(x, y, 44, r_y + 42, 1, content_type, THEME.on_surface_variant, c, false) {
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        LIST_TEXT_X,
+                        r_y + UPLOAD_META_DY,
+                        UPLOAD_RUN_SCALE,
+                        content_type,
+                        THEME.on_surface_variant,
+                        c,
+                        false,
+                    ) {
                         return Some(px);
                     }
                     return Some(c);
@@ -10384,10 +10868,15 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
             // inside it is set from its own top edge.
             let s_rect = chrome::SUGGEST_SEARCH;
             if let Some(c) = draw_rounded_rect(x, y, s_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-                let icon_box = Rect::new(s_rect.x + 14, s_rect.y + 14, 40, 40);
+                let icon_box = Rect::new(
+                    s_rect.x + chrome::SUGGEST_ICON_DX,
+                    s_rect.y + chrome::SUGGEST_ICON_DY,
+                    chrome::SUGGEST_ICON,
+                    chrome::SUGGEST_ICON,
+                );
                 if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container, None, 0) {
-                    let dx = (x as isize) - (s_rect.x + 34) as isize;
-                    let dy = (y as isize) - (s_rect.y + 34) as isize;
+                    let dx = (x as isize) - (s_rect.x + chrome::SUGGEST_ICON_CX) as isize;
+                    let dy = (y as isize) - (s_rect.y + chrome::SUGGEST_ICON_CY) as isize;
                     if (dx * dx + dy * dy >= 9 && dx * dx + dy * dy <= 25) || (dx >= 3 && dx <= 6 && dy >= 3 && dy <= 6) {
                         return THEME.primary;
                     }
@@ -10398,17 +10887,46 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
                 // WHY: the card used to read "Search Web" over a request that
                 // was sent to one host, so the screen promised a web search
                 // the browser does not perform.
-                if let Some(px) = text_px(x, y, s_rect.x + 68, s_rect.y + 14, 1, browser::SEARCH_LABEL, THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    s_rect.x + chrome::SUGGEST_TEXT_DX,
+                    s_rect.y + chrome::SUGGEST_LABEL_DY,
+                    chrome::SUGGEST_RUN_SCALE,
+                    browser::SEARCH_LABEL,
+                    THEME.on_surface_variant,
+                    c,
+                    false,
+                ) {
                     return px;
                 }
                 // The candidate is the string the card offers, and it is
                 // fitted to the row with the platform's mark.
                 //
-                // WHY it was cut to thirty-two bytes and drawn as it was:
-                // the candidate stopped at the edge of the row with nothing
-                // to say that it continued, so it read as a whole address.
+                // WHY the claim is now the code's, not just the comment's: the
+                // fit runs in `Frame::build`, against
+                // `browser::SUGGESTION_TEXT_MAX`, which is
+                // [`chrome::SUGGEST_TEXT_LANE`] -- this card's width less the
+                // inset the ink is drawn at and the gutter it keeps from the
+                // card's trailing edge. The cut and the ink therefore read one
+                // geometry, so a candidate cannot end on the border of the card
+                // that offers it.
+                //
+                // WHY the string arrives already cut: the candidate was drawn
+                // as it was stored, so it stopped at the edge of the row with
+                // nothing to say that it continued, and read as a whole address.
                 let q = &f.suggest[..f.suggest_len];
-                if let Some(px) = text_px(x, y, s_rect.x + 68, s_rect.y + 38, 1, q, THEME.primary, c, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    s_rect.x + chrome::SUGGEST_TEXT_DX,
+                    s_rect.y + chrome::SUGGEST_TEXT_DY,
+                    chrome::SUGGEST_RUN_SCALE,
+                    q,
+                    THEME.primary,
+                    c,
+                    true,
+                ) {
                     return px;
                 }
                 return c;
@@ -10417,20 +10935,45 @@ fn get_browser_pixel_content(x: usize, y: usize, app: &BrowserApp, f: &Frame) ->
             // Direct Navigate card.
             let d_rect = chrome::SUGGEST_NAVIGATE;
             if let Some(c) = draw_rounded_rect(x, y, d_rect, CARD.radius, CARD.fill, CARD.border, 1) {
-                let icon_box = Rect::new(d_rect.x + 14, d_rect.y + 14, 40, 40);
+                let icon_box = Rect::new(
+                    d_rect.x + chrome::SUGGEST_ICON_DX,
+                    d_rect.y + chrome::SUGGEST_ICON_DY,
+                    chrome::SUGGEST_ICON,
+                    chrome::SUGGEST_ICON,
+                );
                 if let Some(ic) = draw_rounded_rect(x, y, icon_box, R_SMALL, THEME.surface_container_high, None, 0) {
-                    let dx = (x as isize) - (d_rect.x + 34) as isize;
-                    let dy = (y as isize) - (d_rect.y + 34) as isize;
+                    let dx = (x as isize) - (d_rect.x + chrome::SUGGEST_ICON_CX) as isize;
+                    let dy = (y as isize) - (d_rect.y + chrome::SUGGEST_ICON_CY) as isize;
                     if dx * dx + dy * dy <= 16 {
                         return THEME.on_surface;
                     }
                     return ic;
                 }
-                if let Some(px) = text_px(x, y, d_rect.x + 68, d_rect.y + 14, 1, b"Open Address", THEME.on_surface_variant, c, false) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    d_rect.x + chrome::SUGGEST_TEXT_DX,
+                    d_rect.y + chrome::SUGGEST_LABEL_DY,
+                    chrome::SUGGEST_RUN_SCALE,
+                    b"Open Address",
+                    THEME.on_surface_variant,
+                    c,
+                    false,
+                ) {
                     return px;
                 }
                 let q = &f.suggest[..f.suggest_len];
-                if let Some(px) = text_px(x, y, d_rect.x + 68, d_rect.y + 38, 1, q, THEME.on_surface, c, true) {
+                if let Some(px) = text_px(
+                    x,
+                    y,
+                    d_rect.x + chrome::SUGGEST_TEXT_DX,
+                    d_rect.y + chrome::SUGGEST_TEXT_DY,
+                    chrome::SUGGEST_RUN_SCALE,
+                    q,
+                    THEME.on_surface,
+                    c,
+                    true,
+                ) {
                     return px;
                 }
                 return c;
@@ -11240,10 +11783,10 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
-            let row_h = 84;
+            let row_h = UPLOAD_ROW_PITCH;
             for (index, (name, _)) in TEST_FIXTURES.iter().enumerate() {
-                let r_y = 220 + index * row_h;
-                if y >= r_y && y < r_y + row_h - 10 && x >= 24 && x <= W - 24 {
+                let r_y = UPLOAD_ROW_Y0 + index * row_h;
+                if chrome::list_row_card(r_y, UPLOAD_CARD_H).contains(x, y) {
                     let _ = std::audio_haptic_click();
                     let mut url = [0u8; 96];
                     let mut n = append_text(&mut url, 0, FIXTURE_URL_PREFIX);
@@ -11262,10 +11805,10 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 app.overlay = SheetOverlay::None;
                 return Tap::Redraw;
             }
-            let row_h = 84;
+            let row_h = UPLOAD_ROW_PITCH;
             for i in 0..app.upload_count {
-                let r_y = 220 + i * row_h;
-                if y >= r_y && y < r_y + row_h - 10 && x >= 24 && x <= W - 24 {
+                let r_y = UPLOAD_ROW_Y0 + i * row_h;
+                if chrome::list_row_card(r_y, UPLOAD_CARD_H).contains(x, y) {
                     let _ = std::audio_haptic_click();
                     // WHY the work is deferred by a pass: the selected row is
                     // drawn as running once the transfer has actually started,
