@@ -1,5 +1,7 @@
 # InterOS Developer Guide
 
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
 The unified developer CLI (`tools/interos.py`, with root wrappers `interos.ps1` and `interos.cmd`) is the authoritative command interface for building, testing, packaging, and managing InterOS Core.
 
 ---
@@ -25,7 +27,7 @@ python tools/interos.py reality
 ```
 
 ### `interos devices`
-Lists supported device profiles, CPU architectures, and their implementation and verification tiers:
+Lists supported virtual machine profiles, CPU architectures, and their implementation and verification tiers:
 ```bash
 python tools/interos.py devices
 ```
@@ -131,9 +133,9 @@ python tools/interos.py inspect dist/my_app.rapp
 ## 5. QEMU Runtime & Package Lifecycle
 
 ### `interos run`
-Launches the canonical QEMU smartphone demo or deploys a specific package:
+Launches the canonical QEMU virtual smartphone environment or deploys a specific package:
 ```bash
-# Launch the canonical QEMU x86_64 demo:
+# Launch the canonical QEMU x86_64 environment:
 python tools/interos.py run qemu
 
 # Deploy and launch a specific application:

@@ -1,5 +1,7 @@
 # Recovery and Secure Updates
 
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
 InterOS Core treats operating system updates as atomic, authenticated transactions rather than raw flash overwrites (`kernel/src/update.rs`, `kernel/src/recovery.rs`).
 
 ---
@@ -41,7 +43,7 @@ The boot recovery controller manages slot state transitions across system reboot
 
 ---
 
-## 3. Platform & Hardware Reality Boundary
+## 3. Platform & Emulation Reality Boundary
 
-- **Kernel Policy vs. Storage Drivers**: The microkernel provides the transaction state machine, cryptographic validation, and recovery policy. Physical block writing depends on platform-specific flash/block drivers.
-- **Physical Device Status**: Production over-the-air (OTA) updates on consumer smartphones are **not** currently deployed. Update transactions are currently verified in virtual storage and QEMU developer targets.
+- **Kernel Policy vs. Storage Drivers**: The microkernel provides the transaction state machine, cryptographic validation, and recovery policy.
+- **QEMU Verification**: There is no physical device, silicon, or over-the-air update deployment. Update transactions are verified strictly in virtual storage and QEMU developer targets.

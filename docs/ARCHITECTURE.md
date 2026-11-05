@@ -1,16 +1,18 @@
 # InterOS Core: System Architecture & Security Specification
 
+> **Project Classification:** Open-source research prototype of a smartphone operating system, not a commercial product  
 > **Target Architectures:** x86_64 (`x86_64-unknown-none`), AArch64 (`aarch64-unknown-none`), RISC-V 64 (`riscv64gc-unknown-none-elf`)  
 > **Core Language:** Bare-Metal Pure Rust (`#![no_std]`) with minimal assembly primitives  
-> **Security Model:** Hardware-Enforced Capability Microkernel (Ring 3 / EL0 / U-Mode Userspace Isolation)  
-> **Canonical Development Target:** x86_64 QEMU PC (`q35` BIOS disk image)  
-> **Physical Hardware Status:** Experimental bring-up (AArch64 PinePhone Allwinner A64 research target)
+> **Security Model:** Capability-Based Microkernel (Ring 3 / EL0 / U-Mode Userspace Isolation)  
+> **Canonical Target:** x86_64 QEMU PC (`q35` BIOS disk image); execution is in QEMU only  
+> **Physical Hardware Status:** Unverified; no physical device or silicon execution  
+> **Contribution Status:** External contributions are not accepted at this stage and will open after the first stable release  
 
 ---
 
 ## 1. Architectural Philosophy & Isolation Model
 
-InterOS Core is engineered from first principles as an open-source, memory-safe mobile operating system foundation:
+InterOS Core is a research prototype of a smartphone operating system written in bare-metal Rust (`#![no_std]`), verified in QEMU:
 
 ```text
 +-------------------------------------------------------------------------+
@@ -30,11 +32,11 @@ InterOS Core is engineered from first principles as an open-source, memory-safe 
 |       Shared-Memory Ring Buffers + Atomic Futex Synchronization         |
 +-------------------------------------------------------------------------+
 |                   InterOS Microkernel Core (Ring 0 / EL1 / S-Mode)      |
-|   - Preemptive Priority Scheduler (100 Hz)   - Memory Paging & MMU       |
-|   - Hardware Keystore & Vault Controller      - Capability Token Matrix  |
+|   - Preemptive Priority Scheduler           - Memory Paging & MMU       |
+|   - Software Keystore & Vault Controller     - Capability Token Matrix  |
 +-------------------------------------------------------------------------+
 |                   Hardware Abstraction Layer (HAL)                      |
-|      x86_64 (Canonical QEMU) |       AArch64 (QEMU / PinePhone) | RISC-V 64|
+|      x86_64 (Canonical QEMU) |       AArch64 (QEMU virt)        | RISC-V 64|
 |   - APIC / PIC / PIT         |   - PSCI / GICv2 / ArchTimer     | - SBI / PLIC|
 |   - Linear DRM/KMS VBE       |   - SimpleFB Framebuffer         | - NS16550A  |
 +-------------------------------------------------------------------------+
@@ -138,7 +140,7 @@ InterOS Core features a native smartphone UI architecture designed for bare-meta
 - Proportional 16×24 master typeface (`FONT`, `FONT_BOLD`) with 17-row cap height, 12-row x-height, and 4-row descender depth.
 - Tabular figures (11px fixed advance at 1×) ensuring clock digits never jitter sideways.
 - Proportional character metrics (e.g. `i` at 6px advance, `W` at 16px advance).
-- 4-bit grayscale coverage anti-aliasing (`test_text_aa`) blending fractional edge alpha into background pixels with fast-path early exits.
+- Grayscale coverage anti-aliasing: the outline face samples 8-bit coverage and maps it through `perceptual_alpha` before blending, and the bitmap fallback draws from a 16-level (4-bit) ramp. There is no subpixel rendering.
 - Text measurement (`measure`), optical centering (`center_x`), line wrapping (`wrap_text`), and ellipsization (`ellipsize`).
 
 ### Frame-Plan Architecture
@@ -149,8 +151,8 @@ InterOS Core features a native smartphone UI architecture designed for bare-meta
 
 ## 5a. The Content Layer: Document Index & Intent Registry
 
-Two questions about the whole device used to be answered inside the apps that
-were asking them. "What files does this device hold?" was answered by the
+Two questions about the whole system used to be answered inside the apps that
+were asking them. "What files does this system hold?" was answered by the
 gallery's own storage scan and again by the file manager's own directory
 listing, with two parsers and two notions of what a file is. "Which program
 opens this file?" was answered by a table inside the file manager, and by
@@ -328,4 +330,4 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 
 1. **DMA / IOMMU**: Device DMA currently relies on physical frame allocation from a reserved frame region. Full SMMU / IOMMU page table integration for hardware peripherals is ongoing.
 2. **GPU Acceleration**: Display rendering utilizes linear software framebuffers (`SimpleFB` / DRM KMS). Hardware-accelerated GPU pipelines are planned for future revisions.
-3. **Physical Hardware Deployment**: Fastboot v2 Android boot images (`boot-aarch64.img`) compile and package correctly. Physical device testing is strictly experimental bring-up targeting laboratory development boards (e.g. PinePhone Allwinner A64).
+3. **Physical Hardware Deployment**: The Fastboot v2 packer (`tools/mkbootimg`) exists but produces no phone boot image: an ARM64 device image needs a real device tree blob and a real initramfs, neither is in this tree, and the packer refuses to substitute placeholders rather than emit a container that would flash and not boot. Physical device deployment is unverified; execution is currently verified in QEMU only.

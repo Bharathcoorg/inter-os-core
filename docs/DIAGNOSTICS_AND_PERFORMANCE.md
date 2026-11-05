@@ -1,6 +1,8 @@
 # Diagnostics and Performance
 
-InterOS Core provides bounded, allocation-free diagnostics and performance measurement primitives suitable for `#![no_std]` bare-metal microkernel execution.
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
+InterOS Core provides bounded, allocation-free diagnostics and performance measurement primitives suitable for `#![no_std]` bare-metal microkernel execution in QEMU.
 
 ---
 
@@ -52,10 +54,10 @@ In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md)
 InterOS provides empirical, automated benchmark verification tools under `tools/` with companion test contracts under `tests/`:
 
 - **System & Storage Benchmark (`tools/bench_interos.py`)**:
-  - Automatically verifies canonical boot image size (~10.47 MB `inter-os-bios.img`, 10,978,304 bytes), 17 Ring-3 application crates, live kernel heap usage via `[DIAG_STATE]` telemetry, and writes structured results to `target/benchmark_report.json` with fail-closed semantics.
+  - Measures the canonical boot image as it stands on disk (`target/inter-os-bios.img` — 12.47 MiB, 13,075,456 bytes at the time of writing; the tool reads the file every run rather than comparing it to a remembered figure), counts the Ring-3 application crates under `apps/`, reads live kernel heap occupancy from the guest's own `[DIAG_STATE]` serial telemetry, and writes structured results to `target/benchmark_report.json`. Any field it cannot observe is printed as `UNAVAILABLE`; nothing is substituted from a previous run.
 - **Boot Latency Measurement (`tools/bench_boot.py`)**:
   - Measures elapsed monotonic cycles from QEMU process startup to initial scanout present (`Step 5: Initial presentation complete`).
 - **Touch-to-Scanout Latency (`tools/bench_tap_latency.py`)**:
-  - Correlates hardware touch injection events with display compositor buffer flips, verified by `tests/test_tap_latency_bench.py`.
+  - Correlates virtual touch injection events with display compositor buffer flips, verified by `tests/test_tap_latency_bench.py`.
 - **Heap Allocation Invariant Enforcement (`tools/bench_heap.py`)**:
   - Validates that interactive rendering loops, font rasterization, touch event routing, and compositing passes execute with strictly zero heap allocations (`tests/test_heap_bench.py`).

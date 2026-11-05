@@ -1,13 +1,15 @@
 # Security Policy
 
-InterOS Core implements a zero-ambient-authority, capability-enforced microkernel architecture for mobile systems. Security is foundational to our design, from hardware privilege separation to userspace isolation and on-device AI runtime boundaries.
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
+InterOS Core implements a zero-ambient-authority, capability-enforced microkernel architecture for mobile systems. Security is foundational to the design, from virtual privilege separation to userspace isolation and host-backed AI runtime boundaries.
 
 ## Supported Versions
 
 | Version / Branch | Supported | Notes |
 | :--- | :--- | :--- |
 | `master` | Yes | Active canonical development branch |
-| Tagged releases (`v*`) | Critical security fixes only | Latest minor/patch release |
+| Tagged releases | Not applicable yet | No `v*` tag exists in this repository; security fixes land on `master` |
 | Development branches | No | Experimental; not for production use |
 
 ## Reporting a Vulnerability
@@ -28,7 +30,7 @@ To help us triage and resolve the issue quickly, please provide:
 1. **Description:** A clear summary of the vulnerability and its potential impact.
 2. **Component:** Affected subsystem (e.g., `kernel`, `cap_table`, `ipc`, `aid`, `drivers`, `vfs`).
 3. **Reproduction Steps:** Minimal proof-of-concept (PoC), test case, or step-by-step instructions.
-4. **Environment:** Architecture (`x86_64`, `aarch64`, or `riscv64`), execution environment (QEMU emulator, hardware target), toolchain version.
+4. **Environment:** Architecture (`x86_64`, `aarch64`, or `riscv64`), execution environment (canonical x86_64 QEMU emulator or QEMU virt), toolchain version.
 5. **Mitigation / Suggested Fix:** If you have identified a fix or mitigation, please include details.
 
 ### Response Timeline
@@ -58,6 +60,6 @@ InterOS Core enforces the following architectural security invariants:
 
 The following threat vectors are considered out of scope for software security advisories:
 
-- Attacks requiring physical access to the device before secure boot handoff.
+- Attacks requiring physical access to the development host machine before hypervisor launch.
 - Compromised host operating system or hypervisor under QEMU emulation.
 - Denial of Service via intentional exhaustion of virtual machine CPU/RAM on development hosts.

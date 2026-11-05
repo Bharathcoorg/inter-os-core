@@ -1,6 +1,8 @@
 # Platform Reality Contract
 
-InterOS Core separates implementation from verification. A subsystem being present in source does not by itself mean that hardware exists or that the feature has been verified on physical hardware.
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
+InterOS Core separates implementation from verification. A subsystem being present in source does not by itself mean that hardware exists or that the feature has been verified on physical hardware. Physical hardware execution does not exist for this project; execution is verified in QEMU only.
 
 ## Runtime states
 
@@ -27,7 +29,7 @@ Persistent state, signed packages, and isolated userspace are required platform 
 
 ## UI contract
 
-Consumer UI must not display fixed demonstration values as live device state. Clock, location, battery, radio, sensor, camera, modem, and similar values must come from an authoritative service/backend or be rendered as unavailable.
+Consumer UI must not display fixed demonstration values as live system state. Clock, location, battery, radio, sensor, camera, modem, and similar values must come from an authoritative service/backend or be rendered as unavailable.
 
 The launcher therefore no longer embeds a fixed clock, location, or synthetic battery percentage.
 

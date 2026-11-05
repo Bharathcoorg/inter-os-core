@@ -11,9 +11,9 @@
 ![Language: Pure Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architectures: x86_64 / AArch64 / RISC-V 64](https://img.shields.io/badge/Architectures-x86__64%20%7C%20AArch64%20%7C%20RISC--V%2064-success.svg)
 ![Build: Reproducible](https://img.shields.io/badge/Build-Reproducible-blue.svg)
-![Verification: QEMU Verified](https://img.shields.io/badge/Verification-QEMU%20Verified%20(797%2F797)-success.svg)
+![Verification: QEMU Verified](https://img.shields.io/badge/Verification-QEMU%20Verified-success.svg)
 
-### **InterOS — Sovereign Rust mobile OS for AArch64, RISC-V 64, and x86_64 with native on-device Local open-model AI runtime, native Rust mobile apps, and Android compatibility.**
+### **InterOS — Research prototype of a mobile operating system written in bare-metal Rust (#![no_std]), running in QEMU only, featuring a host-backed AI inference bridge, native UI, and an isolated Android compatibility boundary.**
 
 **[🌐 Official Website](https://interos.tech)** • **[🚀 Live Demo](https://demo.interos.tech)** • **[💖 Sponsor InterOS](https://interos.tech/sponsors)**
 
@@ -23,9 +23,9 @@
 
 ---
 
-> **Status Notice: Engineering Reality & Verification Status**  
-> InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. The platform enforces per-process virtual address spaces (CR3 / TTBR0_EL1 / SATP), capability-based access control, and safe syscall memory copies (`UserPtr`). Native `.rapp` packages have an Ed25519 attestation path; this does not mean Android APK signatures are verified.  
-> The repository includes automated source-contract and subsystem tests for the canonical x86_64 QEMU smartphone target and QEMU virt bring-up targets for AArch64 and RISC-V 64. Subsystem lifecycle, DRM/KMS scanout, and input pathways are fully QEMU-verified (797 automated contracts passed, 100% boot verification). Physical smartphone deployment remains experimental bring-up.
+> **Status Notice: Research Prototype & Verification Status**  
+> InterOS Core is an open-source research prototype of a smartphone operating system, not a commercial product. It runs in QEMU only; there is no physical device, silicon, or hardware telemetry. The platform enforces per-process virtual address spaces (CR3 / TTBR0_EL1 / SATP), capability-based access control, and safe syscall memory copies (`UserPtr`). Native `.rapp` packages have an Ed25519 attestation path; this does not mean Android APK signatures are verified.  
+> The repository includes automated source-contract and subsystem tests for the canonical x86_64 QEMU virtual smartphone target and QEMU virt bring-up targets for AArch64 and RISC-V 64. Subsystem lifecycle, DRM/KMS scanout, and input pathways are QEMU-verified. Physical smartphone hardware is unverified; physical flashing is not supported. External contributions are not accepted at this stage and will open after the first stable release.
 
 ---
 
@@ -45,7 +45,7 @@ InterOS strictly distinguishes implementation from verification evidence:
 
 > [!IMPORTANT]
 > **QEMU verification does not equal physical hardware verification.**  
-> The canonical developer platform is a virtual smartphone target in QEMU. Physical smartphone flashing (e.g. PinePhone Allwinner A64) is an experimental research track and is not production-ready.
+> The canonical developer platform is a virtual smartphone target in QEMU only. InterOS Core does not run on physical hardware, and physical smartphone flashing is not supported.
 
 See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `python tools/interos.py reality` for live state inspection.
 
@@ -63,33 +63,32 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Shared-Memory IPC** | Present | **Unit-tested / QEMU-verified** | Bounded ring buffers, atomic futex-like synchronization, capability endpoints |
 | **Cryptographic `.rapp` Packages** | Present | **Unit-tested / QEMU-verified** | `kernel/src/package/rapp.rs`; Ed25519 signatures, SHA-256 digests, RAPP v2/v3 parser |
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
-| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, 60 Hz) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and 4-bit grayscale coverage anti-aliasing |
+| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, `refresh_hz = 60` as a programmed target — no physical panel is bound) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and grayscale coverage anti-aliasing (8-bit coverage on the outline face, a 16-level ramp on the bitmap fallback; no subpixel rendering) |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
-| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 16 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops |
+| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 17 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`, `webview_demo`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops. 16 are launchable today: `webview_demo` has no first-party package descriptor yet. |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
-| **Universal Device Studio** | Present | **QEMU-verified** | `emulator/server.py`; Web-based smartphone studio (`http://localhost:4300`) with persistent binary frame streaming (`/api/screen/binary_stream`), zero-overhead `ImageData` caching, live telemetry deck, and 1:1 touch/gesture pipeline |
+| **Universal Device Studio** | Present | **QEMU-verified** | `emulator/server.py`; Web-based emulator control console (`http://localhost:4300`) with persistent binary frame streaming (`/api/screen/binary_stream`), zero-overhead `ImageData` caching, live telemetry deck, and 1:1 touch/gesture pipeline |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
 | **A/B System Updates & Rollback** | Present | **Unit-tested** | `kernel/src/update.rs`, `kernel/src/recovery.rs`; monotonic versions, boot health counter |
-| **Physical Hardware Deployment** | Experimental | **Source-only** | `docs/PHYSICAL_HARDWARE_FLASHING.md`; Fastboot v2 `boot-aarch64.img` header format |
+| **Physical Hardware Deployment** | Unavailable | **Source-only** | `docs/PHYSICAL_HARDWARE_FLASHING.md`; Unverified on physical silicon; the build produces a QEMU disk image |
 
 ---
 
-## 📈 Empirical Sovereign Benchmarks
+## 📈 Measured Footprint
 
-Authentic empirical measurements captured via `python tools/bench_boot.py` and `python tools/bench_interos.py`:
+Every figure below is produced by a command in this repository, against the canonical x86_64 QEMU guest. There is no comparison column. `python tools/bench_interos.py` declines to print one and says why in its own report: *"No comparable measurement of any other mobile operating system was made on this rig, so none is printed beside the numbers above. A QEMU guest and a published phone figure share no method, and neither number can support a comparison between them."* Android, iOS and Ubuntu Touch figures are therefore not quoted here.
 
-| Metric | Android 15 (AOSP) | iOS 18 | Ubuntu Touch | InterOS Sovereign |
-| :--- | :--- | :--- | :--- | :--- |
-| **Active Kernel Heap** | ~2,600 MB (OS RAM) | ~1,900 MB | ~850 MB | **~30 MB** (64 MiB internal pool) |
-| **Base Microkernel Binary** | ~18.5 GB (system) | ~13.0 GB (system) | ~4.2 GB (system) | **~1.8 MB** (stripped kernel ELF) |
-| **Full OS Boot Disk (16 Apps + Daemons, without model weights)** | Included above | Included above | Included above | **~10.47 MB** (`inter-os-bios.img`, 10,978,304 bytes) |
-| **With On-Device AI Infrastructure** | + GMS / CoreAI | + Apple Intelligence | N/A | **~10.5 MB** (+251 KB for `aid` & Agent Manager; GGUF weights staged in `/data/models` or streamed via host bridge) |
-| **Cold Boot Latency** | ~28.0 s (Hardware) | ~21.0 s (Hardware) | ~19.0 s (Hardware) | **~20–23 s** (QEMU TCG software emulation) |
-| **Interactive Render Allocations** | Dynamic GC Pauses | Dynamic ARC Heap | GObject / Heap | **0 bytes** (`#![no_std]` stack/static buffers) |
-| **Authority Model** | Ambient Linux Root | Mach Ports / Daemons | Ambient systemd | **Zero Ambient Authority** (`CapHandle`) |
-| **Kernel Implementation** | C / Linux kernel | C / XNU Mach-BSD | C / Linux kernel | **Rust Microkernel** (`#![no_std]`, bounded `unsafe`) |
-
-> *Note: Android, iOS, and Ubuntu Touch figures reflect total OS RAM on physical silicon devices. InterOS figures reflect active microkernel heap inside the canonical x86_64 QEMU emulator. The ~10.47 MB boot image contains the complete standalone OS, window compositor, display driver, and 16 native applications. The AI service runtime (`aid`) and Agent Manager app add ~251 KB to the system image; multi-megabyte GGUF model weights are streamed via the development host bridge or staged to `/data/models`.*
+| Metric | Measured here | Produced by |
+| :--- | :--- | :--- |
+| **Full OS boot disk** (17 apps + daemons, without model weights) | **12.47 MiB** — `target/inter-os-bios.img`, 13,075,456 bytes | `python tools/bench_interos.py` |
+| **Native applications** | **17** `#![no_std]` / `#![no_main]` crates, 6,287.8 KB of their own source | `python tools/bench_interos.py`, counting `apps/*/Cargo.toml` |
+| **Kernel heap** | **64 MiB** static pool (`kernel/src/allocator.rs`, `HEAP_SIZE`). Occupancy is read from the guest's own `[DIAG_STATE]` serial telemetry, and the tool prints `UNAVAILABLE` rather than a remembered figure when no log is passed | `python tools/bench_interos.py --log <serial log>` |
+| **Cold boot latency** | Timed from QEMU process start to first scanout under TCG software emulation. It moves with host load, so it is measured per run rather than quoted here | `python tools/bench_boot.py` |
+| **Interactive render allocations** | **0 bytes** in the event loops — the apps are `#![no_std]` with no allocator, so per-frame paths hold stack and static buffers only. `python tools/bench_heap.py` separately reads the *kernel* allocator's own used/free bookkeeping from a live guest at boot checkpoints | app source contracts (`tests/test_*_truth_contract.py`), `python tools/bench_heap.py` |
+| **AI inference** | **Host-backed.** `aid` and the Agent Manager are inside the disk image above; multi-megabyte GGUF weights are not — they are staged into `/data/models` or streamed over the development host bridge. No on-device inference is claimed | [docs/SYSTEM_SERVICES.md](docs/SYSTEM_SERVICES.md) |
+| **Authority model** | **Zero ambient authority**: hardware, VFS, IPC and keystore access each require an explicit `CapHandle` | `kernel/src/capability/` |
+| **Text anti-aliasing** | **Grayscale coverage AA.** The outline face samples 8-bit coverage and maps it through `perceptual_alpha`; the bitmap fallback draws from a 16-level (4-bit) ramp. The platform has no subpixel rendering | `sdk/rust/interos-std/src/design/outline_text.rs`, `sdk/rust/interos-std/src/font.rs` |
+| **Physical hardware** | **Unverified.** No InterOS build has booted on silicon, and the keystore reports `is_hardware_backed() == false` | [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md) |
 
 ---
 
@@ -131,7 +130,7 @@ python tools/interos.py logs -f
 ```
 Device Studio web console is accessible at `http://localhost:4300`.
 - **Focus Mode (Default)**: Clean, immersive mobile testing with responsive, direct 1:1 touch mapping.
-- **Lock Screen Interaction**: The device boots to an authentic mobile lock screen. **Swipe up** (drag upward $\ge 28\text{px}$) to unlock the device and access the home screen app grid. Single taps display an informational hint.
+- **Lock Screen Interaction**: The QEMU guest boots to an authentic mobile lock screen. **Swipe up** (drag upward $\ge 28\text{px}$) to unlock the guest and access the home screen app grid. Single taps display an informational hint.
 - **Developer Telemetry Deck**: Press **`D`** or click **`Deck`** in the header to inspect real QEMU CPU registers, block I/O, IPC pipelines, and packages. Press **`F`** or **`Esc`** to return to Focus Mode.
 - See [DEVELOPERS.md](DEVELOPERS.md) for full developer instructions.
 
@@ -210,7 +209,7 @@ InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]
 - **Typography Engine (`interos-std::design::font`)**:
   - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).
   - Tabular digits (11px fixed advance) ensuring clock text never jitters horizontally.
-  - 4-bit grayscale coverage anti-aliasing (`test_text_aa`) with analytical corner feathering and early-exit fast paths.
+  - Grayscale coverage anti-aliasing: `test_text_aa` samples the outline face's 8-bit coverage through `perceptual_alpha`, falling back to the bitmap face's 16-level (4-bit) ramp. No subpixel rendering.
   - Text measurement (`measure`), optical centering (`center_x`), wrapping, and ellipsization (`ellipsize`).
 - **Reusable Primitives (`interos-std::design::primitives`)**:
   - Squircle cards (`draw_rounded_rect`), capsules/pills (`draw_pill`), circles (`draw_circle`), and dividers (`draw_divider`).
@@ -241,7 +240,7 @@ InterOS Core maintains an isolated, bounded subsystem for Android compatibility:
 Device Studio (`http://localhost:4300`) provides a local development twin and emulator control plane:
 
 - **Real QEMU Process Management**: Launch, pause, reset, or stop QEMU backends (`x86_64`, `aarch64`, `riscv64`).
-- **Honest Hardware Telemetry**: Live registers (`CR0`, `CR3`, `RIP`, `EAX`) queried directly from the QEMU monitor. When QEMU is offline, registers reset to dashes (`—`) and RIP reports `Offline`.
+- **Honest QEMU Virtual Machine Telemetry**: Live registers (`CR0`, `CR3`, `RIP`, `EAX`) queried directly from the QEMU monitor. When QEMU is offline, registers reset to dashes (`—`) and RIP reports `Offline`.
 - **Microkernel Serial UART**: Streaming logs directly from Ring 0 / EL1 / S-Mode.
 - **Package Sideloading**: Direct deployer for signed `.rapp` packages with cryptographic validation.
 
@@ -291,10 +290,10 @@ python tools/interos.py stop
 | Architecture | Microkernel Crate | Target Triple | Target Platform | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`q35`), BIOS | Primary emulation contract; boot- and app-runtime verified in QEMU/Device Studio |
-| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Boot-verified in QEMU `virt` from the flat arm64 Image (device tree, RAM, interrupt controller); physical hardware source-only |
-| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Boot-verified in QEMU `virt` (U-mode syscall round trip); physical hardware source-only |
+| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53) | Boot-verified in QEMU `virt` from the flat arm64 Image (device tree, RAM, interrupt controller); physical hardware source-only |
+| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64) | Boot-verified in QEMU `virt` (U-mode syscall round trip); physical hardware source-only |
 
-For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
+For experimental bring-up and image documentation, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
 
 ### Reliability & Platform Specifications
 - [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) — canonical implementation vs. verification terminology.
@@ -311,7 +310,7 @@ For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FL
 
 ## 💖 Sponsoring InterOS
 
-InterOS is an independent, sovereign, open-source mobile operating system engineered from bare-metal Rust. If you find InterOS valuable or wish to support continuous hardware bring-up, compiler development, local AI acceleration, and browser engine porting, consider becoming a sponsor!
+InterOS is an independent, open-source research prototype of a mobile operating system engineered from bare-metal Rust, running in QEMU only. If you find InterOS valuable or wish to support development, consider becoming a sponsor!
 
 - **GitHub Sponsors**: [github.com/sponsors/Bharathcoorg](https://github.com/sponsors/Bharathcoorg)
 - **Direct Sponsorship & Tiers**: [interos.tech/sponsors](https://interos.tech/sponsors)

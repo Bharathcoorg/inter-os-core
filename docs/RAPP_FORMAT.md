@@ -1,5 +1,7 @@
 # InterOS RAPP Binary Package Specification
 
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
 The **RAPP** (Rust Application Package) binary format is the native, deterministic execution package format for InterOS Core (`kernel/src/package/rapp.rs`).
 
 ---
@@ -164,7 +166,7 @@ merely undocumented:
   which the kernel's storage vault encrypts at rest. That is ordinary
   `FileSystemWrite` (id `10`) to the package, not a separate authority, so a
   manifest cannot request enclave access and must not claim to have it.
-- **No device-wide administration is grantable to a package.** Id `18` is
+- **No system-wide administration is grantable to a package.** Id `18` is
   reserved for the system supervisor: the kernel mints it only for a publisher
   key the trust store records as a system publisher, and the runtime gate
   additionally requires a kernel-assigned privileged process identity. Until a
@@ -189,7 +191,7 @@ not `FileSystemRead`: the index *describes* documents — their paths, lengths,
 media types and identities — and reading a description is not reading a file.
 An app that may browse the shared area's catalogue does not thereby gain the
 ability to open the documents in it. `ContentIntentDispatch` is not
-`ProcessSpawn`: spawning a process is authority over the device's task table,
+`ProcessSpawn`: spawning a process is authority over the system's task table,
 while dispatching an intent is authority over one named relationship — "the
 package that declared this media type" — which the kernel resolves from the
 signed manifests.
@@ -200,7 +202,7 @@ signed manifests.
 
 1. **Scaffolding & Packaging**: Developers scaffold projects via `interos new` and bundle binaries via `interos package <name>`.
 2. **Signing**: Packages are signed with the publisher's Ed25519 private key via `interos sign <package> --key <key_file>`.
-3. **Trust Provisioning**: The OS carries no publisher trust root of its own. A publisher becomes trusted only when the owner of the device installs its Ed25519 public key into the trust store, and that record is journalled so it survives a reboot. On a QEMU developer guest the owner provisions a root over the COM1 console with `RAPP_TRUST <public key hex> <publisher>`, which the `interos trust <package.rapp>` command issues.
+3. **Trust Provisioning**: The OS carries no publisher trust root of its own. A publisher becomes trusted only when the owner of the virtual machine installs its Ed25519 public key into the trust store, and that record is journalled so it survives a reboot. On a QEMU developer guest the owner provisions a root over the COM1 console with `RAPP_TRUST <public key hex> <publisher>`, which the `interos trust <package.rapp>` command issues.
 
    Platform-authority publisher identities are an explicit allowlist: the exact
    strings `system` and `platform`, plus the delimited namespace `org.interos.`.
@@ -233,7 +235,7 @@ Evidence levels used below:
 | **Video** | `video/x-motion-jpeg` | **Supported** | `org.interos.video_player` | Unit-tested | Motion JPEG single-frame/stream parsing and baseline JPEG decode. The AVI path above also decodes MJPEG payloads through the same decoder. |
 | **Video** | `video/x-ppm` | **Supported** | `org.interos.video_player` | Unit-tested | Uncompressed PPM P6 frames in `/storage/videos`. The content index itself classifies P6 as `image/x-portable-pixmap`; File Manager maps `/storage/videos/*.ppm` to `video/x-ppm` while retaining the index provenance. Frame decoding is covered by `test_ppm_p6_frame_decode`; no QEMU run has opened a PPM through the player. |
 | **Video** | `video/x-raw` | **Supported** | `org.interos.video_player` | Source-only | Raw RGB24/RGBA frames with a header, opened by suffix from `/storage/videos`. No fixture or test covers this path yet. |
-| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | Unit-tested | H.264, VP9, and AV1 decode requires physical silicon. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` The gallery does not advertise these types: it has no video decoder and its handoff refuses when the gallery itself is the first registered handler. |
+| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | Unit-tested | H.264, VP9, and AV1 decoders are not implemented. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` The gallery does not advertise these types: it has no video decoder and its handoff refuses when the gallery itself is the first registered handler. |
 | **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | QEMU-verified (log) | Audio streams inside AVI files are detected but not decoded. The player logs `"[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed."` and shows `"Audio stream: unavailable"` while the stream is open. |
 | **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Unit-tested | Decoded via native zero-heap image decoders. |
 | **Images** | `image/webp` | **Supported** | `org.interos.gallery` | Unit-tested | Lossless (VP8L) fully supported; lossy (VP8 keyframe) decoder implemented in standard library with fixture test coverage (`vp8_fixtures.rs`). |

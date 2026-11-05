@@ -1,6 +1,8 @@
 # InterOS Core — Developer & Studio Guide
 
-Welcome to the **InterOS** developer guide. This document details our development workflow, Device Studio modes, telemetry inspection, and UI/input guidelines.
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
+This document details the development workflow, Device Studio modes, virtual machine inspection, and UI/input guidelines.
 
 ---
 
@@ -15,12 +17,12 @@ By default, Device Studio launches in **Focus Mode**:
 - **Real-Time Input**: Mouse and touchpad gestures map directly with responsive 1:1 coordinate scaling to the guest microkernel.
 
 ### 2. Developer Telemetry Deck
-The **Developer Telemetry Deck** provides deep, transparent hardware and microkernel inspection tools:
+The **Developer Telemetry Deck** provides deep, transparent virtual machine and microkernel inspection tools:
 - **CPU Registers & State**: Live registers (RAX, RBX, RCX, RDX, RSI, RDI, RIP, RSP), CPU execution state, and active Task ID.
 - **Memory & VFS Block I/O**: Real QEMU RAM allocation, active block storage drive name, read ops, and sector I/O accounting.
 - **Live Process Supervisor**: Task list, Ring privilege level, thread states (`Running`, `Blocked`, `Sleeping`), and PID accounting.
 - **IPC Inspector**: Real-time shared-memory IPC ring buffer endpoints, futex events, and message router telemetry.
-- **Universal Package Sideloading**: Drag-and-drop installer supporting `.app` (Rust native), `.rapp` (Cryptographic sovereign packages), and `.apk` (Android compatibility boundary).
+- **Package Ingest & Sideloading**: Drag-and-drop classifies `.app` (ELF), `.wasm`, `.apk` and `.rapp` payloads on the host and answers `Analyzed; guest installation required` — an `.apk` drop reports DEX and signature *metadata* and explicitly performs no cryptographic verification. The signed install path is separate (`/api/rapp/install`), verifies the RAPP v2 Ed25519 signature and accepts x86_64 `.rapp` packages only. The guest package registry remains the only installed-app authority.
 
 ---
 
@@ -35,7 +37,7 @@ Developers can switch between **Focus Mode** and the **Telemetry Deck** at any t
 | **Exit Focus Mode** | Press **`Escape`** | Collapses phone focus and expands the Telemetry Deck |
 | **Toggle Focus Mode** | Press **`F`** | Toggles between immersive Focus Mode and standard view |
 | **Fullscreen WebApp** | Click **`Fullscreen`** | Hides browser address bar and tabs for native mobile feel |
-| **Hardware Lock / Power**| Click **Power Key** / `#hw-btn-power` | Simulates pressing the physical smartphone power button |
+| **Virtual Lock / Power**| Click **Power Key** / `#hw-btn-power` | Simulates pressing the virtual power key |
 
 > [!TIP]
 > **Developer Quick Workflow**: Press **`D`** while testing any app to inspect its CPU register allocation and IPC packets in real time. Press **`F`** to return to immersive smartphone testing.
@@ -52,9 +54,9 @@ InterOS enforces a strict mobile touch and authentication contract:
    - If an owner PIN has been provisioned (via Settings > Security), swiping up transitions to `ViewMode::PinEntry`.
    - On an unprovisioned system, swiping up directly unlocks onto the Home Screen.
 3. **Locking the Screen**:
-   - **Hardware Button**: Click the right-side physical power button on the chassis.
+   - **Chassis Button**: Click the right-side virtual power button on the studio chassis.
    - **Quick Controls**: Swipe down from top-right status bar, tap **Screen lock**.
-   - **Power Menu**: Tap battery status area or click hardware power button, tap **Lock device**.
+   - **Power Menu**: Tap battery status area or click virtual power button, tap **Lock device**.
 
 ---
 
@@ -62,7 +64,7 @@ InterOS enforces a strict mobile touch and authentication contract:
 
 Before committing changes, always verify all verification suites pass:
 ```bash
-# 1. Run full contract test suite (81 active suites / 797 test cases)
+# 1. Run full contract test suite
 python tests/run_all_contracts.py
 
 # 2. Run kernel unit & subsystem tests

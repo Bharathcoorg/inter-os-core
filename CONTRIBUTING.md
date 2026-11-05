@@ -1,6 +1,9 @@
 # Contributing to InterOS Core
 
-Thank you for your interest in contributing to **InterOS Core**! InterOS Core is an open-source, community-driven sovereign mobile operating system foundation.
+InterOS Core is a research prototype of a smartphone operating system written in bare-metal Rust (`#![no_std]`, `no_main`), running in QEMU only. It is not a commercial product.
+
+> [!IMPORTANT]
+> **Project Contribution Status**: The project is **not** currently accepting external pull requests or contributions. Development is in an early prototype phase. External contributions will open once the platform reaches a stable release; no release date or version tag is committed to here. The guidelines below document the project's engineering principles and describe the validation workflow that will apply when external contributions open.
 
 ---
 
@@ -47,7 +50,7 @@ python tools/interos.py doctor
 ## 🌿 Branch Policy
 
 - **`master` is the sole canonical development branch.**
-- All pull requests, feature branches, and agent workflows must branch from and target `master`.
+- When contributions open, all pull requests and feature branches must branch from and target `master`. At this stage, external pull requests are not accepted.
 - Do not create milestone branches (e.g. `M1`, `M2`, etc.) in the canonical repository.
 - Do not squash, reset, or rewrite canonical Git history.
 - Ensure all commits adhere to Conventional Commits:
@@ -60,7 +63,7 @@ python tools/interos.py doctor
 
 ## 🧪 Testing & Validation Workflow
 
-Before submitting a Pull Request, verify all changes locally:
+When external contributions open, all changes must pass local verification before submission:
 
 1. **Workspace Compilation**:
    ```bash

@@ -1,8 +1,10 @@
 # InterOS Web App Template (Device Studio Prototype)
 
+InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
+
 > **Status Notice: Experimental Web Prototype Template**  
 > This template is an experimental client-side web application designed to run inside **Device Studio** (`http://localhost:4300`).  
-> **Native InterOS Applications**: Native production applications for InterOS Core execute directly as bare-metal ELF binaries within isolated Ring-3 address spaces using the cryptographically signed `.rapp` package format. Web apps run as sandboxed web prototypes interacting with the Device Studio API server.
+> **Native InterOS Applications**: Native applications for InterOS Core execute directly as bare-metal ELF binaries within isolated Ring-3 address spaces using the cryptographically signed `.rapp` package format. Web apps run as sandboxed web prototypes interacting with the Device Studio API server.
 
 ---
 
@@ -66,7 +68,7 @@ await InterOS.vfs.deleteFile('/data/user/notes.txt');
 ```
 
 ### Telemetry (`InterOS.telemetry`)
-Queries the running emulator state from `/api/qemu/telemetry`:
+Queries virtual emulator state from `/api/qemu/telemetry` (virtual emulator telemetry only; physical hardware telemetry is unavailable):
 ```javascript
 // Query battery fuel gauge status:
 const battery = await InterOS.telemetry.getBattery();

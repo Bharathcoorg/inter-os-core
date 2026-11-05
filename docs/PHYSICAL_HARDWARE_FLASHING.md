@@ -1,9 +1,9 @@
-# InterOS — Experimental Physical Hardware Bring-Up Guide
+# InterOS — Platform Image & Bring-Up Status
 
 > [!CAUTION]
-> **Experimental Research Bring-Up Only — Not Production Ready**  
-> InterOS Core does **not** currently support production physical smartphone deployment. Verified runtime execution is established **only** on QEMU virtual targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`).  
-> Attempting to flash unsupported consumer smartphones (such as retail Pixel, Qualcomm, or Tensor devices) carries a high risk of bricking your device or causing permanent data loss. Do **not** attempt to flash InterOS onto daily-driver hardware.
+> **Research Prototype Only — Execution in QEMU Only**  
+> InterOS Core is an open-source research prototype of a smartphone operating system, not a commercial product. Verified runtime execution is established **only** in QEMU virtual targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`).  
+> There is no physical device, no silicon execution, and no hardware telemetry. InterOS Core cannot be flashed to consumer smartphones or retail devices, and physical device flashing is not supported. The build produces a QEMU disk image and nothing else. External contributions are not accepted at this stage and will open after the first stable release.
 
 ---
 
@@ -23,78 +23,53 @@ In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md)
 | **Cellular Modem** | 3GPP AT Serial Protocol Engine | Experimental stub | **Source-only** | Protocol parser state machine; physical baseband unverified |
 | **Flash Storage** | SDHCI eMMC 5.1 Host Controller | Experimental stub | **Source-only** | Register definitions; physical eMMC unverified |
 | **Power Management** | PMIC Fuel Gauge & DVFS Governor | Experimental stub | **Source-only** | Profile scaling logic; physical PMIC unverified |
-| **Crypto Enclave** | Ed25519 & SHA-256 Attestation | Present | **Unit-tested** | Software cryptographic operations verified |
+| **Key Sealing** | Ed25519 & SHA-256 Attestation (software) | Present | **Unit-tested** | `kernel/src/crypto/keystore.rs` reports `is_hardware_backed() == false`; software derivation only |
 
 ---
 
-## 2. Experimental Target Artifacts
+## 2. Target Build Artifacts
 
-The build pipeline produces the following artifacts under `target/`:
+Each architecture is built and verified as a QEMU artifact:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File qemu\build.ps1
+python tools/interos.py build demo       # x86_64 canonical QEMU disk
+python tools/interos.py build aarch64    # AArch64 flat Image for qemu-system-aarch64
+python tools/interos.py build riscv64    # RISC-V 64 ELF for qemu-system-riscv64
 ```
 
-- **`target/boot-aarch64.img`**: Standard Android Boot Image v2 header (`ANDROID!`), packaging the standalone AArch64 microkernel (`kernel-aarch64`), minimal initial ramdisk, and default Device Tree Blob. Produced for experimental laboratory boot testing.
-- **`target/aarch64-unknown-none/debug/kernel-aarch64`**: Pure ELF64 binary suitable for direct JTAG or U-Boot network loading.
-- **`target/inter-os-bios.img`**: Canonical bootable BIOS disk image for local x86_64 development and QEMU verification.
+- **`target/inter-os-bios.img`**: Canonical bootable BIOS disk image for local x86_64 development and QEMU verification. This is the artifact every runtime suite boots.
+- **`target/kernel-aarch64.img`**: Flat arm64 `Image` packed from the `kernel-aarch64` ELF; loaded by `qemu-system-aarch64 -machine virt` at `loader_start + text_offset`. A QEMU boot artifact, not a flashable phone partition.
+- **`target/riscv64gc-unknown-none-elf/debug/kernel-riscv64`**: ELF64 binary loaded by `qemu-system-riscv64 -machine virt` with OpenSBI.
+- **No phone boot image**: `target/boot-aarch64.img` is not produced by this tree, and nothing packages `kernel-aarch64` into an Android Boot Image. An ARM64 device image additionally needs a genuine device tree blob and a genuine initramfs; neither exists here, so `tools/mkbootimg` refuses to run rather than synthesise placeholders, and `qemu/build.ps1` reports `[BLOCKED] No phone boot image was produced`.
 
 ---
 
-## 3. Experimental Laboratory Bring-Up (PinePhone Allwinner A64)
+## 3. Architecture Bring-Up Targets (Unverified on Physical Silicon)
 
-The primary experimental hardware development target is the **Pine64 PinePhone** (Allwinner A64 quad-core Cortex-A53), owing to its open bootloader (U-Boot), accessible hardware serial console, and non-destructive MicroSD boot capability.
+Source-level architectural targets exist for AArch64 and RISC-V 64:
 
-### Non-Destructive MicroSD Boot (Laboratory Procedure)
-To test kernel execution without writing to device eMMC or modifying internal partitions:
+- **AArch64 (`kernel-aarch64`)**: Boot-verified inside QEMU `virt` (Cortex-A53). Board-specific peripheral initialization for physical hardware (such as Allwinner A64 / PinePhone) is unverified source code; no image has been flashed to physical silicon or tested on a physical handset. The AArch64 kernel has no display, touch, or phone storage driver, so a successful flash would not be expected to reach a usable interface.
+- **RISC-V 64 (`kernel-riscv64`)**: Boot-verified inside QEMU `virt` (RV64). Physical SBC bring-up is unverified.
+- **No Verified Physical Flashing Workflow**: The flashing procedures this document used to describe — partitioning an SD card, writing U-Boot with `dd`, wiring a UART adapter to the PinePhone headphone jack — were theoretical steps that were never executed against hardware. The repository's flasher scripts are described in section 4, and the image they would need does not build.
 
-1. Insert a blank MicroSD card into your development workstation.
-2. Partition the card with an MBR partition table:
-   - **Partition 1**: FAT32, 64 MB (Bootable flag) — mounted as `/boot`.
-   - **Partition 2**: ext4, remaining space.
-3. Flash U-Boot SPL to the Allwinner boot offset:
-   ```bash
-   dd if=u-boot-sunxi-with-spl.bin of=/dev/sdX bs=1k seek=8
-   ```
-4. Copy `kernel-aarch64` and compiled Device Tree (`sun50i-a64-pinephone.dtb`) to Partition 1.
-5. Create `/boot/boot.scr` with U-Boot boot instructions:
-   ```text
-   setenv bootargs console=ttyS0,115200 earlycon=uart8250,mmio32,0x01c28000
-   fatload mmc 0:1 0x44000000 sun50i-a64-pinephone.dtb
-   fatload mmc 0:1 0x40080000 kernel-aarch64
-   booti 0x40080000 - 0x44000000
-   ```
-6. Insert the MicroSD card into the PinePhone and power on while monitoring serial output.
-
-### Hardware Serial Debugging (Headphone Jack UART)
-The PinePhone provides hardware UART access via the 3.5mm audio jack:
-1. Ensure internal hardware DIP switch #6 (Headphone UART) is set to **ON**.
-2. Connect a 3.3V USB-to-UART serial cable (Tip: TX, Ring 1: RX, Sleeve: GND).
-3. Connect a serial terminal at `115200` baud, 8N1:
-   ```bash
-   picocom -b 115200 /dev/ttyUSB0
-   ```
+### Serial Diagnostics
+Serial UART output is observed exclusively through the QEMU emulator console (TCP port 4301 or stdio). There are no physical UART connections or hardware adapters supported.
 
 ---
 
 ## 4. Boot Image Header Validation
 
-The Fastboot flasher tool (`tools/flash_phone.ps1`) verifies image header consistency without modifying physical hardware:
+`tools/flash_phone.ps1` and `tools/flash_phone.sh` are real Fastboot drivers, not inspectors: they invoke `fastboot devices`, `fastboot getvar`, and — under `-Mode Boot` / `-Mode Flash` (the latter gated behind `-AllowPersistentFlash`) — `fastboot boot` and `fastboot flash`. What the contract suite pins is their validation behaviour, because the check alone is not a readiness claim:
+
+- Both refuse a container whose payloads are not structurally real, including the magic-plus-ASCII device tree and ramdisk this repository used to ship.
+- Both accept a structurally valid container, so the check discriminates rather than always refusing.
+- Both print `[NOT READY] This platform has never been booted on physical hardware.` on success, and the packer refuses a non-AArch64 kernel so an x86_64 build can never be packaged for ARM64 hardware again.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\flash_phone.ps1 -Mode Info
 ```
 
-*Illustrative example output (static format validation only — not physical device verification):*
-```text
-============================================================
-  Inter OS -- Smartphone Hardware Flasher
-============================================================
-[IMAGE] Target Image: target\boot-aarch64.img
-[IMAGE] Image Size:   10483712 bytes (10 MB)
-[OK] Android Boot Image v2 format verified (Magic: 'ANDROID!').
-[SUCCESS] Image header validation complete.
-```
+Against the current tree that command stops at its own image check: `target\boot-aarch64.img` is absent, `qemu/build.ps1` cannot produce it, and the script exits with `Target boot image ... was not found and could not be built`. That refusal is the accurate state of an unfinished platform, and no example output is quoted here because a successful run cannot be reproduced from this repository.
 
 ---
 
