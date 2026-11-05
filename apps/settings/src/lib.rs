@@ -40,27 +40,42 @@ pub use interos_std::design::accessibility::UserTextScale;
 /// WHAT THE SENTENCES ARE ALLOWED TO SAY, and this is the whole of it: the rung
 /// a level publishes moves a detail page's ROWS -- the row's height, its
 /// title's and captions' line boxes, the badge plate, and a selector's position
-/// and feedback line, all derived together through `RowBoxes::user()` -- and
-/// nothing else on the device. It does not move a screen's own title (drawn
-/// with `run_ink`, at the platform rung, whose line box the divider is derived
+/// and feedback line, all derived together through `RowBoxes::user()`. Inside
+/// this app it moves nothing else: not a screen's own title (drawn with
+/// `run_ink`, at the platform rung, whose line box the divider is derived
 /// from), not a button or segment's label (that control's height is a touch
 /// target, so its glyph is the one number in a row that must not follow the
-/// type), not the landing grid's cards, not the Sensors & Diagnostics,
-/// wallpaper or screen-lock panels (`RowBoxes::platform()`), and not any other
-/// application, which never reads this setting at all.
+/// type), not the landing grid's cards, not the Sensors & Diagnostics, wallpaper
+/// or screen-lock panels (`RowBoxes::platform()`).
+///
+/// Outside this app the setting reaches wherever an application publishes the
+/// rung it read and lays its own geometry out at it, and that is a set this row
+/// cannot enumerate honestly, because it is another crate's business and it
+/// changes as surfaces are migrated. What is true of it today, as the record for
+/// whoever comes back to measure it: eleven applications -- the launcher, and
+/// the agent manager, calculator, calendar, dialer, file manager, gallery,
+/// messages, music, notes and video player -- publish and draw at the rung, the
+/// browser, camera and vault still draw the platform's ladder, and the launcher
+/// both scales its app drawer and holds its home dashboard at the tallest rung
+/// that column can carry, which is the platform's at the larger settings.
+///
+/// WHY the on-screen scope line says "not every screen" instead of naming them:
+/// a list of what stays put is only honest while it is complete, and this row
+/// has no way to measure another application's renderer, so a list here would be
+/// a claim about twelve binaries written in the thirteenth -- the exact stale
+/// sentence this type exists to keep out of the tree. "Not every screen follows
+/// this yet" is false only when everything does, so it says less than the truth
+/// rather than more, which is the direction a notice is allowed to err in.
 ///
 /// WHY "Detail page rows" and not "Detail pages": a detail page also carries a
 /// screen title and a rule under it, and both stay the ladder's. A sentence
 /// naming the page would claim the header too, and the header is the first
-/// thing on that page that does not move. WHY "Everything else" rather than a
-/// list of surfaces: a list can only name some of what stays put, and an
-/// unfinished list reads as "the rest does move"; the negative half, stated this
-/// way, is complete.
+/// thing on that page that does not move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextScaleNotice {
     /// The row's caption: the level as a percentage, and where it applies.
     pub caption: &'static [u8],
-    /// The line under the selector: everything that keeps the platform's size.
+    /// The line under the selector: how far the rung's reach has been proved.
     pub scope: &'static [u8],
     /// The row's badge: the setting took effect, in the rows it names.
     pub badge: &'static [u8],
@@ -71,22 +86,22 @@ pub const fn text_scale_notice(scale: UserTextScale) -> TextScaleNotice {
     match scale {
         UserTextScale::Compact => TextScaleNotice {
             caption: b"Detail page rows: 80%",
-            scope: b"Everything else: 100%",
+            scope: b"Not every screen follows this yet",
             badge: b"APPLIED",
         },
         UserTextScale::Normal => TextScaleNotice {
             caption: b"Detail page rows: 100%",
-            scope: b"Everything else: 100%",
+            scope: b"Not every screen follows this yet",
             badge: b"APPLIED",
         },
         UserTextScale::Large => TextScaleNotice {
             caption: b"Detail page rows: 125%",
-            scope: b"Everything else: 100%",
+            scope: b"Not every screen follows this yet",
             badge: b"APPLIED",
         },
         UserTextScale::ExtraLarge => TextScaleNotice {
             caption: b"Detail page rows: 150%",
-            scope: b"Everything else: 100%",
+            scope: b"Not every screen follows this yet",
             badge: b"APPLIED",
         },
     }
@@ -994,7 +1009,15 @@ mod tests {
                 UserTextScale::from_u8(level).percentage() as u32,
                 "the caption quotes a percentage the ladder does not draw at that level"
             );
-            assert_eq!(notice.scope, b"Everything else: 100%");
+            assert_eq!(notice.scope, b"Not every screen follows this yet");
+            // The scope line states a limit, and a limit it cannot measure may
+            // not be dressed as a figure: this crate reads no other application's
+            // renderer, so a percentage here -- "Everything else: 100%" was the
+            // one -- is a claim about twelve binaries written in the thirteenth.
+            assert!(
+                !notice.scope.contains(&b'%'),
+                "the scope line quotes a percentage the row cannot measure"
+            );
             assert_eq!(notice.badge, b"APPLIED");
         }
     }
@@ -1007,8 +1030,8 @@ mod tests {
     /// in the caption rung, against the column the Font Scaling row actually
     /// gives -- the row's content width less the badge plate measured at the same
     /// level: the caption "Detail page rows: 150%" takes 283px of a 432px budget,
-    /// and the scope line "Everything else: 100%" takes 253px of the 624px column.
-    /// The gate below is the difference, not the fit.
+    /// and the scope line "Not every screen follows this yet" takes 419px of the
+    /// 624px column. The gate below is the difference, not the fit.
     #[test]
     fn the_notice_leaves_the_row_room_at_the_largest_level() {
         let notice = text_scale_notice(UserTextScale::ExtraLarge);

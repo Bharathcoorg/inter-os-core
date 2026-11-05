@@ -4722,10 +4722,12 @@ fn row_pixel(
                 // `display.text_scale`. The detail pages of this app now do --
                 // their rows, captions, badges and scroll height are derived at
                 // the published rung -- and the landing grid, the wallpaper and
-                // screen-lock panels, the Sensors & Diagnostics page and every
-                // other application still draw the platform's ladder. Both
-                // halves are stated, because a notice that only names what
-                // changed is read as "everything changed".
+                // screen-lock panels and the Sensors & Diagnostics page still
+                // draw the platform's ladder. Both halves are stated, because a
+                // notice that only names what changed is read as "everything
+                // changed". How far the rung reaches past this app is deliberately
+                // not listed here: `text_scale_notice` holds why, and where the
+                // reach stands today.
                 let notice = text_scale_notice(app.text_scale);
                 if let Some(c) = row_head(
                     x,
