@@ -1299,6 +1299,18 @@ pub fn sys_verify_package_summary(
 /// Unified system call dispatcher invoked by hardware fast syscall entry stub.
 #[no_mangle]
 pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    // WHY the serial queue is pumped here and not only at the chosen poll
+    // syscalls: a finished COM1 line waits for the next `service_serial_commands`
+    // call, and the existing checkpoints sit exactly where a busy app is not --
+    // an app painting a frame calls neither `event_poll` nor `sys_yield`, so a
+    // tap arriving mid-paint sat in the queue for the whole paint. Measured on
+    // this tree: 190 ms for a second tap landing in a browser repaint, 3.0 s
+    // behind the browser's first page. Every task that is not blocked passes
+    // through this entry on its own kernel stack, interrupts enabled, holding
+    // no kernel lock -- the same context the current checkpoints run in, so the
+    // dispatch still never happens in interrupt context. Once a line exists, it
+    // is dispatched within one syscall of the task that happens to be running.
+    crate::serial::service_serial_commands();
     match num {
         1 => {
             sys_yield();
