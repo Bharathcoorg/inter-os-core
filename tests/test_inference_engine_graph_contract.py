@@ -1,0 +1,567 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
+"""Graph contract for the inference engine that reads the installed model file.
+
+The published file this repository ships -- `embeddinggemma-300M-Q8_0.gguf`, 333 MB,
+24 blocks, three query heads and one key/value head 256 wide over a 768-wide residual
+stream, a 1152-wide feed-forward, Q8_0 matrices with F32 norms, 262,144 vocabulary
+rows, and a `dense_2`/`dense_3` head after the mean pool -- is the only model this
+engine is allowed to be measured against. Every assertion below pins one half of the
+rule that the engine run *that* graph rather than a smaller one it was convenient to
+code: the dtype ids a row is sized for, the thirteen tensors a block is made of, the
+order the block and the pooling head are walked in, the width a caller's vector is
+checked against, and the metadata source the descriptor table has to be handed.
+
+The other half is truth in the comments. This suite reads doc text as well as code,
+because the defect it exists to catch is a sentence claiming a capability the code
+does not have -- a quantisation counted that no arithmetic reads, a run on a
+development host described as a run on the device, a pooling key named as if a reader
+consulted it. Where a claim is pinned, the mutation case puts the false sentence back
+into a copy and shows the detector parts; a gate nobody has seen fail is a comment.
+"""
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SERVICE = ROOT / "userspace" / "system-service" / "src"
+
+# The five GGML dtype ids `quantised_row_bytes` gives a row layout to. 0 and 8 are
+# the two the published file actually uses; 1, 2 and 12 are read because the same
+# code paths answer other files the platform has been handed.
+MAPPED_DTYPES = [0, 1, 2, 8, 12]
+
+# The thirteen tensors the published file declares inside every one of its 24 blocks.
+DECLARED_BLOCK_QUANTISED = [
+    "attn_q.weight",
+    "attn_k.weight",
+    "attn_v.weight",
+    "attn_output.weight",
+    "ffn_gate.weight",
+    "ffn_up.weight",
+    "ffn_down.weight",
+]
+DECLARED_BLOCK_NORMS = [
+    "attn_norm.weight",
+    "attn_q_norm.weight",
+    "attn_k_norm.weight",
+    "post_attention_norm.weight",
+    "ffn_norm.weight",
+    "post_ffw_norm.weight",
+]
+
+
+def read(name: str) -> str:
+    return (SERVICE / name).read_text(encoding="utf-8")
+
+
+def without_comments(source: str) -> str:
+    """`source` with comment lines dropped, so a detector over code cannot be
+    satisfied by a sentence that merely mentions the thing."""
+    kept = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//") or stripped.startswith("///") or stripped.startswith("//!"):
+            continue
+        kept.append(line.split("//")[0])
+    return "\n".join(kept)
+
+
+def function_body(source: str, signature: str) -> str:
+    """The text from `signature` to the line that closes its brace.
+
+    WHY hand-rolled: the contract is about the body's contents and order, and a
+    regex over a fixed number of lines breaks the first time a call is wrapped.
+    """
+    start = source.index(signature)
+    opened = source.index("{", start)
+    depth = 0
+    for index in range(opened, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"{signature} never closes")
+
+
+def doc_block_above(source: str, needle: str) -> str:
+    """The `///` paragraph sitting directly above the line containing `needle`.
+
+    WHY attributes are walked past: `#[derive(...)]` sits between a type's doc block
+    and its declaration, and a reader that stopped there would report every derived
+    type as undocumented -- which is how a false claim in one survives a gate.
+    """
+    lines = source.splitlines()
+    at = next(i for i, line in enumerate(lines) if needle in line)
+    paragraph = []
+    walk = at - 1
+    while walk >= 0:
+        stripped = lines[walk].strip()
+        if stripped.startswith("///"):
+            paragraph.append(stripped[3:].strip())
+            walk -= 1
+        elif not stripped or stripped.startswith("#"):
+            walk -= 1
+        else:
+            break
+    return " ".join(reversed(paragraph))
+
+
+def string_list(source: str, declaration: str) -> list:
+    """The quoted members of a `pub const X: &[&str] = &[...]` list."""
+    body = source[source.index(declaration) :]
+    body = body[: body.index("];")]
+    return re.findall(r'"([^"]+)"', body)
+
+
+def dtype_ids_sized(source: str) -> list:
+    """The dtype ids `quantised_row_bytes` answers a row width for."""
+    body = function_body(source, "pub fn quantised_row_bytes(")
+    return arm_ids(body, "match dtype {")
+
+
+def arm_ids(body: str, after: str) -> list:
+    """Every dtype number naming an arm of the `match` that starts at `after`.
+
+    WHY the digit runs and not whole lines: `embedding_row_into` gives Q4_0, Q8_0 and
+    Q4_K one arm between them (`2 | 8 | 12 =>`), and a reader that only took the
+    number at the start of the line would report an engine that reads three
+    quantisations as reading one.
+    """
+    arms = body[body.index(after) :]
+    found = set()
+    for line in arms.splitlines():
+        match = re.match(r"^\s*((?:\d{1,3}\s*\|\s*)*\d{1,3})\s*=>", line)
+        if match:
+            found.update(int(number) for number in re.findall(r"\d{1,3}", match.group(1)))
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# The dtype set: five ids sized, everything else refused by its number.
+# ---------------------------------------------------------------------------
+
+
+def test_the_engine_sizes_a_row_for_exactly_five_dtype_ids():
+    """The count a comment carries has to be the count the arithmetic carries.
+
+    WHY the arms and not the comment: `quantised_row_bytes` is what the loader calls
+    to size every tensor row it reads, and `gemv` and `embedding_row_into` are what
+    interpret the bytes. A sixth id claimed anywhere is a sixth layout nobody wrote;
+    a dtype outside the five read with a neighbour's block width returns plausible
+    floats from the wrong bytes, which is worse than a refusal and invisible in an
+    embedding until someone compares two of them.
+    """
+    sized = dtype_ids_sized(read("inference.rs"))
+    assert sized == MAPPED_DTYPES, (
+        f"the engine sizes a row for {sized}, not the five {MAPPED_DTYPES}"
+    )
+
+    # `gemv` and `embedding_row_into` have to fall through to the same refusal, by
+    # number, so an unmapped dtype cannot be read at all.
+    for name, signature, anchor in (
+        ("gemv", "pub fn gemv(", "match w_type {"),
+        ("embedding_row_into", "pub fn embedding_row_into(", "match dtype {"),
+    ):
+        body = function_body(read("inference.rs"), signature)
+        assert "_ => Err(InferenceError::UnsupportedQuantization(" in body, (
+            f"{name} no longer refuses a dtype it has no layout for by its number"
+        )
+        assert arm_ids(body, anchor) == MAPPED_DTYPES, (
+            f"{name}'s arms no longer name the five ids the loader sizes rows for: "
+            f"{arm_ids(body, anchor)}"
+        )
+
+
+def test_the_loader_refuses_an_unmapped_dtype_by_number_not_by_reading_it():
+    """`weights.rs` carries the refusal up the stack instead of guessing.
+
+    The published file quantises its matrices as 8 and its norms as 0. A file that
+    put Q5_K (13) where Q8_0 (8) is expected would, without this, have its scale
+    bytes read as quants: `LoadError::UnsupportedDtype` names the tensor and the
+    number so the screen can say which tensor the engine cannot read.
+    """
+    weights = read("weights.rs")
+    assert "LoadError::UnsupportedDtype(" in without_comments(weights)
+    assert "UnsupportedDtype(&'static str, u32)" in weights, (
+        "the loader's dtype refusal stopped carrying the tensor name and the number, "
+        "so a refusal can no longer say which tensor it refused"
+    )
+    # A block whose seven matrices do not agree on one dtype is refused rather than
+    # run at one of them: `LayerWeights` holds a single `weight_type`.
+    assert "MixedBlockDtype(" in weights, (
+        "the loader no longer refuses a block split across two quantisations"
+    )
+
+
+def test_the_dtype_gate_can_fail():
+    """A gate nobody has seen fail is a comment.
+
+    Each block puts one fault into a copy and runs the same detector the gate above
+    runs, so the five-id set, the enumeration and the refusal are each proved
+    observable.
+    """
+    inference = read("inference.rs")
+    baseline = dtype_ids_sized(inference)
+    assert baseline == MAPPED_DTYPES
+
+    # 1. A sixth arm appears and the set the engine sizes parts from the set the
+    # contract names.
+    grown = inference.replace(
+        "        8 => blocks(32, 34),",
+        "        8 => blocks(32, 34),\n        3 => blocks(32, 18),",
+        1,
+    )
+    assert grown != inference, "the dtype match moved; this fixture is stale"
+    assert dtype_ids_sized(grown) != MAPPED_DTYPES, (
+        "an added arm would keep the five-id gate green"
+    )
+
+    # 2. The Q8_0 arm -- the published file's own quantisation -- disappears. The
+    # detector has to notice, because a loader that lost Q8_0 refuses the shipped
+    # model and every number in this repository's measurements stops being about it.
+    lost = inference.replace("        8 => blocks(32, 34),", "", 1)
+    assert lost != inference, "the Q8_0 arm moved; this fixture is stale"
+    assert 8 not in dtype_ids_sized(lost), "losing Q8_0 kept the gate passing"
+
+    # 3. The refusal replaced by a fall-through to a neighbour's layout.
+    guessed = inference.replace(
+        "        _ => Err(InferenceError::UnsupportedQuantization(dtype)),\n    }\n}\n\n/// Divides the accumulated stream",
+        "        _ => {}\n    }\n}\n\n/// Divides the accumulated stream",
+        1,
+    )
+    assert guessed != inference, "embedding_row_into's refusal moved; this fixture is stale"
+    body = function_body(guessed, "pub fn embedding_row_into(")
+    assert "_ => Err(InferenceError::UnsupportedQuantization(" not in body
+    assert "_ => Err(InferenceError::UnsupportedQuantization(" in function_body(
+        inference, "pub fn embedding_row_into("
+    ), "the detector found no refusal to lose in the real source either"
+
+
+# ---------------------------------------------------------------------------
+# The block: the thirteen tensors the file declares, walked in the order it
+# declares them in, with the head geometry the file states.
+# ---------------------------------------------------------------------------
+
+
+def test_the_loader_looks_for_the_thirteen_tensors_the_file_declares():
+    """`BLOCK_QUANTISED` + `BLOCK_NORMS` are the published file's block, by name.
+
+    WHY spelled out here instead of counted: a loader asking for `attention_norm`
+    where the file says `attn_norm` reports a complete model as a missing tensor,
+    and a loader that dropped `attn_q_norm` would run Gemma 2's graph against a file
+    that ships per-head norms -- an answer from a model the disk does not hold.
+    """
+    weights = read("weights.rs")
+    quantised = string_list(weights, "pub const BLOCK_QUANTISED: &[&str] = &[")
+    assert quantised == DECLARED_BLOCK_QUANTISED, (
+        f"the block's quantised tensors are {quantised}, "
+        f"not the file's {DECLARED_BLOCK_QUANTISED}"
+    )
+    norms = string_list(weights, "pub const BLOCK_NORMS: &[&str] = &[")
+    assert norms == DECLARED_BLOCK_NORMS, (
+        f"the block's norms are {norms}, not the file's {DECLARED_BLOCK_NORMS}"
+    )
+
+    # The two per-head norms are the ones a Gemma 2 file has no use for and this one
+    # ships; the loader is allowed to take them as optional and the graph has to
+    # notice when they are there.
+    inference = read("inference.rs")
+    block = function_body(inference, "pub fn run_block(")
+    for field in (
+        "attn_norm", "attn_q", "attn_k", "attn_v", "attn_q_norm", "attn_k_norm",
+        "attn_o", "post_attn_norm", "ffn_norm", "ffn_gate", "ffn_up", "ffn_down",
+        "post_ffn_norm",
+    ):
+        assert f"lw.{field}" in block, (
+            f"run_block never touches lw.{field}, so a tensor the file declares is "
+            "being loaded and not used -- or was dropped from the graph"
+        )
+
+
+def test_the_block_graph_is_the_steps_the_declared_architecture_names():
+    """RMSNorm, QKV, per-head norms, RoPE, cached attention, output, FFN, residuals.
+
+    WHY order and not mere presence: the published file's blocks are a Gemma-2
+    sequence, and the same calls in the wrong order are a different model. A
+    normalisation moved after the residual add, or a second RMSNorm left out of the
+    pre-feed-forward position, changes the numbers without changing a single count.
+    """
+    block = without_comments(function_body(read("inference.rs"), "pub fn run_block("))
+    for step in (
+        "rms_norm(",           # 1. pre-attention norm
+        "gemv(",               # 2. q, k, v
+        "apply_rope(&mut q",   # 4. RoPE over the query heads the file declares
+        "apply_rope(&mut k",   # 4. and over the key head it holds
+        "kv_cache.write(",     # 5. the one key/value head, cached
+        "softmax(",            # 6. scores normalised over the declared span
+        "swiglu(",             # 8. gate and up, multiplied
+    ):
+        assert step in block, f"the block graph no longer contains {step!r}"
+
+    ordering = [
+        block.index("rms_norm("),
+        block.index("gemv("),
+        block.index("apply_rope(&mut q"),
+        block.index("apply_rope(&mut k"),
+        block.index("kv_cache.write("),
+        block.index("softmax("),
+        block.index("swiglu("),
+    ]
+    assert ordering == sorted(ordering), (
+        f"the block's steps are out of the order the architecture states: {ordering}"
+    )
+    # Every norm the file declares per block has to be the argument of a
+    # normalisation, not merely a field the loader happens to fill: dropping one
+    # `rms_norm` call leaves the block running and the numbers wrong.
+    for norm in ("lw.attn_norm", "lw.attn_q_norm", "lw.attn_k_norm",
+                 "lw.post_attn_norm", "lw.ffn_norm", "lw.post_ffn_norm"):
+        assert re.search(rf"rms_norm\([^;]*{re.escape(norm)}", block), (
+            f"nothing normalises with {norm}, so the block runs a tensor the loader "
+            "reads and the graph ignores"
+        )
+    # Both rotations, not one standing in for both: dropping the key head's RoPE
+    # leaves a block that still contains `apply_rope(` and still runs, scoring
+    # every position against an unrotated key.
+    assert block.count("apply_rope(") == 2, (
+        f"the block applies RoPE {block.count('apply_rope(')} times; the architecture "
+        "rotates the query heads and the key head, which is two passes"
+    )
+
+
+def test_grouped_query_attention_is_folded_and_more_than_one_kv_head_is_refused():
+    """Three query heads over one key/value head is what the file declares.
+
+    WHY this is pinned as a contract: the published file is a grouped-query model
+    (`head_count` 3, `head_count_kv` 1, `key_length` 256), the kernel walks one
+    key/value head, and that combination is *correct* -- head 0 is the only head the
+    file holds. The refusal is for a file declaring two or more key/value heads,
+    which would be read as one and reported as the model's. A comment that calls the
+    shipped geometry unsupported is as false as one that calls it supported when it
+    was not.
+    """
+    inference = without_comments(read("inference.rs"))
+    check = function_body(inference, "pub fn check_attention_shape(&self)")
+    assert "self.num_kv_heads > 1" in check, (
+        "the shape check stopped refusing a file with more than one key/value head"
+    )
+    assert '"<arch>.attention.head_count_kv"' in check, (
+        "the refusal no longer names the key the file declared"
+    )
+
+    block = function_body(read("inference.rs"), "pub fn run_block(")
+    assert "for head in 0..config.num_heads" in block, (
+        "the block stopped walking the query heads the file declares"
+    )
+    assert "config.num_kv_heads" in block, (
+        "the block no longer reads the key/value head count off the file's declaration"
+    )
+
+    # And the documentation may not call the shipped file unsupported.
+    doc = doc_block_above(read("inference.rs"), "pub fn check_attention_shape(&self)")
+    assert "not a refusal of grouped-query attention" in doc, (
+        "the attention check is back to describing the published file's own geometry "
+        "as the thing it cannot run"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The run: positions, blocks, pool, head, normalisation, and the caller's width.
+# ---------------------------------------------------------------------------
+
+HEAD_ORDER = [
+    "load_embedding_row",
+    "embedding_row_into",
+    "load_block",
+    "run_block",
+    "rms_norm(",
+    "mean_of(",
+    "run_pooling_head",
+    "l2_normalise(",
+]
+
+
+def test_the_streamed_run_walks_the_file_in_the_order_the_file_is_built():
+    """Embedding row, 24 blocks, final norm, accumulate, pool, head, L2.
+
+    WHY the order of calls in `run_streamed_embedding` is a contract: the published
+    architecture puts the `dense_2`/`dense_3` head AFTER the mean pool and the L2
+    step last. Normalising before the head rescales an input the linear layers were
+    trained on, and pooling after the head means the head ran on one position
+    instead of the sentence.
+    """
+    body = function_body(read("weights.rs"), "pub fn run_streamed_embedding<S: PositionRead>(")
+    positions = []
+    for step in HEAD_ORDER:
+        assert step in body, f"the streamed run no longer contains {step!r}"
+        positions.append(body.index(step))
+    assert positions == sorted(positions), (
+        f"the run's steps are out of order: {dict(zip(HEAD_ORDER, positions))}"
+    )
+    assert "kv_cache.len = pos + 1" in body, (
+        "the cache length is not advanced per position, so the next prompt inherits "
+        "the last one's window"
+    )
+    assert "reader.has_pooling_head()" in body and "pooled_normalised(" in body, (
+        "the run neither asks the file for a head nor says what it does when the file "
+        "has none"
+    )
+
+
+def test_the_callers_vector_width_is_refused_before_the_file_is_read():
+    """A destination narrower than the model is a refusal, not a truncation.
+
+    WHY first: `out.len() < h_dim` is the difference between a 768-number answer and
+    a 512-number prefix of one handed back as the whole embedding, and the check
+    that makes it a refusal has to sit ahead of the scratch budget, the cache shape
+    and the first positioned read. A caller asking for less than the model gives is
+    answered by the status code, not by a shorter vector.
+    """
+    body = without_comments(
+        function_body(read("weights.rs"), "pub fn run_streamed_embedding<S: PositionRead>(")
+    )
+    guard = body.index("if out.len() < h_dim")
+    assert body.index("check_scratch_budget") > guard, (
+        "the scratch budget is now consulted before the caller's width, so an "
+        "impossible request still costs the device a sizing pass"
+    )
+    assert "BufferTooSmall" in body[guard : guard + 120], (
+        "the width guard no longer refuses with the code that says so"
+    )
+    # The same rule on the in-memory path, so the two cannot answer differently.
+    extract = without_comments(function_body(read("inference.rs"), "pub fn extract_embedding("))
+    assert "if out_embedding.len() < config.hidden_dim" in extract, (
+        "the in-memory pool truncates where the streamed one refuses"
+    )
+    assert "Ok(0)" in extract, (
+        "an empty prompt stopped being answered as zero positions"
+    )
+
+
+def test_the_descriptor_table_is_walked_through_a_window_or_it_never_arrives():
+    """The published file's vocabulary sits between its header and its tensors.
+
+    WHY this is a graph contract and not a performance note: `TensorTable::walk` has
+    to pass 262,144 length-prefixed strings to find `general.alignment` and then the
+    descriptors, and a string array states no total size -- each element's own prefix
+    says where the next begins. Over `GgufStream::Buffered` that is one request per
+    512-byte window, counted on the real file at 12,755 pulls. Over a bare
+    `GgufStream::File` it is one request per string, and on a device where every read
+    is a syscall the walk does not reach the table. The loader cannot choose for its
+    caller -- the source is the caller's -- so what this pins is that the walk says
+    so, and that the windowed arm is host-proved rather than assumed.
+    """
+    weights = read("weights.rs")
+    doc = doc_block_above(weights, "pub fn walk(stream: &mut crate::gguf::GgufStream<'_>)")
+    for truth in ("262,144", "512", "Buffered", "File"):
+        assert truth in doc, f"the walk no longer names {truth!r} in its own description"
+    assert "WHAT THE CALLER HAS TO CARRY" in doc, (
+        "the walk stopped telling its caller that a bare descriptor source never "
+        "reaches the descriptor table on a device"
+    )
+
+    # And the host case that proves it, over the real file's own metadata.
+    tests = function_body(
+        weights,
+        "fn the_descriptor_table_walks_through_the_metadata_window_the_device_uses",
+    )
+    assert "INTEROS_REAL_GGUF_PATH" in tests, "the windowed walk is no longer the real file's"
+    assert "buffered_from_slice" in tests, "the case does not drive the buffering arm"
+    assert "pulls > 0" in tests, (
+        "the case would pass on a source that never touched a window -- which is what "
+        "every other walk in this suite uses"
+    )
+    assert "locate_tensor_stream" in tests, (
+        "the two descriptor readers are no longer compared through the window"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Truth in the comments this engine ships with.
+# ---------------------------------------------------------------------------
+
+
+def test_no_comment_claims_a_dtype_the_arithmetic_does_not_have():
+    """The reader of `weights.rs` is told the count and the ids, and they match.
+
+    WHY a second gate on the sentence the other suite already pins: this file's
+    claim is different -- it names the *ids*, so a reader can put them next to a
+    descriptor table. The ids it lists must be the ids `quantised_row_bytes` arms.
+    """
+    doc = doc_block_above(read("weights.rs"), "pub enum LoadError")
+    claim = re.search(r"(\w+)\s+quantisations", doc)
+    assert claim, "the loader no longer states how many quantisations it knows"
+    words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    }
+    counted = words.get(claim.group(1).lower())
+    assert counted == len(MAPPED_DTYPES), (
+        f"the loader claims {claim.group(1)} quantisations; the engine sizes "
+        f"{len(MAPPED_DTYPES)}: {MAPPED_DTYPES}"
+    )
+    for dtype in MAPPED_DTYPES:
+        assert re.search(rf"\b{dtype}\b", doc), f"the claim counts {dtype} without naming it"
+    for absent in ("Q4_1", "Q5_K", "Q6_K"):
+        assert absent in doc, f"the claim stopped saying {absent} is not among them"
+
+
+def test_the_comments_keep_saying_the_device_has_never_run_this_graph():
+    """A host measurement is not a device measurement.
+
+    WHY a gate on the negative: `inference.rs` used to say the published model "does
+    not yet run" while the streamed loader was already running it block by block on
+    the host -- false in one direction, and the replacement sentence has to keep the
+    half that is still true. Nothing here has executed on the guest, so the file that
+    sizes the run has to say so where a reader will find it.
+    """
+    inference = read("inference.rs")
+    budget_doc = doc_block_above(inference, "pub const SCRATCH_BYTE_BUDGET")
+    assert "does not yet run" not in budget_doc, (
+        "the budget still denies a run that the streamed loader performs on the host"
+    )
+    assert "host" in budget_doc, (
+        "the budget no longer says where the run it describes was measured"
+    )
+    # The negative has to be a sentence about the guest, not the word "never"
+    # somewhere in the paragraph: a doc that says the device runs the graph today
+    # while mentioning that it never ran some earlier build would otherwise pass.
+    assert re.search(
+        r"(?i)\b(guest|device)\b[^.]{0,80}\b(never|has not|no measurements)\b",
+        budget_doc,
+    ), (
+        "the budget no longer states, in a sentence about the guest or the device, "
+        "that this graph has not run there"
+    )
+    for lie in ("the device runs", "device-verified run", "on the device it runs"):
+        assert lie not in budget_doc.lower(), (
+            f"the budget now claims {lie!r}, which nothing in this repository has measured"
+        )
+
+    # Mean pooling: what the engine does, and what the file states, are different
+    # facts, and the comment has to keep them apart.
+    extract = function_body(inference, "pub fn extract_embedding(")
+    assert "pooling_type" in extract, (
+        "the pooling comment no longer names the key the file states, so a reader "
+        "cannot tell that nothing reads it"
+    )
+    assert re.search(r"no reader in this service asks|nothing in this service reads", extract), (
+        "the mean-pool comment is back to implying the engine consults the file's "
+        "pooling declaration"
+    )
+
+    # And the lexical index may not call itself the neural model.
+    rag = read("rag.rs")
+    assert "Matryoshka representation learning" not in rag, (
+        "the RAG header claims representation learning the module does not do"
+    )
+    assert "EmbeddingGemma 2 weights" in rag and "lexical" in rag, (
+        "the RAG header stopped saying which vectors it actually indexes"
+    )
+    assert "expandable to 768" not in rag, (
+        "the index is back to offering a width it stores no chunk at"
+    )

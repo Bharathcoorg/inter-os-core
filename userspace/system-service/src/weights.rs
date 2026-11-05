@@ -389,6 +389,16 @@ impl TensorTable {
     /// 262,144-entry vocabulary. The skip counts each string's length prefix and
     /// steps past its bytes, which is why this walk reaches the table at all on a
     /// 512-byte window.
+    ///
+    /// WHAT THE CALLER HAS TO CARRY: that window is not this walk's to make. A
+    /// `GgufStream::Buffered` source hands out the prefixes from bytes it already
+    /// pulled, so the published file's vocabulary is passed in 12,755 window pulls
+    /// (`the_descriptor_table_walks_through_the_metadata_window_the_device_uses`
+    /// counts them on the real file, host-measured). A bare `GgufStream::File`
+    /// source cannot over-read, so every one of those prefix counts is a request
+    /// into the platform -- 262,144 of them before the first descriptor is named.
+    /// A caller that hands this walk a bare descriptor is therefore not running a
+    /// slower version of the same path; the guest never gets to the table.
     pub fn walk(stream: &mut crate::gguf::GgufStream<'_>) -> Result<Self, LoadError> {
         let header = crate::gguf::GgufHeader::parse_stream(stream)?;
         let alignment = crate::gguf::read_alignment_stream(stream, header.kv_count)?;
@@ -1396,6 +1406,237 @@ pub mod tests {
             }
         }
         Err(refused)
+    }
+
+    /// The descriptor table resolved through the metadata window -- the arm the
+    /// device has to use, which no other case in this module drives.
+    ///
+    /// WHY this is its own case and not a line in `walk_the_installed_table`: a
+    /// `GgufStream::from_slice` never buffers, so its `pulls()` is 0 by
+    /// construction, and every descriptor number this module has reported so far
+    /// came from a walk that did not touch a window. The device has no image to
+    /// point at. It reads the same bytes through `Buffered`, where the
+    /// 262,144-entry vocabulary ahead of the table is passed one 512-byte window at
+    /// a time, and the whole reason `skip_metadata_value_stream` counts a string's
+    /// length prefix instead of guessing its size only pays off over that window.
+    ///
+    /// What is pinned is therefore three things the slice walk cannot say: that the
+    /// window is used at all, that it is used about once per window of bytes rather
+    /// than once per vocabulary string, and that the numbers it resolves are the
+    /// identical numbers the slice walk resolves -- same names, same dtypes, same
+    /// rows, same `data_start`, same file position for the last tensor in the file.
+    #[test]
+    fn the_descriptor_table_walks_through_the_metadata_window_the_device_uses() {
+        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            rust_std::println!(
+                "NOT VERIFIED through the window: INTEROS_REAL_GGUF_PATH is unset, so no \
+                 metadata of the 333 MB GGUF was passed a window at a time and the only \
+                 walk this suite ran was the in-memory one."
+            );
+            return;
+        };
+        let (slice_table, prefix, prefix_bytes) = walk_the_installed_table(&path)
+            .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked: {why}"));
+
+        let started = rust_std::time::Instant::now();
+        let mut window = crate::gguf::GgufStream::buffered_from_slice(&prefix);
+        let table = TensorTable::walk(&mut window)
+            .unwrap_or_else(|error| panic!("the installed table refused to walk through \
+                 the metadata window: {error:?}"));
+        let pulls = table.window_pulls;
+        // Every byte of metadata and descriptors up to the data section has to be
+        // stepped over, and one pull serves at most a window of them, so this is the
+        // floor the honest count sits on -- not a number from a run, a number from
+        // the file's own geometry.
+        let floor = table.data_start as usize / crate::gguf::METADATA_WINDOW_BYTES;
+        rust_std::println!(
+            "WINDOWED WALK: {} descriptors resolved over {} prefix bytes in {} window \
+             pulls (floor {} for {} bytes to data_start {}, alignment {}), table holds {} \
+             bytes, in {:?}",
+            table.count(),
+            prefix_bytes,
+            pulls,
+            floor,
+            table.data_start,
+            table.data_start,
+            table.alignment,
+            table.held_bytes(),
+            started.elapsed(),
+        );
+
+        // 1. The window was actually driven. A bare or sliced source reports 0 pulls
+        // for any file, so without this the case below could not tell a windowed
+        // walk from the one it already passes.
+        assert!(
+            pulls > 0,
+            "the walk recorded {} window pulls, so the table was not resolved through a \
+             buffering source and this case measured nothing",
+            pulls
+        );
+
+        // 2. The request count is a count of windows, not of strings. A reader that
+        // asked its source for one value at a time -- which is what a bare
+        // `GgufStream::File` does -- pays a request per length prefix, and this
+        // file's vocabulary alone is 262,144 of them.
+        assert!(
+            pulls >= floor,
+            "{} pulls cannot have passed {} bytes of metadata through {}-byte windows",
+            pulls,
+            table.data_start,
+            crate::gguf::METADATA_WINDOW_BYTES
+        );
+        assert!(
+            pulls <= floor * 2 + 4096,
+            "the window was touched {pulls} times to pass a floor of {floor}: the walk is \
+             issuing a request per value again, which on a device is one syscall per \
+             vocabulary string",
+        );
+
+        // 3. Same bytes, same table. Not a summary of the summary: every field of
+        // every descriptor, in file order.
+        assert_eq!(table.count(), slice_table.count());
+        assert_eq!(table.data_start, slice_table.data_start);
+        assert_eq!(table.alignment, slice_table.alignment);
+        for (windowed, sliced) in table.entries.iter().zip(slice_table.entries.iter()) {
+            assert_eq!(windowed.name, sliced.name);
+            assert_eq!(windowed.dtype, sliced.dtype);
+            assert_eq!((windowed.cols, windowed.rows, windowed.n_dims),
+                (sliced.cols, sliced.rows, sliced.n_dims));
+            assert_eq!(windowed.byte_len, sliced.byte_len);
+            assert_eq!(
+                windowed.position, sliced.position,
+                "{} sits at {} through the window and {} through the slice",
+                rust_std::string::String::from_utf8_lossy(&windowed.name),
+                windowed.position,
+                sliced.position
+            );
+        }
+
+        // 4. The other reader -- the single-name walk, over the windowed source --
+        // lands the last tensor of the file where this table puts it. This is the
+        // number a positioned read is handed on the device.
+        let last = b"blk.23.ffn_down.weight";
+        let through_window = crate::gguf::locate_tensor_stream(
+            &mut crate::gguf::GgufStream::buffered_from_slice(&prefix),
+            last,
+        )
+        .expect("the positioned walk runs")
+        .expect("the published file holds blk.23.ffn_down.weight");
+        let entry = table
+            .find(last)
+            .expect("the windowed table kept blk.23.ffn_down.weight");
+        assert_eq!(
+            entry.position, through_window.file_position,
+            "the table puts the last block's down-projection at {} and the reader at {}",
+            entry.position, through_window.file_position
+        );
+        assert_eq!(entry.dtype, 8, "the published file quantises it Q8_0");
+        assert_eq!(
+            entry.byte_len,
+            quantised_row_bytes(8, 1152).unwrap() as u64 * 768,
+            "1152-wide rows of Q8_0, 768 of them -- the shape the block graph consumes"
+        );
+    }
+
+    /// The caller's vector width is checked before a byte of the model is read.
+    ///
+    /// WHY an empty table over a counting source: the guard at the top of
+    /// `run_streamed_embedding` is the only thing standing between a caller that
+    /// asked for 512 numbers from a 768-wide model and one that received the first
+    /// 512 of them -- a prefix of a vector, handed back as though it were the
+    /// embedding, to be compared with another prefix. The case therefore pins three
+    /// things at once: that the call is refused by the width rule and not by
+    /// something else happening to fail first, that the caller's buffer comes back
+    /// untouched, and that the refusal cost no read at all. The table being empty
+    /// is what makes the third observable; the run's next step would have been the
+    /// missing `token_embd.weight`.
+    #[test]
+    fn a_vector_narrower_than_the_model_is_refused_before_anything_is_read() {
+        let config = ModelConfig::default_test_config();
+        let image: Vec<u8> = Vec::new();
+        let mut reader = WeightReader::new(
+            TensorTable {
+                entries: Vec::new(),
+                data_start: 0,
+                alignment: 32,
+                window_pulls: 0,
+            },
+            BoundedImage::new(&image),
+        );
+        let mut scratch = Scratch::new(&config).expect("the fixture shape is under budget");
+        let mut kv_cache = KvCache::new(&config).expect("the fixture cache is under budget");
+        let mut row: Vec<u8> = Vec::new();
+        let final_norm = [1.0f32; 64];
+        let tokens = [2u32, 3, 4];
+        assert_eq!(config.hidden_dim, 64, "this case is written at the fixture width");
+
+        // One float short. The poison is a NaN, which no pooled, normalised vector
+        // holds, so "untouched" here means untouched and not "coincidentally equal".
+        let mut narrow = [f32::NAN; 63];
+        assert_eq!(
+            run_streamed_embedding(
+                &mut reader,
+                &config,
+                &tokens,
+                &mut scratch,
+                &mut kv_cache,
+                &final_norm,
+                &mut row,
+                &mut narrow,
+            ),
+            Err(LoadError::Graph(InferenceError::BufferTooSmall)),
+            "a 63-float destination for a 64-wide model was answered some other way -- \
+             or not refused at all"
+        );
+        assert!(
+            narrow.iter().all(|v| v.is_nan()),
+            "the refused run wrote into the caller's vector: {narrow:?}"
+        );
+        assert_eq!(
+            reader.source.requests.len(),
+            0,
+            "the width refusal was reached after {} positioned reads, so a call this \
+             service cannot answer still costs the device a trip to the file",
+            reader.source.requests.len()
+        );
+
+        // The destination exactly the model's width is not refused by the guard: the
+        // run gets as far as the table, which is empty, and says so by name. Without
+        // this the block above could be passing on a guard that refuses everything.
+        let mut exact: Vec<f32> = rust_std::vec![f32::NAN; 64];
+        assert_eq!(
+            run_streamed_embedding(
+                &mut reader,
+                &config,
+                &tokens,
+                &mut scratch,
+                &mut kv_cache,
+                &final_norm,
+                &mut row,
+                &mut exact,
+            ),
+            Err(LoadError::TensorAbsent(TENSOR_TOKEN_EMBD, None)),
+            "a correctly sized destination was not let past the width guard"
+        );
+
+        // And a call with nothing to pool answers rather than refusing: zero
+        // positions, the head not applied, no read spent.
+        let mut empty_out: Vec<f32> = rust_std::vec![f32::NAN; 64];
+        let (run, head_applied) = run_streamed_embedding(
+            &mut reader,
+            &config,
+            &[],
+            &mut scratch,
+            &mut kv_cache,
+            &final_norm,
+            &mut row,
+            &mut empty_out,
+        )
+        .expect("no tokens is an answer, not a failure");
+        assert_eq!((run.positions, run.blocks_run, run.bytes_read), (0, 0, 0));
+        assert!(!head_applied);
+        assert!(empty_out.iter().all(|v| v.is_nan()));
+        assert_eq!(reader.source.requests.len(), 0);
     }
 
     /// The hop this module exists to close, taken against the installed file.

@@ -84,8 +84,15 @@ use alloc::vec::Vec;
 /// that number -- the second one against the 333 MB file's own bytes, so the
 /// fixture's numbers are the file's and not whoever typed them in.
 ///
-/// It fits in memory; it does not yet run, because the graph and the weight
-/// loader for it are separate work.
+/// It fits in memory, and on the development host it runs: the graph below is
+/// what `run_block` walks for each of the file's 24 blocks, and
+/// `weights::run_streamed_embedding` reads the installed file's tensors one block
+/// at a time and applies its `dense_2`/`dense_3` head --
+/// `test_the_installed_file_is_read_block_by_block_and_run` measures that over the
+/// 333 MB file's own bytes. None of those measurements are the device's. The guest
+/// has never run this graph, and the first thing that stops it there is not a
+/// number in this file: it is the descriptor walk being handed a source that does
+/// not buffer, which is recorded on `weights::TensorTable::walk`.
 pub const SCRATCH_BYTE_BUDGET: usize = 120 * 1024 * 1024;
 
 /// Bytes one f32 occupies: every buffer the engine sizes is f32.
@@ -1007,11 +1014,16 @@ impl ModelConfig {
 
     /// The head geometry this build's attention kernel can actually walk.
     ///
-    /// WHY it is not part of the budget: two key/value heads fit in memory -- the
-    /// cache prices them -- but the kernel below caches and attends to head 0
-    /// alone, so a grouped-query file would get an answer read from one head and
-    /// reported as the model's. That is a graph gap, not a byte gap, and grouped
-    /// query attention is the separate task that closes it.
+    /// WHY it is not part of the budget: a file declaring two key/value heads fits
+    /// in memory -- the cache prices them -- but the kernel below caches and
+    /// attends to head 0 alone, so a second head would be read as the first and
+    /// reported as the model's. That is a graph gap, not a byte gap.
+    ///
+    /// WHY this is not a refusal of grouped-query attention: it refuses more than
+    /// one key/value HEAD. The published file is grouped-query -- three query heads
+    /// over one key/value head, 256 wide -- so head 0 is the only head the file
+    /// holds, and `run_block` folds each query head onto it, which is what the
+    /// architecture means and what this build runs.
     pub fn check_attention_shape(&self) -> Result<(), InferenceError> {
         if self.num_kv_heads > 1 {
             let stated = u32::try_from(self.num_kv_heads).ok();
@@ -1728,9 +1740,10 @@ pub fn pooled_normalised(pooled: &[f32], count: usize, out: &mut [f32]) {
 ///
 /// WHY the shapes are carried and not re-derived: `dense_2.weight`'s row count is
 /// `dense_3.weight`'s column count, and both are the file's own descriptor
-/// numbers (`gemma-embedding.dense_2_feat_out` says 3072 on the published file,
-/// and the tensor declares [768, 3072]). A head built from one and run at the
-/// other would ask `gemv` for rows the bytes do not hold -- its refusal, but
+/// numbers (the tensor declares [768, 3072], and the file separately states
+/// `gemma-embedding.dense_2_feat_out` as 3072 -- the loader reads the descriptor
+/// and no code in this service reads that key). A head built from one and run at
+/// the other would ask `gemv` for rows the bytes do not hold -- its refusal, but
 /// caught here at the shape instead of mid-multiply.
 ///
 /// WHY the biases are optional: the published
@@ -2249,11 +2262,15 @@ pub fn extract_embedding(
     let count = tokens.len().min(config.seq_len);
     let dim = config.hidden_dim;
 
-    // Mean pooling over the positions, which is what an embedding file declares
-    // when it states `pooling_type` 1 -- the published file states exactly that
-    // number. Each step's normalised residual stream is summed as it is produced,
-    // so the vector is the model's own hidden representation rather than a slice
-    // of the cache or a re-use of the logits.
+    // Mean pooling over the positions -- and mean pooling because this path is
+    // coded that way, not because the file was consulted: `GgufModelInfo` carries
+    // no pooling field and no reader in this service asks for
+    // `gemma-embedding.pooling_type`. The published file does state that key as 1,
+    // which agrees with what runs here; a file declaring a different pooling would
+    // still be mean-pooled, so the agreement is a fact about this one file and not
+    // a check this code performs. Each step's normalised residual stream is summed
+    // as it is produced, so the vector is the model's own hidden representation
+    // rather than a slice of the cache or a re-use of the logits.
     for pos in 0..count {
         forward_step(
             tokens[pos],
@@ -2273,8 +2290,10 @@ pub fn extract_embedding(
     //
     // WHAT THIS DOES NOT DO: the published file also carries `dense_2.weight`
     // (768 -> 3072) and `dense_3.weight` (3072 -> 768) after the pool -- the
-    // head `apply_pooling_head` runs, declared by `dense_2_feat_in/out` and
-    // `dense_3_feat_in/out`. A `ModelWeights` carries no head tensors, so what
+    // head `apply_pooling_head` runs, at the widths its two tensor descriptors
+    // declare (the file also states `dense_2_feat_in/out` and
+    // `dense_3_feat_in/out`; nothing in this service reads those keys). A
+    // `ModelWeights` carries no head tensors, so what
     // comes back from this in-memory path is the pooled pre-head stream, and its
     // caller must say so; the streaming loader that reads the installed file
     // applies the head when the file declares one (see
@@ -3109,6 +3128,131 @@ pub mod tests {
             "the pooled vector has squared length {}",
             got_sq
         );
+    }
+
+    /// The dtype ids this build has a byte layout for, collected from the engine
+    /// rather than read out of a comment.
+    ///
+    /// WHY the whole range and not the five: `quantised_row_bytes` is the function
+    /// the loader calls to size every tensor row it reads, and `gemv` and
+    /// `embedding_row_into` are the two places the bytes are then interpreted. A
+    /// case that only checks the ids it expects to work cannot see a sixth arm
+    /// appear or a fourth disappear; a case that walks the id space and collects
+    /// what answers can see both, and it also sees the shape of the answer for
+    /// everything outside the set -- refused by number, never read with a
+    /// neighbour's block width.
+    #[test]
+    fn the_engine_maps_exactly_five_dtype_ids_and_refuses_the_rest_by_number() {
+        // 0 F32, 1 F16, 2 Q4_0, 8 Q8_0, 12 Q4_K. Q4_1 (3), Q5_K (13) and Q6_K (14)
+        // are the ids the GGML format names that no arithmetic in this service
+        // reads, and the published file uses only 0 and 8.
+        let mapped = [0u32, 1, 2, 8, 12];
+        let mut answered: Vec<u32> = Vec::new();
+        for dtype in 0..=64u32 {
+            if quantised_row_bytes(dtype, 768).is_some() {
+                answered.push(dtype);
+            }
+        }
+        assert_eq!(
+            answered, mapped.to_vec(),
+            "the ids the loader sizes a row for are {answered:?}, not the {mapped:?} this \
+             module's documentation names -- one of the two is now a lie"
+        );
+
+        for dtype in 0..=64u32 {
+            let is_mapped = mapped.contains(&dtype);
+            let row_bytes = quantised_row_bytes(dtype, 768);
+            assert_eq!(row_bytes.is_some(), is_mapped);
+            // The two consumers, at the width the published file runs at. A row the
+            // engine has no layout for must come back naming the number it was
+            // handed, because a dequantisation that guessed a block width returns
+            // plausible-looking floats from the wrong bytes.
+            let raw = [0u8; 3072];
+            let mut stream = [0.0f32; 768];
+            let mut x = [0.0f32; 1];
+            let mut out = [0.0f32; 1];
+            match (is_mapped, row_bytes) {
+                (true, Some(width)) => {
+                    assert_eq!(
+                        embedding_row_into(&raw[..width as usize], dtype, 1.0, &mut stream),
+                        Ok(()),
+                        "dtype {dtype} sizes a {width}-byte row but cannot read one"
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        embedding_row_into(&raw, dtype, 1.0, &mut stream),
+                        Err(InferenceError::UnsupportedQuantization(dtype)),
+                        "embedding_row_into read dtype {dtype} with something other than \
+                         its number"
+                    );
+                    assert_eq!(
+                        gemv(&raw, dtype, &mut x, &mut out, 1, 1),
+                        Err(InferenceError::UnsupportedQuantization(dtype)),
+                        "gemv read dtype {dtype} with something other than its number"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pooled vector is the width the model declares, and a destination that
+    /// cannot hold it is refused instead of truncated.
+    ///
+    /// WHY a buffer wider than the model is used for the passing case: the only
+    /// honest reading of "the engine wrote 64 floats" is one where the bytes past
+    /// 64 are still what the caller left there. The narrower case matters more:
+    /// `hidden_dim.min(out.len())` would have answered a 63-float vector for a
+    /// 64-wide model, and a prefix of an embedding compared against another prefix
+    /// is a similarity no one asked for.
+    #[test]
+    fn the_pooled_vector_is_exactly_the_width_the_model_declares() {
+        let fixture = LittleModel::new();
+        let config = LittleModel::config();
+        let blocks = [Some(fixture.layer())];
+        let model = fixture.weights(&blocks);
+        let tokens = [crate::tokenizer::TOKEN_BOS, 261, 4];
+
+        let mut wide = [f32::NAN; LITTLE_HIDDEN * 2];
+        let dim = extract_embedding(&tokens, &model, &config, &mut wide)
+            .expect("a 128-float destination holds a 64-wide vector");
+        assert_eq!(dim, config.hidden_dim, "the width reported is not the width declared");
+        assert_eq!(dim, LITTLE_HIDDEN);
+        assert!(wide[..dim].iter().all(|v| v.is_finite()));
+        assert!(wide[..dim].iter().any(|v| *v != 0.0));
+        assert!(
+            wide[dim..].iter().all(|v| v.is_nan()),
+            "the pool wrote past the model's declared width"
+        );
+        let mut squared = 0.0f32;
+        for &v in wide[..dim].iter() {
+            squared += v * v;
+        }
+        assert!(
+            (squared - 1.0).abs() < 1e-4,
+            "the vector the caller was told is {} wide has squared length {}",
+            dim,
+            squared
+        );
+
+        let mut narrow = [0.0f32; LITTLE_HIDDEN - 1];
+        assert_eq!(
+            extract_embedding(&tokens, &model, &config, &mut narrow),
+            Err(InferenceError::BufferTooSmall),
+            "a 63-float destination for a 64-wide model was answered with a truncation"
+        );
+        assert!(
+            narrow.iter().all(|v| *v == 0.0),
+            "the refused call still wrote into the caller's buffer: {narrow:?}"
+        );
+
+        // Nothing to pool answers zero rather than refusing and rather than
+        // inventing a zero vector: `Ok(0)` is "no position ran", which the caller's
+        // status is chosen from, and a 64-wide array of zeros would read as a
+        // sentence the model said about the empty string.
+        let mut empty = [0.0f32; LITTLE_HIDDEN];
+        assert_eq!(extract_embedding(&[], &model, &config, &mut empty), Ok(0));
+        assert!(empty.iter().all(|v| *v == 0.0));
     }
 
     #[test]

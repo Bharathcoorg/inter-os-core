@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
-//! Real Retrieval-Augmented Generation (RAG) pipeline for InterOS Core.
+//! Retrieval-Augmented Generation (RAG) pipeline for InterOS Core: document
+//! chunking, vector indexing, cosine ranking and prompt injection. The vectors it
+//! indexes are the lexical projection of `crate::embedding`, and this pipeline
+//! answers with the chunks it stored rather than with text a model produced, so no
+//! part of it is a neural language model.
 //!
 //! Strictly `#![no_std]` and zero heap allocation in all execution and query loops.
 //!
@@ -9,8 +13,11 @@
 //! 1. Document discovery & ingestion from `/storage/` (e.g. `/storage/downloads/`, `/storage/notes/`).
 //! 2. Document parsing & chunking with stable 64-bit deterministic chunk IDs, exact character
 //!    bounds (`start_offset`, `end_offset`), and source attribution metadata.
-//! 3. Vector indexing using EmbeddingGemma 2 / Matryoshka representation learning (supports
-//!    128-D, 256-D, 768-D Q7 fixed-point vector arithmetic).
+//! 3. Vector indexing of the projection in `crate::embedding` -- the deterministic
+//!    lexical n-gram feature hash that module documents as NOT physical neural
+//!    EmbeddingGemma 2 weights -- stored here at 256 dimensions of Q7 fixed-point.
+//!    The hash will fill 128, 256, 512 or 768 slots for a caller that asks, but
+//!    this index holds 256 and compares no wider (see `RAG_VECTOR_DIM`).
 //! 4. Zero-allocation cosine similarity ranking algorithm returning top-K matches with
 //!    exact filename, chunk offset, confidence percentage, and neural vs lexical attribution.
 //! 5. Exact-attribution prompt injection for RAG queries without hallucinating or fabricating citations.
@@ -25,8 +32,14 @@ pub const MAX_DOC_PATH_LEN: usize = 64;
 /// Maximum byte length for a chunk text snippet.
 pub const MAX_CHUNK_TEXT_LEN: usize = 192;
 
-/// Primary Matryoshka vector dimension stored in the RAG index (256-D Q7).
-/// Truncatable to 128-D or expandable to 768-D.
+/// The width one chunk's stored vector occupies: the first 256 dimensions of
+/// `crate::embedding`'s projection, held as Q7 fixed-point.
+///
+/// WHY the number is a ceiling and not a starting point: `search` clamps the
+/// dimension a caller asks for into `128..=RAG_VECTOR_DIM`, a stored record is a
+/// stack array of exactly this width, and nothing in the index can compare a
+/// dimension it has not kept. Asking for 512 or 768 is therefore answered from
+/// these 256 -- it is not a wider vector, and this type does not have one.
 pub const RAG_VECTOR_DIM: usize = 256;
 
 /// Maximum number of indexed document chunks held in memory without heap allocation.
@@ -255,7 +268,9 @@ impl RagIndex {
             chunk.text[..text_copy_len].copy_from_slice(&chunk_slice[..text_copy_len]);
             chunk.text_len = text_copy_len as u16;
 
-            // Generate 256-D Matryoshka vector embedding with zero heap allocation
+            // The chunk's text projected onto the 256 dimensions this index stores:
+            // `crate::embedding`'s deterministic lexical n-gram hash, computed on the
+            // stack. Not the installed model's weights, and not a wider vector.
             compute_embedding_768(
                 &chunk.text[..chunk.text_len as usize],
                 RAG_VECTOR_DIM,
@@ -276,7 +291,9 @@ impl RagIndex {
 
     /// Performs cosine similarity ranking across all indexed chunks for a query.
     ///
-    /// Truncates embedding comparisons to `target_dim` (128, 256, 512, 768).
+    /// The caller's `target_dim` is clamped into `128..=RAG_VECTOR_DIM`, so a
+    /// request for 512 or 768 compares the 256 dimensions the index holds and
+    /// returns that score -- not an error, and not a wider vector.
     /// Returns the number of matches written into `out_matches` (up to `top_k`).
     pub fn search(
         &self,

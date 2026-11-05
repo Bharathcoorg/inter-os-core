@@ -15,10 +15,16 @@
 #[cfg(test)]
 use interos_std as std;
 
-/// EmbeddingGemma 2 canonical full embedding vector dimension.
+/// The width this projection produces, chosen to match the hidden width the
+/// published `embeddinggemma-300M-Q8_0.gguf` declares (768) so a caller holding
+/// either vector sizes one buffer. It is not that model's output: nothing in this
+/// module reads a weight file.
 pub const EMBEDDING_DIM: usize = 768;
 
-/// Supported Matryoshka sub-dimensions.
+/// The sub-dimensions the platform's callers are asked for by convention
+/// (128, 256, 512, 768). `compute_embedding_768` fills any width from 1 to
+/// `EMBEDDING_DIM`, so this list names what is normally requested, not what is
+/// accepted.
 pub const MATRYOSHKA_DIMS: [usize; 4] = [128, 256, 512, 768];
 
 /// Computes software single-precision floating-point square root via Newton-Raphson.
