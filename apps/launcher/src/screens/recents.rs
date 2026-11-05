@@ -156,6 +156,101 @@ const _: () = assert!(
     "the header's count line must sit above the card carousel it is stacked over",
 );
 
+// --- The card's text stack at the rung the shell carries ---------------------
+// WHY the card's own stack is derived and the header/empty/close labels are not:
+// the title, state and reason lines of a task card are inked by the crate's
+// level-aware rasteriser, so their guard bands have to grow with the rung the
+// same run is drawn at or a raised setting clips a descender -- the exact defect
+// the box above was written against, just moved one rung up. The header's
+// "Recent Apps", the empty state and the "Clear All" label are laid by
+// `launcher::text::Label`, which measures and rasterises at the authored ladder
+// and takes no level; carrying those would mean giving the shared `Label` a rung,
+// so they stay authored and the report names that as the shared-file change this
+// screen cannot make on its own.
+//
+// Each band is [`launcher::scale::grown`] of the authored box, so the reader at
+// `PLATFORM_LEVEL` gets the number the card was drawn with -- the sweeps below
+// refuse the day it stops being true -- and a raised rung adds exactly the rows
+// its run's box took.
+
+/// The rows a task card's title reserves at `level`.
+const fn card_name_box(level: u8) -> usize {
+    launcher::scale::grown(CARD_NAME_BOX_H, type_scale::BODY, level)
+}
+/// The rows a task card's state line reserves at `level`.
+const fn card_state_box(level: u8) -> usize {
+    launcher::scale::grown(CARD_STATE_BOX_H, type_scale::CAPTION, level)
+}
+/// Inset from a card's top to its state line at `level`: below the whole title box.
+const fn card_state_top(level: u8) -> usize {
+    CARD_NAME_TOP + card_name_box(level)
+}
+/// Inset from a card's top to the snapshot well at `level`: the whole text stack.
+const fn card_well_top(level: u8) -> usize {
+    card_state_top(level) + card_state_box(level) + CARD_WELL_GAP
+}
+/// The rows the well's reason line reserves at `level`.
+const fn reason_box(level: u8) -> usize {
+    launcher::scale::grown(REASON_BOX_H, type_scale::CAPTION, level)
+}
+
+/// Whether a rung's text stack leaves the snapshot well room for a whole frame.
+const fn card_stack_holds(level: u8) -> bool {
+    card_well_top(level) + CARD_WELL_BOTTOM + SNAPSHOT_H <= CARD_H
+}
+
+/// The largest rung at or below `want` the card can carry without pushing the
+/// frame out of its well.
+///
+/// WHY it never descends past `PLATFORM_LEVEL`: [`launcher::scale::grown`] does not
+/// shrink a box, so the authored level always fits (the gate beside the stack
+/// proved it) and a rung the card cannot carry is met by staying authored rather
+/// than by drawing smaller than the screen was built to.
+const fn recents_held_level(want: u8) -> u8 {
+    let mut level = want;
+    while level > launcher::scale::PLATFORM_LEVEL && !card_stack_holds(level) {
+        level -= 1;
+    }
+    level
+}
+
+/// The rung this frame lays a card's text stack at.
+fn recents_level() -> u8 {
+    recents_held_level(launcher::scale::draw_level())
+}
+
+const _: () = assert!(card_name_box(launcher::scale::PLATFORM_LEVEL) == CARD_NAME_BOX_H);
+const _: () = assert!(card_state_box(launcher::scale::PLATFORM_LEVEL) == CARD_STATE_BOX_H);
+const _: () = assert!(card_state_top(launcher::scale::PLATFORM_LEVEL) == CARD_STATE_TOP);
+const _: () = assert!(card_well_top(launcher::scale::PLATFORM_LEVEL) == CARD_WELL_TOP);
+const _: () = assert!(reason_box(launcher::scale::PLATFORM_LEVEL) == REASON_BOX_H);
+
+/// WHY swept: the held level only earns its place if the rung it hands back fits,
+/// the clamp never raises above what was asked for, and the authored level is
+/// untouched by it -- otherwise a reader who never raised "Text size" would get a
+/// card resized for a setting they did not choose.
+const fn recents_stacks_hold_at_every_rung() -> bool {
+    if recents_held_level(launcher::scale::PLATFORM_LEVEL) != launcher::scale::PLATFORM_LEVEL {
+        return false;
+    }
+    if !card_stack_holds(launcher::scale::PLATFORM_LEVEL) {
+        return false;
+    }
+    let mut want = 0usize;
+    while want <= launcher::scale::MAX_LEVEL as usize {
+        let chosen = recents_held_level(want as u8);
+        if chosen > want as u8 {
+            return false;
+        }
+        if !card_stack_holds(chosen) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(recents_stacks_hold_at_every_rung());
+
 // ============================================================================
 // Hit Testing & Interaction Actions
 // ============================================================================
@@ -418,6 +513,9 @@ struct Plan {
     close_all_label: Label,
     empty_title: Label,
     empty_hint: Label,
+    /// The rung this frame lays a card's text stack at, resolved once so the pixel
+    /// path never walks the ladder.
+    level: u8,
     cached_fingerprint: u64,
 }
 
@@ -452,6 +550,10 @@ fn fingerprint(state: &LauncherState, scroll_offset: i32) -> u64 {
 /// Build plan for the current frame.
 fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
     let theme = THEME;
+    // WHY once here: the rung is asked for at the top of the frame and stored on the
+    // plan, so every card lays its text stack with the same number the painter reads
+    // back per pixel -- a frame never changes rung partway through a pass.
+    let level = recents_level();
 
     // Header labels
     let clock = Label::at(
@@ -495,7 +597,7 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         // Name
         let mut name = [0u8; CARD_NAME_CAP];
         let (fitted_name, fitted_name_len) =
-            launcher::text::ellipsize(card.label(), type_scale::BODY, CARD_TEXT_W);
+            launcher::scale::ellipsize_at(card.label(), type_scale::BODY, CARD_TEXT_W, level);
         let nlen = fitted_name_len.min(CARD_NAME_CAP);
         name[..nlen].copy_from_slice(&fitted_name[..nlen]);
 
@@ -513,7 +615,7 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         let mut reason = [0u8; REASON_CAP];
         let rlen = if let Some(r) = card.preview.reason() {
             let (fitted, fitted_len) =
-                launcher::text::ellipsize(r.as_bytes(), type_scale::CAPTION, WELL_TEXT_W);
+                launcher::scale::ellipsize_at(r.as_bytes(), type_scale::CAPTION, WELL_TEXT_W, level);
             let l = fitted_len.min(REASON_CAP);
             reason[..l].copy_from_slice(&fitted[..l]);
             l
@@ -601,6 +703,7 @@ fn build_plan(state: &LauncherState, motion: &CarouselMotion, fp: u64) -> Plan {
         close_all_label,
         empty_title,
         empty_hint,
+        level,
         cached_fingerprint: fp,
     }
 }
@@ -706,6 +809,9 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
     let px = x as i32;
     let py = y as i32;
+    // WHY read once from the plan: the rung is resolved when the frame is built, so
+    // a pixel path only compares against it -- it never walks the ladder.
+    let lvl = plan.level;
 
     // 1. Status Bar & Clock
     if y < STATUS_BAR_HEIGHT {
@@ -773,7 +879,7 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return c;
             }
         } else if card.badge_len > 0 && px >= (card_x + 22) && px < (card_x + 66) && py >= (card_y + 22) && py < (card_y + 66) {
-            if let Some(c) = crate::test_text_aa(
+            if let Some(c) = crate::test_text_aa_level(
                 x,
                 y,
                 (card_x + 28) as usize,
@@ -782,6 +888,7 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 &card.badge[..card.badge_len],
                 theme.on_surface,
                 card_fill,
+                lvl,
             ) {
                 return c;
             }
@@ -792,9 +899,9 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             && px >= (card_x + CARD_TEXT_X as i32)
             && px < (card_x + CARD_TEXT_RIGHT as i32)
             && py >= (card_y + CARD_NAME_TOP as i32)
-            && py < (card_y + (CARD_NAME_TOP + CARD_NAME_BOX_H) as i32)
+            && py < (card_y + (CARD_NAME_TOP + card_name_box(lvl)) as i32)
         {
-            if let Some(c) = crate::test_text_aa(
+            if let Some(c) = crate::test_text_aa_level(
                 x,
                 y,
                 (card_x + CARD_TEXT_X as i32) as usize,
@@ -803,6 +910,7 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 &card.name[..card.name_len],
                 theme.on_surface,
                 card_fill,
+                lvl,
             ) {
                 return c;
             }
@@ -812,31 +920,33 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if card.state_len > 0
             && px >= (card_x + CARD_TEXT_X as i32)
             && px < (card_x + CARD_TEXT_RIGHT as i32)
-            && py >= (card_y + CARD_STATE_TOP as i32)
-            && py < (card_y + (CARD_STATE_TOP + CARD_STATE_BOX_H) as i32)
+            && py >= (card_y + card_state_top(lvl) as i32)
+            && py < (card_y + (card_state_top(lvl) + card_state_box(lvl)) as i32)
         {
-            if let Some(c) = crate::test_text_aa(
+            if let Some(c) = crate::test_text_aa_level(
                 x,
                 y,
                 (card_x + CARD_TEXT_X as i32) as usize,
-                (card_y + CARD_STATE_TOP as i32) as usize,
+                (card_y + card_state_top(lvl) as i32) as usize,
                 type_scale::CAPTION,
                 &card.state_label[..card.state_len],
                 theme.on_surface_variant,
                 card_fill,
+                lvl,
             ) {
                 return c;
             }
         }
 
         // E. Live Snapshot Preview Well
+        let well_top = card_well_top(lvl);
         let snap_x = card_x + 20 + ((card_w - 40 - SNAPSHOT_W as i32) / 2);
         // WHY derived from the text stack: `84` and `104` were the well's two insets
         // remembered as numbers, and `84` was also the top the gate above checked the
         // title and state lines against. The well is centred between the bottom of that
         // stack and the bottom inset, so the rungs move it and nothing else has to.
-        let snap_y = card_y + CARD_WELL_TOP as i32
-            + ((card_h - (CARD_WELL_TOP + CARD_WELL_BOTTOM) as i32 - SNAPSHOT_H as i32) / 2);
+        let snap_y = card_y + well_top as i32
+            + ((card_h - (well_top + CARD_WELL_BOTTOM) as i32 - SNAPSHOT_H as i32) / 2);
         let snap_w = SNAPSHOT_W as i32;
         let snap_h = SNAPSHOT_H as i32;
 
@@ -860,8 +970,8 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 // descender and every row the bitmap face still paints in that
                 // cell was cut off at the guard, so the well answered the question
                 // "why is this one stopped" with a word missing its tail.
-                if card.reason_len > 0 && py >= ry && py < ry + REASON_BOX_H as i32 {
-                    if let Some(c) = crate::test_text_aa(
+                if card.reason_len > 0 && py >= ry && py < ry + reason_box(lvl) as i32 {
+                    if let Some(c) = crate::test_text_aa_level(
                         x,
                         y,
                         rx,
@@ -870,6 +980,7 @@ pub fn get_recents_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                         &card.reason[..card.reason_len],
                         theme.on_surface_variant,
                         well_bg,
+                        lvl,
                     ) {
                         return c;
                     }
