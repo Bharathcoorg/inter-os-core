@@ -1227,8 +1227,8 @@ def test_the_mirrored_crate_is_the_canonical_crate():
     """
     if CANONICAL.is_dir() and MIRRORED.is_dir():
         for name in ("lib.rs", "main.rs"):
-            a = (CANONICAL / name).read_bytes()
-            b = (MIRRORED / name).read_bytes()
+            a = (CANONICAL / name).read_bytes().replace(b"\r\n", b"\n")
+            b = (MIRRORED / name).read_bytes().replace(b"\r\n", b"\n")
             assert a == b, (
                 f"the mirrored {name} is not the canonical one; "
                 "run tools/mirror_apps.py in interos-apps"

@@ -126,6 +126,8 @@ pub extern "C" fn _start() -> ! {
     render_demo(surface, &app.webview);
     std::surface_flip().ok();
 
+    let mut last_scale = std::design::font::user_text_scale();
+
     let mut input = std::InputEvent {
         kind: 0,
         x: 0,
@@ -136,6 +138,13 @@ pub extern "C" fn _start() -> ! {
     };
 
     loop {
+        let cur_scale = std::design::font::user_text_scale();
+        if cur_scale != last_scale {
+            last_scale = cur_scale;
+            render_demo(surface, &app.webview);
+            std::surface_flip().ok();
+        }
+
         let events = match std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             Ok(ev) => ev,
             Err(_) => break,

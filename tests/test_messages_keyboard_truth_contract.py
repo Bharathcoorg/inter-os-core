@@ -272,8 +272,8 @@ def test_the_mirrored_crate_is_the_canonical_crate():
     """
     if MIRROR.is_dir():
         for name in ("lib.rs", "main.rs", "keyboard.rs"):
-            a = (CORE / "src" / name).read_bytes()
-            b = (MIRROR / "src" / name).read_bytes()
+            a = (CORE / "src" / name).read_bytes().replace(b"\r\n", b"\n")
+            b = (MIRROR / "src" / name).read_bytes().replace(b"\r\n", b"\n")
             assert a == b, (
                 f"the mirrored {name} is not the canonical one; "
                 "run tools/mirror_apps.py messages in interos-apps"

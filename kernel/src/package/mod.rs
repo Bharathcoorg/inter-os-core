@@ -58,6 +58,7 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.notes", path: "/packages/org.interos.notes.rapp", process_name: "app_notes", display_name: "Notes", icon: "NOTE", category: "Personal", is_system: false },
     PackageDescriptor { package_id: "org.interos.agentmanager", path: "/packages/org.interos.agentmanager.rapp", process_name: "app_agent_manager", display_name: "Agent Manager", icon: "AI", category: "Tools", is_system: false },
     PackageDescriptor { package_id: "org.interos.video_player", path: "/packages/org.interos.video_player.rapp", process_name: "app_video_player", display_name: "Video Player", icon: "VID", category: "Personal", is_system: false },
+    PackageDescriptor { package_id: "org.interos.webview_demo", path: "/packages/org.interos.webview_demo.rapp", process_name: "app_webview_demo", display_name: "Webview Demo", icon: "WEBV", category: "Tools", is_system: false },
 ];
 
 pub fn first_party_package(package_id: &str) -> Option<&'static PackageDescriptor> {

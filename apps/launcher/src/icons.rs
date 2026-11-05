@@ -56,6 +56,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Camera)
     } else if id == b"org.interos.browser" || id == b"browser" || id == b"app_browser" || id == b"WEB" || id == b"BROW"
         || id == b"Browser"
+        || id == b"org.interos.webview_demo" || id == b"webview_demo" || id == b"app_webview_demo" || id == b"WEBV"
     {
         Some(IconKind::Browser)
     } else if id == b"org.interos.file_manager" || id == b"file_manager" || id == b"files" || id == b"app_file_manager" || id == b"FILE"
@@ -492,6 +493,9 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
         assert_eq!(match_icon_kind(b"work"), Some(IconKind::Briefcase));
         assert_eq!(match_icon_kind(b"org.interos.card_demo"), Some(IconKind::CardDemo));
+        assert_eq!(match_icon_kind(b"org.interos.webview_demo"), Some(IconKind::Browser));
+        assert_eq!(match_icon_kind(b"app_webview_demo"), Some(IconKind::Browser));
+        assert_eq!(match_icon_kind(b"WEBV"), Some(IconKind::Browser));
         assert_eq!(match_icon_kind(b"org.custom.unknown"), None);
     }
 

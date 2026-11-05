@@ -2786,6 +2786,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
             // The client has now drawn into this surface, so a capture of it is
             // a picture of what the client is showing.
+            surface.dirty = true;
             surface.has_frame = true;
             // The paint starts at the first write that really landed. This
             // handler, not `sys_surface_write`, is what every client reaches.
@@ -2811,7 +2812,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             };
             if end == surface.pixels.len() {
                 surface.frame_ready = true;
-            } else if offset == 0 {
+                surface.frame_complete = true;
+            } else if offset == 0 && !surface.frame_complete {
                 surface.frame_ready = false;
             }
             if let Some(band) = band {
@@ -4766,6 +4768,7 @@ pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels
     if pixels.is_empty() || pixels.len() > 65536 {
         return Err(SyscallResult::InvalidArguments);
     }
+    crate::performance::record_paint_after_touch(crate::interrupts::get_system_ticks(), owner.0);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.write_surface_pixels(surface_id, owner.0, offset, pixels)

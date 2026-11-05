@@ -47,7 +47,7 @@ use agent_manager::theme::THEME;
 use agent_manager::{
     build_embed_request, embed_attribution, format_threshold, format_u32, generation_answer,
     granted_capability_count, load_saved_provider, probe_capability_grants, providers,
-    read_embed_reply, resolve_inference_service, save_preferred_provider, service_name,
+    read_embed_reply, record_tool_refusal_bubble, resolve_inference_service, save_preferred_provider, service_name,
     write_refusal_without_words, AgentTool, AgentToolOutcome, CapabilityGrant, ChatRole,
     ChatSession, ConsentOutcome, DeviceState, EmbedProbe, GenerationAnswer, InstallState,
     ModelProbeStatus, PackageInstallOutcome, PackageRemoveOutcome, ProbeStage, ProbeState,
@@ -1364,6 +1364,27 @@ impl AgentManagerApp {
                     Tone::Bad,
                 );
             }
+        }
+        let any_tool_refused = self.agent_tools.iter().any(|t| !t.ok);
+        if self.tool_consent == ConsentOutcome::Refused || any_tool_refused {
+            let mut read_buf = [0u8; std::ai::ANSWER_SLOT_BYTES];
+            let mut found_pipe_bytes = 0usize;
+            for pipe_id in std::ai::ANSWER_PIPE_FIRST..(std::ai::ANSWER_PIPE_FIRST + std::ai::ANSWER_PIPE_COUNT) {
+                while let Ok(read) = std::shm_pipe_receive(pipe_id, &mut read_buf) {
+                    if read == 0 {
+                        break;
+                    }
+                    if found_pipe_bytes == 0 {
+                        found_pipe_bytes = read;
+                    }
+                }
+            }
+            let drained = if found_pipe_bytes > 0 {
+                Some(&read_buf[..found_pipe_bytes])
+            } else {
+                None
+            };
+            record_tool_refusal_bubble(&mut self.chat, drained);
         }
         self.rebuild();
     }

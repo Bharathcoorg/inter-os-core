@@ -45,9 +45,15 @@ const TEXT_INSET_Y: usize = 16;
 const HEADING_SCALE: usize = 4;
 const BODY_SCALE: usize = 2;
 
-/// The line box a rendered document line reserves at its own rung.
-const fn line_box(is_heading: bool) -> usize {
-    font::line_height(if is_heading { HEADING_SCALE } else { BODY_SCALE })
+/// The line box a rendered document line reserves for a given user text scale.
+pub const fn line_box_for_user_scale(is_heading: bool, user_text_scale: u8) -> usize {
+    let scale = if is_heading { HEADING_SCALE } else { BODY_SCALE };
+    font::line_height_for_user_scale(scale, user_text_scale)
+}
+
+/// The line box a rendered document line reserves at the current user scale.
+pub fn line_box(is_heading: bool) -> usize {
+    line_box_for_user_scale(is_heading, font::user_text_scale())
 }
 
 /// WHY no cap height is repeated here: the ladder belongs to the font module,
@@ -58,9 +64,9 @@ const fn line_box(is_heading: bool) -> usize {
 /// never shallower than the run drawn inside it, which is exactly what the
 /// clipped heading at the top of this note was missing. The rungs' own sizes
 /// are pinned by `tests/test_type_scale_contract.py`.
-const _: () = assert!(line_box(false) >= font::cap_for_scale(BODY_SCALE) as usize);
-const _: () = assert!(line_box(true) >= font::cap_for_scale(HEADING_SCALE) as usize);
-const _: () = assert!(line_box(true) > line_box(false));
+const _: () = assert!(line_box_for_user_scale(false, 1) >= font::cap_for_scale(BODY_SCALE) as usize);
+const _: () = assert!(line_box_for_user_scale(true, 1) >= font::cap_for_scale(HEADING_SCALE) as usize);
+const _: () = assert!(line_box_for_user_scale(true, 1) > line_box_for_user_scale(false, 1));
 
 /// Truthful lifecycle state of an InterWebView instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,7 +711,7 @@ impl InterWebView {
             let scale = if line.is_heading { HEADING_SCALE } else { BODY_SCALE };
             let line_h = line_box(line.is_heading);
             if rel_y_u >= current_y && rel_y_u < current_y + line_h {
-                if let Some(px) = font::test_text_aa(
+                if let Some(px) = font::test_text_aa_user(
                     rel_x,
                     rel_y_u,
                     TEXT_INSET_X,
@@ -1066,5 +1072,32 @@ mod tests {
         // invalid scheme
         assert!(webview.load_url("ftp://unsupported.org").is_err());
         assert_eq!(webview.state(), WebViewState::Error);
+    }
+
+    #[test]
+    fn line_box_scales_gracefully_and_does_not_clip_cap_height() {
+        // Test for scales 1.0 (level 1), 1.25 (level 2), 1.5 (level 3), 2.0 (level 4, clamped to 3)
+        // asserting line box >= cap height for both body and heading.
+        for level in [1u8, 2, 3, 4] {
+            let heading_line_box = line_box_for_user_scale(true, level);
+            let heading_cap = font::cap_for_user_scale(HEADING_SCALE, level) as usize;
+            assert!(
+                heading_line_box >= heading_cap,
+                "heading line box {} < cap height {} at level {}",
+                heading_line_box,
+                heading_cap,
+                level
+            );
+
+            let body_line_box = line_box_for_user_scale(false, level);
+            let body_cap = font::cap_for_user_scale(BODY_SCALE, level) as usize;
+            assert!(
+                body_line_box >= body_cap,
+                "body line box {} < cap height {} at level {}",
+                body_line_box,
+                body_cap,
+                level
+            );
+        }
     }
 }
