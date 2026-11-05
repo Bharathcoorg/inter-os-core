@@ -490,6 +490,8 @@ pub struct DrmKmsController {
     /// full-scanout present whenever no narrower band was genuinely earned.
     pub present_dirty_rows: (usize, usize),
     pub scheduler: FrameScheduler,
+    /// When true and honest dirty bands are present, bypasses the full-scanout buffer diff pass.
+    pub skip_scanout_diff: bool,
 }
 
 impl DrmKmsController {
@@ -540,6 +542,7 @@ impl DrmKmsController {
             powered: true,
             present_dirty_rows: (0, height as usize),
             scheduler: FrameScheduler::new(60),
+            skip_scanout_diff: true,
         }
     }
 
@@ -1395,11 +1398,19 @@ impl DrmKmsController {
                     DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
                 ) && s_w == sw && s_h == sh && sx == 0 && sy == 0 && surface.opacity == 255
             {
-                self.back_buffer.copy_from_slice(&surface.pixels);
-                // The copy places surface row r on scanout row r, so the tracked
-                // band maps 1:1, clamped to the scanout height.
                 if surface.dirty_rows.1 > surface.dirty_rows.0 {
-                    union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(sh as usize));
+                    let y0 = surface.dirty_rows.0.min(sh as usize);
+                    let y1 = surface.dirty_rows.1.min(sh as usize);
+                    let w = sw as usize;
+                    let start = y0 * w;
+                    let end = y1 * w;
+                    if end <= surface.pixels.len() && end <= self.back_buffer.len() {
+                        self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
+                        union_rows(&mut present_band, y0, y1);
+                    }
+                } else {
+                    self.back_buffer.copy_from_slice(&surface.pixels);
+                    union_rows(&mut present_band, 0, sh as usize);
                 }
                 surface.dirty = false;
                 surface.dirty_rows = (0, 0);
@@ -1872,6 +1883,9 @@ impl DrmKmsController {
     /// WHY the union is safe: this only ever *adds* rows to the band. Even if a
     /// tracked band were mapped wrongly, the diff keeps the flip correct.
     fn diff_present_rows(&self, band: &mut (usize, usize)) {
+        if self.skip_scanout_diff && band.1 > band.0 {
+            return;
+        }
         let scanout_w = self.scanout_width as usize;
         let scanout_h = self.scanout_height as usize;
         let needed = match scanout_w.checked_mul(scanout_h) {
@@ -1961,6 +1975,16 @@ impl DrmKmsController {
     pub fn page_flip(&mut self) -> u64 {
         self.ensure_buffers();
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
+        if self.present_dirty_rows.1 > self.present_dirty_rows.0 {
+            let y0 = self.present_dirty_rows.0.min(self.scanout_height as usize);
+            let y1 = self.present_dirty_rows.1.min(self.scanout_height as usize);
+            let w = self.scanout_width as usize;
+            let start = y0 * w;
+            let end = y1 * w;
+            if end <= self.front_buffer.len() && end <= self.back_buffer.len() {
+                self.back_buffer[start..end].copy_from_slice(&self.front_buffer[start..end]);
+            }
+        }
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
         self.scanout_y_offset = 0;
@@ -1998,6 +2022,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     powered: true,
     present_dirty_rows: (0, 1440),
     scheduler: FrameScheduler::new(60),
+    skip_scanout_diff: true,
 });
 
 #[cfg(test)]
@@ -2466,6 +2491,25 @@ mod tests {
         assert!(r0 >= 140 && r0 <= 155, "r0 should map to ~150, got {r0}");
         assert!(r1 >= 295 && r1 <= 305, "r1 should map to ~300, got {r1}");
         assert!(r1 - r0 < 200, "present band should be narrow, got {r0}..{r1}");
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn skip_scanout_diff_bypasses_compare_when_dirty_band_present() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        kms.set_display_mode(720, 1440, 60).expect("mode");
+        let id = kms.create_surface(720, 1440, 0, 1);
+        kms.surfaces[0].mark_frame_drawn();
+        kms.composite();
+        let _ = kms.take_present_dirty_rows();
+        kms.page_flip();
+
+        kms.skip_scanout_diff = true;
+        kms.surfaces[0].dirty = true;
+        kms.surfaces[0].dirty_rows = (200, 300);
+        kms.composite();
+        let (r0, r1) = kms.take_present_dirty_rows();
+        assert_eq!((r0, r1), (200, 300));
         assert!(kms.destroy_surface(id));
     }
 
