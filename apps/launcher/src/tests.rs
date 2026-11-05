@@ -1080,6 +1080,81 @@ fn a_label_inks_the_pixels_it_was_placed_at() {
     assert!(inked > 20, "the label inked {} pixels", inked);
 }
 
+#[test]
+fn a_label_placed_at_the_platform_rung_is_the_label_this_ship() {
+    use crate::text::Label;
+    // WHY this is a test and not a comment: `at` now delegates to `at_level`, so the whole
+    // ladder-bound placement this screen depends on is one function call away from becoming
+    // rung-bound by accident. A reader who never raised "Text size" has to get the box the
+    // shell was drawn with, at every rung, or the setting moves pixels for nobody.
+    let _turn = advance_memo();
+    let samples: [&[u8]; 4] = [b"settings", b"8:42", b"Power off", b"i"];
+    for scale in 1..=5usize {
+        for text in samples {
+            for (x, y) in [(0usize, 0usize), (88, 84), (400, 1300)] {
+                let authored = Label::at(x, y, scale, text, 0xFF102030);
+                let pinned = Label::at_level(x, y, scale, text, 0xFF102030, crate::scale::PLATFORM_LEVEL);
+                assert_eq!(
+                    authored.rect(),
+                    pinned.rect(),
+                    "a label placed at the platform rung changed its box at scale {}",
+                    scale
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_label_placed_at_a_raised_rung_reserves_the_box_that_rung_needs() {
+    use crate::text::Label;
+    // WHY both halves: a raised rung that did not grow the box would clip its own
+    // descender, and a compact rung that grew it would steal rows from the plate above.
+    // The box is the only thing a screen can fit a label inside, so it has to move with
+    // the rung the ink is rasterised at.
+    let _turn = advance_memo();
+    for text in [b"settings" as &[u8], b"Power off", b"jumping"] {
+        for scale in 2..=5usize {
+            let normal = Label::at_level(88, 84, scale, text, 0xFF102030, crate::scale::PLATFORM_LEVEL);
+            let raised = Label::at_level(88, 84, scale, text, 0xFF102030, crate::scale::MAX_LEVEL);
+            let compact = Label::at_level(88, 84, scale, text, 0xFF102030, crate::font::TEXT_SCALE_COMPACT);
+            assert!(
+                raised.rect().h > normal.rect().h,
+                "rung {} did not reserve more rows at the top level than at Normal",
+                scale
+            );
+            assert!(
+                raised.rect().w >= normal.rect().w,
+                "rung {} got narrower ink at the top level than at Normal",
+                scale
+            );
+            assert!(
+                compact.rect().h <= normal.rect().h,
+                "rung {} grew its box for a reader who asked for less",
+                scale
+            );
+            // The label's own rectangle is the only set of rows it can ink, so the grown
+            // box has to be where the grown ink actually lands.
+            let mut inked = 0usize;
+            let mut outside = 0usize;
+            let rect = raised.rect();
+            for y in 40..360 {
+                for x in 60..520 {
+                    if raised.pixel(x, y, 0xFFFFFFFF) == Some(0xFF102030) {
+                        inked += 1;
+                        if x < rect.x || x >= rect.x + rect.w || y < rect.y || y >= rect.y + rect.h
+                        {
+                            outside += 1;
+                        }
+                    }
+                }
+            }
+            assert!(inked > 20, "the raised label inked {} pixels", inked);
+            assert_eq!(outside, 0, "a raised label inked outside the box it reports");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Centring a label on the face it is drawn with
 // ---------------------------------------------------------------------------

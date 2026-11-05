@@ -19,12 +19,17 @@
 //! being true. That is what lets the shell carry the setting without moving one
 //! pixel for the reader who never raised it.
 //!
-//! SCOPE, stated rather than hidden: the app drawer's catalogue names are the first
-//! surface wired through here. The chips, the icon badges and the search field still
-//! answer the authored ladder, because each sits in a pill sized to the run inside it
-//! and moving one means moving the pill row, its band and its tap test in the same
-//! stroke. A screen joins by deriving its own plate beside the authored constant and
-//! keeping [`PLATFORM_LEVEL`]'s answer identical to the number it was drawn with.
+//! SCOPE, stated rather than hidden: the app drawer's catalogue names and the power
+//! menu's whole stack -- its header, both button plates, the Cancel pill and the sheet
+//! that contains them -- are wired through here. The chips, the icon badges and the
+//! search field still answer the authored ladder, because each sits in a pill sized to
+//! the run inside it and moving one means moving the pill row, its band and its tap test
+//! in the same stroke. A screen joins by deriving its own plate beside the authored
+//! constant and keeping [`PLATFORM_LEVEL`]'s answer identical to the number it was drawn
+//! with. A surface whose container the shell does not size -- the status strip is the one
+//! -- joins by asking [`band_level_at`] what that container carries at the rung its frame
+//! resolved, which for the 48-row clock band is the authored rung and nothing above it;
+//! [`band_level`] is the same answer for a surface that has not resolved one.
 
 use crate::font;
 use crate::theme::type_scale;
@@ -210,6 +215,80 @@ pub fn run_em(scale: usize) -> u32 {
 pub fn run_cap(scale: usize) -> u32 {
     cap_at(scale, draw_level())
 }
+
+// -----------------------------------------------------------------------------
+// The rung a container carries
+//
+// WHY this exists beside [`drawer_level_holds`]: every other clamp here measures one
+// binding surface the shell owns -- the drawer's tile. A run also sits inside bands the
+// platform sizes and this crate only reads, of which the 48-row status strip is the
+// clearest: it is the clock's container, and several surfaces draw that clock through
+// the geometry `screens::status.rs` owns. A raised rung whose box does not close inside
+// its band cannot be carried there at all, so the honest answer is the largest rung the
+// band holds -- and the walk that finds it stops at the authored rung, because a surface
+// drawn at Normal may not be redrawn smaller for the reader who asked for nothing.
+// -----------------------------------------------------------------------------
+
+/// Whether a run at `scale`, placed at `top`, still closes inside a band of `band_h`
+/// rows at `level`: the whole box it can ink, not the cap the reader sees, because the
+/// band clips the box.
+pub const fn band_holds(scale: usize, top: usize, band_h: usize, level: u8) -> bool {
+    top + rows_at(scale, level) <= band_h
+}
+
+/// The largest rung at or below `want` whose box still closes inside the band.
+///
+/// WHY the walk stops at [`PLATFORM_LEVEL`] and not at zero: from any rung at or above
+/// the authored one the answer is never below it, so a reader at Normal is never redrawn
+/// smaller -- and the identity every `_at` face in this crate is pinned to would be false
+/// at the level it exists to preserve. A `want` *below* the authored rung is answered as
+/// asked, because the compact reader did ask for less.
+///
+/// WHY it is a walk and not a table: the box grows with the rung and never shrinks, so
+/// stepping down from the rung asked for reaches the largest carrying one, and at the
+/// authored rung the walk never moves.
+pub const fn band_level_at(scale: usize, top: usize, band_h: usize, want: u8) -> u8 {
+    let mut level = want;
+    while level > PLATFORM_LEVEL && !band_holds(scale, top, band_h, level) {
+        level -= 1;
+    }
+    level
+}
+
+/// The rung this process draws a run at `scale` in the band whose top is `top` and whose
+/// height is `band_h`.
+///
+/// WHY it is not what the shell's screens call: a screen resolves the rung once per frame
+/// and hands that answer down, so [`band_level_at`] is the face they use. This one reads
+/// the published rung itself, which is only honest for a caller with no frame to resolve.
+#[inline]
+pub fn band_level(scale: usize, top: usize, band_h: usize) -> u8 {
+    band_level_at(scale, top, band_h, draw_level())
+}
+
+/// WHY swept: the clamp's own two promises -- that it never answers above the rung it is
+/// handed, and that it never steps below the authored rung from a rung at or above it --
+/// are the shape of its walk, so restating them here would only compare the function with
+/// its own definition. What can fail is the rung the walk lands on: the band must carry
+/// the authored rung it floors at, and every answer for a rung at or above that one must
+/// be a rung the band holds. Swept over every rung the ladder offers because a band the
+/// ladder outgrew is exactly what one spot check misses.
+const fn band_level_is_honest(scale: usize, top: usize, band_h: usize) -> bool {
+    if !band_holds(scale, top, band_h, PLATFORM_LEVEL) {
+        return false;
+    }
+    let mut want = PLATFORM_LEVEL as usize;
+    while want <= MAX_LEVEL as usize {
+        if !band_holds(scale, top, band_h, band_level_at(scale, top, band_h, want as u8)) {
+            return false;
+        }
+        want += 1;
+    }
+    true
+}
+const _: () = assert!(band_level_is_honest(type_scale::BODY, 8, 48));
+const _: () = assert!(band_level_is_honest(type_scale::BODY, 0, 48));
+const _: () = assert!(band_level_is_honest(type_scale::TITLE, 0, 400));
 
 // -----------------------------------------------------------------------------
 // Measurement at a rung

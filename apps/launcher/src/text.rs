@@ -351,6 +351,15 @@ pub struct Label {
     ink: u32,
     bytes: [u8; LABEL_CAP],
     outline: Option<crate::outline_text::OutlineRun>,
+    /// The text-size rung this run was placed at, and the one [`Label::pixel`] rasterises
+    /// it at.
+    ///
+    /// WHY it is stored rather than re-read: a label is placed once when a frame is
+    /// planned and then asked about every pixel, so the rung has to travel with the run.
+    /// A `pixel` that re-read the published cell could answer a frame that started at one
+    /// rung and ended at another, which is the disagreement between the ink and the plate
+    /// this whole ladder exists to refuse.
+    level: u8,
 }
 
 /// The longest run a [`Label`] can hold.
@@ -368,40 +377,61 @@ impl Label {
         ink: 0,
         bytes: [0; LABEL_CAP],
         outline: None,
+        level: crate::scale::PLATFORM_LEVEL,
     };
 
-    /// Places `text` with its line box's top-left at (`x`, `y`).
+    /// Places `text` at the rung this shell was authored with, so a label built here draws
+    /// the pixels it drew before the shell read the person's text size.
     pub fn at(x: usize, y: usize, scale: usize, text: &[u8], ink: u32) -> Label {
+        Label::at_level(x, y, scale, text, ink, crate::scale::PLATFORM_LEVEL)
+    }
+
+    /// Places `text`, whose line box starts at (`x`, `y`), at the text-size rung `level`.
+    ///
+    /// WHY the rung is an argument and not a read of the published cell: the same reason
+    /// [`Label`] is placed once per frame at all. A screen resolves the rung it draws at,
+    /// derives its plates from it, and hands that one answer to every run it places, so
+    /// the box a label was fitted to and the ink inside it are solved from one number.
+    ///
+    /// WHY [`Label::at`] delegates here: at [`crate::scale::PLATFORM_LEVEL`] every face
+    /// below is the ladder's own arithmetic -- the em, the ascent and the fallback box are
+    /// the numbers this function replaced, byte for byte -- so opting a screen in cannot
+    /// move a pixel for the reader who asked for nothing.
+    pub fn at_level(
+        x: usize,
+        y: usize,
+        scale: usize,
+        text: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Label {
         let mut bytes = [0u8; LABEL_CAP];
         let len = text.len().min(LABEL_CAP);
         bytes[..len].copy_from_slice(&text[..len]);
         let run = &bytes[..len];
-        let em = crate::outline_text::em_for_scale(scale);
+        let em = crate::scale::em_at(scale, level);
         let (ascent, _descent) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + font::ascent_for_scale(scale)).max(ascent as usize);
+        let baseline = (y + crate::scale::ascent_at(scale, level)).max(ascent as usize);
         let outline = if scale >= 2 {
             crate::outline_text::OutlineRun::place(x, baseline, em, run)
         } else {
             None
         };
-        // WHY the fallback box is the ladder's line box, widened to the cell:
-        // `pixel` below hands a scale-one run to `font::test_text_aa`, which
-        // draws it with the outline face at the rung's cap height. That face
-        // puts its baseline at `y + ascent` and accumulates whole-pixel
-        // coverage (0..=255, no subpixel sampling) down to `y + ascent +
-        // descent`. A box of `GLYPH_H * scale` = 24 rows at rung one ends ON
-        // that baseline, so the clip discarded every row at or below it: the
-        // whole descender of g/j/p/q/y, and the last coverage row of a/c/o
-        // (measured in target/verify/desc_probe). The `max` keeps the bitmap
-        // cell's 48 rows where the outline face declines a run, so only rung
-        // one changes.
+        // WHY the fallback box is the rung's line box, widened to the cell: `pixel`
+        // below hands a scale-one run to the rasteriser, which puts its baseline at
+        // `y + ascent` and accumulates whole-pixel coverage (0..=255, no subpixel
+        // sampling) down to `y + ascent + descent`. A box of `GLYPH_H * scale` = 24 rows
+        // at rung one ends ON that baseline, so the clip discarded every row at or below
+        // it: the whole descender of g/j/p/q/y, and the last coverage row of a/c/o
+        // (measured in target/verify/desc_probe). The `max` keeps the bitmap cell's 48
+        // rows where the outline face declines a run, so only rung one changes.
         let (bx, by, bw, bh) = outline
             .map(|r| r.bounds())
             .unwrap_or((
                 x,
                 y,
-                measure(run, scale),
-                font::line_height(scale).max(line_height(scale)),
+                crate::scale::measure_at(run, scale, level),
+                crate::scale::rows_at(scale, level).max(line_height(scale)),
             ));
         Label {
             x: bx,
@@ -413,6 +443,7 @@ impl Label {
             ink,
             bytes,
             outline,
+            level,
         }
     }
 
@@ -443,12 +474,29 @@ impl Label {
         if let Some(ref outline) = self.outline {
             return outline.pixel(px, py, self.ink, bg);
         }
-        font::test_text_aa(
+        if self.level == crate::scale::PLATFORM_LEVEL {
+            return font::test_text_aa(
+                px,
+                py,
+                self.x,
+                self.top,
+                self.scale,
+                &self.bytes[..self.len],
+                self.ink,
+                bg,
+                false,
+            );
+        }
+        // The bitmap face, at the cap this rung's ladder answers for. WHY not
+        // `font::test_text_aa_user`: that face reads the published cell, and the cell
+        // holds the rung the person *asked* for, not the one this shell's clamp carried --
+        // the same distinction [`crate::scale::draw_level`] exists to keep.
+        interos_std::design::monochrome::text_px(
             px,
             py,
             self.x,
             self.top,
-            self.scale,
+            crate::scale::cap_at(self.scale, self.level),
             &self.bytes[..self.len],
             self.ink,
             bg,

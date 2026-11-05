@@ -395,15 +395,18 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # availability caption, the timeline, the volume row, the transport discs, the
 # queue header, the publish/ringtone/add controls and the add editor keep the
 # pixels they were drawn with; and the shell lays the app drawer's catalogue
-# names and its empty state from the rung, while the drawer's chips, search
-# field, icon badges and status clock and the home grid, shade, lock, recents,
-# search surface and widget cards keep theirs -- each of those sits in a pill or
-# band authored to the run inside it, so its painter, its plate and its tap test
-# have to move in one stroke. Moving the rest means moving each painter and its
-# tap handlers in the same change. `tests/test_notes_truth_contract.py`,
+# names, its empty state and the power menu's whole stack -- header, both action
+# plates, the Cancel pill and the sheet that contains them -- from the rung, while
+# the drawer's chips, search field, icon badges and status clock and the home
+# grid, shade, lock, recents, search surface and widget cards keep theirs -- each
+# of those sits in a pill or band authored to the run inside it, so its painter,
+# its plate and its tap test have to move in one stroke. Moving the rest means
+# moving each painter and its tap handlers in the same change.
+# `tests/test_notes_truth_contract.py`,
 # `tests/test_gallery_truth_contract.py`,
 # `tests/test_calendar_truth_contract.py`,
-# `tests/test_music_truth_contract.py` and
+# `tests/test_music_truth_contract.py`,
+# `tests/test_launcher_power_menu_contract.py` and
 # `tests/test_launcher_dirty_band_contract.py` are the files that say how far each
 # is carried.
 # `camera` carries the rung through its viewfinder chrome: the status card, the

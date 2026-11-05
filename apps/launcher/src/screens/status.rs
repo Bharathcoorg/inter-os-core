@@ -36,6 +36,48 @@ pub const CLOCK_Y: usize = kit::CLOCK_Y;
 /// The clock's type rung.
 pub const CLOCK_SCALE: usize = kit::CLOCK_SCALE;
 
+/// The rung the status clock may be drawn at, given the rung this process draws at.
+///
+/// WHY the clock asks its container and not the person: the 48 status rows are the band
+/// the platform sizes (`viewport::STATUS_BAR_HEIGHT`, which the shell may not resize), and
+/// a run at this rung already reserves 39 of them from row 8 -- one row of the band to
+/// spare. So the largest rung the band carries IS the rung the shell was authored at, and
+/// raising "Text size" cannot move this clock without moving the band. The clamp is still
+/// the honest one rather than a literal, because the day the band or the rung grows the
+/// answer changes here and nowhere else: this is the shell's only measurement of a run
+/// against the band that clips it, and it lives beside the strip's own three constants.
+///
+/// WHY the frame's rung is an argument: a screen resolves the rung once per frame and
+/// derives every plate from that answer; a helper that re-read the published cell would
+/// let a frame begin at one rung and paint its status strip at another.
+///
+/// WHY a gate on the answer today: so the claim above is checked instead of remembered.
+/// The three asserts below say the band carries the authored rung, does not carry the top
+/// one, and therefore answers the top ask with the authored rung -- which is the same
+/// pixels the shell drew before the setting existed.
+pub fn clock_rung_at(level: u8) -> u8 {
+    launcher::scale::band_level_at(CLOCK_SCALE, CLOCK_Y, STATUS_BAR_HEIGHT, level)
+}
+
+const _: () = assert!(launcher::scale::band_holds(
+    CLOCK_SCALE,
+    CLOCK_Y,
+    STATUS_BAR_HEIGHT,
+    launcher::scale::PLATFORM_LEVEL
+));
+const _: () = assert!(!launcher::scale::band_holds(
+    CLOCK_SCALE,
+    CLOCK_Y,
+    STATUS_BAR_HEIGHT,
+    launcher::scale::MAX_LEVEL
+));
+const _: () = assert!(launcher::scale::band_level_at(
+    CLOCK_SCALE,
+    CLOCK_Y,
+    STATUS_BAR_HEIGHT,
+    launcher::scale::MAX_LEVEL
+) == launcher::scale::PLATFORM_LEVEL);
+
 /// The band's three instrument marks, in `ink`, on this display.
 ///
 /// WHY the ink is a parameter: a shell surface that is not the page -- the
