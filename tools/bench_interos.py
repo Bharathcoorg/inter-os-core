@@ -3,13 +3,23 @@
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
 """
-tools/bench_interos.py - InterOS Sovereign Smartphone Empirical Benchmark Suite
+tools/bench_interos.py - InterOS footprint and telemetry measurement
 
-Automates static and runtime telemetry benchmarks across:
-  1. Storage footprint (boot image, kernel binary, and Ring-3 .rapp packages)
-  2. Static & runtime RAM footprint (< 35 MB sovereign budget vs. 2.5 GB Android / 1.8 GB iOS)
-  3. Cold boot latency & hardware scanout cycles ([KMS PERF], [DIAG_STATE], [BOOT])
-  4. Comparative architectural scorecards against Android AOSP, iOS, and Ubuntu Touch
+Reports only what this tool measures here, from files and serial logs that exist
+right now:
+  1. Storage footprint (boot image, Ring-3 application crates and their sources)
+  2. Kernel heap occupancy read from live [DIAG_STATE] serial telemetry
+  3. Scanout cycle counters read from [KMS PERF] markers
+
+WHY no other operating system appears in any output line: an idle-RAM, image or
+boot-latency figure for a different platform means something only with the
+device, the build and the method that produced it. Nothing here measured one,
+so printing one beside a number this project did take would invite a reader to
+compare the two -- which is the fabrication the platform truth rules forbid.
+Every figure below traces to a file size on disk or a line of the guest's own
+serial log; anything without such a source is printed as UNAVAILABLE, and the
+report says outright that no comparable measurement of any other system was
+made.
 
 Outputs structured JSON (`target/benchmark_report.json`) and formatted terminal tables.
 Fails closed when telemetry logs or build artifacts are absent.
@@ -25,41 +35,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Industry Baselines (Physical reference device specs for comparative context)
-BASELINES = {
-    "Android 15 (AOSP)": {
-        "idle_ram_mb": 2600.0,
-        "storage_gb": 18.5,
-        "cold_boot_sec": 28.0,
-        "ambient_authority": "Pervasive (Linux root, ambient Binder)",
-        "kernel_lang": "C / Linux kernel",
-        "app_overhead_mb": 45.0,
-    },
-    "iOS 18": {
-        "idle_ram_mb": 1900.0,
-        "storage_gb": 13.0,
-        "cold_boot_sec": 21.0,
-        "ambient_authority": "Privileged daemons / mach ports",
-        "kernel_lang": "C / XNU Mach-BSD",
-        "app_overhead_mb": 35.0,
-    },
-    "Ubuntu Touch": {
-        "idle_ram_mb": 850.0,
-        "storage_gb": 4.2,
-        "cold_boot_sec": 19.0,
-        "ambient_authority": "Linux systemd, D-Bus",
-        "kernel_lang": "C / Linux kernel",
-        "app_overhead_mb": 60.0,
-    },
-    "InterOS Sovereign": {
-        "idle_ram_mb": None,
-        "storage_gb": None,
-        "cold_boot_sec": None,
-        "ambient_authority": "Zero (Pure CapHandle, hardware MMU isolation)",
-        "kernel_lang": "Rust Microkernel (#![no_std])",
-        "app_overhead_mb": None,
-    }
-}
+# WHY this file has no table of other operating systems' figures in it: a number
+# with no device, no build and no method behind it is not a measurement, and two
+# numbers side by side read as a comparison whether or not one was made. The tool
+# therefore reports the sizes and telemetry it took from this tree, and lists the
+# figures it did not take.
+NOT_MEASURED = [
+    "Cold boot latency: timing from process start to first scanout belongs to "
+    "tools/bench_boot.py, which this tool does not run.",
+    "Interactive render allocations: tools/bench_heap.py walks those with an "
+    "allocation counter; nothing here observes an event loop.",
+    "Per-application resident memory: the guest's serial log carries kernel heap "
+    "totals only, and no per-process accounting is read.",
+    "Idle RAM, image size and boot latency of any other mobile operating system: "
+    "never measured on this rig, and no published figure is quoted without the "
+    "device, build and method that produced it.",
+]
 
 def analyze_storage():
     """Measures physical image and package sizes without synthetic fallbacks."""
@@ -163,59 +154,66 @@ def parse_telemetry_log(log_path):
     return telemetry
 
 def generate_report(storage, telemetry, output_json=None):
-    """Generates comparative terminal tables and JSON records with fail-closed semantics."""
+    """Prints the figures this tool measured, then names the ones it did not."""
     print("=" * 80)
-    print(" INTEROS SOVEREIGN SMARTPHONE OS - EMPIRICAL BENCHMARK SUITE")
+    print(" INTEROS SOVEREIGN SMARTPHONE OS - MEASURED FOOTPRINT AND TELEMETRY")
     print("=" * 80)
+    print()
+    print(" Every figure below is read from a file in this tree or from the guest's own")
+    print(" serial log. None is a figure for any other operating system.")
     print()
 
     boot_img = storage.get("boot_image", {})
     if boot_img.get("size_mb") is not None:
         print(f"[*] Boot Image Size  : {boot_img['size_mb']:.2f} MB ({boot_img.get('name')})")
-        storage_str = f"{boot_img['size_mb']:.2f} MB (PASS)"
     else:
         print("[*] Boot Image Size  : UNAVAILABLE (run build first)")
-        storage_str = "UNAVAILABLE"
 
-    print(f"[*] Total Ring-3 Apps: {storage.get('apps', {}).get('count', 0)} apps")
+    apps = storage.get("apps", {})
+    print(f"[*] Ring-3 Apps      : {apps.get('count', 0)} crates, "
+          f"{apps.get('total_source_kb', 0)} KB of their own source")
 
     if telemetry.get("heap_used_bytes") is not None and telemetry.get("heap_free_bytes") is not None:
         used_mb = telemetry["heap_used_bytes"] / (1024 * 1024)
         free_mb = telemetry["heap_free_bytes"] / (1024 * 1024)
-        print(f"[*] Kernel Memory    : {used_mb:.2f} MB used / {free_mb:.2f} MB free pool")
-        ram_str = f"{used_mb:.2f} MB (PASS)"
+        print(f"[*] Kernel Memory    : {used_mb:.2f} MB used / {free_mb:.2f} MB free pool "
+              f"(from {telemetry.get('source')})")
     else:
         print("[*] Kernel Memory    : UNAVAILABLE (no live serial telemetry log provided)")
-        ram_str = "UNAVAILABLE"
+
+    if telemetry.get("tasks_count") is not None:
+        print(f"[*] Guest Tasks      : {telemetry['tasks_count']} (same log)")
 
     if telemetry.get("kms_composite_cycles") is not None:
-        print(f"[*] Scanout Latency  : {telemetry['kms_composite_cycles']} composite cycles / "
-              f"{telemetry.get('kms_present_cycles', 'n/a')} present cycles")
+        print(f"[*] Scanout Cycles   : {telemetry['kms_composite_cycles']} composite cycles / "
+              f"{telemetry.get('kms_present_cycles', 'n/a')} present cycles (same log)")
     else:
-        print("[*] Scanout Latency  : UNAVAILABLE")
+        print("[*] Scanout Cycles   : UNAVAILABLE")
 
     print()
     print("-" * 80)
-    print(f"{'Metric':<25} | {'Android 15 (AOSP)':<18} | {'iOS 18':<14} | {'InterOS Sovereign':<16}")
+    print(" NOT MEASURED HERE -- reported absent, never quoted from elsewhere:")
     print("-" * 80)
-    print(f"{'Kernel Heap Used':<25} | {'~2,600 MB (OS RAM)':<18} | {'~1,900 MB':<14} | {ram_str:<16}")
-    print(f"{'OS Image Size':<25} | {'~18.5 GB':<18} | {'~13.0 GB':<14} | {storage_str:<16}")
-    print(f"{'Cold Boot Latency':<25} | {'~28.0 s':<18} | {'~21.0 s':<14} | {'20-23 s (TCG QEMU)':<16}")
-    print(f"{'Interactive Alloc':<25} | {'Heap Churn':<18} | {'Heap Churn':<14} | {'0 bytes (PASS)':<16}")
-    print(f"{'Ambient Authority':<25} | {'Pervasive Linux':<18} | {'Mach Ports':<14} | {'Zero Ambient (PASS)':<16}")
-    print(f"{'Memory Safety':<25} | {'C/C++ legacy':<18} | {'C/ObjC/Swift':<14} | {'Rust Microkernel':<16}")
+    for note in NOT_MEASURED:
+        print(f"  - {note}")
+    print()
+    print(" No comparable measurement of any other mobile operating system was made on")
+    print(" this rig, so none is printed beside the numbers above. A QEMU guest and a")
+    print(" published phone figure share no method, and neither number can support a")
+    print(" comparison between them.")
     print("-" * 80)
     print()
 
     has_telemetry = telemetry.get("heap_used_bytes") is not None
     has_image = boot_img.get("size_mb") is not None
-    overall_status = "PASS" if (has_telemetry and has_image) else "INCOMPLETE"
+    overall_status = "COMPLETE" if (has_telemetry and has_image) else "INCOMPLETE"
     current_timestamp = int(time.strftime("%Y%m%d"))
 
     report_data = {
         "storage": storage,
         "telemetry": telemetry,
-        "baselines": BASELINES,
+        "not_measured": NOT_MEASURED,
+        "comparison": "none: this tool measured no operating system but this one",
         "status": overall_status,
         "timestamp": current_timestamp,
     }
@@ -224,20 +222,23 @@ def generate_report(storage, telemetry, output_json=None):
         os.makedirs(os.path.dirname(output_json), exist_ok=True)
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump(report_data, f, indent=2)
-        print(f"[{overall_status}] Full benchmark metrics written to: {output_json}")
+        print(f"[{overall_status}] Measurement record written to: {output_json}")
 
     return report_data
 
 def main():
-    parser = argparse.ArgumentParser(description="InterOS Empirical Benchmark Automation Suite")
-    parser.add_argument("--log", help="Path to serial log capturing boot milestones", default=None)
+    parser = argparse.ArgumentParser(description="InterOS footprint and telemetry measurement")
+    parser.add_argument("--log", help="Path to a serial log carrying the boot and telemetry markers", default=None)
     parser.add_argument("--out", help="Output path for JSON report", default=str(ROOT / "target" / "benchmark_report.json"))
     args = parser.parse_args()
 
     storage = analyze_storage()
     telemetry = parse_telemetry_log(args.log)
     report = generate_report(storage, telemetry, args.out)
-    if report["status"] != "PASS" and args.log is not None:
+    # WHY a hand of the log forces the exit: once a caller supplies telemetry, an
+    # unreadable image or an unparsed marker means the run collected nothing, and
+    # a record of nothing must not leave looking like a record of a result.
+    if report["status"] != "COMPLETE" and args.log is not None:
         sys.exit(1)
 
 if __name__ == "__main__":

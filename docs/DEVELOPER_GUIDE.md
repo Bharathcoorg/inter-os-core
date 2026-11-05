@@ -79,7 +79,7 @@ python tools/interos.py contracts
 ### Empirical Benchmarks
 Runs reproducible benchmark suites measuring image footprints, RAM overhead, boot latency, and heap invariants:
 ```bash
-# Run full system footprint and latency benchmark scorecard:
+# Measure this tree's footprint and the guest's own telemetry markers:
 python tools/bench_interos.py
 
 # Run boot time latency harness:
