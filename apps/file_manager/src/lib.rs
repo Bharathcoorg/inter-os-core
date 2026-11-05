@@ -970,8 +970,33 @@ pub const fn draw_level_at(want: u8) -> u8 {
 }
 #[inline]
 pub fn draw_level() -> u8 {
-    draw_level_at(font::user_text_scale())
+    let want = font::user_text_scale();
+    // WHY the pair is remembered: the walk above measures the home stack, and
+    // every measurement it makes is a division -- one rung refused costs the
+    // stack, and one rung accepted costs it once too. A painter asks the rung
+    // for every run it tests, and a frame tests its runs against most of its
+    // pixels, so this call sits behind a hundred thousand walks per frame while
+    // the answer it gives cannot move until the person moves "Text size". Two
+    // loads answer an unchanged frame; the walk runs once per setting change.
+    if DRAW_WANT.load(core::sync::atomic::Ordering::Acquire) == want {
+        return DRAW_HELD.load(core::sync::atomic::Ordering::Acquire);
+    }
+    let held = draw_level_at(want);
+    DRAW_HELD.store(held, core::sync::atomic::Ordering::Release);
+    DRAW_WANT.store(want, core::sync::atomic::Ordering::Release);
+    held
 }
+
+/// The rung `DRAW_HELD` answers for, and that rung.
+///
+/// WHY the pair rather than one cell: the held level is a function of the wanted
+/// one, so the wanted level is the key and the held level the cached answer. The
+/// answer is stored before the key so a reader that sees a key match also sees
+/// the answer that key produced.
+static DRAW_WANT: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(u8::MAX);
+static DRAW_HELD: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(PLATFORM_LEVEL);
 
 // WHY swept, and why against the clamp rather than the raw rung: the clamp only
 // earns its place if every selectable level answers the panel once the clamp has

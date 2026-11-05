@@ -1862,11 +1862,567 @@ fn glyph_ink(mime: FileMime, dx: isize, dy: isize, ink: u32) -> Option<u32> {
 }
 
 // -----------------------------------------------------------------------------
+// The frame: what this pass paints, answered once
+//
+// WHY the answers are hoisted: the renderer is asked for every pixel of the
+// surface, and the question it is asked -- "what colour is (x, y)" -- has only a
+// couple of dozen distinct answers per pass, all of them fixed the moment the
+// pass starts. Asked per pixel, each row of air around a label pays for the
+// ladder derivation that places it and the trim that cuts it. Measured on the
+// guest, one `header_h()` costs 2.6 µs, one storage-card rect 5.6 µs and one
+// `ellipsize_run` 6.4 µs, because every one of them walks the rung through
+// several integer divisions and QEMU's TCG turns each division into a helper
+// call. Once per pass, the same work is paid 20-odd times instead of a million,
+// and a pixel is a handful of integer compares.
+//
+// WHY the placement travels with the run: [`outline_text::OutlineRun`] carries
+// its own key and re-places its coverage if the pool has evicted it, so a handle
+// held across the paint loses speed and never loses ink. The trimmed bytes
+// travel beside it for the one case the outline face refuses -- a run longer
+// than the pool's key, or wider than its box -- which then still has to reach the
+// bitmap face.
+// -----------------------------------------------------------------------------
+
+/// The longest run a single site can hold: the header's path readout, which is
+/// never longer than the model's own path buffer.
+const RUN_BUF_MAX: usize = MAX_PATH_LEN;
+
+#[derive(Clone, Copy)]
+struct PlacedRun {
+    /// The bytes the run draws, after the lane trim.
+    buf: [u8; RUN_BUF_MAX],
+    len: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    /// One past the last row this run can ink: `y0 + rows_at(scale, level)`, held
+    /// so a pixel standing on a row the run clears costs one compare and no
+    /// lookups.
+    ///
+    /// WHY the band is the ladder's `rows_at` and not [`outline_text::row_band`]:
+    /// the library's identity gates say the two are one number at the rung the
+    /// pass draws on, and the band is the union of the outline line box and the
+    /// bitmap cell, so neither face can ink a row outside it.
+    y_end: usize,
+    /// The cap the bitmap face is asked for, above the authored rung.
+    cap: u32,
+    /// The outline face's placement, when the face took this run.
+    run: Option<outline_text::OutlineRun>,
+    ink: u32,
+    bg: u32,
+}
+
+impl PlacedRun {
+    /// A site the pass has nothing to draw: no bytes, so no ink.
+    const EMPTY: PlacedRun = PlacedRun {
+        buf: [0u8; RUN_BUF_MAX],
+        len: 0,
+        x0: 0,
+        y0: 0,
+        scale: 0,
+        y_end: 0,
+        cap: 0,
+        run: None,
+        ink: 0,
+        bg: 0,
+    };
+}
+
+/// Resolves one line of type for the pass: its box, its colours and its place
+/// in the outline pool.
+fn place(x0: usize, y0: usize, scale: usize, text: &[u8], ink: u32, bg: u32) -> PlacedRun {
+    let lvl = draw_level();
+    let cap = cap_at(scale, lvl);
+    let mut buf = [0u8; RUN_BUF_MAX];
+    let len = text.len().min(RUN_BUF_MAX);
+    buf[..len].copy_from_slice(&text[..len]);
+    let run = if len == 0 || scale == 0 {
+        None
+    } else if lvl == PLATFORM_LEVEL {
+        outline_text::place_run(x0, y0, scale, &buf[..len], None, false)
+    } else {
+        outline_text::place_run_cap(x0, y0, cap, &buf[..len], None, false)
+    };
+    PlacedRun {
+        buf,
+        len,
+        x0,
+        y0,
+        scale,
+        y_end: y0 + rows_at(scale, lvl),
+        cap,
+        run,
+        ink,
+        bg,
+    }
+}
+
+impl PlacedRun {
+    /// The colour of (`x`, `y`) if this run inks it.
+    ///
+    /// WHY the band is the first thing asked: a pixel that stands clear of the
+    /// run's rows is refused by one compare, and the placement pool is never
+    /// touched for it.
+    #[inline(always)]
+    fn pixel(&self, x: usize, y: usize) -> Option<u32> {
+        if self.len == 0 || x < self.x0 || y < self.y0 || y >= self.y_end {
+            return None;
+        }
+        if let Some(run) = self.run {
+            let (rx, rtop, rw, rh) = run.bounds();
+            if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+                return run.pixel(x, y, self.ink, self.bg);
+            }
+            return None;
+        }
+        self.bitmap_pixel(x, y)
+    }
+
+    /// The same question, asked of the bitmap face the outline pool refused.
+    ///
+    /// WHY it is kept out of line: the pool takes every run this screen holds,
+    /// so this is the branch a frame reaches never or once, and inlining it
+    /// would grow the hot guard for no pixel's benefit. The band was tested by
+    /// the caller and is not tested again here.
+    #[inline(never)]
+    fn bitmap_pixel(&self, x: usize, y: usize) -> Option<u32> {
+        let text = &self.buf[..self.len];
+        if draw_level() == PLATFORM_LEVEL {
+            return font::test_text_aa(
+                x,
+                y,
+                self.x0,
+                self.y0,
+                self.scale,
+                text,
+                self.ink,
+                self.bg,
+                false,
+            );
+        }
+        std::design::monochrome::text_px(
+            x, y, self.x0, self.y0, self.cap, text, self.ink, self.bg, false,
+        )
+    }
+}
+
+/// The header: its height, the title and the two readout lines.
+#[derive(Clone, Copy)]
+struct HeaderFrame {
+    h: usize,
+    title: PlacedRun,
+    line1: PlacedRun,
+    line2: PlacedRun,
+}
+
+/// One recent row, as the pass draws it.
+#[derive(Clone, Copy)]
+struct RecentRow {
+    top: usize,
+    bottom: usize,
+    divider_y: usize,
+    /// The first of the 26 rows the file-type glyph's plate stands on.
+    glyph_top: usize,
+    mime: FileMime,
+    name: PlacedRun,
+    time: PlacedRun,
+}
+
+impl RecentRow {
+    const EMPTY: RecentRow = RecentRow {
+        top: 0,
+        bottom: 0,
+        divider_y: 0,
+        glyph_top: 0,
+        mime: FileMime::Directory,
+        name: PlacedRun::EMPTY,
+        time: PlacedRun::EMPTY,
+    };
+}
+
+/// One directory row, as the pass draws it.
+#[derive(Clone, Copy)]
+struct CategoryRow {
+    top: usize,
+    height: usize,
+    rect: Rect,
+    fill: u32,
+    selected: bool,
+    /// The first row of the 26 the glyph's plate stands on.
+    glyph_top: usize,
+    mime: FileMime,
+    label: PlacedRun,
+    caption: PlacedRun,
+}
+
+impl CategoryRow {
+    const EMPTY: CategoryRow = CategoryRow {
+        top: 0,
+        height: 0,
+        rect: Rect::new(0, 0, 0, 0),
+        fill: 0,
+        selected: false,
+        glyph_top: 0,
+        mime: FileMime::Directory,
+        label: PlacedRun::EMPTY,
+        caption: PlacedRun::EMPTY,
+    };
+}
+
+/// The home screen's layout, resolved once for the pass.
+#[derive(Clone, Copy)]
+struct HomeFrame {
+    card: Rect,
+    card_radius: usize,
+    card_fill: u32,
+    card_border: Option<u32>,
+    card_title: PlacedRun,
+    card_line1: PlacedRun,
+    card_line2: PlacedRun,
+    recents_title: PlacedRun,
+    recents_caption: PlacedRun,
+    /// The notice that stands in for the list when the index refused or is empty.
+    recents_note: PlacedRun,
+    recent_rows: usize,
+    recents: [RecentRow; HOME_RECENTS_VISIBLE],
+    category_title: PlacedRun,
+    category_y0: usize,
+    category_y1: usize,
+    category_rows: usize,
+    categories: [CategoryRow; CATEGORY_COUNT],
+    browse: Rect,
+    browse_label: PlacedRun,
+    note1: PlacedRun,
+    note2: PlacedRun,
+}
+
+/// The pass's answers, from the header down.
+#[derive(Clone, Copy)]
+struct Frame {
+    header: HeaderFrame,
+    home: Option<HomeFrame>,
+}
+
+fn build_frame(app: &FileManagerApp) -> Frame {
+    let title = place(
+        TITLE_X,
+        header_title_y(),
+        HEADER_TITLE_SCALE,
+        b"Files",
+        THEME.on_surface,
+        THEME.surface,
+    );
+
+    // The path the app asked, and the platform's own answer. Line 1 is the path
+    // really passed to `fs_list`; line 2 is the real outcome, including a refusal.
+    let mut path_buf = [0u8; MAX_PATH_LEN];
+    let path_len = ellipsize_run(
+        &app.current_path[..app.current_path_len],
+        HEADER_READOUT_SCALE,
+        HEADER_READOUT_MAX_W,
+        &mut path_buf,
+    );
+    let path_w = run_w(&path_buf[..path_len], HEADER_READOUT_SCALE);
+    let line1 = if path_len > 0 && path_w <= HEADER_READOUT_MAX_W {
+        place(
+            READOUT_X1 - path_w,
+            header_readout_line1_y(),
+            HEADER_READOUT_SCALE,
+            &path_buf[..path_len],
+            THEME.on_surface_variant,
+            THEME.surface,
+        )
+    } else {
+        PlacedRun::EMPTY
+    };
+
+    let mut label_buf = [0u8; 40];
+    let label_len = ellipsize_run(
+        &app.probe_label[..app.probe_label_len],
+        HEADER_READOUT_SCALE,
+        HEADER_READOUT_MAX_W,
+        &mut label_buf,
+    );
+    let label_w = run_w(&label_buf[..label_len], HEADER_READOUT_SCALE);
+    let line2 = if label_len > 0 && label_w <= HEADER_READOUT_MAX_W {
+        place(
+            READOUT_X1 - label_w,
+            header_readout_line2_y(),
+            HEADER_READOUT_SCALE,
+            &label_buf[..label_len],
+            THEME.warning,
+            THEME.surface,
+        )
+    } else {
+        PlacedRun::EMPTY
+    };
+
+    Frame {
+        header: HeaderFrame {
+            h: header_h(),
+            title,
+            line1,
+            line2,
+        },
+        home: match app.view {
+            ViewMode::Home => Some(build_home_frame(app)),
+            ViewMode::Browse => None,
+        },
+    }
+}
+
+fn build_home_frame(app: &FileManagerApp) -> HomeFrame {
+    // 1. The storage card.
+    let style = components::card_style(&THEME, components::Elevation::Resting);
+    let card_title = place(
+        60,
+        home_card_title_y(),
+        HOME_CARD_TITLE_SCALE,
+        b"Storage",
+        THEME.on_surface,
+        style.fill,
+    );
+    let card_line1 = place(
+        60,
+        home_card_line1_y(),
+        HOME_CARD_LINE_SCALE,
+        &app.storage_line[..app.storage_line_len],
+        THEME.on_surface_variant,
+        style.fill,
+    );
+    let card_line2 = place(
+        60,
+        home_card_line2_y(),
+        HOME_CARD_LINE_SCALE,
+        app.storage_status(),
+        THEME.warning,
+        style.fill,
+    );
+
+    // 2. The recents section.
+    let recents_title = place(
+        36,
+        home_recents_title_y(),
+        HOME_CARD_TITLE_SCALE,
+        b"Recently modified",
+        THEME.on_surface,
+        THEME.surface,
+    );
+    let recents_caption = place(
+        36,
+        home_recents_caption_y(),
+        HOME_CARD_LINE_SCALE,
+        b"Newest first, from the platform's document index",
+        THEME.on_surface_variant,
+        THEME.surface,
+    );
+    let mut recents_note = PlacedRun::EMPTY;
+    let mut recents = [RecentRow::EMPTY; HOME_RECENTS_VISIBLE];
+    let mut recent_rows = 0usize;
+    if app.recents_error != 0 || app.recents_count == 0 {
+        let (line, ink): (&[u8], u32) = if app.recents_error != 0 {
+            (
+                b"The document index was refused; recents are unavailable",
+                THEME.warning,
+            )
+        } else {
+            (b"The document index holds no documents", THEME.on_surface_variant)
+        };
+        recents_note = place(
+            HOME_ROW_X,
+            home_recents_y0() + home_recents_note_dy(),
+            LABEL_RUNG,
+            line,
+            ink,
+            THEME.surface,
+        );
+    } else {
+        let recent_row_h = home_recent_row_h();
+        let stack_top = home_recents_y0();
+        let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
+        // The name column ends at the row's right edge; the 24px inset matches
+        // the browse rows so a long name cannot reach the border.
+        let max_w = 684 - 100 - 24;
+        for index in 0..visible {
+            let top = stack_top + index * recent_row_h;
+            let name = &app.recents[index].name[..app.recents[index].name_len];
+            let mut name_buf = [0u8; 48];
+            let name_len = ellipsize_run(name, HOME_RECENT_NAME_SCALE, max_w, &mut name_buf);
+            recents[index] = RecentRow {
+                top,
+                bottom: top + recent_row_h,
+                divider_y: top + recent_row_h - 1,
+                glyph_top: top + (recent_row_h - 25) / 2,
+                mime: detect_mime(name, false),
+                name: place(
+                    100,
+                    top + HOME_RECENT_NAME_DY,
+                    HOME_RECENT_NAME_SCALE,
+                    &name_buf[..name_len],
+                    THEME.on_surface,
+                    THEME.surface,
+                ),
+                time: place(
+                    100,
+                    top + home_recent_time_dy(),
+                    HOME_CARD_LINE_SCALE,
+                    &app.recent_time[index][..app.recent_time_len[index]],
+                    THEME.on_surface_variant,
+                    THEME.surface,
+                ),
+            };
+        }
+        recent_rows = visible;
+    }
+
+    // 3. The category section.
+    let category_title = place(
+        36,
+        home_category_title_y(),
+        HOME_CARD_TITLE_SCALE,
+        b"Browse directories",
+        THEME.on_surface,
+        THEME.surface,
+    );
+    let mut categories = [CategoryRow::EMPTY; CATEGORY_COUNT];
+    let mut category_rows = 0usize;
+    {
+        let mut y = category_y0();
+        while category_rows < CATEGORY_COUNT {
+            let Some((index, row_top, row_h)) = category_row_at(y) else {
+                break;
+            };
+            let selected = app.selected_shortcut == index;
+            let fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
+            let icon_center = if index == 0 { row_top + 44 } else { row_top + 35 };
+            let mime = match index {
+                0 => FileMime::Directory,
+                1 | 2 => FileMime::Image,
+                _ => FileMime::Video,
+            };
+            let label_y = if index == 0 {
+                row_top + CATEGORY_FIRST_LABEL_DY
+            } else {
+                row_top + CATEGORY_OTHER_LABEL_DY
+            };
+            let mut label_buf = [0u8; LINE_LEN];
+            let label = place(
+                CATEGORY_LABEL_X,
+                label_y,
+                CATEGORY_LABEL_SCALE,
+                fitted_run(
+                    CATEGORY_LABELS[index],
+                    CATEGORY_LABEL_SCALE,
+                    CATEGORY_LABEL_LANE,
+                    &mut label_buf,
+                ),
+                THEME.on_surface,
+                fill,
+            );
+            let caption = if index == 0 {
+                let mut status_buf = [0u8; LINE_LEN];
+                place(
+                    CATEGORY_LABEL_X,
+                    row_top + category_caption_dy(),
+                    CATEGORY_CAPTION_SCALE,
+                    fitted_run(
+                        app.storage_status(),
+                        CATEGORY_CAPTION_SCALE,
+                        CATEGORY_LABEL_LANE,
+                        &mut status_buf,
+                    ),
+                    THEME.on_surface_variant,
+                    fill,
+                )
+            } else {
+                PlacedRun::EMPTY
+            };
+            categories[index] = CategoryRow {
+                top: row_top,
+                height: row_h,
+                rect: Rect::new(HOME_ROW_X, row_top, HOME_ROW_W, row_h.saturating_sub(1)),
+                fill,
+                selected,
+                glyph_top: icon_center - 13,
+                mime,
+                label,
+                caption,
+            };
+            category_rows += 1;
+            y = row_top + row_h;
+        }
+    }
+
+    // 4. The browse-everything control.
+    let browse = home_browse_btn();
+    let ly = browse.y + browse.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
+    let mut browse_buf = [0u8; LINE_LEN];
+    let shown = fitted_run(
+        b"Browse all files",
+        LABEL_RUNG,
+        control_label_lane(browse.w),
+        &mut browse_buf,
+    );
+    let lx = centered_x(shown, LABEL_RUNG, browse.x, browse.w);
+    let browse_label = place(
+        lx,
+        ly,
+        LABEL_RUNG,
+        shown,
+        THEME.primary,
+        THEME.surface_container_high,
+    );
+
+    // 5. The honest note.
+    let note_y = home_note_y();
+    let note1 = place(
+        36,
+        note_y,
+        HOME_CARD_LINE_SCALE,
+        b"Recents come from the platform's document index.",
+        THEME.on_surface_variant,
+        THEME.surface,
+    );
+    let note2 = place(
+        36,
+        note_y + grown(24, HOME_CARD_LINE_SCALE, draw_level()),
+        HOME_CARD_LINE_SCALE,
+        b"Files the index has not walked are not listed here.",
+        THEME.on_surface_variant,
+        THEME.surface,
+    );
+
+    HomeFrame {
+        card: home_storage_card(),
+        card_radius: style.radius,
+        card_fill: style.fill,
+        card_border: style.border,
+        card_title,
+        card_line1,
+        card_line2,
+        recents_title,
+        recents_caption,
+        recents_note,
+        recent_rows,
+        recents,
+        category_title,
+        category_y0: category_y0(),
+        category_y1: category_y1(),
+        category_rows,
+        categories,
+        browse,
+        browse_label,
+        note1,
+        note2,
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Pixel colour resolution
 // -----------------------------------------------------------------------------
 
 #[inline(never)]
-fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp, frame: &Frame) -> u32 {
     // The platform's band owns the top inset; the app's own chrome starts below it.
     //
     // WHY the instruments are unmeasured: this app holds no radio, no fuel
@@ -1880,12 +2436,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
             .unwrap_or(THEME.surface);
     }
-    if y < header_h() {
-        return header_color(x, y, app);
+    if y < frame.header.h {
+        return header_color(x, y, &frame.header);
     }
-    match app.view {
-        ViewMode::Home => home_color(x, y, app),
-        ViewMode::Browse => browse_color(x, y, app),
+    match &frame.home {
+        Some(home) => home_color(x, y, home),
+        None => browse_color(x, y, app),
     }
 }
 
@@ -1910,7 +2466,7 @@ fn refresh_clock(app: &mut FileManagerApp) -> bool {
 }
 
 /// The header: the platform band above, then the back control, the title and the measured readout.
-fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+fn header_color(x: usize, y: usize, frame: &HeaderFrame) -> u32 {
     // The platform's back control, asked first because it is the one occupant of
     // this row the app does not own: its rect, radius, colours and chevron all
     // come from [`std::design::back_button`], which is what Settings, Calculator,
@@ -1927,69 +2483,25 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // Title: "Files" on the control's row, starting clear of its right edge.
     //
-    // WHY the coordinates are constants rather than written out: `TITLE_X` is
-    // derived from the control's own rect and `HEADER_TITLE_Y` from the rung the
-    // title draws at, so the row cannot be re-invented here, and the gates beside
-    // them are where the header's claim -- that the control and the title both fit
-    // the rows this branch answers and never claim one another's pixel -- is
-    // checked at compile time.
-    if let Some(color) = test_text(
-        x,
-        y,
-        TITLE_X,
-        header_title_y(),
-        HEADER_TITLE_SCALE,
-        b"Files",
-        THEME.on_surface,
-        THEME.surface,
-    ) {
+    // WHY the coordinates arrive already placed: `TITLE_X` is derived from the
+    // control's own rect and the title's row from the rung the title draws at, so
+    // the row cannot be re-invented here, and the gates beside them are where the
+    // header's claim -- that the control and the title both fit the rows this
+    // branch answers and never claim one another's pixel -- is checked at compile
+    // time.
+    if let Some(color) = frame.title.pixel(x, y) {
         return color;
     }
 
     // The path the app asked, and the platform's own answer. Line 1 is the
     // path really passed to `fs_list`; line 2 is the real outcome, including
-    // a refusal.
-    let path = &app.current_path[..app.current_path_len];
-    let mut path_buf = [0u8; MAX_PATH_LEN];
-    let path_len =
-        ellipsize_run(path, HEADER_READOUT_SCALE, HEADER_READOUT_MAX_W, &mut path_buf);
-    let path_w = run_w(&path_buf[..path_len], HEADER_READOUT_SCALE);
-    if path_w <= HEADER_READOUT_MAX_W {
-        if let Some(color) = test_text(
-            x,
-            y,
-            READOUT_X1 - path_w,
-            header_readout_line1_y(),
-            HEADER_READOUT_SCALE,
-            &path_buf[..path_len],
-            THEME.on_surface_variant,
-            THEME.surface,
-        ) {
-            return color;
-        }
+    // a refusal. Each is trimmed to its lane once, when the frame is built, and
+    // a lane that the trim cannot fit leaves the site with nothing to ink.
+    if let Some(color) = frame.line1.pixel(x, y) {
+        return color;
     }
-
-    let mut label_buf = [0u8; 40];
-    let label_len = ellipsize_run(
-        &app.probe_label[..app.probe_label_len],
-        HEADER_READOUT_SCALE,
-        HEADER_READOUT_MAX_W,
-        &mut label_buf,
-    );
-    let label_w = run_w(&label_buf[..label_len], HEADER_READOUT_SCALE);
-    if label_w <= HEADER_READOUT_MAX_W {
-        if let Some(color) = test_text(
-            x,
-            y,
-            READOUT_X1 - label_w,
-            header_readout_line2_y(),
-            HEADER_READOUT_SCALE,
-            &label_buf[..label_len],
-            THEME.warning,
-            THEME.surface,
-        ) {
-            return color;
-        }
+    if let Some(color) = frame.line2.pixel(x, y) {
+        return color;
     }
 
     THEME.surface
@@ -1997,270 +2509,125 @@ fn header_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
 /// The home screen: the storage insight, the index's recents and the four
 /// directory entry points.
-fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+fn home_color(x: usize, y: usize, frame: &HomeFrame) -> u32 {
     // 1. The storage card.
-    let card = home_storage_card();
-    if card.contains(x, y) {
-        let style = components::card_style(&THEME, components::Elevation::Resting);
+    if frame.card.contains(x, y) {
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            card,
-            style.radius,
-            style.fill,
-            style.border,
+            frame.card,
+            frame.card_radius,
+            frame.card_fill,
+            frame.card_border,
             1,
         ) else {
             return THEME.surface;
         };
-        if let Some(color) = test_text(
-            x,
-            y,
-            60,
-            home_card_title_y(),
-            HOME_CARD_TITLE_SCALE,
-            b"Storage",
-            THEME.on_surface,
-            style.fill,
-        ) {
+        if let Some(color) = frame.card_title.pixel(x, y) {
             return color;
         }
-        if let Some(color) = test_text(
-            x,
-            y,
-            60,
-            home_card_line1_y(),
-            HOME_CARD_LINE_SCALE,
-            &app.storage_line[..app.storage_line_len],
-            THEME.on_surface_variant,
-            style.fill,
-        ) {
+        if let Some(color) = frame.card_line1.pixel(x, y) {
             return color;
         }
-        if let Some(color) = test_text(
-            x,
-            y,
-            60,
-            home_card_line2_y(),
-            HOME_CARD_LINE_SCALE,
-            app.storage_status(),
-            THEME.warning,
-            style.fill,
-        ) {
+        if let Some(color) = frame.card_line2.pixel(x, y) {
             return color;
         }
         return base;
     }
 
     // 2. The recents section.
-    if let Some(color) = test_text(
-        x,
-        y,
-        36,
-        home_recents_title_y(),
-        HOME_CARD_TITLE_SCALE,
-        b"Recently modified",
-        THEME.on_surface,
-        THEME.surface,
-    ) {
+    if let Some(color) = frame.recents_title.pixel(x, y) {
         return color;
     }
-    if let Some(color) = test_text(
-        x,
-        y,
-        36,
-        home_recents_caption_y(),
-        HOME_CARD_LINE_SCALE,
-        b"Newest first, from the platform's document index",
-        THEME.on_surface_variant,
-        THEME.surface,
-    ) {
+    if let Some(color) = frame.recents_caption.pixel(x, y) {
+        return color;
+    }
+    if let Some(color) = frame.recents_note.pixel(x, y) {
         return color;
     }
 
-    if app.recents_error != 0 || app.recents_count == 0 {
-        let (line, ink): (&[u8], u32) = if app.recents_error != 0 {
-            (
-                b"The document index was refused; recents are unavailable",
-                THEME.warning,
-            )
-        } else {
-            (b"The document index holds no documents", THEME.on_surface_variant)
-        };
-        if let Some(color) = test_text(
-            x,
-            y,
-            HOME_ROW_X,
-            home_recents_y0() + home_recents_note_dy(),
-            LABEL_RUNG,
-            line,
-            ink,
-            THEME.surface,
-        ) {
+    for row in &frame.recents[..frame.recent_rows] {
+        if y < row.top || y >= row.bottom || x < HOME_ROW_X || x >= PANEL_CONTENT_X1 {
+            continue;
+        }
+        if y == row.divider_y {
+            return ROW.divider;
+        }
+        // The glyph plate is 26 rows tall and starts where the row centres it, so
+        // the mime walk is only asked on the rows its answer can reach -- and the
+        // answer itself is taken once, when the row was laid out.
+        if y >= row.glyph_top && y - row.glyph_top <= 25 {
+            if let Some(ink) =
+                glyph_ink(row.mime, x as isize - 47, y as isize - row.glyph_top as isize, THEME.on_surface)
+            {
+                return ink;
+            }
+        }
+        if let Some(color) = row.name.pixel(x, y) {
             return color;
         }
-    } else {
-        let recent_row_h = home_recent_row_h();
-        let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
-        for index in 0..visible {
-            let top = home_recents_y0() + index * recent_row_h;
-            if y < top || y >= top + recent_row_h || x < HOME_ROW_X || x >= PANEL_CONTENT_X1 {
+        if let Some(color) = row.time.pixel(x, y) {
+            return color;
+        }
+        return THEME.surface;
+    }
+
+    // 3. The category section.
+    if let Some(color) = frame.category_title.pixel(x, y) {
+        return color;
+    }
+
+    if (frame.category_y0..frame.category_y1).contains(&y)
+        && (HOME_ROW_X..CATEGORY_ROW_X1).contains(&x)
+    {
+        for row in &frame.categories[..frame.category_rows] {
+            if y < row.top || y >= row.top + row.height {
                 continue;
             }
-            if y == top + recent_row_h - 1 {
-                return ROW.divider;
+            let Some(base) = draw_rounded_rect(
+                x,
+                y,
+                row.rect,
+                ROW.radius,
+                row.fill,
+                Some(ROW.divider),
+                1,
+            ) else {
+                return THEME.surface;
+            };
+            if row.selected && x < 44 {
+                return THEME.primary;
             }
-            let name = &app.recents[index].name[..app.recents[index].name_len];
-            let mime = detect_mime(name, false);
             if let Some(ink) = glyph_ink(
-                mime,
+                row.mime,
                 x as isize - 47,
-                y as isize - (top as isize + ((recent_row_h - 25) / 2) as isize),
+                y as isize - row.glyph_top as isize,
                 THEME.on_surface,
             ) {
                 return ink;
             }
-            // The name column ends at the row's right edge; the 24px inset
-            // matches the browse rows so a long name cannot reach the border.
-            let max_w = 684 - 100 - 24;
-            let mut name_buf = [0u8; 48];
-            let name_len = ellipsize_run(name, HOME_RECENT_NAME_SCALE, max_w, &mut name_buf);
-            if name_len > 0 {
-                if let Some(color) = test_text(
-                    x,
-                    y,
-                    100,
-                    top + HOME_RECENT_NAME_DY,
-                    HOME_RECENT_NAME_SCALE,
-                    &name_buf[..name_len],
-                    THEME.on_surface,
-                    THEME.surface,
-                ) {
-                    return color;
-                }
-            }
-            if let Some(color) = test_text(
-                x,
-                y,
-                100,
-                top + home_recent_time_dy(),
-                HOME_CARD_LINE_SCALE,
-                &app.recent_time[index][..app.recent_time_len[index]],
-                THEME.on_surface_variant,
-                THEME.surface,
-            ) {
+            // The row's own label lane: the row's right edge, less the column the
+            // label stands in and the air it keeps there. The four directories are
+            // the app's own words and they fit whole -- the gate beside
+            // `CATEGORY_LABEL_LANE` measures them at `CATEGORY_LABEL_SCALE` and
+            // refuses the day the row narrows under them -- while the storage
+            // caption under the first row is the platform's sentence, so it is cut
+            // with an ellipsis rather than run past the row it belongs to.
+            if let Some(color) = row.label.pixel(x, y) {
                 return color;
             }
-            return THEME.surface;
-        }
-    }
-
-    // 3. The category section.
-    if let Some(color) = test_text(
-        x,
-        y,
-        36,
-        home_category_title_y(),
-        HOME_CARD_TITLE_SCALE,
-        b"Browse directories",
-        THEME.on_surface,
-        THEME.surface,
-    ) {
-        return color;
-    }
-
-    if (category_y0()..category_y1()).contains(&y)
-        && (HOME_ROW_X..CATEGORY_ROW_X1).contains(&x)
-    {
-        let Some((index, row_top, row_h)) = category_row_at(y) else {
-            return THEME.surface;
-        };
-        let selected = app.selected_shortcut == index;
-        let fill = if selected { ROW_SELECTED.fill } else { ROW.fill };
-        let rect = Rect::new(HOME_ROW_X, row_top, HOME_ROW_W, row_h.saturating_sub(1));
-        let Some(base) = draw_rounded_rect(x, y, rect, ROW.radius, fill, Some(ROW.divider), 1)
-        else {
-            return THEME.surface;
-        };
-        let icon_center = if index == 0 {
-            row_top + 44
-        } else {
-            row_top + 35
-        };
-        let mime = match index {
-            0 => FileMime::Directory,
-            1 | 2 => FileMime::Image,
-            _ => FileMime::Video,
-        };
-        if selected && x < 44 {
-            return THEME.primary;
-        }
-        if let Some(ink) = glyph_ink(
-            mime,
-            x as isize - 47,
-            y as isize - (icon_center as isize - 13),
-            THEME.on_surface,
-        ) {
-            return ink;
-        }
-        let label_y = if index == 0 {
-            row_top + CATEGORY_FIRST_LABEL_DY
-        } else {
-            row_top + CATEGORY_OTHER_LABEL_DY
-        };
-        // The row's own label lane: the row's right edge, less the column the
-        // label stands in and the air it keeps there. The four directories are
-        // the app's own words and they fit whole -- the gate beside
-        // `CATEGORY_LABEL_LANE` measures them at `CATEGORY_LABEL_SCALE` and
-        // refuses the day the row narrows under them -- while the storage
-        // caption under the first row is the platform's sentence, so it is cut
-        // with an ellipsis rather than run past the row it belongs to.
-        let mut label_buf = [0u8; LINE_LEN];
-        let label = fitted_run(
-            CATEGORY_LABELS[index],
-            CATEGORY_LABEL_SCALE,
-            CATEGORY_LABEL_LANE,
-            &mut label_buf,
-        );
-        if let Some(color) = test_text(
-            x,
-            y,
-            CATEGORY_LABEL_X,
-            label_y,
-            CATEGORY_LABEL_SCALE,
-            label,
-            THEME.on_surface,
-            fill,
-        ) {
-            return color;
-        }
-        if index == 0 {
-            let mut status_buf = [0u8; LINE_LEN];
-            let status = fitted_run(
-                app.storage_status(),
-                CATEGORY_CAPTION_SCALE,
-                CATEGORY_LABEL_LANE,
-                &mut status_buf,
-            );
-            if let Some(color) = test_text(
-                x,
-                y,
-                CATEGORY_LABEL_X,
-                row_top + category_caption_dy(),
-                CATEGORY_CAPTION_SCALE,
-                status,
-                THEME.on_surface_variant,
-                fill,
-            ) {
+            if let Some(color) = row.caption.pixel(x, y) {
                 return color;
             }
+            return base;
         }
-        return base;
+        // The rows the stack reserves that no plate answered: the same surface
+        // the stack's own height promised them.
+        return THEME.surface;
     }
 
     // 4. The browse-everything control.
-    let browse_btn = home_browse_btn();
-    if browse_btn.contains(x, y) {
+    if frame.browse.contains(x, y) {
         // WHY the outline: `border` (#E5E5E5) was 1.08:1 on this pill's own
         // #EFEEE9 fill and 1.21:1 on the #FAFAFA page, and the fill is only
         // 1.11:1 off the page, so the app's one entry-to-everything control was
@@ -2269,30 +2636,11 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if let Some(base) = draw_pill(
             x,
             y,
-            browse_btn,
+            frame.browse,
             THEME.surface_container_high,
             Some(CONTROL_OUTLINE),
         ) {
-            let mut label_buf = [0u8; LINE_LEN];
-            let shown = fitted_run(
-                b"Browse all files",
-                LABEL_RUNG,
-                control_label_lane(browse_btn.w),
-                &mut label_buf,
-            );
-            let lx = centered_x(shown, LABEL_RUNG, browse_btn.x, browse_btn.w);
-            let ly = browse_btn.y
-                + browse_btn.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-            if let Some(color) = test_text(
-                x,
-                y,
-                lx,
-                ly,
-                LABEL_RUNG,
-                shown,
-                THEME.primary,
-                THEME.surface_container_high,
-            ) {
+            if let Some(color) = frame.browse_label.pixel(x, y) {
                 return color;
             }
             return base;
@@ -2301,29 +2649,10 @@ fn home_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 5. The honest note.
-    let note_y = home_note_y();
-    if let Some(color) = test_text(
-        x,
-        y,
-        36,
-        note_y,
-        HOME_CARD_LINE_SCALE,
-        b"Recents come from the platform's document index.",
-        THEME.on_surface_variant,
-        THEME.surface,
-    ) {
+    if let Some(color) = frame.note1.pixel(x, y) {
         return color;
     }
-    if let Some(color) = test_text(
-        x,
-        y,
-        36,
-        note_y + grown(24, HOME_CARD_LINE_SCALE, draw_level()),
-        HOME_CARD_LINE_SCALE,
-        b"Files the index has not walked are not listed here.",
-        THEME.on_surface_variant,
-        THEME.surface,
-    ) {
+    if let Some(color) = frame.note2.pixel(x, y) {
         return color;
     }
 
@@ -3501,31 +3830,108 @@ fn render_file_manager_ui(surface: u32, app: &FileManagerApp) {
     render_file_manager_band(surface, app, 0, H);
 }
 
+/// Guest ticks, when the platform will answer.
+#[inline]
+fn tick_opt() -> Option<u64> {
+    std::get_ticks().ok()
+}
+
+/// Guest ticks between two sample points.
+#[inline]
+fn tick_delta(a: Option<u64>, b: Option<u64>) -> u64 {
+    match (a, b) {
+        (Some(a), Some(b)) => b.wrapping_sub(a),
+        _ => 0,
+    }
+}
+
+/// Stack buffer for a log line, because this binary holds no heap.
+struct LineBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> LineBuf<N> {
+    const fn new() -> Self {
+        LineBuf { buf: [0u8; N], len: 0 }
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl<const N: usize> core::fmt::Write for LineBuf<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for ch in s.bytes() {
+            if self.len >= N {
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.len] = ch;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+/// The split of one full-surface pass, in guest ticks.
+///
+/// WHY the pass is split at all: "the screen came late" and "the screen came
+/// never" look the same from outside, and the two costs they name -- resolving
+/// the frame once, then answering a million pixels from it -- are bounded by
+/// different code. A regression in either is visible in one number.
+fn log_frame_breakdown(prep: u64, draw: u64, write: u64, widgets: u64, chunks: usize) {
+    let mut line = LineBuf::<128>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(line, "[FILE_MANAGER] FRAMEBREAK prep={} draw={} write={} widgets={} chunks={}",
+            prep, draw, write, widgets, chunks);
+    }
+    std::log(line.as_str()).ok();
+}
+
 /// Re-rasterises and writes only rows `y0..y1`.
 fn render_file_manager_band(surface: u32, app: &FileManagerApp, y0: usize, y1: usize) {
+    // The pass's answers, resolved before the first pixel is asked.
+    let t_prep = tick_opt();
+    let frame = build_frame(app);
+    let prep_ticks = tick_delta(t_prep, tick_opt());
     let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     let end = y1.min(H) * W;
+    let mut draw_ticks = 0u64;
+    let mut write_ticks = 0u64;
+    let mut chunks = 0usize;
     while offset < end {
         let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
+        let t_draw = tick_opt();
         for i in 0..count {
-            chunk[i] = get_file_manager_color(x, y, app);
+            chunk[i] = get_file_manager_color(x, y, app, &frame);
             x += 1;
             if x == W {
                 x = 0;
                 y += 1;
             }
         }
-        let _ = std::surface_write(surface, offset, &chunk[..count]);
+        let t_write = tick_opt();
+        draw_ticks += tick_delta(t_draw, t_write);
+        std::surface_write(surface, offset, &chunk[..count]).ok();
+        let t_done = tick_opt();
+        write_ticks += tick_delta(t_write, t_done);
+        chunks += 1;
         offset += count;
     }
+    let t_widgets = tick_opt();
     if surface > 0
         && y0 < entries_card().y + entries_card().h
         && y1 > entries_card().y
     {
         render_widgets(surface, app);
+    }
+    let widgets_ticks = tick_delta(t_widgets, tick_opt());
+    if y0 == 0 && y1 >= H {
+        log_frame_breakdown(prep_ticks, draw_ticks, write_ticks, widgets_ticks, chunks);
     }
 }
 
