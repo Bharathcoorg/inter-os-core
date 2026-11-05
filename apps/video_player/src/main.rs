@@ -276,12 +276,30 @@ fn header_rule_y() -> usize {
 /// screen that never asked for a text size must not be resized by the code that
 /// reads one.
 const _: () = assert!(line_at(2, PLATFORM_LEVEL) == font::line_height(2));
-const _: () = assert!(header_rule_y_at(PLATFORM_LEVEL) == HEADER_RULE_Y_PLATFORM);
-/// The platform's own sums, kept as the number the header drew before the
-/// setting could be read at all -- what the equality gate above is measured
-/// against, and what the gates below clear the taller rung against.
-const HEADER_LINE_Y_PLATFORM: usize = HEADER_TITLE_Y + font::line_height(2);
-const HEADER_RULE_Y_PLATFORM: usize = HEADER_LINE_Y_PLATFORM + font::line_height(1) + 2;
+/// The header's two rows as this screen authored them: the rows it drew before
+/// the setting could be read at all, and the rows every gate below clears a
+/// taller rung against.
+///
+/// WHY these are `header_line_y_at` / `header_rule_y_at` read at
+/// `PLATFORM_LEVEL`, and not the same sums re-spelled in `font::line_height`:
+/// the rows the header paints are those two functions read at the rung the
+/// frame is drawn at, so a platform anchor written in the ladder's own names is
+/// a second copy of the arithmetic -- it holds the platform's number while
+/// owning no part of the derivation, and the gate beside it could only agree
+/// with the layout because the same four numbers had been added by hand twice.
+/// Read through the face the layout calls, the authored anchor and the drawn row
+/// are one expression, and the gate is left to pin only what is not identity.
+const HEADER_LINE_Y: usize = header_line_y_at(PLATFORM_LEVEL);
+const HEADER_RULE_Y: usize = header_rule_y_at(PLATFORM_LEVEL);
+/// WHAT THIS PINS: that the authored anchor above is still the number the header
+/// drew at one hundred per cent, spelled as the ladder's own arithmetic. The
+/// right-hand sides are `font::line_height`, not the `_at` faces, so this is not
+/// the derivation comparing with itself: a `line_at` that ever disagreed with
+/// the ladder at level one moves both header rows and fails here first.
+const _: () = assert!(HEADER_LINE_Y == HEADER_TITLE_Y + font::line_height(2));
+const _: () = assert!(
+    HEADER_RULE_Y == HEADER_TITLE_Y + font::line_height(2) + font::line_height(1) + 2
+);
 /// The widest the centred portrait title may be.
 ///
 /// WHY it is derived from the control that stands to its right: the run is
@@ -719,6 +737,79 @@ const _: () = assert!(
         && LAND_PLAY_HIT.x + LAND_PLAY_HIT.w <= LAND_NEXT_HIT.x
 );
 
+/// The row the landscape running-time numbers stand on inside the lower scrim,
+/// as this screen authored it, and that row at `level`.
+///
+/// WHY a face and not the authored 1120: both numbers are painted on the body
+/// rung, and the wall under them is not the scrim's foot -- it is the transport
+/// row's tap bands, which are the discs' bounding boxes and are not made of type.
+/// The platform's row cleared them because 1120 plus a 39-row box lands at 1159,
+/// under the play control's top row of 1174. At the largest rung the same authored
+/// row carries a 59-row box to 1179 -- five rows inside the rectangle a press on
+/// Play/Pause answers, on a scrim that paints those rows as the number's own line
+/// box. Clamped to the wall the box stops exactly against, the authored row is
+/// what level one answers unchanged, a *lowered* rung never moves it at all, and
+/// the two taller rungs spend rows of the scrim's air rather than rows of a
+/// control the eye reads as a button.
+const LAND_TIME_ROW: usize = 1120;
+
+const fn land_time_y_at(level: u8) -> usize {
+    let highest = land_time_wall_y() - line_at(2, level);
+    if LAND_TIME_ROW < highest {
+        LAND_TIME_ROW
+    } else {
+        highest
+    }
+}
+
+/// The tightest of the transport's three tap bands -- the wall the numbers stop
+/// above. Named because the sweep below and the clamp have to read the same
+/// control, and the play disc is the one of the three whose rect reaches highest.
+const fn land_time_wall_y() -> usize {
+    let prev = LAND_PREV_HIT.y;
+    let next = LAND_NEXT_HIT.y;
+    let play = LAND_PLAY_HIT.y;
+    let mut wall = play;
+    if prev < wall {
+        wall = prev;
+    }
+    if next < wall {
+        wall = next;
+    }
+    wall
+}
+
+/// The authored row, which the face above answers at level one.
+const LAND_TIME_Y: usize = land_time_y_at(PLATFORM_LEVEL);
+const _: () = assert!(LAND_TIME_Y == 1120);
+
+#[inline]
+fn land_time_y() -> usize {
+    land_time_y_at(level())
+}
+
+/// WHAT THIS GATES: at every level the setting can hold, both running-time
+/// numbers keep their whole body boxes on the scrim that paints them and above
+/// the transport's tap bands, and no rung moves a number down.
+const fn land_time_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let y = land_time_y_at(level);
+        if y > LAND_TIME_ROW {
+            return false;
+        }
+        if y < LAND_PANEL.y {
+            return false;
+        }
+        if y + line_at(2, level) > land_time_wall_y() {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(land_time_clear_at_every_level());
+
 const CANVAS_X0: usize = (W - CANVAS_W) / 2; // 20
 const CANVAS_Y0: usize = 148;
 /// The plate at the platform's rung, kept for the gates that name it; the painter
@@ -752,6 +843,128 @@ const fn canvas_y0_at(level: u8) -> usize {
 fn canvas_rect() -> Rect {
     Rect::new(CANVAS_X0, canvas_y0_at(level()), CANVAS_W, CANVAS_H)
 }
+
+/// The canvas's own rows, inside the plate.
+///
+/// Every one of these is an offset from the plate's top, which is itself the
+/// rung the header band reached (`canvas_y0_at`), so a raised text size moves the
+/// whole plate and every row written against it together. What a row still has to
+/// prove is that it keeps *its own* box, which is the rung's, inside the plate and
+/// clear of the run stacked under it -- which is what [`canvas_rows_clear_at_every_level`]
+/// reads these faces for rather than the numbers the painter happens to add.
+///
+/// The idle placeholder's title row.
+const CANVAS_IDLE_DY: usize = 150;
+/// A decoder refusal's row: one run, centred in the plate's upper half, with
+/// nothing stacked under it.
+const CANVAS_ERROR_DY: usize = 176;
+
+/// The supported-formats line's row inside the plate at `level` -- one whole
+/// body-rung box under the idle title, plus the row of air the pair kept.
+///
+/// WHY a face and not the authored 190: the two runs are stacked, and the gap
+/// between their tops was written as `190 - 150` = 40, which is the platform's
+/// body line box (39) and one row. So the pair cleared each other at one hundred
+/// per cent and nowhere else: at the largest rung the title's own box reaches row
+/// 209 while the hint's box starts at 190, and the two share nineteen rows -- a
+/// number of rows a descender in the title would have printed over the hint's
+/// caps, held apart only by the fact that "NO MEDIA OPEN" happens to spell none.
+/// Read as the title's box at the rung the frame draws at, the second run cannot
+/// move up into the first at any setting, and the authored 190 is exactly what the
+/// face answers at level one.
+const fn canvas_hint_dy_at(level: u8) -> usize {
+    CANVAS_IDLE_DY + line_at(2, level) + 1
+}
+
+/// The hint's authored row, which the face above answers at level one.
+const CANVAS_HINT_DY: usize = canvas_hint_dy_at(PLATFORM_LEVEL);
+const _: () = assert!(CANVAS_HINT_DY == 190);
+
+/// The audio notice's authored row: the plate's foot less the 28 rows of inset
+/// this screen put it on.
+const CANVAS_NOTICE_DY: usize = CANVAS_H - 28;
+
+/// The notice's row at `level`: the authored row, raised only as far as its own
+/// caption box grows, so the box's foot never reaches a row past the plate beyond
+/// the one the platform's box already reached.
+///
+/// WHY the foot is the bound and not the plate's last row: `CANVAS_H - 28` gives a
+/// 30-row caption box whose foot lands two rows past the plate's final row at one
+/// hundred per cent -- the notice's own descenders were clipped before this screen
+/// could read a text size at all. That is a layout bug this face records rather
+/// than repairs, because repairing it moves ink the person already sees at the
+/// platform rung, and the rule beside every derivation here is that a screen which
+/// never asked for a size keeps every pixel it had. Holding the foot still is what
+/// makes the *rung* cost the notice nothing: at every level the setting can hold,
+/// the box ends on the row the platform's ended on and no glyph is clipped that was
+/// not clipped before -- which at the largest rung, unclamped, would have been
+/// sixteen rows of the plate's own border eaten out of a two-row clip.
+const fn canvas_notice_dy_at(level: u8) -> usize {
+    let foot = CANVAS_NOTICE_DY + line_at(1, PLATFORM_LEVEL);
+    let highest = foot - line_at(1, level);
+    if CANVAS_NOTICE_DY < highest {
+        CANVAS_NOTICE_DY
+    } else {
+        highest
+    }
+}
+
+/// The notice's authored row, which the face above answers at level one.
+const CANVAS_NOTICE_DY_ROW: usize = canvas_notice_dy_at(PLATFORM_LEVEL);
+const _: () = assert!(CANVAS_NOTICE_DY_ROW == CANVAS_H - 28);
+
+#[inline]
+fn canvas_hint_dy() -> usize {
+    canvas_hint_dy_at(level())
+}
+
+#[inline]
+fn canvas_notice_dy() -> usize {
+    canvas_notice_dy_at(level())
+}
+
+/// WHAT THIS GATES: at every level the setting can hold, the four rows the canvas
+/// paints inside its own plate keep their whole boxes inside the plate's claim on
+/// them, the idle pair keeps one whole line box between its two runs, and the
+/// notice's box never reaches further past the plate's foot than the row this
+/// screen authored it on.
+///
+/// WHY a loop and not the one equality beside [`CANVAS_HINT_DY`]: the authored row
+/// is the platform's half of the fact. A rung is the other half, and the notice's
+/// clip -- the one thing here that is wrong at level one -- is only stated
+/// honestly as a bound every selectable level has to sit under.
+const fn canvas_rows_clear_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        // The hint starts only once the idle title's whole box is behind it.
+        if canvas_hint_dy_at(level) < CANVAS_IDLE_DY + line_at(2, level) {
+            return false;
+        }
+        // Both idle runs keep their own boxes inside the plate.
+        if CANVAS_IDLE_DY + line_at(2, level) > CANVAS_H {
+            return false;
+        }
+        if canvas_hint_dy_at(level) + line_at(1, level) > CANVAS_H {
+            return false;
+        }
+        // A refusal is one run, and its box is the plate's to hold.
+        if CANVAS_ERROR_DY + line_at(1, level) > CANVAS_H {
+            return false;
+        }
+        // The notice never moves down from its authored row, and its foot never
+        // passes the row the platform's box ended on.
+        let dy = canvas_notice_dy_at(level);
+        if dy > CANVAS_NOTICE_DY {
+            return false;
+        }
+        if dy + line_at(1, level) > CANVAS_NOTICE_DY + line_at(1, PLATFORM_LEVEL) {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(canvas_rows_clear_at_every_level());
 
 // Scrubber
 const SEEK_X: usize = 124;
@@ -825,6 +1038,81 @@ const _: () = assert!(
 const _: () = assert!(VOL_HIT.w >= MIN_TOUCH_TARGET && VOL_HIT.h >= MIN_TOUCH_TARGET);
 const _: () = assert!(SEEK_HIT.w >= MIN_TOUCH_TARGET && SEEK_HIT.h >= MIN_TOUCH_TARGET);
 
+/// The volume read-out's column, and the row it stands on at `level`.
+///
+/// WHY a column constant at all: the run starts where the bar's touch band ends,
+/// and the 24 rows of gutter between them were only ever visible in two numbers
+/// the painter added in its head. Named, the gate beside it says the run never
+/// starts inside the track it sits beside.
+const VOL_LABEL_X: usize = 610;
+const _: () = assert!(VOL_BAR_RECT.x + VOL_BAR_RECT.w <= VOL_LABEL_X);
+
+/// The volume row as this screen authored it.
+///
+/// WHY a face and not the clamp the painter carried inline
+/// (`836usize.min(BAND4_Y1 - line_u(2))`): that expression is the whole
+/// derivation with its anchor spelled as a literal at the call site, so the row
+/// the band answers and the row a gate would have to name were two copies of one
+/// sum, and nothing checked the first against the second. The face is the single
+/// derivation, [`VOL_LABEL_Y`] is the authored anchor read from it, and the paint
+/// path calls `vol_label_y()`.
+///
+/// WHY the clamp is the smaller of the two and not a plain sum: band 4 answers
+/// rows up to `BAND4_Y1` and nothing below it, so a body-rung box taller than the
+/// band's remaining rows -- which is what the largest setting makes -- would have
+/// its last rows painted by band 5 instead. Raising the run to the highest row
+/// that still reserves its whole box inside band 4 keeps the ink whole at every
+/// selectable level and leaves the platform's rung exactly where it was (836,
+/// against a band that would have allowed 851 at one hundred per cent).
+const VOL_LABEL_ROW: usize = 836;
+
+const fn vol_label_y_at(level: u8) -> usize {
+    let highest = BAND4_Y1 - line_at(2, level);
+    if VOL_LABEL_ROW < highest {
+        VOL_LABEL_ROW
+    } else {
+        highest
+    }
+}
+
+/// The volume row at the platform's rung, which is the row this screen drew
+/// before it could read a text size at all.
+const VOL_LABEL_Y: usize = vol_label_y_at(PLATFORM_LEVEL);
+/// WHAT THIS PINS: that the face above still answers the authored row at level
+/// one, so the rungs the layout grew from are the rungs the ladder draws.
+const _: () = assert!(VOL_LABEL_Y == 836);
+
+#[inline]
+fn vol_label_y() -> usize {
+    vol_label_y_at(level())
+}
+
+/// WHAT THIS GATES: at every level the setting can hold, the volume read-out's
+/// whole line box sits inside band 4 -- the band that answers its rows -- and its
+/// ink band sits inside the same rows, so no rung can hand the tail of a number
+/// to the band below it.
+const fn vol_label_holds_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let y = vol_label_y_at(level);
+        if y < BAND4_Y0 {
+            return false;
+        }
+        if y + line_at(2, level) > BAND4_Y1 {
+            return false;
+        }
+        if y + ascent_at(2, level) - (cap_at(2, level) as usize) < BAND4_Y0 {
+            return false;
+        }
+        if y + ascent_at(2, level) > BAND4_Y1 {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(vol_label_holds_at_every_level());
+
 // Secondary Row 1 (y: 900, h: 52)
 const SPEED_BTN: Rect = Rect::new(24, 900, 154, 52);
 const ASPECT_BTN: Rect = Rect::new(194, 900, 154, 52);
@@ -847,6 +1135,80 @@ const _: () = assert!(LOOP_BTN.x + LOOP_BTN.w <= PIP_BTN.x);
 const _: () = assert!(PIP_BTN.x + PIP_BTN.w <= W - 24);
 const _: () = assert!(LIB_BTN.x + LIB_BTN.w <= INFO_BTN.x);
 const _: () = assert!(INFO_BTN.x + INFO_BTN.w <= W - 24);
+
+/// The six secondary controls are one row shape repeated, so the label rule below
+/// is stated once against the first plate and these say the other five are the
+/// same shape.
+///
+/// WHY that matters for a rung: the plates are touch targets, and their height is
+/// the platform's minimum plus the air this screen chose -- a physical number, not
+/// a type one, and the contract names each literal. So when the person raises the
+/// text size the plates do not grow, and the only honest claim left is about the
+/// run inside them. It is worth stating as one height because a gate that read
+/// six heights could pass on six different numbers.
+const _: () = assert!(
+    ASPECT_BTN.h == SPEED_BTN.h
+        && LOOP_BTN.h == SPEED_BTN.h
+        && PIP_BTN.h == SPEED_BTN.h
+        && LIB_BTN.h == SPEED_BTN.h
+        && INFO_BTN.h == SPEED_BTN.h
+);
+
+/// The row a plate's centred label starts on, as an offset from the plate's own
+/// top, at `level`.
+///
+/// WHY a function and not the six copies of
+/// `(PLATE.h.saturating_sub(line_u(2))) / 2` the painter carried: the same sum
+/// decides whether a run's ink stays inside the plate it is painted on, and a
+/// gate cannot read a call site. `saturating_sub` is the whole of the behaviour
+/// here: at the largest rung a body line box is taller than these plates, so the
+/// reserved leading gives up and the label's *box* starts on the plate's own top
+/// row -- which is why the rule below is written over the ink band (the cap
+/// height above the baseline) rather than over the box. A plate cannot hold a
+/// line box it did not reserve, but it can and must hold the glyphs.
+const fn plate_label_dy_at(level: u8, plate_h: usize) -> usize {
+    plate_h.saturating_sub(line_at(2, level)) / 2
+}
+
+/// [`plate_label_dy_at`] at the published level.
+#[inline]
+fn plate_label_dy(plate_h: usize) -> usize {
+    plate_label_dy_at(level(), plate_h)
+}
+
+/// The first row a plate label's ink occupies, relative to the plate's top.
+const fn plate_label_ink_top_at(level: u8, plate_h: usize) -> usize {
+    plate_label_dy_at(level, plate_h) + ascent_at(2, level) - cap_at(2, level) as usize
+}
+
+/// The row one past a plate label's last ink row, relative to the plate's top.
+const fn plate_label_ink_foot_at(level: u8, plate_h: usize) -> usize {
+    plate_label_dy_at(level, plate_h) + ascent_at(2, level)
+}
+
+/// WHAT THIS GATES: at every level the setting can hold, a centred label's ink
+/// lands between its plate's first row and its last, so a raised text size can
+/// never print a control's word over the plate's border or outside the rounded
+/// rect that answers the press on it.
+///
+/// WHY a loop: the authored-rung equality would only say that the plates were
+/// built around the rungs the ladder no longer draws alone.
+const fn secondary_labels_hold_in_plates_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        let top = plate_label_ink_top_at(level, SPEED_BTN.h);
+        let foot = plate_label_ink_foot_at(level, SPEED_BTN.h);
+        if top >= foot {
+            return false;
+        }
+        if foot > SPEED_BTN.h {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(secondary_labels_hold_in_plates_at_every_level());
 
 // PIP Floating Preview Card (Bottom Right, 280x158)
 const PIP_W: usize = 280;
@@ -985,11 +1347,6 @@ const _: () = assert!(HOME_HIT.x <= HOME_PILL.x && HOME_HIT.x + HOME_HIT.w >= HO
 ///
 /// WHY under the header's rule: the drawer's title and its line are painted by
 /// the same band the list is tested against, so the list has to start below the
-/// hairline that closes the band rather than under the title's line box.
-/// The drawer's list viewport, and the row it starts on.
-///
-/// WHY under the header's rule: the drawer's title and its line are painted by
-/// the same band the list is tested against, so the list has to start below the
 /// hairline that closes the band rather than under the title's line box -- and
 /// WHY a function: that hairline sits under two runs whose boxes follow the
 /// person's text size, so a list authored at a constant row starts inside the
@@ -1036,8 +1393,27 @@ fn lib_row_h() -> usize {
 const LIB_ROW_H: usize = lib_row_h_at(PLATFORM_LEVEL);
 const _: () = assert!(lib_meta_dy_at(PLATFORM_LEVEL) == 44);
 const _: () = assert!(LIB_ROW_H == 68);
-/// WHAT THIS GATES: a row reserves the whole of both its runs at every level, and
-/// the first row still stands inside the viewport that answers a press on it.
+
+/// The row's playing indicator: the mark's centre row inside the row, and the
+/// half-extent of the ink the painter actually puts around it.
+///
+/// WHY it is named at all, and why it is *not* a face over a level: the row it
+/// rides on grows with the type (both its runs are measured in ascents), while
+/// this mark is a glyph the screen draws itself -- a triangle six rows tall and
+/// ten columns wide, or a dot of radius three. Nothing about the person's text
+/// size asks it to move. What has to be true is that the row never grows *out from
+/// under* it: that the mark stays below the title's cap line, above the meta
+/// line's baseline, and inside the row's own height at every rung, which is what
+/// the two extra clauses in [`library_rows_clear_at_every_level`] read these
+/// numbers for. An authored anchor a taller rung could silently walk past is the
+/// same defect class as a box that leaves its plate.
+const LIB_ROW_ICON_DY: usize = 32;
+const LIB_ROW_ICON_R: usize = 6;
+
+/// WHAT THIS GATES: a row reserves the whole of both its runs at every level, the
+/// indicator that marks the current one still stands between the two runs' ink and
+/// inside the row's own height, and the first row still stands inside the viewport
+/// that answers a press on it.
 const fn library_rows_clear_at_every_level() -> bool {
     let mut level = 0u8;
     while level <= EXTRA_LARGE_LEVEL {
@@ -1045,6 +1421,21 @@ const fn library_rows_clear_at_every_level() -> bool {
             return false;
         }
         if lib_list_y0_at(level) + lib_row_h_at(level) > LIB_VIEW_Y1 {
+            return false;
+        }
+        // The mark's crown sits below the cap line of the title it marks, whose
+        // own baseline is the row's title offset plus the rung's ascent.
+        if LIB_ROW_ICON_DY - LIB_ROW_ICON_R
+            < LIB_ROW_TITLE_DY + ascent_at(2, level) - cap_at(2, level) as usize
+        {
+            return false;
+        }
+        // ...and its foot stays above the meta line's baseline, so a rung that
+        // moved the title's ink never pushes the mark into the second run.
+        if LIB_ROW_ICON_DY + LIB_ROW_ICON_R > lib_meta_dy_at(level) + ascent_at(1, level) {
+            return false;
+        }
+        if LIB_ROW_ICON_DY + LIB_ROW_ICON_R > lib_row_h_at(level) {
             return false;
         }
         level += 1;
@@ -2270,7 +2661,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 // Scrubber: Timestamps & Bar
                 let mut ebuf = [0u8; 12];
                 let elen = format_time(app.elapsed_sec, false, &mut ebuf);
-                if let Some(col) = draw_text(x, y, 40, 1120, 2, &ebuf[..elen], COLOR_TEXT_PRIMARY, bg_hud) {
+                if let Some(col) = draw_text(
+                    x,
+                    y,
+                    40,
+                    land_time_y(),
+                    2,
+                    &ebuf[..elen],
+                    COLOR_TEXT_PRIMARY,
+                    bg_hud,
+                ) {
                     return col;
                 }
 
@@ -2281,7 +2681,16 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     true,
                     &mut rbuf,
                 );
-                if let Some(col) = draw_text(x, y, LAND_REMAIN_X, 1120, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, bg_hud) {
+                if let Some(col) = draw_text(
+                    x,
+                    y,
+                    LAND_REMAIN_X,
+                    land_time_y(),
+                    2,
+                    &rbuf[..rlen],
+                    COLOR_TEXT_MUTED,
+                    bg_hud,
+                ) {
                     return col;
                 }
 
@@ -2526,9 +2935,9 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
 
             let item = &app.playlist.items[row_idx];
 
-            // Playing / Track Indicator Icon (x: 24..48, y: row_y0 + 20..36)
+            // Playing / Track Indicator Icon, centred on the row's own mark row.
             let icon_cx = 36;
-            let icon_cy = row_y0 + 32;
+            let icon_cy = row_y0 + LIB_ROW_ICON_DY;
             let idx_x = (x as i32) - (icon_cx as i32);
             let idx_y = (y as i32) - (icon_cy as i32);
             if is_current && app.state == PlaybackState::Playing {
@@ -2800,7 +3209,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     x,
                     y,
                     mx,
-                    canvas.y + 176,
+                    canvas.y + CANVAS_ERROR_DY,
                     1,
                     msg.as_bytes(),
                     0xFFE05A68,
@@ -2820,7 +3229,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     x,
                     y,
                     mx,
-                    canvas.y + 176,
+                    canvas.y + CANVAS_ERROR_DY,
                     1,
                     msg.as_bytes(),
                     0xFFE05A68,
@@ -2836,7 +3245,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if app.avi_audio_unavailable() {
                 let notice = b"Audio stream: unavailable";
                 let nx = CANVAS_X0 + 12;
-                let ny = canvas.y + CANVAS_H - 28;
+                let ny = canvas.y + canvas_notice_dy();
                 // WHY the gate is the run's real box: `draw_text` answers inside
                 // the caption rung's line box, and a gate shorter than that box
                 // hands the run's last rows back to the surface behind it -- the
@@ -2877,14 +3286,32 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let msg1 = b"NO MEDIA OPEN";
             let mw1 = run_w(msg1, 2, true);
             let mx1 = (W.saturating_sub(mw1)) / 2;
-            if let Some(col) = draw_text_bold(x, y, mx1, canvas.y + 150, 2, msg1, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(col) = draw_text_bold(
+                x,
+                y,
+                mx1,
+                canvas.y + CANVAS_IDLE_DY,
+                2,
+                msg1,
+                COLOR_TEXT_PRIMARY,
+                COLOR_SURFACE,
+            ) {
                 return col;
             }
 
             let msg2 = b"Supported: AVI (MJPEG), PPM P6, RAW RGB24";
             let mw2 = run_w(msg2, 1, false);
             let mx2 = (W.saturating_sub(mw2)) / 2;
-            if let Some(col) = draw_text(x, y, mx2, canvas.y + 190, 1, msg2, COLOR_TEXT_MUTED, COLOR_SURFACE) {
+            if let Some(col) = draw_text(
+                x,
+                y,
+                mx2,
+                canvas.y + canvas_hint_dy(),
+                1,
+                msg2,
+                COLOR_TEXT_MUTED,
+                COLOR_SURFACE,
+            ) {
                 return col;
             }
 
@@ -3086,17 +3513,17 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 vn += 1;
             }
         }
-        // The volume read-out, stood on its own HUD row.
-        //
-        // WHY the smaller of the two numbers: band 4 answers rows up to
-        // `BAND4_Y1` and nothing below it, so a body-rung box taller than the
-        // band's remaining rows -- which is what the largest setting makes --
-        // would have its last rows painted by band 5 instead. Moving the run up
-        // to the highest row that still reserves its whole box inside band 4 keeps
-        // the ink whole at every selectable level and leaves the platform's rung
-        // exactly where it was (836 against 851 at one hundred per cent).
-        let vol_y = 836usize.min(BAND4_Y1 - line_u(2));
-        if let Some(col) = draw_text(x, y, 610, vol_y, 2, &vbuf[..vn], COLOR_TEXT_PRIMARY, COLOR_BG) {
+        // The volume read-out, stood on the row [`vol_label_y`] derives.
+        if let Some(col) = draw_text(
+            x,
+            y,
+            VOL_LABEL_X,
+            vol_label_y(),
+            2,
+            &vbuf[..vn],
+            COLOR_TEXT_PRIMARY,
+            COLOR_BG,
+        ) {
             return col;
         }
 
@@ -3112,7 +3539,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = app.speed.label().as_bytes();
             let lw = run_w(label, 2, true);
             let lx = SPEED_BTN.x + (SPEED_BTN.w.saturating_sub(lw)) / 2;
-            let ly = SPEED_BTN.y + (SPEED_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = SPEED_BTN.y + plate_label_dy(SPEED_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -3124,7 +3551,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = app.aspect.label().as_bytes();
             let lw = run_w(label, 2, true);
             let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
-            let ly = ASPECT_BTN.y + (ASPECT_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = ASPECT_BTN.y + plate_label_dy(ASPECT_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -3136,7 +3563,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = app.loop_mode.label().as_bytes();
             let lw = run_w(label, 2, true);
             let lx = LOOP_BTN.x + (LOOP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LOOP_BTN.y + (LOOP_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = LOOP_BTN.y + plate_label_dy(LOOP_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -3150,7 +3577,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = b"PIP";
             let lw = run_w(label, 2, true);
             let lx = PIP_BTN.x + (PIP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PIP_BTN.y + (PIP_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = PIP_BTN.y + plate_label_dy(PIP_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, pip_ink, pip_fill) {
                 return t_col;
             }
@@ -3162,7 +3589,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = b"LIBRARY";
             let lw = run_w(label, 2, true);
             let lx = LIB_BTN.x + (LIB_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LIB_BTN.y + (LIB_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = LIB_BTN.y + plate_label_dy(LIB_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
                 return t_col;
             }
@@ -3175,7 +3602,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let label = b"MEDIA INFO";
             let lw = run_w(label, 2, true);
             let lx = INFO_BTN.x + (INFO_BTN.w.saturating_sub(lw)) / 2;
-            let ly = INFO_BTN.y + (INFO_BTN.h.saturating_sub(line_u(2))) / 2;
+            let ly = INFO_BTN.y + plate_label_dy(INFO_BTN.h);
             if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, info_fill) {
                 return t_col;
             }
