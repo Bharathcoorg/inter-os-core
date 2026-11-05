@@ -142,7 +142,7 @@ pub fn init() {
     let mut ssm = SHARE_SHEET_MANAGER.lock();
 
     // Register standard first-party sovereign share targets:
-    // 1. Messages (Task 24) - Accepts chat text, links, photos
+    // 1. Messages - Accepts chat text, links, photos
     ssm.register_target(ShareTarget {
         app_id: "interos.messages",
         display_name: "Messages",
@@ -151,7 +151,7 @@ pub fn init() {
         accent_color: (16, 185, 129), // Emerald Green
     });
 
-    // 2. Vault (Task 20) - Accepts encrypted records, photos, audio tracks
+    // 2. Vault - Accepts encrypted records, photos, audio tracks
     ssm.register_target(ShareTarget {
         app_id: "interos.vault",
         display_name: "Vault",
@@ -160,7 +160,7 @@ pub fn init() {
         accent_color: (245, 158, 11), // Amber Gold
     });
 
-    // 3. Browser (Task 23) - Accepts web URLs and text
+    // 3. Browser - Accepts web URLs and text
     ssm.register_target(ShareTarget {
         app_id: "interos.browser",
         display_name: "Browser",
@@ -169,7 +169,7 @@ pub fn init() {
         accent_color: (0, 229, 255), // Neon Cyan
     });
 
-    // 4. Calendar (Task 25) - Accepts calendar events and text
+    // 4. Calendar - Accepts calendar events and text
     ssm.register_target(ShareTarget {
         app_id: "interos.calendar",
         display_name: "Calendar",

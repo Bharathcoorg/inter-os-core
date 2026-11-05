@@ -163,7 +163,7 @@ pub fn init() {
     serial_println!("[TELEPHONY] No physical baseband/SIM backend registered; runtime state remains offline.");
 }
 
-/// Periodic multitasking worker task for the cellular modem (Task 11).
+/// Periodic multitasking worker task for the cellular modem.
 pub extern "C" fn task_telephony_worker() -> ! {
     let mut ticks = 0u64;
     loop {

@@ -802,7 +802,7 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    // Slot 1: IPC Send capability targeting Security Sentinel (Task 2)
+    // Slot 1: IPC Send capability targeting Security Sentinel
     user_caps.insert(Capability {
         id: CapabilityId(902),
         cap_type: CapabilityType::IpcSend,
