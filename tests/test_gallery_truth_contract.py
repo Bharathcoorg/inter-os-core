@@ -745,3 +745,110 @@ def test_the_album_band_overlap_contract_can_fail() -> None:
         "pub const ALBUM_ROW_AIR: usize = AUTHORED_ALBUM_STRIDE - AUTHORED_ALBUM_CARD_H;",
         "album-count-stride-returned",
     )
+
+
+def _plate_lane_faults(source: str) -> list[str]:
+    """Every way the detail plate and its runs can stop agreeing with each other.
+
+    A plate is two decisions -- the fill it recesses to and the edge that says it
+    is there -- and every run inked inside it is a third: the lane the plate
+    actually gives it. Each fault names one of the three being un-stated again.
+    """
+    faults = []
+    if "const DETAIL_PLATE: u32 = THEME.surface_container_low;" not in source:
+        faults.append("detail-plate-fill-not-recessed")
+    if "const DETAIL_PLATE_EDGE: u32 = THEME.outline;" not in source:
+        faults.append("detail-plate-edge-not-prominent")
+    if (
+        "let meta_disp_len = font::ellipsize(&meta_buf[..meta_len], 1, VIDEO_COL_W - 24, &mut meta_disp);"
+        not in source
+        or "&meta_disp[..meta_disp_len]" not in source
+    ):
+        faults.append("video-meta-run-unbound")
+    if (
+        "let lane = video_rect.w.saturating_sub(32);" not in source
+        or "font::ellipsize(badge, 1, lane, &mut buf)" not in source
+        or "1, &buf[..n], THEME.primary, v_bg" not in source
+    ):
+        faults.append("codec-watermark-run-unbound")
+    if (
+        "let lane = TOAST_RECT.w.saturating_sub(32);" not in source
+        or "let run = gallery::fitted_run(msg, 2, lane, &mut trim)" not in source
+        or "2, run, fg, bg" not in source
+    ):
+        faults.append("toast-run-unbound")
+    return faults
+
+
+def test_a_run_inked_on_a_plate_is_cut_to_the_lane_that_plate_gives() -> None:
+    """A buffer that caps bytes is not a lane that caps pixels.
+
+    The codec claim, the video card's size line and the toast's message were
+    each inked straight from a fixed-size buffer, so a run the buffer happily
+    held walked past the plate around it and onto the page -- and the plate's
+    own fill was named as its background while it did so. The detail viewport
+    was worse still: filled with `THEME.surface`, the page's exact colour, and
+    ringed with `THEME.border`, a 1.21:1 hairline, so the frame the person was
+    shown was a hole. Each run is now cut to a lane derived from the rect that
+    holds it, and the plate is one named recessed fill with one named prominent
+    edge.
+    """
+    assert _plate_lane_faults(gallery_main()) == [], (
+        "a gallery run is inked unbounded, or the detail viewport's plate is "
+        "invisible again -- the overflow leaves the control and the hole reads "
+        "as a blank screen"
+    )
+
+
+def test_the_plate_lane_contract_can_fail() -> None:
+    """Each mutation to a lane or a plate must make its own arm fire.
+
+    A gate that cannot fail proves nothing, so every fault the detector names is
+    reproduced here by editing the read source in exactly one place. Each arm
+    asserts its needle is unique first, so a mutation that silently matched two
+    spots fails loudly instead of testing a different region than it names.
+    """
+    main = gallery_main()
+
+    def arm(label: str, needle: str, replacement: str, expected: str) -> None:
+        assert main.count(needle) == 1, f"{label}: needle is not unique in main.rs"
+        faults = _plate_lane_faults(main.replace(needle, replacement))
+        assert expected in faults, (
+            f"{label}: expected the {expected!r} fault, got {faults}"
+        )
+
+    # 1. The plate's edge drops back to the hairline that made it a hole.
+    arm(
+        "edge-returns-to-hairline",
+        "const DETAIL_PLATE_EDGE: u32 = THEME.outline;",
+        "const DETAIL_PLATE_EDGE: u32 = THEME.border;",
+        "detail-plate-edge-not-prominent",
+    )
+    # 2. The plate stops stepping down and matches the page behind it again.
+    arm(
+        "fill-returns-to-page",
+        "const DETAIL_PLATE: u32 = THEME.surface_container_low;",
+        "const DETAIL_PLATE: u32 = THEME.surface;",
+        "detail-plate-fill-not-recessed",
+    )
+    # 3. The card's size line is inked straight from the byte-capped buffer.
+    arm(
+        "meta-run-unbound",
+        "let meta_disp_len = font::ellipsize(&meta_buf[..meta_len], 1, VIDEO_COL_W - 24, &mut meta_disp);",
+        "let meta_disp_len = meta_len;",
+        "video-meta-run-unbound",
+    )
+    # 4. The codec claim is measured against a remembered width, not the plate's.
+    arm(
+        "watermark-lane-forgotten",
+        "let lane = video_rect.w.saturating_sub(32);",
+        "let lane = 304;",
+        "codec-watermark-run-unbound",
+    )
+    # 5. The toast keeps walking past the pill it is drawn inside.
+    arm(
+        "toast-run-unbound",
+        "let run = gallery::fitted_run(msg, 2, lane, &mut trim)",
+        "let run = msg",
+        "toast-run-unbound",
+    )

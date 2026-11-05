@@ -105,3 +105,41 @@ def test_the_contact_capacity_notice_is_not_written_from_a_literal():
     assert "n = put_u16(&mut line, n, MAX_CONTACTS as u16);" in source
     assert 'b"Saved "' in source
     assert "count.min(9)" not in source
+
+
+def test_a_press_answers_only_the_pixels_the_pad_and_the_tab_row_ink():
+    """A finger on bare page must dial nothing and change nothing.
+
+    The pad inked a disc and answered the whole 180x124 cell drawn around it,
+    so the 126 rows of page between two keys in a row typed a digit; the tab
+    row inked a capsule and answered the whole 147x44 column, so a thumb on a
+    capsule's cut corner changed section. Both defects are the same one: the
+    painted box and the tap band were written apart. Each control now states
+    its geometry once, in the accessor its painter calls, and the press asks
+    that accessor -- so a future cell-band loop in a tap handler is a build
+    failure of this contract, not a screen someone has to notice.
+    """
+    source = dialer_main()
+
+    # The two accessors exist, and the ink asks them.
+    assert "fn keypad_key_at(x: usize, y: usize) -> Option<(usize, usize)>" in source
+    assert "fn tab_at(x: usize, y: usize) -> Option<usize>" in source
+    assert "let (row, col) = match keypad_key_at(x, y) {" in source
+    assert "let Some(i) = tab_at(x, y) else {" in source
+
+    # And so does every press: the keypad section, the contact editor's pad,
+    # and the tab row shared by both.
+    assert source.count("if let Some((row, col)) = keypad_key_at(x, y) {") == 2
+    assert "if let Some(i) = tab_at(x, y) {" in source
+
+    # Neither press still walks the box it used to answer.
+    assert "if x >= bx && x < bx + BTN_W" not in source
+    assert "if x >= TAB1_X0 && x < TAB1_X1" not in source
+
+    # The disc is now the target, so the disc itself carries the finger floor
+    # the app states beside it -- the radius is derived from that floor, never
+    # authored as a plate that happens to look round.
+    assert "const KEY_RADIUS: usize = MIN_FINGER_PX / 2;" in source
+    assert "assert!(KEY_RADIUS * 2 >= MIN_FINGER_PX);" in source
+    assert "assert!(2 * KEY_RADIUS <= BTN_H);" in source
+    assert "assert!(2 * KEY_RADIUS <= BTN_W);" in source

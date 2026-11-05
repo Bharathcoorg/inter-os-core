@@ -2835,6 +2835,51 @@ const TAB4_X0: usize = dialer::tab_row::col_x0(3);
 const TAB4_X1: usize = dialer::tab_row::col_x1(3);
 const TAB_LABELS: [&[u8]; 4] = dialer::tab_row::LABELS;
 
+/// The four tab columns, left edge and one-past-the-right edge, in the order the
+/// painter fills them.
+const TAB_COLUMNS: [(usize, usize); 4] = [
+    (TAB1_X0, TAB1_X1),
+    (TAB2_X0, TAB2_X1),
+    (TAB3_X0, TAB3_X1),
+    (TAB4_X0, TAB4_X1),
+];
+
+/// The tab a finger on `(x, y)` selects: the column's index, but only where the
+/// capsule `tabs_pixel` inks is claimed.
+///
+/// WHY the capsule's mask and not the column band: the band is 147 by 44 rows
+/// and the painter fills it with a capsule, so the rounded corners of every
+/// column carry the page's own colour. The press answered the whole band, so a
+/// thumb landing on bare surface still changed section -- the keypad's defect,
+/// one control over. Paint and press now ask this one function, and the mask
+/// comes from the same `draw_pill` on the same `Rect` the painter fills.
+///
+/// WHY the target stays comfortable: the capsule keeps the column's full 147 px
+/// and the band's full 44 rows at its widest, so the 44 dp floor the gate beside
+/// `TAB_BAND_H` pins holds on the pixels that are actually inked; only the four
+/// corners a finger cannot land in the middle of are given back to the page.
+fn tab_at(x: usize, y: usize) -> Option<usize> {
+    if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
+        return None;
+    }
+    let mut i = 0;
+    while i < TAB_COLUMNS.len() {
+        let (x0, x1) = TAB_COLUMNS[i];
+        if x >= x0 && x < x1 {
+            let pill = std::design::primitives::Rect::new(x0, TAB_BAND_Y0, x1 - x0, TAB_BAND_H);
+            // `draw_rounded_rect` decides membership from the rect and its radius
+            // alone -- a border only recolours rim pixels -- so any fill answers
+            // the same mask the painter fills with.
+            if std::design::primitives::draw_pill(x, y, pill, THEME.primary, None).is_some() {
+                return Some(i);
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
 // The painter and the lib's tab gate read the same geometry; these ties fail the
 // build if the band, the surface or the row ever drifts from what `tab_row`
 // publishes, so the gate can no longer pass a row the screen does not paint.
@@ -2980,10 +3025,36 @@ const BACKSPACE_CX: usize = 582;
 const BACKSPACE_CY: usize = 1065;
 const BACKSPACE_R: i32 = 42;
 
-// Keypad layout metrics: the digit and sublabel rungs, inside 48px radius discs.
+// Keypad layout metrics: the digit and sublabel rungs, inside the discs the pad
+// inks -- and, since `keypad_key_at`, inside the same discs the press answers.
 const KEY_DIGIT_SCALE: usize = type_scale::SECTION;
 const KEY_SUB_SCALE: usize = type_scale::CAPTION;
-const KEY_RADIUS: usize = 48;
+
+/// The smallest target this pad may ask a thumb to land on, in rows.
+///
+/// WHY in rows and not in millimetres: the app paints rows, a finger is in
+/// millimetres, and the two only meet through the panel. The reference phone is
+/// a 1:1 720x1440 scanout at 320 dpi -- Device Studio's `interos_reference`
+/// profile in `emulator/server.py` -- so one row is 25.4/320 mm, and nine
+/// millimetres is 113.4 rows. Rounded up to 114, because a floor that cannot be
+/// met exactly is a floor that will be missed.
+///
+/// WHY not the platform's `touch::MIN_TARGET`: that floor is 44 rows, which on
+/// this panel is 3.49 mm -- the height a list row reserves, not a key a person
+/// dials one-handed. The keypad states its own floor here, beside the disc that
+/// has to meet it.
+const MIN_FINGER_PX: usize = 114;
+
+/// The radius of the disc a keypad key is inked on -- and therefore the radius
+/// of the key a press answers.
+///
+/// WHY fifty-seven and not the forty-eight this pad drew: the ink used to be a
+/// 48-row disc inside a 180x124 band the press answered whole, so the disc was
+/// never the target and its size was never checked against one. Once the press
+/// answers the ink (see [`keypad_key_at`]), the disc *is* the target, and a
+/// 96-row disc is 7.62 mm on this panel -- under [`MIN_FINGER_PX`]. Half the
+/// finger floor is the smallest radius that clears it: 114 rows across, 9.05 mm.
+const KEY_RADIUS: usize = MIN_FINGER_PX / 2;
 
 /// WHY this gate is a loop over the four levels: the discs are fixed plates and
 /// the person's rung is not, so the pair of rungs the keypad draws at has to be
@@ -3078,6 +3149,53 @@ const BTN_H: usize = 124;
 const COL_X: [usize; 3] = [48, 270, 492];
 const ROW_Y: [usize; 4] = [410, 560, 710, 860];
 
+/// The centre of the disc the keypad key at (row, col) is inked on.
+#[inline]
+const fn keypad_centre(row: usize, col: usize) -> (usize, usize) {
+    (COL_X[col] + BTN_W / 2, ROW_Y[row] + BTN_H / 2)
+}
+
+/// Which keypad key, if any, is inked at this pixel.
+///
+/// WHY one function for the painter and the press: the pad inked a disc of the
+/// old 48-row radius and answered the whole [`BTN_W`] x [`BTN_H`] cell drawn
+/// around it, so the 126 rows of page between two keys in a row -- and the 54
+/// between two keys in a column -- dialled a number with nothing under the
+/// finger. A press on bare page looks, to the person holding the phone, exactly
+/// like a press that worked. Both sides ask this question now, so the pixels
+/// that dial are the pixels that were drawn, and the answer between two discs
+/// is `None`.
+///
+/// WHY the cell band is still tested first: it is a superset of the disc -- the
+/// gate below holds `2 * KEY_RADIUS <= BTN_H` and `<= BTN_W` -- so clipping to
+/// it can never cut ink, and it answers a frame-wide question in one comparison
+/// for the rows that hold no key at all instead of twelve.
+#[inline]
+fn keypad_key_at(x: usize, y: usize) -> Option<(usize, usize)> {
+    let ix = x as i32;
+    let iy = y as i32;
+    let r = KEY_RADIUS as i32;
+    for row in 0..ROW_Y.len() {
+        let by = ROW_Y[row] as i32;
+        if iy < by || iy >= by + BTN_H as i32 {
+            continue;
+        }
+        for col in 0..COL_X.len() {
+            let bx = COL_X[col] as i32;
+            if ix < bx || ix >= bx + BTN_W as i32 {
+                continue;
+            }
+            let (cx, cy) = keypad_centre(row, col);
+            let dx = ix - cx as i32;
+            let dy = iy - cy as i32;
+            if dx * dx + dy * dy <= r * r {
+                return Some((row, col));
+            }
+        }
+    }
+    None
+}
+
 // -----------------------------------------------------------------------------
 // The touch floor, stated once against the plates the renderer inks.
 //
@@ -3090,16 +3208,24 @@ const ROW_Y: [usize; 4] = [410, 560, 710, 860];
 // -----------------------------------------------------------------------------
 const _: () = {
     use interos_std::design::touch::MIN_TARGET;
-    // The keypad: the cell the renderer fills and the press answers are one
-    // rectangle, and the disc inked inside it clears the floor across.
+    // The keypad: the disc the renderer inks is the target the press answers,
+    // so the disc itself -- not the cell it sits in -- has to clear the finger
+    // floor, and the cell has to stay a superset of the ink so clipping to the
+    // band can never cut a pixel the press would still answer.
+    assert!(KEY_RADIUS * 2 >= MIN_FINGER_PX);
+    assert!(2 * KEY_RADIUS <= BTN_H);
+    assert!(2 * KEY_RADIUS <= BTN_W);
     assert!(BTN_W >= MIN_TARGET);
     assert!(BTN_H >= MIN_TARGET);
-    assert!(KEY_RADIUS * 2 >= MIN_TARGET);
     let mut r = 0;
     while r < ROW_Y.len() {
         assert!(ROW_Y[r] + BTN_H <= ACTION_Y0);
         if r + 1 < ROW_Y.len() {
             assert!(ROW_Y[r] + BTN_H <= ROW_Y[r + 1]);
+            // The discs stay disjoint down the column: `keypad_key_at` answers
+            // the first key that claims a pixel, and a pixel two keys both
+            // claimed would be a coin toss on a dial.
+            assert!(ROW_Y[r + 1] - ROW_Y[r] > 2 * KEY_RADIUS);
         }
         r += 1;
     }
@@ -3108,9 +3234,16 @@ const _: () = {
         assert!(COL_X[c] >= 24 && COL_X[c] + BTN_W <= 696);
         if c + 1 < COL_X.len() {
             assert!(COL_X[c] + BTN_W <= COL_X[c + 1]);
+            assert!(COL_X[c + 1] - COL_X[c] > 2 * KEY_RADIUS);
         }
         c += 1;
     }
+    // The inked disc, not only its band, inside the columns the app owns and
+    // off the action bar below the pad.
+    assert!(COL_X[0] + BTN_W / 2 - KEY_RADIUS >= 24);
+    assert!(COL_X[2] + BTN_W / 2 + KEY_RADIUS <= 696);
+    assert!(ROW_Y[0] + BTN_H / 2 - KEY_RADIUS >= CONTENT_Y0);
+    assert!(ROW_Y[3] + BTN_H / 2 + KEY_RADIUS <= ACTION_Y0);
     // The action bar's three discs, and the pill the call control draws.
     assert!(SOS_R as usize * 2 >= MIN_TARGET);
     assert!(BACKSPACE_R as usize * 2 >= MIN_TARGET);
@@ -3679,56 +3812,52 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 }
 
 /// Segmented tabs. All four sections exist, so all four are live.
+///
+/// The column this pixel belongs to comes from `tab_at`, the same accessor the
+/// press asks, so a tab is inked exactly where it answers.
 fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
+    let Some(i) = tab_at(x, y) else {
         return THEME.surface;
-    }
+    };
+    let (x0, x1) = TAB_COLUMNS[i];
+    let w = x1 - x0;
     let tab_scale = tab_rung();
     let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(tab_scale))) / 2;
-    let ranges = [
-        (TAB1_X0, TAB1_X1),
-        (TAB2_X0, TAB2_X1),
-        (TAB3_X0, TAB3_X1),
-        (TAB4_X0, TAB4_X1),
-    ];
-    for (i, (x0, x1)) in ranges.iter().enumerate() {
-        if x < *x0 || x >= *x1 {
-            continue;
-        }
-        let w = x1 - x0;
-        let active = match dialer.section {
-            DialerSection::Keypad => i == 0,
-            DialerSection::Recents => i == 1,
-            DialerSection::Contacts => i == 2,
-            DialerSection::Settings => i == 3,
-        };
-        let (fill, border, ink) = if active {
-            // The platform's segmented-control grammar: the selected segment
-            // is filled with the accent and its label is the ink on the
-            // accent.
-            (THEME.primary, None, THEME.on_primary)
-        } else {
-            (THEME.surface_container_high, Some(THEME.border), THEME.on_surface_variant)
-        };
-        // WHY a pill and not the old square fill: the design draws segmented
-        // tabs as capsules. The text is only asked inside the pill so a glyph
-        // near the label's ends cannot ink the curved cut-outs.
-        let pill = std::design::primitives::Rect::new(*x0, TAB_BAND_Y0, w, TAB_BAND_H);
-        if std::design::primitives::draw_pill(x, y, pill, fill, border).is_none() {
-            continue;
-        }
-        let label_x0 = *x0 + center_x(TAB_LABELS[i], tab_scale, w);
-        let label_px = if active {
-            test_text_bold(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i],TAB_W,  ink, fill)
-        } else {
-            test_text(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i],TAB_W,  ink, fill)
-        };
-        if let Some(c) = label_px {
-            return c;
-        }
-        return fill;
+    let active = match dialer.section {
+        DialerSection::Keypad => i == 0,
+        DialerSection::Recents => i == 1,
+        DialerSection::Contacts => i == 2,
+        DialerSection::Settings => i == 3,
+    };
+    let (fill, border, ink) = if active {
+        // The platform's segmented-control grammar: the selected segment
+        // is filled with the accent and its label is the ink on the accent.
+        (THEME.primary, None, THEME.on_primary)
+    } else {
+        (THEME.surface_container_high, Some(THEME.border), THEME.on_surface_variant)
+    };
+    // WHY a pill and not the old square fill: the design draws segmented
+    // tabs as capsules. The text is only asked inside the pill so a glyph
+    // near the label's ends cannot ink the curved cut-outs.
+    let pill = std::design::primitives::Rect::new(x0, TAB_BAND_Y0, w, TAB_BAND_H);
+    let shape = match std::design::primitives::draw_pill(x, y, pill, fill, border) {
+        Some(c) => c,
+        None => return THEME.surface,
+    };
+    let label_x0 = x0 + center_x(TAB_LABELS[i], tab_scale, w);
+    let label_px = if active {
+        test_text_bold(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i], TAB_W, ink, fill)
+    } else {
+        test_text(x, y, label_x0, label_y0, tab_scale, TAB_LABELS[i], TAB_W, ink, fill)
+    };
+    if let Some(c) = label_px {
+        return c;
     }
-    THEME.surface
+    // WHY the shape's own colour and not the flat fill: the fill used to be
+    // returned here, which threw away the rim `border` declares and painted the
+    // capsule's edge with its own body -- an outline that was asked for and never
+    // drawn. The rim is the control's boundary, so it is the pixel that shows.
+    shape
 }
 
 /// The labels of the two action pills on the dialed-number card, and the ink
@@ -4126,132 +4255,128 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp, plan: &DisplayPlan) -> 
 
 /// The 3x4 dial pad. Only drawn in the Keypad section.
 ///
-/// Each keypad cell renders a 48px radius circular button disc with subtle
-/// border rim, raised pure-white surface, and depth elevation.
+/// Each key is one inked disc of [`KEY_RADIUS`] on the cell's centre: a
+/// prominent rim -- the edge a person aims at is the edge the press answers, so
+/// it is drawn, not whispered -- and the card's own raised surface inside it.
 /// Cells with sublabels stack the digit and sublabel; cells without (1, *, #)
 /// center the digit vertically in the disc.
+///
+/// WHY the function asks [`keypad_key_at`] instead of walking its own cells:
+/// the pad and the press are one geometry, stated once. The page between two
+/// discs inks nothing, so it returns the page and the press answers nothing.
 fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
-    for row in 0..4 {
-        let by = ROW_Y[row];
-        if y >= by && y < by + BTN_H {
-            for col in 0..3 {
-                let bx = COL_X[col];
-                if x >= bx && x < bx + BTN_W {
-                    let cx = (bx + BTN_W / 2) as i32;
-                    let cy = (by + BTN_H / 2) as i32;
+    let (row, col) = match keypad_key_at(x, y) {
+        Some(key) => key,
+        None => return THEME.surface,
+    };
+    let (cx, cy) = keypad_centre(row, col);
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - cy as i32;
+    let dist_sq = dx * dx + dy * dy;
+    let r = KEY_RADIUS as i32;
 
-                    let dx = x as i32 - cx;
-                    let dy = y as i32 - cy;
-                    let dist_sq = dx * dx + dy * dy;
-                    let r = KEY_RADIUS as i32;
+    // The disc's rim. WHY the outline and not the hairline this pad drew: the
+    // theme documents `border` as the invisible edge -- `#E5E5E5` on the
+    // `#FAFAFA` page this pad sits on is a 1.21:1 step -- and `outline` as the
+    // prominent one, which is what says "the key ends here". Once the press
+    // answers the inked disc, that edge is the control's boundary, and the
+    // platform's own Back chip gives a 48x48 control the same token for the
+    // same reason.
+    if dist_sq >= (r - 2) * (r - 2) {
+        return THEME.outline;
+    }
 
-                    if dist_sq > r * r {
-                        return THEME.surface;
+    let disc_fill = THEME.surface_container;
+
+    let editing_name = matches!(
+        editing,
+        Some(d) if d.contact_edit.is_some_and(|e| e.field == ContactField::Name)
+    );
+
+    let (key_digit_scale, key_sub_scale) = key_rungs();
+    let digit_rows = run_rows(key_digit_scale);
+    let sub_rows = run_rows(key_sub_scale);
+    // The widest a run inside the disc may be: the disc's own diameter less the
+    // border ring and a hair of air, so a sublabel at a scaled rung loses its
+    // tail to the ellipsis rather than its place to the page outside the button.
+    let key_text_w = 2 * KEY_RADIUS - KEY_STACK_PAD;
+
+    let digit_buf: [u8; 1] = if editing_name {
+        let cycle = DialerApp::t9_cycle(row, col);
+        [match editing.and_then(|d| d.editor_last_cell) {
+            Some((lr, lc)) if (lr, lc) == (row, col) => {
+                let ed = editing.and_then(|d| d.contact_edit);
+                match ed {
+                    Some(ed) if ed.name_len > 0 => {
+                        let current = ed.name[ed.name_len - 1];
+                        let at = cycle.iter().position(|&b| b == current).unwrap_or(0);
+                        cycle[(at + 1) % cycle.len()]
                     }
-
-                    // Disc border
-                    if dist_sq >= (r - 2) * (r - 2) {
-                        return THEME.border;
-                    }
-
-                    let disc_fill = THEME.surface_container;
-
-                    let editing_name = matches!(
-                        editing,
-                        Some(d) if d.contact_edit.is_some_and(|e| e.field == ContactField::Name)
-                    );
-
-                    let (key_digit_scale, key_sub_scale) = key_rungs();
-                    let digit_rows = run_rows(key_digit_scale);
-                    let sub_rows = run_rows(key_sub_scale);
-                    // The widest a run inside the disc may be: the disc's own
-                    // diameter less the border ring and a hair of air, so a
-                    // sublabel at a scaled rung loses its tail to the ellipsis
-                    // rather than its place to the page outside the button.
-                    let key_text_w = 2 * KEY_RADIUS - KEY_STACK_PAD;
-
-                    let digit_buf: [u8; 1] = if editing_name {
-                        let cycle = DialerApp::t9_cycle(row, col);
-                        [match editing.and_then(|d| d.editor_last_cell) {
-                            Some((lr, lc)) if (lr, lc) == (row, col) => {
-                                let ed = editing.and_then(|d| d.contact_edit);
-                                match ed {
-                                    Some(ed) if ed.name_len > 0 => {
-                                        let current = ed.name[ed.name_len - 1];
-                                        let at =
-                                            cycle.iter().position(|&b| b == current).unwrap_or(0);
-                                        cycle[(at + 1) % cycle.len()]
-                                    }
-                                    _ => cycle[0],
-                                }
-                            }
-                            _ => cycle[0],
-                        }]
-                    } else {
-                        [get_keypad_char(row, col).map(|d| d as u8).unwrap_or(0)]
-                    };
-                    let has_digit = editing_name || get_keypad_char(row, col).is_some();
-                    let digit_bytes: &[u8] = if has_digit { &digit_buf } else { &[] };
-                    let sub_buf: &[u8] = if editing_name {
-                        DialerApp::t9_cycle(row, col)
-                    } else {
-                        get_keypad_sublabel(row, col)
-                    };
-
-                    let has_sub = !sub_buf.is_empty();
-
-                    let (digit_y0, sub_y0) = if has_sub {
-                        let stack_y0 = (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
-                        (stack_y0, stack_y0 + digit_rows)
-                    } else {
-                        let offset = if digit_bytes == b"*" { 4 } else { 0 };
-                        let center_y0 = (cy as usize).saturating_sub(digit_rows / 2) + offset;
-                        (center_y0, 0)
-                    };
-
-                    // Digit text
-                    if !digit_bytes.is_empty() {
-                        let digit_x0 = (cx as usize).saturating_sub(
-                            run_w(digit_bytes, key_digit_scale) / 2,
-                        );
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            digit_x0,
-                            digit_y0,
-                            key_digit_scale,
-                            digit_bytes,key_text_w, 
-                            THEME.on_surface,
-                            disc_fill,
-                        ) {
-                            return c;
-                        }
-                    }
-
-                    // Sublabel text
-                    if has_sub {
-                        let sub_w = run_w(sub_buf, key_sub_scale);
-                        let sub_x = (cx as usize).saturating_sub(sub_w / 2);
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            sub_x,
-                            sub_y0,
-                            key_sub_scale,
-                            sub_buf,key_text_w, 
-                            THEME.on_surface_variant,
-                            disc_fill,
-                        ) {
-                            return c;
-                        }
-                    }
-
-                    return disc_fill;
+                    _ => cycle[0],
                 }
             }
+            _ => cycle[0],
+        }]
+    } else {
+        [get_keypad_char(row, col).map(|d| d as u8).unwrap_or(0)]
+    };
+    let has_digit = editing_name || get_keypad_char(row, col).is_some();
+    let digit_bytes: &[u8] = if has_digit { &digit_buf } else { &[] };
+    let sub_buf: &[u8] = if editing_name {
+        DialerApp::t9_cycle(row, col)
+    } else {
+        get_keypad_sublabel(row, col)
+    };
+
+    let has_sub = !sub_buf.is_empty();
+
+    let (digit_y0, sub_y0) = if has_sub {
+        let stack_y0 = cy.saturating_sub((digit_rows + sub_rows) / 2);
+        (stack_y0, stack_y0 + digit_rows)
+    } else {
+        let offset = if digit_bytes == b"*" { 4 } else { 0 };
+        let center_y0 = cy.saturating_sub(digit_rows / 2) + offset;
+        (center_y0, 0)
+    };
+
+    // Digit text
+    if !digit_bytes.is_empty() {
+        let digit_x0 = cx.saturating_sub(run_w(digit_bytes, key_digit_scale) / 2);
+        if let Some(c) = test_text(
+            x,
+            y,
+            digit_x0,
+            digit_y0,
+            key_digit_scale,
+            digit_bytes,
+            key_text_w,
+            THEME.on_surface,
+            disc_fill,
+        ) {
+            return c;
         }
     }
-    THEME.surface
+
+    // Sublabel text
+    if has_sub {
+        let sub_w = run_w(sub_buf, key_sub_scale);
+        let sub_x = cx.saturating_sub(sub_w / 2);
+        if let Some(c) = test_text(
+            x,
+            y,
+            sub_x,
+            sub_y0,
+            key_sub_scale,
+            sub_buf,
+            key_text_w,
+            THEME.on_surface_variant,
+            disc_fill,
+        ) {
+            return c;
+        }
+    }
+
+    disc_fill
 }
 
 /// The keypad section's pad: a number pad, unchanged.
@@ -5813,33 +5938,37 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[DIALER APP] Back control pressed. Exiting to launcher.");
     }
 
-    // 2. Segmented tabs. All four are live sections.
-    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
-        if x >= TAB1_X0 && x < TAB1_X1 {
-            dialer.section = DialerSection::Keypad;
-            let _ = std::audio_haptic_click();
-            return Tap::Redraw(Dirty::All);
-        }
-        if x >= TAB2_X0 && x < TAB2_X1 {
-            dialer.section = DialerSection::Recents;
-            let _ = std::audio_haptic_click();
-            return Tap::Redraw(Dirty::All);
-        }
-        if x >= TAB3_X0 && x < TAB3_X1 {
-            // WHY the Contacts tab clears the favourites filter: the tab is
-            // the unfiltered contact list, while the Favorites dock slot is
-            // the filtered one. Carrying the filter over made both controls
-            // read active and left the tab showing a subset of its own list.
-            dialer.open_contacts(false);
-            let _ = std::audio_haptic_click();
-            return Tap::Redraw(Dirty::All);
-        }
-        if x >= TAB4_X0 && x < TAB4_X1 {
-            dialer.section = DialerSection::Settings;
-            dialer.settings_view = SettingsView::Main;
-            dialer.refresh_settings_values();
-            let _ = std::audio_haptic_click();
-            return Tap::Redraw(Dirty::All);
+    // 2. Segmented tabs. All four are live sections. The band is asked through
+    // `tab_at`, the accessor `tabs_pixel` paints with, so a tap on a capsule's
+    // cut corner answers the page it shows instead of a section.
+    if let Some(i) = tab_at(x, y) {
+        match i {
+            0 => {
+                dialer.section = DialerSection::Keypad;
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+            1 => {
+                dialer.section = DialerSection::Recents;
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+            2 => {
+                // WHY the Contacts tab clears the favourites filter: the tab is
+                // the unfiltered contact list, while the Favorites dock slot is
+                // the filtered one. Carrying the filter over made both controls
+                // read active and left the tab showing a subset of its own list.
+                dialer.open_contacts(false);
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+            _ => {
+                dialer.section = DialerSection::Settings;
+                dialer.settings_view = SettingsView::Main;
+                dialer.refresh_settings_values();
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
         }
     }
 
@@ -5944,21 +6073,17 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             }
         }
 
-        // Keypad Matrix
-        for row in 0..4 {
-            let by = ROW_Y[row];
-            if y >= by && y < by + BTN_H {
-                for col in 0..3 {
-                    let bx = COL_X[col];
-                    if x >= bx && x < bx + BTN_W {
-                        if let Some(digit) = get_keypad_char(row, col) {
-                            dialer.input_digit(digit);
-                            std::log("[DIALER APP] Keypad digit entered.").ok();
-                        }
-                        return Tap::Redraw(Dirty::Display);
-                    }
-                }
+        // Keypad Matrix. WHY the disc and not the cell: the pad inks a disc of
+        // `KEY_RADIUS` on each cell's centre, and this answered the whole
+        // 180x124 band around it -- so a thumb landing on the page between two
+        // keys dialled one of them. `keypad_key_at` is the question the painter
+        // asks, asked again here, and it answers `None` where nothing was drawn.
+        if let Some((row, col)) = keypad_key_at(x, y) {
+            if let Some(digit) = get_keypad_char(row, col) {
+                dialer.input_digit(digit);
+                std::log("[DIALER APP] Keypad digit entered.").ok();
             }
+            return Tap::Redraw(Dirty::Display);
         }
 
         // Action Bar: SOS, Call, and Backspace discs
@@ -6171,22 +6296,12 @@ fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'stati
             return Tap::Redraw(Dirty::All);
         }
 
-        // The dial pad, typed as text.
-        if (ROW_Y[0]..ROW_Y[3] + BTN_H).contains(&y) {
-            for row in 0..4 {
-                if y < ROW_Y[row] || y >= ROW_Y[row] + BTN_H {
-                    continue;
-                }
-                for col in 0..3 {
-                    let bx = COL_X[col];
-                    if x < bx || x >= bx + BTN_W {
-                        continue;
-                    }
-                    dialer.editor_press_cell(row, col);
-                    dialer.editor_error = false;
-                    return Tap::Redraw(Dirty::Fields);
-                }
-            }
+        // The dial pad, typed as text. The same discs the keypad section paints
+        // and answers: `keypad_key_at` is the one geometry for both screens.
+        if let Some((row, col)) = keypad_key_at(x, y) {
+            dialer.editor_press_cell(row, col);
+            dialer.editor_error = false;
+            return Tap::Redraw(Dirty::Fields);
         }
 
         // Action row: the two editing discs. The emergency disc lives on the

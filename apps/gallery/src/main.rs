@@ -442,6 +442,30 @@ const DETAIL_VIEW_Y1: usize = 800;
 const DETAIL_VIEW_H: usize = DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0;
 const DETAIL_VIEW_W: usize = (W - 2 * MARGIN) / 2;
 const DETAIL_VIEW_X: usize = (W - DETAIL_VIEW_W) / 2;
+
+/// The detail viewport's plate: one fill and one edge, named once, so the
+/// preview and the runs inked inside it stand on the same pixels.
+///
+/// WHY it needed naming: the viewport was filled with `THEME.surface` -- which
+/// on this app's theme is `#FAFAFA`, the exact colour of the page the renderer
+/// returns behind it -- and edged with `THEME.border`, `#E5E5E5` on that page:
+/// a 1.21:1 hairline around a 1.00:1 fill. The theme documents `border` as the
+/// hairline that separates two surfaces and `outline` as the prominent edge,
+/// and this repo's own Back chip and File Manager controls take `outline`
+/// (`#0A0A0A`, 18.97:1 on the page) for precisely the job of saying "a frame is
+/// here". WCAG 1.4.11 asks 3:1 of the visual boundary of a component; a
+/// 1.21:1 ring is why the preview read as a blank hole.
+///
+/// WHY the fill steps down rather than up: `surface_container_low` (`#F2F2F2`)
+/// is the theme's recessed step -- a well, a viewport -- and every ink rung the
+/// plate carries clears AA on it (the platform's contrast contract holds each
+/// ink legible on each surface rung, `#0A0A0A` at 17.68:1, `#525458` at
+/// 6.78:1, `#6B6B6B` at 4.76:1).
+const DETAIL_PLATE: u32 = THEME.surface_container_low;
+/// The plate's edge: the prominent outline, at 18.97:1 on the page and 17.68:1
+/// on the plate's own fill, so the frame is the first thing a person sees.
+const DETAIL_PLATE_EDGE: u32 = THEME.outline;
+
 const CLOSE: Rect = Rect::new(232, 856, 256, 56);
 
 // Action buttons for CRUD & capture (meeting >= 48px touch targets)
@@ -3417,7 +3441,24 @@ fn video_card_pixel(x: usize, y: usize, app: &GalleryApp, storage_idx: usize, co
     meta_len = append(&mut meta_buf, meta_len, b"  ");
     meta_len = append(&mut meta_buf, meta_len, &size_buf[..size_len]);
     meta_len = append(&mut meta_buf, meta_len, b" bytes");
-    if let Some(c) = text(x, y, x0 + 12, y0 + thumb_h + 36, 1, &meta_buf[..meta_len], THEME.on_surface_variant, THEME.surface_container) {
+    // WHY the composed line is cut to the same lane the name above it is cut to:
+    // the buffer caps the *bytes*, not the ink. Twelve digits of size make the run
+    // 323 rows at the caption rung and a long container name more than that, on a
+    // card 328 rows wide whose lane is 304 -- so the row ran out from under the
+    // card and inked the neighbour's ground. The ellipsis is the app's own
+    // (`font::ellipsize`), the same one every other row on this list pays for.
+    let mut meta_disp = [0u8; 44];
+    let meta_disp_len = font::ellipsize(&meta_buf[..meta_len], 1, VIDEO_COL_W - 24, &mut meta_disp);
+    if let Some(c) = text(
+        x,
+        y,
+        x0 + 12,
+        y0 + thumb_h + 36,
+        1,
+        &meta_disp[..meta_disp_len],
+        THEME.on_surface_variant,
+        THEME.surface_container,
+    ) {
         return c;
     }
 
@@ -4480,12 +4521,22 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
     // Viewport: Image or Video canvas
     if y >= DETAIL_VIEW_Y0 && y < DETAIL_VIEW_Y1 && x >= MARGIN && x < W - MARGIN {
         let view = Rect::new(DETAIL_VIEW_X, DETAIL_VIEW_Y0, DETAIL_VIEW_W, DETAIL_VIEW_H);
-        let shape = match draw_rounded_rect(x, y, view, radius::SMALL, THEME.surface, Some(THEME.border), 1) {
+        let shape = match draw_rounded_rect(
+            x,
+            y,
+            view,
+            radius::SMALL,
+            DETAIL_PLATE,
+            Some(DETAIL_PLATE_EDGE),
+            1,
+        ) {
             Some(c) => c,
+            // The corner cut-outs and the margin columns beside the plate: the
+            // page, which is what the plate is now visibly set off from.
             None => return THEME.surface,
         };
-        if shape == THEME.border {
-            return THEME.border;
+        if shape == DETAIL_PLATE_EDGE {
+            return DETAIL_PLATE_EDGE;
         }
 
         // A video has no frame this build can decode. The inspection view says
@@ -4503,7 +4554,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     2,
                     b"No frame decoded",
                     THEME.on_surface,
-                    THEME.surface_container,
+                    DETAIL_PLATE,
                 ) {
                     return c;
                 }
@@ -4521,11 +4572,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     1,
                     note,
                     THEME.on_surface_variant,
-                    THEME.surface_container,
+                    DETAIL_PLATE,
                 ) {
                     return c;
                 }
-                return THEME.surface_container;
+                return DETAIL_PLATE;
             }
         }
 
@@ -4556,13 +4607,35 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             // video decoder, so there is no frame to show. The surface used
             // to be an animated scanline ramp labelled as a direct scanout,
             // which read as a playing video and was nothing of the sort.
-            let v_bg = THEME.surface_container;
+            //
+            // WHY it is the plate's own fill and not a second surface: a
+            // `surface_container` canvas inside a `surface_container_low` plate
+            // is a step of 1.12:1 -- a frame drawn twice and seen neither way.
+            // One plate, one fill; the badge and the note are inked on it, at
+            // 17.68:1 and 6.78:1.
+            let v_bg = DETAIL_PLATE;
 
             // Codec watermark badge
+            //
+            // WHY the run is cut to the plate's own lane: the claim is one
+            // sentence of forty-one characters and the plate is 336 rows wide set
+            // 16 rows in, so the run measured 376 rows at the caption rung and the
+            // last 57 of them inked the page *past* the plate's edge -- with the
+            // plate's fill named as their background, so the overflow carried a
+            // ground that is not under it. `font::ellipsize` to the lane the plate
+            // gives the run is what every other platform string on this surface
+            // pays for; the watermark was the one that had been inked unbounded.
             if y >= video_rect.y + 12 && y < video_rect.y + 12 + font::line_height(1) {
                 let badge = player.codec.as_str().as_bytes();
-                if let Some(c) = text(x, y, video_rect.x + 16, video_rect.y + 12, 1, badge, THEME.primary, v_bg) {
-                    return c;
+                let lane = video_rect.w.saturating_sub(32);
+                let mut buf = [0u8; 96];
+                let n = font::ellipsize(badge, 1, lane, &mut buf);
+                if n > 0 {
+                    if let Some(c) =
+                        text(x, y, video_rect.x + 16, video_rect.y + 12, 1, &buf[..n], THEME.primary, v_bg)
+                    {
+                        return c;
+                    }
                 }
             }
 
@@ -4587,14 +4660,14 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             }
             Media::Photo(idx) => {
                 let Some(photo) = PHOTOS.get(idx) else {
-                    return THEME.surface;
+                    return DETAIL_PLATE;
                 };
                 let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
                 return blend_argb(photo.primary_color, photo.secondary_color, t);
             }
             Media::StorageItem(idx) => {
                 if app.storage_items.get(idx).is_none() {
-                    return THEME.surface;
+                    return DETAIL_PLATE;
                 }
                 let (src_w, src_h) = if app.detail_rgba_len > 0 && app.detail_w > 0 && app.detail_h > 0 {
                     (app.detail_w as usize, app.detail_h as usize)
@@ -4607,15 +4680,15 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                     }
                 };
                 if src_w == 0 || src_h == 0 {
-                    return THEME.surface_container;
+                    return DETAIL_PLATE;
                 }
                 // The preview keeps the picture's aspect; the spare space stays
-                // the view's own surface so the rounded corners stay clean.
+                // the plate's own fill so the rounded corners stay clean.
                 let (fit_w, fit_h) = fit_size(view.w, view.h, src_w, src_h);
                 let left = view.x + (view.w - fit_w) / 2;
                 let top = view.y + (view.h - fit_h) / 2;
                 if x < left || y < top || x >= left + fit_w || y >= top + fit_h {
-                    return THEME.surface;
+                    return DETAIL_PLATE;
                 }
                 let img_x = ((x - left) * src_w / fit_w.max(1)).min(src_w - 1);
                 let img_y = ((y - top) * src_h / fit_h.max(1)).min(src_h - 1);
@@ -4634,7 +4707,7 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
                         return colour;
                     }
                 }
-                return THEME.surface_container;
+                return DETAIL_PLATE;
             }
         }
     }
@@ -4855,10 +4928,20 @@ fn toast_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
             return Some(c);
         }
         let msg = &app.toast_msg[..app.toast_len];
-        let lw = outline_text::drawn_advance(msg, 2, None).unwrap_or_else(|| font::measure(msg, 2));
+        // WHY the message is cut to the pill's lane: a toast can name the file it
+        // just deleted, and the 48-byte cap on `toast_msg` counts bytes, not
+        // pixels -- at the body rung a name that fills it measures wider than the
+        // 480 rows the pill is, and the centring below then collapses to the
+        // pill's left edge while the ink keeps walking past its right, on top of
+        // whatever the toast is laid over. `gallery::fitted_run` is this app's own
+        // answer for a run wider than its plate.
+        let lane = TOAST_RECT.w.saturating_sub(32);
+        let mut trim = [0u8; 48];
+        let run = gallery::fitted_run(msg, 2, lane, &mut trim);
+        let lw = outline_text::drawn_advance(run, 2, None).unwrap_or_else(|| font::measure(run, 2));
         let lx = TOAST_RECT.x + (TOAST_RECT.w.saturating_sub(lw)) / 2;
         let ly = TOAST_RECT.y + (TOAST_RECT.h.saturating_sub(font::line_height(2))) / 2;
-        if let Some(tc) = text(x, y, lx, ly, 2, msg, fg, bg) {
+        if let Some(tc) = text(x, y, lx, ly, 2, run, fg, bg) {
             return Some(tc);
         }
         return Some(bg);
