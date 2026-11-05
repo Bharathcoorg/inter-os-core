@@ -41,12 +41,14 @@ fn refresh_clock(camera: &mut CameraApp) {
 }
 use std::design::primitives::Rect;
 
+use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::outline_text;
 
 use camera::{
     CameraApp, CameraAspectRatio, CameraFilter, CameraMode, CameraScreen, CameraStatus, CaptureOutcome, FlashMode,
     SettingsRow, TimerMode, SETTINGS_ROW_ORDER, THUMBNAIL_DIM,
 };
+use camera::{draw_level, rung_cell};
 
 /// The platform's corner radii, under the short names the renderer uses.
 const R_CARD: usize = radius::CARD;
@@ -236,59 +238,201 @@ const STATUS_CARD_W: usize = camera::STATUS_CARD_W;
 /// WHY derived and not pinned: the stack is the headline's line box and the
 /// reason's, one box per line the model may split a reason across. Pin the
 /// height and the ladder's next raise overflows the card it should be sizing.
+/// Every number below is a `const fn` of the level, so the gates can still sweep
+/// all four selectable rungs at build time, and the painter reads the same walk
+/// back at the rung `publish_text_scale` handed the renderer.
 const STATUS_STACK_GAP: usize = spacing::GRID_8;
-const STATUS_HEAD_BOX: usize = std::design::font::line_height(camera::STATUS_HEAD_RUNG);
-const STATUS_SUB_BOX: usize = std::design::font::line_height(camera::STATUS_REASON_RUNG);
-const STATUS_STACK_H: usize = STATUS_HEAD_BOX
-    + STATUS_STACK_GAP
-    + camera::STATUS_REASON_LINES * STATUS_SUB_BOX;
 const STATUS_CARD_V_PAD: usize = spacing::GRID_20;
-const STATUS_CARD_H: usize = STATUS_STACK_H + 2 * STATUS_CARD_V_PAD;
+const fn status_head_box_at(lvl: u8) -> usize {
+    camera::line_at(camera::STATUS_HEAD_RUNG, lvl)
+}
+const fn status_sub_box_at(lvl: u8) -> usize {
+    camera::line_at(camera::STATUS_REASON_RUNG, lvl)
+}
+const fn status_stack_h_at(lvl: u8) -> usize {
+    status_head_box_at(lvl)
+        + STATUS_STACK_GAP
+        + camera::STATUS_REASON_LINES * status_sub_box_at(lvl)
+}
+const fn status_card_h_at(lvl: u8) -> usize {
+    status_stack_h_at(lvl) + 2 * STATUS_CARD_V_PAD
+}
+
+// WHY the cells: every number below is a chain of integer divisions on the type
+// ladder -- the em from the cap height, the ascent and descent from the em, the
+// plate from the rows, the pitch from the plate and the slots from the pitch.
+// QEMU's TCG makes a division a helper call, and `get_camera_pixel` answers these
+// numbers for most of the panel's 1,036,800 pixels, so asked per pixel the walk
+// costs more than the ink and the frame never reaches scanout: see
+// `6923b1ab perf(file_manager)`, which measured the same shape of mistake. The
+// answer cannot move until the person moves "Text size", so each one is carried in
+// a cell with the level it was resolved at stamped into its top byte -- a hit is
+// one load and one compare, and the walk runs once per setting change.
+const RUNG_STALE: usize = 0xFF << 24;
+static CELLS: [core::sync::atomic::AtomicUsize; 23] =
+    [const { core::sync::atomic::AtomicUsize::new(RUNG_STALE) }; 23];
+
+const C_HEAD_BOX: usize = 0;
+const C_SUB_BOX: usize = 1;
+const C_CARD_H: usize = 2;
+const C_CARD_Y: usize = 3;
+const C_HEAD_Y: usize = 4;
+const C_SUB_Y: usize = 5;
+const C_SUB2_Y: usize = 6;
+const C_DOT_CY: usize = 7;
+const C_REC_CHIP_H: usize = 8;
+const C_REC_RUNG: usize = 9;
+const C_SHEET_ROW_Y0: usize = 10;
+const C_SHEET_ROW_H: usize = 11;
+const C_SHEET_PLATE_H: usize = 12;
+const C_SHEET_PAGE_ROWS: usize = 13;
+const C_SHEET_PAGES: usize = 14;
+const C_SHEET_TITLE_OFF: usize = 15;
+const C_SHEET_VALUE_OFF: usize = 16;
+const C_SHEET_NOTE_OFF: usize = 17;
+const C_SHEET_HAIRLINE: usize = 18;
+const C_SHEET_ACCENT_TOP: usize = 19;
+const C_SHEET_ACCENT_H: usize = 20;
+const C_SHEET_TITLE_BOX: usize = 21;
+const C_SHEET_RECT_H: usize = 22;
+
+/// The `I`th number, walked only when the published rung moved.
+#[inline(always)]
+fn cell<const I: usize>(at: fn(u8) -> usize) -> usize {
+    rung_cell(&CELLS[I], at)
+}
+
+/// The person's text size, read from the settings store and handed to the
+/// renderer, with the plate geometry above derived from it.
+///
+/// WHY the store and not the field: the camera has no window into Settings, and
+/// `display.text_scale` is the one key the person's choice is written under. The
+/// shared parser understands both the digit and the word a level is stored as, so
+/// an existing preference is never read back as "unset" and quietly reset.
+///
+/// WHY the answer is whether the stored rung moved: a tick or a tap that changed
+/// nothing must not repaint the whole panel.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    DynamicType::new(next).publish() != before
+}
+
+fn status_head_box() -> usize {
+    cell::<C_HEAD_BOX>(status_head_box_at)
+}
+fn status_sub_box() -> usize {
+    cell::<C_SUB_BOX>(status_sub_box_at)
+}
 /// The card, centred on the active frame's centre row inside the well.
-const STATUS_CARD: Rect = Rect::new(
-    VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
-    FRAME_CENTRE_Y - STATUS_CARD_H / 2,
-    STATUS_CARD_W,
-    STATUS_CARD_H,
-);
+const fn status_card_y_at(lvl: u8) -> usize {
+    FRAME_CENTRE_Y - status_card_h_at(lvl) / 2
+}
+const fn status_card_at(lvl: u8) -> Rect {
+    Rect::new(
+        VIEWFINDER_X0 + (VIEWFINDER_W - STATUS_CARD_W) / 2,
+        status_card_y_at(lvl),
+        STATUS_CARD_W,
+        status_card_h_at(lvl),
+    )
+}
+/// The card as the platform's own level draws it: the pixels every shipped screen
+/// was measured against, and the source of the two numbers that do not move.
+const STATUS_CARD_AUTHORED: Rect = status_card_at(camera::PLATFORM_LEVEL);
+fn status_card() -> Rect {
+    Rect::new(
+        STATUS_CARD_AUTHORED.x,
+        cell::<C_CARD_Y>(status_card_y_at),
+        STATUS_CARD_W,
+        cell::<C_CARD_H>(status_card_h_at),
+    )
+}
 /// The gutter the card's status dot lives in.
 const STATUS_ICON_GUTTER: usize = camera::STATUS_ICON_GUTTER;
 /// Where the card's runs start.
-const STATUS_TEXT_X: usize = STATUS_CARD.x + STATUS_ICON_GUTTER;
+const STATUS_TEXT_X: usize = status_card_at(camera::PLATFORM_LEVEL).x + STATUS_ICON_GUTTER;
 /// The column the card's runs are measured and clipped against.
 const STATUS_TEXT_W: usize = camera::STATUS_TEXT_W;
 
 /// The air above the block, which is the air below it.
-const STATUS_STACK_PAD: usize = STATUS_CARD_V_PAD;
+const fn status_stack_pad_at(_lvl: u8) -> usize {
+    STATUS_CARD_V_PAD
+}
 /// The headline's line box top.
-const STATUS_HEAD_Y: usize = STATUS_CARD.y + STATUS_STACK_PAD;
+const fn status_head_y_at(lvl: u8) -> usize {
+    status_card_at(lvl).y + status_stack_pad_at(lvl)
+}
 /// The reason's first box: below the whole box of the run above it.
-const STATUS_SUB_Y: usize = STATUS_HEAD_Y + STATUS_HEAD_BOX + STATUS_STACK_GAP;
+const fn status_sub_y_at(lvl: u8) -> usize {
+    status_head_y_at(lvl) + status_head_box_at(lvl) + STATUS_STACK_GAP
+}
 /// The reason's second box, when the reason needed a split.
-const STATUS_SUB2_Y: usize = STATUS_SUB_Y + STATUS_SUB_BOX;
+const fn status_sub2_y_at(lvl: u8) -> usize {
+    status_sub_y_at(lvl) + status_sub_box_at(lvl)
+}
+fn status_head_y() -> usize {
+    cell::<C_HEAD_Y>(status_head_y_at)
+}
+fn status_sub_y() -> usize {
+    cell::<C_SUB_Y>(status_sub_y_at)
+}
+fn status_sub2_y() -> usize {
+    cell::<C_SUB2_Y>(status_sub2_y_at)
+}
 
 /// The status dot, on the headline's cap centre inside the icon gutter.
-const STATUS_DOT_CX: usize = STATUS_CARD.x + 30;
-const STATUS_DOT_CY: usize = STATUS_HEAD_Y
-    + std::design::font::ascent_for_scale(camera::STATUS_HEAD_RUNG)
-    - std::design::font::cap_for_scale(camera::STATUS_HEAD_RUNG) as usize / 2;
+const STATUS_DOT_CX: usize = status_card_at(camera::PLATFORM_LEVEL).x + 30;
+const fn status_dot_cy_at(lvl: u8) -> usize {
+    status_head_y_at(lvl)
+        + camera::ascent_at(camera::STATUS_HEAD_RUNG, lvl)
+        - camera::cap_at(camera::STATUS_HEAD_RUNG, lvl) as usize / 2
+}
+fn status_dot_cy() -> usize {
+    cell::<C_DOT_CY>(status_dot_cy_at)
+}
 /// The dot's core and the halo around it.
 const STATUS_DOT_R: usize = 6;
 const STATUS_DOT_HALO_R: usize = 11;
 
-/// WHY checked at compile time: the card is dropped on the tightest letterbox
-/// the aspect chip can select, so the first gate is the one a taller stack or a
-/// shorter 1:1 cut breaks; the second is what a widened gutter or a deeper
-/// right margin would break, and the third keeps the halo from reaching the
-/// card's own hairline. The fourth is the one that fires if the model splits a
-/// reason across more lines than the card reserves.
-const _: () = assert!(STATUS_STACK_PAD * 2 + STATUS_STACK_H <= STATUS_CARD_H);
-const _: () = assert!(STATUS_SUB2_Y + STATUS_SUB_BOX <= STATUS_CARD.y + STATUS_CARD_H);
-const _: () = assert!(STATUS_CARD.y >= FRAME_1_1_Y);
-const _: () = assert!(STATUS_CARD.y + STATUS_CARD_H <= FRAME_1_1_Y + FRAME_1_1_H);
-const _: () = assert!(STATUS_TEXT_X + STATUS_TEXT_W <= STATUS_CARD.x + STATUS_CARD_W);
-const _: () = assert!(STATUS_DOT_CX - STATUS_DOT_HALO_R >= STATUS_CARD.x);
-const _: () = assert!(camera::STATUS_REASON_LINES * STATUS_SUB_BOX <= STATUS_STACK_H);
+/// WHY checked at compile time, and swept over every level: the card is dropped
+/// on the tightest letterbox the aspect chip can select, so a taller stack at a
+/// raised rung is the one thing that could overrun it; the reason's second box
+/// must stay inside the card, and the halo must not reach the card's own hairline.
+/// The authored level must answer the pixels every shipped screen was drawn with.
+const fn status_card_holds_at(lvl: u8) -> bool {
+    let card = status_card_at(lvl);
+    if status_stack_pad_at(lvl) * 2 + status_stack_h_at(lvl) > status_card_h_at(lvl) {
+        return false;
+    }
+    if status_sub2_y_at(lvl) + status_sub_box_at(lvl) > card.y + status_card_h_at(lvl) {
+        return false;
+    }
+    if card.y < FRAME_1_1_Y {
+        return false;
+    }
+    if card.y + status_card_h_at(lvl) > FRAME_1_1_Y + FRAME_1_1_H {
+        return false;
+    }
+    if STATUS_TEXT_X + STATUS_TEXT_W > card.x + STATUS_CARD_W {
+        return false;
+    }
+    if STATUS_DOT_CX < card.x + STATUS_DOT_HALO_R {
+        return false;
+    }
+    if camera::STATUS_REASON_LINES * status_sub_box_at(lvl) > status_stack_h_at(lvl) {
+        return false;
+    }
+    true
+}
+const _: () = assert!(status_card_holds_at(0));
+const _: () = assert!(status_card_holds_at(1));
+const _: () = assert!(status_card_holds_at(2));
+const _: () = assert!(status_card_holds_at(3));
 
 /// The self-timer ring's outer and inner radius; the digit lives inside the
 /// inner one.
@@ -303,9 +447,15 @@ const REC_CHIP_W: usize = 120;
 /// it. Twice (ascent - cap / 2) is the shortest chip whose middle is deep
 /// enough for `centred_text_top` to place the run rather than refuse it, so
 /// the cap block sits centred and the whole line box stays inside.
-const REC_CHIP_H: usize = (std::design::font::ascent_for_scale(typography::BODY_SCALE)
-    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize / 2)
-    * 2;
+const fn rec_chip_h_at(lvl: u8) -> usize {
+    (camera::ascent_at(typography::BODY_SCALE, lvl)
+        - camera::cap_at(typography::BODY_SCALE, lvl) as usize / 2)
+        * 2
+}
+/// The chip's height at the rung this app draws at.
+fn rec_chip_h() -> usize {
+    cell::<C_REC_CHIP_H>(rec_chip_h_at)
+}
 const REC_CHIP_TOP: usize = 16;
 /// The dot's centre, measured into the chip, and its radius.
 const REC_DOT_CX_OFF: usize = 16;
@@ -317,21 +467,57 @@ const REC_TEXT_MARGIN: usize = 8;
 /// the margin on its far side.
 const REC_TEXT_W: usize = REC_CHIP_W - REC_TEXT_OFF - REC_TEXT_MARGIN;
 
+/// The rung the record chip's readout takes at `lvl`: the body rung while its
+/// line box still stands inside the chip's fixed height, else the largest rung
+/// below it that does.
+///
+/// WHY the rung gives way and not the chip: the readout hangs over the viewfinder
+/// well at a fixed plate the aspect chip and shutter ring are laid out around, so
+/// a raised text size steps the digits down rather than grow a plate that would
+/// reach past the cut. At the authored level this is the body rung unchanged.
+const fn rec_rung_at(lvl: u8) -> usize {
+    camera::fit_rung_at(typography::BODY_SCALE, rec_chip_h_at(lvl), lvl)
+}
+fn rec_rung() -> usize {
+    cell::<C_REC_RUNG>(rec_rung_at)
+}
+
 /// WHY checked at compile time: the chip's run used to be measured against
 /// `w - 32`, which reached the chip's own right edge, so a time the face set
 /// even a few rows wider inked the border. These two gates are what a wider
 /// dot gutter, a deeper run start or a raised body rung would break.
 const _: () = assert!(REC_TEXT_OFF + REC_TEXT_W + REC_TEXT_MARGIN <= REC_CHIP_W);
-const _: () = assert!(
-    centred_text_top(REC_CHIP_H, typography::BODY_SCALE)
-        + std::design::font::line_height(typography::BODY_SCALE)
-        <= REC_CHIP_H
-);
+
+/// WHY swept over every selectable level: the chip is a fixed plate, so the
+/// gate the ladder needs at the authored height -- the stepped rung's whole line
+/// box, centred by its caps, inside the chip -- is now a fact at every level, and
+/// it fails the build if a raised rung ever steps to a rung the plate cannot hold.
+const fn rec_chip_holds_at(lvl: u8) -> bool {
+    let rung = rec_rung_at(lvl);
+    let chip = rec_chip_h_at(lvl);
+    if centred_text_top_at(chip, rung, lvl) + camera::line_at(rung, lvl) > chip {
+        return false;
+    }
+    if lvl == camera::PLATFORM_LEVEL && rung != typography::BODY_SCALE {
+        return false;
+    }
+    true
+}
+const _: () = assert!(rec_chip_holds_at(0));
+const _: () = assert!(rec_chip_holds_at(1));
+const _: () = assert!(rec_chip_holds_at(2));
+const _: () = assert!(rec_chip_holds_at(3));
 /// WHY: the chip hangs from the top of the cut, so it has to clear the shortest
 /// one the aspect chip offers, and it stands to the right of the chip row that
 /// floats over the same well -- a wider chip or a longer chip row would put the
 /// two on top of each other.
-const _: () = assert!(REC_CHIP_TOP + REC_CHIP_H <= FRAME_1_1_H);
+const fn rec_chip_clears_at(lvl: u8) -> bool {
+    REC_CHIP_TOP + rec_chip_h_at(lvl) <= FRAME_1_1_H
+}
+const _: () = assert!(rec_chip_clears_at(0));
+const _: () = assert!(rec_chip_clears_at(1));
+const _: () = assert!(rec_chip_clears_at(2));
+const _: () = assert!(rec_chip_clears_at(3));
 const _: () = assert!(TIMER_RECT.x + TIMER_RECT.w <= SHUTTER_CX - REC_CHIP_W / 2);
 
 /// Centre of the flash pictogram inside `FLASH_RECT`.
@@ -414,92 +600,192 @@ const _: () = assert!(SHUTTER_CY - SHUTTER_RING_OUTER >= DOCK_Y0);
 const SHEET_TITLE_Y0: usize = 160;
 /// The gap between the sheet title's line box and the hairline under it.
 const SHEET_RULE_GAP: usize = 6;
-const SHEET_ROW_Y0: usize = SHEET_TITLE_Y0 + SHEET_TITLE_BOX + SHEET_RULE_GAP;
 /// The air above and below the three runs inside one plate.
 const SHEET_PLATE_PAD: usize = 1;
-/// The gap between two plates.
-const SHEET_ROW_GAP: usize = 4;
+/// The gap between two plates, grown by the note rung's box above the authored level.
+const fn sheet_row_gap_at(lvl: u8) -> usize {
+    camera::grown(4, typography::CAPTION_SCALE, lvl)
+}
+/// The three runs, as the line boxes of the faces they are drawn with, at `lvl`.
+const fn sheet_title_box_at(lvl: u8) -> usize {
+    camera::plate_at(std::design::font::line_height(typography::BODY_SCALE), typography::BODY_SCALE, lvl)
+}
+const fn sheet_value_box_at(lvl: u8) -> usize {
+    camera::plate_at(std::design::font::line_height(typography::BODY_SCALE), typography::BODY_SCALE, lvl)
+}
+const fn sheet_note_box_at(lvl: u8) -> usize {
+    camera::plate_at(std::design::font::line_height(typography::CAPTION_SCALE), typography::CAPTION_SCALE, lvl)
+}
+/// The three runs as one block, so the block -- not either line -- is centred.
+const fn sheet_stack_h_at(lvl: u8) -> usize {
+    sheet_title_box_at(lvl) + sheet_value_box_at(lvl) + sheet_note_box_at(lvl)
+}
+/// A plate's own height -- the box its runs are centred in, and the box the tap
+/// answers.
+///
+/// WHY the plate and not the pitch: the row used to be tapped on the 96-row pitch
+/// it is laid out on, so the 8 gap rows under a plate answered that plate although
+/// no pixel of it is drawn there.
+const fn sheet_plate_h_at(lvl: u8) -> usize {
+    sheet_stack_h_at(lvl) + SHEET_PLATE_PAD * 2
+}
+const fn sheet_row_y0_at(lvl: u8) -> usize {
+    SHEET_TITLE_Y0 + sheet_title_box_at(lvl) + SHEET_RULE_GAP
+}
 /// The pitch two plates stand on: a plate and the gap under it.
-const SHEET_ROW_H: usize = SHEET_PLATE_H + SHEET_ROW_GAP;
-/// A plate's own height -- the box its runs are centred in, and the box the
-/// tap answers.
+const fn sheet_row_h_at(lvl: u8) -> usize {
+    sheet_plate_h_at(lvl) + sheet_row_gap_at(lvl)
+}
+/// The air above the block, which is the air below it.
+const fn sheet_stack_pad_at(lvl: u8) -> usize {
+    (sheet_plate_h_at(lvl) - sheet_stack_h_at(lvl)) / 2
+}
+const fn sheet_title_off_at(lvl: u8) -> usize {
+    sheet_stack_pad_at(lvl)
+}
+const fn sheet_value_off_at(lvl: u8) -> usize {
+    sheet_title_off_at(lvl) + sheet_title_box_at(lvl)
+}
+const fn sheet_note_off_at(lvl: u8) -> usize {
+    sheet_value_off_at(lvl) + sheet_value_box_at(lvl)
+}
+const fn sheet_hairline_y_at(lvl: u8) -> usize {
+    sheet_row_y0_at(lvl) - 6
+}
+/// The accent beside the title: exactly the height of the title's caps at the rung
+/// this app draws at, so the bar reads as a rule against the word, not a stripe.
+const fn sheet_accent_top_at(lvl: u8) -> usize {
+    SHEET_TITLE_Y0
+        + camera::ascent_at(typography::BODY_SCALE, lvl)
+        - camera::cap_at(typography::BODY_SCALE, lvl) as usize
+}
+const fn sheet_accent_h_at(lvl: u8) -> usize {
+    camera::cap_at(typography::BODY_SCALE, lvl) as usize
+}
+/// How many plate pitches the sheet can show between its first row and the mode
+/// strip, derived from the pitch the plates actually stand on at `lvl`.
 ///
-/// WHY the plate and not the pitch: the row used to be tapped on the 96-row
-/// pitch it is laid out on, so the 8 gap rows under a plate answered that
-/// plate although no pixel of it is drawn there.
-const SHEET_PLATE_H: usize = SHEET_STACK_H + SHEET_PLATE_PAD * 2;
-/// How many plate pitches the sheet can show between its first row and the
-/// mode strip, derived from the pitch the plates actually stand on.
-///
-/// WHY the list pages: the raised rungs grew the stack to 108 rows, a plate
-/// 110 and a pitch 114, so nine rows reached row 1231 -- 81 rows past the
-/// strip at 1150 -- and no lawful trimming of the air above the title buys
-/// them back. The sheet keeps the rungs, shows the seven rows its slots hold
-/// and turns a page for the rest.
-const SHEET_SLOTS: usize = (MODE_STRIP_Y0 - SHEET_ROW_Y0) / SHEET_ROW_H;
-/// The plates one page shows: every slot but the last, which is the pager.
-const SHEET_PAGE_ROWS: usize = SHEET_SLOTS - 1;
-/// How many pages the full row order needs at that window.
-const SHEET_PAGES: usize = (camera::SETTINGS_ROWS + SHEET_PAGE_ROWS - 1) / SHEET_PAGE_ROWS;
-/// Where the sheet ends: the last slot's pitch, so the frame is the page.
-const SHEET_BOTTOM: usize = SHEET_ROW_Y0 + SHEET_SLOTS * SHEET_ROW_H;
-const SHEET_RECT: Rect = Rect::new(VIEWFINDER_X0, 140, W - 2 * VIEWFINDER_X0, SHEET_BOTTOM - 140);
+/// WHY the list pages: the raised rungs grew the stack, the plate and the pitch,
+/// so nine rows reached past the strip and no lawful trimming of the air above the
+/// title buys them back. The sheet keeps the rungs, shows the rows its slots hold
+/// and turns a page for the rest -- the slot count and the pagination follow the
+/// derived plate, so the count is what the rung leaves room for and never a
+/// remembered seven.
+const fn sheet_slots_at(lvl: u8) -> usize {
+    MODE_STRIP_Y0.saturating_sub(sheet_row_y0_at(lvl)) / sheet_row_h_at(lvl)
+}
+const fn sheet_page_rows_at(lvl: u8) -> usize {
+    sheet_slots_at(lvl).saturating_sub(1)
+}
+const fn sheet_pages_at(lvl: u8) -> usize {
+    let page_rows = if sheet_page_rows_at(lvl) > 1 {
+        sheet_page_rows_at(lvl)
+    } else {
+        1
+    };
+    (camera::SETTINGS_ROWS + page_rows - 1) / page_rows
+}
+const fn sheet_bottom_at(lvl: u8) -> usize {
+    sheet_row_y0_at(lvl) + sheet_slots_at(lvl) * sheet_row_h_at(lvl)
+}
+const fn sheet_rect_at(lvl: u8) -> Rect {
+    Rect::new(VIEWFINDER_X0, 140, W - 2 * VIEWFINDER_X0, sheet_bottom_at(lvl) - 140)
+}
+
+// The authored (one-hundred-per-cent) forms, kept by name for the gates below and
+// for the call sites that fold a literal; the runtime fns answer the same at the
+// published rung.
+const SHEET_RECT: Rect = sheet_rect_at(camera::PLATFORM_LEVEL);
 const SHEET_ROW_X0: usize = camera::SETTINGS_PLATE_X;
 const SHEET_ROW_W: usize = camera::SETTINGS_PLATE_W;
 const SHEET_TEXT_X: usize = SHEET_ROW_X0 + camera::SETTINGS_TEXT_INSET;
 const SHEET_TEXT_W: usize = camera::SETTINGS_TEXT_MAX;
-
-/// The row's runs, as the line boxes of the faces they are drawn with.
-const SHEET_TITLE_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
-const SHEET_VALUE_BOX: usize = std::design::font::line_height(typography::BODY_SCALE);
-const SHEET_NOTE_BOX: usize = std::design::font::line_height(typography::CAPTION_SCALE);
-/// The three runs as one block, so the block -- not either line -- is centred.
-const SHEET_STACK_H: usize = SHEET_TITLE_BOX + SHEET_VALUE_BOX + SHEET_NOTE_BOX;
-/// The air above the block, which is the air below it.
-const SHEET_STACK_PAD: usize = (SHEET_PLATE_H - SHEET_STACK_H) / 2;
-/// Each run's offset from the top of its plate.
-const SHEET_TITLE_OFF: usize = SHEET_STACK_PAD;
-const SHEET_VALUE_OFF: usize = SHEET_TITLE_OFF + SHEET_TITLE_BOX;
-const SHEET_NOTE_OFF: usize = SHEET_VALUE_OFF + SHEET_VALUE_BOX;
-
-/// The hairline under the sheet's title.
-const SHEET_HAIRLINE_Y: usize = SHEET_ROW_Y0 - 6;
-/// The amber accent beside the title: exactly the height of the title's caps,
-/// so the bar reads as a rule against the word rather than a stripe of its own.
 const SHEET_ACCENT_X: usize = SHEET_ROW_X0;
 const SHEET_ACCENT_W: usize = 4;
-const SHEET_ACCENT_TOP: usize = SHEET_TITLE_Y0
-    + std::design::font::ascent_for_scale(typography::BODY_SCALE)
-    - std::design::font::cap_for_scale(typography::BODY_SCALE) as usize;
-const SHEET_ACCENT_H: usize = std::design::font::cap_for_scale(typography::BODY_SCALE) as usize;
 
-/// The plate of the row at `index`: the box the painter fills and the tap
-/// handler answers, named once.
-const fn settings_row_rect(index: usize) -> Rect {
+// The runtime forms: the same derivations, held in the cells above so a painter
+// and the tap handler agree on where every plate stands however high the person set
+// their text size, and neither walks the ladder for a pixel.
+fn sheet_row_y0() -> usize { cell::<C_SHEET_ROW_Y0>(sheet_row_y0_at) }
+fn sheet_row_h() -> usize { cell::<C_SHEET_ROW_H>(sheet_row_h_at) }
+fn sheet_plate_h() -> usize { cell::<C_SHEET_PLATE_H>(sheet_plate_h_at) }
+fn sheet_page_rows() -> usize { cell::<C_SHEET_PAGE_ROWS>(sheet_page_rows_at) }
+fn sheet_pages() -> usize { cell::<C_SHEET_PAGES>(sheet_pages_at) }
+fn sheet_title_off() -> usize { cell::<C_SHEET_TITLE_OFF>(sheet_title_off_at) }
+fn sheet_value_off() -> usize { cell::<C_SHEET_VALUE_OFF>(sheet_value_off_at) }
+fn sheet_note_off() -> usize { cell::<C_SHEET_NOTE_OFF>(sheet_note_off_at) }
+fn sheet_hairline_y() -> usize { cell::<C_SHEET_HAIRLINE>(sheet_hairline_y_at) }
+fn sheet_accent_top() -> usize { cell::<C_SHEET_ACCENT_TOP>(sheet_accent_top_at) }
+fn sheet_accent_h() -> usize { cell::<C_SHEET_ACCENT_H>(sheet_accent_h_at) }
+fn sheet_title_box() -> usize { cell::<C_SHEET_TITLE_BOX>(sheet_title_box_at) }
+const fn sheet_rect_h_at(lvl: u8) -> usize {
+    sheet_bottom_at(lvl) - 140
+}
+fn sheet_rect() -> Rect {
     Rect::new(
-        SHEET_ROW_X0,
-        SHEET_ROW_Y0 + index * SHEET_ROW_H,
-        SHEET_ROW_W,
-        SHEET_PLATE_H,
+        SHEET_RECT.x,
+        SHEET_RECT.y,
+        SHEET_RECT.w,
+        cell::<C_SHEET_RECT_H>(sheet_rect_h_at),
     )
 }
 
-/// WHY checked at compile time: the stack is only legal while the note's line
-/// box still ends inside its plate -- raise a rung and that is the first gate
-/// to fail. The chain gates are what a taller plate, a wider pitch or a
-/// shorter sheet breaks, and they are the difference between a page whose last
-/// plate fits and one that runs under the sheet's own hairline; the last two
-/// keep the sheet clear of the mode strip and every row inside some page.
-const _: () = assert!(SHEET_NOTE_OFF + SHEET_NOTE_BOX <= SHEET_PLATE_H);
-const _: () = assert!(SHEET_TITLE_Y0 + SHEET_TITLE_BOX <= SHEET_HAIRLINE_Y);
-const _: () = assert!(SHEET_ROW_Y0 + SHEET_SLOTS * SHEET_ROW_H <= SHEET_RECT.y + SHEET_RECT.h);
-const _: () = assert!(
-    settings_row_rect(SHEET_SLOTS - 1).y + SHEET_PLATE_H <= SHEET_RECT.y + SHEET_RECT.h
-);
-const _: () = assert!(SHEET_TEXT_X + SHEET_TEXT_W <= SHEET_ROW_X0 + SHEET_ROW_W);
-const _: () = assert!(SHEET_ROW_X0 + SHEET_ROW_W <= SHEET_RECT.x + SHEET_RECT.w);
-const _: () = assert!(SHEET_RECT.y + SHEET_RECT.h <= MODE_STRIP_Y0);
-const _: () = assert!(SHEET_PAGES * SHEET_PAGE_ROWS >= camera::SETTINGS_ROWS);
+/// The plate of the row at `index`, at the level this app draws at. See
+/// [`settings_row_rect`].
+fn settings_row_rect(index: usize) -> Rect {
+    Rect::new(
+        SHEET_ROW_X0,
+        sheet_row_y0() + index * sheet_row_h(),
+        SHEET_ROW_W,
+        sheet_plate_h(),
+    )
+}
+
+/// WHY checked at compile time, and swept over every level: the stack is only
+/// legal while the note's line box still ends inside its plate -- raise a rung and
+/// that is the first gate to fail. The chain gates are what a taller plate, a
+/// wider pitch or a shorter sheet breaks, and they are the difference between a
+/// page whose last plate fits and one that runs under the sheet's own hairline; the
+/// last two keep the sheet clear of the mode strip and every row inside some page,
+/// and the pagination gate is what a rung that leaves no room for a page fails.
+const fn sheet_holds_at(lvl: u8) -> bool {
+    if sheet_note_off_at(lvl) + sheet_note_box_at(lvl) > sheet_plate_h_at(lvl) {
+        return false;
+    }
+    if SHEET_TITLE_Y0 + sheet_title_box_at(lvl) > sheet_hairline_y_at(lvl) {
+        return false;
+    }
+    if sheet_slots_at(lvl) < 2 {
+        return false;
+    }
+    if sheet_row_y0_at(lvl) + sheet_slots_at(lvl) * sheet_row_h_at(lvl)
+        > sheet_rect_at(lvl).y + sheet_rect_at(lvl).h
+    {
+        return false;
+    }
+    if sheet_row_y0_at(lvl) + (sheet_slots_at(lvl) - 1) * sheet_row_h_at(lvl) + sheet_plate_h_at(lvl)
+        > sheet_rect_at(lvl).y + sheet_rect_at(lvl).h
+    {
+        return false;
+    }
+    if SHEET_TEXT_X + SHEET_TEXT_W > SHEET_ROW_X0 + SHEET_ROW_W {
+        return false;
+    }
+    if SHEET_ROW_X0 + SHEET_ROW_W > sheet_rect_at(lvl).x + sheet_rect_at(lvl).w {
+        return false;
+    }
+    if sheet_rect_at(lvl).y + sheet_rect_at(lvl).h > MODE_STRIP_Y0 {
+        return false;
+    }
+    if sheet_pages_at(lvl) * sheet_page_rows_at(lvl) < camera::SETTINGS_ROWS {
+        return false;
+    }
+    true
+}
+const _: () = assert!(sheet_holds_at(0));
+const _: () = assert!(sheet_holds_at(1));
+const _: () = assert!(sheet_holds_at(2));
+const _: () = assert!(sheet_holds_at(3));
 
 const RETICLE_ARM: usize = 40;
 
@@ -532,25 +818,53 @@ fn test_text(
     color: u32,
     bg: u32,
 ) -> Option<u32> {
-    if scale < 2 {
-        let w = std::design::font::measure(text, scale);
-        let h = std::design::font::line_height(scale);
-        if x < x0 || x - x0 >= w.min(max_w) || y < y0 || y - y0 >= h {
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    let lvl = draw_level();
+    if lvl == camera::PLATFORM_LEVEL {
+        // The ladder's own path, byte for byte what this function drew before the
+        // setting reached it, so a reader who never raised "Text size" sees no
+        // pixel move.
+        if scale < 2 {
+            let w = std::design::font::measure(text, scale);
+            let h = std::design::font::line_height(scale);
+            if x < x0 || x - x0 >= w.min(max_w) || y < y0 || y - y0 >= h {
+                return None;
+            }
+            return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
+        }
+        let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+        if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
             return None;
+        }
+        if x >= x0 + max_w {
+            return None;
+        }
+        if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
+            return run.pixel(x, y, color, bg);
         }
         return std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
     }
-    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
-    if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
-        return None;
+    // The published rung: the outline face at the rung's cap height, and the
+    // bitmap face filling in when a run does not fit an outline slot. WHY the band
+    // grows with the rung: a run fitted to a scaled em walks taller than the
+    // unscaled cell, so the ladder's band would cut the descenders of the very run
+    // the setting enlarged.
+    let cap = camera::run_cap(scale);
+    if scale >= 2 {
+        if let Some(run) = outline_text::place_run_cap(x0, y0, cap, text, Some(max_w), false) {
+            let (rx, rtop, rw, rh) = run.bounds();
+            if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+                return run.pixel(x, y, color, bg);
+            }
+            return None;
+        }
     }
-    if x >= x0 + max_w {
-        return None;
+    if x >= x0 && x < x0 + max_w && y >= y0 && y < y0 + camera::run_rows(scale) {
+        return std::design::monochrome::text_px(x, y, x0, y0, cap, text, color, bg, false);
     }
-    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
-        return run.pixel(x, y, color, bg);
-    }
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+    None
 }
 
 /// Vector lightning bolt pictogram for flash pill
@@ -657,9 +971,21 @@ const TOP_ROW_TEXT_PAD_X: usize = 6;
 /// ascent has no centred placement, and answering zero leaves the run in the
 /// box's top rows where the gate below can see it, rather than wrapping a
 /// `usize` around the canvas.
-const fn centred_text_top(h: usize, rung: usize) -> usize {
-    let box_top = h / 2 + std::design::font::cap_for_scale(rung) as usize / 2;
-    let ascent = std::design::font::ascent_for_scale(rung);
+const fn centred_text_top_at(h: usize, rung: usize, lvl: u8) -> usize {
+    let box_top = h / 2 + camera::cap_at(rung, lvl) as usize / 2;
+    let ascent = camera::ascent_at(rung, lvl);
+    if ascent > box_top {
+        0
+    } else {
+        box_top - ascent
+    }
+}
+
+/// The row a rung's caps block sits on, centred in `h` rows, at the level this
+/// app draws at. See [`centred_text_top_at`].
+fn centred_text_top(h: usize, rung: usize) -> usize {
+    let box_top = h / 2 + camera::run_cap(rung) as usize / 2;
+    let ascent = camera::run_ascent(rung);
     if ascent > box_top {
         0
     } else {
@@ -670,13 +996,30 @@ const fn centred_text_top(h: usize, rung: usize) -> usize {
 /// WHY checked at compile time: the pills are one height and every label in
 /// this app is centred in one, so a rung raised above what a 48-row capsule
 /// holds would fail here rather than spill ink onto the chassis. The gates say
-/// the run's whole line box stays inside the box it is dropped into.
-const _: () = assert!(centred_text_top(TOP_ROW_H, typography::CAPTION_SCALE)
-    + std::design::font::line_height(typography::CAPTION_SCALE)
-    <= TOP_ROW_H);
-const _: () = assert!(centred_text_top(TOP_ROW_H, typography::BODY_SCALE)
-    + std::design::font::line_height(typography::BODY_SCALE)
-    <= TOP_ROW_H);
+/// the rung `fit_rung` answers -- the rung a raised level steps down to -- keeps
+/// its whole line box inside the box it is dropped into, at every selectable
+/// level, and that at the authored level the wanted rung stands unchanged so
+/// adopting the setting moves no pixel for a reader who never raised it.
+const fn capsule_labels_fit(lvl: u8) -> bool {
+    let rungs = [typography::CAPTION_SCALE, typography::BODY_SCALE];
+    let mut i = 0;
+    while i < rungs.len() {
+        let want = rungs[i];
+        let rung = camera::fit_rung_at(want, TOP_ROW_H, lvl);
+        if centred_text_top_at(TOP_ROW_H, rung, lvl) + camera::line_at(rung, lvl) > TOP_ROW_H {
+            return false;
+        }
+        if lvl == camera::PLATFORM_LEVEL && rung != want {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = assert!(capsule_labels_fit(0));
+const _: () = assert!(capsule_labels_fit(1));
+const _: () = assert!(capsule_labels_fit(2));
+const _: () = assert!(capsule_labels_fit(3));
 
 /// Draws a label centred in `rect`, upgrading to Scale 2 Body where it fits.
 ///
@@ -698,20 +1041,21 @@ fn top_row_label(
     if room == 0 {
         return None;
     }
-    let scale = if std::design::font::measure(label, 2) <= room {
-        2
-    } else {
-        1
-    };
+    let lvl = draw_level();
+    // The body rung while a raised level's line box still fits the capsule, else
+    // the caption rung; then step to the caption when the body's own advance is
+    // wider than the room. At the authored level this is the rung the ladder used.
+    let mut scale = camera::fit_rung_at(2, rect.h, lvl);
+    if scale == 2 && camera::run_w_at(label, 2, lvl) > room {
+        scale = 1;
+    }
     let mut buf = [0u8; 96];
-    let len = std::design::font::ellipsize(label, scale, room, &mut buf);
+    let len = camera::ellipsize_run(label, scale, room, &mut buf);
     if len == 0 {
         return None;
     }
     let text = &buf[..len];
-    let drawn = outline_text::drawn_advance(text, scale, None)
-        .unwrap_or_else(|| std::design::font::measure(text, scale))
-        .min(room);
+    let drawn = camera::run_drawn_advance(text, scale, room).min(room);
     let x0 = rect.x + (rect.w - drawn) / 2;
     let y0 = rect.y + centred_text_top(rect.h, scale);
     test_text(x, y, x0, y0, scale, text, room, color, bg)
@@ -724,20 +1068,18 @@ fn top_row_label(
 /// pill cannot hold at Scale 2 must say what it is rather than disappear.
 #[inline(always)]
 fn flash_label(x: usize, y: usize, label: &[u8], color: u32, bg: u32) -> Option<u32> {
-    let scale = if std::design::font::measure(label, 2) <= FLASH_TEXT_W {
-        2
-    } else {
-        1
-    };
+    let lvl = draw_level();
+    let mut scale = camera::fit_rung_at(2, FLASH_RECT.h, lvl);
+    if scale == 2 && camera::run_w_at(label, 2, lvl) > FLASH_TEXT_W {
+        scale = 1;
+    }
     let mut buf = [0u8; 96];
-    let len = std::design::font::ellipsize(label, scale, FLASH_TEXT_W, &mut buf);
+    let len = camera::ellipsize_run(label, scale, FLASH_TEXT_W, &mut buf);
     if len == 0 {
         return None;
     }
     let text = &buf[..len];
-    let drawn = outline_text::drawn_advance(text, scale, None)
-        .unwrap_or_else(|| std::design::font::measure(text, scale))
-        .min(FLASH_TEXT_W);
+    let drawn = camera::run_drawn_advance(text, scale, FLASH_TEXT_W).min(FLASH_TEXT_W);
     let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - drawn) / 2;
     let y0 = FLASH_RECT.y + centred_text_top(FLASH_RECT.h, scale);
     test_text(x, y, x0, y0, scale, text, FLASH_TEXT_W, color, bg)
@@ -971,7 +1313,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
     }
 
     // 2. The settings surface (when open)
-    if camera.screen == CameraScreen::Settings && SHEET_RECT.contains(x, y) {
+    if camera.screen == CameraScreen::Settings && sheet_rect().contains(x, y) {
         return settings_pixel(x, y, camera, page);
     }
 
@@ -1100,7 +1442,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                     VIEWFINDER_X0 + VIEWFINDER_W / 2 - REC_CHIP_W / 2,
                     active_y0 + REC_CHIP_TOP,
                     REC_CHIP_W,
-                    REC_CHIP_H,
+                    rec_chip_h(),
                 );
                 if rec_rect.contains(x, y) {
                     if let Some(rc) = std::design::primitives::draw_rounded_rect(
@@ -1120,14 +1462,15 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                             return chrome::RECORD;
                         }
                         let text = b"00:00";
+                        let rung = rec_rung();
                         let lx = rec_rect.x + REC_TEXT_OFF;
-                        let ly = rec_rect.y + centred_text_top(REC_CHIP_H, typography::BODY_SCALE);
+                        let ly = rec_rect.y + centred_text_top(rec_chip_h(), rung);
                         if let Some(tc) = test_text(
                             x,
                             y,
                             lx,
                             ly,
-                            typography::BODY_SCALE,
+                            rung,
                             text,
                             REC_TEXT_W,
                             chrome::TEXT,
@@ -1146,11 +1489,18 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
             // not a live image, not sensor telemetry and not a capture.
             if camera.total_photos == 0 && camera.countdown_ticks == 0 {
                 let ink = status_ink(camera.status);
-                if STATUS_CARD.contains(x, y) {
+                let card = status_card();
+                let head_y = status_head_y();
+                let head_box = status_head_box();
+                let sub_y = status_sub_y();
+                let sub_box = status_sub_box();
+                let sub2_y = status_sub2_y();
+                let dot_cy = status_dot_cy();
+                if card.contains(x, y) {
                     if let Some(card_c) = std::design::primitives::draw_rounded_rect(
                         x,
                         y,
-                        STATUS_CARD,
+                        card,
                         R_CARD,
                         chrome::SURFACE,
                         Some(chrome::tint(ink, 45)),
@@ -1158,7 +1508,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                     ) {
                         // Icon-like status dot with a quiet halo.
                         let dot_dx = x as isize - STATUS_DOT_CX as isize;
-                        let dot_dy = y as isize - STATUS_DOT_CY as isize;
+                        let dot_dy = y as isize - dot_cy as isize;
                         let dot_r2 = dot_dx * dot_dx + dot_dy * dot_dy;
                         if dot_r2 <= (STATUS_DOT_HALO_R * STATUS_DOT_HALO_R) as isize {
                             if dot_r2 <= (STATUS_DOT_R * STATUS_DOT_R) as isize {
@@ -1178,13 +1528,14 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                         // between them is STATUS_STACK_GAP. The reason owns
                         // two boxes because the model splits it at a word when
                         // one column cannot hold it; an unsplit reason leaves
-                        // the second box empty.
-                        if y >= STATUS_HEAD_Y && y < STATUS_HEAD_Y + STATUS_HEAD_BOX {
+                        // the second box empty. Each box is the rung the person
+                        // chose, so the card grows to hold the type it draws.
+                        if y >= head_y && y < head_y + head_box {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
                                 STATUS_TEXT_X,
-                                STATUS_HEAD_Y,
+                                head_y,
                                 camera::STATUS_HEAD_RUNG,
                                 &camera.head[..camera.head_len],
                                 STATUS_TEXT_W,
@@ -1193,12 +1544,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                             ) {
                                 return tc;
                             }
-                        } else if y >= STATUS_SUB_Y && y < STATUS_SUB_Y + STATUS_SUB_BOX {
+                        } else if y >= sub_y && y < sub_y + sub_box {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
                                 STATUS_TEXT_X,
-                                STATUS_SUB_Y,
+                                sub_y,
                                 camera::STATUS_REASON_RUNG,
                                 &camera.sub[..camera.sub_len],
                                 STATUS_TEXT_W,
@@ -1207,12 +1558,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
                             ) {
                                 return tc;
                             }
-                        } else if y >= STATUS_SUB2_Y && y < STATUS_SUB2_Y + STATUS_SUB_BOX {
+                        } else if y >= sub2_y && y < sub2_y + sub_box {
                             if let Some(tc) = test_text(
                                 x,
                                 y,
                                 STATUS_TEXT_X,
-                                STATUS_SUB2_Y,
+                                sub2_y,
                                 camera::STATUS_REASON_RUNG,
                                 &camera.sub2[..camera.sub2_len],
                                 STATUS_TEXT_W,
@@ -1353,10 +1704,15 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 
 /// `page` windows the row order into the sheet's content plates; the last
 /// slot is the pager that turns it.
 fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
+    // The sheet is one geometry: read the rung once and let the plate count, the
+    // pitch, the accent, the hairline and the page windows all follow it, so a
+    // raised text size moves the painter and the tap handler as one block.
+    let page_rows = sheet_page_rows();
+    let pages = sheet_pages();
     if let Some(c) = std::design::primitives::draw_rounded_rect(
         x,
         y,
-        SHEET_RECT,
+        sheet_rect(),
         radius::SHEET,
         chrome::SURFACE,
         Some(chrome::BORDER_STRONG),
@@ -1365,14 +1721,14 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
         // Amber accent bar beside the title.
         if x >= SHEET_ACCENT_X
             && x < SHEET_ACCENT_X + SHEET_ACCENT_W
-            && y >= SHEET_ACCENT_TOP
-            && y < SHEET_ACCENT_TOP + SHEET_ACCENT_H
+            && y >= sheet_accent_top()
+            && y < sheet_accent_top() + sheet_accent_h()
         {
             return chrome::AMBER;
         }
 
         // Title, on the Body scale, inside its own line box.
-        if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + SHEET_TITLE_BOX {
+        if y >= SHEET_TITLE_Y0 && y < SHEET_TITLE_Y0 + sheet_title_box() {
             if let Some(tc) = test_text(
                 x,
                 y,
@@ -1389,7 +1745,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
         }
 
         // Hairline between the title and the first row.
-        if y >= SHEET_HAIRLINE_Y && y < SHEET_HAIRLINE_Y + 2 {
+        if y >= sheet_hairline_y() && y < sheet_hairline_y() + 2 {
             if x >= SHEET_ROW_X0 && x < SHEET_ROW_X0 + SHEET_ROW_W {
                 return chrome::BORDER;
             }
@@ -1397,9 +1753,9 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
 
         // The rows: each one's plate is the box `settings_row_rect` names, so
         // the painter fills exactly what the tap handler answers. The slot
-        // wears the row order's entry at `page * SHEET_PAGE_ROWS + slot`.
-        for slot in 0..SHEET_PAGE_ROWS {
-            let row_index = page * SHEET_PAGE_ROWS + slot;
+        // wears the row order's entry at `page * page_rows + slot`.
+        for slot in 0..page_rows {
+            let row_index = page * page_rows + slot;
             if row_index >= camera::SETTINGS_ROWS {
                 continue;
             }
@@ -1420,18 +1776,18 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
             );
             let title = camera.settings_row_title(row);
             // WHY the bands are the line boxes and the block is centred: the
-            // title and the value are body-scale runs (39 rows each) and the
-            // note is a caption (30), so 108 rows of type stand in a plate 110
-            // tall. The plate used to start them at row 2, which left no air
-            // under the block at all and let the note's descenders ink the
-            // plate's own bottom hairline.
-            if y < row_y + SHEET_VALUE_OFF {
+            // title and the value are body-scale runs and the note is a caption,
+            // each as wide as the face answers at this rung, and the whole block
+            // stands centred in its plate. The plate used to start them at row 2,
+            // which left no air under the block at all and let the note's
+            // descenders ink the plate's own bottom hairline.
+            if y < row_y + sheet_value_off() {
                 let title_scale = camera::SETTINGS_TITLE_RUNG;
                 if let Some(tc) = test_text(
                     x,
                     y,
                     SHEET_TEXT_X,
-                    row_y + SHEET_TITLE_OFF,
+                    row_y + sheet_title_off(),
                     title_scale,
                     title,
                     SHEET_TEXT_W,
@@ -1440,7 +1796,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
                 ) {
                     return tc;
                 }
-            } else if y < row_y + SHEET_NOTE_OFF {
+            } else if y < row_y + sheet_note_off() {
                 let len = camera.settings_value_lens[row_index];
                 let value = &camera.settings_values[row_index][..len];
                 let val_scale = camera::SETTINGS_VALUE_RUNG;
@@ -1448,7 +1804,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
                     x,
                     y,
                     SHEET_TEXT_X,
-                    row_y + SHEET_VALUE_OFF,
+                    row_y + sheet_value_off(),
                     val_scale,
                     value,
                     SHEET_TEXT_W,
@@ -1464,7 +1820,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
                         x,
                         y,
                         SHEET_TEXT_X,
-                        row_y + SHEET_NOTE_OFF,
+                        row_y + sheet_note_off(),
                         typography::CAPTION_SCALE,
                         note,
                         SHEET_TEXT_W,
@@ -1482,7 +1838,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
         // The pager: the sheet's last slot, named in `settings_row_rect` so
         // the plate the painter fills is the plate the tap handler answers.
         // Its label says which way the page turns, in the caption rung.
-        let pager = settings_row_rect(SHEET_PAGE_ROWS);
+        let pager = settings_row_rect(page_rows);
         if pager.contains(x, y) {
             if let Some(plate_c) = std::design::primitives::draw_rounded_rect(
                 x,
@@ -1494,7 +1850,7 @@ fn settings_pixel(x: usize, y: usize, camera: &CameraApp, page: usize) -> u32 {
                 1,
             ) {
                 let label: &[u8] =
-                    if page + 1 < SHEET_PAGES { b"MORE SETTINGS" } else { b"FIRST SETTINGS" };
+                    if page + 1 < pages { b"MORE SETTINGS" } else { b"FIRST SETTINGS" };
                 let lx = camera::centred_x(label, typography::CAPTION_SCALE, pager.x, pager.w);
                 let ly = pager.y + centred_text_top(pager.h, typography::CAPTION_SCALE);
                 if let Some(tc) = test_text(
@@ -1646,7 +2002,7 @@ fn log_capture_code(prefix: &[u8], code: i64) {
 /// answered where the page is turned.
 fn settings_row_at(x: usize, y: usize) -> Option<usize> {
     let mut index = 0usize;
-    while index < SHEET_PAGE_ROWS {
+    while index < sheet_page_rows() {
         if settings_row_rect(index).contains(x, y) {
             return Some(index);
         }
@@ -1656,8 +2012,8 @@ fn settings_row_at(x: usize, y: usize) -> Option<usize> {
 }
 
 fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize, page: &mut usize) -> Tap {
-    if settings_row_rect(SHEET_PAGE_ROWS).contains(x, y) {
-        *page = (*page + 1) % SHEET_PAGES;
+    if settings_row_rect(sheet_page_rows()).contains(x, y) {
+        *page = (*page + 1) % sheet_pages();
         std::log("[CAMERA APP] Settings page turned.").ok();
         return Tap::Redraw(Dirty::All);
     }
@@ -1665,7 +2021,7 @@ fn handle_settings_tap(camera: &mut CameraApp, x: usize, y: usize, page: &mut us
         Some(slot) => slot,
         None => return Tap::None,
     };
-    let index = *page * SHEET_PAGE_ROWS + slot;
+    let index = *page * sheet_page_rows() + slot;
     if index >= camera::SETTINGS_ROWS {
         return Tap::None;
     }
@@ -1936,6 +2292,10 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // The person's text size is read once here, before any pixel is written, so
+    // the first frame already carries the rung the setting names.
+    publish_text_scale();
+
     camera.mode = CameraMode::Photo;
     render_camera_ui(surface, &camera, sheet_page);
     let _ = std::surface_flip();
@@ -1944,6 +2304,18 @@ pub extern "C" fn _start() -> ! {
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             let _ = &events;
+
+            // WHY once per wake and never per glyph: the read is a syscall, so
+            // calling it where the runs are laid out would cost a kernel crossing
+            // for every pixel's worth of geometry. One call settles the rung for the
+            // whole wake, and the only work it can cause is one full repaint -- which
+            // is deliberate, because a moved rung moves the card, the sheet's plates
+            // and the chip's readout, and a screen still showing the old ones is the
+            // defect this exists to refuse.
+            if publish_text_scale() {
+                render_camera_ui(surface, &camera, sheet_page);
+                let _ = std::surface_flip();
+            }
 
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 let mut needs_redraw = false;

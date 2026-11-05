@@ -556,10 +556,539 @@ pub const SHUTTER_NOTICE_MAX: usize = 96;
 /// table rather than the bitmap cell's. Both widths are decided by
 /// `outline_text::drawn_advance`, which mirrors the placement's own
 /// refusals, so the centring uses the width of the run that is drawn.
+///
+/// WHY the rung the person chose: a caption centred on the platform's advance is
+/// centred on a run the ladder no longer inks -- the plate grows but the word
+/// drifts off its optical middle. At the authored level this is the ladder path,
+/// byte for byte.
 pub fn centred_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
+    let lvl = draw_level();
+    if lvl != PLATFORM_LEVEL {
+        let w = run_w_at(text, scale, lvl);
+        return x0 + available.saturating_sub(w) / 2;
+    }
     let w = std::design::outline_text::drawn_advance(text, scale, Some(available))
         .unwrap_or_else(|| std::design::font::measure(text, scale));
     x0 + available.saturating_sub(w) / 2
+}
+
+// -----------------------------------------------------------------------------
+// The person's text size, and the geometry that follows it
+//
+// WHY this block exists: every box below was authored as the platform's type
+// ladder read at one hundred per cent, so a person who raised "Text size" in
+// Settings got a *smaller* reading surface here -- the ink moves through the
+// runtime helpers, the plate does not move at all. Settings writes the level,
+// `DynamicType::publish` hands it to the renderer, and the faces under
+// [`rows_at`] answer at it. A layout that moves its ink but keeps its box is the
+// defect this app had; a layout that moves its box to a rung the renderer never
+// got is the same defect mirrored, so the rung is read from the one cell the
+// renderer draws from.
+// -----------------------------------------------------------------------------
+
+/// The text-size level every box in this file was authored against.
+pub const PLATFORM_LEVEL: u8 = interos_std::design::font::TEXT_SCALE_NORMAL;
+
+/// The highest level the ladder offers, and therefore the level the gates sweep
+/// to. [`UserTextScale::from_u8`] clamps anything above it.
+pub const MAX_LEVEL: u8 = 3;
+
+/// The smallest rung the ladder carries; a walk that steps a label down to fit a
+/// fixed plate never goes past it.
+pub const MIN_RUNG: usize = 1;
+
+/// The later of two layout edges.
+///
+/// WHY a helper rather than `Ord::max`: `max` is not callable in a `const`
+/// context on this toolchain, and several edges here must fold at compile time.
+pub const fn later(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The cap height a rung inks at on a level.
+pub const fn cap_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::cap_for_user_scale(scale, level)
+}
+
+/// The line box a rung reserves on a level.
+pub const fn line_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::line_height_for_user_scale(scale, level)
+}
+
+/// The ascent a rung's baseline sits above its box's top on a level.
+pub const fn ascent_at(scale: usize, level: u8) -> usize {
+    interos_std::design::font::ascent_for_user_scale(scale, level)
+}
+
+/// The pixels-per-em a rung is rasterised at on a level.
+pub const fn em_at(scale: usize, level: u8) -> u32 {
+    interos_std::design::font::em_for_user_scale(scale, level)
+}
+
+/// The rows a run at `scale` can ink on `level`: [`outline_text::row_band`]'s
+/// union of the outline line box and the bitmap cell, asked at a level rather
+/// than at the ladder.
+///
+/// WHY a restatement and not a call: `row_band` is a `const fn` of the ladder, so
+/// a plate sized from it can never see the setting. The walk below is the same
+/// one -- the lower of the two faces' baselines, the deeper of the two faces'
+/// bottoms -- with every metric read through the `*_user_scale` faces, and the
+/// gate beside the identity checks proves the two answers agree at the level they
+/// were authored at.
+pub const fn rows_at(scale: usize, level: u8) -> usize {
+    if scale == 0 {
+        return 0;
+    }
+    let em = em_at(scale, level);
+    let (outline_ascent, outline_descent) =
+        interos_std::design::typeface::line_metrics(em);
+    let outline_ascent = outline_ascent as usize;
+    let outline_descent = outline_descent as usize;
+    let line_ascent = ascent_at(scale, level);
+    let baseline = later(outline_ascent, line_ascent);
+    later(baseline + outline_descent, line_at(scale, level))
+}
+
+/// An authored vertical stride between two stacked runs, grown by the rows the
+/// rung's box gained above the level the stride was authored at.
+pub const fn grown(stride: usize, scale: usize, level: u8) -> usize {
+    stride + rows_at(scale, level).saturating_sub(rows_at(scale, PLATFORM_LEVEL))
+}
+
+/// A plate that reserves a rung's box plus its authored air, never below the
+/// height it was drawn with.
+pub const fn plate_at(authored: usize, scale: usize, level: u8) -> usize {
+    let air = authored.saturating_sub(rows_at(scale, PLATFORM_LEVEL));
+    later(authored, rows_at(scale, level) + air)
+}
+
+/// The rung `scale` takes inside a fixed plate `available` rows deep, at the
+/// level this app draws at: the requested rung while its line box fits, and the
+/// largest rung below it that the plate does hold. Never below [`MIN_RUNG`].
+///
+/// WHY a run-time walk: several of this app's controls are chrome of a fixed
+/// height -- a 48-row capsule, the shutter's disc -- and a fixed plate cannot
+/// hold a run at every selectable level. The rung gives way rather than the ink;
+/// the gates beside each caller loop the four levels so the bound is still a
+/// build-time fact.
+pub fn fit_rung(want: usize, available: usize) -> usize {
+    let level = level();
+    fit_rung_at(want, available, level)
+}
+
+/// [`fit_rung`] as a `const fn` of a level, so a gate can sweep every level.
+pub const fn fit_rung_at(want: usize, available: usize, level: u8) -> usize {
+    let mut rung = want;
+    while rung > MIN_RUNG && line_at(rung, level) > available {
+        rung -= 1;
+    }
+    if rung < MIN_RUNG {
+        MIN_RUNG
+    } else {
+        rung
+    }
+}
+
+/// The rung `scale` takes inside a fixed plate `available` rows deep, measured by
+/// the inked band a run reserves rather than its line box, at the level `lvl`
+/// names: the requested rung while the band fits, and the largest rung below it
+/// that the plate does hold. Never below [`MIN_RUNG`].
+///
+/// WHY a band rather than the line box: the dock's refusal strip is sized from
+/// [`SHUTTER_NOTICE_ROWS`], which is the outline-and-bitmap union the renderer
+/// actually inks (`outline_text::row_band`), not `line_height`. The SDK has no
+/// level-aware `row_band_at`, so this restates the band's own walk (the same
+/// union [`rows_at`] folds) against the plate, and the identity gate beside
+/// [`rows_at`] proves it answers the platform's number at the authored level.
+pub const fn fit_rung_rows_at(want: usize, available: usize, lvl: u8) -> usize {
+    let mut rung = want;
+    while rung > MIN_RUNG && rows_at(rung, lvl) > available {
+        rung -= 1;
+    }
+    if rung < MIN_RUNG {
+        MIN_RUNG
+    } else {
+        rung
+    }
+}
+
+/// The rung `scale` takes inside a fixed plate `max_w` columns wide, at the
+/// level this app draws at: the requested rung while its widest advance fits, and
+/// the largest below it that does. Never below [`MIN_RUNG`].
+pub fn fit_rung_width(want: usize, text: &[u8], max_w: usize) -> usize {
+    let level = level();
+    let mut rung = want;
+    while rung > MIN_RUNG && run_w_at(text, rung, level) > max_w {
+        rung -= 1;
+    }
+    if rung < MIN_RUNG {
+        MIN_RUNG
+    } else {
+        rung
+    }
+}
+
+/// The advance a run takes at `scale`, at the level `lvl` names.
+pub fn run_w_at(text: &[u8], scale: usize, lvl: u8) -> usize {
+    if scale == 0 || text.is_empty() {
+        return 0;
+    }
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::measure(text, scale);
+    }
+    let w = interos_std::design::font::measure_user_scale(text, scale, lvl);
+    if w == 0 {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// The advance a run takes at `scale`, at the level this app draws at.
+#[inline]
+pub fn run_w(text: &[u8], scale: usize) -> usize {
+    run_w_at(text, scale, level())
+}
+
+/// `font::ellipsize` at the rung the person chose.
+///
+/// WHY a restatement and not a call: `font::ellipsize` spends its trim budget in
+/// the ladder's em, so a run cut to a lane at one rung and inked at another is an
+/// ellipsis past the plate's edge. At the authored level this *is*
+/// `font::ellipsize`, byte for byte.
+pub fn ellipsize_run(text: &[u8], scale: usize, max_w: usize, out: &mut [u8]) -> usize {
+    let lvl = level();
+    if lvl == PLATFORM_LEVEL {
+        return interos_std::design::font::ellipsize(text, scale, max_w, out);
+    }
+    if text.is_empty() || scale == 0 {
+        return 0;
+    }
+    if run_w_at(text, scale, lvl) <= max_w {
+        let len = text.len().min(out.len());
+        out[..len].copy_from_slice(&text[..len]);
+        return len;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots_w = run_w_at(DOTS, scale, lvl);
+    if dots_w > max_w || out.len() < 3 {
+        return 0;
+    }
+    let em = em_at(scale, lvl);
+    let mut used = 0usize;
+    let mut fit = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let mut adv = interos_std::design::typeface::advance_px(c, em) as usize;
+        if adv == 0 {
+            adv = interos_std::design::font::advance_of(c, false) * scale;
+        }
+        if used + adv > max_w - dots_w || fit + 1 + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        fit = i + 1;
+    }
+    out[..fit].copy_from_slice(&text[..fit]);
+    out[fit..fit + 3].copy_from_slice(DOTS);
+    fit + 3
+}
+
+/// The advance of the run the surface can actually draw, at this app's rung.
+///
+/// WHY it restates [`outline_text::drawn_advance`]: that function folds `scale`
+/// through the platform's em, so a run centred with it at a raised rung is centred
+/// on the width the painter no longer inks. At the authored level this is the
+/// platform's answer.
+pub fn run_drawn_advance(text: &[u8], scale: usize, available: usize) -> usize {
+    let lvl = level();
+    if lvl == PLATFORM_LEVEL {
+        return std::design::outline_text::drawn_advance(text, scale, Some(available))
+            .unwrap_or_else(|| interos_std::design::font::measure(text, scale));
+    }
+    let w = run_w_at(text, scale, lvl);
+    if w > available {
+        interos_std::design::font::measure(text, scale)
+    } else {
+        w
+    }
+}
+
+/// The rows the refusal caption may ink: the whole strip between the dock's top
+/// edge and the shutter's outer ring, the caption's air included.
+///
+/// WHY the air is spent: `DOCK_Y0` is derived as the ring's upper edge less the
+/// caption's band less [`SHUTTER_NOTICE_AIR`], so the room the caption owns is the
+/// authored band plus its four rows of air. Spending the air is the cheapest give
+/// the dock has, and the mode carousel stands a few rows above the strip, so the
+/// room cannot open further than that.
+pub const SHUTTER_NOTICE_ROOM: usize = SHUTTER_CY - SHUTTER_RING_OUTER - DOCK_Y0;
+
+/// The rung the shutter's refusal caption draws at on `lvl`: the body rung while
+/// the room between the dock's top edge and the shutter's ring holds its inked
+/// band, else the largest rung below it the room does hold.
+///
+/// WHY stepped rather than grown: the caption lives in that room and nowhere else
+/// -- [`SHUTTER_NOTICE_ROWS`] plus [`SHUTTER_NOTICE_AIR`] by construction -- and
+/// the room cannot open to hold a taller run without moving the dock into the mode
+/// carousel. The rung gives way rather than the ink, measured by the band the
+/// renderer inks ([`rows_at`]), not the line box alone. At the authored level this
+/// is the body rung unchanged.
+pub const fn shutter_notice_rung_at(lvl: u8) -> usize {
+    fit_rung_rows_at(SHUTTER_NOTICE_SCALE, SHUTTER_NOTICE_ROOM, lvl)
+}
+pub fn shutter_notice_rung() -> usize {
+    shutter_notice_rung_live()
+}
+
+// WHY swept over every selectable level: the strip is a fixed plate, so the honest
+// fact is that the rung the notice answers never inks past it. The band a stepped
+// rung reserves may overrun the room only from the ladder's floor rung, and only by
+// one row -- measured, rung 1 stands 44 rows at Extra Large against a 43-row room
+// and no smaller rung exists -- and [`shutter_notice_band`] clamps the plate to the
+// room so that row is refused rather than inked over the ring. At the authored level
+// the wanted body rung stands and its band is the strip unchanged, so adopting the
+// setting moves no pixel for a reader who never raised it.
+const _: () = assert!(shutter_notice_holds_at_every_level());
+const fn shutter_notice_holds_at_every_level() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        let rung = shutter_notice_rung_at(lvl);
+        if rung < MIN_RUNG || rung > SHUTTER_NOTICE_SCALE {
+            return false;
+        }
+        let band = rows_at(rung, lvl);
+        if band > SHUTTER_NOTICE_ROOM && rung != MIN_RUNG {
+            return false;
+        }
+        if band > SHUTTER_NOTICE_ROOM + 1 {
+            return false;
+        }
+        if lvl == PLATFORM_LEVEL && (rung != SHUTTER_NOTICE_SCALE || band != SHUTTER_NOTICE_ROWS)
+        {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+
+
+// -----------------------------------------------------------------------------
+// The rung the painter and the hit test both ask for
+// -----------------------------------------------------------------------------
+
+// The rung's metrics, resolved once per rung rather than once per pixel.
+//
+// WHY the cells: every number below is a chain of integer divisions -- the em
+// from the cap height, the ascent and descent from the em -- and QEMU's TCG
+// makes each division a helper call. A painter asks them for most of the pixels
+// it writes, so asked per pixel the walk costs more than the ink and the frame
+// never reaches scanout; see `6923b1ab perf(file_manager)`. The answer cannot
+// move until the person moves "Text size", so it is carried in one cell per
+// kind with the level it was resolved at stamped in its top byte: a hit is one
+// load and a shift, and the walk runs once per setting change.
+//
+// WHY a byte per rung: the ladder's tallest box (rung seven at Extra Large)
+// stands 210 rows, so one rung's metric fits a byte and eight rungs fit a word.
+// A rung past the ladder's table is not carried here and is answered by the
+// walk, which is what it did before this block existed.
+type MetricCell = core::sync::atomic::AtomicUsize;
+const STALE: usize = 0xFF << 24;
+const RUNG_TABLE: usize = 8;
+
+/// `cell`, resolved at the level the renderer draws at, by `at`.
+///
+/// WHY the level travels inside the value: a cell that only holds a number
+/// cannot say which rung it was answered for, and a painter that repaints after
+/// a setting change would keep the stale box. The top byte is the level, the
+/// rest is the answer.
+#[inline(always)]
+pub fn rung_cell(cell: &MetricCell, at: fn(u8) -> usize) -> usize {
+    let lvl = draw_level();
+    let held = cell.load(core::sync::atomic::Ordering::Acquire);
+    if held >> 24 == lvl as usize {
+        return held & 0x00FF_FFFF;
+    }
+    let value = at(lvl);
+    cell.store(((lvl as usize) << 24) | value, core::sync::atomic::Ordering::Release);
+    value
+}
+
+static CAP_CELLS: [MetricCell; RUNG_TABLE] = [
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+];
+static LINE_CELLS: [MetricCell; RUNG_TABLE] = [
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+];
+static ASCENT_CELLS: [MetricCell; RUNG_TABLE] = [
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+];
+static ROWS_CELLS: [MetricCell; RUNG_TABLE] = [
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+    MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE), MetricCell::new(STALE),
+];
+static NOTICE_RUNG_CELL: MetricCell = MetricCell::new(STALE);
+static NOTICE_BAND_CELL: MetricCell = MetricCell::new(STALE);
+
+/// One rung's metric, walked only when the rung the person chose moved.
+#[inline(always)]
+fn metric(cells: &[MetricCell; RUNG_TABLE], scale: usize, at: fn(usize, u8) -> usize) -> usize {
+    if scale >= RUNG_TABLE {
+        return at(scale, draw_level());
+    }
+    let cell = &cells[scale];
+    let lvl = draw_level();
+    let held = cell.load(core::sync::atomic::Ordering::Acquire);
+    if held >> 24 == lvl as usize {
+        return held & 0x00FF_FFFF;
+    }
+    let value = at(scale, lvl);
+    cell.store(((lvl as usize) << 24) | value, core::sync::atomic::Ordering::Release);
+    value
+}
+
+/// [`cap_at`] in the width the cells carry.
+fn cap_rows_at(scale: usize, lvl: u8) -> usize {
+    cap_at(scale, lvl) as usize
+}
+
+/// The line box a run at `scale` reserves at this app's rung.
+#[inline]
+pub fn run_line(scale: usize) -> usize {
+    metric(&LINE_CELLS, scale, line_at)
+}
+
+/// The rows a run at `scale` can ink at this app's rung.
+#[inline]
+pub fn run_rows(scale: usize) -> usize {
+    metric(&ROWS_CELLS, scale, rows_at)
+}
+
+/// The cap height a run at `scale` is rasterised at, at this app's rung.
+#[inline]
+pub fn run_cap(scale: usize) -> u32 {
+    metric(&CAP_CELLS, scale, cap_rows_at) as u32
+}
+
+/// The ascent a run at `scale` reserves at this app's rung.
+#[inline]
+pub fn run_ascent(scale: usize) -> usize {
+    metric(&ASCENT_CELLS, scale, ascent_at)
+}
+
+/// The rows the caption may ink, and the rung it inks them at.
+#[inline]
+pub fn shutter_notice_rung_live() -> usize {
+    rung_cell(&NOTICE_RUNG_CELL, shutter_notice_rung_at)
+}
+
+/// The band the stepped caption reserves, clamped to the room the dock holds.
+#[inline]
+pub fn shutter_notice_band() -> usize {
+    rung_cell(&NOTICE_BAND_CELL, |lvl| {
+        rows_at(shutter_notice_rung_at(lvl), lvl).min(SHUTTER_NOTICE_ROOM)
+    })
+}
+
+/// The rung this process draws at: the level `publish_text_scale` handed the
+/// renderer from `display.text_scale`, clamped by [`UserTextScale::from_u8`] to
+/// the ladder's largest selectable rung.
+///
+/// WHY no further downward clamp: every control the camera drops on the fixed
+/// 1440-row panel is either chrome of a fixed height -- a 48-row capsule, the
+/// shutter's disc, the dock strip -- whose label the renderer steps down with
+/// [`fit_rung`], or a stack that grows inside a bound the ladder never overruns:
+/// the status card is centred on a 680-row letterbox and its tallest derived
+/// stand is 202 rows, and the settings sheet paginates, so a taller plate turns
+/// a page rather than running under the mode strip. The panel answers every
+/// selectable rung, so the person's rung is drawn as asked and nothing gives.
+#[inline]
+pub fn draw_level() -> u8 {
+    interos_std::design::font::user_text_scale()
+}
+
+/// The same value the geometry helpers below read.
+#[inline]
+fn level() -> u8 {
+    draw_level()
+}
+
+// WHY checked here: the derivations above are only a faithful restatement of the
+// ladder if every rung answers the platform's own number at the platform's level.
+const _: () = assert!(rows_at(theme::typography::BODY_SCALE, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, theme::typography::BODY_SCALE).1);
+const _: () = assert!(rows_at(theme::typography::CAPTION_SCALE, PLATFORM_LEVEL)
+    == interos_std::design::outline_text::row_band(0, theme::typography::CAPTION_SCALE).1);
+const _: () = assert!(line_at(theme::typography::BODY_SCALE, PLATFORM_LEVEL)
+    == interos_std::design::font::line_height(theme::typography::BODY_SCALE));
+const _: () = assert!(cap_at(theme::typography::BODY_SCALE, PLATFORM_LEVEL)
+    == interos_std::design::font::cap_for_scale(theme::typography::BODY_SCALE));
+const _: () = assert!(ascent_at(theme::typography::BODY_SCALE, PLATFORM_LEVEL)
+    == interos_std::design::font::ascent_for_scale(theme::typography::BODY_SCALE));
+
+// WHY swept: the rung step-down is the half of this change that keeps a raised
+// rung from spilling a fixed plate's ink, so it is checked against every level a
+// renderer can be handed -- the rung it answers never drops below the ladder's
+// smallest, and at the authored level every wanted rung stands unchanged (a fixed
+// plate that held its rung at one hundred per cent still holds it, so adopting the
+// setting moves no pixel for a reader who never raised it).
+const _: () = assert!(fit_rung_holds_at_every_level());
+const fn fit_rung_holds_at_every_level() -> bool {
+    // The body rung a 48-row capsule, the shutter's disc and the dock strip carry.
+    let want = theme::typography::BODY_SCALE;
+    // The authored strip every fixed plate holds it at one hundred per cent.
+    let authored = rows_at(want, PLATFORM_LEVEL);
+    let mut level = 0;
+    while level <= MAX_LEVEL as usize {
+        let lvl = level as u8;
+        // Never below the smallest rung.
+        if fit_rung_at(want, authored, lvl) < MIN_RUNG {
+            return false;
+        }
+        // The rung only ever steps down, never up past what was asked.
+        if fit_rung_at(want, authored, lvl) > want {
+            return false;
+        }
+        // At the authored level the wanted rung stands: the plate was drawn to
+        // hold it, so `line_at(want, PLATFORM) <= authored`.
+        if lvl == PLATFORM_LEVEL && fit_rung_at(want, authored, lvl) != want {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+
+/// WHY swept: a plate that shrinks at Compact or a box that runs backwards at
+/// Extra Large is invisible to an assertion written at the authored level alone.
+const _: () = assert!(rows_monotone_up_to_max_level());
+const fn rows_monotone_up_to_max_level() -> bool {
+    let rungs = [
+        theme::typography::CAPTION_SCALE,
+        theme::typography::BODY_SCALE,
+        theme::typography::SECTION_SCALE,
+    ];
+    let mut rung = 0;
+    while rung < rungs.len() {
+        let scale = rungs[rung];
+        let mut level = 1usize;
+        while level <= MAX_LEVEL as usize {
+            if rows_at(scale, level as u8) < rows_at(scale, (level - 1) as u8) {
+                return false;
+            }
+            level += 1;
+        }
+        rung += 1;
+    }
+    true
 }
 
 /// The byte offset a notice's reason splits at, so neither half loses a word.
@@ -574,12 +1103,13 @@ pub fn centred_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usiz
 /// wider than the column has no boundary to break at and is returned whole --
 /// the gate over the verdicts is what keeps that case from being reachable.
 pub fn notice_break(text: &[u8], column: usize, scale: usize) -> usize {
-    if std::design::font::measure(text, scale) <= column {
+    let lvl = draw_level();
+    if run_w_at(text, scale, lvl) <= column {
         return text.len();
     }
     let mut split = 0usize;
     for (index, byte) in text.iter().enumerate() {
-        if *byte == b' ' && std::design::font::measure(&text[..index], scale) <= column {
+        if *byte == b' ' && run_w_at(&text[..index], scale, lvl) <= column {
             split = index;
         }
     }
@@ -1146,7 +1676,7 @@ impl CameraApp {
         self.shutter_notice_len = len;
         self.shutter_notice_x = centred_x(
             &self.shutter_notice[..len],
-            SHUTTER_NOTICE_SCALE,
+            shutter_notice_rung(),
             VIEWFINDER_LEFT,
             SHUTTER_NOTICE_MAX_W,
         );
@@ -1209,24 +1739,69 @@ impl CameraApp {
             return None;
         }
         let text = &self.shutter_notice[..self.shutter_notice_len];
-        let (bx, bt, bw, bh) = std::design::outline_text::run_box(
-            self.shutter_notice_x,
-            SHUTTER_NOTICE_Y,
-            SHUTTER_NOTICE_SCALE,
-            text,
-        );
-        if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
-            return None;
+        let rung = shutter_notice_rung();
+        let lvl = draw_level();
+        if lvl == PLATFORM_LEVEL {
+            let (bx, bt, bw, bh) = std::design::outline_text::run_box(
+                self.shutter_notice_x,
+                SHUTTER_NOTICE_Y,
+                rung,
+                text,
+            );
+            if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
+                return None;
+            }
+            let run = std::design::outline_text::place_run(
+                self.shutter_notice_x,
+                SHUTTER_NOTICE_Y,
+                rung,
+                text,
+                Some(SHUTTER_NOTICE_MAX_W),
+                false,
+            )?;
+            return run.pixel(x, y, ink, bg);
         }
-        let run = std::design::outline_text::place_run(
+        // The caption at the rung the strip holds, inked at the level the person
+        // chose: the outline face at the rung's cap height, the bitmap face filling
+        // in when the outline refuses, and the band grown to the rung so a raised
+        // level's descenders are not cut by the authored box. WHY the band is asked
+        // from [`shutter_notice_band`] and not from the rung's own rows: the room is
+        // the plate, and at Extra Large the floor rung's band is one row deeper than
+        // it -- refused here, so no caption ink ever reaches the ring's edge.
+        let cap = run_cap(rung);
+        let band = shutter_notice_band();
+        if let Some(run) = std::design::outline_text::place_run_cap(
             self.shutter_notice_x,
             SHUTTER_NOTICE_Y,
-            SHUTTER_NOTICE_SCALE,
+            cap,
             text,
             Some(SHUTTER_NOTICE_MAX_W),
             false,
-        )?;
-        run.pixel(x, y, ink, bg)
+        ) {
+            let (rx, rtop, rw, rh) = run.bounds();
+            if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh && y < SHUTTER_NOTICE_Y + band {
+                return run.pixel(x, y, ink, bg);
+            }
+            return None;
+        }
+        if x >= self.shutter_notice_x
+            && x < self.shutter_notice_x + SHUTTER_NOTICE_MAX_W
+            && y >= SHUTTER_NOTICE_Y
+            && y < SHUTTER_NOTICE_Y + band
+        {
+            return interos_std::design::monochrome::text_px(
+                x,
+                y,
+                self.shutter_notice_x,
+                SHUTTER_NOTICE_Y,
+                cap,
+                text,
+                ink,
+                bg,
+                false,
+            );
+        }
+        None
     }
 
     /// The label the capture readout carries.

@@ -406,9 +406,18 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # `tests/test_music_truth_contract.py` and
 # `tests/test_launcher_dirty_band_contract.py` are the files that say how far each
 # is carried.
+# `camera` carries the rung through its viewfinder chrome: the status card, the
+# settings sheet's plates and pagination, the record chip's readout, the capsule
+# labels and the shutter's refusal caption are each derived from the rung the
+# renderer was handed, and a painted box, its label's plate and its tap band come
+# from the same one. The refusal caption is the one place the panel cannot hold the
+# rung it is asked for: its room is the strip between the dock's top edge and the
+# shutter's ring, 43 rows, and the body rung stands 59 at Extra Large, so the
+# caption steps down there rather than inking the ring.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
     "calculator": "publish_text_scale",
+    "camera": "publish_text_scale",
     "calendar": "publish_text_scale",
     "dialer": "publish_text_scale",
     "file_manager": "publish_text_scale",
@@ -433,7 +442,6 @@ RUNG_AWARE_APPS = {
 # platform rung whatever the person chose.
 RUNG_BLIND_APPS = {
     "browser",
-    "camera",
     "vault",
 }
 
