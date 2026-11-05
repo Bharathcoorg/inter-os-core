@@ -49,9 +49,9 @@ use file_manager::{
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
     validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap,
     FileAction,
-    IndexedDocument, LayoutMode, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
+    IndexedDocument, LayoutMode, MAX_DETAILS_LINES, MAX_PATH_LEN, MAX_SEARCH_RESULTS, OpProblem,
     SearchScope, Selection, SortMode, TypedField, ViewMode, ACTION_BAR_Y0, ACTION_BAR_Y1,
-    ACTION_LABELS, ACTION_SLOT_W, BREADCRUMB_SCALE,
+    ACTION_LABELS, BREADCRUMB_SCALE,
     CATEGORY_CAPTION_SCALE, CATEGORY_COUNT, CATEGORY_FIRST_LABEL_DY, CATEGORY_LABEL_LANE,
     CATEGORY_LABEL_SCALE, CATEGORY_LABEL_X, CATEGORY_OTHER_LABEL_DY, CATEGORY_ROW_X1,
     CRUMB_ROW_X0, CRUMB_ROW_X1,
@@ -70,7 +70,7 @@ use file_manager::{
     PANEL_CONTENT_X1,
     SCOPE_CAPTION_MAX_W, SCOPE_CAPTION_SCALE, SCOPE_TEXT_X,
     SEARCH_TEXT_LANE, SEARCH_TEXT_SCALE, SEARCH_TEXT_X,
-    SHEET, SHEET_NAME_LIST_SCALE, SHEET_DEST_SLOT_W, SHEET_TITLE_SCALE,
+    SHEET, SHEET_NAME_LIST_SCALE, SHEET_TITLE_SCALE,
     STATUS_LANE, STATUS_SCALE, STATUS_TEXT_X,
     // The same boxes, derived at the rung the person chose. Every paint site and
     // every hit test below asks one of these, so the rectangle the app inks is
@@ -253,82 +253,6 @@ const DISABLED: u32 = THEME.border;
 // -----------------------------------------------------------------------------
 // Rasterisers
 // -----------------------------------------------------------------------------
-
-/// Inks one text run's pixel at `(x, y)`, at the rung this app draws at.
-///
-/// `bg` is the fill the run is drawn on top of, because the anti-aliased glyph
-/// edges are blended toward what is actually under them.
-///
-/// WHY the outline face comes first: the title is drawn at the section rung and
-/// the headings at the body rung, so on the bitmap face both are a cell magnified
-/// by an integer -- a soft ramp where an edge belongs.
-///
-/// WHY the band comes from the model's `rows_at` and not from `line_height`:
-/// `rows_at` is [`outline_text::row_band`]'s union of the outline line box and the
-/// bitmap cell, asked at the rung the plate was sized from. A run inked at one
-/// rung inside a band answered at another is the defect every gate in the library
-/// exists to refuse, and the library's identity checks say the two answers are
-/// the same number at the level the app was authored at -- so the ladder path
-/// below re-points the draw site without moving a pixel.
-#[inline(always)]
-fn ink_run(
-    x: usize,
-    y: usize,
-    x0: usize,
-    y0: usize,
-    scale: usize,
-    text: &[u8],
-    color: u32,
-    bg: u32,
-) -> Option<u32> {
-    if scale == 0 || text.is_empty() {
-        return None;
-    }
-    let lvl = draw_level();
-    if lvl == PLATFORM_LEVEL {
-        // The ladder's own path, unchanged.
-        let band_bottom = outline_text::row_band(y0, scale).1;
-        if y < y0 || y >= band_bottom {
-            return None;
-        }
-        if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
-            return run.pixel(x, y, color, bg);
-        }
-        return font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false);
-    }
-    let cap = cap_at(scale, lvl);
-    if let Some(run) = outline_text::place_run_cap(x0, y0, cap, text, None, false) {
-        let (rx, rtop, rw, rh) = run.bounds();
-        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
-            return run.pixel(x, y, color, bg);
-        }
-        return None;
-    }
-    // The bitmap face, at the rung it is asked for. WHY the band grows with the
-    // level: a run fitted to a scaled em walks taller than the unscaled cell, so
-    // the ladder's band would cut the descenders of the very run it enlarged.
-    if y >= y0 && y < y0 + rows_at(scale, lvl) {
-        return std::design::monochrome::text_px(x, y, x0, y0, cap, text, color, bg, false);
-    }
-    None
-}
-
-#[inline(always)]
-fn test_text(
-    x: usize,
-    y: usize,
-    x0: usize,
-    y0: usize,
-    scale: usize,
-    text: &[u8],
-    color: u32,
-    bg: u32,
-) -> Option<u32> {
-    if x < x0 || x >= W {
-        return None;
-    }
-    ink_run(x, y, x0, y0, scale, text, color, bg)
-}
 
 #[inline(always)]
 fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
@@ -2096,12 +2020,272 @@ struct HomeFrame {
     note2: PlacedRun,
 }
 
+/// A control the pass paints with `draw_pill`: its plate, its state's colours,
+/// and the run centred on the plate.
+#[derive(Clone, Copy)]
+struct Pill {
+    rect: Rect,
+    fill: u32,
+    ring: Option<u32>,
+    label: PlacedRun,
+}
+
+impl Pill {
+    /// This control's pixel, or `None` for a pixel it does not answer.
+    ///
+    /// The three answers are the ones the per-pixel painter gave: the label's ink
+    /// where it reaches, the plate across the rest of the box, and nothing at all
+    /// for a pixel inside the box but outside its corner arc, which falls through
+    /// to whatever stands behind the control.
+    #[inline(always)]
+    fn pixel(&self, x: usize, y: usize) -> Option<u32> {
+        if !self.rect.contains(x, y) {
+            return None;
+        }
+        let base = draw_pill(x, y, self.rect, self.fill, self.ring)?;
+        Some(self.label.pixel(x, y).unwrap_or(base))
+    }
+
+    /// A scope or toolbar chip.
+    ///
+    /// WHY the ring is the strong outline and not `THEME.border`: `border` is
+    /// #E5E5E5, 1.08:1 against this chip's own #EFEEE9 fill and 1.21:1 against the
+    /// #FAFAFA page it stands on, so the edge said nothing and the chip itself was
+    /// only 1.11:1 off the page -- an invisible control with a label on it.
+    /// `outline` is #0A0A0A: 17.04:1 on the chip and 18.97:1 on the page, the same
+    /// role the platform's own back chip takes for the same reason. A selected pill
+    /// is the page's opposite (#0A0A0A, 18.97:1 on the page), so it needs no edge.
+    fn chip(rect: Rect, label: &[u8], selected: bool) -> Pill {
+        let (fill, ink, ring) = if selected {
+            (THEME.inverted_surface(), THEME.on_inverted_surface(), None)
+        } else {
+            (
+                THEME.surface_container_high,
+                THEME.on_surface,
+                Some(CONTROL_OUTLINE),
+            )
+        };
+        Pill {
+            rect,
+            fill,
+            ring,
+            label: plate_label(label, rect, ink, fill),
+        }
+    }
+
+    /// An action bar slot, whose third state -- the one a person cannot take --
+    /// keeps a boundary that still reads as quiet: the muted ink, 5.11:1 against
+    /// the page it sits on, because a disabled slot's fill *is* the page.
+    fn action(app: &FileManagerApp, slot: usize) -> Pill {
+        let rect = action_slot_rect(slot);
+        let (label, enabled, selected) = action_slot_state(app, slot);
+        let (fill, ink, ring) = if selected {
+            (THEME.inverted_surface(), THEME.on_inverted_surface(), None)
+        } else if enabled {
+            (
+                THEME.surface_container_high,
+                THEME.on_surface,
+                Some(CONTROL_OUTLINE),
+            )
+        } else {
+            (THEME.surface, THEME.muted, Some(THEME.muted))
+        };
+        Pill {
+            rect,
+            fill,
+            ring,
+            label: plate_label(label, rect, ink, fill),
+        }
+    }
+}
+
+/// A control the pass paints with `draw_rounded_rect` on top of a card: its plate,
+/// its colours, and the run on the plate.
+#[derive(Clone, Copy)]
+struct Button {
+    rect: Rect,
+    radius: usize,
+    fill: u32,
+    border: Option<u32>,
+    border_w: usize,
+    label: PlacedRun,
+}
+
+impl Button {
+    const EMPTY: Button = Button {
+        rect: Rect::new(0, 0, 0, 0),
+        radius: 0,
+        fill: 0,
+        border: None,
+        border_w: 0,
+        label: PlacedRun::EMPTY,
+    };
+
+    /// This control's pixel over the card's own `base`, and `None` outside its box.
+    ///
+    /// A control the state refuses is `EMPTY`, so its box answers no pixel and the
+    /// card shows where it would have stood; a pixel inside the box but outside its
+    /// corner arc answers the card, which is what the painter answered once the
+    /// control's own plate refused.
+    #[inline(always)]
+    fn pixel(&self, x: usize, y: usize, base: u32) -> Option<u32> {
+        if !self.rect.contains(x, y) {
+            return None;
+        }
+        let Some(plate) =
+            draw_rounded_rect(x, y, self.rect, self.radius, self.fill, self.border, self.border_w)
+        else {
+            return Some(base);
+        };
+        Some(self.label.pixel(x, y).unwrap_or(plate))
+    }
+
+    /// A button standing on a `Raised` card.
+    ///
+    /// WHY the primary one has no edge: near-black on the raised card is 17.04:1 by
+    /// itself. WHY the secondary one moved off `surface_container_high`: the card is
+    /// painted with that very token, so the button was #EFEEE9 on #EFEEE9 -- 1.00:1,
+    /// borderless, and only its word on screen. It takes the platform's resting white
+    /// (1.16:1 against the card) and the theme's strong outline (17.04:1).
+    fn on_card(rect: Rect, label: &[u8], primary: bool) -> Button {
+        let (fill, border, ink) = if primary {
+            (THEME.primary, None, THEME.on_primary)
+        } else {
+            (
+                RAISED_CONTROL_FILL,
+                Some(CONTROL_OUTLINE),
+                THEME.on_surface,
+            )
+        };
+        Button {
+            rect,
+            radius: THEME.radii.control,
+            fill,
+            border,
+            border_w: usize::from(border.is_some()),
+            label: plate_label(label, rect, ink, fill),
+        }
+    }
+}
+
+/// A control's label, cut to the plate it stands on and centred inside it.
+///
+/// WHY once for the pass rather than once per pixel: `fitted_run` measures a run one
+/// advance at a time and `centered_x` asks the ladder what it just measured, so every
+/// pixel standing anywhere on the control re-measured the whole word it could not
+/// even be on.
+fn plate_label(label: &[u8], rect: Rect, ink: u32, bg: u32) -> PlacedRun {
+    let mut buf = [0u8; LINE_LEN];
+    let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut buf);
+    let x = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
+    let y = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
+    place(x, y, LABEL_RUNG, shown, ink, bg)
+}
+
+/// One breadcrumb: its run, and the separator that follows it in its own ink.
+#[derive(Clone, Copy)]
+struct CrumbInk {
+    run: PlacedRun,
+    sep: PlacedRun,
+}
+
+impl CrumbInk {
+    const EMPTY: CrumbInk = CrumbInk {
+        run: PlacedRun::EMPTY,
+        sep: PlacedRun::EMPTY,
+    };
+}
+
+/// The details card, as the pass draws it.
+#[derive(Clone, Copy)]
+struct DetailsFrame {
+    rect: Rect,
+    radius: usize,
+    fill: u32,
+    border: Option<u32>,
+    title: PlacedRun,
+    line_count: usize,
+    lines: [PlacedRun; MAX_DETAILS_LINES],
+    open: Button,
+    close: Button,
+}
+
+/// The confirmation sheet, as the pass draws it.
+#[derive(Clone, Copy)]
+struct SheetFrame {
+    rect: Rect,
+    radius: usize,
+    fill: u32,
+    border: Option<u32>,
+    title: PlacedRun,
+    name_count: usize,
+    names: [PlacedRun; 3],
+    destinations: [Button; CATEGORY_COUNT],
+    name_field: Button,
+    cancel: Button,
+    confirm: Button,
+}
+
+/// The browse screen, as the pass draws it.
+#[derive(Clone, Copy)]
+struct BrowseFrame {
+    field: Rect,
+    field_radius: usize,
+    field_fill: u32,
+    magnifier_x: usize,
+    magnifier_y: usize,
+    clear: Rect,
+    clear_x: usize,
+    clear_y: usize,
+    show_clear: bool,
+    query: PlacedRun,
+    scope_y0: usize,
+    scope_y1: usize,
+    /// Where the caption's own column ends: the first scope pill's left edge.
+    scope_x1: usize,
+    scope_caption: PlacedRun,
+    scope_pills: [Pill; 2],
+    crumb_y0: usize,
+    crumb_y1: usize,
+    crumb_count: usize,
+    crumbs: [CrumbInk; 6],
+    toolbar: [Pill; 3],
+    card: Rect,
+    card_radius: usize,
+    card_fill: u32,
+    card_border: Option<u32>,
+    empty: bool,
+    /// The row the folder pictogram above the empty-card headline stands on.
+    glyph_y: isize,
+    headline: PlacedRun,
+    subline: PlacedRun,
+    status_y0: usize,
+    status_y1: usize,
+    status: PlacedRun,
+    slots: [Pill; 7],
+    details: Option<DetailsFrame>,
+    sheet: Option<SheetFrame>,
+}
+
+/// The screen below the header, with the layout it draws already resolved.
+#[derive(Clone, Copy)]
+enum Screen {
+    Home(HomeFrame),
+    Browse(BrowseFrame),
+}
+
 /// The pass's answers, from the header down.
 #[derive(Clone, Copy)]
 struct Frame {
     header: HeaderFrame,
-    home: Option<HomeFrame>,
+    screen: Screen,
 }
+
+// WHY a budget and not a shrug: the frame carries every run the screen inks, and a
+// run carries its own text, so this is the largest object an app stack ever holds.
+// The task's user stack is 256 KiB; the pass getting near this line is the pass that
+// needs its runs cut down, not the stack raised.
+const _: () = assert!(core::mem::size_of::<Frame>() < 48 * 1024);
 
 fn build_frame(app: &FileManagerApp) -> Frame {
     let title = place(
@@ -2164,9 +2348,9 @@ fn build_frame(app: &FileManagerApp) -> Frame {
             line1,
             line2,
         },
-        home: match app.view {
-            ViewMode::Home => Some(build_home_frame(app)),
-            ViewMode::Browse => None,
+        screen: match app.view {
+            ViewMode::Home => Screen::Home(build_home_frame(app)),
+            ViewMode::Browse => Screen::Browse(build_browse_frame(app)),
         },
     }
 }
@@ -2417,6 +2601,388 @@ fn build_home_frame(app: &FileManagerApp) -> HomeFrame {
     }
 }
 
+/// The browse screen's layout, resolved once for the pass.
+///
+/// WHY the whole screen is resolved here and not in the pixel function: this chrome
+/// is a score of boxes derived from the ladder -- the field, the scope row, the
+/// breadcrumb strip, three toolbar chips, the card, the status line, seven action
+/// slots -- and each of the ~20 trims and centring calls the painter used to make
+/// *per pixel*. Under the emulator's interpreter a division is a helper call, so the
+/// pass cost 54,692 guest ticks, 61 times the home screen's 889, and a tap on the
+/// home screen's browse control took the better part of a minute to reach scanout.
+/// What is left below is a compare per pixel and, on the pixels that hold ink, one
+/// read of a run the pass already rasterised.
+fn build_browse_frame(app: &FileManagerApp) -> BrowseFrame {
+    // 1. The search field, its magnifier, its clear action and its needle.
+    let field = search_field();
+    let clear = search_clear();
+    let has_query = !app.query.is_empty();
+    let text = if has_query {
+        app.query.as_slice()
+    } else {
+        b"Search this device's documents".as_slice()
+    };
+    let ink = if has_query {
+        THEME.on_surface
+    } else {
+        THEME.on_surface_variant
+    };
+    // The needle is trimmed to the field's own lane -- the column it is typed in,
+    // up to the air before the clear action -- so a long query stays inside the box
+    // the tap handler answers instead of running under the control that clears it.
+    let mut needle = [0u8; LINE_LEN];
+    let shown = fitted_run(text, SEARCH_TEXT_SCALE, SEARCH_TEXT_LANE, &mut needle);
+    let query = place(
+        SEARCH_TEXT_X,
+        field.y + grown(16, SEARCH_TEXT_SCALE, draw_level()),
+        SEARCH_TEXT_SCALE,
+        shown,
+        ink,
+        THEME.surface_container_high,
+    );
+
+    // 2. The search scope caption and its two pills.
+    let scope_this = scope_this_pill();
+    let mut scope_buf = [0u8; LINE_LEN];
+    let scope_shown = fitted_run(
+        &app.scope[..app.scope_len],
+        SCOPE_CAPTION_SCALE,
+        SCOPE_CAPTION_MAX_W,
+        &mut scope_buf,
+    );
+    let scope_caption = place(
+        SCOPE_TEXT_X,
+        scope_y(),
+        SCOPE_CAPTION_SCALE,
+        scope_shown,
+        THEME.on_surface_variant,
+        THEME.surface,
+    );
+
+    // 3. The breadcrumbs. The painted rows are the whole union box the rungs
+    // reserve, centred inside the touch strip beside them, so a crumb is answered
+    // wherever its ink reaches -- and the strip is laid out by `crumb_step`, the
+    // same function the tap handler walks, so a crumb is only inked where it can be
+    // tapped and a run never straddles the strip's edge.
+    let crumb_y0 = crumb_y();
+    let crumb_rows = crumb_rows();
+    let mut crumbs = [CrumbInk::EMPTY; 6];
+    let mut crumb_count = 0usize;
+    {
+        let mut cursor = CRUMB_ROW_X0;
+        for index in 0..app.crumb_count {
+            let crumb = app.crumbs[index];
+            let label =
+                &app.current_path[crumb.label_start..crumb.label_start + crumb.label_len];
+            let last = index + 1 == app.crumb_count;
+            let mut buf = [0u8; MAX_PATH_LEN];
+            let Some(step) = crumb_step(label, cursor, last, &mut buf) else {
+                break;
+            };
+            let ink = if last {
+                THEME.on_surface
+            } else {
+                THEME.primary
+            };
+            let run = place(
+                step.x,
+                crumb_y0,
+                BREADCRUMB_SCALE,
+                &buf[..step.len],
+                ink,
+                THEME.surface,
+            );
+            let sep = step
+                .sep_x
+                .map(|x| {
+                    place(
+                        x,
+                        crumb_y0,
+                        BREADCRUMB_SCALE,
+                        CRUMB_SEP,
+                        THEME.on_surface_variant,
+                        THEME.surface,
+                    )
+                })
+                .unwrap_or(PlacedRun::EMPTY);
+            crumbs[index] = CrumbInk { run, sep };
+            crumb_count += 1;
+            cursor = step.next_x;
+        }
+    }
+
+    // 5. The details card and 6. the confirmation sheet, each over the entries card.
+    let details = app.has_details.then(|| build_details_frame(app));
+    let sheet = app.has_pending.then(|| build_sheet_frame(app));
+
+    // 7. The entries card, and the two runs that explain it when it holds nothing.
+    let card = entries_card();
+    let style = components::card_style(&THEME, components::Elevation::Resting);
+    let empty = app.card_item_count() == 0;
+    let (headline, subline, headline_ink): (&[u8], &[u8], u32) = if empty {
+        if app.searching {
+            if app.search_error != 0 {
+                (
+                    b"Search Unavailable",
+                    b"The device refused the search; see the status line",
+                    THEME.warning,
+                )
+            } else {
+                (
+                    b"No Matches",
+                    b"The index holds no document with that name",
+                    THEME.on_surface,
+                )
+            }
+        } else {
+            match app.listing_state {
+                ListingState::Refused => (
+                    b"Directory Unreadable",
+                    b"The device refused to list this directory",
+                    THEME.warning,
+                ),
+                ListingState::NotListed => (
+                    b"Not Listed Yet",
+                    b"This directory has not been listed",
+                    THEME.on_surface_variant,
+                ),
+                _ => (
+                    b"Directory Empty",
+                    b"This directory holds no entries",
+                    THEME.on_surface,
+                ),
+            }
+        }
+    } else {
+        (b"", b"", THEME.on_surface)
+    };
+    // The card's two runs are cut to the card's own lane before they are centred: an
+    // explanation of why nothing is listed that leaves the card is worse than no
+    // explanation, and the gate beside `EMPTY_CARD_LANE` is what says the platform's
+    // own refusals fit.
+    let empty_headline_y = empty_headline_y();
+    let mut headline_buf = [0u8; LINE_LEN];
+    let headline_shown =
+        fitted_run(headline, EMPTY_HEADLINE_SCALE, EMPTY_CARD_LANE, &mut headline_buf);
+    let headline = place(
+        centered_x(headline_shown, EMPTY_HEADLINE_SCALE, card.x, card.w),
+        empty_headline_y,
+        EMPTY_HEADLINE_SCALE,
+        headline_shown,
+        headline_ink,
+        style.fill,
+    );
+    let mut subline_buf = [0u8; LINE_LEN];
+    let subline_shown =
+        fitted_run(subline, EMPTY_SUBLINE_SCALE, EMPTY_CARD_LANE, &mut subline_buf);
+    let subline = place(
+        centered_x(subline_shown, EMPTY_SUBLINE_SCALE, card.x, card.w),
+        empty_subline_y(),
+        EMPTY_SUBLINE_SCALE,
+        subline_shown,
+        THEME.on_surface_variant,
+        style.fill,
+    );
+
+    // 8. The status line.
+    let mut status_buf = [0u8; LINE_LEN];
+    let status_shown = if app.status_len > 0 {
+        fitted_run(
+            &app.status[..app.status_len],
+            STATUS_SCALE,
+            STATUS_LANE,
+            &mut status_buf,
+        )
+    } else {
+        b"".as_slice()
+    };
+    let status = place(
+        STATUS_TEXT_X,
+        status_y(),
+        STATUS_SCALE,
+        status_shown,
+        THEME.on_surface_variant,
+        THEME.surface,
+    );
+
+    BrowseFrame {
+        field,
+        field_radius: THEME.radii.control,
+        field_fill: THEME.surface_container_high,
+        magnifier_x: field.x + 28,
+        magnifier_y: field.y + search_glyph_dy(),
+        clear,
+        clear_x: clear.x + clear.w / 2,
+        clear_y: clear.y + clear.h / 2,
+        show_clear: has_query,
+        query,
+        scope_y0: scope_y(),
+        scope_y1: scope_row_y1(),
+        scope_x1: scope_this.x,
+        scope_caption,
+        scope_pills: [
+            Pill::chip(scope_this, SearchScope::ThisFolder.label(), app.search_scope == SearchScope::ThisFolder),
+            Pill::chip(scope_all_pill(), SearchScope::AllStorage.label(), app.search_scope == SearchScope::AllStorage),
+        ],
+        crumb_y0,
+        crumb_y1: crumb_y0 + crumb_rows,
+        crumb_count,
+        crumbs,
+        toolbar: [
+            Pill::chip(toolbar_pill(0), &app.sort_label[..app.sort_label_len], false),
+            Pill::chip(toolbar_pill(1), LayoutMode::List.label(), app.layout == LayoutMode::List),
+            Pill::chip(toolbar_pill(2), LayoutMode::Grid.label(), app.layout == LayoutMode::Grid),
+        ],
+        card,
+        card_radius: style.radius,
+        card_fill: style.fill,
+        card_border: style.border,
+        empty,
+        glyph_y: empty_headline_y as isize - 53,
+        headline,
+        subline,
+        status_y0: status_y(),
+        status_y1: status_y() + status_rows(),
+        status,
+        slots: [
+            Pill::action(app, 0),
+            Pill::action(app, 1),
+            Pill::action(app, 2),
+            Pill::action(app, 3),
+            Pill::action(app, 4),
+            Pill::action(app, 5),
+            Pill::action(app, 6),
+        ],
+        details,
+        sheet,
+    }
+}
+
+/// The details card, with the handler it names already decided.
+fn build_details_frame(app: &FileManagerApp) -> DetailsFrame {
+    let dcard = details_card();
+    let style = components::card_style(&THEME, components::Elevation::Raised);
+    let title = place(
+        dcard.x + DETAILS_INSET,
+        details_title_y(),
+        DETAILS_TITLE_SCALE,
+        app.details.title_str().as_bytes(),
+        THEME.on_surface,
+        style.fill,
+    );
+    let mut lines = [PlacedRun::EMPTY; MAX_DETAILS_LINES];
+    for index in 0..app.details.line_count {
+        lines[index] = place(
+            dcard.x + DETAILS_INSET,
+            details_line_y(index),
+            DETAILS_LINE_SCALE,
+            &app.details.lines[index][..app.details.line_lens[index]],
+            if index == 3 && !app.details.has_handler {
+                THEME.warning
+            } else {
+                THEME.on_surface_variant
+            },
+            style.fill,
+        );
+    }
+    // WHY the button is absent rather than greyed out: a button that opens nothing
+    // is a promise the device cannot keep. The card names the missing handler in its
+    // own line, so the reason is still on the screen.
+    let open_offered = app.details.is_dir || app.details.has_handler;
+    DetailsFrame {
+        rect: dcard,
+        radius: style.radius,
+        fill: style.fill,
+        border: style.border,
+        title,
+        line_count: app.details.line_count,
+        lines,
+        open: open_offered.then(|| Button::on_card(details_open(), b"Open", true)).unwrap_or(Button::EMPTY),
+        close: Button::on_card(details_close(), b"Close", false),
+    }
+}
+
+/// The confirmation sheet, in the state the pending action puts it in.
+fn build_sheet_frame(app: &FileManagerApp) -> SheetFrame {
+    let sheet = sheet();
+    let style = components::card_style(&THEME, components::Elevation::Raised);
+    let title = place(
+        sheet.x + 20,
+        sheet_title_y(),
+        SHEET_TITLE_SCALE,
+        &app.sheet_title[..app.sheet_title_len],
+        THEME.on_surface,
+        style.fill,
+    );
+    let mut names = [PlacedRun::EMPTY; 3];
+    for index in 0..app.sheet_name_count {
+        names[index] = place(
+            sheet.x + 20,
+            sheet_name_line_y(index),
+            SHEET_NAME_LIST_SCALE,
+            &app.sheet_names[index][..app.sheet_name_lens[index]],
+            THEME.on_surface_variant,
+            style.fill,
+        );
+    }
+    let choosing = app.pending.action == FileAction::Copy || app.pending.action == FileAction::Move;
+    let destinations = if choosing {
+        [
+            Button::on_card(sheet_destination_rect(0), CATEGORY_LABELS[0], app.destination == 0),
+            Button::on_card(sheet_destination_rect(1), CATEGORY_LABELS[1], app.destination == 1),
+            Button::on_card(sheet_destination_rect(2), CATEGORY_LABELS[2], app.destination == 2),
+            Button::on_card(sheet_destination_rect(3), CATEGORY_LABELS[3], app.destination == 3),
+        ]
+    } else {
+        [Button::EMPTY; CATEGORY_COUNT]
+    };
+    // WHY the plate has an edge: its old fill was `surface_container_high`, which is
+    // what the `Raised` sheet is painted with -- #EFEEE9 on #EFEEE9, 1.00:1, and no
+    // border at all. The place to type a name had no bounds, and one of the two
+    // states of this sheet (the state that asks you to edit text) was a bare word on
+    // the panel. It takes the same treatment as the sheet's secondary buttons: the
+    // platform's resting white (1.16:1 against the sheet) ringed with the theme's
+    // strong outline (17.04:1 against the sheet), so the typed run reads at 18.97:1
+    // instead of 17.04:1. The radius stays 0 and the run keeps its own inset: the
+    // rectangle, the label's position and the tap target are the ones the sheet
+    // already answers, and only the colours move.
+    let renaming =
+        app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder;
+    let name_field = if renaming {
+        let rect = Rect::new(SHEET.x + 20, sheet_name_y(), SHEET.w - 40, sheet_name_h());
+        Button {
+            rect,
+            radius: 0,
+            fill: RAISED_CONTROL_FILL,
+            border: Some(CONTROL_OUTLINE),
+            border_w: 1,
+            label: place(
+                rect.x + 12,
+                rect.y + grown(12, SEARCH_TEXT_SCALE, draw_level()),
+                SEARCH_TEXT_SCALE,
+                app.rename_field.as_slice(),
+                THEME.on_surface,
+                RAISED_CONTROL_FILL,
+            ),
+        }
+    } else {
+        Button::EMPTY
+    };
+    SheetFrame {
+        rect: sheet,
+        radius: style.radius,
+        fill: style.fill,
+        border: style.border,
+        title,
+        name_count: app.sheet_name_count,
+        names,
+        destinations,
+        name_field,
+        cancel: Button::on_card(sheet_button_rect(false), b"Cancel", false),
+        confirm: Button::on_card(sheet_button_rect(true), b"Confirm", true),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Pixel colour resolution
 // -----------------------------------------------------------------------------
@@ -2439,9 +3005,9 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp, frame: &Fram
     if y < frame.header.h {
         return header_color(x, y, &frame.header);
     }
-    match &frame.home {
-        Some(home) => home_color(x, y, home),
-        None => browse_color(x, y, app),
+    match &frame.screen {
+        Screen::Home(home) => home_color(x, y, home),
+        Screen::Browse(browse) => browse_color(x, y, browse),
     }
 }
 
@@ -2665,322 +3231,132 @@ fn home_color(x: usize, y: usize, frame: &HomeFrame) -> u32 {
 }
 
 /// The browse screen.
-fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
+fn browse_color(x: usize, y: usize, frame: &BrowseFrame) -> u32 {
     // 1. The search field and its clear action.
-    let field = search_field();
-    if (field.y..field.y + field.h).contains(&y)
-        && x >= field.x
-        && x < field.x + field.w
-    {
-        let field_fill = THEME.surface_container_high;
+    if frame.field.contains(x, y) {
         // WHY the outline: `border` (#E5E5E5) is 1.08:1 against this field's own
-        // #EFEEE9 fill and 1.21:1 against the page, and the fill is 1.11:1 off
-        // the page, so the search field had no visible bounds. `outline`
-        // (#0A0A0A) is 17.04:1 on the field and 18.97:1 on the page; the
-        // magnifier and clear glyphs keep `on_surface_variant` at 6.53:1 on the
-        // fill, above the 3:1 this repo asks of an icon.
+        // #EFEEE9 fill and 1.21:1 against the page, and the fill is 1.11:1 off the
+        // page, so the search field had no visible bounds. `outline` (#0A0A0A) is
+        // 17.04:1 on the field and 18.97:1 on the page; the magnifier and clear
+        // glyphs keep `on_surface_variant` at 6.53:1 on the fill, above the 3:1 this
+        // repo asks of an icon.
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            field,
-            THEME.radii.control,
-            field_fill,
+            frame.field,
+            frame.field_radius,
+            frame.field_fill,
             Some(CONTROL_OUTLINE),
             1,
         ) else {
             return THEME.surface;
         };
-        let clear = search_clear();
-        if !app.query.is_empty() && clear.contains(x, y) {
-            let cx = clear.x + clear.w / 2;
-            let cy = clear.y + clear.h / 2;
-            let dx = x as i32 - cx as i32;
-            let dy = y as i32 - cy as i32;
+        if frame.show_clear && frame.clear.contains(x, y) {
+            let dx = x as i32 - frame.clear_x as i32;
+            let dy = y as i32 - frame.clear_y as i32;
             if dx.abs() <= 6 && dy.abs() <= 6 && (dx.abs() - dy.abs()).abs() <= 2 {
                 return THEME.on_surface_variant;
             }
             return base;
         }
-        let mx = field.x + 28;
-        let my = field.y + search_glyph_dy();
-        let dx = x as i32 - mx as i32;
-        let dy = y as i32 - my as i32;
+        let dx = x as i32 - frame.magnifier_x as i32;
+        let dy = y as i32 - frame.magnifier_y as i32;
         let ring = dx * dx + dy * dy;
         if (ring >= 36 && ring <= 64) || (dx >= 6 && dx <= 11 && dy >= 6 && dy <= 11) {
             return THEME.on_surface_variant;
         }
-        let text = if app.query.is_empty() {
-            b"Search this device's documents".as_slice()
-        } else {
-            app.query.as_slice()
-        };
-        let ink = if app.query.is_empty() {
-            THEME.on_surface_variant
-        } else {
-            THEME.on_surface
-        };
-        // The needle is trimmed to the field's own lane -- the column it is typed
-        // in, up to the air before the clear action -- so a long query stays
-        // inside the box the tap handler answers instead of running under the
-        // control that clears it.
-        let mut needle = [0u8; LINE_LEN];
-        let shown = fitted_run(text, SEARCH_TEXT_SCALE, SEARCH_TEXT_LANE, &mut needle);
-        if let Some(color) = test_text(
-            x,
-            y,
-            SEARCH_TEXT_X,
-            field.y + grown(16, SEARCH_TEXT_SCALE, draw_level()),
-            SEARCH_TEXT_SCALE,
-            shown,
-            ink,
-            field_fill,
-        ) {
+        if let Some(color) = frame.query.pixel(x, y) {
             return color;
         }
-        return field_fill;
+        return frame.field_fill;
     }
 
     // 2. The search scope caption and its two pills.
-    let scope_this = scope_this_pill();
-    if (scope_y()..scope_row_y1()).contains(&y)
+    if (frame.scope_y0..frame.scope_y1).contains(&y)
         && x >= SCOPE_TEXT_X
-        && x < scope_this.x
+        && x < frame.scope_x1
     {
-        let mut buf = [0u8; LINE_LEN];
-        let shown = fitted_run(
-            &app.scope[..app.scope_len],
-            SCOPE_CAPTION_SCALE,
-            SCOPE_CAPTION_MAX_W,
-            &mut buf,
-        );
-        if !shown.is_empty() {
-            if let Some(color) = test_text(
-                x,
-                y,
-                SCOPE_TEXT_X,
-                scope_y(),
-                SCOPE_CAPTION_SCALE,
-                shown,
-                THEME.on_surface_variant,
-                THEME.surface,
-            ) {
-                return color;
-            }
+        if let Some(color) = frame.scope_caption.pixel(x, y) {
+            return color;
         }
         return THEME.surface;
     }
-    if let Some(color) = pill_color(
-        x,
-        y,
-        scope_this,
-        SearchScope::ThisFolder.label(),
-        app.search_scope == SearchScope::ThisFolder,
-    ) {
-        return color;
-    }
-    if let Some(color) = pill_color(
-        x,
-        y,
-        scope_all_pill(),
-        SearchScope::AllStorage.label(),
-        app.search_scope == SearchScope::AllStorage,
-    ) {
-        return color;
+    for pill in &frame.scope_pills {
+        if let Some(color) = pill.pixel(x, y) {
+            return color;
+        }
     }
 
     // 3. The breadcrumbs. The painted rows are the whole union box the rungs
     // reserve, centred inside the touch strip beside them, so a crumb is
-    // answered wherever its ink reaches -- and the row is laid out by
-    // `crumb_step`, the same function the tap handler walks, so a crumb is only
-    // inked where it can be tapped and a run never straddles the strip's edge.
-    let crumb_top = crumb_y();
-    if (crumb_top..crumb_top + crumb_rows()).contains(&y)
+    // answered wherever its ink reaches -- and the strip the frame holds was laid
+    // out by `crumb_step`, the same function the tap handler walks, so a crumb is
+    // only inked where it can be tapped and a run never straddles the strip's edge.
+    if (frame.crumb_y0..frame.crumb_y1).contains(&y)
         && (CRUMB_ROW_X0..CRUMB_ROW_X1).contains(&x)
     {
-        let mut cursor = CRUMB_ROW_X0;
-        for index in 0..app.crumb_count {
-            let crumb = app.crumbs[index];
-            let label = &app.current_path[crumb.label_start..crumb.label_start + crumb.label_len];
-            let mut buf = [0u8; MAX_PATH_LEN];
-            let Some(step) = crumb_step(label, cursor, index + 1 == app.crumb_count, &mut buf)
-            else {
-                break;
-            };
-            let run = &buf[..step.len];
-            let ink = if index + 1 == app.crumb_count {
-                THEME.on_surface
-            } else {
-                THEME.primary
-            };
-            if let Some(color) = test_text(
-                x,
-                y,
-                step.x,
-                crumb_top,
-                BREADCRUMB_SCALE,
-                run,
-                ink,
-                THEME.surface,
-            ) {
+        for crumb in &frame.crumbs[..frame.crumb_count] {
+            if let Some(color) = crumb.run.pixel(x, y) {
                 return color;
             }
-            if let Some(sep_x) = step.sep_x {
-                if let Some(color) = test_text(
-                    x,
-                    y,
-                    sep_x,
-                    crumb_top,
-                    BREADCRUMB_SCALE,
-                    CRUMB_SEP,
-                    THEME.on_surface_variant,
-                    THEME.surface,
-                ) {
-                    return color;
-                }
+            if let Some(color) = crumb.sep.pixel(x, y) {
+                return color;
             }
-            cursor = step.next_x;
         }
         return THEME.surface;
     }
 
     // 4. The sort and layout toolbar.
-    if let Some(color) = pill_color(
-        x,
-        y,
-        toolbar_pill(0),
-        &app.sort_label[..app.sort_label_len],
-        false,
-    ) {
-        return color;
-    }
-    if let Some(color) = pill_color(
-        x,
-        y,
-        toolbar_pill(1),
-        LayoutMode::List.label(),
-        app.layout == LayoutMode::List,
-    ) {
-        return color;
-    }
-    if let Some(color) = pill_color(
-        x,
-        y,
-        toolbar_pill(2),
-        LayoutMode::Grid.label(),
-        app.layout == LayoutMode::Grid,
-    ) {
-        return color;
+    for pill in &frame.toolbar {
+        if let Some(color) = pill.pixel(x, y) {
+            return color;
+        }
     }
 
     // 5. The details card, drawn over the entries card.
-    if app.has_details {
-        if let Some(color) = details_color(x, y, app) {
+    if let Some(details) = &frame.details {
+        if let Some(color) = details_color(x, y, details) {
             return color;
         }
     }
 
     // 6. The confirmation sheet, drawn over the entries card.
-    if app.has_pending {
-        if let Some(color) = sheet_color(x, y, app) {
+    if let Some(sheet) = &frame.sheet {
+        if let Some(color) = sheet_color(x, y, sheet) {
             return color;
         }
     }
 
     // 7. The entries card.
-    let card = entries_card();
-    if (card.y..card.y + card.h).contains(&y) {
-        if x < card.x || x >= card.x + card.w {
+    if (frame.card.y..frame.card.y + frame.card.h).contains(&y) {
+        if x < frame.card.x || x >= frame.card.x + frame.card.w {
             return THEME.surface;
         }
-        let style = components::card_style(&THEME, components::Elevation::Resting);
         let Some(base) = draw_rounded_rect(
             x,
             y,
-            card,
-            style.radius,
-            style.fill,
-            style.border,
+            frame.card,
+            frame.card_radius,
+            frame.card_fill,
+            frame.card_border,
             1,
         ) else {
             return THEME.surface;
         };
-        if app.card_item_count() == 0 {
+        if frame.empty {
             // Folder pictogram above the headline.
             if let Some(ink) = glyph_ink(
                 FileMime::Directory,
                 x as isize - 343,
-                y as isize - (empty_headline_y() as isize - 53),
+                y as isize - frame.glyph_y,
                 THEME.primary,
             ) {
                 return ink;
             }
-            let (headline, subline, headline_ink): (&[u8], &[u8], u32) = if app.searching {
-                if app.search_error != 0 {
-                    (
-                        b"Search Unavailable",
-                        b"The device refused the search; see the status line",
-                        THEME.warning,
-                    )
-                } else {
-                    (
-                        b"No Matches",
-                        b"The index holds no document with that name",
-                        THEME.on_surface,
-                    )
-                }
-            } else {
-                match app.listing_state {
-                    ListingState::Refused => (
-                        b"Directory Unreadable",
-                        b"The device refused to list this directory",
-                        THEME.warning,
-                    ),
-                    ListingState::NotListed => (
-                        b"Not Listed Yet",
-                        b"This directory has not been listed",
-                        THEME.on_surface_variant,
-                    ),
-                    _ => (
-                        b"Directory Empty",
-                        b"This directory holds no entries",
-                        THEME.on_surface,
-                    ),
-                }
-            };
-            // The card's two runs are cut to the card's own lane before they are
-            // centred: an explanation of why nothing is listed that leaves the
-            // card is worse than no explanation, and the gate beside
-            // `EMPTY_CARD_LANE` is what says the platform's own refusals fit.
-            let mut headline_buf = [0u8; LINE_LEN];
-            let headline =
-                fitted_run(headline, EMPTY_HEADLINE_SCALE, EMPTY_CARD_LANE, &mut headline_buf);
-            let hx = centered_x(headline, EMPTY_HEADLINE_SCALE, card.x, card.w);
-            if let Some(color) = test_text(
-                x,
-                y,
-                hx,
-                empty_headline_y(),
-                EMPTY_HEADLINE_SCALE,
-                headline,
-                headline_ink,
-                style.fill,
-            ) {
+            if let Some(color) = frame.headline.pixel(x, y) {
                 return color;
             }
-            let mut subline_buf = [0u8; LINE_LEN];
-            let subline =
-                fitted_run(subline, EMPTY_SUBLINE_SCALE, EMPTY_CARD_LANE, &mut subline_buf);
-            let sx = centered_x(subline, EMPTY_SUBLINE_SCALE, card.x, card.w);
-            if let Some(color) = test_text(
-                x,
-                y,
-                sx,
-                empty_subline_y(),
-                EMPTY_SUBLINE_SCALE,
-                subline,
-                THEME.on_surface_variant,
-                style.fill,
-            ) {
+            if let Some(color) = frame.subline.pixel(x, y) {
                 return color;
             }
         }
@@ -2988,83 +3364,21 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     // 8. The status line.
-    let status_top = status_y();
-    if (status_top..status_top + status_rows()).contains(&y)
+    if (frame.status_y0..frame.status_y1).contains(&y)
         && (STATUS_TEXT_X..CRUMB_ROW_X1).contains(&x)
     {
-        if app.status_len > 0 {
-            let mut status_buf = [0u8; LINE_LEN];
-            let shown = fitted_run(
-                &app.status[..app.status_len],
-                STATUS_SCALE,
-                STATUS_LANE,
-                &mut status_buf,
-            );
-            if let Some(color) = test_text(
-                x,
-                y,
-                STATUS_TEXT_X,
-                status_top,
-                STATUS_SCALE,
-                shown,
-                THEME.on_surface_variant,
-                THEME.surface,
-            ) {
-                return color;
-            }
+        if let Some(color) = frame.status.pixel(x, y) {
+            return color;
         }
         return THEME.surface;
     }
 
     // 9. The action bar.
     if (ACTION_BAR_Y0..ACTION_BAR_Y1).contains(&y) {
-        for slot in 0..7usize {
-            let rect = action_slot_rect(slot);
-            if !rect.contains(x, y) {
-                continue;
+        for pill in &frame.slots {
+            if let Some(color) = pill.pixel(x, y) {
+                return color;
             }
-            let (label, enabled, selected) = action_slot_state(app, slot);
-            let fill = if selected {
-                THEME.inverted_surface()
-            } else if enabled {
-                THEME.surface_container_high
-            } else {
-                THEME.surface
-            };
-            let ink = if selected {
-                THEME.on_inverted_surface()
-            } else if enabled {
-                THEME.on_surface
-            } else {
-                THEME.muted
-            };
-            // WHY the ring moves with the state: `border` (#E5E5E5) is 1.08:1
-            // on the enabled pill's own #EFEEE9 fill and 1.21:1 on the page, and
-            // a disabled slot's fill *is* the page -- 1.00:1 against it -- so
-            // none of these controls had an edge a person could find. An enabled
-            // pill takes the theme's strong outline (17.04:1 on its fill,
-            // 18.97:1 on the page); a selected pill is the page's opposite and
-            // needs no edge; a disabled one keeps a boundary that still reads
-            // as quiet -- the muted ink, 5.11:1 against the page it sits on.
-            let ring = if selected {
-                None
-            } else if enabled {
-                Some(CONTROL_OUTLINE)
-            } else {
-                Some(THEME.muted)
-            };
-            if let Some(base) = draw_pill(x, y, rect, fill, ring) {
-                let mut label_buf = [0u8; LINE_LEN];
-                let shown =
-                    fitted_run(label, LABEL_RUNG, control_label_lane(ACTION_SLOT_W), &mut label_buf);
-                let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-                let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-                if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
-                    return color;
-                }
-                return base;
-            }
-            return THEME.surface;
         }
         return THEME.surface;
     }
@@ -3075,56 +3389,6 @@ fn browse_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     }
 
     THEME.surface
-}
-
-/// One of the rounded toolbar or scope pills.
-fn pill_color(
-    x: usize,
-    y: usize,
-    rect: Rect,
-    label: &[u8],
-    selected: bool,
-) -> Option<u32> {
-    if !rect.contains(x, y) {
-        return None;
-    }
-    let fill = if selected {
-        THEME.inverted_surface()
-    } else {
-        THEME.surface_container_high
-    };
-    let ink = if selected {
-        THEME.on_inverted_surface()
-    } else {
-        THEME.on_surface
-    };
-    // WHY the ring is the strong outline and not `THEME.border`: `border` is
-    // #E5E5E5, 1.08:1 against this chip's own #EFEEE9 fill and 1.21:1 against
-    // the #FAFAFA page it stands on, so the edge said nothing and the chip
-    // itself was only 1.11:1 off the page -- an invisible control with a label
-    // on it. `outline` is #0A0A0A: 17.04:1 on the chip and 18.97:1 on the page,
-    // the same role the platform's own back chip takes for the same reason.
-    // A selected pill is the page's opposite (#0A0A0A, 18.97:1 on the page), so
-    // it needs no edge of its own -- see the detail card's primary button.
-    let ring = if selected {
-        None
-    } else {
-        Some(CONTROL_OUTLINE)
-    };
-    let base = draw_pill(x, y, rect, fill, ring)?;
-    // WHY the label goes through `fitted_run` before it is centred:
-    // `centered_x` left-aligns a run wider than the control it is centred in, and
-    // the run then paints over the control's right edge into its neighbour. The
-    // lane is the control's own width less one grid step of air, and it is the
-    // number the host gate measures this app's labels against.
-    let mut label_buf = [0u8; LINE_LEN];
-    let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
-    let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-    let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-    if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
-        return Some(color);
-    }
-    Some(base)
 }
 
 /// The label, whether it can be taken, and whether it is the current mode.
@@ -3148,275 +3412,81 @@ fn action_slot_state(app: &FileManagerApp, slot: usize) -> (&'static [u8], bool,
 }
 
 /// The details card, drawn over the entries card.
-fn details_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
-    let dcard = details_card();
-    if !dcard.contains(x, y) {
+///
+/// WHY it reads a resolved frame: the card's radius, fill, border and every run on
+/// it were re-derived at the pixel, so the one screen that names a single file cost
+/// more than the whole list it covers.
+fn details_color(x: usize, y: usize, frame: &DetailsFrame) -> Option<u32> {
+    if !frame.rect.contains(x, y) {
         return None;
     }
-    let style = components::card_style(&THEME, components::Elevation::Raised);
     let Some(base) = draw_rounded_rect(
         x,
         y,
-        dcard,
-        style.radius,
-        style.fill,
-        style.border,
+        frame.rect,
+        frame.radius,
+        frame.fill,
+        frame.border,
         1,
     ) else {
         return Some(THEME.surface);
     };
-    if let Some(color) = test_text(
-        x,
-        y,
-        dcard.x + DETAILS_INSET,
-        details_title_y(),
-        DETAILS_TITLE_SCALE,
-        app.details.title_str().as_bytes(),
-        THEME.on_surface,
-        style.fill,
-    ) {
+    if let Some(color) = frame.title.pixel(x, y) {
         return Some(color);
     }
-    for index in 0..app.details.line_count {
-        let line = &app.details.lines[index][..app.details.line_lens[index]];
-        if let Some(color) = test_text(
-            x,
-            y,
-            dcard.x + DETAILS_INSET,
-            details_line_y(index),
-            DETAILS_LINE_SCALE,
-            line,
-            if index == 3 && !app.details.has_handler {
-                THEME.warning
-            } else {
-                THEME.on_surface_variant
-            },
-            style.fill,
-        ) {
+    for line in &frame.lines[..frame.line_count] {
+        if let Some(color) = line.pixel(x, y) {
             return Some(color);
         }
     }
-    for (rect, label, primary) in [
-        (details_open(), b"Open".as_slice(), true),
-        (details_close(), b"Close".as_slice(), false),
-    ] {
-        if primary && !app.details.is_dir && !app.details.has_handler {
-            // WHY the button is absent rather than greyed out: a button that
-            // opens nothing is a promise the device cannot keep. The card
-            // names the missing handler in its own line, so the reason is
-            // still on the screen.
-            continue;
-        }
-        if !rect.contains(x, y) {
-            continue;
-        }
-        let (fill, border, border_w) = if primary {
-            // The one filled control on the card: near-black on the raised
-            // card is 17.04:1 by itself, so it needs no edge.
-            (THEME.primary, None, 0)
-        } else {
-            // The card's own fill is `Raised` -- `surface_container_high`, the
-            // very token this button used to fill itself with -- so the
-            // secondary button was `#EFEEE9` on `#EFEEE9`: 1.00:1, no border,
-            // and only the word "Close" on screen. It now takes the
-            // platform's resting white (1.16:1 against the card, the same step
-            // a resting card takes on a raised one) and the theme's strong
-            // outline (17.04:1) so the tappable rectangle is visible.
-            (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
-        };
-        let ink = if primary {
-            THEME.on_primary
-        } else {
-            THEME.on_surface
-        };
-        if let Some(button) =
-            draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
-        {
-            let mut label_buf = [0u8; LINE_LEN];
-            let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
-            let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-            if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
-                return Some(color);
-            }
-            return Some(button);
-        }
-        // Inside the button's rectangle but outside its corners: the card
-        // shows through, and `base` is that card's own pixel. It used to say
-        // `THEME.surface` -- the page's `#FAFAFA` -- which punched a pale
-        // quarter-disc of a colour that is nowhere on this card into each
-        // corner. The outline made that artefact worth naming: a control with
-        // a visible edge shows the blobs sitting right against its arc.
-        return Some(base);
+    if let Some(color) = frame.open.pixel(x, y, base) {
+        return Some(color);
     }
-    Some(base)
+    // Inside a button's rectangle but outside its corner arc: the card shows
+    // through, and `base` is that card's own pixel. It used to say
+    // `THEME.surface` -- the page's `#FAFAFA` -- which punched a pale quarter-disc
+    // of a colour that is nowhere on this card into each corner. The outline made
+    // that artefact worth naming: a control with a visible edge shows the blobs
+    // sitting right against its arc.
+    frame.close.pixel(x, y, base).or(Some(base))
 }
 
 /// The confirmation sheet, drawn over the entries card.
-fn sheet_color(x: usize, y: usize, app: &FileManagerApp) -> Option<u32> {
-    let sheet = sheet();
-    if !sheet.contains(x, y) {
+///
+/// WHY it reads a resolved frame: the sheet's state -- whether it offers
+/// destinations or a name field -- was re-derived from the pending action at every
+/// one of its pixels, along with its ladder and each of its runs.
+fn sheet_color(x: usize, y: usize, frame: &SheetFrame) -> Option<u32> {
+    if !frame.rect.contains(x, y) {
         return None;
     }
-    let style = components::card_style(&THEME, components::Elevation::Raised);
-    let Some(base) = draw_rounded_rect(x, y, sheet, style.radius, style.fill, style.border, 1)
+    let Some(base) =
+        draw_rounded_rect(x, y, frame.rect, frame.radius, frame.fill, frame.border, 1)
     else {
         return Some(THEME.surface);
     };
-    if let Some(color) = test_text(
-        x,
-        y,
-        sheet.x + 20,
-        sheet_title_y(),
-        SHEET_TITLE_SCALE,
-        &app.sheet_title[..app.sheet_title_len],
-        THEME.on_surface,
-        style.fill,
-    ) {
+    if let Some(color) = frame.title.pixel(x, y) {
         return Some(color);
     }
-    for index in 0..app.sheet_name_count {
-        if let Some(color) = test_text(
-            x,
-            y,
-            sheet.x + 20,
-            sheet_name_line_y(index),
-            SHEET_NAME_LIST_SCALE,
-            &app.sheet_names[index][..app.sheet_name_lens[index]],
-            THEME.on_surface_variant,
-            style.fill,
-        ) {
+    for name in &frame.names[..frame.name_count] {
+        if let Some(color) = name.pixel(x, y) {
             return Some(color);
         }
     }
-    if app.pending.action == FileAction::Copy || app.pending.action == FileAction::Move {
-        for index in 0..CATEGORY_COUNT {
-            let rect = sheet_destination_rect(index);
-            if !rect.contains(x, y) {
-                continue;
-            }
-            let chosen = index == app.destination;
-            let (fill, border, border_w) = if chosen {
-                (THEME.primary, None, 0)
-            } else {
-                // The unchosen destinations were `surface_container_high` on
-                // the `Raised` sheet -- the sheet's own `#EFEEE9` -- with no
-                // border, so the four selectable targets had no bounds at all
-                // and only their labels showed. Same treatment as the sheet's
-                // secondary button: the platform's white on the sheet, the
-                // theme's strong outline.
-                (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
-            };
-            let ink = if chosen {
-                THEME.on_primary
-            } else {
-                THEME.on_surface
-            };
-            let Some(button) =
-                draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
-            else {
-                // Inside the chip's box but outside its corner arc: the sheet
-                // shows through, so the sheet's own pixel is the answer.
-                return Some(base);
-            };
-            let mut label_buf = [0u8; LINE_LEN];
-            let shown = fitted_run(
-                CATEGORY_LABELS[index],
-                LABEL_RUNG,
-                control_label_lane(SHEET_DEST_SLOT_W),
-                &mut label_buf,
-            );
-            let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-            let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-            if let Some(color) = test_text(
-                x,
-                y,
-                lx,
-                ly,
-                LABEL_RUNG,
-                shown,
-                ink,
-                fill,
-            ) {
-                return Some(color);
-            }
-            return Some(button);
-        }
-    }
-    if app.pending.action == FileAction::Rename || app.pending.action == FileAction::NewFolder {
-        let field = Rect::new(SHEET.x + 20, sheet_name_y(), SHEET.w - 40, sheet_name_h());
-        if field.contains(x, y) {
-            // WHY the plate moved: its old fill was `surface_container_high`,
-            // which is what the `Raised` sheet is painted with -- #EFEEE9 on
-            // #EFEEE9, 1.00:1, and no border at all. The place to type a name
-            // had no bounds, and one of the two states of this sheet (the state
-            // that asks you to edit text) was a bare word on the panel. It takes
-            // the same treatment as the sheet's secondary buttons: the
-            // platform's resting white (1.16:1 against the sheet) ringed with
-            // the theme's strong outline (17.04:1 against the sheet), and the
-            // typed run reads at 18.97:1 instead of 17.04:1. The radius stays 0:
-            // the rectangle, the label's position and the tap target are the
-            // ones the sheet already answers, and only the colours move.
-            let fill = RAISED_CONTROL_FILL;
-            let Some(plate) =
-                draw_rounded_rect(x, y, field, 0, fill, Some(CONTROL_OUTLINE), 1)
-            else {
-                return Some(base);
-            };
-            if let Some(color) = test_text(
-                x,
-                y,
-                field.x + 12,
-                field.y + grown(12, SEARCH_TEXT_SCALE, draw_level()),
-                SEARCH_TEXT_SCALE,
-                app.rename_field.as_slice(),
-                THEME.on_surface,
-                fill,
-            ) {
-                return Some(color);
-            }
-            return Some(plate);
-        }
-    }
-    for (index, label) in [b"Cancel".as_slice(), b"Confirm".as_slice()]
-        .iter()
-        .enumerate()
-    {
-        let rect = sheet_button_rect(index == 1);
-        if !rect.contains(x, y) {
-            continue;
-        }
-        let (fill, border, border_w) = if index == 1 {
-            (THEME.primary, None, 0)
-        } else {
-            // The sheet is `Raised`, so its `#EFEEE9` fill was this button's
-            // fill: `#EFEEE9` on `#EFEEE9`, borderless. The secondary action
-            // now takes the platform's white (1.16:1 against the sheet) and
-            // the theme's strong outline (17.04:1 against the sheet).
-            (RAISED_CONTROL_FILL, Some(CONTROL_OUTLINE), 1)
-        };
-        let ink = if index == 1 {
-            THEME.on_primary
-        } else {
-            THEME.on_surface
-        };
-        let Some(button) =
-            draw_rounded_rect(x, y, rect, THEME.radii.control, fill, border, border_w)
-        else {
-            // Outside the button's corner arc the sheet shows through, so the
-            // sheet's own pixel is the answer, not the page's colour.
-            return Some(base);
-        };
-        let mut label_buf = [0u8; LINE_LEN];
-        let shown = fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf);
-        let lx = centered_x(shown, LABEL_RUNG, rect.x, rect.w);
-        let ly = rect.y + rect.h.saturating_sub(run_rows(LABEL_RUNG)) / 2;
-        if let Some(color) = test_text(x, y, lx, ly, LABEL_RUNG, shown, ink, fill) {
+    // A destination that the pending action does not offer arrives as an empty
+    // button, so it answers nothing and the sheet's own pixels stand.
+    for dest in &frame.destinations {
+        if let Some(color) = dest.pixel(x, y, base) {
             return Some(color);
         }
-        return Some(button);
     }
-    Some(base)
+    if let Some(color) = frame.name_field.pixel(x, y, base) {
+        return Some(color);
+    }
+    if let Some(color) = frame.cancel.pixel(x, y, base) {
+        return Some(color);
+    }
+    frame.confirm.pixel(x, y, base).or(Some(base))
 }
 
 // -----------------------------------------------------------------------------

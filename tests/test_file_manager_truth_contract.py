@@ -335,10 +335,14 @@ def test_the_fit_gate_measures_at_the_rung_the_painter_inks():
         "painter makes"
     )
 
+    # The label of a raised control is cut and centred once, when the frame builds
+    # the plate it stands on, so the site is `plate_label` rather than the painter.
+    # The claim is the same: the lane is derived from the control's own width and
+    # the measurement is taken at the rung the same plate inks at.
     for painter_site in (
         "ellipsize_run(name, ENTRY_SUB_SCALE, ENTRY_NAME_LANE, &mut name_buf)",
         "ellipsize_run(name, GRID_NAME_SCALE, GRID_NAME_LANE, &mut name_buf)",
-        "fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut label_buf)",
+        "fitted_run(label, LABEL_RUNG, control_label_lane(rect.w), &mut buf)",
     ):
         assert painter_site in main, f"the painter stopped using the library's rung and lane: {painter_site}"
 
@@ -569,7 +573,7 @@ def test_the_details_fit_contract_can_fail():
 # the app used to write inside the branch that inked the mark.
 _GLYPH_OFFSETS = (
     ("home_recents_y0() + 8,", "home_recents_y0() + home_recents_note_dy(),"),
-    ("field.y + 26;", "field.y + search_glyph_dy();"),
+    ("field.y + 26,", "field.y + search_glyph_dy(),"),
     ("            16,\n            mime,", "            entry_glyph_dy(),\n            mime,"),
     ("cell_h, 83, 30, mime, ink)", "cell_h, GRID_GLYPH_X, grid_glyph_dy(), mime, ink)"),
     ("for dy in 0..26usize {", "for dy in 0..GLYPH_ROWS {"),
@@ -964,15 +968,23 @@ def test_a_progress_tick_repaints_the_rows_the_painter_inks():
         "render_file_manager_band(surface, app, status_top, status_top + status_rows())"
         in band
     ), "the progress tick repaints a band the painter did not derive at the person's rung"
-    # The painter's half: the region that inks the status run, measured with the
-    # same two calls in the same order.
-    assert "if (status_top..status_top + status_rows()).contains(&y)" in main, (
+    # The painter's half: the band the frame hands the region test, measured with
+    # the same two calls in the same order. Once this was one `if` inside the
+    # painter; the pass now resolves it into the frame before the first pixel, so
+    # the pair is pinned where the band is derived and where the pixel reads it.
+    assert "status_y0: status_y(),\n        status_y1: status_y() + status_rows()," in main, (
         "the surface stopped painting the status rows the ladder derives, so the "
         "tick's band no longer matches what is on it"
     )
-    assert main.count("let status_top = status_y();") == 2, (
-        "the status band is no longer two sites -- the paint and the repaint -- "
-        "written from one derivation"
+    assert "(frame.status_y0..frame.status_y1).contains(&y)" in main, (
+        "the status band reached the pixel test by a route the frame did not derive"
+    )
+    assert main.count("status_y() + status_rows()") == 1, (
+        "the band's foot is derived in more than one place again -- one for the "
+        "paint, one for the repaint, and they drift"
+    )
+    assert main.count("status_top + status_rows()") == 1, (
+        "the repaint no longer carries the tick's own half of the band"
     )
     assert "STATUS_Y" not in main, (
         "the repaint went back to the authored status strip"
