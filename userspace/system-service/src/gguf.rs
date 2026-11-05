@@ -1241,7 +1241,7 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
 /// Reads the declaring metadata of the model file at `path`.
 pub fn read_model_info(path: &str) -> Result<GgufModelInfo, GgufError> {
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
-    let mut stream = GgufStream::from_file(fd);
+    let mut stream = GgufStream::buffered_from_file(fd);
     let res = read_model_info_stream(&mut stream);
     let _ = std::fs_close(fd);
     res
@@ -1955,7 +1955,7 @@ pub fn scan_file_for_tensor(
     target_name: &[u8],
 ) -> Result<Option<GgufTensorInfo>, GgufError> {
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
-    let mut stream = GgufStream::from_file(fd);
+    let mut stream = GgufStream::buffered_from_file(fd);
     let res = find_tensor_stream(&mut stream, target_name);
     let _ = std::fs_close(fd);
     res
@@ -2017,7 +2017,7 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
 /// Follows strict `#![no_std]` and zero-heap allocation principles.
 pub fn read_gguf_header(path: &str) -> Result<GgufHeader, GgufError> {
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| GgufError::FileNotFound)?;
-    let mut stream = GgufStream::from_file(fd);
+    let mut stream = GgufStream::buffered_from_file(fd);
     let res = GgufHeader::parse_stream(&mut stream);
     let _ = std::fs_close(fd);
     res
@@ -3572,6 +3572,49 @@ pub(crate) mod tests {
             "the walk made {} requests over {} bytes",
             stream.pulls(),
             file.len()
+        );
+    }
+
+    #[test]
+    fn test_ranged_read_path_counts_syscalls_not_just_bytes() {
+        // Construct a synthetic GGUF buffer containing an array of 256 strings.
+        // A bare GgufStream::File reader reads each string length prefix via read_u64(),
+        // paying 1 syscall per string (256 syscalls for 256 strings).
+        // The ranged-read windowed stream (GgufStream::Buffered) pulls METADATA_WINDOW_BYTES
+        // (512 bytes) per window, reducing syscalls dramatically.
+        let string_count = 256usize;
+        let str_val = b"token";
+        let total_payload_bytes = 12 + string_count * (8 + str_val.len());
+        let mut file = host_std::vec::Vec::new();
+        file.extend_from_slice(&8u32.to_le_bytes()); // STRING type
+        file.extend_from_slice(&(string_count as u64).to_le_bytes());
+        for _ in 0..string_count {
+            file.extend_from_slice(&(str_val.len() as u64).to_le_bytes());
+            file.extend_from_slice(str_val);
+        }
+        assert_eq!(file.len(), total_payload_bytes);
+
+        let mut buffered = GgufStream::buffered_from_slice(&file);
+        let elem_type = buffered.read_u32().unwrap();
+        assert_eq!(elem_type, 8);
+        let count = buffered.read_u64().unwrap();
+        assert_eq!(count, string_count as u64);
+
+        for _ in 0..count {
+            let s_len = buffered.read_u64().unwrap() as usize;
+            buffered.skip(s_len).unwrap();
+        }
+
+        let pulls = buffered.pulls();
+        let expected_max_pulls = (total_payload_bytes / METADATA_WINDOW_BYTES) + 2;
+        assert!(
+            pulls <= expected_max_pulls,
+            "buffered stream made {pulls} pulls, expected at most {expected_max_pulls}"
+        );
+        let unbuffered_syscalls_floor = string_count;
+        assert!(
+            pulls < unbuffered_syscalls_floor / 20,
+            "the ranged-read path ({pulls} pulls) must be over 20x fewer syscalls than the bare path ({unbuffered_syscalls_floor} syscalls)"
         );
     }
 }

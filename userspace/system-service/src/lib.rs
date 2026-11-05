@@ -1280,7 +1280,7 @@ fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
 /// travel on the shared-memory pipe the answers already use, and the notice that
 /// offers a caller "a token-id stream of your own" is offering the ten the mailbox
 /// carries until then.
-const EMBED_TOKEN_IDS_MAX: usize = 32;
+const EMBED_TOKEN_IDS_MAX: usize = 512;
 
 /// Which of the three answers an embedding request gets.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1687,7 +1687,7 @@ fn run_installed_embedding(
     let source = weights::ModelFileDescriptor { fd };
 
     let walked = {
-        let mut stream = GgufStream::from_file(fd);
+        let mut stream = GgufStream::buffered_from_file(fd);
         weights::TensorTable::walk(&mut stream)
     };
     let table = match walked {
@@ -1699,7 +1699,7 @@ fn run_installed_embedding(
     };
 
     let read = {
-        let mut stream = GgufStream::from_file(fd);
+        let mut stream = GgufStream::buffered_from_file(fd);
         gguf::read_model_info_stream(&mut stream)
     };
     let info = match read {
@@ -4117,7 +4117,7 @@ mod tests {
         }
         let failures = [
             (
-                TooManyIds { needed: 40, bound: 32 },
+                TooManyIds { needed: EMBED_TOKEN_IDS_MAX + 8, bound: EMBED_TOKEN_IDS_MAX },
                 "a segmentation past the bound",
             ),
             (
@@ -4165,7 +4165,7 @@ mod tests {
             for (text, name) in [
                 (mapped(), "ids the file's own vocabulary declared"),
                 (
-                    TooManyIds { needed: 40, bound: 32 },
+                    TooManyIds { needed: EMBED_TOKEN_IDS_MAX + 8, bound: EMBED_TOKEN_IDS_MAX },
                     "a segmentation past the bound",
                 ),
             ] {
@@ -4278,6 +4278,47 @@ mod tests {
             read_token_ids(&[0u8; (EMBED_TOKEN_IDS_MAX + 1) * 4]).map(|ids| ids.len),
             None,
             "a stream one past the printed bound was accepted, so the notice is a claim"
+        );
+    }
+
+    #[test]
+    fn test_64_token_stream_runs_and_oversize_refused_with_limit_named() {
+        // 1. A 64-token stream runs.
+        let mut tokens_64 = [0u8; 64 * 4];
+        for i in 0..64 {
+            let id = (i as u32) + 1;
+            tokens_64[i * 4..(i + 1) * 4].copy_from_slice(&id.to_le_bytes());
+        }
+        let stream = read_token_ids(&tokens_64).expect("a 64-token stream runs within the raised bound");
+        assert_eq!(stream.len, 64);
+        assert_eq!(stream.as_slice().len(), 64);
+
+        // 2. An oversize stream past the budget (e.g. EMBED_TOKEN_IDS_MAX + 1 = 513 tokens) is refused.
+        let mut past_budget = [0u8; (EMBED_TOKEN_IDS_MAX + 1) * 4];
+        for i in 0..=EMBED_TOKEN_IDS_MAX {
+            let id = (i as u32) + 1;
+            past_budget[i * 4..(i + 1) * 4].copy_from_slice(&id.to_le_bytes());
+        }
+        assert_eq!(
+            read_token_ids(&past_budget).map(|s| s.len),
+            None,
+            "a past-budget stream must be refused"
+        );
+
+        // 3. The refusal message names the number.
+        let needed = EMBED_TOKEN_IDS_MAX + 1;
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) =
+            embedding_gap_notice(EmbeddingGap::IdStreamFull(needed, EMBED_TOKEN_IDS_MAX), &mut scratch);
+        assert_eq!(status, STATUS_UNSUPPORTED);
+        let notice_text = core::str::from_utf8(notice).expect("notice is valid utf8");
+        assert!(
+            notice_text.contains("answers at most 512"),
+            "refusal must name the limit number 512: {notice_text}"
+        );
+        assert!(
+            notice_text.contains("segments the text into 513"),
+            "refusal must name the needed number 513: {notice_text}"
         );
     }
 

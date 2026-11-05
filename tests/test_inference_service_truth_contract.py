@@ -2342,8 +2342,8 @@ def test_the_file_backed_branch_reaches_the_loader_it_was_written_for():
         "weights::run_streamed_embedding(",
     ):
         assert shipping in run, f"the file-backed branch no longer uses {shipping!r}"
-    assert "GgufStream::from_file(fd)" in run, (
-        "the table is walked from something other than the descriptor the guest opened"
+    assert "GgufStream::buffered_from_file(fd)" in run, (
+        "the table is walked from something other than the ranged-read descriptor the guest opened"
     )
     assert "HostFileSource" not in run and "from_slice" not in run, (
         "the device path reads a host fixture; the loader's host measurement would "
@@ -3010,7 +3010,7 @@ def _id_stream_bound_faults(lib: str, tokenizer: str, prose: dict) -> list:
 
 
 def test_the_id_stream_refusal_prints_the_bound_the_run_enforces():
-    """The 32-position bound is one number, and the caller is told exactly that one.
+    """The 512-position bound is one number, and the caller is told exactly that one.
 
     The refusal at `EmbeddingGap::IdStreamFull` is the only place a person learns
     how long a stream the embedding run answers, and the array in `TokenIds` is the
@@ -3048,7 +3048,7 @@ def test_the_id_stream_bound_gate_can_fail():
 
     clean = _id_stream_bound_faults(lib, tokenizer, prose)
     assert not clean, f"the bound detector fires on the service as it stands: {clean}"
-    assert id_stream_bound(lib) == 32, "the shipped bound moved without this fixture being re-read"
+    assert id_stream_bound(lib) == 512, "the shipped bound moved without this fixture being re-read"
 
     # 1. The printed bound frozen to today's number while the constant moves. This
     # is the exact drift this gate exists to stop: the notice keeps saying 32, the
@@ -3107,7 +3107,7 @@ def test_the_id_stream_bound_gate_can_fail():
     # 5. Prose in the tokenizer's own header left behind by a raised ceiling.
     moved = {
         name: (
-            text.replace("bounded at 32 positions", "bounded at 512 positions", 1)
+            text.replace("bounded at 512 positions", "bounded at 1024 positions", 1)
             if name == "tokenizer.rs"
             else text
         )
@@ -3118,8 +3118,8 @@ def test_the_id_stream_bound_gate_can_fail():
     )
     faults = _id_stream_bound_faults(lib, tokenizer, moved)
     assert any(
-        "while EMBED_TOKEN_IDS_MAX is 32" in f for f in faults
-    ), f"prose claiming 512 positions passes the gate: {faults}"
+        "while EMBED_TOKEN_IDS_MAX is 512" in f for f in faults
+    ), f"prose claiming 1024 positions passes the gate: {faults}"
 
     # 6. The host proof of the agreement deleted: the source shapes still line up,
     # but nothing any more runs the notice and reads its digits back.
@@ -3134,25 +3134,25 @@ def test_the_id_stream_bound_gate_can_fail():
     )
 
     # 7. A raised bound, stated consistently everywhere, must PASS. Without this
-    # the detector would be pinning the number 32 rather than the agreement between
+    # the detector would be pinning the number 512 rather than the agreement between
     # the number and the bound, and the day a pipe carries the ids it would be the
     # gate itself that refuses the raise.
     raised_lib = lib.replace(
-        "const EMBED_TOKEN_IDS_MAX: usize = 32;",
         "const EMBED_TOKEN_IDS_MAX: usize = 512;",
+        "const EMBED_TOKEN_IDS_MAX: usize = 1024;",
         1,
     )
     raised_prose = {
         name: (
-            text.replace("bounded at 32 positions", "bounded at 512 positions", 1)
+            text.replace("bounded at 512 positions", "bounded at 1024 positions", 1)
             if name == "tokenizer.rs"
             else text
         )
         for name, text in prose.items()
     }
     raised = _id_stream_bound_faults(raised_lib, tokenizer, raised_prose)
-    assert not raised, f"the gate freezes the value at 32 instead of the agreement: {raised}"
-    assert id_stream_bound(raised_lib) == 512
+    assert not raised, f"the gate freezes the value at 512 instead of the agreement: {raised}"
+    assert id_stream_bound(raised_lib) == 1024
 
 
 def main() -> int:

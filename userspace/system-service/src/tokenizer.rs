@@ -92,7 +92,7 @@
 //! * `add_eos_token` is true in this file, and is read, reported and NOT applied:
 //!   this file declares no chat template for the EOS to belong to, and an encoder
 //!   that appended a position would add one the caller did not ask for to a run
-//!   bounded at 32 positions.
+//!   bounded at 512 positions.
 //!
 //! WHY the status a reply carries is decided from this table's RESULT rather than
 //! from the file's presence: see `TextIds` and `apply_file_vocabulary` in
