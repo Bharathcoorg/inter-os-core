@@ -3156,9 +3156,19 @@ const _: () = assert!(CRUMB_MIN_ROOM > CRUMB_SEP_GAP);
 // stack -- so a pane clipped to its content is a narrower rect, never an empty one.
 const _: () = assert!(5 * ENTRY_ROW_H < ENTRIES_CARD.h);
 
+/// The height of the list's content at a level, for a given number of items.
+///
+/// WHY the rung is a parameter here: the pane the browse pass inks is cut from
+/// this number at every rung the ladder offers (see
+/// [`pane_depth_matches_the_layout_that_inks`]), and a swept gate cannot ask a
+/// global what it holds.
+pub const fn list_content_height_at(level: u8, item_count: usize) -> usize {
+    item_count * entry_row_h_at(level)
+}
+
 /// The height of the list's content for a given number of items.
 pub fn list_content_height(item_count: usize) -> usize {
-    item_count * entry_row_h()
+    list_content_height_at(draw_level(), item_count)
 }
 
 /// The rectangle one item's row is drawn in.
@@ -3220,14 +3230,24 @@ pub fn list_scroll(item_count: usize, card: Rect, offset: usize) -> ScrollState 
 // The grid
 // -----------------------------------------------------------------------------
 
-/// The height of the grid's content for a given number of items.
-pub fn grid_content_height(item_count: usize) -> usize {
+/// The height of the grid's content at a level: one cell row per
+/// [`GRID_COLS`] items, the gap between every pair of rows it actually lays.
+///
+/// WHY the row count is a division and not a call: the gate that sweeps the pane
+/// runs in const context, where a method the compiler has not made `const` is
+/// not available -- and the walk `grid_cell_rect` takes is the same sum.
+pub const fn grid_content_height_at(level: u8, item_count: usize) -> usize {
     if item_count == 0 {
         return 0;
     }
-    let rows = item_count.div_ceil(GRID_COLS);
-    let cell_h = grid_cell_h();
+    let rows = (item_count + GRID_COLS - 1) / GRID_COLS;
+    let cell_h = grid_cell_h_at(level);
     rows * cell_h + rows.saturating_sub(1) * GRID_GAP
+}
+
+/// The height of the grid's content for a given number of items.
+pub fn grid_content_height(item_count: usize) -> usize {
+    grid_content_height_at(draw_level(), item_count)
 }
 
 /// The depth of the entries pane the active layout actually inks for `count`
@@ -3249,17 +3269,92 @@ pub fn grid_content_height(item_count: usize) -> usize {
 /// (see [`empty_headline_y`]), so clipping a card that holds nothing would crop
 /// the card the explanation is drawn inside.
 pub fn entries_pane_h(layout: LayoutMode, count: usize) -> usize {
-    let card = entries_card();
+    entries_pane_h_at(draw_level(), layout, count)
+}
+
+/// [`entries_pane_h`] at a named rung, so the gate below can sweep it at every
+/// rung the ladder offers instead of only at the one this process draws.
+#[inline]
+pub const fn entries_pane_h_at(level: u8, layout: LayoutMode, count: usize) -> usize {
+    let card = entries_card_at(level);
     if count == 0 {
         return card.h;
     }
-    let content = if layout == LayoutMode::Grid {
-        grid_content_height(count)
-    } else {
-        list_content_height(count)
+    let content = match layout {
+        LayoutMode::Grid => grid_content_height_at(level, count),
+        LayoutMode::List => list_content_height_at(level, count),
     };
-    card.h.min(content)
+    if card.h < content {
+        card.h
+    } else {
+        content
+    }
 }
+
+/// Truth gate, swept: at every rung and every listing length the entries pane is
+/// exactly the depth the layout it is cut for reaches, and never a row deeper.
+///
+/// WHY the gate reads each layout's own sum and not [`entries_pane_h_at`]'s
+/// branch: the defect this file carries (a browse screen that painted the whole
+/// viewport while the list inked five rows) is a pane cut for the layout that is
+/// NOT on screen. Both faces are derived here from the row and cell heights the
+/// painter blits, so a pane that answers the other layout's depth -- or the
+/// viewport the active layout leaves empty -- refuses the sum it is compared to.
+/// The last two clauses are the same claim from the plate's side: its deepest
+/// pixel is on the last row the layout inks, and the row under it is not inked.
+const fn pane_depth_matches_the_layout_that_inks() -> bool {
+    let mut level = 0;
+    while level <= MAX_LEVEL {
+        let card = entries_card_at(level);
+        if card.h == 0 {
+            return false;
+        }
+        let list_h = entry_row_h_at(level);
+        let cell_h = grid_cell_h_at(level);
+        let mut count = 1;
+        while count <= MAX_PARSED_ENTRIES {
+            let list_pane = entries_pane_h_at(level, LayoutMode::List, count);
+            let grid_pane = entries_pane_h_at(level, LayoutMode::Grid, count);
+            // The list's own depth: one plate per entry, and no gap between them.
+            let list_ink = count * list_h;
+            // The grid's own depth, written as the painter walks it: the last
+            // cell's foot below the card's top.
+            let rows = (count + GRID_COLS - 1) / GRID_COLS;
+            let grid_ink = (rows - 1) * (cell_h + GRID_GAP) + cell_h;
+            if list_pane > list_ink || grid_pane > grid_ink {
+                return false;
+            }
+            if list_pane > card.h || grid_pane > card.h {
+                return false;
+            }
+            // A listing that does not fill the viewport leaves no plate below its
+            // last row; one that does keeps the viewport whole.
+            if list_ink < card.h && list_pane != list_ink {
+                return false;
+            }
+            if list_ink >= card.h && list_pane != card.h {
+                return false;
+            }
+            if grid_ink < card.h && grid_pane != grid_ink {
+                return false;
+            }
+            if grid_ink >= card.h && grid_pane != card.h {
+                return false;
+            }
+            count += 1;
+        }
+        // An empty listing keeps the whole plate its explanation stands in.
+        if entries_pane_h_at(level, LayoutMode::List, 0) != card.h {
+            return false;
+        }
+        if entries_pane_h_at(level, LayoutMode::Grid, 0) != card.h {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(pane_depth_matches_the_layout_that_inks());
 
 /// The rectangle one grid cell is drawn in.
 pub fn grid_cell_rect(card: Rect, index: usize, scroll_offset: usize) -> Rect {
