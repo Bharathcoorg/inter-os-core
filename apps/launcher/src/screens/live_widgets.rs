@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-use crate::{test_text_aa, LauncherState};
+use crate::{test_text_aa_level, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{type_scale, radius, Theme, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
@@ -136,6 +136,43 @@ pub const fn chip_h_at(level: u8) -> usize {
 }
 const CHIP_H: usize = chip_h_at(launcher::scale::PLATFORM_LEVEL);
 
+/// The width a pill has to be to carry `text` at `level`, never narrower than the
+/// width it was drawn with.
+///
+/// WHY this is [`launcher::scale::plate_at`] turned sideways: the pill's height already
+/// grew with the rung it carries, and its width was the rung it was authored at. A
+/// raised caption is a fifteen-per-cent-wider ink inside the same pill, which is the
+/// split this module exists to refuse -- so the air the pill was drawn with is solved
+/// off the authored pair and added back to the run this level paints. At the authored
+/// rung the sum is the authored width exactly, and the run is never wider than the pill
+/// that was sized around it.
+fn chip_w_at(text: &[u8], scale: usize, level: u8, authored: usize) -> usize {
+    let air =
+        authored.saturating_sub(launcher::scale::painted_width_at(text, scale, false, launcher::scale::PLATFORM_LEVEL));
+    launcher::scale::later(
+        authored,
+        launcher::scale::painted_width_at(text, scale, false, level) + air,
+    )
+}
+
+/// The header's status pill: the card column's own right gutter, and a plate as wide
+/// as the run inside it at `level`.
+fn header_chip_at(level: u8) -> Rect {
+    let w = chip_w_at(b"Platform Active", type_scale::CAPTION, level, HEADER_CHIP_W);
+    Rect::new(
+        SCREEN_WIDTH - HEADER_CHIP_RIGHT_INSET - w,
+        HEADER_Y,
+        w,
+        chip_h_at(level),
+    )
+}
+
+/// The pill the header was drawn with, and the gap between its right edge and the
+/// panel's -- the same gutter the card column closes on, so the chip and the cards
+/// under it end on one line.
+const HEADER_CHIP_W: usize = 174;
+const HEADER_CHIP_RIGHT_INSET: usize = 40;
+
 /// The cards whose figures are device readings.
 ///
 /// WHY they are consts and not literals inside the painter: the shell repaints a
@@ -239,6 +276,10 @@ const AUDIO_FOOT_Y: usize = audio_foot_y_at(launcher::scale::PLATFORM_LEVEL);
 /// detail) and the security card (label, the status figure, the architecture
 /// line, the capability chip). The pair takes the height the taller stack needs
 /// so the two cards still read as one row.
+///
+/// The two pills' authored widths, which [`chip_w_at`] grows with the run each carries.
+const CAL_CHIP_W: usize = 110;
+const VAULT_CHIP_W: usize = 130;
 const fn cal_chip_dy_at(level: u8) -> usize {
     CARD_INSET_Y
         + lh_at(type_scale::CAPTION, level)
@@ -355,11 +396,13 @@ const READINGS_HEAD_Y: usize = readings_head_y_at(launcher::scale::PLATFORM_LEVE
 /// walked: the four cards below the first are the same row the card above plus
 /// one pitch, and the pitch itself is derived from the line box the rung draws.
 ///
-/// WHY these stay anchors rather than call sites: the painter lays its cards from the
-/// rows below, so a rung that carried a taller column would ink rows the plate was
-/// never sized for. Every call site has to walk to the rung [`held_level_at`] answers
-/// with in the same change that sizes the plate, and until it does each constant here
-/// is the authored rung's row.
+/// WHY these are anchors and not the call sites: [`build_widgets_frame`] lays every
+/// card from `reading_card_y_at(level, n)`, so the rung the painter walks and the rung
+/// the plate was sized from are one number. Each constant here is that same face at the
+/// rung the dashboard was drawn with, which is what lets the gates under it name the
+/// rows the screen shipped with -- and a call site that went back to one of these
+/// instead of the face would ink a card at Normal inside a column grown for a raised
+/// rung, which is the split the whole ladder exists to refuse.
 const READING_CARD1_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 1);
 const READING_CARD2_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 2);
 const READING_CARD3_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 3);
@@ -461,9 +504,16 @@ const READING_CARD_W: usize = 640;
 const READING_TEXT_MAX: usize = side_text_w(READING_CARD_W, 24, 24);
 
 /// The room the header title and subtitle get before the status chip: from the
-/// left margin to the chip's own left edge (the screen minus the chip's span),
-/// less the margin and a gutter.
-const HEADER_TEXT_MAX: usize = SCREEN_WIDTH - 214 - 40 - 8;
+/// left margin to the chip's own left edge, less the margin and a gutter.
+///
+/// WHY it is solved off the chip rather than written down: the chip's pill is now a
+/// rung's width, so the room the header runs have is whatever is left of the panel
+/// once that pill is placed. At the authored rung the pill is the width it was drawn
+/// with, and this answers the `SCREEN_WIDTH - 214 - 40 - 8` the header was laid out
+/// against -- `214` was that pill's own right inset plus its width.
+fn header_text_max_at(level: u8) -> usize {
+    header_chip_at(level).x.saturating_sub(40 + 8)
+}
 /// The clock is canonical shell telemetry drawn in the shared band; its bound is
 /// simply the width left of it on the screen, so it can never run off-edge.
 const CLOCK_TEXT_MAX: usize = SCREEN_WIDTH - crate::screens::status::CLOCK_X;
@@ -496,9 +546,9 @@ const _: () = assert!(
 /// level, and it asks each card the same question a reader asks of it -- does the stack
 /// this rung lays end inside the plate this rung sizes -- plus the column against the
 /// home mark. [`held_level_at`] is the walk that names which rung may be carried at all,
-/// and every arm below holds at the rung it is measured with. What this sweep does NOT
-/// prove is that the screen has moved: the painter still lays at the authored rung's
-/// rows, so a raised rung is proven holdable here long before it is drawn.
+/// and every arm below holds at the rung it is measured with. The painter lays at that
+/// same rung, so what this sweep proves is what the device is drawn with: a card whose
+/// stack outran its plate at a raised level would have failed here before it shipped.
 const fn stacks_hold_at_every_rung() -> bool {
     let mut level = 0usize;
     while level <= launcher::scale::MAX_LEVEL as usize {
@@ -579,6 +629,25 @@ const _: () = assert!(readings_bottom_at(launcher::scale::PLATFORM_LEVEL) <= HOM
 const _: () = assert!(held_level_at(launcher::scale::PLATFORM_LEVEL) == launcher::scale::PLATFORM_LEVEL);
 const _: () = assert!(launcher::scale::PLATFORM_LEVEL <= launcher::scale::MAX_LEVEL);
 
+/// WHY swept per scale and not once: [`launcher::scale`] proves its own identities at
+/// the drawer's name scale, and this screen inkes runs at four. Each of the faces below
+/// is the one [`run_metrics_at`] and [`LabelRun::new_at`] substitute for the ladder's
+/// `em_for_scale` / `ascent_for_scale`, so a rung-derived answer that disagreed with the
+/// ladder at the authored rung would move this dashboard's ink for a reader who never
+/// raised "Text size" -- the one thing the anchors above cannot catch, because they all
+/// measure boxes rather than the pen that draws inside them.
+const fn run_faces_answer_the_ladder_at(scale: usize, level: u8) -> bool {
+    launcher::scale::em_at(scale, level) == launcher::outline_text::em_for_scale(scale)
+        && launcher::scale::ascent_at(scale, level) == launcher::font::ascent_for_scale(scale)
+}
+const _: () = assert!(
+    run_faces_answer_the_ladder_at(type_scale::CAPTION, launcher::scale::PLATFORM_LEVEL)
+        && run_faces_answer_the_ladder_at(type_scale::BODY, launcher::scale::PLATFORM_LEVEL)
+        && run_faces_answer_the_ladder_at(type_scale::SECTION, launcher::scale::PLATFORM_LEVEL)
+        && run_faces_answer_the_ladder_at(type_scale::TITLE, launcher::scale::PLATFORM_LEVEL),
+    "the rung-derived em and ascent must answer the ladder's own faces at the authored rung",
+);
+
 /// The card column's last row against the mark's first row, at the rung the screen
 /// actually draws at.
 ///
@@ -592,18 +661,42 @@ const _: () = assert!(launcher::scale::PLATFORM_LEVEL <= launcher::scale::MAX_LE
 /// own, because every row in the column is derived from the type ladder above it
 /// and none was ever measured off the pill. At a raised rung the same column is
 /// taller by the boxes that grew, which is what [`held_level_at`] walks down to
-/// find -- though the painter has not yet started asking it which rung to lay.
+/// find, and the painter lays at the rung that walk answers.
 const _: () = assert!(
     readings_bottom_at(launcher::scale::PLATFORM_LEVEL) <= HOME_PILL.y,
     "the dashboard's last readings card must stay above the home gesture pill",
 );
 
-/// First row the dashboard draws a queried figure into, and the row after the
-/// last one. Covers the calendar card because its date line is read from the
-/// RTC rather than written here.
-pub const fn readings_band() -> (usize, usize) {
-    (STORAGE_ROW.y, CAL_ROW.y + CAL_ROW.h)
+/// The rows a rung draws its queried figures across: the top of its first card row and
+/// the row after its last one. Covers the calendar card because its date line is read
+/// from the RTC rather than written here.
+const fn readings_band_at(level: u8) -> (usize, usize) {
+    let first = storage_row_at(level);
+    let last = cal_row_at(level);
+    (first.y, last.y + last.h)
 }
+
+/// The band this screen repaints when a reading moves, taken at the rung its painter
+/// lays its cards.
+///
+/// WHY it asks the same question the painter asks instead of keeping its own answer:
+/// the band is the rows the shell re-inks, and the cards sit where the column's rung
+/// puts them. A band derived at one rung beside a painter laying at another repaints
+/// rows nobody redrew while leaving the rows that moved untouched -- so this face
+/// moved in the one change that also sized the plates in [`build_widgets_frame`], and
+/// the pair under it pins the authored rung back to the rows the screen was drawn with.
+pub fn readings_band() -> (usize, usize) {
+    readings_band_at(held_level_at(launcher::scale::draw_level()))
+}
+
+const _: () = assert!(
+    readings_band_at(launcher::scale::PLATFORM_LEVEL).0 == STORAGE_ROW.y,
+    "the rung-derived band must open on the row the dashboard was drawn with",
+);
+const _: () = assert!(
+    readings_band_at(launcher::scale::PLATFORM_LEVEL).1 == CAL_ROW.y + CAL_ROW.h,
+    "the rung-derived band must close on the row the dashboard was drawn with",
+);
 
 // -----------------------------------------------------------------------------
 // Rounded Geometry Helpers
@@ -655,16 +748,37 @@ const RUN_CAP: usize = 64;
 /// It fills the caller's own buffer rather than returning one, so the painted
 /// bytes outlive the call that trimmed them.
 fn truncate_into(bytes: &[u8], scale: usize, max_w: usize, buf: &mut [u8]) -> usize {
+    truncate_into_at(bytes, scale, launcher::scale::PLATFORM_LEVEL, max_w, buf)
+}
+
+/// [`truncate_into`] with the advances and the mark measured at `level`.
+///
+/// WHY the trim needs the rung and not just the plate: [`launcher::scale::ellipsize_at`]
+/// spends the budget with the advances that level's em carries, so a run trimmed at the
+/// authored rung and inked at a raised one keeps glyphs the plate then refuses -- an
+/// ellipsis past the edge of the card it was fitted to.
+fn truncate_into_at(
+    bytes: &[u8],
+    scale: usize,
+    level: u8,
+    max_w: usize,
+    buf: &mut [u8],
+) -> usize {
     let len = bytes.len().min(buf.len());
     buf[..len].copy_from_slice(&bytes[..len]);
-    if max_w == 0 || text::measure(&buf[..len], scale) <= max_w {
+    if max_w == 0 || launcher::scale::measure_at(&buf[..len], scale, level) <= max_w {
         return len;
     }
-    // WHY the run handed to `ellipsize` is three bytes shorter than the buffer:
+    // WHY the run handed to the trim is three bytes shorter than the buffer:
     // the mark is written over the run's tail, and a destination that could hold
     // one or the other would end the run mid-glyph with no mark on it.
     let room = buf.len() - 3;
-    let (trimmed, trimmed_len) = text::ellipsize(&bytes[..bytes.len().min(room)], scale, max_w);
+    let (trimmed, trimmed_len) = launcher::scale::ellipsize_at(
+        &bytes[..bytes.len().min(room)],
+        scale,
+        max_w,
+        level,
+    );
     let n = trimmed_len.min(buf.len());
     buf[..n].copy_from_slice(&trimmed[..n]);
     n
@@ -691,14 +805,40 @@ const fn side_text_w(w: usize, left_inset: usize, right_inset: usize) -> usize {
 /// The room the volume reading and the mixer tag share on the audio footer row.
 const AUDIO_FOOT_TEXT_W: usize = side_text_w(AUDIO_ROW.w, 20, 20);
 
+/// [`run_metrics_at`] at the rung every box on this screen was drawn with.
 fn run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
-    let em = launcher::outline_text::em_for_scale(scale);
+    run_metrics_at(y, scale, launcher::scale::PLATFORM_LEVEL)
+}
+
+/// The em a run at `scale` is rasterised at on `level`, and the box its ink occupies
+/// under that rung's baseline: the outline face's own line metrics unioned with the
+/// ascent this ladder reserves.
+///
+/// WHY the rung is an argument and not a re-read: the plan resolves every run once,
+/// when the frame is built, and then asks each of them about every pixel of the
+/// surface. A run whose plate was sized at one rung and whose ink was placed at
+/// another is the defect this screen's ladder exists to prevent.
+///
+/// WHY the authored rung answers the number this file used before it could see one:
+/// `em_for_scale` and `ascent_for_scale` read the platform ladder, and the gates under
+/// [`LabelRun::new_at`] refuse the day the rung-derived faces disagree with them at
+/// [`launcher::scale::PLATFORM_LEVEL`] -- which is what lets a reader who never raised
+/// "Text size" get the pixels this screen drew before it read the setting.
+fn run_metrics_at(y: usize, scale: usize, level: u8) -> (u32, usize, usize) {
+    let em = launcher::scale::em_at(scale, level);
     let (asc, desc) = interos_std::design::typeface::line_metrics(em);
-    let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
+    let baseline = (y + launcher::scale::ascent_at(scale, level)).max(asc as usize);
     let top = baseline.saturating_sub(asc as usize);
     (em, top, (baseline + desc as usize).saturating_sub(top))
 }
 
+/// One run of text this dashboard paints: where it sits, how wide it was fitted, and
+/// the rung its own ink was measured and trimmed at.
+///
+/// WHY the rung is carried rather than asked for: the plan builds every run once and
+/// then answers a question per pixel, and the pixel path cannot re-read the published
+/// setting without letting a frame that began at one rung finish at another. Carrying
+/// the rung beside the bytes is what keeps the plate, the trim and the ink one answer.
 #[derive(Clone, Copy)]
 struct LabelRun {
     x: usize,
@@ -706,6 +846,7 @@ struct LabelRun {
     w: usize,
     h: usize,
     scale: usize,
+    level: u8,
     len: usize,
     ink: u32,
     em: u32,
@@ -722,6 +863,7 @@ impl LabelRun {
         w: 0,
         h: 0,
         scale: 1,
+        level: launcher::scale::PLATFORM_LEVEL,
         len: 0,
         ink: 0,
         em: 0,
@@ -731,15 +873,36 @@ impl LabelRun {
         outline: None,
     };
 
+    /// A left-anchored run fitted at the rung this screen was drawn with.
     fn new(x: usize, y: usize, max_w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+        LabelRun::new_at(x, y, max_w, scale, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`LabelRun::new`], fitted, measured and placed at `level`.
+    ///
+    /// WHY every face below is the rung's and not the ladder's: the plate this run sits
+    /// in is derived from the same `level` by the `*_at` chain above it, so a run
+    /// measured at one and inked at the other is the split this module refuses -- the
+    /// ink would outrun the plate or shrink inside it. The authored rung answers the
+    /// numbers this file used before it could see one, which the gate under
+    /// [`build_widgets_frame`] proves for each scale drawn here.
+    fn new_at(
+        x: usize,
+        y: usize,
+        max_w: usize,
+        scale: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Self {
         let mut buf = [0u8; RUN_CAP];
-        let len = truncate_into(bytes, scale, max_w, &mut buf);
-        let (em, top, box_h) = run_metrics(y, scale);
-        let w = text::measure(&buf[..len], scale)
+        let len = truncate_into_at(bytes, scale, level, max_w, &mut buf);
+        let (em, top, box_h) = run_metrics_at(y, scale, level);
+        let w = launcher::scale::measure_at(&buf[..len], scale, level)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize)
             .min(max_w.max(1));
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
+        let baseline = (y + launcher::scale::ascent_at(scale, level)).max(asc as usize);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 x,
@@ -756,6 +919,7 @@ impl LabelRun {
             w,
             h: text::line_height(scale),
             scale,
+            level,
             len,
             ink,
             em,
@@ -766,16 +930,34 @@ impl LabelRun {
         }
     }
 
+    /// A run centred inside `w` at the rung this screen was drawn with.
     fn centred(x: usize, y: usize, w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+        LabelRun::centred_at(x, y, w, scale, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`LabelRun::centred`], measured and centred at `level`.
+    ///
+    /// WHY the centring is done at the same rung as the measurement: the inset and the
+    /// width come off one number, and a run centred at one rung and measured at another
+    /// would sit off the middle of the plate its chip drew around it.
+    fn centred_at(
+        x: usize,
+        y: usize,
+        w: usize,
+        scale: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Self {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let measured = text::measure(&buf[..len], scale);
-        let inset = text::center_x(&buf[..len], scale, w);
-        let (em, top, box_h) = run_metrics(y, scale);
+        let measured = launcher::scale::measure_at(&buf[..len], scale, level);
+        let inset = if measured >= w { 0 } else { (w - measured) / 2 };
+        let (em, top, box_h) = run_metrics_at(y, scale, level);
         let rx = x + inset;
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
+        let baseline = (y + launcher::scale::ascent_at(scale, level)).max(asc as usize);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
@@ -792,6 +974,7 @@ impl LabelRun {
             w: measured.max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
+            level,
             len,
             ink,
             em,
@@ -802,16 +985,36 @@ impl LabelRun {
         }
     }
 
+    /// A run whose right edge is anchored at `x_right`, at the rung this screen was
+    /// drawn with.
     fn right(x_right: usize, y: usize, max_w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+        LabelRun::right_at(x_right, y, max_w, scale, bytes, ink, launcher::scale::PLATFORM_LEVEL)
+    }
+
+    /// As [`LabelRun::right`], fitted and anchored at `level`.
+    ///
+    /// WHY the anchor and the width share a rung: the edge a right-anchored reading
+    /// steps back from is `x_right`, and it steps back by the width the level paints --
+    /// anchoring at one rung's width and inking at another's is a value whose tail
+    /// crosses the centre line its card reserves for it.
+    fn right_at(
+        x_right: usize,
+        y: usize,
+        max_w: usize,
+        scale: usize,
+        bytes: &[u8],
+        ink: u32,
+        level: u8,
+    ) -> Self {
         let mut buf = [0u8; RUN_CAP];
-        let len = truncate_into(bytes, scale, max_w, &mut buf);
-        let (em, top, box_h) = run_metrics(y, scale);
-        let w = text::measure(&buf[..len], scale)
+        let len = truncate_into_at(bytes, scale, level, max_w, &mut buf);
+        let (em, top, box_h) = run_metrics_at(y, scale, level);
+        let w = launcher::scale::measure_at(&buf[..len], scale, level)
             .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize)
             .min(max_w.max(1));
         let rx = x_right.saturating_sub(w);
         let (asc, _) = interos_std::design::typeface::line_metrics(em);
-        let baseline = (y + launcher::font::ascent_for_scale(scale)).max(asc as usize);
+        let baseline = (y + launcher::scale::ascent_at(scale, level)).max(asc as usize);
         let outline = if scale >= 2 && len <= launcher::outline_text::KEY_MAX {
             launcher::outline_text::OutlineRun::place(
                 rx,
@@ -828,6 +1031,7 @@ impl LabelRun {
             w,
             h: text::line_height(scale),
             scale,
+            level,
             len,
             ink,
             em,
@@ -849,7 +1053,7 @@ impl LabelRun {
         if let Some(ref run) = self.outline {
             return run.pixel(px, py, self.ink, bg);
         }
-        test_text_aa(
+        test_text_aa_level(
             px,
             py,
             self.x,
@@ -858,6 +1062,7 @@ impl LabelRun {
             &self.bytes[..self.len],
             self.ink,
             bg,
+            self.level,
         )
     }
 }
@@ -999,15 +1204,31 @@ fn push_dec(out: &mut [u8], at: usize, mut v: u64) -> usize {
 fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     let theme = THEME;
 
+    // WHY the rung is resolved once here and handed to every run and every plate below:
+    // this plan is built the first time a pixel of the surface is asked about and then
+    // answers a question per pixel, so a face that re-read the published setting partway
+    // through would lay one card at one rung and the next at another. [`held_level_at`]
+    // is the rung this column carries -- the drawer's clamp answers for a tile's cell,
+    // not for the tallest stack the shell draws -- and at the rung a reader who never
+    // raised "Text size" has, every face below is the number this painter used before it
+    // could see one.
+    let level = held_level_at(launcher::scale::draw_level());
+
     // 1. Canonical Status Bar Elements
+    //
+    // WHY the clock stays at the authored rung: its plate is the shared status band, in
+    // `screens::status`, and that band's rows are not derived from this ladder yet. Ink
+    // grown inside a plate this screen does not size is the split the rest of this file
+    // refuses, so the clock joins when the band does.
     let status_clock = if state.clock_source_ok {
-        LabelRun::new(
+        LabelRun::new_at(
             crate::screens::status::CLOCK_X,
             crate::screens::status::CLOCK_Y,
             CLOCK_TEXT_MAX,
             type_scale::BODY,
             &state.clock_time,
             theme.on_surface,
+            launcher::scale::PLATFORM_LEVEL,
         )
     } else {
         LabelRun::EMPTY
@@ -1015,42 +1236,52 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
 
     // 2. Header
     // WHY the subtitle sits a whole title box below the title: the page title is
-    // a rung-4 run that reserves `lh(TITLE)` rows, and at the old y the
+    // a rung-4 run that reserves `lh_at(TITLE, level)` rows, and at the old y the
     // subtitle's ink began above the bottom of that box, so the two read as one
     // smeared row on the device.
-    let page_title = LabelRun::new(40, HEADER_Y, HEADER_TEXT_MAX, type_scale::TITLE, b"Live Widgets", theme.on_surface);
-    let page_subtitle = LabelRun::new(
+    let page_title = LabelRun::new_at(
         40,
-        HEADER_Y + lh(type_scale::TITLE),
-        HEADER_TEXT_MAX,
+        HEADER_Y,
+        header_text_max_at(level),
+        type_scale::TITLE,
+        b"Live Widgets",
+        theme.on_surface,
+        level,
+    );
+    let page_subtitle = LabelRun::new_at(
+        40,
+        HEADER_Y + lh_at(type_scale::TITLE, level),
+        header_text_max_at(level),
         type_scale::CAPTION,
         b"Real-time hardware telemetry & system status",
         theme.on_surface_variant,
+        level,
     );
 
     // WHY the chip is as wide as it is: the caption run measures ~135 px and the
     // old 150 px pill left the label touching its own border, which reads as a
     // clipped control rather than a status. WHY it is as tall as it is: the pill
     // reserves the caption run's whole line box plus its own padding.
-    let status_chip_rect = Rect::new(SCREEN_WIDTH - 214, HEADER_Y, 174, CHIP_H);
-    let status_chip_label = LabelRun::centred(
+    let status_chip_rect = header_chip_at(level);
+    let status_chip_label = LabelRun::centred_at(
         status_chip_rect.x,
         status_chip_rect.y + CHIP_PAD_Y,
         status_chip_rect.w,
         type_scale::CAPTION,
         b"Platform Active",
         0xFF10B981, // Emerald green
+        level,
     );
 
-    // 3. Row 1: Storage & Physical Memory (STORAGE_ROW / RAM_ROW, one ladder high)
+    // 3. Row 1: Storage & Physical Memory (one ladder high, both cards the same stack)
     //
     // WHY both figures are read from the kernel: a capacity is a property of the
     // machine the guest happens to be running on, and the same image boots with
     // 1 GiB in Device Studio and with whatever a developer's QEMU line says. The
     // card printed "6.00 GB" and "13.2 GB" as source literals, so it reported
     // hardware the device never confirmed.
-    let storage_rect = STORAGE_ROW;
-    let storage_label = LabelRun::new(storage_rect.x + 20, ROW1_LABEL_Y, card_text_w(STORAGE_ROW.w), type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant);
+    let storage_rect = storage_row_at(level);
+    let storage_label = LabelRun::new_at(storage_rect.x + 20, row1_label_y_at(level), card_text_w(storage_rect.w), type_scale::CAPTION, b"Storage & VFS", theme.on_surface_variant, level);
     let mut cap_buf = [0u8; 24];
     let cap_len = if state.storage_state_valid {
         push_capacity(&mut cap_buf, state.storage_total_bytes)
@@ -1058,29 +1289,30 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
         push_text(&mut cap_buf, 0, b"Unavailable")
     };
     let storage_ink = if state.storage_state_valid { theme.on_surface } else { theme.on_surface_variant };
-    let storage_capacity = LabelRun::new(storage_rect.x + 20, ROW1_FIGURE_Y, card_text_w(STORAGE_ROW.w), type_scale::TITLE, &cap_buf[..cap_len], storage_ink);
+    let storage_capacity = LabelRun::new_at(storage_rect.x + 20, row1_figure_y_at(level), card_text_w(storage_rect.w), type_scale::TITLE, &cap_buf[..cap_len], storage_ink, level);
     let storage_mount = if state.storage_state_valid {
-        LabelRun::new(storage_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(STORAGE_ROW.w), type_scale::BODY, b"Persistent Block Disk", theme.on_surface)
+        LabelRun::new_at(storage_rect.x + 20, row1_secondary_y_at(level), card_text_w(storage_rect.w), type_scale::BODY, b"Persistent Block Disk", theme.on_surface, level)
     } else {
-        LabelRun::new(storage_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(STORAGE_ROW.w), type_scale::BODY, b"No block device bound", theme.on_surface_variant)
+        LabelRun::new_at(storage_rect.x + 20, row1_secondary_y_at(level), card_text_w(storage_rect.w), type_scale::BODY, b"No block device bound", theme.on_surface_variant, level)
     };
-    let storage_detail = LabelRun::new(storage_rect.x + 20, ROW1_DETAIL_Y, card_text_w(STORAGE_ROW.w), type_scale::CAPTION, b"/data, /user, /storage persist", theme.on_surface_variant);
+    let storage_detail = LabelRun::new_at(storage_rect.x + 20, row1_detail_y_at(level), card_text_w(storage_rect.w), type_scale::CAPTION, b"/data, /user, /storage persist", theme.on_surface_variant, level);
 
-    let ram_rect = RAM_ROW;
-    let ram_label = LabelRun::new(ram_rect.x + 20, ROW1_LABEL_Y, card_text_w(RAM_ROW.w), type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant);
+    let ram_rect = ram_row_at(level);
+    let ram_label = LabelRun::new_at(ram_rect.x + 20, row1_label_y_at(level), card_text_w(ram_rect.w), type_scale::CAPTION, b"Physical Memory", theme.on_surface_variant, level);
     let mut ram_buf = [0u8; 24];
     let ram_len = if state.memory_state_valid {
         push_capacity(&mut ram_buf, state.memory_total_bytes)
     } else {
         push_text(&mut ram_buf, 0, b"Unavailable")
     };
-    let ram_total = LabelRun::new(
+    let ram_total = LabelRun::new_at(
         ram_rect.x + 20,
-        ROW1_FIGURE_Y,
-        card_text_w(RAM_ROW.w),
+        row1_figure_y_at(level),
+        card_text_w(ram_rect.w),
         type_scale::TITLE,
         &ram_buf[..ram_len],
         if state.memory_state_valid { 0xFF10B981 } else { theme.on_surface_variant },
+        level,
     );
     // WHY the second line is the used counter and not a governor claim: nothing
     // in this kernel feeds the DVFS governor a load sample and no CPU frequency
@@ -1097,8 +1329,8 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     // those offsets were the 8x16 cell's, shorter than the boxes they follow, so
     // this card's body line began while the scale-4 figure above was still
     // painting and read through it. The storage card already stacks this way.
-    let ram_mmu = LabelRun::new(ram_rect.x + 20, ROW1_SECONDARY_Y, card_text_w(RAM_ROW.w), type_scale::BODY, &used_buf[..used_len], theme.on_surface);
-    let ram_detail = LabelRun::new(ram_rect.x + 20, ROW1_DETAIL_Y, card_text_w(RAM_ROW.w), type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant);
+    let ram_mmu = LabelRun::new_at(ram_rect.x + 20, row1_secondary_y_at(level), card_text_w(ram_rect.w), type_scale::BODY, &used_buf[..used_len], theme.on_surface, level);
+    let ram_detail = LabelRun::new_at(ram_rect.x + 20, row1_detail_y_at(level), card_text_w(ram_rect.w), type_scale::CAPTION, b"Isolated CR3 Page Tables", theme.on_surface_variant, level);
 
     // 4. Row 2: Real System Audio & Master Volume (AUDIO_ROW)
     //
@@ -1106,15 +1338,15 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     // master-volume register, so a reading is the only evidence this shell has
     // that a codec is bound at all. Without one the card says it was not told,
     // instead of naming a sound device the platform never answered for.
-    let audio_rect = AUDIO_ROW;
-    let audio_art_rect = Rect::new(audio_rect.x + 20, audio_rect.y + 16, 44, 44);
-    let audio_title = LabelRun::new(audio_rect.x + 76, AUDIO_TITLE_Y, AUDIO_TITLE_TEXT_W, type_scale::BODY, b"Master Audio Output", theme.on_surface);
+    let audio_rect = audio_row_at(level);
+    let audio_art_rect = Rect::new(audio_rect.x + 20, audio_rect.y + CARD_INSET_Y, 44, 44);
+    let audio_title = LabelRun::new_at(audio_rect.x + 76, audio_title_y_at(level), AUDIO_TITLE_TEXT_W, type_scale::BODY, b"Master Audio Output", theme.on_surface, level);
     let audio_sublabel = if state.volume_state_valid {
-        LabelRun::new(audio_rect.x + 76, AUDIO_SUB_Y, AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"AC'97 codec, 48 kHz PCM", theme.on_surface_variant)
+        LabelRun::new_at(audio_rect.x + 76, audio_sub_y_at(level), AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"AC'97 codec, 48 kHz PCM", theme.on_surface_variant, level)
     } else {
-        LabelRun::new(audio_rect.x + 76, AUDIO_SUB_Y, AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant)
+        LabelRun::new_at(audio_rect.x + 76, audio_sub_y_at(level), AUDIO_TITLE_TEXT_W, type_scale::CAPTION, b"No volume reported by the mixer", theme.on_surface_variant, level)
     };
-    let audio_gauge_rect = Rect::new(audio_rect.x + 20, AUDIO_GAUGE_Y, audio_rect.w - 40, AUDIO_GAUGE_H);
+    let audio_gauge_rect = Rect::new(audio_rect.x + 20, audio_gauge_y_at(level), audio_rect.w - 40, AUDIO_GAUGE_H);
     let pct = if state.volume_state_valid { state.last_volume_percent as usize } else { 0 };
     let audio_gauge_fill_w = (audio_gauge_rect.w * pct.min(100)) / 100;
 
@@ -1131,16 +1363,16 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         push_text(&mut vol_buf, 0, b"Volume: not reported")
     };
-    let audio_volume_label = LabelRun::new(audio_rect.x + 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant);
+    let audio_volume_label = LabelRun::new_at(audio_rect.x + 20, audio_foot_y_at(level), AUDIO_FOOT_TEXT_W, type_scale::CAPTION, &vol_buf[..vn], theme.on_surface_variant, level);
     let audio_service_tag = if state.volume_state_valid {
-        LabelRun::right(audio_rect.x + audio_rect.w - 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Mixer register live", 0xFF10B981)
+        LabelRun::right_at(audio_rect.x + audio_rect.w - 20, audio_foot_y_at(level), AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Mixer register live", 0xFF10B981, level)
     } else {
-        LabelRun::right(audio_rect.x + audio_rect.w - 20, AUDIO_FOOT_Y, AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant)
+        LabelRun::right_at(audio_rect.x + audio_rect.w - 20, audio_foot_y_at(level), AUDIO_FOOT_TEXT_W, type_scale::CAPTION, b"Audio unread", theme.on_surface_variant, level)
     };
 
-    // 5. Row 3: Calendar / RTC & Security (CAL_ROW / VAULT_ROW)
-    let cal_rect = CAL_ROW;
-    let cal_label = LabelRun::new(cal_rect.x + 20, CAL_LABEL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant);
+    // 5. Row 3: Calendar / RTC & Security
+    let cal_rect = cal_row_at(level);
+    let cal_label = LabelRun::new_at(cal_rect.x + 20, cal_label_y_at(level), card_text_w(cal_rect.w), type_scale::CAPTION, b"System Date & Clock", theme.on_surface_variant, level);
     // WHY "No clock reading" and not "Clock Synced": the two say opposite things
     // and the old literal was printed whenever the RTC refused, so the card
     // claimed a synchronisation this shell had just been told did not happen.
@@ -1155,15 +1387,25 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     };
     // WHY the date line is derived from the label box and not from a `y + 38`:
     // the old offset assumed the 8x16 cell, but the label is a caption run that
-    // reserves `lh(CAPTION)` rows, so the date line is one whole caption box
-    // under the card's inset - named from the ladder so a change in the caption
+    // reserves `lh_at(CAPTION, level)` rows, so the date line is one whole caption
+    // box under the card's inset - named from the ladder so a change in the caption
     // stride moves it with the label.
-    let cal_date = LabelRun::new(cal_rect.x + 20, CAL_DATE_Y, card_text_w(CAL_ROW.w), type_scale::SECTION, date_slice, theme.on_surface);
-    let cal_time_chip = Rect::new(cal_rect.x + 20, CAL_CHIP_Y, 110, CHIP_H);
+    let cal_date = LabelRun::new_at(cal_rect.x + 20, cal_date_y_at(level), card_text_w(cal_rect.w), type_scale::SECTION, date_slice, theme.on_surface, level);
+    let cal_time_chip = Rect::new(
+        cal_rect.x + 20,
+        cal_chip_y_at(level),
+        chip_w_at(
+            if state.clock_source_ok { b"Hardware RTC" } else { b"RTC refused" },
+            type_scale::CAPTION,
+            level,
+            CAL_CHIP_W,
+        ),
+        chip_h_at(level),
+    );
     let cal_time_label = if state.clock_source_ok {
-        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface)
+        LabelRun::centred_at(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"Hardware RTC", theme.on_surface, level)
     } else {
-        LabelRun::centred(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"RTC refused", theme.on_surface_variant)
+        LabelRun::centred_at(cal_time_chip.x, cal_time_chip.y + CHIP_PAD_Y, cal_time_chip.w, type_scale::CAPTION, b"RTC refused", theme.on_surface_variant, level)
     };
     // WHY the detail names the reading it shows: the chip above it already says
     // where the date came from, and a static "No calendar source queried" under
@@ -1177,30 +1419,36 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     } else {
         push_text(&mut cal_buf, 0, b"No calendar source queried")
     };
-    let cal_detail = LabelRun::new(cal_rect.x + 20, CAL_DETAIL_Y, card_text_w(CAL_ROW.w), type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant);
+    let cal_detail = LabelRun::new_at(cal_rect.x + 20, cal_detail_y_at(level), card_text_w(cal_rect.w), type_scale::CAPTION, &cal_buf[..cal_len], theme.on_surface_variant, level);
 
     // WHY the security card is stacked from the ladder: the status figure is a
-    // rung-4 run that reserves `lh(TITLE)` rows, and the architecture line
+    // rung-4 run that reserves `lh_at(TITLE, level)` rows, and the architecture line
     // and the chip below it were spaced by the 8x16 cell's 52 and 34 rows, so
     // each began its ink while the run above was still inside its box.
-    let vault_rect = VAULT_ROW;
-    let vault_label = LabelRun::new(vault_rect.x + 20, VAULT_LABEL_Y, card_text_w(VAULT_ROW.w), type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant);
-    let vault_status = LabelRun::new(vault_rect.x + 20, VAULT_STATUS_Y, card_text_w(VAULT_ROW.w), type_scale::TITLE, b"Enforced", 0xFF10B981);
-    let vault_arch = LabelRun::new(vault_rect.x + 20, VAULT_ARCH_Y, card_text_w(VAULT_ROW.w), type_scale::BODY, b"Zero Ambient Authority", theme.on_surface);
-    let vault_chip_rect = Rect::new(vault_rect.x + 20, VAULT_CHIP_Y, 130, CHIP_H);
-    let vault_chip_label = LabelRun::centred(vault_chip_rect.x, vault_chip_rect.y + CHIP_PAD_Y, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF);
+    let vault_rect = vault_row_at(level);
+    let vault_label = LabelRun::new_at(vault_rect.x + 20, vault_label_y_at(level), card_text_w(vault_rect.w), type_scale::CAPTION, b"Security Architecture", theme.on_surface_variant, level);
+    let vault_status = LabelRun::new_at(vault_rect.x + 20, vault_status_y_at(level), card_text_w(vault_rect.w), type_scale::TITLE, b"Enforced", 0xFF10B981, level);
+    let vault_arch = LabelRun::new_at(vault_rect.x + 20, vault_arch_y_at(level), card_text_w(vault_rect.w), type_scale::BODY, b"Zero Ambient Authority", theme.on_surface, level);
+    let vault_chip_rect = Rect::new(
+        vault_rect.x + 20,
+        vault_chip_y_at(level),
+        chip_w_at(b"Capability Broker", type_scale::CAPTION, level, VAULT_CHIP_W),
+        chip_h_at(level),
+    );
+    let vault_chip_label = LabelRun::centred_at(vault_chip_rect.x, vault_chip_rect.y + CHIP_PAD_Y, vault_chip_rect.w, type_scale::CAPTION, b"Capability Broker", 0xFFFFFFFF, level);
 
     // 6. Section 2 Header.
-    let readings_head = LabelRun::new(
+    let readings_head = LabelRun::new_at(
         40,
-        READINGS_HEAD_Y,
+        readings_head_y_at(level),
         card_text_w(READING_CARD_W),
         type_scale::SECTION,
         b"System Readings",
         theme.on_surface,
+        level,
     );
 
-    // 7. System Readings Cards (READINGS_CARD0_Y, five cards a READING_PITCH apart)
+    // 7. System Readings Cards (five cards, one rung's pitch apart)
     let mut pkg_buf = [0u8; 32];
     let mut n = push_dec(&mut pkg_buf, 0, state.app_count as u64);
     for &b in b" registered" {
@@ -1221,38 +1469,43 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
     }
 
     let card_w = READING_CARD_W;
-    let card_h = READING_CARD_H;
+    let card_h = reading_card_h_at(level);
     // WHY the run rows are derived per card: the label is a body run reserving
-    // `lh(BODY)` rows, and the sublabels were placed inside that box, so they
-    // read straight through it. The card is now as tall as the sublabel's whole
+    // `lh_at(BODY, level)` rows, and the sublabels were placed inside that box, so
+    // they read straight through it. The card is now as tall as the sublabel's whole
     // box, and the value is right-anchored and shares the label's row, so all
     // three runs are bounded at the card centre by `READING_TEXT_MAX`.
+    let card0 = reading_card_y_at(level, 0);
+    let card1 = reading_card_y_at(level, 1);
+    let card2 = reading_card_y_at(level, 2);
+    let card3 = reading_card_y_at(level, 3);
+    let card4 = reading_card_y_at(level, 4);
     let readings = [
         DashboardReadingCard {
-            rect: Rect::new(40, READINGS_CARD0_Y, card_w, card_h),
-            label: LabelRun::new(64, READINGS_CARD0_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Package Registry", theme.on_surface),
-            sublabel: LabelRun::new(64, READINGS_CARD0_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, READINGS_CARD0_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &pkg_buf[..n], theme.on_surface),
+            rect: Rect::new(40, card0, card_w, card_h),
+            label: LabelRun::new_at(64, card0 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Package Registry", theme.on_surface, level),
+            sublabel: LabelRun::new_at(64, card0 + reading_sub_dy_at(level), READING_TEXT_MAX, type_scale::CAPTION, b"Signed verified package store", theme.on_surface_variant, level),
+            value: LabelRun::right_at(40 + card_w - 24, card0 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &pkg_buf[..n], theme.on_surface, level),
             accent_color: 0xFF6366F1,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, READING_CARD1_Y, card_w, card_h),
-            label: LabelRun::new(64, READING_CARD1_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"IPC Alert Channel", theme.on_surface),
-            sublabel: LabelRun::new(64, READING_CARD1_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, READING_CARD1_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }),
+            rect: Rect::new(40, card1, card_w, card_h),
+            label: LabelRun::new_at(64, card1 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"IPC Alert Channel", theme.on_surface, level),
+            sublabel: LabelRun::new_at(64, card1 + reading_sub_dy_at(level), READING_TEXT_MAX, type_scale::CAPTION, b"Kernel notification queue", theme.on_surface_variant, level),
+            value: LabelRun::right_at(40 + card_w - 24, card1 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, &notif_buf[..n_len], if state.notification_count > 0 { 0xFFF59E0B } else { theme.on_surface_variant }, level),
             accent_color: 0xFF10B981,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, READING_CARD2_Y, card_w, card_h),
-            label: LabelRun::new(64, READING_CARD2_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Display Compositor", theme.on_surface),
-            sublabel: LabelRun::new(64, READING_CARD2_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant),
+            rect: Rect::new(40, card2, card_w, card_h),
+            label: LabelRun::new_at(64, card2 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Display Compositor", theme.on_surface, level),
+            sublabel: LabelRun::new_at(64, card2 + reading_sub_dy_at(level), READING_TEXT_MAX, type_scale::CAPTION, b"Flagship portrait 720x1440", theme.on_surface_variant, level),
             // WHY the panel state and not a frame rate: nothing in this kernel measures
             // a flip interval - the scanout deadline is computed from a configured
             // refresh figure - so "60 FPS" reported a number no clock had observed.
             // Whether the panel has power is something the platform does answer.
-            value: LabelRun::right(
+            value: LabelRun::right_at(
                 40 + card_w - 24,
-                READING_CARD2_Y + READING_VALUE_DY,
+                card2 + READING_VALUE_DY,
                 READING_TEXT_MAX,
                 type_scale::BODY,
                 if !state.display_power_state_valid {
@@ -1267,24 +1520,25 @@ fn build_widgets_frame(state: &LauncherState) -> WidgetsPlan {
                 } else {
                     theme.on_surface_variant
                 },
+                level,
             ),
             accent_color: 0xFF8B5CF6,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, READING_CARD3_Y, card_w, card_h),
-            label: LabelRun::new(64, READING_CARD3_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Network Connectivity", theme.on_surface),
+            rect: Rect::new(40, card3, card_w, card_h),
+            label: LabelRun::new_at(64, card3 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Network Connectivity", theme.on_surface, level),
             // WHY this names the address as a configuration: the stack sends from a
             // fixed address and nothing probes a link, so the old line's "Online"
             // claimed a measured connection that no code here could observe.
-            sublabel: LabelRun::new(64, READING_CARD3_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, READING_CARD3_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Link unverified", theme.on_surface_variant),
+            sublabel: LabelRun::new_at(64, card3 + reading_sub_dy_at(level), READING_TEXT_MAX, type_scale::CAPTION, b"E1000 IPv4, addr 10.0.2.15", theme.on_surface_variant, level),
+            value: LabelRun::right_at(40 + card_w - 24, card3 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Link unverified", theme.on_surface_variant, level),
             accent_color: 0xFF3B82F6,
         },
         DashboardReadingCard {
-            rect: Rect::new(40, READING_CARD4_Y, card_w, card_h),
-            label: LabelRun::new(64, READING_CARD4_Y + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface),
-            sublabel: LabelRun::new(64, READING_CARD4_Y + READING_SUB_DY, READING_TEXT_MAX, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant),
-            value: LabelRun::right(40 + card_w - 24, READING_CARD4_Y + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Protected", 0xFF059669),
+            rect: Rect::new(40, card4, card_w, card_h),
+            label: LabelRun::new_at(64, card4 + READING_LABEL_DY, READING_TEXT_MAX, type_scale::BODY, b"Process Sandbox & Isolation", theme.on_surface, level),
+            sublabel: LabelRun::new_at(64, card4 + reading_sub_dy_at(level), READING_TEXT_MAX, type_scale::CAPTION, b"Ring 3 user mode CR3 tables", theme.on_surface_variant, level),
+            value: LabelRun::right_at(40 + card_w - 24, card4 + READING_VALUE_DY, READING_TEXT_MAX, type_scale::BODY, b"Protected", 0xFF059669, level),
             accent_color: 0xFF059669,
         },
     ];

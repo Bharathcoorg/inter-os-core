@@ -190,10 +190,14 @@ def test_shell_reads_ram_and_capacity_and_repaints_the_cards_they_move():
     assert "screens::live_widgets::invalidate_widgets_cache()" in launcher
     widgets = read("apps/launcher/src/screens/live_widgets.rs")
     # One geometry owner for the band and the cards inside it: a band retyped
-    # away from the rows it covers is how a reading ends up stale on screen.
-    assert "pub const fn readings_band() -> (usize, usize)" in widgets
-    assert "(STORAGE_ROW.y, CAL_ROW.y + CAL_ROW.h)" in widgets
-    assert "let cal_rect = CAL_ROW;" in widgets
+    # away from the rows it covers is how a reading ends up stale on screen. Both
+    # now take the rung the painter lays its cards at, so raising "Text size"
+    # moves the repainted rows with the rows that actually moved.
+    assert "pub fn readings_band() -> (usize, usize)" in widgets
+    assert "readings_band_at(held_level_at(launcher::scale::draw_level()))" in widgets
+    assert "let first = storage_row_at(level);" in widgets
+    assert "let last = cal_row_at(level);" in widgets
+    assert "let cal_rect = cal_row_at(level);" in widgets
 
 
 def test_installed_ram_total_counts_ram_and_not_the_mmio_hole():
