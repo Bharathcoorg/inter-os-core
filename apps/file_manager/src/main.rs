@@ -34,9 +34,9 @@ use std::design::outline_text;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 use std::design::scroll::ScrollState;
 pub use file_manager::{
-    action_for_mime, detect_mime, fmt_u64, has_suffix, parse_vfs_entries, document_from_index,
-    document_from_path, FileMime, RuntimeFileEntry, SelectedDocument, MAX_DOCUMENT_PATH_LEN,
-    MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES,
+    action_for_mime, detect_mime, fmt_u64, glyph_ink, has_suffix, parse_vfs_entries,
+    document_from_index, document_from_path, FileMime, RuntimeFileEntry, SelectedDocument,
+    MAX_DOCUMENT_PATH_LEN, MAX_ENTRY_NAME_LEN, MAX_PARSED_ENTRIES,
 };
 // The layout, the scroll geometry and the file model live in the library so
 // the renderer and the hit test can call the same functions.
@@ -1704,86 +1704,10 @@ fn set_as_action(app: &mut FileManagerApp, action: FileAction) -> bool {
 // -----------------------------------------------------------------------------
 // Vector pictograms
 //
-// WHY the icons are drawn here and not in the SDK: they are this app's own
-// vocabulary for the media types it lists. The shapes are the same ones the
-// list rows, the grid cells and the recents rows all use, so one file reads
-// the same wherever it appears.
+// The ink itself is `file_manager::glyph_ink`, beside the box it fills, so the
+// shapes a person reads in a list row, a grid cell and a recents row are one
+// testable answer rather than four copies of a predicate.
 // -----------------------------------------------------------------------------
-
-/// The ink for one pixel of a media-type pictogram, in a 34x26 box.
-fn glyph_ink(mime: FileMime, dx: isize, dy: isize, ink: u32) -> Option<u32> {
-    if dx < 0 || dy < 0 || dx > 33 || dy > 25 {
-        return None;
-    }
-    let hit = match mime {
-        FileMime::Directory => {
-            let in_tab = dx <= 12 && dy >= 1 && dy <= 5;
-            let in_body = dx <= 32 && dy >= 5 && dy <= 23;
-            if in_tab || in_body {
-                dy == 1
-                    || dy == 23
-                    || dx == 0
-                    || dx == 32
-                    || (dy == 5 && dx > 12)
-                    || (dx == 12 && dy <= 5)
-            } else {
-                false
-            }
-        }
-        FileMime::Image => {
-            if dx >= 2 && dx <= 30 && dy <= 24 {
-                let frame = dx == 2 || dx == 30 || dy == 0 || dy == 24;
-                let sun_dx = dx - 22;
-                let sun_dy = dy - 6;
-                let sun = sun_dx * sun_dx + sun_dy * sun_dy <= 4;
-                let mountain = dy >= 14 && (dx - 12).abs() <= 24 - dy;
-                frame || sun || mountain
-            } else {
-                false
-            }
-        }
-        FileMime::Video => {
-            if dx >= 2 && dx <= 30 && dy <= 24 {
-                let frame = dx == 2 || dx == 30 || dy == 0 || dy == 24;
-                let play = dx >= 12 && dx <= 22 && (dy - 12).abs() <= dx - 12;
-                frame || play
-            } else {
-                false
-            }
-        }
-        FileMime::Audio => {
-            let head_one = dx >= 4 && dx <= 10 && dy >= 17 && dy <= 22;
-            let head_two = dx >= 16 && dx <= 22 && dy >= 14 && dy <= 19;
-            let stem_one = dx == 10 && dy >= 2 && dy <= 19;
-            let stem_two = dx == 22 && dy >= 2 && dy <= 16;
-            let beam = dx >= 10 && dx <= 22 && dy >= 2 && dy <= 5;
-            head_one || head_two || stem_one || stem_two || beam
-        }
-        FileMime::Document | FileMime::Other => {
-            if dx >= 4 && dx <= 28 && dy <= 24 {
-                let in_fold = dx > 20 && dy < 8 && (dx - 20) + dy > 8;
-                if in_fold {
-                    false
-                } else {
-                    let outline = dx == 4
-                        || dx == 28
-                        || dy == 0
-                        || dy == 24
-                        || ((dx >= 20 && dy <= 8) && ((dx - 20) + dy == 8));
-                    let lines = (dy == 11 || dy == 16) && dx >= 9 && dx <= 23;
-                    outline || lines
-                }
-            } else {
-                false
-            }
-        }
-    };
-    if hit {
-        Some(ink)
-    } else {
-        None
-    }
-}
 
 // -----------------------------------------------------------------------------
 // The frame: what this pass paints, answered once

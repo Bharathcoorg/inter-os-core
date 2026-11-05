@@ -2700,6 +2700,96 @@ pub const GRID_NAME_LANE: usize = GRID_CELL_W - 2 * GRID_TEXT_INSET;
 pub const GLYPH_COLS: usize = 34;
 pub const GLYPH_ROWS: usize = 26;
 
+/// The ink for one pixel of a media-type pictogram, in the [`GLYPH_COLS`] x
+/// [`GLYPH_ROWS`] box.
+///
+/// WHY the artwork lives beside the box it fills: the sweep that asks this
+/// question walks the named box, so keeping the two in one file is what lets a
+/// test ask whether every glyph still stands inside it. They are this app's own
+/// vocabulary for the media types it lists -- not the SDK's -- and the shapes
+/// are the same ones the list rows, the grid cells and the recents rows all
+/// use, so one file reads the same wherever it appears.
+///
+/// WHY each shape is written the way it points: a pictogram is a promise about
+/// the medium. The play triangle points at the direction the content travels,
+/// the same way the chevrons beside a expandable row do.
+pub fn glyph_ink(mime: FileMime, dx: isize, dy: isize, ink: u32) -> Option<u32> {
+    if dx < 0 || dy < 0 || dx >= GLYPH_COLS as isize || dy >= GLYPH_ROWS as isize {
+        return None;
+    }
+    let hit = match mime {
+        FileMime::Directory => {
+            let in_tab = dx <= 12 && dy >= 1 && dy <= 5;
+            let in_body = dx <= 32 && dy >= 5 && dy <= 23;
+            if in_tab || in_body {
+                dy == 1
+                    || dy == 23
+                    || dx == 0
+                    || dx == 32
+                    || (dy == 5 && dx > 12)
+                    || (dx == 12 && dy <= 5)
+            } else {
+                false
+            }
+        }
+        FileMime::Image => {
+            if dx >= 2 && dx <= 30 && dy <= 24 {
+                let frame = dx == 2 || dx == 30 || dy == 0 || dy == 24;
+                let sun_dx = dx - 22;
+                let sun_dy = dy - 6;
+                let sun = sun_dx * sun_dx + sun_dy * sun_dy <= 4;
+                let mountain = dy >= 14 && (dx - 12).abs() <= 24 - dy;
+                frame || sun || mountain
+            } else {
+                false
+            }
+        }
+        FileMime::Video => {
+            if dx >= 2 && dx <= 30 && dy <= 24 {
+                let frame = dx == 2 || dx == 30 || dy == 0 || dy == 24;
+                // Wide at the left column, closing to a point at the right one:
+                // the base is the edge the triangle departs from, the apex the
+                // direction it goes.
+                let play = dx >= 12 && dx <= 22 && (dy - 12).abs() <= 22 - dx;
+                frame || play
+            } else {
+                false
+            }
+        }
+        FileMime::Audio => {
+            let head_one = dx >= 4 && dx <= 10 && dy >= 17 && dy <= 22;
+            let head_two = dx >= 16 && dx <= 22 && dy >= 14 && dy <= 19;
+            let stem_one = dx == 10 && dy >= 2 && dy <= 19;
+            let stem_two = dx == 22 && dy >= 2 && dy <= 16;
+            let beam = dx >= 10 && dx <= 22 && dy >= 2 && dy <= 5;
+            head_one || head_two || stem_one || stem_two || beam
+        }
+        FileMime::Document | FileMime::Other => {
+            if dx >= 4 && dx <= 28 && dy <= 24 {
+                let in_fold = dx > 20 && dy < 8 && (dx - 20) + dy > 8;
+                if in_fold {
+                    false
+                } else {
+                    let outline = dx == 4
+                        || dx == 28
+                        || dy == 0
+                        || dy == 24
+                        || ((dx >= 20 && dy <= 8) && ((dx - 20) + dy == 8));
+                    let lines = (dy == 11 || dy == 16) && dx >= 9 && dx <= 23;
+                    outline || lines
+                }
+            } else {
+                false
+            }
+        }
+    };
+    if hit {
+        Some(ink)
+    } else {
+        None
+    }
+}
+
 /// The air a list row keeps above its glyph, and the column the grid's glyph
 /// stands in with the cell's own width taken from both sides.
 ///
@@ -5880,5 +5970,89 @@ mod tests {
         let notice = &notice_buf[..len];
         assert_eq!(notice, b"New: 0 done, 1 failed - first: restricted (platform code -13)");
         assert!(!contains_subslice(notice, b"platform does not support"));
+    }
+
+    /// The inked rows of one column of a glyph, between the frame's top and
+    /// bottom edges so only the artwork inside the frame is measured.
+    fn inked_rows(mime: FileMime, dx: isize) -> usize {
+        (1..24)
+            .filter(|dy| glyph_ink(mime, dx, *dy, 1).is_some())
+            .count()
+    }
+
+    /// The width of a pictogram's ink, column by column across the whole box.
+    fn ink_profile(mime: FileMime) -> [usize; GLYPH_COLS] {
+        let mut profile = [0usize; GLYPH_COLS];
+        for (dx, slot) in profile.iter_mut().enumerate() {
+            *slot = inked_rows(mime, dx as isize);
+        }
+        profile
+    }
+
+    #[test]
+    fn the_video_play_triangle_points_the_way_playback_goes() {
+        let profile = ink_profile(FileMime::Video);
+        // The frame inks columns 2 and 30 and rows 0 and 24; between those edges
+        // the only artwork is the play triangle, which spans columns 12 to 22.
+        let widest = (12..=22).max_by_key(|dx| profile[*dx]).unwrap();
+        let narrowest = (12..=22).min_by_key(|dx| profile[*dx]).unwrap();
+        assert_eq!(
+            (widest, narrowest),
+            (12, 22),
+            "a play triangle is wide where it starts and comes to a point in the \
+             direction the content goes, so the tallest column must be the left one"
+        );
+        assert_eq!(profile[12], 21, "the base is one unbroken run down the left edge");
+        assert_eq!(profile[22], 1, "the apex is a single pixel");
+        for dx in 13..=22 {
+            assert!(
+                profile[dx] < profile[dx - 1],
+                "the triangle closes on every step to the right, not in one place"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glyph_never_inks_past_the_box_the_painter_walks() {
+        // The painter asks this question for dx in 0..GLYPH_COLS and dy in
+        // 0..GLYPH_ROWS, so the guard is the only thing keeping a shape inside the
+        // plate that carries it. Written as a smaller figure than the box it would
+        // silently drop the artwork's own edge; written as a larger one it would
+        // report ink at pixels no row of the sweep ever visits.
+        for mime in [
+            FileMime::Directory,
+            FileMime::Image,
+            FileMime::Video,
+            FileMime::Audio,
+            FileMime::Document,
+            FileMime::Other,
+        ] {
+            assert!(
+                ink_profile(mime).iter().any(|rows| *rows > 0),
+                "a pictogram that inks nothing is an empty plate, not an icon"
+            );
+            assert!(glyph_ink(mime, -1, 0, 1).is_none());
+            assert!(glyph_ink(mime, 0, -1, 1).is_none());
+            assert!(glyph_ink(mime, GLYPH_COLS as isize, 0, 1).is_none());
+            assert!(glyph_ink(mime, 0, GLYPH_ROWS as isize, 1).is_none());
+        }
+        // The box's own last column and last row stay reachable, so the guard is
+        // the box and not the old hand-written pair of numbers beside it.
+        assert_eq!(glyph_ink(FileMime::Directory, 0, 12, 1), Some(1));
+        assert_eq!(glyph_ink(FileMime::Image, 2, 24, 1), Some(1));
+        assert_eq!(glyph_ink(FileMime::Image, 30, 12, 1), Some(1));
+    }
+
+    #[test]
+    fn the_play_direction_gate_can_fail() {
+        // The same measurement applied to the mirror image: if the check above
+        // accepted a triangle pointing backwards it would be reading nothing.
+        let backwards = |dx: isize, dy: isize| (dy - 12).abs() <= dx - 12;
+        let mut widths = [0usize; 11];
+        for (dx, slot) in (12..=22).zip(widths.iter_mut()) {
+            *slot = (1..24).filter(|dy| backwards(dx, *dy)).count();
+        }
+        assert_eq!(widths[0], 1, "a backwards triangle puts its point on the left");
+        assert_eq!(widths[10], 21);
     }
 }
