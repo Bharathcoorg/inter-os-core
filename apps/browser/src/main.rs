@@ -1323,6 +1323,42 @@ fn tile_mark_box(rect: Rect) -> Rect {
     )
 }
 
+/// The square a count badge is cut into on a chrome tile.
+///
+/// WHY derived from the rung and not taken from [`chrome::ICON`]: the badge
+/// knocks a digit out of its plate, and the caption rung reserves
+/// `font::line_height(HOME_CAPTION_RUNG)` rows -- thirty, where the icon square
+/// is twenty-four. Centring a run whose box is taller than the plate under it is
+/// not a clip: `box_.h - font::line_height(rung)` is a `usize` subtraction, so it
+/// wrapped on the first frame that inked the Tabs tile and the app panicked
+/// before it could present one. The plate grows to the run it carries, the same
+/// answer the gallery's badges were given for the same reason.
+#[inline]
+fn tab_badge_box(rect: Rect) -> Rect {
+    let side = font::line_height(chrome::HOME_CAPTION_RUNG);
+    Rect::new(
+        rect.x + (rect.w - side) / 2,
+        rect.y + (rect.h - side) / 2,
+        side,
+        side,
+    )
+}
+
+/// WHY checked at compile time: a badge that outgrew its tile would ink rows the
+/// tile never paints, and the two Tiles controls are plates of different heights
+/// -- the header's is forty-four rows, the bar's is the platform chip's forty-
+/// eight -- so neither can be assumed to carry the other's room.
+const _: () = assert!(
+    font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_TOP_BTN.h
+        && font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_TOP_BTN.w,
+    "the header's tab badge must stand inside its tile",
+);
+const _: () = assert!(
+    font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_BTN.h
+        && font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_BTN.w,
+    "the navigation bar's tab badge must stand inside its tile",
+);
+
 /// A tile and the platform mark it wears, as one pixel lookup.
 ///
 /// WHY the ink comes from the state and not from the caller: a `#0A0A0A` mark
@@ -6951,6 +6987,10 @@ fn star_glyph(x: usize, y: usize, cx: usize, cy: usize, filled: bool) -> bool {
 /// count is readable in both states instead of vanishing in the one that
 /// matters most. The digit is knocked out of the disc rather than drawn beside
 /// it, so nothing here adds a colour to a monochrome palette.
+///
+/// WHY the plate is [`tab_badge_box`] and not [`tile_mark_box`]: the caption
+/// rung reserves more rows than the platform's icon square carries, and the
+/// centring below only holds while the plate is at least that tall.
 fn tab_badge_pixel(
     x: usize,
     y: usize,
@@ -7602,17 +7642,17 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 
     // Tab Counter Badge `[N]` Button
     //
-    // WHY the box is returned and not discarded: the badge paints its own
-    // 27-pixel square, and every pixel of the target outside it used to fall
-    // through to the bar's colour, so the rest of the 46x44 control a tap
-    // answers was invisible.
+    // WHY the box is returned and not discarded: the badge inks only its own
+    // plate, and every pixel of the target outside it used to fall through to
+    // the bar's colour, so the rest of the 46x44 control a tap answers was
+    // invisible.
     let tabs_top_state = if app.overlay == SheetOverlay::TabSwitcher {
         chrome::ChromeState::Current
     } else {
         chrome::ChromeState::Resting
     };
     if let Some(c) = chrome_tile_px(x, y, TABS_TOP_BTN, BTN_R, tabs_top_state) {
-        let box_ = tile_mark_box(TABS_TOP_BTN);
+        let box_ = tab_badge_box(TABS_TOP_BTN);
         if let Some(badge) = tab_badge_pixel(x, y, box_, app.tabs.tab_count(), tabs_top_state) {
             return badge;
         }
@@ -10249,7 +10289,7 @@ fn bottom_bar_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
         chrome::ChromeState::Resting
     };
     if let Some(c) = chrome_tile_px(x, y, TABS_BTN, BTN_R, tabs_state) {
-        if let Some(px) = tab_badge_pixel(x, y, tile_mark_box(TABS_BTN), app.tabs.tab_count(), tabs_state) {
+        if let Some(px) = tab_badge_pixel(x, y, tab_badge_box(TABS_BTN), app.tabs.tab_count(), tabs_state) {
             return px;
         }
         return c;
