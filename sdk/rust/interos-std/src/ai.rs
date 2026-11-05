@@ -1,14 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
-//! On-Device Local AI & EmbeddingGemma 2 Vector Primitives
+//! Inference-Service Wire Contract and Lexical Vector Primitives
 //!
-//! Zero-allocation `#![no_std]` data structures and integer fixed-point vector
-//! arithmetic for on-device multimodal embeddings (Google EmbeddingGemma 2)
-//! and Gemma 4 local inference daemon (`aid`).
+//! WHAT THIS FILE IS FOR: the shared vocabulary between a Ring-3 application
+//! and the system inference service. It publishes the service id and ABI
+//! version the platform's registry reports, the message tags a query carries,
+//! the status codes a reply answers with, the `repr(C)` request, response and
+//! search layouts both sides read byte-for-byte, and the fixed-point
+//! arithmetic an app runs over whatever comes back -- integer square root,
+//! software `f32` square root, Q7 quantisation and Q15 cosine similarity, all
+//! allocation-free.
 //!
-//! Supports Matryoshka Representation Learning (MRL) dimension truncations
-//! (128, 256, 512, 768) and Q7 fixed-point cosine similarity calculation.
+//! WHAT THE EMBEDDING FUNCTIONS HERE ACTUALLY COMPUTE: a projection, not a
+//! model's output. `compute_text_embedding_dim_f32` hashes the prompt's
+//! unigrams, bigrams and trigrams onto the requested dimension and
+//! L2-normalises the result in software; the one thing it reads is the bytes
+//! its caller handed it. No weight of no model file enters into it, which is
+//! why [`STATUS_BASELINE_LEXICAL`] exists as a status of its own and why a
+//! reply carrying it must never be scored as a neural answer. The four
+//! Matryoshka dimensions named by [`MatryoshkaDim`] are the widths a request
+//! may ask for; asking for one says nothing about who computed it.
+//!
+//! REACHING THE SERVICE IS NOT IMPLEMENTED HERE. This module defines the
+//! shapes a call travels in. It issues no syscall, opens no channel and holds
+//! no client, so nothing in it connects to `aid` or to any other process, and
+//! the ids and tags below are names rather than evidence that anything
+//! answers them. A caller that needs the service asks the registry for its
+//! state and reports what it is told, including `STATUS_UNAVAILABLE`.
+//!
+//! WHY no model family is named here either: this crate carries no weights,
+//! no vocabulary and no runner, so it could neither make a model's embedding
+//! nor tell one that arrived over the wire from the projection it computes
+//! itself. Only the reply's own status says which arithmetic ran.
 
 // -----------------------------------------------------------------------------
 // The inference service interface
