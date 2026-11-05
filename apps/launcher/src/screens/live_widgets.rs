@@ -72,10 +72,23 @@ const _: () = assert!(
     "the dashboard's home mark must be the platform's mark, not a rectangle of its own",
 );
 
-/// The line box a run at `scale` reserves, named once so a card's rows can be
-/// stacked from the ladder rather than from a fitted literal.
+/// The rows a rung's line box reserves for `scale`.
+///
+/// WHY this reads the level rather than the ladder: every paint-Y below is a chain of
+/// `+ lh(CAPTION)`, so a raised caption moved its ink while the card's plate stayed the
+/// number authored at Normal -- the stack walked out of the rectangle the shell had
+/// reserved for it. Each stride and the box it carries are now the same face of the same
+/// level, and the sweeps under them refuse the day one stops holding the other.
+pub const fn lh_at(scale: usize, level: u8) -> usize {
+    launcher::scale::line_at(scale, level)
+}
+
+/// The line box the ladder reserves for `scale`: [`lh_at`] at the rung every box here
+/// was drawn with. Kept as the anchor so the authored numbers stay single-source --
+/// each constant below is this face at that level, and the identity the gates assert is
+/// therefore true by construction rather than by a number remembered twice.
 const fn lh(scale: usize) -> usize {
-    launcher::font::line_height(scale)
+    lh_at(scale, launcher::scale::PLATFORM_LEVEL)
 }
 
 /// WHY every second line below is derived from the line above: the old offsets
@@ -106,7 +119,10 @@ const ROW_GAP: usize = 14;
 /// WHY the dashboard starts below this box: a run's ink reaches the bottom of
 /// the box it reserves, and the first card row began inside the subtitle's.
 const HEADER_Y: usize = 60;
-const HEADER_STACK_H: usize = lh(type_scale::TITLE) + lh(type_scale::CAPTION);
+const fn header_stack_h_at(level: u8) -> usize {
+    lh_at(type_scale::TITLE, level) + lh_at(type_scale::CAPTION, level)
+}
+const HEADER_STACK_H: usize = header_stack_h_at(launcher::scale::PLATFORM_LEVEL);
 
 /// A chip: a caption label inside a filled pill, so the pill reserves the
 /// caption's own line box plus its vertical padding.
@@ -115,7 +131,10 @@ const HEADER_STACK_H: usize = lh(type_scale::TITLE) + lh(type_scale::CAPTION);
 /// and a caption run drawn with the outline face at the raised rung puts ink
 /// below the pill's bottom edge, which reads as a clipped control.
 const CHIP_PAD_Y: usize = 6;
-const CHIP_H: usize = CHIP_PAD_Y + lh(type_scale::CAPTION) + CHIP_PAD_Y;
+pub const fn chip_h_at(level: u8) -> usize {
+    CHIP_PAD_Y + lh_at(type_scale::CAPTION, level) + CHIP_PAD_Y
+}
+const CHIP_H: usize = chip_h_at(launcher::scale::PLATFORM_LEVEL);
 
 /// The cards whose figures are device readings.
 ///
@@ -125,20 +144,47 @@ const CHIP_H: usize = CHIP_PAD_Y + lh(type_scale::CAPTION) + CHIP_PAD_Y;
 ///
 /// Row 1 (Storage & Physical Memory): label, the figure, a body line, a caption
 /// detail. Both cards share the same vertical ladder.
-const ROW1_STACK_H: usize = CARD_INSET_Y
-    + lh(type_scale::CAPTION)
-    + lh(type_scale::TITLE)
-    + lh(type_scale::BODY)
-    + lh(type_scale::CAPTION);
-const ROW1_CARD_H: usize = ROW1_STACK_H + CARD_BOTTOM_PAD;
-const ROW1_Y: usize = HEADER_Y + HEADER_STACK_H + ROW_GAP;
-const STORAGE_ROW: Rect = Rect::new(40, ROW1_Y, 305, ROW1_CARD_H);
-const RAM_ROW: Rect = Rect::new(375, ROW1_Y, 305, ROW1_CARD_H);
+const fn row1_stack_h_at(level: u8) -> usize {
+    CARD_INSET_Y
+        + lh_at(type_scale::CAPTION, level)
+        + lh_at(type_scale::TITLE, level)
+        + lh_at(type_scale::BODY, level)
+        + lh_at(type_scale::CAPTION, level)
+}
+pub const fn row1_card_h_at(level: u8) -> usize {
+    row1_stack_h_at(level) + CARD_BOTTOM_PAD
+}
+const ROW1_STACK_H: usize = row1_stack_h_at(launcher::scale::PLATFORM_LEVEL);
+const ROW1_CARD_H: usize = row1_card_h_at(launcher::scale::PLATFORM_LEVEL);
+const fn row1_y_at(level: u8) -> usize {
+    HEADER_Y + header_stack_h_at(level) + ROW_GAP
+}
+const ROW1_Y: usize = row1_y_at(launcher::scale::PLATFORM_LEVEL);
+const fn storage_row_at(level: u8) -> Rect {
+    Rect::new(40, row1_y_at(level), 305, row1_card_h_at(level))
+}
+const fn ram_row_at(level: u8) -> Rect {
+    Rect::new(375, row1_y_at(level), 305, row1_card_h_at(level))
+}
+const STORAGE_ROW: Rect = storage_row_at(launcher::scale::PLATFORM_LEVEL);
+const RAM_ROW: Rect = ram_row_at(launcher::scale::PLATFORM_LEVEL);
 
-const ROW1_LABEL_Y: usize = ROW1_Y + CARD_INSET_Y;
-const ROW1_FIGURE_Y: usize = ROW1_LABEL_Y + lh(type_scale::CAPTION);
-const ROW1_SECONDARY_Y: usize = ROW1_FIGURE_Y + lh(type_scale::TITLE);
-const ROW1_DETAIL_Y: usize = ROW1_SECONDARY_Y + lh(type_scale::BODY);
+const fn row1_label_y_at(level: u8) -> usize {
+    row1_y_at(level) + CARD_INSET_Y
+}
+const fn row1_figure_y_at(level: u8) -> usize {
+    row1_label_y_at(level) + lh_at(type_scale::CAPTION, level)
+}
+const fn row1_secondary_y_at(level: u8) -> usize {
+    row1_figure_y_at(level) + lh_at(type_scale::TITLE, level)
+}
+const fn row1_detail_y_at(level: u8) -> usize {
+    row1_secondary_y_at(level) + lh_at(type_scale::BODY, level)
+}
+const ROW1_LABEL_Y: usize = row1_label_y_at(launcher::scale::PLATFORM_LEVEL);
+const ROW1_FIGURE_Y: usize = row1_figure_y_at(launcher::scale::PLATFORM_LEVEL);
+const ROW1_SECONDARY_Y: usize = row1_secondary_y_at(launcher::scale::PLATFORM_LEVEL);
+const ROW1_DETAIL_Y: usize = row1_detail_y_at(launcher::scale::PLATFORM_LEVEL);
 
 /// Audio card: the title, then the device line a whole body box below it, then
 /// the footer row - the volume reading on the left, the mixer tag on the right -
@@ -151,72 +197,261 @@ const ROW1_DETAIL_Y: usize = ROW1_SECONDARY_Y + lh(type_scale::BODY);
 const AUDIO_GAUGE_GAP: usize = 4;
 const AUDIO_GAUGE_H: usize = 8;
 const AUDIO_FOOT_GAP: usize = 10;
-const AUDIO_FOOT_DY: usize = CARD_INSET_Y
-    + lh(type_scale::BODY)
-    + lh(type_scale::CAPTION)
-    + AUDIO_GAUGE_GAP
-    + AUDIO_GAUGE_H
-    + AUDIO_FOOT_GAP;
-const AUDIO_CARD_H: usize = AUDIO_FOOT_DY + lh(type_scale::CAPTION) + CARD_BOTTOM_PAD;
-const AUDIO_ROW_Y: usize = ROW1_Y + ROW1_CARD_H + ROW_GAP;
-const AUDIO_ROW: Rect = Rect::new(40, AUDIO_ROW_Y, 640, AUDIO_CARD_H);
-const AUDIO_TITLE_Y: usize = AUDIO_ROW_Y + CARD_INSET_Y;
-const AUDIO_SUB_Y: usize = AUDIO_TITLE_Y + lh(type_scale::BODY);
-const AUDIO_GAUGE_Y: usize = AUDIO_SUB_Y + lh(type_scale::CAPTION) + AUDIO_GAUGE_GAP;
-const AUDIO_FOOT_Y: usize = AUDIO_GAUGE_Y + AUDIO_GAUGE_H + AUDIO_FOOT_GAP;
+const fn audio_foot_dy_at(level: u8) -> usize {
+    CARD_INSET_Y
+        + lh_at(type_scale::BODY, level)
+        + lh_at(type_scale::CAPTION, level)
+        + AUDIO_GAUGE_GAP
+        + AUDIO_GAUGE_H
+        + AUDIO_FOOT_GAP
+}
+pub const fn audio_card_h_at(level: u8) -> usize {
+    audio_foot_dy_at(level) + lh_at(type_scale::CAPTION, level) + CARD_BOTTOM_PAD
+}
+const AUDIO_FOOT_DY: usize = audio_foot_dy_at(launcher::scale::PLATFORM_LEVEL);
+const AUDIO_CARD_H: usize = audio_card_h_at(launcher::scale::PLATFORM_LEVEL);
+const fn audio_row_y_at(level: u8) -> usize {
+    row1_y_at(level) + row1_card_h_at(level) + ROW_GAP
+}
+const AUDIO_ROW_Y: usize = audio_row_y_at(launcher::scale::PLATFORM_LEVEL);
+const fn audio_row_at(level: u8) -> Rect {
+    Rect::new(40, audio_row_y_at(level), 640, audio_card_h_at(level))
+}
+const AUDIO_ROW: Rect = audio_row_at(launcher::scale::PLATFORM_LEVEL);
+const fn audio_title_y_at(level: u8) -> usize {
+    audio_row_y_at(level) + CARD_INSET_Y
+}
+const fn audio_sub_y_at(level: u8) -> usize {
+    audio_title_y_at(level) + lh_at(type_scale::BODY, level)
+}
+const fn audio_gauge_y_at(level: u8) -> usize {
+    audio_sub_y_at(level) + lh_at(type_scale::CAPTION, level) + AUDIO_GAUGE_GAP
+}
+const fn audio_foot_y_at(level: u8) -> usize {
+    audio_gauge_y_at(level) + AUDIO_GAUGE_H + AUDIO_FOOT_GAP
+}
+const AUDIO_TITLE_Y: usize = audio_title_y_at(launcher::scale::PLATFORM_LEVEL);
+const AUDIO_SUB_Y: usize = audio_sub_y_at(launcher::scale::PLATFORM_LEVEL);
+const AUDIO_GAUGE_Y: usize = audio_gauge_y_at(launcher::scale::PLATFORM_LEVEL);
+const AUDIO_FOOT_Y: usize = audio_foot_y_at(launcher::scale::PLATFORM_LEVEL);
 
 /// Row 3: the calendar card (label, the RTC date line, the source chip, the
 /// detail) and the security card (label, the status figure, the architecture
 /// line, the capability chip). The pair takes the height the taller stack needs
 /// so the two cards still read as one row.
-const CAL_CHIP_DY: usize = CARD_INSET_Y + lh(type_scale::CAPTION) + lh(type_scale::SECTION);
-const CAL_DETAIL_DY: usize = CAL_CHIP_DY + CHIP_H + 4;
-const VAULT_CHIP_DY: usize =
-    CARD_INSET_Y + lh(type_scale::CAPTION) + lh(type_scale::TITLE) + lh(type_scale::BODY);
-const ROW3_CARD_H: usize = VAULT_CHIP_DY + CHIP_H + CARD_BOTTOM_PAD;
-const ROW3_Y: usize = AUDIO_ROW_Y + AUDIO_CARD_H + ROW_GAP;
+const fn cal_chip_dy_at(level: u8) -> usize {
+    CARD_INSET_Y
+        + lh_at(type_scale::CAPTION, level)
+        + lh_at(type_scale::SECTION, level)
+}
+const fn cal_detail_dy_at(level: u8) -> usize {
+    cal_chip_dy_at(level) + chip_h_at(level) + 4
+}
+const fn vault_chip_dy_at(level: u8) -> usize {
+    CARD_INSET_Y
+        + lh_at(type_scale::CAPTION, level)
+        + lh_at(type_scale::TITLE, level)
+        + lh_at(type_scale::BODY, level)
+}
+pub const fn row3_card_h_at(level: u8) -> usize {
+    vault_chip_dy_at(level) + chip_h_at(level) + CARD_BOTTOM_PAD
+}
+const CAL_CHIP_DY: usize = cal_chip_dy_at(launcher::scale::PLATFORM_LEVEL);
+const CAL_DETAIL_DY: usize = cal_detail_dy_at(launcher::scale::PLATFORM_LEVEL);
+const VAULT_CHIP_DY: usize = vault_chip_dy_at(launcher::scale::PLATFORM_LEVEL);
+const ROW3_CARD_H: usize = row3_card_h_at(launcher::scale::PLATFORM_LEVEL);
+const fn row3_y_at(level: u8) -> usize {
+    audio_row_y_at(level) + audio_card_h_at(level) + ROW_GAP
+}
+const ROW3_Y: usize = row3_y_at(launcher::scale::PLATFORM_LEVEL);
 
 /// Calendar card: label, the RTC date line, the source chip a whole section box
 /// under it, then the detail row.
-const CAL_ROW: Rect = Rect::new(40, ROW3_Y, 305, ROW3_CARD_H);
-const CAL_LABEL_Y: usize = CAL_ROW.y + CARD_INSET_Y;
-const CAL_DATE_Y: usize = CAL_LABEL_Y + lh(type_scale::CAPTION);
-const CAL_CHIP_Y: usize = CAL_ROW.y + CAL_CHIP_DY;
-const CAL_DETAIL_Y: usize = CAL_ROW.y + CAL_DETAIL_DY;
+const fn cal_row_at(level: u8) -> Rect {
+    Rect::new(40, row3_y_at(level), 305, row3_card_h_at(level))
+}
+const CAL_ROW: Rect = cal_row_at(launcher::scale::PLATFORM_LEVEL);
+const fn cal_label_y_at(level: u8) -> usize {
+    row3_y_at(level) + CARD_INSET_Y
+}
+const fn cal_date_y_at(level: u8) -> usize {
+    cal_label_y_at(level) + lh_at(type_scale::CAPTION, level)
+}
+const fn cal_chip_y_at(level: u8) -> usize {
+    row3_y_at(level) + cal_chip_dy_at(level)
+}
+const fn cal_detail_y_at(level: u8) -> usize {
+    row3_y_at(level) + cal_detail_dy_at(level)
+}
+const CAL_LABEL_Y: usize = cal_label_y_at(launcher::scale::PLATFORM_LEVEL);
+const CAL_DATE_Y: usize = cal_date_y_at(launcher::scale::PLATFORM_LEVEL);
+const CAL_CHIP_Y: usize = cal_chip_y_at(launcher::scale::PLATFORM_LEVEL);
+const CAL_DETAIL_Y: usize = cal_detail_y_at(launcher::scale::PLATFORM_LEVEL);
 
 /// Security card: label, the status figure, the architecture line, then the
 /// capability chip a whole body box under the architecture line.
-const VAULT_ROW: Rect = Rect::new(375, ROW3_Y, 305, ROW3_CARD_H);
-const VAULT_LABEL_Y: usize = VAULT_ROW.y + CARD_INSET_Y;
-const VAULT_STATUS_Y: usize = VAULT_LABEL_Y + lh(type_scale::CAPTION);
-const VAULT_ARCH_Y: usize = VAULT_STATUS_Y + lh(type_scale::TITLE);
-const VAULT_CHIP_Y: usize = VAULT_ARCH_Y + lh(type_scale::BODY);
+const fn vault_row_at(level: u8) -> Rect {
+    Rect::new(375, row3_y_at(level), 305, row3_card_h_at(level))
+}
+const VAULT_ROW: Rect = vault_row_at(launcher::scale::PLATFORM_LEVEL);
+const fn vault_label_y_at(level: u8) -> usize {
+    row3_y_at(level) + CARD_INSET_Y
+}
+const fn vault_status_y_at(level: u8) -> usize {
+    vault_label_y_at(level) + lh_at(type_scale::CAPTION, level)
+}
+const fn vault_arch_y_at(level: u8) -> usize {
+    vault_status_y_at(level) + lh_at(type_scale::TITLE, level)
+}
+const fn vault_chip_y_at(level: u8) -> usize {
+    vault_arch_y_at(level) + lh_at(type_scale::BODY, level)
+}
+const VAULT_LABEL_Y: usize = vault_label_y_at(launcher::scale::PLATFORM_LEVEL);
+const VAULT_STATUS_Y: usize = vault_status_y_at(launcher::scale::PLATFORM_LEVEL);
+const VAULT_ARCH_Y: usize = vault_arch_y_at(launcher::scale::PLATFORM_LEVEL);
+const VAULT_CHIP_Y: usize = vault_chip_y_at(launcher::scale::PLATFORM_LEVEL);
 
 /// Readings cards: the label, and the sublabel one body box below it. The value
 /// is right-anchored on the same first row, so it keeps its own offset.
 const READING_LABEL_DY: usize = 10;
-const READING_SUB_DY: usize = READING_LABEL_DY + lh(type_scale::BODY);
+const fn reading_sub_dy_at(level: u8) -> usize {
+    READING_LABEL_DY + lh_at(type_scale::BODY, level)
+}
+const READING_SUB_DY: usize = reading_sub_dy_at(launcher::scale::PLATFORM_LEVEL);
 const READING_VALUE_DY: usize = 20;
 /// Height of one readings card, and the pitch between two of them: the card
 /// reserves the sublabel's whole box, the pitch keeps the 12-row gutter the
 /// 64x76 pair had.
-const READING_CARD_H: usize = READING_SUB_DY + lh(type_scale::CAPTION) + 3;
+pub const fn reading_card_h_at(level: u8) -> usize {
+    reading_sub_dy_at(level) + lh_at(type_scale::CAPTION, level) + 3
+}
+const READING_CARD_H: usize = reading_card_h_at(launcher::scale::PLATFORM_LEVEL);
 const READING_GUTTER: usize = 12;
-const READING_PITCH: usize = READING_CARD_H + READING_GUTTER;
+const fn reading_pitch_at(level: u8) -> usize {
+    reading_card_h_at(level) + READING_GUTTER
+}
+const READING_PITCH: usize = reading_pitch_at(launcher::scale::PLATFORM_LEVEL);
 const READINGS_CARD_COUNT: usize = 5;
 /// The five readings cards' top edges, one pitch apart.
-const READING_CARD1_Y: usize = READINGS_CARD0_Y + READING_PITCH;
-const READING_CARD2_Y: usize = READINGS_CARD0_Y + 2 * READING_PITCH;
-const READING_CARD3_Y: usize = READINGS_CARD0_Y + 3 * READING_PITCH;
-const READING_CARD4_Y: usize = READINGS_CARD0_Y + 4 * READING_PITCH;
+const fn reading_card_y_at(level: u8, index: usize) -> usize {
+    readings_card0_y_at(level) + index * reading_pitch_at(level)
+}
 /// The first readings card's row, and the section header above it. WHY the
 /// header is solved from the card and not from the card row above: a section run
 /// reserves `lh(SECTION)` rows and its descender reaches the bottom of that box,
 /// so a header placed a few rows above the card let the card's own fill answer
 /// those rows first and ate the tail of the 'g'.
 const READINGS_HEAD_GAP: usize = 10;
-const READINGS_CARD0_Y: usize = ROW3_Y + ROW3_CARD_H + READINGS_HEAD_GAP + lh(type_scale::SECTION);
-const READINGS_HEAD_Y: usize = READINGS_CARD0_Y - lh(type_scale::SECTION);
+const fn readings_card0_y_at(level: u8) -> usize {
+    row3_y_at(level) + row3_card_h_at(level) + READINGS_HEAD_GAP
+        + lh_at(type_scale::SECTION, level)
+}
+const fn readings_head_y_at(level: u8) -> usize {
+    readings_card0_y_at(level) - lh_at(type_scale::SECTION, level)
+}
+const READINGS_CARD0_Y: usize = readings_card0_y_at(launcher::scale::PLATFORM_LEVEL);
+const READINGS_HEAD_Y: usize = readings_head_y_at(launcher::scale::PLATFORM_LEVEL);
+/// The rows a rung's whole card column occupies, so the ladder above it can be
+/// walked: the four cards below the first are the same row the card above plus
+/// one pitch, and the pitch itself is derived from the line box the rung draws.
+///
+/// WHY these stay anchors rather than call sites: the painter lays its cards from the
+/// rows below, so a rung that carried a taller column would ink rows the plate was
+/// never sized for. Every call site has to walk to the rung [`held_level_at`] answers
+/// with in the same change that sizes the plate, and until it does each constant here
+/// is the authored rung's row.
+const READING_CARD1_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 1);
+const READING_CARD2_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 2);
+const READING_CARD3_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 3);
+const READING_CARD4_Y: usize = reading_card_y_at(launcher::scale::PLATFORM_LEVEL, 4);
+
+/// The row the dashboard's card column closes on: the last readings card's
+/// bottom edge, which is also the ceiling [`held_level_at`] measures against.
+const fn readings_bottom_at(level: u8) -> usize {
+    readings_card0_y_at(level)
+        + (READINGS_CARD_COUNT - 1) * reading_pitch_at(level)
+        + reading_card_h_at(level)
+}
+
+/// Whether a rung's whole column closes above the home gesture pill.
+///
+/// WHY the pill and not the screen's bottom edge: the mark is painted over the last
+/// rows of the surface, so a card that reaches it is drawn under the shell's own
+/// gesture mark -- ink nobody asked for, and the pill is the row the column has to
+/// stop above today, at the rung it was authored with.
+const fn column_holds(level: u8) -> bool {
+    readings_bottom_at(level) <= HOME_PILL.y
+}
+
+/// The largest rung this dashboard carries.
+///
+/// WHY the walk is the screen's and not [`launcher::scale::draw_level_at`]'s: that
+/// clamp asks whether a tile's icon-and-name group fits a grid cell, which is the
+/// drawer's container and not this one. This column is the tallest stack of boxes the
+/// shell draws -- header, four card rows and five reading cards chained from the same
+/// ladder -- and its ceiling is the row the home mark starts on, so a rung has to be
+/// measured against that and not assumed from another surface.
+///
+/// WHY a downward walk: every box grows with the rung and none shrinks, so the largest
+/// carrying rung is found by stepping down from the one asked for, and the authored
+/// rung is the floor the walk can never pass. At the rung the shell was drawn with the
+/// walk never moves, which the gate under it proves.
+pub const fn held_level_at(want: u8) -> u8 {
+    let mut level = want;
+    while level > 0 && !column_holds(level) {
+        level -= 1;
+    }
+    level
+}
+
+/// One of this dashboard's cards, as the rung that carries it sizes it: the plate it
+/// paints and the row its deepest box closes on, so a gate can compare the two without
+/// reading a painter.
+///
+/// WHY a plain struct rather than the painter's own plan: the plan caches a frame and
+/// rebuilds it from live state, and a fit question about the ladder has to be answerable
+/// with no state at all -- which is what lets the sweep under it run at compile time.
+#[derive(Clone, Copy)]
+pub struct CardBand {
+    pub name: &'static str,
+    pub plate: usize,
+    pub stack_bottom: usize,
+}
+
+/// The five card plates this screen builds, and the row each card's own stack of runs
+/// reaches, at `level`.
+pub const fn cards_at(level: u8) -> [CardBand; 5] {
+    [
+        CardBand {
+            name: "storage & memory",
+            plate: row1_card_h_at(level),
+            stack_bottom: row1_detail_y_at(level) + lh_at(type_scale::CAPTION, level)
+                - row1_y_at(level),
+        },
+        CardBand {
+            name: "master audio",
+            plate: audio_card_h_at(level),
+            stack_bottom: audio_foot_y_at(level) + lh_at(type_scale::CAPTION, level)
+                - audio_row_y_at(level),
+        },
+        CardBand {
+            name: "date & clock",
+            plate: row3_card_h_at(level),
+            stack_bottom: cal_detail_y_at(level) + lh_at(type_scale::CAPTION, level)
+                - row3_y_at(level),
+        },
+        CardBand {
+            name: "security architecture",
+            plate: row3_card_h_at(level),
+            stack_bottom: vault_chip_y_at(level) + chip_h_at(level) - row3_y_at(level),
+        },
+        CardBand {
+            name: "system readings",
+            plate: reading_card_h_at(level),
+            stack_bottom: reading_sub_dy_at(level) + lh_at(type_scale::CAPTION, level),
+        },
+    ]
+}
 
 /// The width of a readings card, and the room one of its side-anchored runs
 /// gets: each half of the span between the left label's anchor and the right
@@ -254,18 +489,98 @@ const _: () = assert!(
     lh(type_scale::TITLE) > lh(type_scale::BODY),
     "a title line box must reserve more rows than the body above it",
 );
-const _: () = assert!(ROW1_DETAIL_Y + lh(type_scale::CAPTION) <= STORAGE_ROW.y + STORAGE_ROW.h);
-const _: () = assert!(ROW1_DETAIL_Y + lh(type_scale::CAPTION) <= RAM_ROW.y + RAM_ROW.h);
-const _: () = assert!(AUDIO_SUB_Y + lh(type_scale::CAPTION) <= AUDIO_GAUGE_Y);
-const _: () = assert!(AUDIO_FOOT_Y + lh(type_scale::CAPTION) <= AUDIO_ROW_Y + AUDIO_CARD_H);
-const _: () = assert!(VAULT_CHIP_Y + CHIP_H <= VAULT_ROW.y + VAULT_ROW.h);
-const _: () = assert!(CAL_CHIP_Y + CHIP_H <= CAL_DETAIL_Y);
-const _: () = assert!(CAL_DETAIL_Y + lh(type_scale::CAPTION) <= CAL_ROW.y + CAL_ROW.h);
-const _: () = assert!(READING_SUB_DY + lh(type_scale::CAPTION) <= READING_CARD_H);
-const _: () = assert!(READINGS_HEAD_Y + lh(type_scale::SECTION) <= READINGS_CARD0_Y);
-const _: () = assert!(AUDIO_ROW_Y >= STORAGE_ROW.y + STORAGE_ROW.h);
-const _: () = assert!(ROW3_Y >= AUDIO_ROW.y + AUDIO_ROW.h);
-/// The card column's last row against the mark's first row.
+
+/// WHY swept rather than asserted once at the authored ladder: every fit question below
+/// was a pair of remembered rows, and a rung that grew the ink inside a card while the
+/// card's own plate stayed put answered none of them. The walk is therefore over the
+/// level, and it asks each card the same question a reader asks of it -- does the stack
+/// this rung lays end inside the plate this rung sizes -- plus the column against the
+/// home mark. [`held_level_at`] is the walk that names which rung may be carried at all,
+/// and every arm below holds at the rung it is measured with. What this sweep does NOT
+/// prove is that the screen has moved: the painter still lays at the authored rung's
+/// rows, so a raised rung is proven holdable here long before it is drawn.
+const fn stacks_hold_at_every_rung() -> bool {
+    let mut level = 0usize;
+    while level <= launcher::scale::MAX_LEVEL as usize {
+        let l = level as u8;
+        if lh_at(type_scale::CAPTION, l) < launcher::scale::cap_at(type_scale::CAPTION, l) as usize
+        {
+            return false;
+        }
+        if lh_at(type_scale::BODY, l) <= lh_at(type_scale::CAPTION, l) {
+            return false;
+        }
+        if lh_at(type_scale::TITLE, l) <= lh_at(type_scale::BODY, l) {
+            return false;
+        }
+        if row1_detail_y_at(l) + lh_at(type_scale::CAPTION, l)
+            > row1_y_at(l) + row1_card_h_at(l)
+        {
+            return false;
+        }
+        if audio_sub_y_at(l) + lh_at(type_scale::CAPTION, l) > audio_gauge_y_at(l) {
+            return false;
+        }
+        if audio_foot_y_at(l) + lh_at(type_scale::CAPTION, l)
+            > audio_row_y_at(l) + audio_card_h_at(l)
+        {
+            return false;
+        }
+        if vault_chip_y_at(l) + chip_h_at(l) > row3_y_at(l) + row3_card_h_at(l) {
+            return false;
+        }
+        if cal_chip_y_at(l) + chip_h_at(l) > cal_detail_y_at(l) {
+            return false;
+        }
+        if cal_detail_y_at(l) + lh_at(type_scale::CAPTION, l) > row3_y_at(l) + row3_card_h_at(l)
+        {
+            return false;
+        }
+        if reading_sub_dy_at(l) + lh_at(type_scale::CAPTION, l) > reading_card_h_at(l) {
+            return false;
+        }
+        if readings_head_y_at(l) + lh_at(type_scale::SECTION, l) > readings_card0_y_at(l) {
+            return false;
+        }
+        if audio_row_y_at(l) < row1_y_at(l) + row1_card_h_at(l) {
+            return false;
+        }
+        if row3_y_at(l) < audio_row_y_at(l) + audio_card_h_at(l) {
+            return false;
+        }
+        let mut card = 0usize;
+        while card < 5 {
+            let band = cards_at(held_level_at(l as u8))[card];
+            if band.stack_bottom > band.plate {
+                return false;
+            }
+            card += 1;
+        }
+        if readings_bottom_at(held_level_at(l as u8)) > HOME_PILL.y {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(stacks_hold_at_every_rung());
+
+/// WHY the authored rung answers the authored numbers exactly: the dashboard a reader
+/// who never raised "Text size" gets must be the pixels this file drew before it read
+/// the setting, and each constant above is the rung's face at that level. These hold by
+/// construction -- and that is the point: they hold because there is now one derivation
+/// and the numbers are its anchors, not because two copies of a layout happen to agree.
+const _: () = assert!(row1_card_h_at(launcher::scale::PLATFORM_LEVEL) == ROW1_CARD_H);
+const _: () = assert!(audio_card_h_at(launcher::scale::PLATFORM_LEVEL) == AUDIO_CARD_H);
+const _: () = assert!(row3_card_h_at(launcher::scale::PLATFORM_LEVEL) == ROW3_CARD_H);
+const _: () = assert!(reading_card_h_at(launcher::scale::PLATFORM_LEVEL) == READING_CARD_H);
+const _: () = assert!(chip_h_at(launcher::scale::PLATFORM_LEVEL) == CHIP_H);
+const _: () = assert!(readings_bottom_at(launcher::scale::PLATFORM_LEVEL) <= HOME_PILL.y);
+const _: () = assert!(held_level_at(launcher::scale::PLATFORM_LEVEL) == launcher::scale::PLATFORM_LEVEL);
+const _: () = assert!(launcher::scale::PLATFORM_LEVEL <= launcher::scale::MAX_LEVEL);
+
+/// The card column's last row against the mark's first row, at the rung the screen
+/// actually draws at.
 ///
 /// WHY this needed re-solving rather than a passing glance: the gate is written
 /// against `HOME_PILL.y`, and the mark moved two rows UP with this change -- from
@@ -275,9 +590,11 @@ const _: () = assert!(ROW3_Y >= AUDIO_ROW.y + AUDIO_ROW.h);
 /// fifth readings card closes at row 1247 and sits 171 rows clear of the mark:
 /// the gate holds with the platform's row exactly as it held with this screen's
 /// own, because every row in the column is derived from the type ladder above it
-/// and none was ever measured off the pill.
+/// and none was ever measured off the pill. At a raised rung the same column is
+/// taller by the boxes that grew, which is what [`held_level_at`] walks down to
+/// find -- though the painter has not yet started asking it which rung to lay.
 const _: () = assert!(
-    READINGS_CARD0_Y + (READINGS_CARD_COUNT - 1) * READING_PITCH + READING_CARD_H <= HOME_PILL.y,
+    readings_bottom_at(launcher::scale::PLATFORM_LEVEL) <= HOME_PILL.y,
     "the dashboard's last readings card must stay above the home gesture pill",
 );
 
