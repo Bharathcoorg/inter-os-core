@@ -3149,6 +3149,12 @@ const _: () = assert!(
 );
 const _: () = assert!(CRUMB_ROW_X1 <= ENTRIES_CARD.x + ENTRIES_CARD.w);
 const _: () = assert!(CRUMB_MIN_ROOM > CRUMB_SEP_GAP);
+// WHY the five rows and not the whole card: the shortest listing this app can be
+// handed is a directory of a handful of entries, and the blank plate the person
+// sees is exactly the depth the card reserves beyond it. The gate says the case is
+// representable -- that the authored viewport really is deeper than a short row
+// stack -- so a pane clipped to its content is a narrower rect, never an empty one.
+const _: () = assert!(5 * ENTRY_ROW_H < ENTRIES_CARD.h);
 
 /// The height of the list's content for a given number of items.
 pub fn list_content_height(item_count: usize) -> usize {
@@ -3222,6 +3228,37 @@ pub fn grid_content_height(item_count: usize) -> usize {
     let rows = item_count.div_ceil(GRID_COLS);
     let cell_h = grid_cell_h();
     rows * cell_h + rows.saturating_sub(1) * GRID_GAP
+}
+
+/// The depth of the entries pane the active layout actually inks for `count`
+/// items.
+///
+/// WHY the pane is a clip and not the card: [`ENTRIES_CARD`] is the *viewport* a
+/// long listing scrolls inside -- it stays as deep as it was authored whether the
+/// directory holds two files or the maximum the parser carries. The browse screen
+/// paints that region per pixel, from its `y` band alone, before any row is
+/// blitted: the rows themselves are blitted in the page background's own
+/// `surface` fill, so they hide the plate while they stand on it, and the depth
+/// below the last row is the plate the person reads as an empty second pane. The
+/// card's rect is left alone -- the hit tests, the scrollbar thumb and the scroll
+/// extent all need the viewport -- and only the inked pane is cut to what the
+/// layout reaches, from the same two derivations `scroll_for` picks between.
+///
+/// WHY an empty listing keeps the whole depth: the empty state's headline and
+/// explanation are positioned from the card's own top and stand in that region
+/// (see [`empty_headline_y`]), so clipping a card that holds nothing would crop
+/// the card the explanation is drawn inside.
+pub fn entries_pane_h(layout: LayoutMode, count: usize) -> usize {
+    let card = entries_card();
+    if count == 0 {
+        return card.h;
+    }
+    let content = if layout == LayoutMode::Grid {
+        grid_content_height(count)
+    } else {
+        list_content_height(count)
+    };
+    card.h.min(content)
 }
 
 /// The rectangle one grid cell is drawn in.
@@ -4699,6 +4736,60 @@ mod tests {
             rect.y + rect.h - 1,
         );
         assert_eq!(hit, Some(last));
+    }
+
+    /// The pane's depth at the rung this process draws, with the authored card's
+    /// depth asserted beside it: every clause below reads the viewport the frame
+    /// is cut from, and the pin that keeps the authored region is the test above.
+    /// Measured here at the ladder's normal rung, a five-row list inks 290 of the
+    /// 920 the viewport reserves, and a five-cell grid 312 -- the remainder is the
+    /// plate the person saw as an empty second pane.
+    #[test]
+    fn the_pane_is_the_depth_the_active_layout_reaches() {
+        let card_h = entries_card().h;
+        assert_eq!(card_h, entries_card_at(PLATFORM_LEVEL).h);
+
+        // A short list inks its rows and nothing under them.
+        for count in 1..=7 {
+            assert_eq!(entries_pane_h(LayoutMode::List, count), list_content_height(count));
+            assert_eq!(entries_pane_h(LayoutMode::List, count), count * entry_row_h());
+            assert!(entries_pane_h(LayoutMode::List, count) < card_h);
+        }
+
+        // A short grid inks its cell rows and the gaps between them -- the same
+        // derivation `grid_content_height` publishes, restated here at the figure
+        // the defect report predicted so the two cannot drift apart silently.
+        assert_eq!(grid_content_height(9), 3 * grid_cell_h() + 2 * GRID_GAP);
+        for count in [1usize, 4, 5, 9] {
+            assert_eq!(entries_pane_h(LayoutMode::Grid, count), grid_content_height(count));
+            assert!(entries_pane_h(LayoutMode::Grid, count) < card_h);
+        }
+
+        // A listing that outgrows the viewport keeps the whole viewport: the clip
+        // is a floor under the ink, never a cap on the scroll range.
+        assert_eq!(entries_pane_h(LayoutMode::List, MAX_PARSED_ENTRIES), card_h);
+        assert_eq!(entries_pane_h(LayoutMode::Grid, MAX_PARSED_ENTRIES), card_h);
+        assert_eq!(entries_pane_h(LayoutMode::List, 64), ENTRIES_CARD.h);
+        assert_eq!(entries_pane_h(LayoutMode::Grid, 64), ENTRIES_CARD.h);
+
+        // An empty listing keeps the whole plate the explanation stands in.
+        assert_eq!(entries_pane_h(LayoutMode::List, 0), ENTRIES_CARD.h);
+        assert_eq!(entries_pane_h(LayoutMode::Grid, 0), ENTRIES_CARD.h);
+    }
+
+    #[test]
+    fn the_pane_never_extends_past_the_rows_it_clips() {
+        // The last row a short listing inks ends exactly where its pane ends, so
+        // the bordered plate cannot stop above a row that is drawn.
+        for count in 1..=7 {
+            let last = entry_row_rect(entries_card(), count - 1, 0);
+            assert_eq!(
+                last.y + last.h - entries_card().y,
+                entries_pane_h(LayoutMode::List, count)
+            );
+            let bottom = entries_card().y + entries_pane_h(LayoutMode::List, count);
+            assert_eq!(entry_at_point(entries_card(), 0, count, 360, bottom), None);
+        }
     }
 
     #[test]

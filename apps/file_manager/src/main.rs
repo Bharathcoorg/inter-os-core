@@ -82,7 +82,7 @@ use file_manager::{
     category_y1, crumb_hit, crumb_rows, crumb_y, drawn_w, draw_level, empty_headline_y,
     empty_subline_y, ellipsize_run, entry_glyph_dy, entry_row_h_max, entry_search_name_dy,
     entry_search_path_dy, entries_card,
-    entries_card_at, grid_cell_h_max, grid_glyph_dy, grown,
+    entries_card_at, entries_pane_h, grid_cell_h_max, grid_glyph_dy, grown,
     GLYPH_COLS, GLYPH_ROWS, GRID_GLYPH_X,
     header_h, header_readout_line1_y, header_readout_line2_y,
     header_title_y, home_browse_btn, home_card_line1_y,
@@ -2642,7 +2642,18 @@ fn build_browse_frame(app: &FileManagerApp) -> BrowseFrame {
     // 7. The entries card, and the two runs that explain it when it holds nothing.
     let card = entries_card();
     let style = components::card_style(&THEME, components::Elevation::Resting);
-    let empty = app.card_item_count() == 0;
+    let count = app.card_item_count();
+    let empty = count == 0;
+    // WHY the frame carries the inked pane and not the viewport: the pass below
+    // paints this rect from its `y` band alone, before any row is blitted, and the
+    // rows are blitted in the page background's own fill -- so every row hides the
+    // plate under it and only the depth past the last row shows. Left at the
+    // viewport's full depth, a short listing was a tall bordered card that was
+    // empty below its fifth row. The viewport itself is untouched everywhere else:
+    // the hit tests, the scroll extent and the scrollbar thumb all still read
+    // `entries_card()`, and an empty listing keeps the whole plate because that is
+    // what its explanation is positioned from.
+    let card = Rect::new(card.x, card.y, card.w, entries_pane_h(app.layout, count));
     let (headline, subline, headline_ink): (&[u8], &[u8], u32) = if empty {
         if app.searching {
             if app.search_error != 0 {
