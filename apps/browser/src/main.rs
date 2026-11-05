@@ -1287,6 +1287,23 @@ const TAB_URL_LANE: usize = TAB_TEXT_LIMIT - (TAB_URL_TEXT_X - chrome::LIST_ROW_
 const TAB_TITLE_BUF: usize = MAX_TITLE_LEN + 3;
 const TAB_URL_BUF: usize = MAX_URL_LEN + 3;
 
+/// The plate a tab's number stands on, in the column the card's address starts
+/// at, one rung's line box tall and wide enough to hold the digit whole.
+///
+/// WHY the plate is a line box and not the twenty-four rows it was: the card
+/// inked the count inside a plate twenty-four rows tall while the digit it drew
+/// reserves a whole line box of thirty, so the plate answered only its own top
+/// and the last six rows of every number were erased -- the strip showed `1` as
+/// a stubbed vertical. Plate and digit are now the same box at the same rung,
+/// which is the only way the plate can still hold the count when the rung moves.
+const TAB_BADGE_X: usize = TAB_URL_TEXT_X;
+const TAB_BADGE_W: usize = 28;
+const TAB_BADGE_H: usize = TAB_RUN_LINE_BOX;
+const TAB_BADGE_Y: usize = TAB_TITLE_DY;
+
+/// The top of an empty slot's single line, centred in the card that carries it.
+const TAB_EMPTY_Y: usize = (TAB_CARD_H - TAB_RUN_LINE_BOX) / 2;
+
 const _: () = assert!(TAB_TEXT_LIMIT > 0);
 const _: () = assert!(TAB_URL_TEXT_X > chrome::LIST_ROW_CARD_X);
 const _: () = assert!(TAB_TITLE_TEXT_X > TAB_URL_TEXT_X);
@@ -1305,6 +1322,11 @@ const _: () = assert!(chrome::LIST_ROW_CARD_X + TAB_TEXT_LIMIT + spacing::GRID_8
     == TAB_CLOSE_CENTER_X - MIN_TOUCH_TARGET / 2);
 const _: () = assert!(TAB_TITLE_LANE < chrome::LIST_ROW_CARD_W
     && TAB_URL_LANE < chrome::LIST_ROW_CARD_W);
+/// The plate holds its digit and stands clear of the name it numbers, and the
+/// empty slot's line is inside the card it is inked on.
+const _: () = assert!(TAB_BADGE_X + TAB_BADGE_W <= TAB_TITLE_TEXT_X);
+const _: () = assert!(TAB_BADGE_Y + TAB_BADGE_H <= TAB_URL_DY);
+const _: () = assert!(TAB_EMPTY_Y + TAB_RUN_LINE_BOX <= TAB_CARD_H);
 
 /// Omnibox Right Controls
 const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
@@ -1520,6 +1542,25 @@ fn nav_glyph_ink(active: bool) -> u32 {
 const MENU_ROW_Y0: usize = 130;
 const MENU_ROW_H: usize = 44;
 
+/// The rung a menu row's label is set at, and the line box it reserves.
+///
+/// WHY both are named: the painter drew the rule under each label at
+/// `item_y + 30`, a literal that agreed with the label's own line box only as
+/// long as the label stayed at the caption rung. A rule belongs at the foot of
+/// the box the label fills, so it now comes off the same ladder the label does
+/// and the two cannot part.
+const MENU_RUNG: usize = type_scale::CAPTION;
+const MENU_LINE_BOX: usize = font::line_height(MENU_RUNG);
+
+/// Where a menu row's label starts, and the lane it is cut to: the card's own
+/// right edge, less the air the label keeps from it.
+const MENU_TEXT_X: usize = 464;
+const MENU_TEXT_GUTTER: usize = 8;
+const MENU_TEXT_LANE: usize = MENU_CARD.x + MENU_CARD.w - MENU_TEXT_X - MENU_TEXT_GUTTER;
+
+const _: () = assert!(MENU_LINE_BOX <= MENU_ROW_H);
+const _: () = assert!(MENU_TEXT_X + MENU_TEXT_LANE <= MENU_CARD.x + MENU_CARD.w);
+
 /// The kebab menu's card.
 ///
 /// WHY one named box for the card and its rows: the card is painted as a
@@ -1591,8 +1632,97 @@ const _: () = assert!(chrome::home_tile_hit(3).x + chrome::home_tile_hit(3).w
 /// and its trailing picture plate -- is laid out inside `main.rs`, and boxes
 /// that nothing paints are how this module acquired dead geometry once already.
 const HOME_CARD_Y0: usize = chrome::HOME_LIST_Y1;
-const HOME_CARD_H: usize = 100;
+
+/// The rung a "Your pages" card's three lines are set at.
+///
+/// WHY the card's height is now read off that rung: the card was a remembered
+/// one hundred rows while its three lines started at rows twenty, forty-eight
+/// and seventy-two of it -- each reserving a whole line box of thirty. The last
+/// line therefore ended at row one hundred and two of a one hundred-row card,
+/// and the plate answered its bottom two rows as flat card: the tail of `g`,
+/// `p` and `y` in a saved page's address was shaved off at the card's own
+/// border, and the three boxes overlapped one another by two rows each. The
+/// block is now stacked by the rung and the card is the block plus the air, so
+/// the one hundred rows the card has always painted are exactly what its three
+/// lines need.
+const HOME_CARD_RUNG: usize = type_scale::CAPTION;
+
+/// One line box at [`HOME_CARD_RUNG`].
+const HOME_CARD_LINE: usize = font::line_height(HOME_CARD_RUNG);
+
+/// How many lines a saved-page card carries: name, address, and where the row
+/// came from.
+const HOME_CARD_LINES: usize = 3;
+
+/// The three lines as one block, and the air the card keeps above and below it.
+const HOME_CARD_BLOCK_H: usize = HOME_CARD_LINES * HOME_CARD_LINE;
+const HOME_CARD_BLOCK_PAD_Y: usize = 5;
+
+/// The height of one card: its block plus the air on both sides of it.
+const HOME_CARD_H: usize = HOME_CARD_BLOCK_H + 2 * HOME_CARD_BLOCK_PAD_Y;
+
+/// The top of the block inside the card, and of each line inside the block.
+const HOME_CARD_BLOCK_Y: usize = (HOME_CARD_H - HOME_CARD_BLOCK_H) / 2;
+const HOME_CARD_LINE2_Y: usize = HOME_CARD_BLOCK_Y + HOME_CARD_LINE;
+const HOME_CARD_LINE3_Y: usize = HOME_CARD_BLOCK_Y + 2 * HOME_CARD_LINE;
+
+/// The air between two cards.
 const HOME_CARD_GAP: usize = 12;
+
+/// Where a card's lines start, and the air left between a line and the picture
+/// plate that trails it. WHY both are named: the lane the three lines are cut
+/// to used to be measured from the card's `+32` while the lines were drawn from
+/// its `+20`, so every run was let twelve rows wider than the card's own edge
+/// gives it -- a long page name finished under the picture it was trimmed for.
+const HOME_CARD_TEXT_INSET: usize = 20;
+const HOME_CARD_TEXT_GUTTER: usize = 12;
+
+/// The empty-state card's two lines, as one block of the same rung, centred in
+/// the same card.
+const HOME_EMPTY_BLOCK_H: usize = 2 * HOME_CARD_LINE;
+const HOME_EMPTY_BLOCK_Y: usize = (HOME_CARD_H - HOME_EMPTY_BLOCK_H) / 2;
+const HOME_EMPTY_SECOND_Y: usize = HOME_EMPTY_BLOCK_Y + HOME_CARD_LINE;
+
+const _: () = assert!(HOME_CARD_H == 100);
+const _: () = assert!(HOME_CARD_BLOCK_Y + HOME_CARD_BLOCK_H <= HOME_CARD_H);
+const _: () = assert!(HOME_CARD_LINE3_Y + HOME_CARD_LINE <= HOME_CARD_H);
+const _: () = assert!(HOME_EMPTY_BLOCK_Y + HOME_EMPTY_BLOCK_H <= HOME_CARD_H);
+const _: () = assert!(HOME_EMPTY_BLOCK_Y == 20);
+const _: () = assert!(home_card(0).w > HOME_CARD_TEXT_INSET + HOME_CARD_TEXT_GUTTER);
+
+/// The start page's brand block: the mark, the name and what the name is of.
+///
+/// WHY the band is derived from its own contents: it was `130..244` with the
+/// icon at 134, the brand line at 196 and the subtitle at 220 -- twenty-four
+/// rows of stride for lines that reserve a box of thirty. The subtitle's box
+/// ended at row two hundred and fifty of a band that stopped at two hundred and
+/// forty-four, so the tail of the `g` in "Sovereign" was drawn where the next
+/// band's own background answered, and the word arrived without its descender.
+const HERO_RUNG: usize = type_scale::CAPTION;
+const HERO_LINE: usize = font::line_height(HERO_RUNG);
+
+/// The band the brand block is painted in: from the row under the toolbar to
+/// the quick-link band's own top, both of which the platform names.
+const HERO_BAND_Y0: usize = 130;
+const HERO_BAND_Y1: usize = chrome::HOME_GRID_Y0;
+
+/// The app's own mark: its plate, and the centre its inked ring is drawn about.
+const HERO_ICON: Rect = Rect::new(334, HERO_BAND_Y0 + 4, 52, 52);
+const HERO_ICON_CX: isize = (HERO_ICON.x + HERO_ICON.w / 2) as isize;
+const HERO_ICON_CY: isize = (HERO_ICON.y + HERO_ICON.h / 2) as isize;
+
+/// The two lines, stacked as one block directly under the mark.
+const HERO_BRAND_Y: usize = HERO_ICON.y + HERO_ICON.h;
+const HERO_SUB_Y: usize = HERO_BRAND_Y + HERO_LINE;
+
+const _: () = assert!(HERO_ICON.y + HERO_ICON.h <= HERO_BRAND_Y);
+const _: () = assert!(HERO_BRAND_Y + HERO_LINE <= HERO_SUB_Y);
+const _: () = assert!(
+    HERO_SUB_Y + HERO_LINE <= HERO_BAND_Y1,
+    "the brand block's last line must finish inside the band that paints it",
+);
+const _: () = assert!(HERO_BAND_Y1 <= chrome::HOME_GRID_Y0);
+const _: () = assert!(HERO_LINE >= 16);
 
 const _: () = assert!(HOME_CARD_Y0 > chrome::HOME_LIST_Y0);
 /// The four cards, their air and the empty-state card must stay above the
@@ -1797,6 +1927,27 @@ const LIST_Y: usize = 236;
 const _: () = assert!(chrome::FILTER_CLEAR.y >= FILTER_Y);
 const _: () = assert!(chrome::FILTER_CLEAR.y + chrome::FILTER_CLEAR.h <= FILTER_Y + FILTER_H);
 const _: () = assert!(FILTER_Y + FILTER_H <= LIST_Y);
+
+// -----------------------------------------------------------------------------
+// The one-line note a sheet sets under its header
+//
+// WHY the note is named here: six sheets inked the same caption below their
+// header band, each at a row it remembered. The band, its rung and its title row
+// are `chrome`'s -- see `chrome::in_sheet_header` and `chrome::SHEET_TITLE_Y` --
+// so the note is set from that band's own foot rather than from a row that can
+// drift out of it while the band moves.
+// -----------------------------------------------------------------------------
+
+/// The rung of the one-line note a sheet sets under its header.
+const SHEET_NOTE_RUNG: usize = type_scale::CAPTION;
+
+/// Where that note stands: the band's own foot, plus the air below it.
+const SHEET_NOTE_GAP: usize = 12;
+const SHEET_NOTE_X: usize = 32;
+const SHEET_NOTE_Y: usize =
+    chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H + SHEET_NOTE_GAP;
+
+const _: () = assert!(SHEET_NOTE_Y >= chrome::SHEET_HEADER_Y0 + chrome::SHEET_HEADER_H);
 
 /// The stride between two bookmark rows.
 const BOOKMARK_ROW_PITCH: usize = 80;
@@ -6753,6 +6904,71 @@ impl BrowserApp {
 }
 
 // -----------------------------------------------------------------------------
+// The status screen's own block
+//
+// WHY these are named at all: the screen that answers a failed navigation
+// stacks a title, up to six body lines, the gateway's own reason and the
+// failure badge, and every gap between those four was a literal written beside
+// the one that follows it. The body stride was twenty-eight rows while each of
+// its lines is drawn at a rung whose line box is thirty -- so two rows of every
+// line hung inside the next line's band, and the painter answers one pixel at a
+// time, so the tail of `g`, `j`, `p`, `q` and `y` in one body line was drawn
+// under the next one's blank rows. Every stride below is the rung's own box.
+// -----------------------------------------------------------------------------
+
+/// The rung the status screen's title, body and reason are set at.
+const FRAME_RUNG: usize = type_scale::CAPTION;
+
+/// One line box at [`FRAME_RUNG`]: the height every stride below takes.
+const FRAME_LINE_BOX: usize = font::line_height(FRAME_RUNG);
+
+/// The air between the status screen's title and the body under it.
+const FRAME_HEAD_GAP: usize = 10;
+
+/// The first body line's top, measured from the title's own top.
+const FRAME_BODY_TOP: usize = FRAME_LINE_BOX + FRAME_HEAD_GAP;
+
+/// How many body lines the screen will hold.
+const FRAME_BODY_LINES: usize = 6;
+
+/// The gutter the body is cut to. WHY a gutter and not a count: the text is
+/// centred on the panel, so its lane is the panel less the air kept on each
+/// side -- a remembered 560 is a lane that no container owns.
+const FRAME_TEXT_GUTTER: usize = 80;
+const FRAME_TEXT_LANE: usize = W - 2 * FRAME_TEXT_GUTTER;
+
+/// The air between the body block's last line and what follows it.
+const FRAME_DETAIL_GAP: usize = 16;
+const FRAME_BADGE_GAP: usize = 24;
+
+/// The air below the gateway's reason line before the failure badge.
+const FRAME_BADGE_UNDER_GAP: usize = 20;
+
+/// The failure badge's plate: one line box, plus the air that keeps a
+/// descender off its border.
+const FRAME_BADGE_PAD_Y: usize = 3;
+const FRAME_BADGE_H: usize = FRAME_LINE_BOX + 2 * FRAME_BADGE_PAD_Y;
+
+/// Where the badge's own line sits inside its plate.
+const FRAME_BADGE_TEXT_Y: usize = (FRAME_BADGE_H - FRAME_LINE_BOX) / 2;
+
+/// The plate's width and the half-width the centred stack measures from.
+const FRAME_BADGE_W: usize = 360;
+
+/// The address capsule's rung, and the row its line sits on inside the pill.
+const PILL_RUNG: usize = type_scale::CAPTION;
+
+const _: () = assert!(FRAME_TEXT_LANE == 560);
+const _: () = assert!(FRAME_BODY_TOP == 40);
+const _: () = assert!(FRAME_LINE_BOX >= 16);
+const _: () = assert!(FRAME_BADGE_H <= 44);
+const _: () = assert!(FRAME_BADGE_TEXT_Y + FRAME_LINE_BOX <= FRAME_BADGE_H);
+const _: () = assert!(
+    FRAME_BODY_LINES * FRAME_LINE_BOX + FRAME_BODY_TOP <= NAV_BAR_Y0 - TOOLBAR_Y1,
+    "the status screen's body block must fit the viewport it is drawn in",
+);
+
+// -----------------------------------------------------------------------------
 // Per-Frame State Cache
 // -----------------------------------------------------------------------------
 struct Frame {
@@ -6856,11 +7072,11 @@ impl Frame {
         } else {
             THEME.on_surface_variant
         };
-        f.pill_len = font::ellipsize(src, 1, PILL_TEXT_MAX, &mut f.pill);
+        f.pill_len = font::ellipsize(src, PILL_RUNG, PILL_TEXT_MAX, &mut f.pill);
         f.show_caret = app.address_focused;
-        f.caret_x = PILL_TEXT_X + text_width(&f.pill[..f.pill_len], 1);
+        f.caret_x = PILL_TEXT_X + text_width(&f.pill[..f.pill_len], PILL_RUNG);
         f.select_w = if app.select_all {
-            text_width(&f.pill[..f.pill_len], 1)
+            text_width(&f.pill[..f.pill_len], PILL_RUNG)
         } else {
             0
         };
@@ -6932,24 +7148,24 @@ impl Frame {
             }),
         };
 
-        f.head_scale = 1;
+        f.head_scale = FRAME_RUNG;
         let n = head_src.len().min(f.head.len());
         f.head[..n].copy_from_slice(&head_src[..n]);
         f.head_len = n;
-        let head_w = text_width(&f.head[..f.head_len], 1);
+        let head_w = text_width(&f.head[..f.head_len], FRAME_RUNG);
         f.head_x = (W.saturating_sub(head_w)) / 2;
 
-        let mut lines: [&'static [u8]; 6] = [&b""[..]; 6];
-        f.body_n = font::wrap_text(body_src, 1, 560, 6, &mut lines);
+        let mut lines: [&'static [u8]; FRAME_BODY_LINES] = [&b""[..]; FRAME_BODY_LINES];
+        f.body_n = font::wrap_text(body_src, FRAME_RUNG, FRAME_TEXT_LANE, FRAME_BODY_LINES, &mut lines);
         for i in 0..f.body_n {
             f.body[i] = lines[i];
-            f.body_x[i] = (W.saturating_sub(text_width(lines[i], 1))) / 2;
+            f.body_x[i] = (W.saturating_sub(text_width(lines[i], FRAME_RUNG))) / 2;
         }
 
         f.icon_cy = 380;
         f.head_y = 440;
         for i in 0..f.body_n {
-            f.body_y[i] = f.head_y + 40 + i * 28;
+            f.body_y[i] = f.head_y + FRAME_BODY_TOP + i * FRAME_LINE_BOX;
         }
 
         // The candidate the suggestion cards offer.
@@ -6973,12 +7189,12 @@ impl Frame {
         } else {
             0
         };
-        f.detail_y = f.head_y + 40 + f.body_n * 28 + 16;
+        f.detail_y = f.head_y + FRAME_BODY_TOP + f.body_n * FRAME_LINE_BOX + FRAME_DETAIL_GAP;
         // The badge sits below the body, and below the reason when there
         // is one.
-        f.err_y = f.head_y + 40 + f.body_n * 28 + 24;
+        f.err_y = f.head_y + FRAME_BODY_TOP + f.body_n * FRAME_LINE_BOX + FRAME_BADGE_GAP;
         if f.detail_len > 0 {
-            f.err_y = f.detail_y + 28 + 20;
+            f.err_y = f.detail_y + FRAME_LINE_BOX + FRAME_BADGE_UNDER_GAP;
         }
 
         f
@@ -7931,13 +8147,13 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 // Start Page (New Tab)
 // -----------------------------------------------------------------------------
 fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
-    // 1. Sovereign Brand Hero Section (y 130..244)
-    if y >= 130 && y < 244 {
-        // App icon squircle (52x52) centered at (334, 134)
-        let icon_rect = Rect::new(334, 134, 52, 52);
+    // 1. Sovereign Brand Hero Section (the band the ladder measures)
+    if y >= HERO_BAND_Y0 && y < HERO_BAND_Y1 {
+        // App icon squircle, and the ring inked at its own centre.
+        let icon_rect = HERO_ICON;
         if let Some(c) = draw_rounded_rect(x, y, icon_rect, R_CARD, THEME.primary, Some(THEME.border), 1) {
-            let cx = 360isize;
-            let cy = 160isize;
+            let cx = HERO_ICON_CX;
+            let cy = HERO_ICON_CY;
             let dx = (x as isize) - cx;
             let dy = (y as isize) - cy;
             let r2 = dx * dx + dy * dy;
@@ -7952,17 +8168,17 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
 
         // Brand Title
         let brand_text = b"InterOS Browser";
-        let bw = text_width(brand_text, 1);
+        let bw = text_width(brand_text, HERO_RUNG);
         let bx0 = (W.saturating_sub(bw)) / 2;
-        if let Some(px) = text_px(x, y, bx0, 196, 1, brand_text, THEME.on_surface, THEME.surface, true) {
+        if let Some(px) = text_px(x, y, bx0, HERO_BRAND_Y, HERO_RUNG, brand_text, THEME.on_surface, THEME.surface, true) {
             return px;
         }
 
         // Subtitle
         let sub_text = b"Sovereign Web";
-        let sw = text_width(sub_text, 1);
+        let sw = text_width(sub_text, HERO_RUNG);
         let sx0 = (W.saturating_sub(sw)) / 2;
-        if let Some(px) = text_px(x, y, sx0, 220, 1, sub_text, THEME.on_surface_variant, THEME.surface, false) {
+        if let Some(px) = text_px(x, y, sx0, HERO_SUB_Y, HERO_RUNG, sub_text, THEME.on_surface_variant, THEME.surface, false) {
             return px;
         }
         return THEME.surface;
@@ -8091,10 +8307,10 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
                 return sc;
             }
             let text_x = empty_rect.x + 80;
-            if let Some(px) = text_px(x, y, text_x, empty_rect.y + 20, 1, b"No Bookmarks Yet", THEME.on_surface, c, true) {
+            if let Some(px) = text_px(x, y, text_x, empty_rect.y + HOME_EMPTY_BLOCK_Y, HOME_CARD_RUNG, b"No Bookmarks Yet", THEME.on_surface, c, true) {
                 return px;
             }
-            if let Some(px) = text_px(x, y, text_x, empty_rect.y + 46, 1, b"Bookmarked and visited pages appear here", THEME.on_surface_variant, c, false) {
+            if let Some(px) = text_px(x, y, text_x, empty_rect.y + HOME_EMPTY_SECOND_Y, HOME_CARD_RUNG, b"Bookmarked and visited pages appear here", THEME.on_surface_variant, c, false) {
                 return px;
             }
             return c;
@@ -8118,24 +8334,26 @@ fn home_page_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
             );
             // WHY the card's three lines are trimmed to the picture's edge: a
             // page names itself as long as it likes, and the last words of a
-            // name that outgrew the card would land under its icon.
-            let line_w = thumb.x - (card_rect.x + 32);
+            // name that outgrew the card would land under its icon. The lane is
+            // measured from the column the lines are actually drawn in, less
+            // the air kept before the plate, so the cut and the ink agree.
+            let line_w = thumb.x - (card_rect.x + HOME_CARD_TEXT_INSET) - HOME_CARD_TEXT_GUTTER;
             let mut line = [0u8; 128];
-            let text_x = card_rect.x + 20;
-            let n = font::ellipsize(row.title, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, text_x, card_rect.y + 20, 1, &line[..n], THEME.on_surface, THEME.surface_container_high, true) {
+            let text_x = card_rect.x + HOME_CARD_TEXT_INSET;
+            let n = font::ellipsize(row.title, HOME_CARD_RUNG, line_w, &mut line);
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + HOME_CARD_BLOCK_Y, HOME_CARD_RUNG, &line[..n], THEME.on_surface, THEME.surface_container_high, true) {
                 return px;
             }
-            let n = font::ellipsize(row.url, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, text_x, card_rect.y + 48, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
+            let n = font::ellipsize(row.url, HOME_CARD_RUNG, line_w, &mut line);
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + HOME_CARD_LINE2_Y, HOME_CARD_RUNG, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             // WHY the category is muted and not accented: the accent is the
             // colour this browser uses for the thing a tap acts on, and the
             // whole card is already that one target. An accent word inside a
             // tappable card reads as a second, narrower link that is not one.
-            let n = font::ellipsize(row.meta, 1, line_w, &mut line);
-            if let Some(px) = text_px(x, y, text_x, card_rect.y + card_rect.h - 28, 1, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
+            let n = font::ellipsize(row.meta, HOME_CARD_RUNG, line_w, &mut line);
+            if let Some(px) = text_px(x, y, text_x, card_rect.y + HOME_CARD_LINE3_Y, HOME_CARD_RUNG, &line[..n], THEME.on_surface_variant, THEME.surface_container_high, false) {
                 return px;
             }
             if let Some(tc) = draw_rounded_rect(x, y, thumb, R_CHIP, THEME.surface_container, None, 0) {
@@ -8795,7 +9013,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             }
         }
         for i in 0..f.body_n.min(f.body.len()).min(f.body_x.len()).min(f.body_y.len()) {
-            if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], 1, f.body[i], THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], FRAME_RUNG, f.body[i], THEME.on_surface_variant, THEME.surface, false) {
                 return px;
             }
         }
@@ -8812,13 +9030,13 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // the server said from what the browser knows.
         if f.detail_len > 0 {
             let detail = &f.detail[..f.detail_len];
-            let dw = text_width(detail, 1);
+            let dw = text_width(detail, FRAME_RUNG);
             if let Some(px) = text_px(
                 x,
                 y,
                 (W.saturating_sub(dw)) / 2,
                 f.detail_y,
-                1,
+                FRAME_RUNG,
                 detail,
                 THEME.on_surface,
                 THEME.surface,
@@ -8835,7 +9053,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         // connection and a gateway that answered nothing all produced the
         // same badge, so the badge was decoration rather than a report.
         let err_y = f.err_y;
-        let err_rect = Rect::new(cx - 180, err_y, 360, 36);
+        let err_rect = Rect::new(cx - FRAME_BADGE_W / 2, err_y, FRAME_BADGE_W, FRAME_BADGE_H);
         if let Some(c) = draw_rounded_rect(x, y, err_rect, R_SMALL, THEME.surface_container_high, Some(THEME.border), 1) {
             let label: &[u8] = match app.status {
                 PageStatus::NoTransport => match app.transport_failure {
@@ -8901,8 +9119,14 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::Downloaded | PageStatus::DownloadPrompt => THEME.primary,
                 _ => THEME.error,
             };
-            let lw = text_width(label, 1);
-            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + 8, 1, label, label_color, c, false) {
+            // WHY the line is set from the plate's own height: the badge is one
+            // line box of the rung it is lettered at, plus the air that keeps a
+            // descender off its border. Lettering it at a remembered eight rows
+            // inside a thirty-six-row plate left the last two rows of the plate
+            // to answer the run's box -- a reason that ends in `G`, `Y` or `P`
+            // lost its tail at the badge's own bottom edge.
+            let lw = text_width(label, FRAME_RUNG);
+            if let Some(px) = text_px(x, y, cx - lw / 2, err_y + FRAME_BADGE_TEXT_Y, FRAME_RUNG, label, label_color, c, false) {
                 return px;
             }
             return c;
@@ -9575,10 +9799,22 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     let border_w = if is_active { 2 } else { 1 };
                     if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, Some(border_col), border_w) {
                         // Tab badge `[i+1]`
-                        let badge_rect = Rect::new(40, card_y + 16, 28, 24);
+                        let badge_rect = Rect::new(
+                            TAB_BADGE_X,
+                            card_y + TAB_BADGE_Y,
+                            TAB_BADGE_W,
+                            TAB_BADGE_H,
+                        );
                         if let Some(bc) = draw_rounded_rect(x, y, badge_rect, R_SMALL, THEME.surface_container, None, 0) {
                             let digit = [b'1' + (i as u8)];
-                            if let Some(px) = text_px(x, y, 48, card_y + 20, 1, &digit, THEME.primary, bc, true) {
+                            // WHY the digit is set from the plate it sits in:
+                            // the plate is one line box of the same rung the
+                            // digit is drawn at, so the count is knocked out of
+                            // the plate whole instead of losing its last rows
+                            // past the plate's own bottom edge.
+                            let dx = centred_text_left(badge_rect, &digit, TAB_RUN_SCALE);
+                            let dy = badge_rect.y + centred_text_top(badge_rect.h, TAB_RUN_SCALE);
+                            if let Some(px) = text_px(x, y, dx, dy, TAB_RUN_SCALE, &digit, THEME.primary, bc, true) {
                                 return Some(px);
                             }
                             return Some(bc);
@@ -9663,7 +9899,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                     // Empty slot dashed/dim card
                     if let Some(c) = draw_rounded_rect(x, y, card_rect, CARD.radius, CARD.fill, CARD.border, 1) {
                         let label = b"+ Empty Tab Slot";
-                        if let Some(px) = text_px(x, y, 40, card_y + 44, 1, label, THEME.on_surface_variant, c, false) {
+                        if let Some(px) = text_px(x, y, TAB_BADGE_X, card_y + TAB_EMPTY_Y, TAB_RUN_SCALE, label, THEME.on_surface_variant, c, false) {
                             return Some(px);
                         }
                         return Some(c);
@@ -10038,7 +10274,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Uploads, measurements, and samples run on this device; nothing is estimated.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             let rows: [(&[u8], &[u8]); 4] = [
@@ -10098,7 +10334,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Browser configuration, search engine, and device settings.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             let rows: [(&[u8], &[u8]); 4] = [
@@ -10158,7 +10394,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Pick a document. An upload is complete only when the gateway confirms every byte.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             if app.upload_count == 0 {
@@ -10308,7 +10544,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Every number is measured on this device through the Studio gateway. Nothing is estimated.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             if app.speed_running {
@@ -10450,7 +10686,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Each row is the gateway's answer to this reader. No JavaScript runs and nothing is saved.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             if app.lab_running {
@@ -10547,7 +10783,7 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
                 return Some(THEME.surface);
             }
             let caption = b"Built by the gateway. Tap one to download it into shared storage.";
-            if let Some(px) = text_px(x, y, 32, 182, 1, caption, THEME.on_surface_variant, THEME.surface, false) {
+            if let Some(px) = text_px(x, y, SHEET_NOTE_X, SHEET_NOTE_Y, SHEET_NOTE_RUNG, caption, THEME.on_surface_variant, THEME.surface, false) {
                 return Some(px);
             }
             let row_h = UPLOAD_ROW_PITCH;
@@ -10599,10 +10835,28 @@ fn render_sheet_overlay(x: usize, y: usize, app: &BrowserApp) -> Option<u32> {
             ) {
                 for (idx, item) in MENU_ITEMS.iter().enumerate() {
                     let item_y = MENU_ROW_Y0 + idx * MENU_ROW_H;
-                    if let Some(px) = text_px(x, y, 464, item_y, 1, item, THEME.on_surface, c, false) {
+                    // WHY the label is cut to the card's own lane: the items are
+                    // this app's words, so they fit today, but a label is inked
+                    // from the rung and a rung that rises walks the last words
+                    // past the card's edge. The cut and the plate it is measured
+                    // on come off the same two numbers.
+                    let mut label = [0u8; 32];
+                    let n = font::ellipsize(*item, MENU_RUNG, MENU_TEXT_LANE, &mut label);
+                    if let Some(px) = text_px(
+                        x,
+                        y,
+                        MENU_TEXT_X,
+                        item_y,
+                        MENU_RUNG,
+                        &label[..n],
+                        THEME.on_surface,
+                        c,
+                        false,
+                    ) {
                         return Some(px);
                     }
-                    if idx + 1 < MENU_ITEMS.len() && y == item_y + 30 {
+                    // The rule sits at the foot of the label's own line box.
+                    if idx + 1 < MENU_ITEMS.len() && y == item_y + MENU_LINE_BOX {
                         return Some(THEME.outline_variant);
                     }
                 }
