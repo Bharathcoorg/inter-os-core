@@ -55,7 +55,15 @@ fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBack
     Ok(available)
 }
 
-fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
+/// The sectors the canonical InterFS region occupies on a device of `total`.
+///
+/// WHY `pub(super)` and not private: the provisioning path in `staging` streams
+/// hundreds of thousands of sectors and must mount the filesystem ONCE, not once
+/// per chunk. Remounting per chunk re-reads the whole allocation bitmap -- 3,071
+/// sectors on the demo disk -- and under emulated IDE that is not slow, it is
+/// unreachable. A single mount has to be made through this module's region and
+/// guard, or the streaming path would be a second, unguarded way into the region.
+pub(super) fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
     region_for_layout(total, FilesystemLayout::canonical())
 }
 
@@ -149,7 +157,7 @@ fn announce_space_refusal(scope: &str, path: &str, report: &SpaceReport) {
 /// from the running kernel's program headers, and the boot area from the
 /// device's own partition table. Nothing here consults a fixed sector number,
 /// so repacking the image moves the protection with it.
-fn guard_region(
+pub(super) fn guard_region(
     device: &mut dyn BlockDevice,
     base_lba: u32,
     region_sectors: u32,

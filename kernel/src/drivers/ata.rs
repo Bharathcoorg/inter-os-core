@@ -28,6 +28,24 @@ const ATA_DRIVE_HEAD_PORT: u16 = 0x1F6;
 const ATA_STATUS_CMD_PORT: u16 = 0x1F7;
 const ATA_CONTROL_PORT: u16 = 0x3F6;
 
+/// The secondary ATA channel's base ports.
+///
+/// WHY this channel is reached at all: the demo device occupies the primary
+/// channel with the boot image (unit 0) and the data disk (unit 1), so a third
+/// disk has nowhere else to sit on this transport. QEMU's `piix3-ide` exposes
+/// `ide.1` for exactly that, and provisioning needs one more disk -- the
+/// disposable staging image a host tool writes -- without moving either of the
+/// two the device already depends on.
+const ATA2_DATA_PORT: u16 = 0x170;
+const ATA2_ERROR_PORT: u16 = 0x171;
+const ATA2_SECTOR_COUNT_PORT: u16 = 0x172;
+const ATA2_LBA_LOW_PORT: u16 = 0x173;
+const ATA2_LBA_MID_PORT: u16 = 0x174;
+const ATA2_LBA_HIGH_PORT: u16 = 0x175;
+const ATA2_DRIVE_HEAD_PORT: u16 = 0x176;
+const ATA2_STATUS_CMD_PORT: u16 = 0x177;
+const ATA2_CONTROL_PORT: u16 = 0x376;
+
 /// ATA Commands.
 const CMD_IDENTIFY: u8 = 0xEC;
 const CMD_READ_SECTORS: u8 = 0x20;
@@ -58,6 +76,16 @@ pub struct AtaDrive {
     total_sectors: u32,
     model_name: String,
     is_master: bool,
+    /// Whether this instance is a *presence probe* rather than a working disk.
+    ///
+    /// WHY a flag on the drive and not a flag on the caller: an empty IDE slot
+    /// never asserts DRQ, and `wait_drq` spins ten million status reads before
+    /// it says so. That is the right patience for a disk the OS is about to
+    /// store on and the wrong patience for a device that is usually not there --
+    /// every boot of a real phone would pay it. A probe waits a bounded number of
+    /// reads and reports absence instead of timing out on the console, because a
+    /// provisioning channel that was never attached is not a fault.
+    probe_only: bool,
 }
 
 impl AtaDrive {
@@ -78,6 +106,7 @@ impl AtaDrive {
             total_sectors: 0,
             model_name: String::new(),
             is_master: true,
+            probe_only: false,
         }
     }
 
@@ -98,7 +127,53 @@ impl AtaDrive {
             total_sectors: 0,
             model_name: String::new(),
             is_master: false,
+            probe_only: false,
         }
+    }
+
+    /// The staging channel: the master drive of the secondary ATA controller.
+    ///
+    /// WHY a drive of its own: the boot image and the data disk already hold both
+    /// units of the primary channel, and a payload copied in from the host has to
+    /// arrive on a disk that is not either of them -- one that provisioning can
+    /// attach for a single run and detach forever after.
+    ///
+    /// WHY `is_probe` decides the patience: presence is established with bounded
+    /// waits, because an empty slot never answers and a real phone boots without
+    /// this disk attached. Once the slot has answered, the same drive is taken
+    /// again with the ordinary patience, so a slow sector read on a drive that is
+    /// genuinely there is never mistaken for absence.
+    fn secondary(is_probe: bool) -> Self {
+        Self {
+            data_port: Port::new(ATA2_DATA_PORT),
+            _error_port: PortReadOnly::new(ATA2_ERROR_PORT),
+            sector_count_port: Port::new(ATA2_SECTOR_COUNT_PORT),
+            lba_low_port: Port::new(ATA2_LBA_LOW_PORT),
+            lba_mid_port: Port::new(ATA2_LBA_MID_PORT),
+            lba_high_port: Port::new(ATA2_LBA_HIGH_PORT),
+            drive_head_port: Port::new(ATA2_DRIVE_HEAD_PORT),
+            status_port: PortReadOnly::new(ATA2_STATUS_CMD_PORT),
+            cmd_port: PortWriteOnly::new(ATA2_STATUS_CMD_PORT),
+            _control_port: PortWriteOnly::new(ATA2_CONTROL_PORT),
+            alt_status_port: PortReadOnly::new(ATA2_CONTROL_PORT),
+            total_sectors: 0,
+            model_name: String::new(),
+            // The drive/head byte selects the drive *within* the channel the
+            // ports already chose, so the secondary master uses the same 0xA0 and
+            // 0xE0 values the primary master does.
+            is_master: true,
+            probe_only: is_probe,
+        }
+    }
+
+    /// Probes the secondary channel's master for a staging drive, patiently.
+    pub fn new_secondary_master_probe() -> Self {
+        Self::secondary(true)
+    }
+
+    /// The secondary channel's master as a working disk.
+    pub fn new_secondary_master() -> Self {
+        Self::secondary(false)
     }
 
     /// Performs bus delay by reading the alternate status register 4 times (~400ns).
@@ -134,9 +209,18 @@ impl AtaDrive {
         }
     }
 
+    /// The most status polls a presence probe spends before calling the slot
+    /// empty. A working disk waits ten million; an empty IDE slot answers nothing
+    /// at all, so a probe has to stop early and say "absent" rather than spin for
+    /// the whole patience a real transfer deserves.
+    const PROBE_POLL_LIMIT: u32 = 200_000;
+    /// The most status polls a transfer waits out before the operation fails.
+    const TRANSFER_POLL_LIMIT: u32 = 10_000_000;
+
     /// Waits until the drive clears the BSY status bit with a timeout counter.
     fn wait_not_busy(&mut self) -> Result<u8, AtaError> {
-        let mut timeout = 10_000_000;
+        let limit = if self.probe_only { Self::PROBE_POLL_LIMIT } else { Self::TRANSFER_POLL_LIMIT };
+        let mut timeout = limit;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_BSY) == 0 {
@@ -146,13 +230,19 @@ impl AtaDrive {
             timeout -= 1;
         }
         let status = unsafe { self.status_port.read() };
-        crate::serial_println!("[ATA] wait_not_busy timed out, status={:#04X}", status);
+        // WHY a probe stays quiet: an empty slot is the normal state of the
+        // staging channel, and a timeout line on the console for a disk that was
+        // never attached reads like a failing drive.
+        if !self.probe_only {
+            crate::serial_println!("[ATA] wait_not_busy timed out, status={:#04X}", status);
+        }
         Err(AtaError::Timeout)
     }
 
     /// Waits until the drive asserts DRQ (Data Request Ready) or returns an error.
     fn wait_drq(&mut self) -> Result<(), AtaError> {
-        let mut timeout = 10_000_000;
+        let limit = if self.probe_only { Self::PROBE_POLL_LIMIT } else { Self::TRANSFER_POLL_LIMIT };
+        let mut timeout = limit;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_ERR) != 0 {
@@ -168,7 +258,9 @@ impl AtaDrive {
             timeout -= 1;
         }
         let status = unsafe { self.status_port.read() };
-        crate::serial_println!("[ATA] wait_drq timed out, status={:#04X}", status);
+        if !self.probe_only {
+            crate::serial_println!("[ATA] wait_drq timed out, status={:#04X}", status);
+        }
         Err(AtaError::Timeout)
     }
 
@@ -358,6 +450,17 @@ pub static ATA_BOOT: Mutex<Option<AtaDrive>> = Mutex::new(None);
 /// Global synchronized ATA controller instance for persistent storage.
 pub static ATA_PRIMARY: Mutex<Option<AtaDrive>> = Mutex::new(None);
 
+/// The staging disk provisioning reads a model payload from, when one is
+/// attached to the secondary channel.
+///
+/// WHY this is a separate static and not part of `ATA_PRIMARY`: the data disk is
+/// the device the OS stores on, and nothing may ever be written to it from a
+/// path that did not decide to write to it. A staging disk is read-only input
+/// that provisioning looks for by name, and on the device a person carries it is
+/// simply `None` -- which is the whole reason the provisioning path costs nothing
+/// there.
+pub static ATA_STAGING: Mutex<Option<AtaDrive>> = Mutex::new(None);
+
 /// Initializes and probes the ATA hard drives.
 /// If a dedicated secondary drive (Primary Slave) is present, it is mounted
 /// as the persistent storage disk (ATA_PRIMARY), separating persistent state
@@ -373,6 +476,8 @@ pub fn init() -> Result<(), AtaError> {
     let mut slave = AtaDrive::new_primary_slave();
     let slave_found = slave.identify().is_ok();
 
+    probe_staging_channel();
+
     if slave_found {
         *ATA_PRIMARY.lock() = Some(slave);
         Ok(())
@@ -384,5 +489,57 @@ pub fn init() -> Result<(), AtaError> {
         Ok(())
     } else {
         Err(AtaError::DeviceNotFound)
+    }
+}
+
+/// Looks once, patiently-but-boundedly, for a staging disk on the secondary
+/// channel and keeps it if it answers.
+///
+/// WHY the answer is silent when nothing is there: a device that has never been
+/// provisioned is the ordinary case, and a console line for it on every boot
+/// trains anyone reading the log to ignore the lines that matter. When a disk
+/// *is* there, provisioning is about to spend minutes on it, so the fact it was
+/// seen belongs on the console.
+fn probe_staging_channel() {
+    let mut probe = AtaDrive::new_secondary_master_probe();
+    if probe.identify().is_err() {
+        return;
+    }
+    // Re-identify without the probe's impatience, so the disk the OS is about to
+    // read six hundred thousand sectors from is held to the same patience as any
+    // other drive.
+    let mut staging = AtaDrive::new_secondary_master();
+    if staging.identify().is_err() {
+        return;
+    }
+    let sectors = staging.sector_count();
+    let model = String::from(staging.model());
+    crate::serial_println!("[ATA] staging channel: model '{}' online, {} sectors.", model, sectors);
+    *ATA_STAGING.lock() = Some(staging);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_probe_configures_probe_patience_and_secondary_master() {
+        let probe = AtaDrive::new_secondary_master_probe();
+        assert!(probe.is_master);
+        assert!(probe.probe_only);
+    }
+
+    #[test]
+    fn staging_working_drive_is_not_probe_only() {
+        let working = AtaDrive::new_secondary_master();
+        assert!(working.is_master);
+        assert!(!working.probe_only);
+    }
+
+    #[test]
+    fn staging_poll_limits_are_honest_and_bounded() {
+        assert_eq!(AtaDrive::PROBE_POLL_LIMIT, 200_000);
+        assert_eq!(AtaDrive::TRANSFER_POLL_LIMIT, 10_000_000);
+        assert!(AtaDrive::PROBE_POLL_LIMIT < AtaDrive::TRANSFER_POLL_LIMIT);
     }
 }
