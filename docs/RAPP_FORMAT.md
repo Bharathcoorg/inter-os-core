@@ -155,6 +155,25 @@ Declared capability IDs map into per-process capability token table rights and o
 | `21` | `SystemControl` | `INVOKE` | `SERVICE_AUDIO_CONTROL_OBJECT` | Scoped hardware audio synthesis and playback control |
 | `22` | `SystemControl` | `INVOKE` | `SERVICE_CAMERA_CONTROL_OBJECT` | Scoped camera sensor frame capture |
 | `23` | `SystemControl` | `INVOKE` | `SERVICE_SENSOR_CONTROL_OBJECT` | Scoped IMU, accelerometer, and sensor reading |
+| `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
+| `25` | `ContentIndexRead` | `READ` | `0` (Global) | Read the shared document index and the intent registry |
+| `26` | `ContentIntentDispatch` | `INVOKE` | `0` (Global) | Dispatch an intent to the package that declared a handler for it |
+| `27` | `SurfaceCapture` | `READ` | `0` (Global) | Read the pixels of another task's display surface (the task switcher's thumbnails) |
+| `28` | `AudioStream` | `READ \| WRITE` | `0` (Global) | Open, feed, observe and close the kernel's AC'97 PCM output stream |
+| `29` | `MemoryHeap` | `READ \| WRITE` | `0` (Global) | Map anonymous memory and manage userspace heap allocations (`memory.heap`) |
+| `30` | `ProcessThreads` | `INVOKE` | `0` (Global) | Spawn execution threads and manage thread-local storage (`process.threads`) |
+
+Package verification accepts ids `1..=30` and rejects every other value (`0`, `31+`) with `RappError::UnknownCapability` at `kernel/src/package/rapp.rs:261`; the userspace minter refuses the same set with `"Unknown RAPP v2 capability"` (`kernel/src/task/user.rs`). The capability enum itself reaches further — `kernel/src/capability/mod.rs:215` maps `InferenceService` 31 through `TlsTrustRead` 39 — but those nine identifiers are deliberately outside the manifest ladder: the kernel mints them from service policy for the built-in clients that need them, so a manifest declaring one is rejected even though the type exists.
+
+**Why the content layer has its own two identifiers.** `ContentIndexRead` is
+not `FileSystemRead`: the index *describes* documents — their paths, lengths,
+media types and identities — and reading a description is not reading a file.
+An app that may browse the shared area's catalogue does not thereby gain the
+ability to open the documents in it. `ContentIntentDispatch` is not
+`ProcessSpawn`: spawning a process is authority over the system's task table,
+while dispatching an intent is authority over one named relationship — "the
+package that declared this media type" — which the kernel resolves from the
+signed manifests.
 
 ### Capabilities that RAPP v2 does not define
 
@@ -179,22 +198,6 @@ capabilities must resolve it to the identifier that actually delivers what the
 name promises. `tools/interos.py` enforces this with
 `ALIAS_FORBIDDEN_CAPABILITY_IDS`, and `tests/test_rapp_capability_abi.py` pins
 it against this table.
-| `24` | `RealtimeClockRead` | `READ` | `0` (Global) | Read wall-clock hardware real-time clock (RTC) |
-| `25` | `ContentIndexRead` | `READ` | `0` (Global) | Read the shared document index and the intent registry |
-| `26` | `ContentIntentDispatch` | `INVOKE` | `0` (Global) | Dispatch an intent to the package that declared a handler for it |
-| `28` | `AudioStream` | `READ \| WRITE` | `0` (Global) | Open, feed, observe and close the kernel's AC'97 PCM output stream |
-
-Values outside `1..=28` (such as `0` or `29+`) are strictly unknown and rejected during package verification (`RappError::UnknownCapability`).
-
-**Why the content layer has its own two identifiers.** `ContentIndexRead` is
-not `FileSystemRead`: the index *describes* documents — their paths, lengths,
-media types and identities — and reading a description is not reading a file.
-An app that may browse the shared area's catalogue does not thereby gain the
-ability to open the documents in it. `ContentIntentDispatch` is not
-`ProcessSpawn`: spawning a process is authority over the system's task table,
-while dispatching an intent is authority over one named relationship — "the
-package that declared this media type" — which the kernel resolves from the
-signed manifests.
 
 ---
 
@@ -235,7 +238,7 @@ Evidence levels used below:
 | **Video** | `video/x-motion-jpeg` | **Supported** | `org.interos.video_player` | Unit-tested | Motion JPEG single-frame/stream parsing and baseline JPEG decode. The AVI path above also decodes MJPEG payloads through the same decoder. |
 | **Video** | `video/x-ppm` | **Supported** | `org.interos.video_player` | Unit-tested | Uncompressed PPM P6 frames in `/storage/videos`. The content index itself classifies P6 as `image/x-portable-pixmap`; File Manager maps `/storage/videos/*.ppm` to `video/x-ppm` while retaining the index provenance. Frame decoding is covered by `test_ppm_p6_frame_decode`; no QEMU run has opened a PPM through the player. |
 | **Video** | `video/x-raw` | **Supported** | `org.interos.video_player` | Source-only | Raw RGB24/RGBA frames with a header, opened by suffix from `/storage/videos`. No fixture or test covers this path yet. |
-| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | Unit-tested | H.264, VP9, and AV1 decoders are not implemented. Refused with exact contract string: `"No hardware H.264 decoder bound. Software decode unavailable."` The gallery does not advertise these types: it has no video decoder and its handoff refuses when the gallery itself is the first registered handler. |
+| **Video** | `video/mp4`, `video/webm`, `video/quicktime` | **Refused** | *None* | Unit-tested | No H.264/AVC, VP8/VP9 or AV1 decoder is implemented. The H.264/AVC refusal has the exact contract string `"No hardware H.264 decoder bound. Software decode unavailable."` (`NO_HW_H264_MSG`, `apps/video_player/src/lib.rs`), emitted only on the `VideoCodec::H264` branch (`apps/video_player/src/main.rs`, and `decode_h264_or_mp4_frame`) — that is `.mp4` / `.h264` names and `ftyp`/NAL-shaped payloads. `video/webm` and `video/quicktime` reach no decoder branch at all: neither suffix is in the player's `VIDEO_SUFFIXES`, so `detect_codec_from_name` classifies them `Unknown`, and the H.264 wording is not attached to a VP8/VP9 or QuickTime container. Inside an AVI, a video fourcc that is not MJPEG is refused with `AviError::UnsupportedCodec(fourcc)`. The gallery does not advertise these types: it has no video decoder and its handoff refuses when the gallery itself is the first registered handler. |
 | **Video Audio** | Embedded AVI Audio | **Unavailable** | `org.interos.video_player` | QEMU-verified (log) | Audio streams inside AVI files are detected but not decoded. The player logs `"[VIDEO PLAYER] AVI has an audio stream; audio playback is unavailable and is not claimed."` and shows `"Audio stream: unavailable"` while the stream is open. |
 | **Images** | `image/png`, `image/jpeg`, `image/gif` | **Supported** | `org.interos.gallery` | Unit-tested | Decoded via native zero-heap image decoders. |
 | **Images** | `image/webp` | **Supported** | `org.interos.gallery` | Unit-tested | Lossless (VP8L) fully supported; lossy (VP8 keyframe) decoder implemented in standard library with fixture test coverage (`vp8_fixtures.rs`) verified against libwebp v1.3.2 reference outputs. RFC 6386 intra keyframes supported; delta/inter frames and VP8X alpha/animation are explicitly refused to maintain zero-heap static bounds. |

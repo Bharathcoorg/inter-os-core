@@ -65,7 +65,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
 | **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, `refresh_hz = 60` as a programmed target — no physical panel is bound) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and grayscale coverage anti-aliasing (8-bit coverage on the outline face, a 16-level ramp on the bitmap fallback; no subpixel rendering) |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
-| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 17 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`, `webview_demo`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops. 16 are launchable today: `webview_demo` has no first-party package descriptor yet. |
+| **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 17 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`, `webview_demo`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops. All 17 carry a first-party package descriptor in `FIRST_PARTY_PACKAGES` (`kernel/src/package/mod.rs`) — `webview_demo` included, with `apps/webview_demo/manifest.json` — and the package registry seeds every one of them active (`kernel/src/package/registry.rs`). The launchable set counted from those sources is 15 applications: the app drawer skips `launcher` and `compositor`, which are the shell and the display service rather than user applications (`apps/launcher/src/main.rs`). |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
 | **Universal Device Studio** | Present | **QEMU-verified** | `emulator/server.py`; Web-based emulator control console (`http://localhost:4300`) with persistent binary frame streaming (`/api/screen/binary_stream`), zero-overhead `ImageData` caching, live telemetry deck, and 1:1 touch/gesture pipeline |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
@@ -81,7 +81,7 @@ Every figure below is produced by a command in this repository, against the cano
 | Metric | Measured here | Produced by |
 | :--- | :--- | :--- |
 | **Full OS boot disk** (17 apps + daemons, without model weights) | **12.47 MiB** — `target/inter-os-bios.img`, 13,075,456 bytes | `python tools/bench_interos.py` |
-| **Native applications** | **17** `#![no_std]` / `#![no_main]` crates, 6,287.8 KB of their own source | `python tools/bench_interos.py`, counting `apps/*/Cargo.toml` |
+| **Native applications** | **17** `#![no_std]` / `#![no_main]` crates, 6,465.3 KB of their own source | `python tools/bench_interos.py`, counting `apps/*/Cargo.toml` |
 | **Kernel heap** | **64 MiB** static pool (`kernel/src/allocator.rs`, `HEAP_SIZE`). Occupancy is read from the guest's own `[DIAG_STATE]` serial telemetry, and the tool prints `UNAVAILABLE` rather than a remembered figure when no log is passed | `python tools/bench_interos.py --log <serial log>` |
 | **Cold boot latency** | Timed from QEMU process start to first scanout under TCG software emulation. It moves with host load, so it is measured per run rather than quoted here | `python tools/bench_boot.py` |
 | **Interactive render allocations** | **0 bytes** in the event loops — the apps are `#![no_std]` with no allocator, so per-frame paths hold stack and static buffers only. `python tools/bench_heap.py` separately reads the *kernel* allocator's own used/free bookkeeping from a live guest at boot checkpoints | app source contracts (`tests/test_*_truth_contract.py`), `python tools/bench_heap.py` |
@@ -171,7 +171,7 @@ InterOS Core implements a strict **Capability-Based Microkernel** architecture w
                    Launcher Shell
        ┌─────────────────┼─────────────────┐
     Lock Screen     Home Surface      App Drawer
-    Quick Controls  Activity Space    14 First-Party Apps (16 Native Crates)
+    Quick Controls  Activity Space    15 First-Party Apps (17 Native Crates)
                          │
                  Applications (.rapp)
 ```

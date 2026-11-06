@@ -64,14 +64,14 @@ InterOS provides empirical, automated benchmark verification tools under `tools/
 
 ---
 
-## 5. Paint Performance & Emulator Probe Failure Mode (#262)
+## 5. Paint Performance & Touch-to-Paint Measurement
 
 - **Paint Latency & Present Banding**:
   - Display latency is captured by the kernel's `record_paint_after_touch` hook when an interactive client task writes pixels to its owned surface in `kernel/src/syscall/mod.rs`.
   - The measurement captures the exact duration from touch event ingress to the compositor's dirty band present. Unowned surface writes and timer repaints from background tasks do not reset the tap-to-paint timestamp.
   - Zero heap allocation is strictly preserved across the entire display path: applications write directly to preallocated DRM/KMS surface memories.
 
-- **Emulator Server Probe Failure Mode (#262)**:
-  - Automated contracts probing emulator ports (`4300` for Studio RPC, `5900` for VNC) observe `[WinError 10061]` / `ConnectionRefusedError` whenever the external Device Studio or emulator server process is offline.
-  - Contract runners intentionally report these suites as skipped or failed-closed rather than launching synthetic server instances or attempting unauthorized VM process restarts.
+- **Suites That Require a Live Guest Backend**:
+  - Some runtime suites can only be answered by a running Device Studio / QEMU guest. When that backend is not bound, the contract runner reports the suite as skipped or failed-closed rather than launching a synthetic server instance, restarting a VM, or substituting a remembered result.
+  - Socket-level probing of the emulator's RPC and VNC endpoints is **not an accepted verification method in this project**, and no such probe is recorded here as evidence. A touch-to-paint or presentation claim comes from the guest's own serial telemetry and scanout, or it is reported as untested.
   - The Platform Truth Contract strictly forbids faking socket connectivity or inventing telemetry when the emulator bridge is unbound.
