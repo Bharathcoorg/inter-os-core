@@ -57,13 +57,15 @@ fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBack
 
 /// The sectors the canonical InterFS region occupies on a device of `total`.
 ///
-/// WHY `pub(super)` and not private: the provisioning path in `staging` streams
-/// hundreds of thousands of sectors and must mount the filesystem ONCE, not once
-/// per chunk. Remounting per chunk re-reads the whole allocation bitmap -- 3,071
-/// sectors on the demo disk -- and under emulated IDE that is not slow, it is
-/// unreachable. A single mount has to be made through this module's region and
-/// guard, or the streaming path would be a second, unguarded way into the region.
-pub(super) fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
+/// WHY one function and not a per-caller computation: every data-file operation
+/// in this module -- load, store, reserve, truncate, length, remove, the two
+/// ranged variants and the provision-manifest read -- runs the same three steps,
+/// region then `guard_region` then one `InterFs::mount_region`. A caller that
+/// worked the region out itself would be a second, unguarded way into it, and one
+/// that mounted per chunk of a long write would re-read the allocation bitmap
+/// each time -- 3,071 sectors on the demo disk -- which under emulated IDE is not
+/// slow, it is unreachable.
+fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
     region_for_layout(total, FilesystemLayout::canonical())
 }
 

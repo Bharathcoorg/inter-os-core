@@ -1220,8 +1220,11 @@ pub fn run_streamed_embedding<S: PositionRead>(
     }
 
     // Hoisted block loop: load each layer once, running all token positions through it.
-    // This reduces block tensor disk reads from (positions * layers) down to (1 * layers),
-    // reducing total read bytes by up to 512x on a 512-token prompt pass.
+    // This cuts `load_block` operations from (positions * layers) to (1 * layers).
+    // One operation reads the block's thirteen tensors, and `read_in_bounded_chunks`
+    // serves each of those as ceil(tensor bytes / 64 KiB) positioned reads -- so the
+    // ATA-level read count falls by the same factor as the block count, `positions`,
+    // which is up to 512x on a 512-token prompt pass.
     for block in 0..config.num_layers {
         reader.load_block(block)?;
         let lw = reader.block();
