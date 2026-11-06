@@ -1365,26 +1365,8 @@ impl AgentManagerApp {
                 );
             }
         }
-        let any_tool_refused = self.agent_tools.iter().any(|t| !t.ok);
-        if self.tool_consent == ConsentOutcome::Refused || any_tool_refused {
-            let mut read_buf = [0u8; std::ai::ANSWER_SLOT_BYTES];
-            let mut found_pipe_bytes = 0usize;
-            for pipe_id in std::ai::ANSWER_PIPE_FIRST..(std::ai::ANSWER_PIPE_FIRST + std::ai::ANSWER_PIPE_COUNT) {
-                while let Ok(read) = std::shm_pipe_receive(pipe_id, &mut read_buf) {
-                    if read == 0 {
-                        break;
-                    }
-                    if found_pipe_bytes == 0 {
-                        found_pipe_bytes = read;
-                    }
-                }
-            }
-            let drained = if found_pipe_bytes > 0 {
-                Some(&read_buf[..found_pipe_bytes])
-            } else {
-                None
-            };
-            record_tool_refusal_bubble(&mut self.chat, drained);
+        if self.tool_consent == ConsentOutcome::Refused {
+            record_tool_refusal_bubble(&mut self.chat, None);
         }
         self.rebuild();
     }

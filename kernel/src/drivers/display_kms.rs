@@ -2497,6 +2497,8 @@ mod tests {
     #[test]
     fn skip_scanout_diff_bypasses_compare_when_dirty_band_present() {
         let mut kms = DrmKmsController::new(720, 1440);
+        assert!(kms.skip_scanout_diff, "skip_scanout_diff must default to true in new()");
+        assert!(DRM_KMS.try_lock().expect("drm_kms lock").skip_scanout_diff, "skip_scanout_diff must default to true in DRM_KMS static");
         kms.set_display_mode(720, 1440, 60).expect("mode");
         let id = kms.create_surface(720, 1440, 0, 1);
         kms.surfaces[0].mark_frame_drawn();
@@ -2504,7 +2506,6 @@ mod tests {
         let _ = kms.take_present_dirty_rows();
         kms.page_flip();
 
-        kms.skip_scanout_diff = true;
         kms.surfaces[0].dirty = true;
         kms.surfaces[0].dirty_rows = (200, 300);
         kms.composite();

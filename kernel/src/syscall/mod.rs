@@ -4768,7 +4768,6 @@ pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels
     if pixels.is_empty() || pixels.len() > 65536 {
         return Err(SyscallResult::InvalidArguments);
     }
-    crate::performance::record_paint_after_touch(crate::interrupts::get_system_ticks(), owner.0);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.write_surface_pixels(surface_id, owner.0, offset, pixels)

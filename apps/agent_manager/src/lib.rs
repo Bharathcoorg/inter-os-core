@@ -2374,18 +2374,14 @@ const PERMISSION_DENIED: i64 = -1;
 /// was never allowed to run.
 pub const TOOL_REFUSED_MESSAGE: &[u8] = b"Refused: the kernel holds no agent task capability";
 
-/// What the notice bubble says when a tool action is refused and the channel carries no words.
-pub const TOOL_ACTION_REFUSED_MESSAGE: &[u8] = b"Tool action refused: UNAVAILABLE or NOT IMPLEMENTED";
-
 /// Pushes a tool refusal notice into the conversation transcript.
 ///
-/// WHY drained message is checked: when the service streams a refusal reason onto
-/// an answer pipe, the screen displays those exact words; when the channel is silent
-/// or empty, the platform truth contract requires reporting UNAVAILABLE or NOT IMPLEMENTED.
-pub fn record_tool_refusal_bubble(chat: &mut ChatSession, drained_message: Option<&[u8]>) {
-    match drained_message {
+/// WHY the platform message is used: when no channel message is provided, the platform
+/// truth contract requires using the kernel's own capability refusal message.
+pub fn record_tool_refusal_bubble(chat: &mut ChatSession, message: Option<&[u8]>) {
+    match message {
         Some(msg) if !msg.is_empty() => chat.push(ChatRole::Notice, msg),
-        _ => chat.push(ChatRole::Notice, TOOL_ACTION_REFUSED_MESSAGE),
+        _ => chat.push(ChatRole::Notice, TOOL_REFUSED_MESSAGE),
     }
 }
 
@@ -5073,19 +5069,19 @@ mod tests {
     #[test]
     fn tool_refusal_bubble_reports_channel_words_or_unavailable() {
         let mut chat = ChatSession::new();
-        // Silent pipe reports UNAVAILABLE or NOT IMPLEMENTED
+        // Silent pipe reports kernel capability refusal message
         record_tool_refusal_bubble(&mut chat, None);
         assert_eq!(chat.len(), 1);
         let msg = chat.last_message().unwrap();
         assert_eq!(msg.role, ChatRole::Notice);
-        assert_eq!(&msg.text[..msg.text_len as usize], b"Tool action refused: UNAVAILABLE or NOT IMPLEMENTED");
+        assert_eq!(&msg.text[..msg.text_len as usize], TOOL_REFUSED_MESSAGE);
 
-        // Empty pipe reports UNAVAILABLE or NOT IMPLEMENTED
+        // Empty pipe reports kernel capability refusal message
         record_tool_refusal_bubble(&mut chat, Some(b""));
         assert_eq!(chat.len(), 2);
         let msg2 = chat.last_message().unwrap();
         assert_eq!(msg2.role, ChatRole::Notice);
-        assert_eq!(&msg2.text[..msg2.text_len as usize], b"Tool action refused: UNAVAILABLE or NOT IMPLEMENTED");
+        assert_eq!(&msg2.text[..msg2.text_len as usize], TOOL_REFUSED_MESSAGE);
 
         // Pipe with actual words reports the pipe's words
         let notice = b"Tool action refused: missing storage permission";

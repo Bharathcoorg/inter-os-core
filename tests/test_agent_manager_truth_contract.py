@@ -1227,12 +1227,48 @@ def test_the_mirrored_crate_is_the_canonical_crate():
     """
     if CANONICAL.is_dir() and MIRRORED.is_dir():
         for name in ("lib.rs", "main.rs"):
-            a = (CANONICAL / name).read_bytes().replace(b"\r\n", b"\n")
-            b = (MIRRORED / name).read_bytes().replace(b"\r\n", b"\n")
+            a = (CANONICAL / name).read_bytes()
+            b = (MIRRORED / name).read_bytes()
             assert a == b, (
                 f"the mirrored {name} is not the canonical one; "
                 "run tools/mirror_apps.py in interos-apps"
             )
+
+
+def test_streamed_refusal_across_two_pipe_chunks_is_delivered_whole():
+    """A refusal split across two pipe chunks must be delivered whole and not as one chunk.
+
+    The service streams multi-chunk replies by sending an AiStreamNotice and placing chunks
+    sequentially on the channel. The reader must loop while collected < streamed, appending
+    each chunk into the chat transcript rather than returning after the first chunk.
+    """
+    for path, (_lib, main, _theme) in SOURCES.items():
+        stream_fn = _body(main, "fn take_streamed_answer")
+        assert "while collected < streamed" in stream_fn, (
+            f"{path} does not collect all chunks across the stream"
+        )
+        assert "self.chat.append_chunk(piece)" in stream_fn, (
+            f"{path} does not append subsequent chunks to deliver the message whole"
+        )
+        assert "TOOL_ACTION_REFUSED_MESSAGE" not in main, (
+            f"{path} invents a generic refusal message instead of relaying the service's own words"
+        )
+
+
+def test_tool_path_does_not_drain_unowned_answer_pipes():
+    """The tool execution path must not drain answer pipes it did not ask for.
+
+    Looped pipe draining without an owned stream notice destroys the channel contents
+    for other active consumers (like background inference or search).
+    """
+    for path, (_lib, main, _theme) in SOURCES.items():
+        run_tools_fn = _body(main, "fn run_tools")
+        assert "ANSWER_PIPE" not in run_tools_fn, (
+            f"{path} blindly drains answer pipes in run_tools without owning the answer channel"
+        )
+        assert "shm_pipe_receive" not in run_tools_fn, (
+            f"{path} receives pipe data during local tool execution without an allocated channel"
+        )
 
 
 # -----------------------------------------------------------------------------

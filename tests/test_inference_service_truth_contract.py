@@ -3105,9 +3105,11 @@ def test_the_id_stream_bound_gate_can_fail():
     ), f"a mapping buffer sized by a literal passes the gate: {faults}"
 
     # 5. Prose in the tokenizer's own header left behind by a raised ceiling.
+    current_bound = id_stream_bound(lib)
+    next_bound = current_bound * 2
     moved = {
         name: (
-            text.replace("bounded at 512 positions", "bounded at 1024 positions", 1)
+            text.replace(f"bounded at {current_bound} positions", f"bounded at {next_bound} positions", 1)
             if name == "tokenizer.rs"
             else text
         )
@@ -3118,8 +3120,8 @@ def test_the_id_stream_bound_gate_can_fail():
     )
     faults = _id_stream_bound_faults(lib, tokenizer, moved)
     assert any(
-        "while EMBED_TOKEN_IDS_MAX is 512" in f for f in faults
-    ), f"prose claiming 1024 positions passes the gate: {faults}"
+        f"while EMBED_TOKEN_IDS_MAX is {current_bound}" in f for f in faults
+    ), f"prose claiming {next_bound} positions passes the gate: {faults}"
 
     # 6. The host proof of the agreement deleted: the source shapes still line up,
     # but nothing any more runs the notice and reads its digits back.
@@ -3138,21 +3140,21 @@ def test_the_id_stream_bound_gate_can_fail():
     # the number and the bound, and the day a pipe carries the ids it would be the
     # gate itself that refuses the raise.
     raised_lib = lib.replace(
-        "const EMBED_TOKEN_IDS_MAX: usize = 512;",
-        "const EMBED_TOKEN_IDS_MAX: usize = 1024;",
+        f"const EMBED_TOKEN_IDS_MAX: usize = {current_bound};",
+        f"const EMBED_TOKEN_IDS_MAX: usize = {next_bound};",
         1,
     )
     raised_prose = {
         name: (
-            text.replace("bounded at 512 positions", "bounded at 1024 positions", 1)
+            text.replace(f"bounded at {current_bound} positions", f"bounded at {next_bound} positions", 1)
             if name == "tokenizer.rs"
             else text
         )
         for name, text in prose.items()
     }
     raised = _id_stream_bound_faults(raised_lib, tokenizer, raised_prose)
-    assert not raised, f"the gate freezes the value at 512 instead of the agreement: {raised}"
-    assert id_stream_bound(raised_lib) == 1024
+    assert not raised, f"the gate freezes the value at {current_bound} instead of the agreement: {raised}"
+    assert id_stream_bound(raised_lib) == next_bound
 
 
 def main() -> int:

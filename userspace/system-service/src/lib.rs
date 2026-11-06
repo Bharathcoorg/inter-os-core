@@ -4312,13 +4312,15 @@ mod tests {
             embedding_gap_notice(EmbeddingGap::IdStreamFull(needed, EMBED_TOKEN_IDS_MAX), &mut scratch);
         assert_eq!(status, STATUS_UNSUPPORTED);
         let notice_text = core::str::from_utf8(notice).expect("notice is valid utf8");
+        let expected_bound = alloc::format!("answers at most {EMBED_TOKEN_IDS_MAX}");
+        let expected_needed = alloc::format!("segments the text into {needed}");
         assert!(
-            notice_text.contains("answers at most 512"),
-            "refusal must name the limit number 512: {notice_text}"
+            notice_text.contains(&expected_bound),
+            "refusal must name the limit number: {notice_text}"
         );
         assert!(
-            notice_text.contains("segments the text into 513"),
-            "refusal must name the needed number 513: {notice_text}"
+            notice_text.contains(&expected_needed),
+            "refusal must name the needed number: {notice_text}"
         );
     }
 
