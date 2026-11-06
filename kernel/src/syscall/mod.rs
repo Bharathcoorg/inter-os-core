@@ -2789,7 +2789,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             surface.dirty = true;
             surface.has_frame = true;
             // The paint starts at the first write that really landed. This
-            // handler, not `sys_surface_write`, is what every client reaches.
+            // inline arm is the only surface-write path in the kernel; the
+            // unreached `sys_surface_write` helper that once shadowed it has
+            // been deleted.
             crate::performance::record_paint_after_touch(crate::interrupts::get_system_ticks(), owner.0);
             // Record which surface rows moved, exactly as the safer
             // `write_surface_pixels` path does.
@@ -4760,21 +4762,6 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
             Err(SyscallResult::DeviceError)
         }
     }
-}
-
-/// Writes bounded ARGB pixels into an owned display surface.
-pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels: &[u32]) -> Result<usize, SyscallResult> {
-    let owner = require_display_service(cap_slot)?;
-    if pixels.is_empty() || pixels.len() > 65536 {
-        return Err(SyscallResult::InvalidArguments);
-    }
-    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
-    display.write_surface_pixels(surface_id, owner.0, offset, pixels)
-        .map_err(|err| {
-            crate::serial_println!("[SURFACE_WRITE ERROR] id={} owner={} offset={} count={}: {}", surface_id, owner.0, offset, pixels.len(), err);
-            SyscallResult::PermissionDenied
-        })
 }
 
 /// The widest and tallest preview a capture may ask for.

@@ -56,7 +56,6 @@ def main() -> None:
          "object-scoped display hardware authority")
     for marker in (
         "pub fn sys_surface_create(cap_slot: usize",
-        "pub fn sys_surface_write(cap_slot: usize",
         "pub fn sys_surface_destroy(cap_slot: usize",
         "pub fn sys_surface_flip(cap_slot: usize",
         "73 => {",

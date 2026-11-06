@@ -113,8 +113,9 @@ static TAP_TO_FLIP_MAX_MS: AtomicU64 = AtomicU64::new(0);
 // surface, and the shell repaints on its own timer. A stamp that accepted the
 // first write from any task would credit the touched app with the shell's
 // write, and report a paint that never started -- it did, in one run, because
-// the dead `sys_surface_write` this stamp first sat in was replaced by the live
-// syscall path and every neighbouring task's write began answering the tap.
+// the dead surface-write helper this stamp first sat in (since deleted) was
+// replaced by the live syscall path and every neighbouring task's write began
+// answering the tap.
 static PAINT_STAMPED: AtomicBool = AtomicBool::new(false);
 static TAP_TO_PAINT_LAST_MS: AtomicU64 = AtomicU64::new(0);
 static INPUT_OWNER_TASK: AtomicU64 = AtomicU64::new(u64::MAX);
