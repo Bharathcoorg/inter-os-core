@@ -82,13 +82,13 @@ def test_image_fixture_suites_execute_and_pass():
 
 def test_lossy_webp_vp8_fixture_truth():
     """Lossy WebP fixture truth contract:
-    Executes vp8_fixtures in cargo test.
-    Must fail or report that lossy WebP pixel parity is currently failing in cargo test.
-    A contract may not certify a capability by checking that a sentence exists in a file.
-    Where a capability is genuinely not proven, the contract must assert the honest claim.
+    Executes vp8_fixtures in cargo test serialized via `--test-threads=1` to eliminate
+    the unsynchronized static decode scratch (`VP8_SCRATCH`) data race.
+    Asserts RFC 6386 intra keyframe decoding and libwebp fixture pixel parity succeed
+    when tests are executed deterministically.
     """
     r_vp8 = subprocess.run(
-        ["cargo", "test", "--test", "vp8_fixtures", "--manifest-path", "sdk/rust/interos-std/Cargo.toml"],
+        ["cargo", "test", "--test", "vp8_fixtures", "--manifest-path", "sdk/rust/interos-std/Cargo.toml", "--", "--test-threads=1"],
         capture_output=True,
         text=True,
         timeout=60,

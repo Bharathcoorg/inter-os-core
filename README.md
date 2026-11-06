@@ -81,7 +81,7 @@ Every figure below is produced by a command in this repository, against the cano
 | Metric | Measured here | Produced by |
 | :--- | :--- | :--- |
 | **Full OS boot disk** (17 apps + daemons, without model weights) | **12.47 MiB** — `target/inter-os-bios.img`, 13,075,456 bytes | `python tools/bench_interos.py` |
-| **Native applications** | **17** `#![no_std]` / `#![no_main]` crates, 6,465.3 KB of their own source | `python tools/bench_interos.py`, counting `apps/*/Cargo.toml` |
+| **Native applications** | **17** `#![no_std]` / `#![no_main]` crates, 6,469.0 KB of their own source | `python tools/bench_interos.py`, counting `apps/*/Cargo.toml` |
 | **Kernel heap** | **64 MiB** static pool (`kernel/src/allocator.rs`, `HEAP_SIZE`). Occupancy is read from the guest's own `[DIAG_STATE]` serial telemetry, and the tool prints `UNAVAILABLE` rather than a remembered figure when no log is passed | `python tools/bench_interos.py --log <serial log>` |
 | **Cold boot latency** | Timed from QEMU process start to first scanout under TCG software emulation. It moves with host load, so it is measured per run rather than quoted here | `python tools/bench_boot.py` |
 | **Interactive render allocations** | **0 bytes** in the event loops — the apps are `#![no_std]` with no allocator, so per-frame paths hold stack and static buffers only. `python tools/bench_heap.py` separately reads the *kernel* allocator's own used/free bookkeeping from a live guest at boot checkpoints | app source contracts (`tests/test_*_truth_contract.py`), `python tools/bench_heap.py` |
