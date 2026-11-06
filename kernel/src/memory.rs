@@ -22,7 +22,16 @@ static PHYSICAL_MEMORY_OFFSET: Mutex<Option<VirtAddr>> = Mutex::new(None);
 static MEMORY_MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 static KERNEL_PML4_FRAME: Mutex<Option<PhysFrame<Size4KiB>>> = Mutex::new(None);
-static TOTAL_PHYSICAL_RAM_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(2048 * 1024 * 1024);
+static TOTAL_PHYSICAL_RAM_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn total_physical_ram_bytes() -> u64 {
+    TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub fn set_total_physical_ram_bytes_for_test(bytes: u64) {
+    TOTAL_PHYSICAL_RAM_BYTES.store(bytes, core::sync::atomic::Ordering::Release);
+}
 
 /// Initializes global memory management singletons: page mapper, physical offset, and frame allocator.
 ///
@@ -115,11 +124,14 @@ pub struct MemoryTelemetry {
 /// Computes physical memory usage honestly from the platform RAM info, active tasks,
 /// and kernel heap/reserved memory regions.
 pub fn memory_telemetry() -> MemoryTelemetry {
-    let total_bytes = {
-        let detected = TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire);
-        let platform = crate::hal::PLATFORM.info().total_ram_bytes as u64;
-        detected.max(platform)
-    };
+    let total_bytes = TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire);
+    if total_bytes == 0 {
+        return MemoryTelemetry {
+            total_bytes: 0,
+            used_bytes: 0,
+            free_bytes: 0,
+        };
+    }
 
     // Calculate active user tasks memory from TaskPageTable allocated frames / mapped bytes:
     let mut tasks_mapped_bytes: u64 = 0;
@@ -1055,3 +1067,58 @@ pub fn map_guard_page(guard_vaddr: VirtAddr) {
 pub fn guard_page_addr(stack_base: usize) -> VirtAddr {
     VirtAddr::new((stack_base - GUARD_PAGE_SIZE) as u64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_telemetry_reports_detected_ram_without_authored_floor() {
+        // Test with 256 MiB detected RAM (lower than the old 2 GiB authored floor)
+        let ram_256mb = 256 * 1024 * 1024u64;
+        set_total_physical_ram_bytes_for_test(ram_256mb);
+        let telem = memory_telemetry();
+        assert_eq!(telem.total_bytes, ram_256mb, "256 MiB detected RAM must not be clamped to 2 GiB");
+        assert!(telem.total_bytes < 2048 * 1024 * 1024, "Total bytes must not enforce a 2 GiB floor");
+
+        // Test with 512 MiB detected RAM
+        let ram_512mb = 512 * 1024 * 1024u64;
+        set_total_physical_ram_bytes_for_test(ram_512mb);
+        let telem = memory_telemetry();
+        assert_eq!(telem.total_bytes, ram_512mb);
+
+        // Test with 4 GiB detected RAM
+        let ram_4gb = 4096 * 1024 * 1024u64;
+        set_total_physical_ram_bytes_for_test(ram_4gb);
+        let telem = memory_telemetry();
+        assert_eq!(telem.total_bytes, ram_4gb);
+
+        // Restore clean state
+        set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_memory_telemetry_used_free_arithmetic_matches_detected() {
+        let ram_512mb = 512 * 1024 * 1024u64;
+        set_total_physical_ram_bytes_for_test(ram_512mb);
+        let telem = memory_telemetry();
+
+        assert_eq!(
+            telem.used_bytes + telem.free_bytes,
+            telem.total_bytes,
+            "Used bytes and free bytes must sum exactly to total bytes"
+        );
+        assert!(telem.used_bytes <= telem.total_bytes);
+
+        // When detected RAM is 0 (uninitialized)
+        set_total_physical_ram_bytes_for_test(0);
+        let uninit = memory_telemetry();
+        assert_eq!(uninit.total_bytes, 0);
+        assert_eq!(uninit.used_bytes, 0);
+        assert_eq!(uninit.free_bytes, 0);
+
+        // Restore clean state
+        set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+    }
+}
+
