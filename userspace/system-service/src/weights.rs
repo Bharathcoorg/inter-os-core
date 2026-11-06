@@ -2481,6 +2481,54 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn test_head_weights_refuse_mid_dim_exceeding_max_head_mid_dim() {
+        let oversized_mid = (MAX_HEAD_MID_DIM + 32) as u64;
+        let hidden = 768u64;
+
+        let mut entries = Vec::new();
+        entries.push(TensorEntry {
+            name: b"dense_2.weight".to_vec(),
+            dtype: 8, // Q8_0
+            cols: hidden,
+            rows: oversized_mid,
+            n_dims: 2,
+            byte_len: 53_503_488,
+            stated_offset: 0,
+            position: 0,
+        });
+        entries.push(TensorEntry {
+            name: b"dense_3.weight".to_vec(),
+            dtype: 8, // Q8_0
+            cols: oversized_mid,
+            rows: hidden,
+            n_dims: 2,
+            byte_len: 53_503_488,
+            stated_offset: 53_503_488,
+            position: 53_503_488,
+        });
+
+        let table = TensorTable {
+            entries,
+            data_start: 0,
+            alignment: 32,
+            window_pulls: 0,
+        };
+
+        let dummy_source = [0u8; 64];
+        let bounded = BoundedImage::new(&dummy_source);
+        let mut reader = WeightReader::new(table, bounded);
+        let outcome = reader.load_pooling_head(hidden as usize);
+        assert_eq!(
+            outcome,
+            Err(LoadError::BadShape(
+                TENSOR_DENSE_2,
+                oversized_mid,
+                MAX_HEAD_MID_DIM as u64,
+            ))
+        );
+    }
+
     /// The real published file, read through the platform's own bound.
     ///
     /// WHY this is not the same case as the one above it: `BoundedImage` proves the

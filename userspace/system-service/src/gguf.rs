@@ -3268,6 +3268,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_vocab_counted_not_loaded_threshold_honours_bound_and_bound_plus_one() {
+        let mut info = GgufTokenizerInfo::empty();
+        // At exact bound: not counted-only (considered within loadable element limit)
+        info.vocab = VocabReading::Counted {
+            elements: MAX_STRING_ARRAY_ELEMENTS as u32,
+        };
+        assert!(!info.vocab_counted_not_loaded());
+
+        // At bound + 1: exceeds load limit, marked counted-not-loaded
+        info.vocab = VocabReading::Counted {
+            elements: (MAX_STRING_ARRAY_ELEMENTS + 1) as u32,
+        };
+        assert!(info.vocab_counted_not_loaded());
+    }
+
+    #[test]
     fn test_tokenizer_walk_reads_a_flag_as_bool_type_7_and_refuses_any_other_width() {
         let mut out = host_std::vec::Vec::new();
         begin_vec_file(&mut out, 2);

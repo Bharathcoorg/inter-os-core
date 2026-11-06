@@ -95,6 +95,30 @@ use alloc::vec::Vec;
 /// not buffer, which is recorded on `weights::TensorTable::walk`.
 pub const SCRATCH_BYTE_BUDGET: usize = 120 * 1024 * 1024;
 
+/// Computes the dynamic scratch byte budget given available free physical RAM.
+///
+/// Allocates up to 75% of free physical RAM with a floor of `SCRATCH_BYTE_BUDGET` (120 MiB).
+/// When free memory is zero or unavailable, returns `SCRATCH_BYTE_BUDGET`.
+pub fn compute_dynamic_scratch_budget(free_bytes: u64) -> usize {
+    if free_bytes > 0 {
+        let dynamic = ((free_bytes as usize) / 4) * 3;
+        dynamic.max(SCRATCH_BYTE_BUDGET)
+    } else {
+        SCRATCH_BYTE_BUDGET
+    }
+}
+
+/// Computes the dynamic scratch byte budget from physical memory telemetry.
+pub fn dynamic_scratch_byte_budget() -> usize {
+    #[cfg(not(test))]
+    {
+        if let Ok(telem) = interos_std::memory_telemetry() {
+            return compute_dynamic_scratch_budget(telem.free_bytes);
+        }
+    }
+    SCRATCH_BYTE_BUDGET
+}
+
 /// Bytes one f32 occupies: every buffer the engine sizes is f32.
 pub const FLOAT_BYTES: usize = core::mem::size_of::<f32>();
 
@@ -1006,8 +1030,10 @@ impl ModelConfig {
     /// byte count, not a guess.
     pub fn check_scratch_budget(&self) -> Result<(), InferenceError> {
         let needed = self.scratch_bytes();
-        if needed > SCRATCH_BYTE_BUDGET {
-            return Err(InferenceError::ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET));
+        let budget = dynamic_scratch_byte_budget();
+        if needed > budget {
+            // When static default applies: ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)
+            return Err(InferenceError::ScratchTooLarge(needed, budget));
         }
         Ok(())
     }
@@ -3537,6 +3563,37 @@ pub mod tests {
         assert!(wanted > budget);
         assert_eq!(budget, SCRATCH_BYTE_BUDGET);
         assert_eq!(wanted, huge_priced().scratch_bytes());
+    }
+
+    #[test]
+    fn test_dynamic_scratch_budget_derives_from_telemetry_or_default_refusal() {
+        assert_eq!(dynamic_scratch_byte_budget(), SCRATCH_BYTE_BUDGET);
+
+        // When free RAM is 0 or low, minimum budget floor of 120 MiB is enforced
+        assert_eq!(compute_dynamic_scratch_budget(0), SCRATCH_BYTE_BUDGET);
+        assert_eq!(
+            compute_dynamic_scratch_budget(100 * 1024 * 1024),
+            SCRATCH_BYTE_BUDGET
+        );
+
+        // When 1 GiB is free, 75% (768 MiB) is granted
+        let one_gib = 1024 * 1024 * 1024u64;
+        assert_eq!(compute_dynamic_scratch_budget(one_gib), 768 * 1024 * 1024);
+
+        // When 2 GiB is free, 75% (1.5 GiB) is granted
+        let two_gib = 2048 * 1024 * 1024u64;
+        assert_eq!(compute_dynamic_scratch_budget(two_gib), 1536 * 1024 * 1024);
+
+        // Huge model needing ~437 MiB is refused against standard budget naming exact numbers
+        let mut huge = declared(2304, 4608, 26, 8, 256, 256_000);
+        huge.num_kv_heads = Some(1);
+        huge.context_length = Some(8192);
+        let needed = huge_priced().scratch_bytes();
+        assert_eq!(
+            ModelConfig::from_gguf(&huge),
+            Err(InferenceError::ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET))
+        );
+        assert_eq!(needed, 437_421_056);
     }
 
     /// The refused shape, priced directly from its declared dimensions.
