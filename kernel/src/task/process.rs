@@ -33,7 +33,16 @@ pub struct ResourceLimits {
 
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self { max_threads: 64, max_open_files: 256, max_network_sockets: 16, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
+        Self {
+            max_threads: 64,
+            max_open_files: 256,
+            max_network_sockets: 16,
+            max_ipc_endpoints: 64,
+            max_address_space_bytes: crate::task::user::user_address_space_limit() as u64,
+            max_background_cpu_ticks: 500,
+            max_background_ipc: 64,
+            max_background_network_bytes: 1024 * 1024,
+        }
     }
 }
 

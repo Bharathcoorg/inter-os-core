@@ -375,7 +375,7 @@ pub fn resource_limits(id: ServiceId) -> ResourceLimits {
             max_threads: 4,
             max_open_files: 32,
             max_ipc_endpoints: 32,
-            max_address_space_bytes: 2048 * 1024 * 1024,
+            max_address_space_bytes: crate::task::user::user_address_space_limit() as u64,
             ..ResourceLimits::default()
         },
         _ => ResourceLimits {

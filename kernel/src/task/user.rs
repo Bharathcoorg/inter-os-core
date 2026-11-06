@@ -30,6 +30,21 @@ pub const USER_STACK_SIZE: usize = 256 * 1024;
 pub const USER_STACK_TOP: usize = 0x0400_0000;
 pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
+/// Computes the dynamic userspace address-space limit based on detected physical RAM.
+///
+/// When detected physical RAM is 0 (uninitialized or unrecorded), it falls back to
+/// `USER_ADDRESS_SPACE_LIMIT`. When RAM is known, it reserves 25% (at least 64 MiB)
+/// for kernel, drivers, and peer processes, granting up to 75% to user processes.
+pub fn user_address_space_limit() -> usize {
+    let detected = crate::memory::total_physical_ram_bytes() as usize;
+    if detected == 0 {
+        USER_ADDRESS_SPACE_LIMIT
+    } else {
+        let reserve = (detected / 4).max(64 * 1024 * 1024);
+        detected.saturating_sub(reserve)
+    }
+}
+
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
 pub const USER_CS_SELECTOR: u64 = 0x23;
 
@@ -239,7 +254,13 @@ pub fn load_user_elf_into_page_table(
         mapped_address_space = mapped_address_space
             .checked_add(((seg_end_vaddr - p_vaddr + 4095) / 4096) * 4096)
             .ok_or("userspace address-space size overflow")?;
-        if mapped_address_space.checked_add(USER_STACK_SIZE).ok_or("userspace address-space size overflow")? > USER_ADDRESS_SPACE_LIMIT {
+        let addr_space_limit = user_address_space_limit();
+        if mapped_address_space.checked_add(USER_STACK_SIZE).ok_or("userspace address-space size overflow")? > addr_space_limit {
+            crate::serial_println!(
+                "[ELF] userspace address-space limit exceeded: requested {} bytes > limit {} bytes",
+                mapped_address_space.saturating_add(USER_STACK_SIZE),
+                addr_space_limit
+            );
             return Err("userspace address-space limit exceeded");
         }
 
@@ -2329,3 +2350,51 @@ pub fn spawn_app_webview_demo(id_security: TaskId) -> TaskId {
     );
     id
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_user_address_space_limit_scales_with_detected_physical_ram() {
+        // Fallback when detected RAM is 0 (unrecorded)
+        crate::memory::set_total_physical_ram_bytes_for_test(0);
+        assert_eq!(user_address_space_limit(), USER_ADDRESS_SPACE_LIMIT);
+
+        // On a 256 MiB platform: 25% reserve is 64 MiB, limit is 192 MiB
+        crate::memory::set_total_physical_ram_bytes_for_test(256 * 1024 * 1024);
+        assert_eq!(user_address_space_limit(), 192 * 1024 * 1024);
+
+        // On a 512 MiB platform: 25% reserve is 128 MiB, limit is 384 MiB
+        crate::memory::set_total_physical_ram_bytes_for_test(512 * 1024 * 1024);
+        assert_eq!(user_address_space_limit(), 384 * 1024 * 1024);
+
+        // On a 2 GiB platform: 25% reserve is 512 MiB, limit is 1.5 GiB (> 256 MiB)
+        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+        let limit_2gb = user_address_space_limit();
+        assert_eq!(limit_2gb, 1536 * 1024 * 1024);
+        assert!(limit_2gb > 256 * 1024 * 1024, "2 GiB host must lift limit beyond 256 MiB");
+
+        // On a 4 GiB platform: 25% reserve is 1 GiB, limit is 3 GiB
+        crate::memory::set_total_physical_ram_bytes_for_test(4096 * 1024 * 1024);
+        let limit_4gb = user_address_space_limit();
+        assert_eq!(limit_4gb, 3072 * 1024 * 1024);
+        assert!(limit_4gb > 256 * 1024 * 1024);
+
+        // Restore clean baseline state
+        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_resource_limits_default_address_space_matches_dynamic_limit() {
+        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+        let default_limits = crate::task::process::ResourceLimits::default();
+        assert_eq!(default_limits.max_address_space_bytes, user_address_space_limit() as u64);
+        assert_eq!(default_limits.max_address_space_bytes, 1536 * 1024 * 1024);
+        assert!(default_limits.max_address_space_bytes > 256 * 1024 * 1024);
+
+        // Restore clean baseline state
+        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+    }
+}
+
