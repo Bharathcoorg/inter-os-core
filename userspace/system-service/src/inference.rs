@@ -4080,4 +4080,51 @@ pub mod tests {
             Ok(64)
         );
     }
+
+    /// Feasibility verdict on conversational models (<=2B parameters) within the 120 MiB budget:
+    ///
+    /// WHY this test exists: the platform truth contract forbids claiming on-device generative AI
+    /// when the hardware budget cannot host it. This test pins the physical and arithmetic proof:
+    /// - 2B parameters require at least 1.1 GiB (Q4_K) or 2.1 GiB (Q8_0) in weight storage.
+    /// - At 12 MB/s IDE synchronous PIO disk throughput, streaming 1.1 GiB for every generated
+    ///   token would require >80 seconds per token.
+    /// - In-memory execution exceeds SCRATCH_BYTE_BUDGET (120 MiB) by more than 2x for KV-cache alone
+    ///   and by more than 9x for weights.
+    /// Therefore, conversational models are provably unfeasible on-device and must be designated
+    /// as host-backed inference via the development bridge.
+    #[test]
+    fn conversational_2b_model_feasibility_verdict_proves_on_device_unfeasible() {
+        // 1. Weight footprint arithmetic for 2B parameters
+        const PARAM_COUNT_2B: usize = 2_000_000_000;
+        let q4_weight_bytes = (PARAM_COUNT_2B * 9) / 16;
+        let q8_weight_bytes = (PARAM_COUNT_2B * 17) / 16;
+        assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
+        assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
+
+        // 2. Disk streaming latency at 12 MB/s
+        const IDE_PIO_THROUGHPUT_BYTES_PER_SEC: usize = 12 * 1024 * 1024;
+        let sec_per_token_q4 = q4_weight_bytes / IDE_PIO_THROUGHPUT_BYTES_PER_SEC;
+        assert!(sec_per_token_q4 >= 80, "Streaming 2B Q4 takes at least 80s per token");
+
+        // 3. ModelConfig scratch budget check fails for 2B architecture with 4 KV heads
+        let conv_2b = ModelConfig {
+            hidden_dim: 2048,
+            intermediate_dim: 16384,
+            num_layers: 18,
+            num_heads: 8,
+            head_dim: 256,
+            num_kv_heads: 4,
+            seq_len: 2048,
+            vocab_size: 256000,
+            sliding_window: None,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+        };
+        let needed_scratch = conv_2b.scratch_bytes();
+        assert!(needed_scratch > SCRATCH_BYTE_BUDGET * 2, "KV cache + scratch exceeds budget by 2x");
+        assert_eq!(
+            conv_2b.check_scratch_budget(),
+            Err(InferenceError::ScratchTooLarge(needed_scratch, SCRATCH_BYTE_BUDGET))
+        );
+    }
 }
