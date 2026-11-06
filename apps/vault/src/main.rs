@@ -2568,8 +2568,24 @@ fn release_surface() {
     }
 }
 
+/// Reads and publishes the user's preferred text scale from settings.
+///
+/// WHY the store is read into a fixed stack buffer: zero heap allocations in
+/// event loops. When the store has no preference, the held rung is preserved.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = interos_std::design::accessibility::UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = interos_std::design::accessibility::DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    interos_std::design::accessibility::DynamicType::new(next).publish() != before
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    publish_text_scale();
     // WHY the banner does not announce the keystore: the keystore's
     // availability is a fact about the platform, and the banner was written
     // before the app had asked. On this platform the kernel refuses to
@@ -2644,6 +2660,10 @@ pub extern "C" fn _start() -> ! {
 
     // Interactive Event Reactor Loop
     loop {
+        if publish_text_scale() {
+            repaint(surface, &vault, Dirty::All);
+            let _ = std::surface_flip();
+        }
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             // WHY there is no flip on the timer tick: the app repaints only
             // the rows an input dirtied, and publishing a frame it did not

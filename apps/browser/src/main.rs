@@ -12531,8 +12531,25 @@ fn destroy_and_exit(surface: u32) -> ! {
 // -----------------------------------------------------------------------------
 // Application Entry Point (_start)
 // -----------------------------------------------------------------------------
+
+/// Reads and publishes the user's preferred text scale from settings.
+///
+/// WHY the store is read into a fixed stack buffer: zero heap allocations in
+/// event loops. When the store has no preference, the held rung is preserved.
+fn publish_text_scale() -> bool {
+    let mut buf = [0u8; 32];
+    let mut want = None;
+    if let Ok(n) = std::settings_get("display.text_scale", &mut buf) {
+        want = interos_std::design::accessibility::UserTextScale::from_settings_value(&buf[..n]);
+    }
+    let before = interos_std::design::accessibility::DynamicType::current().scale;
+    let next = want.unwrap_or(before);
+    interos_std::design::accessibility::DynamicType::new(next).publish() != before
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    publish_text_scale();
     std::log("[BROWSER APP (Ring 3)] Sovereign Decentralized Web Client online.",
     )
     .ok();
@@ -12604,6 +12621,10 @@ pub extern "C" fn _start() -> ! {
                 render_browser_ui(surface, &browser);
                 let _ = std::surface_flip();
             }
+        }
+        if publish_text_scale() && surface > 0 {
+            render_browser_ui(surface, &browser);
+            let _ = std::surface_flip();
         }
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {

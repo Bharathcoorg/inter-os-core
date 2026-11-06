@@ -419,6 +419,7 @@ PUBLISHES_AT_BUILD_ONLY: set[str] = set()
 # caption steps down there rather than inking the ring.
 RUNG_AWARE_APPS = {
     "agent_manager": "publish_text_scale",
+    "browser": "publish_text_scale",
     "calculator": "publish_text_scale",
     "camera": "publish_text_scale",
     "calendar": "publish_text_scale",
@@ -430,23 +431,14 @@ RUNG_AWARE_APPS = {
     "music": "publish_text_scale",
     "notes": "publish_text_scale",
     "settings": "publish_text_scale",
+    "vault": "publish_text_scale",
     "video_player": "publish_text_scale",
 }
 
 # The applications that lay words on the panel and still lay them out at the rung
-# the machine was built at. WHY the gaps are written down instead of left off a
-# list: an absent name is indistinguishable from a screen nobody looked at, and
-# this is the part of the work that is not done.
-#
-# `compositor` and `webview_demo` are on no list: the first paints no pixels of
-# its own and the second draws its chrome through the SDK, so neither has a text
-# lane of its own to carry a rung into. The gap the second one names lives in
-# `sdk/rust/interos-std/src/webview.rs`, which renders the document's type at the
-# platform rung whatever the person chose.
-RUNG_BLIND_APPS = {
-    "browser",
-    "vault",
-}
+# the machine was built at. All 15 text-rendering applications now read and publish
+# the user's preferred text scale rung.
+RUNG_BLIND_APPS: set[str] = set()
 
 # The stems of the calls that put a run of text on the panel -- `test_text`, its
 # anti-aliased arm, the outline face's `place_run`, the kit's centred labels and
