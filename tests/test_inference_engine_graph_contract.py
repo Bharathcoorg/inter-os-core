@@ -565,3 +565,123 @@ def test_the_comments_keep_saying_the_device_has_never_run_this_graph():
     assert "expandable to 768" not in rag, (
         "the index is back to offering a width it stores no chunk at"
     )
+
+
+def _address_space_doc_defects(inference: str, services: str, user_rs: str) -> list:
+    """What would let the budget doc quote an address-space figure the kernel
+    does not grant.
+
+    WHY a cross-check and not a pin on the sentence: this block described the
+    inference service as "budgeted 2 GiB" of address space after the kernel had
+    started granting `user_address_space_limit()`, a figure derived from the RAM it
+    detected. A pin on that sentence would only have held the wrong number in
+    place. Reading the grant makes the doc follow the kernel: move the grant and
+    this fails until the doc says what the new grant is.
+    """
+    defects = []
+    grant = function_body(services, "ServiceId::Inference => ResourceLimits {")
+    granted = re.search(r"max_address_space_bytes:\s*([^,\n]+),", grant)
+    if granted is None:
+        defects.append("the inference grant no longer states an address-space limit")
+    elif "user_address_space_limit" not in granted.group(1):
+        defects.append(
+            f"the kernel grants the inference service {granted.group(1).strip()}, "
+            "not the derived limit this gate holds the doc to"
+        )
+
+    # The figure the doc may quote is the one the kernel's own test pins for a
+    # 2 GiB guest, so the doc cannot carry a number no artifact produces.
+    pinned = re.search(
+        r"ram\.set\(2048 \* 1024 \* 1024\);\s*"
+        r"let limit_2gb = user_address_space_limit\(\);\s*"
+        r"assert_eq!\(limit_2gb, (\d+) \* 1024 \* 1024\);",
+        user_rs,
+    )
+    if pinned is None:
+        defects.append(
+            "the kernel no longer pins what a 2 GiB guest grants, so the doc's "
+            "address-space figure has no artifact behind it"
+        )
+        return defects
+
+    budget_doc = doc_block_above(inference, "pub const SCRATCH_BYTE_BUDGET")
+    if "user_address_space_limit" not in budget_doc:
+        defects.append(
+            "the budget doc no longer names the function the kernel grants the "
+            "service's address space from, so its figure cannot be checked"
+        )
+    if f"{pinned.group(1)} MiB" not in budget_doc:
+        defects.append(
+            f"the kernel pins a 2 GiB guest at {pinned.group(1)} MiB of user address "
+            "space and the budget doc quotes something else"
+        )
+    if re.search(r"(?i)budgeted\s+2\s*gib", budget_doc):
+        defects.append("the budget doc is back to a fixed 2 GiB grant the kernel does not make")
+    return defects
+
+
+def _address_space_sources() -> tuple:
+    kernel = ROOT / "kernel" / "src"
+    return (
+        read("inference.rs"),
+        (kernel / "services.rs").read_text(encoding="utf-8"),
+        (kernel / "task" / "user.rs").read_text(encoding="utf-8"),
+    )
+
+
+def test_the_budget_doc_quotes_the_address_space_limit_the_kernel_grants():
+    """The doc's figure is the kernel's, read from the kernel, not remembered."""
+    defects = _address_space_doc_defects(*_address_space_sources())
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_address_space_doc_contract_can_fail():
+    """Each detector above is tripped by the drift it exists for."""
+    inference, services, user_rs = _address_space_sources()
+    assert _address_space_doc_defects(inference, services, user_rs) == []
+
+    remembered = inference.replace("computes to 1536 MiB", "computes to 2048 MiB", 1)
+    assert remembered != inference, "the figure the contract watches moved"
+    assert any(
+        "quotes something else" in d
+        for d in _address_space_doc_defects(remembered, services, user_rs)
+    ), "a doc quoting a number the kernel never computed passed"
+
+    two_gib = inference.replace(
+        "is budgeted `user_address_space_limit()`", "is budgeted 2 GiB of it", 1
+    )
+    assert two_gib != inference, "the grant sentence the contract watches moved"
+    assert any(
+        "fixed 2 GiB grant" in d for d in _address_space_doc_defects(two_gib, services, user_rs)
+    ), "the original over-claim, a flat 2 GiB budget, passed"
+
+    unnamed = inference.replace(
+        "`ServiceId::Inference` is budgeted `user_address_space_limit()`",
+        "`ServiceId::Inference` is budgeted generously",
+        1,
+    )
+    assert unnamed != inference, "the symbol the contract watches moved"
+    assert any(
+        "no longer names the function" in d
+        for d in _address_space_doc_defects(unnamed, services, user_rs)
+    ), "a doc that quotes a figure with no symbol to check it against passed"
+
+    authored = services.replace(
+        "max_address_space_bytes: crate::task::user::user_address_space_limit() as u64,",
+        "max_address_space_bytes: 2 * 1024 * 1024 * 1024,",
+        1,
+    )
+    assert authored != services, "the grant the contract watches moved"
+    assert any(
+        "not the derived limit" in d
+        for d in _address_space_doc_defects(inference, authored, user_rs)
+    ), "the kernel going back to an authored ceiling went unnoticed"
+
+    unpinned = user_rs.replace(
+        "assert_eq!(limit_2gb, 1536 * 1024 * 1024);", "", 1
+    )
+    assert unpinned != user_rs, "the kernel pin the contract watches moved"
+    assert any(
+        "no artifact behind it" in d
+        for d in _address_space_doc_defects(inference, services, unpinned)
+    ), "losing the kernel's own figure left the doc's number uncheckable"

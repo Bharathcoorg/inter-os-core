@@ -1647,6 +1647,114 @@ def test_the_bounded_read_contract_can_fail():
     ), "the refusal lost its sentence and the contract did not notice"
 
 
+def _hoist_comment(weights: str) -> str:
+    """The `//` block above the hoisted `for block` loop, as exact source text.
+
+    WHY the raw substring and not a normalized paragraph: the mutation test below
+    has to put the drifted wording back into the source, and a needle that had its
+    comment markers and indentation stripped matches nothing.
+    """
+    at = weights.index("for block in 0..config.num_layers {")
+    kept = []
+    for line in reversed(weights[:at].splitlines(keepends=True)):
+        if line.strip().startswith("//"):
+            kept.append(line)
+        elif line.strip():
+            break
+    return "".join(reversed(kept))
+
+
+def _hoist_claim_defects(weights: str) -> list[str]:
+    """What would let the hoist comment quote a ratio whose unit it does not name.
+
+    WHY the unit matters: one `load_block` is not one disk read. It reads the
+    block's thirteen tensors and `read_in_bounded_chunks` serves each as
+    ceil(bytes / 64 KiB) positioned reads, so a comment that calls the operation
+    count a read count states a number the ATA never saw. The ratio itself is
+    right -- both the operation count and the read count fall by `positions` --
+    but it has to say which of the two it is counting.
+    """
+    defects = []
+    claim = _hoist_comment(weights)
+    if not claim:
+        defects.append("the hoisted block loop no longer says what hoisting saves")
+        return defects
+    if "`load_block` operations" not in claim:
+        defects.append(
+            "the hoist comment no longer names the unit its (positions * layers) to "
+            "(1 * layers) ratio counts"
+        )
+    if "read_in_bounded_chunks" not in claim:
+        defects.append(
+            "the hoist comment no longer says one block operation is many positioned "
+            "reads, so a reader takes the operation count for the read count"
+        )
+    if "disk reads" in claim:
+        defects.append(
+            "the hoist comment calls a `load_block` invocation a disk read: the "
+            "operation is chunked into ceil(tensor bytes / 64 KiB) of them"
+        )
+    return defects
+
+
+def test_the_hoisted_block_loop_says_which_count_it_cuts():
+    """The saving is real; the unit it is measured in has to be stated."""
+    defects = _hoist_claim_defects(read("weights.rs"))
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_hoist_claim_contract_can_fail():
+    """Each detector above is tripped by the drift it exists for.
+
+    The first source is the comment as it shipped before this gate: it called the
+    `load_block` count "block tensor disk reads" and quoted 512x against that.
+    """
+    weights = read("weights.rs")
+    assert _hoist_claim_defects(weights) == []
+    claim = _hoist_comment(weights)
+
+    drifted = weights.replace(
+        claim,
+        "    // Hoisted block loop: load each layer once, running all token positions\n"
+        "    // through it. This reduces block tensor disk reads from (positions * layers)\n"
+        "    // down to (1 * layers), reducing total read bytes by up to 512x on a\n"
+        "    // 512-token prompt pass.\n",
+        1,
+    )
+    assert drifted != weights, "the hoist comment the contract watches moved"
+    defects = _hoist_claim_defects(drifted)
+    assert any("unit its" in d for d in defects), "an unnamed unit passed"
+    assert any("operation count for the read count" in d for d in defects), (
+        "a comment silent on the chunking passed"
+    )
+    assert any("calls a `load_block` invocation a disk read" in d for d in defects), (
+        "the original wording, which conflated the two counts, passed"
+    )
+
+    # Scoped to the comment: both phrases appear elsewhere in `weights.rs`, in the
+    # doc of the function that does the chunking, so a whole-file replace would
+    # mutate that instead and leave the claim under test untouched.
+    unitless_claim = claim.replace("`load_block` operations", "block loads", 1)
+    assert unitless_claim != claim, "the unit the contract watches moved"
+    unitless = weights.replace(claim, unitless_claim, 1)
+    assert any("unit its" in d for d in _hoist_claim_defects(unitless)), (
+        "renaming the unit to something the loader does not call went unnoticed"
+    )
+
+    silent_claim = claim.replace("`read_in_bounded_chunks`", "the chunking loop", 1)
+    assert silent_claim != claim, "the chunking reference the contract watches moved"
+    silent = weights.replace(claim, silent_claim, 1)
+    assert any(
+        "operation count for the read count" in d for d in _hoist_claim_defects(silent)
+    ), "dropping the name of the function that does the chunking went unnoticed"
+
+    deleted = weights.replace(claim, "", 1)
+    assert deleted != weights, "the comment the contract watches is gone"
+    assert any("no longer says what hoisting saves" in d for d in _hoist_claim_defects(deleted)), (
+        "deleting the claim entirely passed the contract"
+    )
+
+
 def test_the_loader_runs_the_installed_file_or_says_it_did_not():
     """The one case that runs the graph over the 333 MB file has to say when it did not.
 
