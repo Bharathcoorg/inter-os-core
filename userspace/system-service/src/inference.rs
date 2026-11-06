@@ -57,21 +57,31 @@ use alloc::vec::Vec;
 ///
 /// 128 MiB is also the ceiling the platform itself puts on one mapping, and the
 /// budget has to live under it rather than at it:
-/// - `sys_mem_map` refuses any single mapping above 128 MiB
-///   (`kernel/src/syscall/mod.rs`), and the heap serves one big buffer from one
-///   mapping plus a 16-byte block header and page rounding;
-/// - the address space a process may hold in total is its own resource limit, and
-///   `ServiceId::Inference` is budgeted 2 GiB of it
-///   (`kernel/src/services.rs::resource_limits`) -- the 256 MiB
-///   `USER_ADDRESS_SPACE_LIMIT` (`kernel/src/task/user.rs`) is the default for a
-///   process that states no limit, and it bounds what the loaded `.rapp`, its
-///   256 KiB stack and this service's other mappings would have to share.
+/// - `sys_mem_map` refuses a mapping above 128 MiB
+///   (`kernel/src/syscall/mod.rs`), and the service heap serves an allocation the
+///   free list cannot from exactly one new mapping
+///   (`sdk/rust/interos-std/src/heap.rs`), which carries a 32-byte block header
+///   and is rounded up to a page. That bounds any one buffer a run holds, and no
+///   total can express it -- so `LARGEST_SINGLE_BUFFER_BYTES` is checked beside
+///   the total;
+/// - the address space a process may hold in total is its own resource limit.
+///   `ServiceId::Inference` is budgeted `user_address_space_limit()`
+///   (`kernel/src/services.rs::resource_limits`), which is derived from the RAM
+///   the kernel detected: detected less a quarter of it, and at least 64 MiB,
+///   held back (`kernel/src/task/user.rs`). On the demo's 2 GiB guest that
+///   computes to 1536 MiB. The 256 MiB `USER_ADDRESS_SPACE_LIMIT` beside it is
+///   not a ceiling anyone chose -- it is what the derivation falls back to when
+///   no RAM total was recorded at all. It bounds what the loaded `.rapp`, its
+///   stack and this service's other mappings share.
 ///
-/// So the budget is the mapping ceiling less an 8 MiB reservation for the header,
-/// the guard pages and the rest of the footprint that shares the address space:
-/// 128 MiB - 8 MiB = 120 MiB = 125,829,120 bytes. One run's largest single
-/// buffer, the 48 MiB K tensor, is well under the mapping ceiling, and the whole
-/// run is well under the service's address-space budget.
+/// So 120 MiB is the floor, not the budget: it is the mapping ceiling less an
+/// 8 MiB reservation for the header, the guard pages and the rest of the
+/// footprint that shares the address space -- 128 MiB - 8 MiB = 120 MiB =
+/// 125,829,120 bytes. `dynamic_scratch_byte_budget` raises the total toward
+/// three quarters of the free RAM the guest reports and never returns less than
+/// this floor, and it falls back to the floor when no telemetry arrives. One
+/// run's largest single buffer, the 48 MiB K tensor, is well under the mapping
+/// ceiling, and the whole run is well under the service's address-space budget.
 ///
 /// The published `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks, 2048 positions,
 /// one key/value head 256 wide, 768-wide stream, 1152-wide feed-forward and
@@ -118,6 +128,24 @@ pub fn dynamic_scratch_byte_budget() -> usize {
     }
     SCRATCH_BYTE_BUDGET
 }
+
+/// Bytes the biggest single buffer one run may ask the heap for.
+///
+/// WHY a ceiling the free-RAM budget cannot express: `sys_mem_map` refuses a
+/// mapping whose length is above 128 MiB (`kernel/src/syscall/mod.rs`), and the
+/// service heap serves an allocation the free list cannot from exactly one new
+/// mapping (`sdk/rust/interos-std/src/heap.rs`). Free RAM says how much a run may
+/// hold in total; it says nothing about whether one tensor inside it can be mapped
+/// at all. Raising the budget from free RAM without this check admitted shapes the
+/// platform then refused at the heap, so the refusal arrived after the work had
+/// been promised instead of before it.
+///
+/// WHERE the number comes from: the heap maps `align4096(align16(size) + 32)`, the
+/// 32 being `size_of::<BlockHeader>()`. So the exact largest buffer is 128 MiB -
+/// 32 bytes, and one more byte rounds the mapping past the ceiling. This constant
+/// is the largest *page-aligned* buffer under that, which keeps the bound a round
+/// number and leaves 4,064 bytes of room if the header ever grows.
+pub const LARGEST_SINGLE_BUFFER_BYTES: usize = 128 * 1024 * 1024 - 4096;
 
 /// Bytes one f32 occupies: every buffer the engine sizes is f32.
 pub const FLOAT_BYTES: usize = core::mem::size_of::<f32>();
@@ -994,9 +1022,31 @@ impl ModelConfig {
     /// Bytes the whole run needs: the cache plus every activation, score and
     /// logit buffer `Scratch` holds.
     ///
-    /// This is the one number the engine's size limit is measured against.
+    /// This is one of the two numbers the engine's size limit is measured
+    /// against; `largest_single_buffer_bytes` is the other.
     pub fn scratch_bytes(&self) -> usize {
         self.kv_cache_bytes().saturating_add(Scratch::bytes_for(self))
+    }
+
+    /// Bytes in the one buffer a run allocates that is biggest.
+    ///
+    /// WHY the total is not enough on its own: `KvCache::new` and `Scratch::new`
+    /// allocate each tensor as its own `Vec`, and the service heap asks the
+    /// kernel for exactly one mapping per allocation. So a shape can fit the
+    /// device in total and still be unservable because one of its tensors is too
+    /// big to map, and only this number says so.
+    pub fn largest_single_buffer_bytes(&self) -> usize {
+        // `kv_cache_bytes` prices both tensors; `KvCache` holds them as two.
+        let cache_tensor = self.kv_cache_bytes() / 2;
+        let logits = self.vocab_size.saturating_mul(FLOAT_BYTES);
+        let feed_forward = self.intermediate_dim.saturating_mul(FLOAT_BYTES);
+        let stream = self.hidden_dim.saturating_mul(FLOAT_BYTES);
+        let scores = self.seq_len.saturating_mul(FLOAT_BYTES);
+        cache_tensor
+            .max(logits)
+            .max(feed_forward)
+            .max(stream)
+            .max(scores)
     }
 
     /// First cached position one query at `pos` may attend over, exclusive of
@@ -1020,20 +1070,51 @@ impl ModelConfig {
         }
     }
 
-    /// Refuses a declared shape whose scratch is over `SCRATCH_BYTE_BUDGET`.
+    /// Refuses a declared shape the device cannot hold: one whose total scratch
+    /// is over the budget free RAM gives it, or whose biggest single tensor is
+    /// over what one mapping can carry.
     ///
     /// WHY this replaces the six maxima: each of them refused a dimension on its
     /// own, so a model could only be described as too wide, too deep or too rich
-    /// in tokens. What the device actually has is one pile of bytes, and one
-    /// comparison against it says both whether this model fits and how far over it
-    /// is. The refusal names the two numbers because the answer to "too big" is a
-    /// byte count, not a guess.
+    /// in tokens. What the device actually has is bytes, and a comparison against
+    /// them says both whether this model fits and how far over it is. The refusal
+    /// names the two numbers because the answer to "too big" is a byte count, not
+    /// a guess.
+    ///
+    /// WHY two comparisons and not one: they measure different things. Free RAM
+    /// bounds the total a run may hold; the platform's per-mapping ceiling bounds
+    /// any one buffer inside it. A shape can satisfy the first and still be
+    /// unservable, and only the second says so before the heap is asked.
     pub fn check_scratch_budget(&self) -> Result<(), InferenceError> {
+        self.check_scratch_against(dynamic_scratch_byte_budget())
+    }
+
+    /// The same two refusals against a budget the caller states.
+    ///
+    /// WHY it is separate from `check_scratch_budget`: that one reads the guest's
+    /// telemetry, which a test build cannot author, so in a test it always gets
+    /// the 120 MiB floor -- and at the floor the mapping check below can never
+    /// fire. `scratch_bytes` is `kv_cache_bytes` plus every `Scratch` buffer, and
+    /// `largest_single_buffer_bytes` is the biggest of those same allocations, so
+    /// the total is at least twice it: a buffer over the 128 MiB ceiling already
+    /// puts the total past 256 MiB. Taking the budget as a parameter is what lets
+    /// a test hold the ceiling to the shape it exists for: one that clears the
+    /// total and still cannot be mapped.
+    ///
+    /// WHY the total is compared first: it is the budget, and the number the
+    /// person can act on when the device is simply too small. The mapping ceiling
+    /// is the second answer, for the shape that would have fit.
+    pub fn check_scratch_against(&self, budget: usize) -> Result<(), InferenceError> {
         let needed = self.scratch_bytes();
-        let budget = dynamic_scratch_byte_budget();
         if needed > budget {
-            // When static default applies: ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)
             return Err(InferenceError::ScratchTooLarge(needed, budget));
+        }
+        let largest = self.largest_single_buffer_bytes();
+        if largest > LARGEST_SINGLE_BUFFER_BYTES {
+            return Err(InferenceError::ScratchTooLarge(
+                largest,
+                LARGEST_SINGLE_BUFFER_BYTES,
+            ));
         }
         Ok(())
     }
@@ -4005,15 +4086,90 @@ pub mod tests {
 
         // 4. The same file at the longest context its family ships with is refused,
         // for its bytes and with both numbers: the budget was not loosened until
-        // this model happened to clear it.
+        // this model happened to clear it. The total answers first, because that
+        // is the budget; this shape's one cache tensor is over the mapping
+        // ceiling too, and the test below holds that refusal on a shape whose
+        // total is affordable.
         let longer = ModelConfig {
             seq_len: 8192,
             ..config
         };
+        assert_eq!(longer.kv_cache_bytes() / 2, 201_326_592);
+        assert!(
+            longer.kv_cache_bytes() / 2 > LARGEST_SINGLE_BUFFER_BYTES,
+            "one cache tensor of this shape is not mappable either"
+        );
         assert_eq!(
             longer.check_scratch_budget(),
             Err(InferenceError::ScratchTooLarge(403_782_144, SCRATCH_BYTE_BUDGET)),
             "the real file at 8192 positions has to be refused by the bytes it names"
+        );
+    }
+
+    /// WHY: free RAM bounds what a run may hold in total, and the platform's
+    /// per-mapping ceiling bounds any one tensor inside it. Nothing derives the
+    /// second from the first, so once the budget is raised from telemetry a shape
+    /// can be affordable in total and still be unmappable -- and then the refusal
+    /// has to name the tensor that cannot be had, because the total is not what
+    /// the device refused.
+    #[test]
+    fn a_shape_whose_biggest_tensor_cannot_be_mapped_is_refused_by_that_tensor() {
+        // The published geometry at the longest context its family ships with:
+        // 24 layers of 8192 positions, one key/value head 256 wide.
+        let wide = ModelConfig {
+            num_layers: 24,
+            seq_len: 8192,
+            num_kv_heads: 1,
+            head_dim: 256,
+            ..ModelConfig::default_test_config()
+        };
+
+        // A guest reporting 1 GiB free gets three quarters of it, which is far
+        // more than one mapping can carry. That gap is the whole reason the
+        // ceiling is checked beside the total.
+        let budget = compute_dynamic_scratch_budget(1024 * 1024 * 1024);
+        assert!(
+            budget > LARGEST_SINGLE_BUFFER_BYTES,
+            "the free-RAM budget is supposed to outgrow one mapping; if it no longer \
+             does, the ceiling check is dead weight and should say why"
+        );
+        assert!(
+            wide.scratch_bytes() <= budget,
+            "the shape was meant to be affordable in total: {} bytes against a {} byte budget",
+            wide.scratch_bytes(),
+            budget
+        );
+
+        // `KvCache` holds as two tensors the bytes `kv_cache_bytes` prices together.
+        let tensor = wide.kv_cache_bytes() / 2;
+        assert!(
+            tensor > LARGEST_SINGLE_BUFFER_BYTES,
+            "one cache tensor is {tensor} bytes, over the {LARGEST_SINGLE_BUFFER_BYTES} byte ceiling"
+        );
+        assert_eq!(
+            wide.largest_single_buffer_bytes(),
+            tensor,
+            "the cache tensor is this shape's biggest single allocation"
+        );
+        assert_eq!(
+            wide.check_scratch_against(budget),
+            Err(InferenceError::ScratchTooLarge(
+                tensor,
+                LARGEST_SINGLE_BUFFER_BYTES
+            )),
+            "an affordable total must not hide a tensor no mapping can carry"
+        );
+
+        // The production entry point still refuses this shape, on the total: in a
+        // test build its budget is the floor, so the two checks answer in the
+        // other order. Both are refusals; neither is a pass.
+        assert_eq!(
+            wide.check_scratch_budget(),
+            Err(InferenceError::ScratchTooLarge(
+                wide.scratch_bytes(),
+                SCRATCH_BYTE_BUDGET
+            )),
+            "the floor budget refuses the same shape by its total"
         );
     }
 

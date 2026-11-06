@@ -407,7 +407,35 @@ def test_a_declaration_beyond_the_engine_is_refused_not_clamped():
     # of them exceeds at least one of those ceilings while the device has room for
     # the shape. What bounds a run now is what it costs.
     assert "check_scratch_budget" in body, "from_gguf no longer prices the declared shape"
-    assert "ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)" in inference
+    # WHY these pins name the code and not a bare string in the file: this gate
+    # used to look for `ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)` anywhere in
+    # `inference.rs`, and it kept passing after production started refusing
+    # against a computed budget -- the only surviving copy of that string was a
+    # comment restating the code that used to be there. A pin a comment can
+    # satisfy is not a pin on behaviour.
+    priced = function_body(inference, "fn check_scratch_budget")
+    assert "check_scratch_against(dynamic_scratch_byte_budget())" in priced, (
+        "the run's total is no longer measured against the budget the guest's own "
+        "free RAM gives, so the size answer is not derived from the device"
+    )
+    against = function_body(inference, "fn check_scratch_against")
+    assert "ScratchTooLarge(needed, budget)" in against, (
+        "the refusal no longer carries the total it was measured against"
+    )
+    assert "largest_single_buffer_bytes" in against and "LARGEST_SINGLE_BUFFER_BYTES" in against, (
+        "the biggest single tensor is no longer checked against the one mapping the "
+        "platform will serve: free RAM bounds a run's total, and a shape can fit "
+        "that total while holding a tensor no mapping can carry"
+    )
+    # Scoped to the production half of the file: the engine's own tests assert a
+    # refusal against `SCRATCH_BYTE_BUDGET`, because in a test build the telemetry
+    # the budget is derived from cannot be authored and the floor is what arrives.
+    # A pin that counted those would fire on the tests proving the floor, not on
+    # the production path refusing against it.
+    production = without_comments(inference.split("#[cfg(test)]")[0])
+    assert "ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET)" not in production, (
+        "the engine refuses against a constant it no longer computes the budget from"
+    )
     # The ceilings are gone from the engine's code. Prose is allowed to name one
     # to explain what the budget replaced; a declaration, or a check reading a
     # dimension against it, is not.
