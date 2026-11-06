@@ -1961,7 +1961,7 @@ fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [
     let status = match gap {
         EmbeddingGap::NoWeights => {
             notice.word(
-                b"Embedding refused: the strict-neural flag is set and the model namespace holds no weights file the probe read.",
+                b"Embedding refused: the strict-neural flag is set and the model namespace holds no weights file (/data/models/embeddinggemma-2.gguf) the probe read.",
             );
             STATUS_UNAVAILABLE
         }

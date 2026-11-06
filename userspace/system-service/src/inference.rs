@@ -4158,10 +4158,16 @@ pub mod tests {
         assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
         assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
 
-        // 2. Disk streaming latency at 12 MB/s
-        const IDE_PIO_THROUGHPUT_BYTES_PER_SEC: usize = 12 * 1024 * 1024;
-        let sec_per_token_q4 = q4_weight_bytes / IDE_PIO_THROUGHPUT_BYTES_PER_SEC;
-        assert!(sec_per_token_q4 >= 80, "Streaming 2B Q4 takes at least 80s per token");
+        // 2. Disk streaming latency at theoretical ceiling
+        // Note: Real physical throughput is device-dependent and unmeasured on-device.
+        // Even under the theoretical ATA PIO Mode 4 burst maximum of 16 MB/s, streaming
+        // >1.1 GiB weights would require >60s per token.
+        const THEORETICAL_IDE_PIO_MAX_UPPER_BOUND: usize = 16 * 1024 * 1024;
+        let sec_per_token_q4 = q4_weight_bytes / THEORETICAL_IDE_PIO_MAX_UPPER_BOUND;
+        assert!(
+            sec_per_token_q4 >= 60,
+            "Streaming 2B Q4 takes at least 60s per token under theoretical PIO ceiling"
+        );
 
         // 3. ModelConfig scratch budget check fails for 2B architecture with 4 KV heads
         let conv_2b = ModelConfig {

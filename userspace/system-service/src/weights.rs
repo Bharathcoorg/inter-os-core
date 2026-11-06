@@ -1201,22 +1201,48 @@ pub fn run_streamed_embedding<S: PositionRead>(
         *slot = 0.0;
     }
 
+    let mut stream_buf = Vec::new();
+    stream_buf
+        .try_reserve_exact(positions.checked_mul(h_dim).ok_or(LoadError::Arithmetic)?)
+        .map_err(|_| LoadError::Arithmetic)?;
+    stream_buf.resize(positions * h_dim, 0.0f32);
+
+    // Pre-extract token embedding rows into stream_buf for each token position
     for pos in 0..positions {
         let (dtype, row_bytes) = reader.load_embedding_row(tokens[pos], h_dim, row)?;
-        // The row into the stream, in the dtype the descriptor stated, scaled the way
-        // Gemma's embedding path scales it.
-        embedding_row_into(&row[..row_bytes as usize], dtype, scale, &mut scratch.x[..h_dim])?;
-        for block in 0..config.num_layers {
-            reader.load_block(block)?;
-            let lw = reader.block();
+        let start = pos * h_dim;
+        embedding_row_into(
+            &row[..row_bytes as usize],
+            dtype,
+            scale,
+            &mut stream_buf[start..start + h_dim],
+        )?;
+    }
+
+    // Hoisted block loop: load each layer once, running all token positions through it.
+    // This reduces block tensor disk reads from (positions * layers) down to (1 * layers),
+    // reducing total read bytes by up to 512x on a 512-token prompt pass.
+    for block in 0..config.num_layers {
+        reader.load_block(block)?;
+        let lw = reader.block();
+        for pos in 0..positions {
+            let start = pos * h_dim;
+            scratch.x[..h_dim].copy_from_slice(&stream_buf[start..start + h_dim]);
             run_block(block, &lw, pos, config, kv_cache, scratch)?;
+            stream_buf[start..start + h_dim].copy_from_slice(&scratch.x[..h_dim]);
+            kv_cache.len = pos + 1;
         }
+    }
+
+    // Post-layer final norm and mean accumulation across all token positions
+    for pos in 0..positions {
+        let start = pos * h_dim;
+        scratch.x[..h_dim].copy_from_slice(&stream_buf[start..start + h_dim]);
         inference::rms_norm(&mut scratch.x[..h_dim], final_norm, config.rms_norm_eps);
         scratch.hidden[..h_dim].copy_from_slice(&scratch.x[..h_dim]);
         for i in 0..h_dim {
             scratch.pooled[i] += scratch.hidden[i];
         }
-        kv_cache.len = pos + 1;
     }
 
     // The pool, then the head the file declares, then the L2 step -- in that
