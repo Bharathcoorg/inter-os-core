@@ -61,3 +61,17 @@ InterOS provides empirical, automated benchmark verification tools under `tools/
   - Correlates virtual touch injection events with display compositor buffer flips, verified by `tests/test_tap_latency_bench.py`.
 - **Heap Allocation Invariant Enforcement (`tools/bench_heap.py`)**:
   - Validates that interactive rendering loops, font rasterization, touch event routing, and compositing passes execute with strictly zero heap allocations (`tests/test_heap_bench.py`).
+
+---
+
+## 5. Paint Performance & Emulator Probe Failure Mode (#262)
+
+- **Paint Latency & Present Banding**:
+  - Display latency is captured by the kernel's `record_paint_after_touch` hook when an interactive client task writes pixels to its owned surface in `kernel/src/syscall/mod.rs`.
+  - The measurement captures the exact duration from touch event ingress to the compositor's dirty band present. Unowned surface writes and timer repaints from background tasks do not reset the tap-to-paint timestamp.
+  - Zero heap allocation is strictly preserved across the entire display path: applications write directly to preallocated DRM/KMS surface memories.
+
+- **Emulator Server Probe Failure Mode (#262)**:
+  - Automated contracts probing emulator ports (`4300` for Studio RPC, `5900` for VNC) observe `[WinError 10061]` / `ConnectionRefusedError` whenever the external Device Studio or emulator server process is offline.
+  - Contract runners intentionally report these suites as skipped or failed-closed rather than launching synthetic server instances or attempting unauthorized VM process restarts.
+  - The Platform Truth Contract strictly forbids faking socket connectivity or inventing telemetry when the emulator bridge is unbound.
