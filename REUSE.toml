@@ -66,7 +66,7 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 # work this project authored, and the REUSE specification exempts the licence texts
 # a project ships by name.
 [[annotations]]
-path = ["**/*.ld", "**/*.bat", "**/*.cmd", "**/.gitignore", "**/.gitkeep", "NOTICE", "interos"]
+path = ["**/*.ld", "**/*.bat", "**/*.cmd", "**/.gitignore", "**/.gitkeep", "**/.gitattributes", "NOTICE", "interos"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Bharath B R <https://github.com/Bharathcoorg>"
 SPDX-License-Identifier = "AGPL-3.0-only"
