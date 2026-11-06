@@ -694,6 +694,27 @@ fn publish_text_scale() -> bool {
     DynamicType::new(next).publish() != before
 }
 
+/// Drops every shell plan whose geometry was solved at the rung that just moved.
+///
+/// WHY all of them and not one: each screen caches a frame plan built by centring,
+/// trimming and stacking runs at the rung the shell held when the plan was made. A
+/// plan that survives a rung change keeps inking the previous rung's boxes inside the
+/// plates the new rung asked for -- the exact split between a painted box and the
+/// band that taps it that this shell has already been made to pay for twice.
+///
+/// WHY this is not just `render_view`'s own list: `render_view` repaints the whole
+/// surface, so its caches fall by rebuilding on the `(0, 0)` pixel of that frame.
+/// A rung change can also arrive on a wake that only dirties one band, and a banded
+/// repaint never passes through `(0, 0)` -- so the caches have to be dropped here,
+/// independently of the repaint that follows.
+fn invalidate_rung_caches() {
+    screens::home::invalidate_paint_cache();
+    screens::app_drawer::invalidate_app_drawer_frame();
+    screens::live_widgets::invalidate_widgets_cache();
+    screens::search::invalidate_search_frame();
+    screens::activity::invalidate_activity_frame();
+}
+
 /// WHY the slot is resolved by type and not written down: the kernel
 /// resolves settings capabilities by slot index, and the slot that holds
 /// `FileSystemRead` in this shell's grant table is decided by the order
@@ -3164,6 +3185,35 @@ pub extern "C" fn _start() -> ! {
         {
             let _ = std::service_heartbeat(10);
 
+            // WHY on every wake and not only when a child is reaped: the person changes
+            // the text size in Settings while this shell is alive, and a backgrounded
+            // application is not reaped -- so a shell that read the store only on the
+            // reap path kept drawing at the rung it last happened to exit an app at.
+            // This is one settings query per wake, ahead of the work the wake does, and
+            // never one per glyph, which is the cost the note beside
+            // `publish_text_scale` refuses to pay. It is the same shape the Agent
+            // Manager and Messages loops landed.
+            let rung_moved = publish_text_scale();
+            if rung_moved {
+                invalidate_rung_caches();
+                // WHY the caches go cold even when no repaint follows: the reap path
+                // below ends in its own whole-surface paint for the view transition,
+                // and a plan that survived into it would centre every name at the rung
+                // this wake just replaced.
+                //
+                // WHY no repaint of our own while a child holds the foreground: that
+                // path repaints on the same wake, so a second full frame here would
+                // only cost the person a frame they cannot see.
+                if state.active_child.is_none() {
+                    // WHY `Dirty::All` and not a band: a rung change moves every plate
+                    // the shell draws, so the only region that covers it is the screen,
+                    // and `present_dirty` is the path the shell already uses to say so.
+                    // Naming one screen's band here would leave the others holding the
+                    // previous rung's pixels until a touch reached them.
+                    present_dirty(surface, &state, Dirty::All);
+                }
+            }
+
             // Reap the foreground application when it exits.
             if let Some(child_id) = state.active_child {
                 match std::waitpid(child_id) {
@@ -3180,15 +3230,12 @@ pub extern "C" fn _start() -> ! {
                         refresh_wallpapers(&mut state);
                         refresh_user_profile(&mut state);
     refresh_schedule(&mut state);
-                        // WHY on the same wake as the wallpaper re-read: the text-size
-                        // setting is written by the application that just held the
-                        // foreground, and this is the first point the shell can learn
-                        // it moved. A rung that moved re-plans the drawer, because the
-                        // names in it were centred and trimmed at the old one; the
-                        // `render_view` below is the repaint that carries them.
-                        if publish_text_scale() {
-                            screens::app_drawer::invalidate_app_drawer_frame();
-                        }
+                        // WHY the same wake as the wallpaper re-read: the rung itself was
+                        // already read at the top of this wake, and the caches cleared
+                        // there if it moved; what this path adds is the view transition
+                        // below, whose `render_view` is the repaint that carries the new
+                        // sizes into the names every screen centred and trimmed at the
+                        // old one.
                         if let Ok(lock_st) = std::user_get_lock_state(1000) {
                             state.lock_state = lock_st;
                         }
@@ -3227,10 +3274,9 @@ pub extern "C" fn _start() -> ! {
                         // WHY here and not only on the clean reap: this path is the
                         // other half of "the foreground application is gone", taken
                         // when the child was already gone by the time it was reaped.
-                        // The setting it may have written still has to reach the shell.
-                        if publish_text_scale() {
-                            screens::app_drawer::invalidate_app_drawer_frame();
-                        }
+                        // The rung it may have written was read at the top of this
+                        // wake, and the caches cleared there; what remains is the
+                        // view transition and the repaint below.
                         state.current_view = if state.lock_state == std::UserLockState::Unlocked {
                             ViewMode::HomeScreen
                         } else {

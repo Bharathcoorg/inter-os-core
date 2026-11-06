@@ -549,6 +549,22 @@ pub fn query_band() -> (usize, usize) {
     launcher::layout::search_content_band()
 }
 
+/// Drops this surface's cached frame plan.
+///
+/// WHY this exists beside the fingerprint in [`plan`]: the fingerprint catches every
+/// query and index change, because a keystroke is the only thing this surface plans
+/// from. The person's text size is not a keystroke -- it changes on a wake that
+/// touches nothing here -- and a banded repaint never passes through `(0, 0)`, where
+/// the plan would otherwise rebuild. So a rung change is the one event the shell has
+/// to report to this cache itself.
+pub fn invalidate_search_frame() {
+    let slot: *mut Option<Plan> = core::ptr::addr_of_mut!(PLAN);
+    // SAFETY: the launcher is one bare-metal task and the paint loop is not
+    // preemptible or reentrant, so this is the only reference to the slot at any
+    // time; the shell calls it between wakes, never while a frame is being walked.
+    unsafe { *slot = None };
+}
+
 /// The colour of (`x`, `y`) on the search surface.
 pub fn get_search_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let p = plan(x, y, state);
