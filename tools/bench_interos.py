@@ -76,14 +76,14 @@ def analyze_storage():
         results["boot_image"] = {
             "name": img_name,
             "size_bytes": img_size,
-            "size_mb": round(img_size / (1024 * 1024), 2),
+            "size_mib": round(img_size / (1024 * 1024), 2),
             "status": "AVAILABLE",
         }
     else:
         results["boot_image"] = {
             "name": "UNAVAILABLE",
             "size_bytes": None,
-            "size_mb": None,
+            "size_mib": None,
             "status": "MISSING",
         }
 
@@ -101,7 +101,7 @@ def analyze_storage():
     results["apps"] = {
         "count": app_count,
         "total_source_bytes": app_sources,
-        "total_source_kb": round(app_sources / 1024, 1),
+        "total_source_kib": round(app_sources / 1024, 1),
     }
     
     return results
@@ -164,19 +164,23 @@ def generate_report(storage, telemetry, output_json=None):
     print()
 
     boot_img = storage.get("boot_image", {})
-    if boot_img.get("size_mb") is not None:
-        print(f"[*] Boot Image Size  : {boot_img['size_mb']:.2f} MB ({boot_img.get('name')})")
+    # WHY every size in this report is labelled with a binary prefix: each one is
+    # divided by 1024 or 1024 * 1024, so the unit the number carries is KiB/MiB.
+    # Labelling those MB and KB stated a decimal unit the arithmetic never
+    # computed, and this report is the source the README's figures are quoted from.
+    if boot_img.get("size_mib") is not None:
+        print(f"[*] Boot Image Size  : {boot_img['size_mib']:.2f} MiB ({boot_img.get('name')})")
     else:
         print("[*] Boot Image Size  : UNAVAILABLE (run build first)")
 
     apps = storage.get("apps", {})
     print(f"[*] Ring-3 Apps      : {apps.get('count', 0)} crates, "
-          f"{apps.get('total_source_kb', 0)} KB of their own source")
+          f"{apps.get('total_source_kib', 0)} KiB of their own source")
 
     if telemetry.get("heap_used_bytes") is not None and telemetry.get("heap_free_bytes") is not None:
-        used_mb = telemetry["heap_used_bytes"] / (1024 * 1024)
-        free_mb = telemetry["heap_free_bytes"] / (1024 * 1024)
-        print(f"[*] Kernel Memory    : {used_mb:.2f} MB used / {free_mb:.2f} MB free pool "
+        used_mib = telemetry["heap_used_bytes"] / (1024 * 1024)
+        free_mib = telemetry["heap_free_bytes"] / (1024 * 1024)
+        print(f"[*] Kernel Memory    : {used_mib:.2f} MiB used / {free_mib:.2f} MiB free pool "
               f"(from {telemetry.get('source')})")
     else:
         print("[*] Kernel Memory    : UNAVAILABLE (no live serial telemetry log provided)")
@@ -205,7 +209,7 @@ def generate_report(storage, telemetry, output_json=None):
     print()
 
     has_telemetry = telemetry.get("heap_used_bytes") is not None
-    has_image = boot_img.get("size_mb") is not None
+    has_image = boot_img.get("size_mib") is not None
     overall_status = "COMPLETE" if (has_telemetry and has_image) else "INCOMPLETE"
     current_timestamp = int(time.strftime("%Y%m%d"))
 
