@@ -2433,6 +2433,12 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
             let stats = crate::memory::memory_telemetry();
+            if !stats.is_reading() {
+                // No detection happened, so there is no reading to hand over.
+                // Returning the zeroed struct as a success is what let the
+                // memory card print 0 MB under a REPORTED badge.
+                return SyscallResult::Unavailable as i64;
+            }
             let bytes = unsafe {
                 core::slice::from_raw_parts(
                     &stats as *const crate::memory::MemoryTelemetry as *const u8,

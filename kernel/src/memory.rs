@@ -28,9 +28,48 @@ pub fn total_physical_ram_bytes() -> u64 {
     TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Holds exclusive host-test ownership of the detected RAM total for its lifetime.
+///
+/// WHY this exists rather than a bare setter: `TOTAL_PHYSICAL_RAM_BYTES` is one
+/// process-wide atomic and `cargo test` runs cases on several threads, so two
+/// cases that author it interleave -- one then measures the other's platform and
+/// the assertion that fails names neither case. Holding the lock for the whole
+/// case makes "the RAM this case sees" mean "the RAM this case wrote".
+///
+/// WHY `Drop` restores the value it found instead of an authored baseline: every
+/// case that "restored clean state" used to write 2 GiB back, which is a platform
+/// this kernel never detected and which then leaked into whichever case ran next.
 #[cfg(test)]
-pub fn set_total_physical_ram_bytes_for_test(bytes: u64) {
-    TOTAL_PHYSICAL_RAM_BYTES.store(bytes, core::sync::atomic::Ordering::Release);
+pub struct DetectedRamGuard {
+    found: u64,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl DetectedRamGuard {
+    /// Authors the detected RAM total for the remainder of this case.
+    pub fn set(&self, bytes: u64) {
+        TOTAL_PHYSICAL_RAM_BYTES.store(bytes, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl Drop for DetectedRamGuard {
+    fn drop(&mut self) {
+        TOTAL_PHYSICAL_RAM_BYTES.store(self.found, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Takes the host-test lock on the detected RAM total and records what it held.
+///
+/// A poisoned lock is unwound rather than propagated: a case that panicked while
+/// authoring a RAM total must not stop every later case from measuring one.
+#[cfg(test)]
+pub fn hold_detected_ram_for_test() -> DetectedRamGuard {
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let found = TOTAL_PHYSICAL_RAM_BYTES.load(core::sync::atomic::Ordering::Acquire);
+    DetectedRamGuard { found, _lock: lock }
 }
 
 /// Initializes global memory management singletons: page mapper, physical offset, and frame allocator.
@@ -119,6 +158,19 @@ pub struct MemoryTelemetry {
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub free_bytes: u64,
+}
+
+impl MemoryTelemetry {
+    /// Whether this record is a reading, rather than the absence of one.
+    ///
+    /// WHY the total decides it: `init_memory` records a total only when the
+    /// memory map yields at least 128 MiB of usable RAM, so a zero total means no
+    /// detection happened -- not that the machine holds no memory. Handing that
+    /// record back as a success made Settings paint `0 MB` under a `REPORTED`
+    /// badge, which states a measurement nobody took.
+    pub fn is_reading(&self) -> bool {
+        self.total_bytes != 0
+    }
 }
 
 /// Computes physical memory usage honestly from the platform RAM info, active tasks,
@@ -1074,33 +1126,31 @@ mod tests {
 
     #[test]
     fn test_memory_telemetry_reports_detected_ram_without_authored_floor() {
-        // Test with 256 MiB detected RAM (lower than the old 2 GiB authored floor)
+        let ram = hold_detected_ram_for_test();
+
+        // 256 MiB detected is below the 2 GiB the total used to be floored at
         let ram_256mb = 256 * 1024 * 1024u64;
-        set_total_physical_ram_bytes_for_test(ram_256mb);
+        ram.set(ram_256mb);
         let telem = memory_telemetry();
         assert_eq!(telem.total_bytes, ram_256mb, "256 MiB detected RAM must not be clamped to 2 GiB");
         assert!(telem.total_bytes < 2048 * 1024 * 1024, "Total bytes must not enforce a 2 GiB floor");
 
-        // Test with 512 MiB detected RAM
         let ram_512mb = 512 * 1024 * 1024u64;
-        set_total_physical_ram_bytes_for_test(ram_512mb);
+        ram.set(ram_512mb);
         let telem = memory_telemetry();
         assert_eq!(telem.total_bytes, ram_512mb);
 
-        // Test with 4 GiB detected RAM
         let ram_4gb = 4096 * 1024 * 1024u64;
-        set_total_physical_ram_bytes_for_test(ram_4gb);
+        ram.set(ram_4gb);
         let telem = memory_telemetry();
         assert_eq!(telem.total_bytes, ram_4gb);
-
-        // Restore clean state
-        set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
     }
 
     #[test]
     fn test_memory_telemetry_used_free_arithmetic_matches_detected() {
+        let ram = hold_detected_ram_for_test();
         let ram_512mb = 512 * 1024 * 1024u64;
-        set_total_physical_ram_bytes_for_test(ram_512mb);
+        ram.set(ram_512mb);
         let telem = memory_telemetry();
 
         assert_eq!(
@@ -1110,15 +1160,60 @@ mod tests {
         );
         assert!(telem.used_bytes <= telem.total_bytes);
 
-        // When detected RAM is 0 (uninitialized)
-        set_total_physical_ram_bytes_for_test(0);
+        // Nothing recorded at all
+        ram.set(0);
         let uninit = memory_telemetry();
         assert_eq!(uninit.total_bytes, 0);
         assert_eq!(uninit.used_bytes, 0);
         assert_eq!(uninit.free_bytes, 0);
+    }
 
-        // Restore clean state
-        set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+    #[test]
+    fn test_an_undetected_ram_total_is_not_reported_as_a_reading() {
+        let ram = hold_detected_ram_for_test();
+
+        ram.set(0);
+        let undetected = memory_telemetry();
+        assert!(
+            !undetected.is_reading(),
+            "a total nothing recorded is the absence of a measurement, not a 0 MB one"
+        );
+
+        // 128 MiB is the smallest total init_memory records at all.
+        ram.set(128 * 1024 * 1024);
+        assert!(
+            memory_telemetry().is_reading(),
+            "the smallest detectable platform is a reading and must not be refused"
+        );
+    }
+
+    #[test]
+    fn test_two_cases_cannot_author_the_ram_total_at_once() {
+        let ram = hold_detected_ram_for_test();
+        let authored = 700 * 1024 * 1024u64;
+        ram.set(authored);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let other = hold_detected_ram_for_test();
+            other.set(1234);
+            let _ = tx.send(total_physical_ram_bytes());
+        });
+
+        // While this case holds the guard the spawned author cannot take it, so
+        // nothing it writes can land inside this case's assertions.
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
+            "a second author of the RAM total must wait for the first instead of interleaving"
+        );
+        assert_eq!(total_physical_ram_bytes(), authored);
+
+        drop(ram);
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).ok(),
+            Some(1234),
+            "the waiting author proceeds once the guard is released"
+        );
     }
 }
 

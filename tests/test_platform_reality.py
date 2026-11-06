@@ -685,6 +685,41 @@ class PlatformRealityTests(unittest.TestCase):
             self.assertIn(literal, body)
         self.assertNotIn("size.saturating_add(4095)", body)
 
+    def test_an_undetected_ram_total_is_refused_not_reported_as_zero(self):
+        memory = self.read("kernel/src/memory.rs")
+
+        # The total starts unrecorded, and only a detection that found real RAM
+        # writes it. Nothing authors a platform the memory map did not report.
+        self.assertIn(
+            "static TOTAL_PHYSICAL_RAM_BYTES: core::sync::atomic::AtomicU64 = "
+            "core::sync::atomic::AtomicU64::new(0);", memory)
+        self.assertIn("if detected_ram >= 128 * 1024 * 1024 {", memory)
+        self.assertNotIn("detected.max(", memory)
+
+        # A record with no total is the absence of a reading, not a 0 MB one.
+        self.assertIn(
+            "pub fn is_reading(&self) -> bool {\n        self.total_bytes != 0", memory)
+
+        # The syscall refuses it. Handing the zeroed struct back as a success is
+        # what let the memory card print 0 MB under a REPORTED badge.
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        start = syscall.index("        135 => {")
+        end = syscall.index("        136 => {", start)
+        body = syscall[start:end]
+        self.assertIn("let stats = crate::memory::memory_telemetry();", body)
+        self.assertIn("if !stats.is_reading() {", body)
+        self.assertIn("return SyscallResult::Unavailable as i64;", body)
+
+        # Host tests author the total only through the guard that serializes
+        # them. A bare setter let parallel cases measure each other's platform,
+        # and each of them "restored" an authored 2 GiB afterwards.
+        self.assertIn("static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());", memory)
+        self.assertIn("pub fn hold_detected_ram_for_test() -> DetectedRamGuard {", memory)
+        self.assertNotIn("set_total_physical_ram_bytes_for_test", memory)
+        user = self.read("kernel/src/task/user.rs")
+        self.assertNotIn("set_total_physical_ram_bytes_for_test", user)
+        self.assertIn("crate::memory::hold_detected_ram_for_test()", user)
+
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")
         start = scheduler.index("pub fn dump_process_table")

@@ -2357,44 +2357,41 @@ mod tests {
 
     #[test]
     fn test_user_address_space_limit_scales_with_detected_physical_ram() {
-        // Fallback when detected RAM is 0 (unrecorded)
-        crate::memory::set_total_physical_ram_bytes_for_test(0);
+        let ram = crate::memory::hold_detected_ram_for_test();
+
+        // Nothing recorded: the authored default is the only honest answer
+        ram.set(0);
         assert_eq!(user_address_space_limit(), USER_ADDRESS_SPACE_LIMIT);
 
         // On a 256 MiB platform: 25% reserve is 64 MiB, limit is 192 MiB
-        crate::memory::set_total_physical_ram_bytes_for_test(256 * 1024 * 1024);
+        ram.set(256 * 1024 * 1024);
         assert_eq!(user_address_space_limit(), 192 * 1024 * 1024);
 
         // On a 512 MiB platform: 25% reserve is 128 MiB, limit is 384 MiB
-        crate::memory::set_total_physical_ram_bytes_for_test(512 * 1024 * 1024);
+        ram.set(512 * 1024 * 1024);
         assert_eq!(user_address_space_limit(), 384 * 1024 * 1024);
 
         // On a 2 GiB platform: 25% reserve is 512 MiB, limit is 1.5 GiB (> 256 MiB)
-        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+        ram.set(2048 * 1024 * 1024);
         let limit_2gb = user_address_space_limit();
         assert_eq!(limit_2gb, 1536 * 1024 * 1024);
         assert!(limit_2gb > 256 * 1024 * 1024, "2 GiB host must lift limit beyond 256 MiB");
 
         // On a 4 GiB platform: 25% reserve is 1 GiB, limit is 3 GiB
-        crate::memory::set_total_physical_ram_bytes_for_test(4096 * 1024 * 1024);
+        ram.set(4096 * 1024 * 1024);
         let limit_4gb = user_address_space_limit();
         assert_eq!(limit_4gb, 3072 * 1024 * 1024);
         assert!(limit_4gb > 256 * 1024 * 1024);
-
-        // Restore clean baseline state
-        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
     }
 
     #[test]
     fn test_resource_limits_default_address_space_matches_dynamic_limit() {
-        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
+        let ram = crate::memory::hold_detected_ram_for_test();
+        ram.set(2048 * 1024 * 1024);
         let default_limits = crate::task::process::ResourceLimits::default();
         assert_eq!(default_limits.max_address_space_bytes, user_address_space_limit() as u64);
         assert_eq!(default_limits.max_address_space_bytes, 1536 * 1024 * 1024);
         assert!(default_limits.max_address_space_bytes > 256 * 1024 * 1024);
-
-        // Restore clean baseline state
-        crate::memory::set_total_physical_ram_bytes_for_test(2048 * 1024 * 1024);
     }
 }
 
