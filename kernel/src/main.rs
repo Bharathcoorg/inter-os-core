@@ -426,6 +426,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     SCHEDULER.lock().init(main_caps);
     serial_println!("[OK] Primordial Kernel Thread registered as Task 0.");
 
+    // The always-on service set is a device-side choice read off the data disk,
+    // so a tiered measurement boots one kernel image for every tier.
+    kernel::services::load_boot_profile_from_device();
+
     // Kernel registers service definitions only. Ring-3 PID 1
     // owns service startup, recovery and lifecycle policy.
     kernel::services::init();

@@ -57,6 +57,182 @@ impl ServiceId {
     }
 }
 
+/// Which always-on service set the kernel declares at boot.
+///
+/// WHY a device-side profile and not a build flag: a tiered measurement is
+/// only comparable if the bytes under it are the same bytes. Switching the
+/// service set with a `cfg` would mean one kernel image per tier, and then a
+/// difference between tiers could be a difference between builds. The token
+/// lives on the data disk, so every tier boots the same kernel, apps and
+/// agents images and only the profile file differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BootProfile {
+    /// Hardware services and the interactive shell; no AI daemons.
+    OsOnly = 0,
+    /// `OsOnly` plus the always-on inference daemon.
+    Agents = 1,
+}
+
+/// The profile a device with no readable profile file boots.
+///
+/// This is the set the platform has always started: an absent or unreadable
+/// profile must not quietly cost a running device its assistant.
+pub const DEFAULT_BOOT_PROFILE: BootProfile = BootProfile::Agents;
+
+/// Services declared by every profile, in PID 1's startup order.
+const BASE_SERVICES: [ServiceId; 11] = [
+    ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network,
+    ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera, ServiceId::Sensor,
+    ServiceId::Compositor, ServiceId::Launcher,
+];
+
+/// The inference daemon, which is the whole difference between the profiles.
+const AI_SERVICES: [ServiceId; 1] = [ServiceId::Inference];
+
+/// The service set a profile registers, derived rather than restated so the
+/// two profiles cannot drift apart by someone editing one list.
+const ALL_SERVICES: [ServiceId; BASE_SERVICES.len() + AI_SERVICES.len()] = {
+    let mut all = [ServiceId::Init; BASE_SERVICES.len() + AI_SERVICES.len()];
+    let mut index = 0;
+    while index < BASE_SERVICES.len() {
+        all[index] = BASE_SERVICES[index];
+        index += 1;
+    }
+    let mut extra = 0;
+    while extra < AI_SERVICES.len() {
+        all[BASE_SERVICES.len() + extra] = AI_SERVICES[extra];
+        extra += 1;
+    }
+    all
+};
+
+static BOOT_PROFILE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(DEFAULT_BOOT_PROFILE as u8);
+
+impl BootProfile {
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::OsOnly => "os",
+            Self::Agents => "agents",
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::OsOnly),
+            1 => Some(Self::Agents),
+            _ => None,
+        }
+    }
+
+    /// Reads a profile token, accepting nothing but the token itself.
+    ///
+    /// WHY an unrecognised token is `None` rather than a default: a typo in a
+    /// provisioned profile would otherwise be reported as a measurement of the
+    /// tier the author did not ask for. The caller says so on the console and
+    /// keeps the default set.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let token = trim_profile(bytes);
+        if equals_ignore_case(token, b"os") {
+            Some(Self::OsOnly)
+        } else if equals_ignore_case(token, b"agents") {
+            Some(Self::Agents)
+        } else {
+            None
+        }
+    }
+}
+
+fn trim_profile(bytes: &[u8]) -> &[u8] {
+    let is_pad = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0);
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && is_pad(bytes[start]) {
+        start += 1;
+    }
+    while end > start && is_pad(bytes[end - 1]) {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+fn equals_ignore_case(candidate: &[u8], expected: &[u8]) -> bool {
+    candidate.len() == expected.len()
+        && candidate
+            .iter()
+            .zip(expected)
+            .all(|(found, want)| found.eq_ignore_ascii_case(want))
+}
+
+/// The service definitions one profile puts in the registry.
+///
+/// PID 1 starts what the kernel declared and nothing else, so this list is the
+/// entire boot-time authority difference between the tiers.
+pub fn declared_services(profile: BootProfile) -> &'static [ServiceId] {
+    match profile {
+        BootProfile::OsOnly => &BASE_SERVICES,
+        BootProfile::Agents => &ALL_SERVICES,
+    }
+}
+
+/// The profile `init()` will register.
+pub fn boot_profile() -> BootProfile {
+    BootProfile::from_code(BOOT_PROFILE.load(Ordering::Acquire)).unwrap_or(DEFAULT_BOOT_PROFILE)
+}
+
+/// Selects the service set. Only boot code calls this, and only before `init()`.
+pub fn set_boot_profile(profile: BootProfile) {
+    BOOT_PROFILE.store(profile as u8, Ordering::Release);
+}
+
+/// Where a provisioning tool leaves the boot profile token.
+///
+/// Same reasoning as `PROVISION_MANIFEST_PATH`: this is a block-filesystem
+/// name, not a VFS path, because the VFS's record of what exists is sealed in
+/// the keystore and a host tool cannot write one. `/provision/` is a namespace
+/// the VFS never creates.
+pub const BOOT_PROFILE_PATH: &str = "/provision/boot.profile";
+
+/// The most profile bytes the kernel looks at. A token is a few characters;
+/// the window only has to cover trailing padding a fixed buffer may carry.
+const BOOT_PROFILE_WINDOW: usize = 64;
+
+const _: () = assert!(
+    BOOT_PROFILE_PATH.len() <= crate::storage::interfs::MAX_PATH,
+    "the boot profile path must fit one InterFS inode record"
+);
+
+/// Applies the device-side boot profile, if the device carries one.
+///
+/// Call this before [`init`]. An absent profile file is the ordinary device:
+/// it keeps [`DEFAULT_BOOT_PROFILE`] and the boot log says nothing. A file the
+/// kernel can read but cannot name is reported, because a device booting a
+/// different service set than its operator asked for is worth one console
+/// line, and a silent fallback would make every measurement beside it wrong.
+pub fn load_boot_profile_from_device() {
+    let mut bytes = [0u8; BOOT_PROFILE_WINDOW];
+    let Ok(read) = crate::storage::filesystem::load_data_file(BOOT_PROFILE_PATH, &mut bytes)
+    else {
+        return;
+    };
+    match BootProfile::parse(&bytes[..read]) {
+        Some(profile) => {
+            set_boot_profile(profile);
+            crate::serial_println!(
+                "[SERVICE] Boot profile '{}' read from {}.",
+                profile.token(),
+                BOOT_PROFILE_PATH
+            );
+        }
+        None => crate::serial_println!(
+            "[SERVICE] {} names no boot profile; registering the default '{}'.",
+            BOOT_PROFILE_PATH,
+            DEFAULT_BOOT_PROFILE.token()
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 
@@ -318,24 +494,25 @@ static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 16] = [
 /// Registers the system-service set. PID1 owns process creation and lifecycle.
 pub fn init() {
     if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
+    let profile = boot_profile();
     {
         let Some(mut records) = SERVICE_RECORDS.try_lock() else { return; };
         records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running, generation: 1 });
     }
     // Service definitions are registered but not started here. PID 1 owns
     // userspace service lifecycle through the ServiceStart syscall.
-    for id in [
-        ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network,
-        ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera, ServiceId::Sensor,
-        ServiceId::Compositor, ServiceId::Launcher, ServiceId::Inference,
-    ] {
+    for &id in declared_services(profile) {
         if let Some(mut records) = SERVICE_RECORDS.try_lock() {
             records[id as usize] = Some(ServiceRecord {
                 id, task: TaskId(0), state: ServiceState::Declared, generation: 0
             });
         }
     }
-    crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
+    crate::serial_println!(
+        "[SERVICE] Boot profile '{}' registered {} service definitions; PID 1 controls startup.",
+        profile.token(),
+        declared_services(profile).len()
+    );
 }
 
 /// Resource budget assigned to each first-party system service. These limits are
@@ -1010,5 +1187,69 @@ mod tests {
                 id
             );
         }
+    }
+
+    /// A boot profile names the services that boot declares, and nothing else.
+    ///
+    /// WHY this is a declaration question and not a start question: PID 1 starts
+    /// exactly the set the kernel registry declares, so a service that is not
+    /// declared here is a process that never exists -- no task, no address-space
+    /// budget, no page table. The alternative, declaring everything and starting
+    /// a subset, would leave the unstarted service's image embedded and its
+    /// registry record claiming an authority the device does not use.
+    #[test]
+    fn the_os_only_profile_declares_no_inference_service_and_the_agent_profile_does() {
+        let base = declared_services(BootProfile::OsOnly);
+        let agents = declared_services(BootProfile::Agents);
+
+        assert!(
+            !base.contains(&ServiceId::Inference),
+            "the OS-only tier must not boot the inference service: that is the whole tier"
+        );
+        assert!(
+            agents.contains(&ServiceId::Inference),
+            "the agent tier is defined by the inference service being present"
+        );
+
+        for required in [
+            ServiceId::Display,
+            ServiceId::Input,
+            ServiceId::Compositor,
+            ServiceId::Launcher,
+        ] {
+            assert!(
+                base.contains(&required),
+                "a profile that did not declare {:?} would boot a black screen",
+                required
+            );
+        }
+
+        assert!(
+            base.iter().all(|id| agents.contains(id)),
+            "the agent tier must be the OS tier plus the AI service, never a different OS"
+        );
+        assert_eq!(
+            agents.len(),
+            base.len() + 1,
+            "the two profiles must differ by exactly the inference service"
+        );
+    }
+
+    /// A profile token is only ever the two words this device boots.
+    ///
+    /// WHY the refusal matters more than the accept: the file sits on a disk a
+    /// host tool writes, so a misspelling is the ordinary failure. Reading
+    /// `agennts` as OS-only would take the AI service away quietly, and the
+    /// next person would find a device that refuses to answer and a log that
+    /// never said the profile was ignored. An unknown token is no profile at
+    /// all, and the caller says so on the console.
+    #[test]
+    fn an_unknown_profile_token_is_not_a_profile() {
+        assert_eq!(BootProfile::parse(b"os"), Some(BootProfile::OsOnly));
+        assert_eq!(BootProfile::parse(b"OS\n"), Some(BootProfile::OsOnly));
+        assert_eq!(BootProfile::parse(b"  agents\r\n"), Some(BootProfile::Agents));
+        assert_eq!(BootProfile::parse(b"agennts"), None);
+        assert_eq!(BootProfile::parse(b""), None);
+        assert_eq!(BootProfile::parse(b"agents extra"), None);
     }
 }
