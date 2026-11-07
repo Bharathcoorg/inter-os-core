@@ -243,6 +243,7 @@ HEADER_TOP = _design("HEADER_TOP")                # viewport::HEADER_TOP
 TYPE_H3 = _settings("TYPE_H3")          # the row / card rung, settings main.rs
 TYPE_DISPLAY = _settings("TYPE_DISPLAY")  # the screen-title rung
 LINE_H = _settings("LINE_H")            # font::line_height(TYPE_H3), settings main.rs
+CAPTION_LINE_H = _settings("CAPTION_LINE_H")  # font::line_height(TYPE_CAPTION), settings main.rs
 LINE_H_DISPLAY = _line_height(TYPE_DISPLAY)
 
 assert LINE_H == _line_height(TYPE_H3), (
@@ -270,7 +271,7 @@ CARD_PAD = _settings("CARD_PAD")
 CARD_LINE_GAP = _settings("CARD_LINE_GAP")
 GRID_GAP = _settings("GRID_GAP")
 CARD_W = _settings("CARD_W")
-CARD_H = _settings("CARD_H")             # CARD_PAD*2 + LINE_H*3 + CARD_LINE_GAP
+CARD_H = _settings("CARD_H")             # CARD_PAD*2 + LINE_H + CARD_LINE_GAP + CAPTION_LINE_H*2
 GRID_Y = _settings("GRID_Y")
 
 def landing_card_rect(i):
@@ -298,11 +299,11 @@ ROW_GAP = _settings("ROW_GAP")
 # only read back, so an app that re-factored its chain away from the platform's
 # step is reported instead of silently followed.
 assert MARGIN == GRID_24 and ROW_PAD_V == GRID_32 and ROW_LINE_GAP == GRID_8
-assert CARD_H == CARD_PAD * 2 + LINE_H * 3 + CARD_LINE_GAP, (
-    "a landing card no longer reserves three body line boxes and the step between them"
+assert CARD_H == CARD_PAD * 2 + LINE_H + CARD_LINE_GAP + CAPTION_LINE_H * 2, (
+    "a landing card no longer reserves its body line box, two caption line boxes and the step between them"
 )
-assert ROW_H == (ROW_PAD_V + LINE_H + ROW_LINE_GAP) + LINE_H + ROW_PAD_V, (
-    "a detail row no longer reserves two body line boxes and its own padding"
+assert ROW_H == (ROW_PAD_V + LINE_H + ROW_LINE_GAP) + CAPTION_LINE_H + ROW_PAD_V, (
+    "a detail row no longer reserves its body line box, caption line box and its own padding"
 )
 assert DIVIDER_Y == HEADER_TOP + LINE_H_DISPLAY + GRID_16, (
     "the header rule no longer closes the screen title's line box"
