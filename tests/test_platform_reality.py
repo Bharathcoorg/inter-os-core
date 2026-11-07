@@ -12,26 +12,58 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _user_address_space_defects(user: str, services: str) -> list[str]:
-    """Detects discrepancies in userspace address-space derivation, wiring, and refusal pins."""
+    """Detects discrepancies in userspace address-space derivation, wiring, and body-scoped refusal pins."""
     defects = []
+
+    # 1. Signatures
     if "pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize" not in user:
-        defects.append("missing compute_dynamic_user_address_space_limit")
+        defects.append("missing compute_dynamic_user_address_space_limit signature")
     if "pub fn user_address_space_limit() -> usize" not in user:
-        defects.append("missing user_address_space_limit")
+        defects.append("missing user_address_space_limit signature")
     if 'classified as "not reported"' not in user:
         defects.append("missing classified as 'not reported'")
-    if '"userspace address-space limit exceeded"' not in user:
-        defects.append("missing 'userspace address-space limit exceeded'")
-    if '"userspace address-space budget exceeded"' not in user:
-        defects.append("missing 'userspace address-space budget exceeded'")
-    if "let reserve = (detected / 4).max(64 * 1024 * 1024);" not in user:
-        defects.append("missing reserve formula (detected / 4).max(64 * 1024 * 1024)")
-    if "detected.saturating_sub(reserve)" not in user:
-        defects.append("missing saturating_sub(reserve)")
-    if "USER_ADDRESS_SPACE_LIMIT" not in user:
-        defects.append("missing USER_ADDRESS_SPACE_LIMIT fallback")
+
+    # 2. Body-scoped limit derivation
+    limit_sig = "pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {"
+    if limit_sig in user:
+        start = user.index(limit_sig)
+        end = user.index("\n}\n", start)
+        limit_body = user[start:end]
+        if "USER_ADDRESS_SPACE_LIMIT" not in limit_body:
+            defects.append("compute_dynamic_user_address_space_limit body does not reference USER_ADDRESS_SPACE_LIMIT")
+        if "let reserve = (detected / 4).max(64 * 1024 * 1024);" not in limit_body:
+            defects.append("missing reserve formula (detected / 4).max(64 * 1024 * 1024)")
+        if "detected.saturating_sub(reserve)" not in limit_body:
+            defects.append("missing saturating_sub(reserve)")
+    else:
+        defects.append("missing compute_dynamic_user_address_space_limit body")
+
+    # 3. Body-scoped ELF load segment limit refusal
+    elf_sig = "pub fn load_user_elf_into_page_table("
+    if elf_sig in user:
+        start_elf = user.index(elf_sig)
+        end_elf = user.index("\n}\n", start_elf)
+        elf_body = user[start_elf:end_elf]
+        if 'return Err("userspace address-space limit exceeded");' not in elf_body:
+            defects.append("load_user_elf_into_page_table missing live return Err('userspace address-space limit exceeded')")
+    else:
+        defects.append("missing load_user_elf_into_page_table body")
+
+    # 4. Body-scoped process instantiation budget refusal
+    spawn_sig = "pub fn spawn_user_process_with_limits("
+    if spawn_sig in user:
+        start_spawn = user.index(spawn_sig)
+        end_spawn = user.index("\n}\n", start_spawn)
+        spawn_body = user[start_spawn:end_spawn]
+        if 'return Err("userspace address-space budget exceeded");' not in spawn_body:
+            defects.append("spawn_user_process_with_limits missing live return Err('userspace address-space budget exceeded')")
+    else:
+        defects.append("missing spawn_user_process_with_limits body")
+
+    # 5. Services wiring
     if "max_address_space_bytes: crate::task::user::user_address_space_limit() as u64," not in services:
         defects.append("services.rs does not wire max_address_space_bytes to user_address_space_limit()")
+
     return defects
 
 
@@ -757,7 +789,7 @@ class PlatformRealityTests(unittest.TestCase):
         # Baseline: real files produce zero defects
         self.assertEqual(_user_address_space_defects(user, services), [])
 
-        # Mutation 1: break the dynamic reserve formula
+        # Mutation 1: break the dynamic reserve formula inside the function body
         m1_user = user.replace(
             "let reserve = (detected / 4).max(64 * 1024 * 1024);",
             "let reserve = 0usize;"
@@ -771,9 +803,26 @@ class PlatformRealityTests(unittest.TestCase):
         )
         self.assertIn("services.rs does not wire max_address_space_bytes to user_address_space_limit()", _user_address_space_defects(user, m2_services))
 
-        # Mutation 3: corrupt refusal string
-        m3_user = user.replace('"userspace address-space limit exceeded"', '"memory limit exceeded"')
-        self.assertIn("missing 'userspace address-space limit exceeded'", _user_address_space_defects(m3_user, services))
+        # Mutation 3: hardcode fallback in body instead of referencing USER_ADDRESS_SPACE_LIMIT
+        m3_user = user.replace(
+            "if detected_ram_bytes == 0 {\n        USER_ADDRESS_SPACE_LIMIT",
+            "if detected_ram_bytes == 0 {\n        256 * 1024 * 1024"
+        )
+        self.assertIn("compute_dynamic_user_address_space_limit body does not reference USER_ADDRESS_SPACE_LIMIT", _user_address_space_defects(m3_user, services))
+
+        # Mutation 4: delete live return Err("userspace address-space limit exceeded") in load_user_elf_into_page_table
+        m4_user = user.replace(
+            'return Err("userspace address-space limit exceeded");',
+            'return Err("segment error");'
+        )
+        self.assertIn("load_user_elf_into_page_table missing live return Err('userspace address-space limit exceeded')", _user_address_space_defects(m4_user, services))
+
+        # Mutation 5: delete live return Err("userspace address-space budget exceeded") in spawn_user_process_with_limits
+        m5_user = user.replace(
+            'return Err("userspace address-space budget exceeded");',
+            'return Err("budget error");'
+        )
+        self.assertIn("spawn_user_process_with_limits missing live return Err('userspace address-space budget exceeded')", _user_address_space_defects(m5_user, services))
 
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")
