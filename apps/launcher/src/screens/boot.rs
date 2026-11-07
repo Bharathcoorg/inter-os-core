@@ -814,6 +814,15 @@ fn wordmark_frame() -> &'static Wordmark {
     slot
 }
 
+/// Drops the boot screen's memoised layout and wordmark frame.
+pub fn invalidate_boot_frame() {
+    let layout = unsafe { &mut *LAYOUT.0.get() };
+    layout.resolved = false;
+    let wordmark = unsafe { &mut *WORDMARK_RUN.0.get() };
+    wordmark.resolved = false;
+    wordmark.run = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
