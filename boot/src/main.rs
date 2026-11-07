@@ -23,40 +23,24 @@ fn main() -> anyhow::Result<()> {
             if ap.exists() {
                 ap
             } else {
-                let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
-                let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
-                let candidates = vec![p1, p2];
-                let mut best: Option<PathBuf> = None;
-                let mut best_mtime = None;
-                for c in candidates {
-                    if c.exists() {
-                        if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
-                            if best_mtime.is_none() || Some(m) > best_mtime {
-                                best_mtime = Some(m);
-                                best = Some(c);
-                            }
-                        }
-                    }
-                }
-                best.unwrap_or(ap)
+                anyhow::bail!("Specified kernel ELF path does not exist: {:?}", ap);
             }
         } else {
-            let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
-            let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
-            let candidates = vec![p1, p2];
-            let mut best: Option<PathBuf> = None;
-            let mut best_mtime = None;
-            for c in candidates {
-                if c.exists() {
-                    if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
-                        if best_mtime.is_none() || Some(m) > best_mtime {
-                            best_mtime = Some(m);
-                            best = Some(c);
-                        }
-                    }
-                }
+            let p1 = PathBuf::from("kernel/target/x86_64-unknown-none/release/kernel");
+            let p2 = PathBuf::from("target/x86_64-unknown-none/release/kernel");
+            let p3 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
+            let p4 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
+            if p1.exists() {
+                p1
+            } else if p2.exists() {
+                p2
+            } else if p3.exists() {
+                p3
+            } else if p4.exists() {
+                p4
+            } else {
+                anyhow::bail!("Kernel ELF not found in standard target locations");
             }
-            best.unwrap_or_else(|| PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel"))
         }
     };
 

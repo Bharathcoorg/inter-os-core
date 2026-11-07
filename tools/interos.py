@@ -420,23 +420,28 @@ def _build_x86_kernel_and_image():
     ]
     if kernel_profile == "release":
         cargo_build.append("--release")
+    target_base = Path(os.environ["CARGO_TARGET_DIR"]) if "CARGO_TARGET_DIR" in os.environ else (WORKSPACE_ROOT / "kernel" / "target")
+    canonical_kernel = target_base / "x86_64-unknown-none" / kernel_profile / "kernel"
+    if canonical_kernel.exists():
+        try:
+            canonical_kernel.unlink()
+        except OSError:
+            pass
+
     res = subprocess.run(cargo_build, cwd=str(WORKSPACE_ROOT))
     if res.returncode != 0:
         log_error("x86_64 kernel build failed")
         return res.returncode
 
-    k1 = WORKSPACE_ROOT / "kernel" / "target" / "x86_64-unknown-none" / kernel_profile / "kernel"
-    k2 = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / kernel_profile / "kernel"
-    kernel_path = k1 if (k1.exists() and (not k2.exists() or k1.stat().st_mtime >= k2.stat().st_mtime)) else k2
-    if not kernel_path.exists():
-        log_error(f"Kernel artifact missing after successful cargo build: {kernel_path}")
+    if not canonical_kernel.exists():
+        log_error(f"Kernel artifact missing after successful cargo build: {canonical_kernel}")
         return 1
 
-    if kernel_path == k1:
-        k2.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(k1, k2)
-    elif kernel_path == k2 and k1.parent.exists():
-        shutil.copy2(k2, k1)
+    target_mirror = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / kernel_profile / "kernel"
+    target_mirror.parent.mkdir(parents=True, exist_ok=True)
+    if canonical_kernel.resolve() != target_mirror.resolve():
+        shutil.copy2(canonical_kernel, target_mirror)
+    kernel_path = canonical_kernel
 
     log("Packaging canonical QEMU Phone BIOS image...")
     res = subprocess.run([
@@ -493,15 +498,19 @@ ARM64_TEXT_OFFSET_FIELD = 0x08
 ARM64_IMAGE_SIZE_FIELD = 0x10
 
 
-def aarch64_elf_candidates():
-    """Every place cargo may have written the aarch64 kernel ELF.
+def resolve_aarch64_kernel_elf(profile="debug"):
+    target_base = Path(os.environ["CARGO_TARGET_DIR"]) if "CARGO_TARGET_DIR" in os.environ else (AARCH64_KERNEL_DIR / "target")
+    canonical = target_base / AARCH64_TARGET_TRIPLE / profile / "kernel-aarch64"
+    if canonical.exists():
+        return canonical
+    target_mirror = TARGET_DIR / AARCH64_TARGET_TRIPLE / profile / "kernel-aarch64"
+    if target_mirror.exists():
+        return target_mirror
+    return canonical
 
-    WHY more than one: the crate is excluded from the root workspace, so its own
-    `kernel-aarch64/target/` holds the normal build, but a build driven from a
-    different `CARGO_TARGET_DIR` lands in the workspace target instead. Picking
-    the newest existing candidate reports the image that was just built instead
-    of packing a stale ELF from the other directory.
-    """
+
+def aarch64_elf_candidates():
+    """Compatibility helper returning candidates in deterministic order."""
     candidates = []
     for root in (AARCH64_KERNEL_DIR / "target", TARGET_DIR):
         for profile in ("debug", "release"):
@@ -577,16 +586,14 @@ def pack_aarch64_flat_image(elf_path, image_path):
     return len(image)
 
 
-def _pack_aarch64_image():
+def _pack_aarch64_image(profile="debug"):
     """Build-step entry point: pack the aarch64 ELF into the flat QEMU Image."""
-    existing = [path for path in aarch64_elf_candidates() if path.exists()]
-    if not existing:
+    elf_path = resolve_aarch64_kernel_elf(profile)
+    if not elf_path.exists():
         log_error(
-            "aarch64 kernel ELF not found; tried: "
-            + ", ".join(str(p.relative_to(WORKSPACE_ROOT)) for p in aarch64_elf_candidates())
+            f"aarch64 kernel ELF not found at expected path: {elf_path.relative_to(WORKSPACE_ROOT)}"
         )
         return 1
-    elf_path = max(existing, key=lambda path: path.stat().st_mtime)
     log(f"Packing flat arm64 Image for QEMU direct boot from {elf_path.name}...")
     size = pack_aarch64_flat_image(elf_path, AARCH64_FLAT_IMAGE)
     if size is None:
@@ -1154,16 +1161,20 @@ def cmd_pack(args):
             log_error(f"Manifest missing required field: {field}")
             return 1
     bin_dir = app_dir / "bin"
-    elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
-    if not elf_candidates:
+    entrypoint = manifest_data.get("entrypoint", f"{app_name}.elf")
+    target_elf = bin_dir / entrypoint
+    if not target_elf.exists():
         build_ret = cmd_build(argparse.Namespace(name=app_name, target=None, arch="x86_64-unknown-none"))
         if build_ret != 0:
             return build_ret
-        elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
-        if not elf_candidates:
-            log_error("No ELF payload found in app/bin after the automatic build")
-            return 1
-    payload = elf_candidates[0].read_bytes()
+        if not target_elf.exists():
+            elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
+            if elf_candidates:
+                target_elf = elf_candidates[0]
+            else:
+                log_error(f"No ELF payload {entrypoint} found in app/bin after the build")
+                return 1
+    payload = target_elf.read_bytes()
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives import serialization

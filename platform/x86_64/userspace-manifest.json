@@ -56,6 +56,11 @@
       "manifest": "userspace/system-service/Cargo.toml"
     },
     {
+      "name": "aid",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
       "name": "compositor",
       "kind": "application",
       "manifest": "apps/compositor/Cargo.toml"
