@@ -120,7 +120,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_tap_latency_bench.py": 49,
     "tests/test_tls_trust_contract.py": 24,
     "tests/test_tracked_artefact_contract.py": 5,
-    "tests/test_type_scale_contract.py": 8,
+    "tests/test_type_scale_contract.py": 10,
     "tests/test_ui_design_goal_contract.py": 5,
     "tests/test_user_account_contract.py": 5,
     "tests/test_vault_truth_contract.py": 7,

@@ -1101,6 +1101,16 @@ fn frame_for(x: usize, y: usize, state: &LauncherState) -> &Frame {
     &slot.frame
 }
 
+/// Drops the lock screen's cached frame plan.
+///
+/// Clears the memoised layout so a subsequent paint pass or text-scale
+/// rung change forces a complete re-measurement.
+pub fn invalidate_lock_frame() {
+    let slot = unsafe { &mut *FRAME_MEMO.0.get() };
+    slot.measured = false;
+    slot.state = 0;
+}
+
 // --- PIN keypad -------------------------------------------------------------
 //
 // WHY the grid lives in one place: this keypad used to be written twice -- a

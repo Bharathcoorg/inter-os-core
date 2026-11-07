@@ -545,3 +545,59 @@ def test_the_apps_that_carry_the_persons_text_size_are_named():
             "before its first frame and again per wake, because the size is "
             "changed in Settings while the screen is alive"
         )
+
+
+CACHED_SURFACE_INVALIDATORS = {
+    "home.rs": "screens::home::invalidate_paint_cache",
+    "app_drawer.rs": "screens::app_drawer::invalidate_app_drawer_frame",
+    "live_widgets.rs": "screens::live_widgets::invalidate_widgets_cache",
+    "search.rs": "screens::search::invalidate_search_frame",
+    "activity.rs": "screens::activity::invalidate_activity_frame",
+    "recents.rs": "screens::recents::invalidate_recents_frame",
+    "notifications.rs": "screens::notifications::invalidate_events_frame",
+    "quick_controls.rs": "screens::quick_controls::invalidate_frame_cache",
+    "lock.rs": "screens::lock::invalidate_lock_frame",
+}
+
+
+def _rung_invalidation_defects(main_code: str) -> list[str]:
+    defects = []
+    if "fn invalidate_rung_caches()" not in main_code:
+        defects.append("main.rs does not define invalidate_rung_caches")
+        return defects
+
+    start = main_code.index("fn invalidate_rung_caches()")
+    brace = main_code.index("{", start)
+    end = main_code.index("}", brace)
+    body = main_code[brace:end]
+
+    for screen_file, invoker in CACHED_SURFACE_INVALIDATORS.items():
+        if invoker not in body:
+            defects.append(f"invalidate_rung_caches does not call {invoker} for {screen_file}")
+
+    if "let rung_moved = publish_text_scale();" not in main_code or "invalidate_rung_caches();" not in main_code:
+        defects.append("main.rs does not call invalidate_rung_caches when publish_text_scale moves")
+
+    return defects
+
+
+def test_launcher_screens_with_paint_caches_are_invalidated_on_rung_change():
+    """All 9 launcher screens with cached frame plans are invalidated when the text scale moves."""
+    main_code = (APPS / "launcher" / "src" / "main.rs").read_text(encoding="utf-8")
+    defects = _rung_invalidation_defects(main_code)
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_launcher_rung_invalidation_gate_can_fail():
+    """Each detector above trips when an invalidator is dropped or rung change does not call it."""
+    main_code = (APPS / "launcher" / "src" / "main.rs").read_text(encoding="utf-8")
+    assert _rung_invalidation_defects(main_code) == []
+
+    # 1. Dropping one screen invalidator
+    dropped = main_code.replace("screens::lock::invalidate_lock_frame();", "")
+    assert any("screens::lock::invalidate_lock_frame" in d for d in _rung_invalidation_defects(dropped))
+
+    # 2. Dropping the call when rung moves
+    uncall = main_code.replace("invalidate_rung_caches();", "")
+    assert any("does not call invalidate_rung_caches" in d for d in _rung_invalidation_defects(uncall))
+

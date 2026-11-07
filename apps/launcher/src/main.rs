@@ -713,6 +713,10 @@ fn invalidate_rung_caches() {
     screens::live_widgets::invalidate_widgets_cache();
     screens::search::invalidate_search_frame();
     screens::activity::invalidate_activity_frame();
+    screens::recents::invalidate_recents_frame();
+    screens::notifications::invalidate_events_frame();
+    screens::quick_controls::invalidate_frame_cache();
+    screens::lock::invalidate_lock_frame();
 }
 
 /// WHY the slot is resolved by type and not written down: the kernel
