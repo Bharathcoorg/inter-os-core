@@ -727,7 +727,7 @@ def test_the_weight_pricing_gate_can_fail():
     assert any("no longer defines weight_bytes" in d for d in _weight_pricing_defects(missing))
 
 
-def _gemma_declared_architecture_defects(inference: str, weights: str, lib: str) -> list[str]:
+def _gemma_declared_architecture_defects(inference: str, weights: str, lib: str, model_path: Path = None) -> list[str]:
     defects = []
     if "ModelIdentity::from_gguf" not in inference:
         defects.append("inference.rs does not parse ModelIdentity::from_gguf from metadata")
@@ -748,9 +748,11 @@ def _gemma_declared_architecture_defects(inference: str, weights: str, lib: str)
     if "config.check_admission(info.file_type)" not in inference:
         defects.append("ModelConfig::from_gguf does not consult check_admission with declared file_type")
 
-    # Binary GGUF assertions if physical model exists on host
-    real_path = Path("target/verify/models/embeddinggemma-300M-Q8_0.gguf")
-    if real_path.exists():
+    # Binary GGUF assertions: fail loudly if model artifact is missing
+    real_path = model_path if model_path is not None else Path("target/verify/models/embeddinggemma-300M-Q8_0.gguf")
+    if not real_path.exists():
+        defects.append(f"Model file {real_path} not found: binary GGUF header verification requires declared artifact")
+    else:
         with open(real_path, "rb") as f:
             header = f.read(24)
             magic, version, tensor_count, kv_count = struct.unpack("<4sIQQ", header)
@@ -795,4 +797,7 @@ def test_the_declared_architecture_contract_can_fail():
     # 4. Dropping check_admission
     no_adm = inference.replace("pub fn check_admission", "pub fn unverified_admission")
     assert any("check_admission" in d for d in _gemma_declared_architecture_defects(no_adm, weights, lib))
+
+    # 5. Missing model artifact causes failure (fail-closed, not silently skipped)
+    assert any("Model file" in d for d in _gemma_declared_architecture_defects(inference, weights, lib, model_path=Path("nonexistent_model.gguf")))
 

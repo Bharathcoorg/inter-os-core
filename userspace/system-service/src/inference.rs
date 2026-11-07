@@ -4082,11 +4082,10 @@ pub mod tests {
                 None
             }
         }) else {
-            file_bytes::println!(
-                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 the 333 MB GGUF was never opened and only hand-written fixtures were priced."
+            panic!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Verifying model config pricing against model file requires the model file."
             );
-            return;
         };
 
         // The metadata the walk needs is under a kilobyte into a 6.5 MB block, but

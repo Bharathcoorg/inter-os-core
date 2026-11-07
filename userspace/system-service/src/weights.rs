@@ -1464,12 +1464,10 @@ pub mod tests {
                 None
             }
         }) else {
-            rust_std::println!(
-                "NOT VERIFIED through the window: INTEROS_REAL_GGUF_PATH is unset, so no \
-                 metadata of the 333 MB GGUF was passed a window at a time and the only \
-                 walk this suite ran was the in-memory one."
+            panic!(
+                "NOT VERIFIED through the window: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Walking descriptor table through metadata window requires the model file."
             );
-            return;
         };
         let (slice_table, prefix, prefix_bytes) = walk_the_installed_table(&path)
             .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked: {why}"));
@@ -1691,12 +1689,10 @@ pub mod tests {
                 None
             }
         }) else {
-            rust_std::println!(
-                "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 no tensor of the 333 MB GGUF was read and the loader ran only on hand-written \
-                 fixtures."
+            panic!(
+                "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Running block-by-block inference requires the installed model weights."
             );
-            return;
         };
 
         // 1. One pass over the descriptor table. The prefix it walked over is kept
@@ -2596,11 +2592,10 @@ pub mod tests {
                 None
             }
         }) else {
-            rust_std::println!(
-                "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 no tensor of the 333 MB GGUF was read through the platform's read bound."
+            panic!(
+                "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Testing block loads through platform read bounds requires the model file."
             );
-            return;
         };
 
         let (table, prefix, _) = walk_the_installed_table(&path)

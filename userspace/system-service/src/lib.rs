@@ -3901,12 +3901,10 @@ mod tests {
                 None
             }
         }) else {
-            real_file::println!(
-                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 the identity clause has only ever quoted a hand-written fixture and the \
-                 loader has only ever been handed one."
+            panic!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Verifying identity clause against installed model requires the model file."
             );
-            return;
         };
         // The same window the engine's own real-file test reads: enough for every key
         // before the vocabulary, and the walk stops there by design.

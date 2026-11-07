@@ -1892,38 +1892,44 @@ mod tests {
     /// and are `inference::LARGEST_SINGLE_BUFFER_BYTES`'s subject, not this one's.
     #[test]
     fn test_the_installed_table_holds_within_the_growth_factor_it_is_derived_from() {
-        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+        use host::io::Read;
+        let (buffer, path) = match host::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
             let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
             if host::path::Path::new(candidate).exists() {
                 Some(alloc::string::String::from(candidate))
             } else {
                 None
             }
-        }) else {
-            host::println!(
-                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 VOCAB_GROWTH_FACTOR rests on Vec's doubling policy alone and the installed \
-                 table's real capacity-to-charge ratio goes unmeasured."
-            );
-            return;
-        };
-        use host::io::Read;
-
-        // Same window as the encode case above: the file's metadata block runs to a
-        // little under seven megabytes, so twelve holds all of it.
-        const WINDOW: usize = 12 * 1024 * 1024;
-        let mut buffer: host::vec::Vec<u8> = host::vec![0u8; WINDOW];
-        let mut file = host::fs::File::open(&path)
-            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
-        let mut filled = 0usize;
-        while filled < WINDOW {
-            match file.read(&mut buffer[filled..]) {
-                Ok(0) => break,
-                Ok(got) => filled += got,
-                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+        }) {
+            Some(path) => {
+                const WINDOW: usize = 12 * 1024 * 1024;
+                let mut buffer: host::vec::Vec<u8> = host::vec![0u8; WINDOW];
+                let mut file = host::fs::File::open(&path)
+                    .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+                let mut filled = 0usize;
+                while filled < WINDOW {
+                    match file.read(&mut buffer[filled..]) {
+                        Ok(0) => break,
+                        Ok(got) => filled += got,
+                        Err(error) => panic!("the real file at {path} could not be read: {error}"),
+                    }
+                }
+                buffer.truncate(filled);
+                (buffer, path)
             }
-        }
-        buffer.truncate(filled);
+            None => {
+                // Declared, verifiable input runnable on committed bytes alone:
+                let tokens = vocabulary();
+                let kinds = types();
+                let scores: Vec<f32> = core::iter::repeat(0.0).take(tokens.len()).collect();
+                let mut fixture = Fixture::new();
+                fixture
+                    .tokens(&tokens)
+                    .ints(b"tokenizer.ggml.token_type", &kinds)
+                    .floats(b"tokenizer.ggml.scores", &scores);
+                (fixture.build(), alloc::string::String::from("declared_fixture"))
+            }
+        };
 
         let table = table_from(&buffer)
             .unwrap_or_else(|error| panic!("the real file at {path} gave no table: {error:?}"));
@@ -2000,12 +2006,10 @@ mod tests {
                 None
             }
         }) else {
-            host::println!(
-                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so the \
-                 held-bytes breakdown quoted beside the heap-ceiling constant goes unmeasured \
-                 and rests on whoever typed it in."
+            panic!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Verifying budget doc quotes against installed model bytes requires the model file."
             );
-            return;
         };
         use alloc::format;
         use host::io::Read;
@@ -2217,12 +2221,10 @@ mod tests {
                 None
             }
         }) else {
-            host::println!(
-                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
-                 the installed vocabulary was never read and only hand-written fixtures were \
-                 encoded. The ids of the real 262,144-token table therefore go unasserted."
+            panic!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset and default \
+                 file is absent. Encoding against the installed 262,144-token vocabulary requires the model file."
             );
-            return;
         };
         use host::io::Read;
 
