@@ -450,15 +450,17 @@ pub static ATA_BOOT: Mutex<Option<AtaDrive>> = Mutex::new(None);
 /// Global synchronized ATA controller instance for persistent storage.
 pub static ATA_PRIMARY: Mutex<Option<AtaDrive>> = Mutex::new(None);
 
-/// The staging disk provisioning reads a model payload from, when one is
-/// attached to the secondary channel.
+/// Secondary ATA channel master drive.
 ///
-/// WHY this is a separate static and not part of `ATA_PRIMARY`: the data disk is
-/// the device the OS stores on, and nothing may ever be written to it from a
-/// path that did not decide to write to it. A staging disk is read-only input
-/// that provisioning looks for by name, and on the device a person carries it is
-/// simply `None` -- which is the whole reason the provisioning path costs nothing
-/// there.
+/// NOTE on platform topology and VFS provisioning truth: in canonical QEMU
+/// instances (`emulator/server.py`), only primary master (`ATA_BOOT` on `ide.0,unit=0`)
+/// and primary slave (`ATA_PRIMARY` on `ide.0,unit=1`) are attached. The secondary
+/// channel (`ide.1`) has no physical disk attached, so `probe_staging_channel()`
+/// consistently finds no device (`None`). Model provisioning in InterOS operates
+/// directly via `ATA_PRIMARY` using host-prepared InterFS images (via `tools/model_provisioning.py`),
+/// imported at boot via `kernel/src/fs/vfs.rs:import_provisioned_models()`. This secondary
+/// staging drive handle is preserved for physical secondary-channel controller hardware,
+/// but is unattached in standard QEMU emulation.
 pub static ATA_STAGING: Mutex<Option<AtaDrive>> = Mutex::new(None);
 
 /// Initializes and probes the ATA hard drives.
