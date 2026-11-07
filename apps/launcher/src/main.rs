@@ -1525,7 +1525,14 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
         return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
     }
 
-    launcher::search::AiEmbeddingStatus::Available { abi_version }
+    // 3. Platform Truth Contract: The presence of the inference daemon and model weights
+    // does not constitute neural search integration in the launcher. The launcher currently
+    // has no IPC query channel to `aid` (`0xFFFF_000C`) for neural embeddings. Calling
+    // `compute_text_embedding_q7` executes a local lexical n-gram hash projection, not neural
+    // retrieval. Under AGENTS.md ("do not claim system-wide integration until launcher-to-service
+    // IPC, authorization, and real retrieval are tested"), we honestly report unavailable.
+    let _ = abi_version;
+    launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC retrieval unintegrated")
 }
 
 /// The ranker the search runs with.
@@ -1632,7 +1639,7 @@ fn refresh_search_index(state: &mut LauncherState) {
         Err(reason) => state.search_index.set_files_state(SourceState::Unavailable(reason)),
     }
 
-    // 4. System AI & embedding service status (probed via IPC/VFS).
+    // 4. System AI & embedding service status (probed via registry/VFS).
     let ai_status = probe_system_ai_status();
     match ai_status {
         launcher::search::AiEmbeddingStatus::Available { .. } => {

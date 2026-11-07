@@ -344,8 +344,10 @@ impl Ranker for SemanticRanker {
             return base_score;
         }
 
-        // When physical weights and AI service are available, compute cosine similarity
-        // between query and entry in 128-D Matryoshka space
+        // Platform Truth Contract: `compute_text_embedding_q7` is a lexical n-gram hash
+        // projection into 128-D space, not a neural embedding from weights. True neural
+        // retrieval requires IPC vector query to `aid` (`0xFFFF_000C`). When AI status
+        // is marked available, this calculates similarity using the deterministic n-gram projection.
         let mut query_vec = [0i8; 128];
         let mut entry_vec = [0i8; 128];
         interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
