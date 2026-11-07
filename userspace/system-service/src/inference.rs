@@ -1085,7 +1085,6 @@ impl ModelConfig {
             0 => Ok(params.saturating_mul(4)),            // F32: 4 bytes/weight
             1 => Ok(params.saturating_mul(2)),            // F16: 2 bytes/weight
             2 => Ok((params.saturating_mul(18)) / 32),    // Q4_0: 4.5 bits/weight
-            3 => Ok((params.saturating_mul(20)) / 32),    // Q4_1: 5 bits/weight
             7 | 8 => Ok((params.saturating_mul(34)) / 32), // Q8_0: 8.5 bits/weight (7 in GGUF file_type, 8 in GGML type)
             12 => Ok((params.saturating_mul(144)) / 256), // Q4_K: 4.5 bits/weight
             other => Err(InferenceError::UnsupportedQuantization(other)),

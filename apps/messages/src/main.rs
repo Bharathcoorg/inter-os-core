@@ -348,15 +348,18 @@ impl MessagesApp {
         self.convo_scroll.offset = self.convo_scroll.max_offset();
     }
 
-    /// Derives the 256-bit AES-GCM / ChaCha20 session key from Keystore Slot 3.
+    /// Probes Keystore Slot 3 for session key derivation.
+    ///
+    /// WHY this always reports refused: Under the Platform Truth Contract and kernel
+    /// security policy (`sys_keystore_derive`), raw cryptographic key material never
+    /// crosses the kernel/userspace boundary to Ring 3. The probe honestly records
+    /// the kernel's refusal.
     pub fn derive_messaging_key(&mut self) -> bool {
         let mut key = [0u8; 32];
         match std::keystore_derive(3, &mut key) {
             Ok(32) => {
                 self.keystore_derived = true;
-                std::log("[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.",
-                )
-                .ok();
+                std::log("[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.").ok();
                 true
             }
             Ok(_) => {
@@ -364,7 +367,8 @@ impl MessagesApp {
                 false
             }
             Err(_) => {
-                std::log("[MESSAGES APP] Keystore Slot 3: derivation refused by the kernel; no session key.").ok();
+                self.keystore_derived = false;
+                std::log("[MESSAGES APP] Keystore Slot 3: derivation refused by kernel policy; raw keys never cross to Ring 3.").ok();
                 false
             }
         }

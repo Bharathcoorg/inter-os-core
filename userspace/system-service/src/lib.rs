@@ -2231,6 +2231,15 @@ pub fn handle_ipc_inference_query(
     }
 
     // 2. Generative token stream queries (Gemma 4 2B / on-device generative)
+    //
+    // Platform Truth Contract & Architecture Boundary: Full generative autoregressive
+    // text generation (`inference::generate()`) requires resident weights (which exceed
+    // the 120 MiB process scratch ceiling for Gemma-class models >1.1 GiB) or an
+    // autoregressive streamed block reader. Real generative inference in the initial
+    // developer architecture is host-backed via development bridge; on-device generative
+    // queries without resident generative weights truthfully reply with STATUS_UNSUPPORTED
+    // or STATUS_UNAVAILABLE plus the structured model gap notice, refusing to fabricate
+    // synthetic prose.
     if msg_type == MSG_TYPE_GENERATE
         || msg_type == MSG_TYPE_GENERATE_ALT
         || (payload.len() >= 4 && (&payload[..4] == b"GENR" || &payload[..4] == b"GEN:"))
@@ -2517,6 +2526,9 @@ pub fn handle_ipc_inference_query(
             .ok()
             .and_then(|_| std::get_ticks().ok())
             .unwrap_or(start_tick);
+        // The platform timer exposes millisecond-resolution ticks (PIT);
+        // multiplying by 1000 converts elapsed milliseconds to nominal microseconds
+        // for the wire descriptor `AiInferenceResponse.latency_micros` (1ms granularity).
         let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
 
         let resp_hdr = std::ai::AiInferenceResponse {
