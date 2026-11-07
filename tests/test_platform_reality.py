@@ -720,6 +720,14 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertNotIn("set_total_physical_ram_bytes_for_test", user)
         self.assertIn("crate::memory::hold_detected_ram_for_test()", user)
 
+    def test_user_address_space_limit_is_derived_and_refused_by_name(self):
+        user = self.read("kernel/src/task/user.rs")
+        self.assertIn("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize", user)
+        self.assertIn("pub fn user_address_space_limit() -> usize", user)
+        self.assertIn('classified as "not reported"', user)
+        self.assertIn("userspace address-space limit exceeded", user)
+        self.assertIn("userspace address-space budget exceeded", user)
+
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")
         start = scheduler.index("pub fn dump_process_table")

@@ -102,7 +102,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_notes_truth_contract.py": 17,
     "tests/test_notification_contract.py": 6,
     "tests/test_permission_policy_contract.py": 6,
-    "tests/test_platform_reality.py": 65,
+    "tests/test_platform_reality.py": 66,
     "tests/test_qemu_phone_profile_contract.py": 3,
     "tests/test_rapp_trust_contract.py": 8,
     "tests/test_runner_integrity.py": 15,

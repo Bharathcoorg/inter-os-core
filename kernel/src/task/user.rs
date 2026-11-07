@@ -28,21 +28,45 @@ pub const USER_STACK_SIZE: usize = 256 * 1024;
 /// to 64 MiB (0x0400_0000) provides ample headroom for user images while staying
 /// well within the userspace address limit.
 pub const USER_STACK_TOP: usize = 0x0400_0000;
+/// The fallback per-process address-space ceiling when RAM telemetry has not been reported.
+///
+/// WHY this is a fallback rather than a hard ceiling: 256 MiB was the authored limit before
+/// dynamic scaling from physical RAM was implemented. When memory detection has completed,
+/// `user_address_space_limit()` derives the actual limit from detected physical RAM via
+/// `compute_dynamic_user_address_space_limit`.
 pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
-/// Computes the dynamic userspace address-space limit based on detected physical RAM.
+/// Computes the dynamic userspace address-space limit given detected physical RAM bytes.
 ///
-/// When detected physical RAM is 0 (uninitialized or unrecorded), it falls back to
-/// `USER_ADDRESS_SPACE_LIMIT`. When RAM is known, it reserves 25% (at least 64 MiB)
-/// for kernel, drivers, and peer processes, granting up to 75% to user processes.
-pub fn user_address_space_limit() -> usize {
-    let detected = crate::memory::total_physical_ram_bytes() as usize;
-    if detected == 0 {
+/// # Arithmetic and Direction
+/// - When `detected_ram_bytes == 0`: classified as "not reported" (detection has not run or
+///   yielded no valid reading), never as "no memory". Falls back to `USER_ADDRESS_SPACE_LIMIT`
+///   (256 MiB), because clamping to zero would refuse every process on a functioning guest.
+/// - When `detected_ram_bytes > 0`: reserves 25% of RAM (at least 64 MiB) for the kernel,
+///   page tables, frame allocator, and peer services, granting the remaining 75%
+///   (`detected - reserve`) to userspace processes.
+///   - On a 256 MiB guest: reserves 64 MiB, granting 192 MiB.
+///   - On a 512 MiB guest: reserves 128 MiB, granting 384 MiB.
+///   - On a 2 GiB guest: reserves 512 MiB, granting 1536 MiB.
+///   - On a 4 GiB guest: reserves 1024 MiB, granting 3072 MiB.
+///
+/// A process requesting address space beyond this limit is refused by name with
+/// `"userspace address-space limit exceeded"` in `load_user_elf_into_page_table` and
+/// `"userspace address-space budget exceeded"` during process instantiation.
+pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {
+    if detected_ram_bytes == 0 {
         USER_ADDRESS_SPACE_LIMIT
     } else {
+        let detected = detected_ram_bytes as usize;
         let reserve = (detected / 4).max(64 * 1024 * 1024);
         detected.saturating_sub(reserve)
     }
+}
+
+/// The address-space limit for a user process under the guest's detected physical RAM.
+#[inline]
+pub fn user_address_space_limit() -> usize {
+    compute_dynamic_user_address_space_limit(crate::memory::total_physical_ram_bytes())
 }
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
@@ -2359,17 +2383,20 @@ mod tests {
     fn test_user_address_space_limit_scales_with_detected_physical_ram() {
         let ram = crate::memory::hold_detected_ram_for_test();
 
-        // Nothing recorded: the authored default is the only honest answer
+        // Zero detected RAM: classified as not reported, falls back to USER_ADDRESS_SPACE_LIMIT
         ram.set(0);
         assert_eq!(user_address_space_limit(), USER_ADDRESS_SPACE_LIMIT);
+        assert_eq!(compute_dynamic_user_address_space_limit(0), USER_ADDRESS_SPACE_LIMIT);
 
         // On a 256 MiB platform: 25% reserve is 64 MiB, limit is 192 MiB
         ram.set(256 * 1024 * 1024);
         assert_eq!(user_address_space_limit(), 192 * 1024 * 1024);
+        assert_eq!(compute_dynamic_user_address_space_limit(256 * 1024 * 1024), 192 * 1024 * 1024);
 
         // On a 512 MiB platform: 25% reserve is 128 MiB, limit is 384 MiB
         ram.set(512 * 1024 * 1024);
         assert_eq!(user_address_space_limit(), 384 * 1024 * 1024);
+        assert_eq!(compute_dynamic_user_address_space_limit(512 * 1024 * 1024), 384 * 1024 * 1024);
 
         // On a 2 GiB platform: 25% reserve is 512 MiB, limit is 1.5 GiB (> 256 MiB)
         ram.set(2048 * 1024 * 1024);
