@@ -150,7 +150,7 @@ pub fn dynamic_user_address_space_budget() -> usize {
             return compute_dynamic_address_space_budget(telem.total_bytes);
         }
     }
-    1536 * 1024 * 1024
+    compute_dynamic_address_space_budget(0)
 }
 
 /// Bytes the biggest single buffer one run may ask the heap for.
@@ -4429,17 +4429,30 @@ pub mod tests {
             ))
         );
 
-        // 3. Admission check refuses 2B Q8 weights even with 1 KV head against 1536 MiB limit
+        // 3. Admission check refuses 2B Q8 weights even with 1 KV head against limits
         let conv_2b_1kv = ModelConfig {
             num_kv_heads: 1,
             ..conv_2b
         };
         let q8_weight_1kv = conv_2b_1kv.weight_bytes(8).expect("Q8_0 is supported");
+
+        // Tested against a 2 GiB machine budget (1536 MiB user address space)
+        let budget_2g = compute_dynamic_address_space_budget(2048 * 1024 * 1024);
+        assert_eq!(budget_2g, 1536 * 1024 * 1024);
+        assert_eq!(
+            conv_2b_1kv.check_admission_against(Some(8), budget_2g),
+            Err(InferenceError::ScratchTooLarge(
+                q8_weight_1kv + conv_2b_1kv.scratch_bytes(),
+                1536 * 1024 * 1024
+            ))
+        );
+
+        // Tested against default fallback budget (256 MiB user address space)
         assert_eq!(
             conv_2b_1kv.check_admission(Some(8)),
             Err(InferenceError::ScratchTooLarge(
                 q8_weight_1kv + conv_2b_1kv.scratch_bytes(),
-                1536 * 1024 * 1024
+                FALLBACK_USER_ADDRESS_SPACE_LIMIT
             ))
         );
 

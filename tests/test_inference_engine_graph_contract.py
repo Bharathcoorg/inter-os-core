@@ -1,4 +1,3 @@
-import struct
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
@@ -23,6 +22,7 @@ into a copy and shows the detector parts; a gate nobody has seen fail is a comme
 """
 
 import re
+import struct
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

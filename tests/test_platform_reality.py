@@ -11,6 +11,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _user_address_space_defects(user: str, services: str) -> list[str]:
+    """Detects discrepancies in userspace address-space derivation, wiring, and refusal pins."""
+    defects = []
+    if "pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize" not in user:
+        defects.append("missing compute_dynamic_user_address_space_limit")
+    if "pub fn user_address_space_limit() -> usize" not in user:
+        defects.append("missing user_address_space_limit")
+    if 'classified as "not reported"' not in user:
+        defects.append("missing classified as 'not reported'")
+    if '"userspace address-space limit exceeded"' not in user:
+        defects.append("missing 'userspace address-space limit exceeded'")
+    if '"userspace address-space budget exceeded"' not in user:
+        defects.append("missing 'userspace address-space budget exceeded'")
+    if "let reserve = (detected / 4).max(64 * 1024 * 1024);" not in user:
+        defects.append("missing reserve formula (detected / 4).max(64 * 1024 * 1024)")
+    if "detected.saturating_sub(reserve)" not in user:
+        defects.append("missing saturating_sub(reserve)")
+    if "USER_ADDRESS_SPACE_LIMIT" not in user:
+        defects.append("missing USER_ADDRESS_SPACE_LIMIT fallback")
+    if "max_address_space_bytes: crate::task::user::user_address_space_limit() as u64," not in services:
+        defects.append("services.rs does not wire max_address_space_bytes to user_address_space_limit()")
+    return defects
+
+
 class PlatformRealityTests(unittest.TestCase):
     def read(self, path):
         return (ROOT / path).read_text(encoding="utf-8")
@@ -722,27 +746,34 @@ class PlatformRealityTests(unittest.TestCase):
 
     def test_user_address_space_limit_is_derived_and_refused_by_name(self):
         user = self.read("kernel/src/task/user.rs")
-        self.assertIn("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize", user)
-        self.assertIn("pub fn user_address_space_limit() -> usize", user)
-        start = user.index("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {")
-        end = user.index("\n}\n", start)
-        body = user[start:end]
-        self.assertIn("let reserve = (detected / 4).max(64 * 1024 * 1024);", body)
-        self.assertIn("detected.saturating_sub(reserve)", body)
-        self.assertIn("USER_ADDRESS_SPACE_LIMIT", body)
         services = self.read("kernel/src/services.rs")
-        self.assertIn("max_address_space_bytes: crate::task::user::user_address_space_limit() as u64,", services)
+        defects = _user_address_space_defects(user, services)
+        self.assertEqual(defects, [], f"Gate found defects: {defects}")
 
     def test_user_address_space_limit_gate_can_fail(self):
         user = self.read("kernel/src/task/user.rs")
-        start = user.index("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {")
-        end = user.index("\n}\n", start)
-        body = user[start:end]
-        mutated_body = body.replace(
+        services = self.read("kernel/src/services.rs")
+
+        # Baseline: real files produce zero defects
+        self.assertEqual(_user_address_space_defects(user, services), [])
+
+        # Mutation 1: break the dynamic reserve formula
+        m1_user = user.replace(
             "let reserve = (detected / 4).max(64 * 1024 * 1024);",
             "let reserve = 0usize;"
         )
-        self.assertNotIn("let reserve = (detected / 4).max(64 * 1024 * 1024);", mutated_body)
+        self.assertIn("missing reserve formula (detected / 4).max(64 * 1024 * 1024)", _user_address_space_defects(m1_user, services))
+
+        # Mutation 2: disconnect services.rs wiring
+        m2_services = services.replace(
+            "crate::task::user::user_address_space_limit()",
+            "256 * 1024 * 1024"
+        )
+        self.assertIn("services.rs does not wire max_address_space_bytes to user_address_space_limit()", _user_address_space_defects(user, m2_services))
+
+        # Mutation 3: corrupt refusal string
+        m3_user = user.replace('"userspace address-space limit exceeded"', '"memory limit exceeded"')
+        self.assertIn("missing 'userspace address-space limit exceeded'", _user_address_space_defects(m3_user, services))
 
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")
