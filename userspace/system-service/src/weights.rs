@@ -1182,7 +1182,10 @@ pub fn run_streamed_embedding<S: PositionRead>(
     if final_norm.len() < h_dim {
         return Err(InferenceError::CorruptedWeights.into());
     }
-    let positions = tokens.len().min(config.seq_len);
+    if tokens.len() > config.seq_len {
+        return Err(InferenceError::ContextLengthExceeded.into());
+    }
+    let positions = tokens.len();
     let scale = f32_sqrt(h_dim as f32);
 
     // WHY the accumulator is cleared here: this scratch is handed in by the
@@ -1671,6 +1674,43 @@ pub mod tests {
         assert!(!head_applied);
         assert!(empty_out.iter().all(|v| v.is_nan()));
         assert_eq!(reader.source.requests.len(), 0);
+    }
+
+    /// Untrusted input sequence exceeding the model's declared context length is refused,
+    /// never silently truncated.
+    #[test]
+    fn untrusted_input_exceeding_declared_seq_len_is_refused() {
+        let config = ModelConfig::default_test_config();
+        let image: Vec<u8> = Vec::new();
+        let mut reader = WeightReader::new(
+            TensorTable {
+                entries: Vec::new(),
+                data_start: 0,
+                alignment: 32,
+                window_pulls: 0,
+            },
+            BoundedImage::new(&image),
+        );
+        let mut scratch = Scratch::new(&config).expect("the fixture shape is under budget");
+        let mut kv_cache = KvCache::new(&config).expect("the fixture cache is under budget");
+        let mut row: Vec<u8> = Vec::new();
+        let final_norm = [1.0f32; 64];
+        let mut out = [0.0f32; 64];
+        // Sized from declared config.seq_len: exactly one token past the declared bound
+        let too_long = rust_std::vec![1u32; config.seq_len + 1];
+        assert_eq!(
+            run_streamed_embedding(
+                &mut reader,
+                &config,
+                &too_long,
+                &mut scratch,
+                &mut kv_cache,
+                &final_norm,
+                &mut row,
+                &mut out,
+            ),
+            Err(LoadError::Graph(InferenceError::ContextLengthExceeded))
+        );
     }
 
     /// The hop this module exists to close, taken against the installed file.

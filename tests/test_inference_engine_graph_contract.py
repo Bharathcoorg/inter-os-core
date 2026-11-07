@@ -801,3 +801,74 @@ def test_the_declared_architecture_contract_can_fail():
     # 5. Missing model artifact causes failure (fail-closed, not silently skipped)
     assert any("Model file" in d for d in _gemma_declared_architecture_defects(inference, weights, lib, model_path=Path("nonexistent_model.gguf")))
 
+
+def _untrusted_input_bound_defects(weights: str, inference: str) -> list[str]:
+    defects = []
+    stream_body = function_body(weights, "pub fn run_streamed_embedding<S: PositionRead>(")
+    if "tokens.len() > config.seq_len" not in stream_body:
+        defects.append("run_streamed_embedding does not enforce tokens.len() against config.seq_len")
+    if "ContextLengthExceeded" not in stream_body:
+        defects.append("run_streamed_embedding does not refuse over-length tokens with ContextLengthExceeded")
+    if "tokens.len().min(config.seq_len)" in stream_body:
+        defects.append("run_streamed_embedding silently truncates tokens with min(config.seq_len) instead of refusing")
+    if re.search(r"tokens\.len\(\)\s*>\s*\d+", stream_body):
+        defects.append("run_streamed_embedding bounds tokens with an authored integer constant instead of declared config.seq_len")
+
+    extract_body = function_body(inference, "pub fn extract_embedding(")
+    if "tokens.len() > config.seq_len" not in extract_body:
+        defects.append("extract_embedding does not enforce tokens.len() against config.seq_len")
+    if "ContextLengthExceeded" not in extract_body:
+        defects.append("extract_embedding does not refuse over-length tokens with ContextLengthExceeded")
+    if "tokens.len().min(config.seq_len)" in extract_body:
+        defects.append("extract_embedding silently truncates tokens with min(config.seq_len) instead of refusing")
+    if re.search(r"tokens\.len\(\)\s*>\s*\d+", extract_body):
+        defects.append("extract_embedding bounds tokens with an authored integer constant instead of declared config.seq_len")
+
+    return defects
+
+
+def test_untrusted_input_bounds_are_sized_from_model_declaration_and_refused():
+    """Untrusted input sequence length is bounded by declared seq_len from the model file and refused."""
+    defects = _untrusted_input_bound_defects(read("weights.rs"), read("inference.rs"))
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_untrusted_input_bounds_gate_can_fail():
+    """Each detector above trips when input bounds or refusals are broken."""
+    weights = read("weights.rs")
+    inference = read("inference.rs")
+    assert _untrusted_input_bound_defects(weights, inference) == []
+
+    # 1. Silent clamping in run_streamed_embedding
+    clamped_weights = weights.replace(
+        "if tokens.len() > config.seq_len {\n        return Err(InferenceError::ContextLengthExceeded.into());\n    }\n    let positions = tokens.len();",
+        "let positions = tokens.len().min(config.seq_len);",
+        1,
+    )
+    assert any("silently truncates" in d for d in _untrusted_input_bound_defects(clamped_weights, inference))
+
+    # 2. Authored constant in run_streamed_embedding
+    authored_weights = weights.replace(
+        "if tokens.len() > config.seq_len {",
+        "if tokens.len() > 512 {",
+        1,
+    )
+    assert any("authored integer constant" in d for d in _untrusted_input_bound_defects(authored_weights, inference))
+
+    # 3. Silent clamping in extract_embedding
+    clamped_infer = inference.replace(
+        "if tokens.len() > config.seq_len {\n        return Err(InferenceError::ContextLengthExceeded);\n    }\n    let count = tokens.len();",
+        "let count = tokens.len().min(config.seq_len);",
+        1,
+    )
+    assert any("silently truncates" in d for d in _untrusted_input_bound_defects(weights, clamped_infer))
+
+    # 4. Authored constant in extract_embedding
+    authored_infer = inference.replace(
+        "if tokens.len() > config.seq_len {",
+        "if tokens.len() > 2048 {",
+        1,
+    )
+    assert any("authored integer constant" in d for d in _untrusted_input_bound_defects(weights, authored_infer))
+
+

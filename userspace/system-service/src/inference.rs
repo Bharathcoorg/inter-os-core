@@ -2453,7 +2453,10 @@ pub fn extract_embedding(
     config.check_scratch_budget()?;
     let mut scratch = Scratch::new(config)?;
     let mut kv_cache = KvCache::new(config)?;
-    let count = tokens.len().min(config.seq_len);
+    if tokens.len() > config.seq_len {
+        return Err(InferenceError::ContextLengthExceeded);
+    }
+    let count = tokens.len();
     let dim = config.hidden_dim;
 
     // Mean pooling over the positions -- and mean pooling because this path is
@@ -4461,6 +4464,30 @@ pub mod tests {
         assert_eq!(
             conv_2b.check_scratch_budget(),
             Err(InferenceError::ScratchTooLarge(needed_scratch, SCRATCH_BYTE_BUDGET))
+        );
+    }
+
+    /// Untrusted input sequence exceeding declared context length is refused,
+    /// never silently truncated.
+    #[test]
+    fn test_extract_embedding_refuses_tokens_exceeding_declared_seq_len() {
+        let config = ModelConfig::default_test_config();
+        let weights = ModelWeights {
+            token_embd: TokenEmbedding::Table {
+                bytes: &[],
+                rows: 0,
+                dtype: 0,
+            },
+            layers: &[],
+            final_norm: &[],
+            output_weight: None,
+            output_weight_type: 0,
+        };
+        let mut out = [0.0f32; 64];
+        let too_long = alloc::vec![1u32; config.seq_len + 1];
+        assert_eq!(
+            extract_embedding(&too_long, &weights, &config, &mut out),
+            Err(InferenceError::ContextLengthExceeded)
         );
     }
 }

@@ -82,7 +82,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_hal_boundary_contract.py": 4,
     "tests/test_heap_bench.py": 16,
     "tests/test_image_format_truth_contract.py": 4,
-    "tests/test_inference_engine_graph_contract.py": 17,
+    "tests/test_inference_engine_graph_contract.py": 19,
     "tests/test_inference_service_truth_contract.py": 66,
     "tests/test_input_contract.py": 2,
     "tests/test_input_coordinate_contract.py": 26,
