@@ -129,6 +129,30 @@ pub fn dynamic_scratch_byte_budget() -> usize {
     SCRATCH_BYTE_BUDGET
 }
 
+/// Fallback user address space budget when no physical RAM telemetry is available (256 MiB).
+pub const FALLBACK_USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
+
+/// Computes the dynamic user address space budget given total physical RAM bytes.
+pub fn compute_dynamic_address_space_budget(total_bytes: u64) -> usize {
+    if total_bytes == 0 {
+        FALLBACK_USER_ADDRESS_SPACE_LIMIT
+    } else {
+        let reserve = ((total_bytes / 4) as usize).max(64 * 1024 * 1024);
+        (total_bytes as usize).saturating_sub(reserve)
+    }
+}
+
+/// Dynamic user address space budget for this service, derived from memory telemetry.
+pub fn dynamic_user_address_space_budget() -> usize {
+    #[cfg(not(test))]
+    {
+        if let Ok(telem) = interos_std::memory_telemetry() {
+            return compute_dynamic_address_space_budget(telem.total_bytes);
+        }
+    }
+    1536 * 1024 * 1024
+}
+
 /// Bytes the biggest single buffer one run may ask the heap for.
 ///
 /// WHY a ceiling the free-RAM budget cannot express: `sys_mem_map` refuses a
@@ -1055,16 +1079,41 @@ impl ModelConfig {
 
     /// Prices the weight bytes required to store this model configuration in memory
     /// for a given quantisation dtype (e.g. Q4_K = 12, Q8_0 = 8, F16 = 1, F32 = 0).
-    pub fn weight_bytes(&self, dtype: u32) -> usize {
+    pub fn weight_bytes(&self, dtype: u32) -> Result<usize, InferenceError> {
         let params = self.parameter_count();
         match dtype {
-            0 => params.saturating_mul(4),            // F32: 4 bytes/weight
-            1 => params.saturating_mul(2),            // F16: 2 bytes/weight
-            2 => (params.saturating_mul(18)) / 32,    // Q4_0: 4.5 bits/weight
-            8 => (params.saturating_mul(34)) / 32,    // Q8_0: 8.5 bits/weight
-            12 => (params.saturating_mul(144)) / 256, // Q4_K: 4.5 bits/weight
-            _ => (params.saturating_mul(34)) / 32,    // Default to Q8_0
+            0 => Ok(params.saturating_mul(4)),            // F32: 4 bytes/weight
+            1 => Ok(params.saturating_mul(2)),            // F16: 2 bytes/weight
+            2 => Ok((params.saturating_mul(18)) / 32),    // Q4_0: 4.5 bits/weight
+            3 => Ok((params.saturating_mul(20)) / 32),    // Q4_1: 5 bits/weight
+            7 | 8 => Ok((params.saturating_mul(34)) / 32), // Q8_0: 8.5 bits/weight (7 in GGUF file_type, 8 in GGML type)
+            12 => Ok((params.saturating_mul(144)) / 256), // Q4_K: 4.5 bits/weight
+            other => Err(InferenceError::UnsupportedQuantization(other)),
         }
+    }
+
+    /// Checks whether the model's weight footprint and scratch working set fit
+    /// within the process's user address space limit and memory budget.
+    pub fn check_admission(&self, file_type: Option<u32>) -> Result<(), InferenceError> {
+        self.check_admission_against(file_type, dynamic_user_address_space_budget())
+    }
+
+    /// Checks admission against a specified address space budget.
+    pub fn check_admission_against(
+        &self,
+        file_type: Option<u32>,
+        budget: usize,
+    ) -> Result<(), InferenceError> {
+        self.check_attention_shape()?;
+        self.check_scratch_budget()?;
+        if let Some(ft) = file_type {
+            let weights = self.weight_bytes(ft)?;
+            let total_working_set = weights.saturating_add(self.scratch_bytes());
+            if total_working_set > budget {
+                return Err(InferenceError::ScratchTooLarge(total_working_set, budget));
+            }
+        }
+        Ok(())
     }
 
     /// Bytes in the one buffer a run allocates that is biggest.
@@ -1282,9 +1331,8 @@ impl ModelConfig {
         // Checked in the order the graph is built: the head geometry first, since
         // a file whose heads do not tile their own residual stream is a malformed
         // declaration rather than a big one, then the byte budget the whole run
-        // is measured against.
-        config.check_attention_shape()?;
-        config.check_scratch_budget()?;
+        // is measured against, and the declared weights against the address space budget.
+        config.check_admission(info.file_type)?;
         Ok(config)
     }
 }
@@ -4026,7 +4074,14 @@ pub mod tests {
         extern crate std as file_bytes;
         use file_bytes::io::Read;
 
-        let Some(path) = file_bytes::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = file_bytes::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if file_bytes::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             file_bytes::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
                  the 333 MB GGUF was never opened and only hand-written fixtures were priced."
@@ -4356,12 +4411,37 @@ pub mod tests {
         };
 
         // 1. Weight bytes priced from model configuration
-        let q4_weight_bytes = conv_2b.weight_bytes(12); // Q4_K
-        let q8_weight_bytes = conv_2b.weight_bytes(8);  // Q8_0
+        let q4_weight_bytes = conv_2b.weight_bytes(12).expect("Q4_K is supported");
+        let q8_weight_bytes = conv_2b.weight_bytes(8).expect("Q8_0 is supported");
+        assert!(conv_2b.weight_bytes(999).is_err(), "unknown dtype must be refused");
         assert!(q4_weight_bytes > 1_000_000_000, "2B Q4 weights must exceed 1 GiB");
         assert!(q8_weight_bytes > 2_000_000_000, "2B Q8 weights must exceed 2 GiB");
         assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
         assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
+
+        // 2. Admission check refuses 2B architecture with 4 KV heads on head count
+        assert_eq!(
+            conv_2b.check_admission(Some(8)),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(4),
+                1
+            ))
+        );
+
+        // 3. Admission check refuses 2B Q8 weights even with 1 KV head against 1536 MiB limit
+        let conv_2b_1kv = ModelConfig {
+            num_kv_heads: 1,
+            ..conv_2b
+        };
+        let q8_weight_1kv = conv_2b_1kv.weight_bytes(8).expect("Q8_0 is supported");
+        assert_eq!(
+            conv_2b_1kv.check_admission(Some(8)),
+            Err(InferenceError::ScratchTooLarge(
+                q8_weight_1kv + conv_2b_1kv.scratch_bytes(),
+                1536 * 1024 * 1024
+            ))
+        );
 
         // 2. Scratch check refuses the 2B architecture cleanly
         let needed_scratch = conv_2b.scratch_bytes();

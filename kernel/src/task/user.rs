@@ -2409,6 +2409,17 @@ mod tests {
         let limit_4gb = user_address_space_limit();
         assert_eq!(limit_4gb, 3072 * 1024 * 1024);
         assert!(limit_4gb > 256 * 1024 * 1024);
+
+        // On a 128 MiB low-memory QEMU platform: 25% is 32 MiB, clamped to min 64 MiB reserve, limit is 64 MiB
+        ram.set(128 * 1024 * 1024);
+        assert_eq!(user_address_space_limit(), 64 * 1024 * 1024);
+        assert_eq!(compute_dynamic_user_address_space_limit(128 * 1024 * 1024), 64 * 1024 * 1024);
+
+        // On a 16 GiB platform: 25% reserve is 4 GiB, limit is 12 GiB
+        ram.set(16 * 1024 * 1024 * 1024);
+        let limit_16gb = user_address_space_limit();
+        assert_eq!(limit_16gb, 12 * 1024 * 1024 * 1024);
+        assert_eq!(compute_dynamic_user_address_space_limit(16 * 1024 * 1024 * 1024), 12 * 1024 * 1024 * 1024);
     }
 
     #[test]

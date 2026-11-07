@@ -1,3 +1,4 @@
+import struct
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
@@ -691,7 +692,7 @@ def _weight_pricing_defects(inference: str) -> list[str]:
     defects = []
     if "pub fn parameter_count(&self) -> usize" not in inference:
         defects.append("ModelConfig no longer defines parameter_count")
-    if "pub fn weight_bytes(&self, dtype: u32) -> usize" not in inference:
+    if "pub fn weight_bytes(&self, dtype: u32) -> Result<usize, InferenceError>" not in inference:
         defects.append("ModelConfig no longer defines weight_bytes to price weights in the cost model")
     if "12 MB/s" in inference or "12 MB" in inference:
         defects.append("inference.rs still contains unmeasured throughput claim: '12 MB/s'")
@@ -722,7 +723,7 @@ def test_the_weight_pricing_gate_can_fail():
     assert any("unmeasured throughput claim" in d for d in _weight_pricing_defects(speed))
 
     # 2. Removing weight_bytes from cost model
-    missing = inference.replace("pub fn weight_bytes(&self, dtype: u32) -> usize", "pub fn unpriced_weights(&self) -> usize", 1)
+    missing = inference.replace("pub fn weight_bytes(&self, dtype: u32) -> Result<usize, InferenceError>", "pub fn unpriced_weights(&self) -> Result<usize, InferenceError>", 1)
     assert any("no longer defines weight_bytes" in d for d in _weight_pricing_defects(missing))
 
 
@@ -742,6 +743,23 @@ def _gemma_declared_architecture_defects(inference: str, weights: str, lib: str)
         defects.append("lib.rs does not name /data/models/embeddinggemma-2.gguf in missing weight refusal")
     if "test_model_config_prices_weight_bytes_against_memory_budget" not in inference:
         defects.append("inference.rs does not verify priced weight footprint against memory budget")
+    if "pub fn check_admission" not in inference:
+        defects.append("inference.rs does not provide check_admission")
+    if "config.check_admission(info.file_type)" not in inference:
+        defects.append("ModelConfig::from_gguf does not consult check_admission with declared file_type")
+
+    # Binary GGUF assertions if physical model exists on host
+    real_path = Path("target/verify/models/embeddinggemma-300M-Q8_0.gguf")
+    if real_path.exists():
+        with open(real_path, "rb") as f:
+            header = f.read(24)
+            magic, version, tensor_count, kv_count = struct.unpack("<4sIQQ", header)
+            if magic != b"GGUF":
+                defects.append(f"GGUF magic invalid: {magic}")
+            if version != 3:
+                defects.append(f"GGUF version is not 3: {version}")
+            if tensor_count != 316:
+                defects.append(f"Declared tensor count is {tensor_count}, expected 316")
     return defects
 
 
@@ -773,4 +791,8 @@ def test_the_declared_architecture_contract_can_fail():
     # 3. Dropping missing path in refusal
     no_path = lib.replace("/data/models/embeddinggemma-2.gguf", "some_generic_file")
     assert any("/data/models/embeddinggemma-2.gguf" in d for d in _gemma_declared_architecture_defects(inference, weights, no_path))
+
+    # 4. Dropping check_admission
+    no_adm = inference.replace("pub fn check_admission", "pub fn unverified_admission")
+    assert any("check_admission" in d for d in _gemma_declared_architecture_defects(no_adm, weights, lib))
 

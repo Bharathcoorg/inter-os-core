@@ -1892,7 +1892,14 @@ mod tests {
     /// and are `inference::LARGEST_SINGLE_BUFFER_BYTES`'s subject, not this one's.
     #[test]
     fn test_the_installed_table_holds_within_the_growth_factor_it_is_derived_from() {
-        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if host::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             host::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
                  VOCAB_GROWTH_FACTOR rests on Vec's doubling policy alone and the installed \
@@ -1985,7 +1992,14 @@ mod tests {
 
     #[test]
     fn test_the_budget_doc_quotes_the_held_bytes_the_installed_file_yields() {
-        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if host::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             host::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so the \
                  held-bytes breakdown quoted beside the heap-ceiling constant goes unmeasured \
@@ -2195,7 +2209,14 @@ mod tests {
     /// The parity gap is stated in the module header.
     #[test]
     fn test_the_real_file_encodes_its_own_vocabulary() {
-        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if host::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             host::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
                  the installed vocabulary was never read and only hand-written fixtures were \

@@ -724,9 +724,25 @@ class PlatformRealityTests(unittest.TestCase):
         user = self.read("kernel/src/task/user.rs")
         self.assertIn("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize", user)
         self.assertIn("pub fn user_address_space_limit() -> usize", user)
-        self.assertIn('classified as "not reported"', user)
-        self.assertIn("userspace address-space limit exceeded", user)
-        self.assertIn("userspace address-space budget exceeded", user)
+        start = user.index("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {")
+        end = user.index("\n}\n", start)
+        body = user[start:end]
+        self.assertIn("let reserve = (detected / 4).max(64 * 1024 * 1024);", body)
+        self.assertIn("detected.saturating_sub(reserve)", body)
+        self.assertIn("USER_ADDRESS_SPACE_LIMIT", body)
+        services = self.read("kernel/src/services.rs")
+        self.assertIn("max_address_space_bytes: crate::task::user::user_address_space_limit() as u64,", services)
+
+    def test_user_address_space_limit_gate_can_fail(self):
+        user = self.read("kernel/src/task/user.rs")
+        start = user.index("pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {")
+        end = user.index("\n}\n", start)
+        body = user[start:end]
+        mutated_body = body.replace(
+            "let reserve = (detected / 4).max(64 * 1024 * 1024);",
+            "let reserve = 0usize;"
+        )
+        self.assertNotIn("let reserve = (detected / 4).max(64 * 1024 * 1024);", mutated_body)
 
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")

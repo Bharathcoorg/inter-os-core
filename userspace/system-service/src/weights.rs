@@ -1456,7 +1456,14 @@ pub mod tests {
     /// rows, same `data_start`, same file position for the last tensor in the file.
     #[test]
     fn the_descriptor_table_walks_through_the_metadata_window_the_device_uses() {
-        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if rust_std::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             rust_std::println!(
                 "NOT VERIFIED through the window: INTEROS_REAL_GGUF_PATH is unset, so no \
                  metadata of the 333 MB GGUF was passed a window at a time and the only \
@@ -1676,7 +1683,14 @@ pub mod tests {
     /// so out loud instead of passing on a hand-written description of the file.
     #[test]
     fn test_the_installed_file_is_read_block_by_block_and_run() {
-        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if rust_std::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             rust_std::println!(
                 "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset, so \
                  no tensor of the 333 MB GGUF was read and the loader ran only on hand-written \
@@ -2574,7 +2588,14 @@ pub mod tests {
     /// device, where the same loop runs over the syscall.
     #[test]
     fn the_installed_file_loads_through_the_platform_read_bound() {
-        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if rust_std::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             rust_std::println!(
                 "NOT VERIFIED against the installed file: INTEROS_REAL_GGUF_PATH is unset, so \
                  no tensor of the 333 MB GGUF was read through the platform's read bound."

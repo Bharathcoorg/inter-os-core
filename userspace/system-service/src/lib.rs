@@ -3893,7 +3893,14 @@ mod tests {
         extern crate std as real_file;
         use real_file::io::Read;
 
-        let Some(path) = real_file::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+        let Some(path) = real_file::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf";
+            if real_file::path::Path::new(candidate).exists() {
+                Some(alloc::string::String::from(candidate))
+            } else {
+                None
+            }
+        }) else {
             real_file::println!(
                 "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
                  the identity clause has only ever quoted a hand-written fixture and the \
