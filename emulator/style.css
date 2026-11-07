@@ -1856,7 +1856,7 @@ html, body.dark-theme {
   pointer-events: none;
   transform: translate(-50%, -50%) scale(0);
   opacity: 0;
-  transition: transform 0.1s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.12s ease;
+  transition: transform 0.03s ease-out, opacity 0.03s ease-out;
   z-index: 100;
 }
 
