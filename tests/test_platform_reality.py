@@ -11,8 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _user_address_space_defects(user: str, services: str) -> list[str]:
-    """Detects discrepancies in userspace address-space derivation, wiring, and body-scoped refusal pins."""
+def _user_address_space_defects(user: str, services: str, inference: str = None) -> list[str]:
+    """Detects discrepancies in userspace address-space derivation, wiring, telemetry derivation, and refusal pins."""
     defects = []
 
     # 1. Signatures
@@ -23,7 +23,11 @@ def _user_address_space_defects(user: str, services: str) -> list[str]:
     if 'classified as "not reported"' not in user:
         defects.append("missing classified as 'not reported'")
 
-    # 2. Body-scoped limit derivation
+    # 2. Kernel fallback constant definition (256 MiB)
+    if "pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;" not in user:
+        defects.append("USER_ADDRESS_SPACE_LIMIT is not defined as 256 * 1024 * 1024 (256 MiB fallback)")
+
+    # 3. Body-scoped limit derivation
     limit_sig = "pub fn compute_dynamic_user_address_space_limit(detected_ram_bytes: u64) -> usize {"
     if limit_sig in user:
         start = user.index(limit_sig)
@@ -38,7 +42,18 @@ def _user_address_space_defects(user: str, services: str) -> list[str]:
     else:
         defects.append("missing compute_dynamic_user_address_space_limit body")
 
-    # 3. Body-scoped ELF load segment limit refusal
+    # 4. Telemetry wiring in user_address_space_limit()
+    limit_fn_sig = "pub fn user_address_space_limit() -> usize {"
+    if limit_fn_sig in user:
+        start_fn = user.index(limit_fn_sig)
+        end_fn = user.index("\n}\n", start_fn)
+        fn_body = user[start_fn:end_fn]
+        if "compute_dynamic_user_address_space_limit(crate::memory::total_physical_ram_bytes())" not in fn_body:
+            defects.append("user_address_space_limit() body does not wire crate::memory::total_physical_ram_bytes()")
+    else:
+        defects.append("missing user_address_space_limit() body")
+
+    # 5. Body-scoped ELF load segment limit refusal
     elf_sig = "pub fn load_user_elf_into_page_table("
     if elf_sig in user:
         start_elf = user.index(elf_sig)
@@ -49,7 +64,7 @@ def _user_address_space_defects(user: str, services: str) -> list[str]:
     else:
         defects.append("missing load_user_elf_into_page_table body")
 
-    # 4. Body-scoped process instantiation budget refusal
+    # 6. Body-scoped process instantiation budget refusal
     spawn_sig = "pub fn spawn_user_process_with_limits("
     if spawn_sig in user:
         start_spawn = user.index(spawn_sig)
@@ -60,9 +75,16 @@ def _user_address_space_defects(user: str, services: str) -> list[str]:
     else:
         defects.append("missing spawn_user_process_with_limits body")
 
-    # 5. Services wiring
+    # 7. Services wiring
     if "max_address_space_bytes: crate::task::user::user_address_space_limit() as u64," not in services:
         defects.append("services.rs does not wire max_address_space_bytes to user_address_space_limit()")
+
+    # 8. Kernel <-> system-service fallback budget harmonization
+    if inference is not None:
+        if "pub const FALLBACK_USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;" not in inference:
+            defects.append("FALLBACK_USER_ADDRESS_SPACE_LIMIT is not defined as 256 * 1024 * 1024 (256 MiB fallback) in inference.rs")
+        if "compute_dynamic_address_space_budget(0)" not in inference:
+            defects.append("dynamic_user_address_space_budget does not fall back to compute_dynamic_address_space_budget(0)")
 
     return defects
 
@@ -779,50 +801,73 @@ class PlatformRealityTests(unittest.TestCase):
     def test_user_address_space_limit_is_derived_and_refused_by_name(self):
         user = self.read("kernel/src/task/user.rs")
         services = self.read("kernel/src/services.rs")
-        defects = _user_address_space_defects(user, services)
+        inference = self.read("userspace/system-service/src/inference.rs")
+        defects = _user_address_space_defects(user, services, inference)
         self.assertEqual(defects, [], f"Gate found defects: {defects}")
 
     def test_user_address_space_limit_gate_can_fail(self):
         user = self.read("kernel/src/task/user.rs")
         services = self.read("kernel/src/services.rs")
+        inference = self.read("userspace/system-service/src/inference.rs")
 
         # Baseline: real files produce zero defects
-        self.assertEqual(_user_address_space_defects(user, services), [])
+        self.assertEqual(_user_address_space_defects(user, services, inference), [])
 
         # Mutation 1: break the dynamic reserve formula inside the function body
         m1_user = user.replace(
             "let reserve = (detected / 4).max(64 * 1024 * 1024);",
             "let reserve = 0usize;"
         )
-        self.assertIn("missing reserve formula (detected / 4).max(64 * 1024 * 1024)", _user_address_space_defects(m1_user, services))
+        self.assertIn("missing reserve formula (detected / 4).max(64 * 1024 * 1024)", _user_address_space_defects(m1_user, services, inference))
 
         # Mutation 2: disconnect services.rs wiring
         m2_services = services.replace(
             "crate::task::user::user_address_space_limit()",
             "256 * 1024 * 1024"
         )
-        self.assertIn("services.rs does not wire max_address_space_bytes to user_address_space_limit()", _user_address_space_defects(user, m2_services))
+        self.assertIn("services.rs does not wire max_address_space_bytes to user_address_space_limit()", _user_address_space_defects(user, m2_services, inference))
 
         # Mutation 3: hardcode fallback in body instead of referencing USER_ADDRESS_SPACE_LIMIT
         m3_user = user.replace(
             "if detected_ram_bytes == 0 {\n        USER_ADDRESS_SPACE_LIMIT",
             "if detected_ram_bytes == 0 {\n        256 * 1024 * 1024"
         )
-        self.assertIn("compute_dynamic_user_address_space_limit body does not reference USER_ADDRESS_SPACE_LIMIT", _user_address_space_defects(m3_user, services))
+        self.assertIn("compute_dynamic_user_address_space_limit body does not reference USER_ADDRESS_SPACE_LIMIT", _user_address_space_defects(m3_user, services, inference))
 
         # Mutation 4: delete live return Err("userspace address-space limit exceeded") in load_user_elf_into_page_table
         m4_user = user.replace(
             'return Err("userspace address-space limit exceeded");',
             'return Err("segment error");'
         )
-        self.assertIn("load_user_elf_into_page_table missing live return Err('userspace address-space limit exceeded')", _user_address_space_defects(m4_user, services))
+        self.assertIn("load_user_elf_into_page_table missing live return Err('userspace address-space limit exceeded')", _user_address_space_defects(m4_user, services, inference))
 
         # Mutation 5: delete live return Err("userspace address-space budget exceeded") in spawn_user_process_with_limits
         m5_user = user.replace(
             'return Err("userspace address-space budget exceeded");',
             'return Err("budget error");'
         )
-        self.assertIn("spawn_user_process_with_limits missing live return Err('userspace address-space budget exceeded')", _user_address_space_defects(m5_user, services))
+        self.assertIn("spawn_user_process_with_limits missing live return Err('userspace address-space budget exceeded')", _user_address_space_defects(m5_user, services, inference))
+
+        # Mutation 6: user_address_space_limit() ignores RAM telemetry (#291 Hole A)
+        m6_user = user.replace(
+            "compute_dynamic_user_address_space_limit(crate::memory::total_physical_ram_bytes())",
+            "USER_ADDRESS_SPACE_LIMIT"
+        )
+        self.assertIn("user_address_space_limit() body does not wire crate::memory::total_physical_ram_bytes()", _user_address_space_defects(m6_user, services, inference))
+
+        # Mutation 7: re-author kernel 256 MiB fallback constant (#291 Hole B)
+        m7_user = user.replace(
+            "pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;",
+            "pub const USER_ADDRESS_SPACE_LIMIT: usize = 1024 * 1024 * 1024;"
+        )
+        self.assertIn("USER_ADDRESS_SPACE_LIMIT is not defined as 256 * 1024 * 1024 (256 MiB fallback)", _user_address_space_defects(m7_user, services, inference))
+
+        # Mutation 8: re-author system service fallback constant (breaks kernel <-> service harmonisation)
+        m8_inference = inference.replace(
+            "pub const FALLBACK_USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;",
+            "pub const FALLBACK_USER_ADDRESS_SPACE_LIMIT: usize = 512 * 1024 * 1024;"
+        )
+        self.assertIn("FALLBACK_USER_ADDRESS_SPACE_LIMIT is not defined as 256 * 1024 * 1024 (256 MiB fallback) in inference.rs", _user_address_space_defects(user, services, m8_inference))
 
     def test_process_table_reports_real_cr3_values(self):
         scheduler = self.read("kernel/src/task/scheduler.rs")

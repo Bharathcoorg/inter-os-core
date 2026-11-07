@@ -3010,30 +3010,40 @@ mod tests {
                 g_nanos = elapsed;
             }
         }
-        // Sample all three paths within a unified window under consistent system load
-        // so that f_nanos, a_nanos, and g_nanos reflect the genuine architectural ask counts:
-        for _ in 0..10 {
-            if f_nanos * 2 >= a_nanos || a_nanos >= g_nanos {
-                let t_f = std::time::Instant::now();
-                let _ = paint_held(&held);
-                let sf = t_f.elapsed().as_nanos() as u64;
+        // Per-path minima across K unified windows (task #290):
+        // To compare the three gating strategies on actual execution speed without false skew
+        // from system load shifting between sections, measure all three paths consecutively
+        // in K unified windows. Taking the per-path minimum filters out thread preemption
+        // delays across all three measurements under identical load conditions:
+        let mut f_min = u64::MAX;
+        let mut a_min = u64::MAX;
+        let mut g_min = u64::MAX;
+        for w in 0..12 {
+            let t_f = std::time::Instant::now();
+            let _ = paint_held(&held);
+            f_min = f_min.min(t_f.elapsed().as_nanos() as u64);
 
+            if w % 2 == 0 {
                 let t_a = std::time::Instant::now();
                 let _ = paint_band(0, false);
-                let sa = t_a.elapsed().as_nanos() as u64;
+                a_min = a_min.min(t_a.elapsed().as_nanos() as u64);
 
                 let t_g = std::time::Instant::now();
                 let _ = paint_estimate(0);
-                let sg = t_g.elapsed().as_nanos() as u64;
+                g_min = g_min.min(t_g.elapsed().as_nanos() as u64);
+            } else {
+                let t_g = std::time::Instant::now();
+                let _ = paint_estimate(0);
+                g_min = g_min.min(t_g.elapsed().as_nanos() as u64);
 
-                if sf * 2 < sa && sa < sg {
-                    f_nanos = sf;
-                    a_nanos = sa;
-                    g_nanos = sg;
-                    break;
-                }
+                let t_a = std::time::Instant::now();
+                let _ = paint_band(0, false);
+                a_min = a_min.min(t_a.elapsed().as_nanos() as u64);
             }
         }
+        let f_nanos = f_min;
+        let a_nanos = a_min;
+        let g_nanos = g_min;
         println!(
             "G estimate gate    : asks={} rasterises={} cost={} ns = {:.2} ns/px, against A's {} \
              asks and {} ns -- the estimate asks {:.1}x the questions the run's own box needs, \
