@@ -77,6 +77,18 @@ APP_TARGETS = {
             "framebuffer"
         ),
     },
+    "webview_demo": {
+        "launch_id": "webview_demo",
+        "launch_ack": "[PROCESS] Guest application launched id=webview_demo",
+        "process_entry": "[PROCESS ENTRY]",
+        "ready": "[WEBVIEW DEMO] Initial frame presented to hardware scanout.",
+        "endpoint": (
+            "host wrote the launch command to the guest serial socket -> the "
+            "application returned from surface_flip, which composited its "
+            "surfaces, programmed the scanout and wrote the hardware "
+            "framebuffer"
+        ),
+    },
 }
 
 # The guest must be fully up before a launch means anything; timing a launch

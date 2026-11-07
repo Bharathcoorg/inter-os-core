@@ -75,3 +75,9 @@ InterOS provides empirical, automated benchmark verification tools under `tools/
   - Some runtime suites can only be answered by a running Device Studio / QEMU guest. When that backend is not bound, the contract runner reports the suite as skipped or failed-closed rather than launching a synthetic server instance, restarting a VM, or substituting a remembered result.
   - Socket-level probing of the emulator's RPC and VNC endpoints is **not an accepted verification method in this project**, and no such probe is recorded here as evidence. A touch-to-paint or presentation claim comes from the guest's own serial telemetry and scanout, or it is reported as untested.
   - The Platform Truth Contract strictly forbids faking socket connectivity or inventing telemetry when the emulator bridge is unbound.
+
+- **Emulator Probe Failure Mode & Input Line Monotonicity (#262)**:
+  - When Device Studio or external test probes observe touch delivery via the emulator's serial interface or `[DIAG_STATE]` telemetry, a naive probe that matches existing lines without verifying progress will re-match an old, stale `[DIAG_STATE]` emission and report false success for a touch event that was dropped or preempted.
+  - To prevent stale match drift, probes must track the guest's serial `input_lines` / cursor position and require that line counts or sequence numbers strictly increase after each touch injection before asserting that the guest acknowledged delivery.
+  - In `emulator/server.py`, touch verification cannot rely on un-fenced serial socket reads. An unconfirmed touch injection must report unverified or fail closed rather than assuming delivery.
+

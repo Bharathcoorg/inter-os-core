@@ -125,6 +125,7 @@ pub extern "C" fn _start() -> ! {
     // Render initial page
     render_demo(surface, &app.webview);
     std::surface_flip().ok();
+    std::log("[WEBVIEW DEMO] Initial frame presented to hardware scanout.").ok();
 
     let mut last_scale = std::design::font::user_text_scale();
 

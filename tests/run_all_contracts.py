@@ -61,7 +61,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_android_compat_contract.py": 3,
     "tests/test_android_guest_contract.py": 3,
     "tests/test_android_runtime_contract.py": 5,
-    "tests/test_app_launch_bench.py": 24,
+    "tests/test_app_launch_bench.py": 25,
     "tests/test_bench_harness.py": 26,
     "tests/test_browser_http_contract.py": 31,
     "tests/test_browser_media_transfer_contract.py": 13,
