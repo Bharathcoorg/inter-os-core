@@ -3293,6 +3293,222 @@ def test_the_id_stream_bound_gate_can_fail():
     assert id_stream_bound(raised_lib) == next_bound
 
 
+def _real_file_cases(source: str) -> list:
+    """Each case that opens the installed model file, as `(name, body)` pairs."""
+    cases = []
+    for name in re.findall(r"\n    fn (\w+)\(\) \{", source):
+        body = function_body(source, f"    fn {name}() {{")
+        if "INTEROS_REAL_GGUF_PATH" in body:
+            cases.append((name, body))
+    return cases
+
+
+BUDGET_DOC_SHAPE = re.compile(
+    r"(\d+) bytes held: byte map (\d+) \+ piece bytes (\d+) \+ start entries (\d+) \+ "
+    r"matchable flags (\d+) \+ pool (\d+), over (\d+) declared entries"
+)
+
+
+def _budget_defects(tokenizer: str, inference: str) -> list:
+    """Every way a derived byte budget can quietly turn back into an authored one.
+
+    WHY a detector that returns findings rather than asserts: the same rules have to
+    pass on the tree as it is and fire on a tree with one rule reversed, and a file
+    of `assert`s can only do the first. Each rule below is one of the shapes the
+    claim dies in: the telemetry call living only in the test half of the file; the
+    derived number reaching the entry point while the refusals still quote the
+    constant; a measured table priced against the constant instead of the budget in
+    force; and a justification quoting bytes computed from the constant rather than
+    out of the model file -- the breakdown this file carried before summed to a
+    different total than the one it named, and nothing in the tree could see that.
+    """
+    defects = []
+    production = tokenizer.split("#[cfg(test)]")[0]
+    code = without_comments(production)
+
+    def body(signature: str):
+        """`function_body`, or None when the file no longer has that function.
+
+        WHY: a budget helper deleted outright is a finding this gate has to name.
+        Raised as a ValueError it reads as a broken test, and a broken test reports
+        nothing about which guarantee went away.
+        """
+        try:
+            return function_body(code, signature)
+        except ValueError:
+            return None
+
+    derived = body("pub fn dynamic_tokenizer_heap_budget")
+    if derived is None:
+        defects.append("nothing derives the tokenizer budget from the guest any more")
+    else:
+        if "memory_telemetry()" not in derived:
+            defects.append("no guest telemetry reaches the tokenizer budget")
+        if "compute_dynamic_tokenizer_budget(telem.free_bytes)" not in derived:
+            defects.append("the tokenizer budget drops the free bytes it just read")
+
+    clamp = body("pub fn compute_dynamic_tokenizer_budget")
+    if clamp is None:
+        defects.append("the arithmetic that clamps the ceiling to free bytes is gone")
+    else:
+        if "TOKENIZER_HEAP_BUDGET.min(spendable)" not in clamp:
+            defects.append("the tokenizer budget raises toward the ceiling instead of clamping to it")
+        if "/ VOCAB_GROWTH_FACTOR" not in clamp:
+            defects.append(
+                "the clamped budget stopped dividing free bytes by the growth it is priced with"
+            )
+
+    entry = body("pub fn build_from_stream")
+    if entry is None:
+        defects.append("the un-budgeted entry point is gone, so nothing derives a budget per build")
+    else:
+        if "dynamic_tokenizer_heap_budget()" not in entry:
+            defects.append("the un-budgeted entry point no longer derives a budget")
+        if "TOKENIZER_HEAP_BUDGET" in entry:
+            defects.append(
+                "the entry point hands the walk the authored ceiling, not the derived budget"
+            )
+    walker = body("fn build_from_stream_under")
+    if walker is None or "VocabularyRead::with_budget(budget)" not in walker:
+        defects.append("the walk starts under a budget it never installs")
+
+    for signature in ("fn charge", "fn tokens", "fn count_of", "fn finish"):
+        site = body(signature)
+        if site is None:
+            defects.append(f"{signature} is gone, so nothing refuses against the budget in force")
+        elif "TOKENIZER_HEAP_BUDGET" in site:
+            defects.append(
+                f"{signature} refuses against the authored ceiling, not the budget in force"
+            )
+
+    # What a real file measured is the file's, not the constant's. A case that opens
+    # the installed model may bound those bytes only by the budget its build ran
+    # under; quoting the literal there is how a raised ceiling becomes a wider bound
+    # that nothing on the device ever refused at. Comments are dropped first: a case
+    # that merely NAMES the constant in its own explanation is not pricing anything
+    # with it.
+    for name, case in _real_file_cases(tokenizer):
+        if "TOKENIZER_HEAP_BUDGET" in without_comments(case):
+            defects.append(f"{name} prices a measured table against the authored ceiling")
+
+    marker = "pub const TOKENIZER_HEAP_BUDGET"
+    if marker not in production:
+        defects.append("the authored ceiling the derivation clamps to is no longer declared")
+    else:
+        doc_lines = [
+            line.strip()[3:] if line.strip().startswith("///") else line.strip()
+            for line in doc_comment(production, marker).splitlines()
+        ]
+        doc = " ".join(" ".join(doc_lines).split())
+        matches = BUDGET_DOC_SHAPE.findall(doc)
+        if not matches:
+            defects.append("the budget doc quotes no breakdown of the bytes the build held")
+        else:
+            total, byte_map, pieces, starts, flags, pool, _entries = (int(g) for g in matches[0])
+            if byte_map + pieces + starts + flags + pool != total:
+                defects.append(
+                    f"the budget doc's breakdown sums to "
+                    f"{byte_map + pieces + starts + flags + pool}, not the {total} it names"
+                )
+
+    try:
+        scratch = function_body(without_comments(inference), "fn check_scratch_budget")
+    except ValueError:
+        scratch = ""
+    if "check_scratch_against(dynamic_scratch_byte_budget())" not in scratch:
+        defects.append("the run prices itself against a ceiling it did not derive from the guest")
+    return defects
+
+
+def test_both_budgets_are_derived_from_the_guest_and_refused_by_name():
+    """The scratch and the vocabulary are priced against what the device reports free.
+
+    Three claims, each pinned where it can actually be broken: the number a refusal
+    prints is the budget in force, not the constant someone authored; the derivation
+    clamps the ceiling DOWN for the vocabulary (a ceiling above reachable RAM is an
+    abort, not a refusal) and up for the scratch; and the bytes a real file was
+    measured holding add up to what its own breakdown says.
+    """
+    defects = _budget_defects(read("tokenizer.rs"), read("inference.rs"))
+    assert defects == [], "\n".join(defects)
+
+
+def test_the_derived_budget_contract_can_fail():
+    """A budget gate that cannot be tripped has not gated a budget.
+
+    Each source below is the live file with one rule reversed: the telemetry read
+    deleted, the entry point handed the constant, the clamp turned from min to max,
+    the running charge compared to the constant, a real file's measured table
+    bounded by the constant, and the breakdown this tree actually carried -- a total
+    its own five parts did not sum to. The detector names every one and stays silent
+    on the tree as it is.
+    """
+    tokenizer = read("tokenizer.rs")
+    inference = read("inference.rs")
+    assert _budget_defects(tokenizer, inference) == []
+
+    unasked = tokenizer.replace(
+        "        if let Ok(telem) = std::memory_telemetry() {\n"
+        "            return compute_dynamic_tokenizer_budget(telem.free_bytes);\n"
+        "        }\n",
+        "",
+    )
+    assert unasked != tokenizer, "the no-telemetry fixture no longer matches the file"
+    assert _budget_defects(unasked, inference), "a budget that never asks the guest passed"
+
+    authored_entry = tokenizer.replace(
+        "Self::build_from_stream_under(stream, dynamic_tokenizer_heap_budget())",
+        "Self::build_from_stream_under(stream, TOKENIZER_HEAP_BUDGET)",
+    )
+    assert authored_entry != tokenizer, "the authored-entry fixture no longer matches the file"
+    assert _budget_defects(authored_entry, inference), (
+        "an entry point that hands the walk the constant passed"
+    )
+
+    raised = tokenizer.replace(
+        "TOKENIZER_HEAP_BUDGET.min(spendable)", "TOKENIZER_HEAP_BUDGET.max(spendable)"
+    )
+    assert raised != tokenizer, "the raise-past-free fixture no longer matches the file"
+    assert _budget_defects(raised, inference), (
+        "a budget that promises more than the guest reports free passed"
+    )
+
+    constant_refusal = tokenizer.replace(
+        "        if next > self.budget {", "        if next > TOKENIZER_HEAP_BUDGET {"
+    )
+    assert constant_refusal != tokenizer, "the constant-refusal fixture no longer matches the file"
+    assert _budget_defects(constant_refusal, inference), (
+        "a running charge that refuses against the constant passed"
+    )
+
+    constant_bound = tokenizer.replace(
+        "            table.heap_bytes() <= dynamic_tokenizer_heap_budget(),",
+        "            table.heap_bytes() <= TOKENIZER_HEAP_BUDGET,",
+    )
+    assert constant_bound != tokenizer, "the constant-bound fixture no longer matches the file"
+    assert _budget_defects(constant_bound, inference), (
+        "a real file's measured bytes bounded by the authored ceiling passed"
+    )
+
+    invented_breakdown = tokenizer.replace(
+        "4649658 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
+        "5672210 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
+    )
+    assert invented_breakdown != tokenizer, "the invented-total fixture no longer matches the file"
+    assert _budget_defects(invented_breakdown, inference), (
+        "the breakdown this tree carried before -- a total its own five parts did not sum to -- passed"
+    )
+
+    unpriced_scratch = inference.replace(
+        "self.check_scratch_against(dynamic_scratch_byte_budget())",
+        "self.check_scratch_against(SCRATCH_BYTE_BUDGET)",
+    )
+    assert unpriced_scratch != inference, "the authored-scratch fixture no longer matches the file"
+    assert _budget_defects(tokenizer, unpriced_scratch), (
+        "a run priced against the floor rather than the guest's free RAM passed"
+    )
+
+
 def main() -> int:
     tests = [name for name in globals() if name.startswith("test_")]
     failed = 0

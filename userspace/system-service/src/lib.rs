@@ -1591,11 +1591,15 @@ impl TokenIds {
 /// Maps a text to the installed file's own ids, from a table read out of that file.
 ///
 /// WHY the table is built here and dropped when this returns: `FileTokenizer` holds
-/// a vocabulary on the heap -- five and a half megabytes for the installed file --
-/// and the `aid` loop has no place to keep one between requests without a lock,
+/// a vocabulary on the heap -- for the installed file, the five parts priced out of
+/// the real bytes in `tokenizer::TOKENIZER_HEAP_BUDGET`'s doc -- and the `aid` loop
+/// has no place to keep one between requests without a lock,
 /// which the platform's rule says a request path does not take. So the mapping is
-/// paid for per request, its cost is bounded by `tokenizer::TOKENIZER_HEAP_BUDGET`,
-/// and its refusal names both numbers instead of half-building a table.
+/// paid for per request, its cost is bounded by `tokenizer::dynamic_tokenizer_heap_budget`
+/// -- which is the guest's own reported free bytes clamped to
+/// `tokenizer::TOKENIZER_HEAP_BUDGET`, read again for this request because nothing
+/// here holds a table between two -- and its refusal names both numbers instead of
+/// half-building a table.
 ///
 /// WHY `NotAttempted` before the file is even opened: the caller's own ids beat
 /// anything computed here, and an empty query has nothing to map. Reaching for a

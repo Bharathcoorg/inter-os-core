@@ -136,11 +136,17 @@ pub const WORD_MARKER: &[u8] = b"\xe2\x96\x81";
 /// vocabulary and tight enough to be a bound.
 pub const MAX_PIECE_BYTES: usize = 128;
 
-/// How many bytes of heap the service will spend holding one file's vocabulary.
+/// The ceiling on how many bytes of heap the service will spend holding one file's
+/// vocabulary, and the budget a build runs under when the guest reports no free
+/// memory to derive one from.
 ///
-/// WHY this number: sized against the installed file, whose table the probe
-/// measured at 5,672,210 bytes (piece bytes 2,315,366 + start entries 1,048,580 +
-/// matchable flags 262,144 + pool 1,022,548 + byte map 1,024). Sixteen mebibytes
+/// WHY this number: sized against the installed file, whose table the build ends at
+/// 4649658 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +
+/// matchable flags 262144 + pool 1022548, over 262144 declared entries -- the five
+/// `VocabularyRead::finish` charges, each measured out of the table this file builds
+/// for that file rather than typed in, which is what
+/// `test_the_budget_doc_quotes_the_held_bytes_the_installed_file_yields` compares this
+/// sentence against. Sixteen mebibytes
 /// leaves that file room for the vectors' own growth and still refuses a
 /// hundred-megabyte vocabulary on the first read rather than after it.
 ///
@@ -152,7 +158,82 @@ pub const MAX_PIECE_BYTES: usize = 128;
 /// of the vectors as they fill is the allocator's and is NOT counted, which is
 /// what the headroom above is for. A heap the service cannot grow is a build that
 /// aborts, which is why nothing here asks before checking.
+///
+/// WHY this is a ceiling and not the budget: sixteen mebibytes is what the service
+/// will hold when the guest can hand it over. On a device whose reported free bytes
+/// are below `VOCAB_GROWTH_FACTOR` times that, the ceiling is unreachable, and an
+/// unreachable ceiling is the abort this paragraph ends on rather than the refusal
+/// it exists for. `dynamic_tokenizer_heap_budget` clamps it to what the guest
+/// reports, and every refusal below names the clamped number it actually ran under.
 pub const TOKENIZER_HEAP_BUDGET: usize = 16 * 1024 * 1024;
+
+/// What the heap really maps for every byte the running charge counts.
+///
+/// WHY a factor and not the count: `charge` counts the entries the table ends up
+/// holding, and the vectors' geometric growth to hold them is the allocator's. The
+/// paragraph on `TOKENIZER_HEAP_BUDGET` calls the headroom above it the reason that
+/// is safe, and against an authored 16 MiB it is a choice. Against the free bytes a
+/// guest reports it is an arithmetic that has to be stated, or the derived budget
+/// names a ceiling the heap cannot reach.
+///
+/// WHERE TWO COMES FROM: a `Vec` that grows by doubling holds a capacity below twice
+/// its length, and every vector this build fills grows that way -- `bytes` by
+/// `extend_from_slice`, `starts`, `pool`, `scores` and `kinds` by `push`. The one
+/// exception is tighter rather than looser: `matchable` is built with
+/// `Vec::with_capacity(vocab)` and pushed to exactly `vocab`, so its capacity equals
+/// its length. Two is therefore the worst vector's bound and not an average, and
+/// `test_the_installed_table_holds_within_the_growth_factor_it_is_derived_from`
+/// measures the real ratio over the installed file's own 262,144-entry table, so the
+/// number in this paragraph is an artifact rather than a guess.
+pub const VOCAB_GROWTH_FACTOR: usize = 2;
+
+/// The heap budget a build runs under, given the free bytes the guest reports.
+///
+/// WHY this clamps DOWN where `inference::compute_dynamic_scratch_budget` raises UP:
+/// the two constants answer different questions. The scratch floor exists so a run
+/// that priced near it is not refused on a device with more to give, and raising it
+/// spends only address space the kernel already granted this service. This ceiling
+/// exists so a file that declares a hundred-megabyte vocabulary is refused on its
+/// count instead of after its bytes are read, and raising it above what the guest has
+/// free turns that refusal into the abort `TOKENIZER_HEAP_BUDGET`'s paragraph names.
+/// So the derived budget is the authored ceiling when the device can reach it, and
+/// what the device can reach when it cannot.
+///
+/// WHY the division and not the whole of free: what the heap maps is the vectors'
+/// capacity, and `VOCAB_GROWTH_FACTOR` is the bound on how far capacity runs past the
+/// charge. Handing the budget all of free would promise bytes the growth spends twice
+/// over, which is the same promise the ceiling exists to refuse.
+///
+/// WHY zero falls back rather than clamping to zero: `free_bytes == 0` is not "no
+/// memory", it is "no reading" -- the kernel classifies an undetected RAM total as
+/// not reported rather than as zero. A budget derived from a reading that never
+/// arrived would refuse every file on a device that is fine, so the authored ceiling
+/// stands, which is the same fallback `dynamic_scratch_byte_budget` takes.
+pub fn compute_dynamic_tokenizer_budget(free_bytes: u64) -> usize {
+    if free_bytes > 0 {
+        let spendable = (free_bytes / VOCAB_GROWTH_FACTOR as u64) as usize;
+        TOKENIZER_HEAP_BUDGET.min(spendable)
+    } else {
+        TOKENIZER_HEAP_BUDGET
+    }
+}
+
+/// The budget for the build starting now, read from the guest's own telemetry.
+///
+/// WHY it is read per build and cached nowhere: `lib.rs` builds a table per request
+/// and drops it when the request returns, so no budget survives between two builds to
+/// go stale -- and no memory-pressure notice reaches this service's `ipc_recv` loop
+/// that could invalidate one if it did. Re-reading the guest is the re-derivation; a
+/// cached budget would need a notice this platform does not send it.
+pub fn dynamic_tokenizer_heap_budget() -> usize {
+    #[cfg(not(test))]
+    {
+        if let Ok(telem) = std::memory_telemetry() {
+            return compute_dynamic_tokenizer_budget(telem.free_bytes);
+        }
+    }
+    TOKENIZER_HEAP_BUDGET
+}
 
 /// The per-entry floor charged the moment an array's element count is read,
 /// before any element is touched.
@@ -302,9 +383,27 @@ impl FileTokenizer {
 
     /// Builds the table from any GGUF stream, so the walk that runs on the device
     /// can also be driven from a fixture and from a slice of the real file.
+    ///
+    /// The ceiling it refuses at is read from the guest here and passed down whole,
+    /// so the four refusals in one walk all name the same number.
     pub fn build_from_stream(stream: &mut GgufStream<'_>) -> Result<Self, TokenizerError> {
+        Self::build_from_stream_under(stream, dynamic_tokenizer_heap_budget())
+    }
+
+    /// `build_from_stream` against a ceiling the caller names.
+    ///
+    /// WHY it is a separate entry and not a parameter on the public one: every caller
+    /// on the device has exactly one honest ceiling, the free bytes the guest reports,
+    /// and an entry that took one would invite a caller to type a number in instead.
+    /// The seam exists for the host suite, which cannot make a syscall answer 20 MiB
+    /// free, and it is where the clamp in `compute_dynamic_tokenizer_budget` is
+    /// watched biting rather than asserted about.
+    fn build_from_stream_under(
+        stream: &mut GgufStream<'_>,
+        budget: usize,
+    ) -> Result<Self, TokenizerError> {
         let header = GgufHeader::parse_stream(stream).map_err(TokenizerError::Reader)?;
-        let mut read = VocabularyRead::new();
+        let mut read = VocabularyRead::with_budget(budget);
 
         for _ in 0..header.kv_count {
             let key_len = stream
@@ -746,6 +845,14 @@ struct VocabularyRead {
     byte_first_id: u32,
     vocab: Option<u32>,
     held: usize,
+    /// The ceiling this build refuses at: what `dynamic_tokenizer_heap_budget`
+    /// derived from the guest's own free bytes, never the authored constant.
+    ///
+    /// WHY it is a field and not a call at each refusal: the four refusals below have
+    /// to name one number, and a budget re-read four times could differ between them
+    /// if the guest's free bytes moved mid-walk -- which would make the charge refuse
+    /// against a ceiling the count check never saw.
+    budget: usize,
     bos_id: Option<u32>,
     eos_id: Option<u32>,
     pad_id: Option<u32>,
@@ -759,7 +866,13 @@ struct VocabularyRead {
 }
 
 impl VocabularyRead {
-    fn new() -> Self {
+    /// A build that refuses at `budget` instead of at what the guest reported.
+    ///
+    /// WHY it exists: `dynamic_tokenizer_heap_budget` reads a syscall, so a host test
+    /// cannot hand it a device that has 20 MiB free and watch the clamp bite. This is
+    /// the seam the derivation is tested through, and it is the same shape as
+    /// `inference::ModelConfig::check_scratch_against`.
+    fn with_budget(budget: usize) -> Self {
         Self {
             bytes: Vec::new(),
             starts: Vec::new(),
@@ -771,6 +884,7 @@ impl VocabularyRead {
             vocab: None,
             // The byte map is a kibibyte and exists before any key is read.
             held: core::mem::size_of::<[u32; 256]>(),
+            budget,
             bos_id: None,
             eos_id: None,
             pad_id: None,
@@ -790,8 +904,8 @@ impl VocabularyRead {
             .held
             .checked_add(amount)
             .ok_or(TokenizerError::ArithmeticOverflow)?;
-        if next > TOKENIZER_HEAP_BUDGET {
-            return Err(TokenizerError::VocabHeldTooLarge(next, TOKENIZER_HEAP_BUDGET));
+        if next > self.budget {
+            return Err(TokenizerError::VocabHeldTooLarge(next, self.budget));
         }
         self.held = next;
         Ok(())
@@ -822,19 +936,13 @@ impl VocabularyRead {
             .read_u64()
             .map_err(|error| at("tokenizer.ggml.tokens", error))?;
         let Ok(declared) = u32::try_from(declared) else {
-            return Err(TokenizerError::VocabTooLarge(
-                usize::MAX,
-                TOKENIZER_HEAP_BUDGET,
-            ));
+            return Err(TokenizerError::VocabTooLarge(usize::MAX, self.budget));
         };
         // The floor charge, before a single element is touched; see
         // `MIN_TABLE_BYTES_PER_ENTRY` for why a count alone is enough to refuse.
         let projected = (declared as usize).saturating_mul(MIN_TABLE_BYTES_PER_ENTRY);
-        if projected > TOKENIZER_HEAP_BUDGET {
-            return Err(TokenizerError::VocabTooLarge(
-                projected,
-                TOKENIZER_HEAP_BUDGET,
-            ));
+        if projected > self.budget {
+            return Err(TokenizerError::VocabTooLarge(projected, self.budget));
         }
         self.vocab = Some(declared);
         self.starts.push(0);
@@ -946,7 +1054,7 @@ impl VocabularyRead {
     ) -> Result<u32, TokenizerError> {
         let count = stream.read_u64().map_err(|error| at(key, error))?;
         u32::try_from(count)
-            .map_err(|_| TokenizerError::VocabTooLarge(usize::MAX, TOKENIZER_HEAP_BUDGET))
+            .map_err(|_| TokenizerError::VocabTooLarge(usize::MAX, self.budget))
     }
 
     /// A scalar id, whatever width the file declared it in -- GGUF writers differ.
@@ -1010,6 +1118,7 @@ impl VocabularyRead {
             byte_first_id,
             vocab,
             held,
+            budget,
             bos_id,
             eos_id,
             pad_id,
@@ -1121,8 +1230,8 @@ impl VocabularyRead {
         drop(scores);
         drop(kinds);
 
-        if held > TOKENIZER_HEAP_BUDGET {
-            return Err(TokenizerError::VocabHeldTooLarge(held, TOKENIZER_HEAP_BUDGET));
+        if held > budget {
+            return Err(TokenizerError::VocabHeldTooLarge(held, budget));
         }
         // A vocabulary the encoder cannot match against is a vocabulary it cannot
         // encode with; that is the same gap as having no vocabulary at all.
@@ -1404,6 +1513,14 @@ mod tests {
         table_from(&bytes).expect("the fixture builds a table")
     }
 
+    /// `table_from` against a ceiling the case names, which is the only way a host
+    /// case can watch the clamp in `compute_dynamic_tokenizer_budget` bite: the
+    /// production entry reads a syscall, and there is no guest here to make it answer.
+    fn table_from_under(bytes: &[u8], budget: usize) -> Result<FileTokenizer, TokenizerError> {
+        let mut stream = GgufStream::from_slice(bytes);
+        FileTokenizer::build_from_stream_under(&mut stream, budget)
+    }
+
     /// Encodes and returns the ids, panicking with the refusal if the table said
     /// no -- every case below fits the buffer it is given.
     fn ids_of(text: &[u8]) -> Vec<u32> {
@@ -1667,6 +1784,266 @@ mod tests {
         );
     }
 
+    /// The budget a build runs under is the guest's, not the constant's.
+    ///
+    /// WHAT THIS PROVES: `TOKENIZER_HEAP_BUDGET` is a ceiling on the derivation and
+    /// not the number the walk refuses at. A device that reports 20 MiB free gets a
+    /// 10 MiB budget, because `VOCAB_GROWTH_FACTOR` says the heap maps up to twice
+    /// what the charge counts; a device that reports 2 GiB free gets the authored
+    /// ceiling, because sixteen mebibytes is what the service decided one vocabulary
+    /// is worth holding. And a reading that did not arrive -- zero -- gets the ceiling
+    /// too, since clamping to zero would refuse every file on a device that is fine.
+    #[test]
+    fn test_the_budget_is_clamped_to_what_the_guest_reports_free() {
+        // No reading: the authored ceiling is the only honest answer, and it is the
+        // same fallback `inference::compute_dynamic_scratch_budget` takes.
+        assert_eq!(
+            compute_dynamic_tokenizer_budget(0),
+            TOKENIZER_HEAP_BUDGET,
+            "a telemetry that did not arrive was read as a device with no memory"
+        );
+        assert_eq!(
+            dynamic_tokenizer_heap_budget(),
+            TOKENIZER_HEAP_BUDGET,
+            "the host suite has no syscall to answer, so it must fall back and say so"
+        );
+
+        // The demo's guest: 2 GiB detected, and the scratch budget takes three
+        // quarters of what is free. Even the quarter left is far past the ceiling,
+        // so the authored number stands and nothing about the demo changes.
+        let two_gib = 2048 * 1024 * 1024;
+        assert_eq!(
+            compute_dynamic_tokenizer_budget(two_gib),
+            TOKENIZER_HEAP_BUDGET
+        );
+
+        // Exactly twice the ceiling: the last free count where the authored number
+        // still fits under the growth factor.
+        let exact = (TOKENIZER_HEAP_BUDGET * VOCAB_GROWTH_FACTOR) as u64;
+        assert_eq!(compute_dynamic_tokenizer_budget(exact), TOKENIZER_HEAP_BUDGET);
+
+        // One byte below that, and the clamp bites: the budget is the device's, and
+        // it is below the ceiling the refusal used to name unconditionally.
+        let clamped = compute_dynamic_tokenizer_budget(exact - 1);
+        assert!(
+            clamped < TOKENIZER_HEAP_BUDGET,
+            "a device reporting {} bytes free was still promised the {TOKENIZER_HEAP_BUDGET} \
+             byte ceiling, which is the abort the ceiling exists to refuse",
+            exact - 1
+        );
+        assert_eq!(clamped, ((exact - 1) / VOCAB_GROWTH_FACTOR as u64) as usize);
+
+        // A device with almost nothing free is not told it has almost nothing free.
+        assert_eq!(compute_dynamic_tokenizer_budget(2), 1);
+    }
+
+    /// A ceiling the guest cannot reach refuses at the ceiling it derived, and the
+    /// refusal carries that number rather than the constant beside it.
+    ///
+    /// WHY this is a separate case from the arithmetic above: the derivation could be
+    /// right and the walk could still refuse against `TOKENIZER_HEAP_BUDGET`, which is
+    /// what it did before this -- the budget was a constant read at four sites, so
+    /// deriving it changed nothing a reader could observe.
+    #[test]
+    fn test_a_build_under_a_clamped_budget_refuses_naming_the_clamp() {
+        let free = 20 * 1024 * 1024;
+        let budget = compute_dynamic_tokenizer_budget(free);
+        assert_eq!(budget, 10 * 1024 * 1024);
+
+        let declared = (budget / MIN_TABLE_BYTES_PER_ENTRY) + 1;
+        let mut file = Fixture::new();
+        file.tokens_as(declared as u64, &[b"<pad>"]);
+        let bytes = file.build();
+        let error = table_from_under(&bytes, budget)
+            .err()
+            .expect("a vocabulary past the clamped budget must not be walked");
+        assert_eq!(
+            error,
+            TokenizerError::VocabTooLarge(declared * MIN_TABLE_BYTES_PER_ENTRY, budget),
+            "the refusal named a ceiling the build was not running under"
+        );
+
+        // And the same file, whose count the authored ceiling accepts, is walked --
+        // so the clamp is what refused it and not the fixture being oversized.
+        assert!(
+            declared * MIN_TABLE_BYTES_PER_ENTRY <= TOKENIZER_HEAP_BUDGET,
+            "this case proved nothing: the constant would have refused it too"
+        );
+        let mut under_ceiling = Fixture::new();
+        under_ceiling.tokens(&[b"<pad>"]);
+        let small = under_ceiling.build();
+        assert!(table_from_under(&small, budget).is_ok());
+    }
+
+    /// The installed file's own table holds within the factor the budget is derived
+    /// from, measured over its real bytes rather than asserted about.
+    ///
+    /// WHY this case exists: `VOCAB_GROWTH_FACTOR` is the whole justification for
+    /// dividing the guest's free bytes before comparing them to the charge. If the
+    /// real table's vectors held more than twice what the charge counted, the derived
+    /// budget would name a ceiling the heap could not reach -- the abort the module
+    /// header says a budget exists to prevent -- and nothing else in this suite would
+    /// notice, because every other case prices a fixture typed in by hand.
+    ///
+    /// WHAT IT DOES NOT MEASURE: the service heap. This runs on the host allocator,
+    /// so what is measured is the vectors' capacity against the charge, which is the
+    /// part the allocator's own policy decides and the part the factor stands for.
+    /// The service heap's per-allocation header and page rounding sit on top of that
+    /// and are `inference::LARGEST_SINGLE_BUFFER_BYTES`'s subject, not this one's.
+    #[test]
+    fn test_the_installed_table_holds_within_the_growth_factor_it_is_derived_from() {
+        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            host::println!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so \
+                 VOCAB_GROWTH_FACTOR rests on Vec's doubling policy alone and the installed \
+                 table's real capacity-to-charge ratio goes unmeasured."
+            );
+            return;
+        };
+        use host::io::Read;
+
+        // Same window as the encode case above: the file's metadata block runs to a
+        // little under seven megabytes, so twelve holds all of it.
+        const WINDOW: usize = 12 * 1024 * 1024;
+        let mut buffer: host::vec::Vec<u8> = host::vec![0u8; WINDOW];
+        let mut file = host::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+        let mut filled = 0usize;
+        while filled < WINDOW {
+            match file.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(got) => filled += got,
+                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+            }
+        }
+        buffer.truncate(filled);
+
+        let table = table_from(&buffer)
+            .unwrap_or_else(|error| panic!("the real file at {path} gave no table: {error:?}"));
+
+        // What the charge counts for the table that ships: the four vectors that
+        // survive `finish`, plus the byte map that exists before any key is read.
+        let counted = table.heap_bytes();
+
+        // What the heap actually holds for those same four vectors.
+        let mapped = table.bytes.capacity() * core::mem::size_of::<u8>()
+            + table.starts.capacity() * core::mem::size_of::<u32>()
+            + table.matchable.capacity() * core::mem::size_of::<bool>()
+            + table.pool.capacity() * core::mem::size_of::<u32>();
+
+        // The two vectors `finish` drops are alive at the charge's peak, so the peak
+        // the budget has to cover is counted plus their four bytes an entry, and the
+        // heap at that peak is `mapped` plus their capacity -- which the same doubling
+        // bound puts under twice their counted size.
+        assert!(
+            table.declares_scores() && table.declares_token_types(),
+            "the installed file changed shape and this case's peak arithmetic with it"
+        );
+        let transient_counted = table.declared_vocab() as usize * core::mem::size_of::<f32>() * 2;
+        let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
+        let peak_counted = counted + transient_counted;
+
+        assert!(
+            peak_mapped <= peak_counted * VOCAB_GROWTH_FACTOR,
+            "the installed table peaks at {peak_mapped} bytes of heap for {peak_counted} counted, \
+             past the {VOCAB_GROWTH_FACTOR}x the derived budget divides free bytes by"
+        );
+        host::println!(
+            "REAL FILE GROWTH {path}: counted {counted}, mapped {mapped} (ratio {:.3}), peak \
+             counted {peak_counted}, peak mapped bound {peak_mapped} (ratio {:.3}), factor \
+             reserved {VOCAB_GROWTH_FACTOR}. Measured on the host allocator: the vectors' \
+             capacity, not the service heap's mapped pages.",
+            mapped as f64 / counted as f64,
+            peak_mapped as f64 / peak_counted as f64,
+        );
+    }
+
+    /// The doc block above `TOKENIZER_HEAP_BUDGET`, whitespace-collapsed to one line.
+    ///
+    /// WHY out of this file's own bytes: the breakdown that doc quotes is a
+    /// measurement of the installed model file, and a measurement restated by hand
+    /// drifts -- the numbers it carried for a while summed to something other than
+    /// the total they named. Reading the sentence at test time compares it to the
+    /// measurement instead of to whoever typed it in.
+    fn budget_doc() -> host::string::String {
+        let source = include_str!("tokenizer.rs");
+        let (head, _) = source
+            .split_once("pub const TOKENIZER_HEAP_BUDGET")
+            .expect("this file no longer declares TOKENIZER_HEAP_BUDGET");
+        let mut doc = host::string::String::new();
+        for line in head.lines().rev() {
+            let Some(rest) = line.trim().strip_prefix("///") else {
+                break;
+            };
+            doc.insert_str(0, rest.trim());
+            doc.insert(0, ' ');
+        }
+        doc.split_whitespace()
+            .collect::<host::vec::Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn test_the_budget_doc_quotes_the_held_bytes_the_installed_file_yields() {
+        let Some(path) = host::env::var("INTEROS_REAL_GGUF_PATH").ok() else {
+            host::println!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset, so the \
+                 held-bytes breakdown quoted beside the heap-ceiling constant goes unmeasured \
+                 and rests on whoever typed it in."
+            );
+            return;
+        };
+        use alloc::format;
+        use host::io::Read;
+
+        const WINDOW: usize = 12 * 1024 * 1024;
+        let mut buffer: host::vec::Vec<u8> = host::vec![0u8; WINDOW];
+        let mut file = host::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+        let mut filled = 0usize;
+        while filled < WINDOW {
+            match file.read(&mut buffer[filled..]) {
+                Ok(0) => break,
+                Ok(got) => filled += got,
+                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+            }
+        }
+        buffer.truncate(filled);
+
+        let table = table_from(&buffer)
+            .unwrap_or_else(|error| panic!("the real file at {path} gave no table: {error:?}"));
+
+        // The five the running charge ends on, each from the table that shipped:
+        // `VocabularyRead::finish` holds the byte map from the first step, charges
+        // every piece's bytes as it reads it, bills a start entry and a matchable
+        // flag per declared id, and adds the pool's four bytes an emitted piece.
+        let vocab = table.declared_vocab() as usize;
+        let byte_map = core::mem::size_of::<[u32; 256]>();
+        let pieces = table.bytes.len();
+        let starts = vocab * core::mem::size_of::<u32>();
+        let flags = vocab * core::mem::size_of::<bool>();
+        let pool = table.pool.len() * core::mem::size_of::<u32>();
+        let held = table.heap_bytes();
+
+        assert_eq!(
+            byte_map + pieces + starts + flags + pool,
+            held,
+            "the five parts this case prices no longer sum to what the build charges, so \
+             `finish` changed what it bills and the doc's breakdown is the next thing to move"
+        );
+
+        let quoted = format!(
+            "{held} bytes held: byte map {byte_map} + piece bytes {pieces} + start entries \
+             {starts} + matchable flags {flags} + pool {pool}, over {vocab} declared entries"
+        );
+        let doc = budget_doc();
+        assert!(
+            doc.contains(&quoted),
+            "the heap-ceiling doc does not quote the installed file's own bytes.\n  \
+             it must say: {quoted}\n  it says: {doc}"
+        );
+    }
+
     #[test]
     fn test_a_piece_longer_than_the_window_names_the_id_and_both_numbers() {
         let long = vec![b'x'; MAX_PIECE_BYTES + 1];
@@ -1883,11 +2260,15 @@ mod tests {
         assert_eq!(table.byte_of_id(238), Some(0x00));
         assert_eq!(table.byte_of_id(493), Some(0xFF));
 
-        // The two numbers the budget was chosen against.
+        // The two numbers the budget was chosen against. The ceiling is the one this
+        // build ran under, named by the derivation rather than by the constant, so a
+        // raised literal cannot widen the bound this case observes without also being
+        // the budget the refusal would have quoted.
         assert!(
-            table.heap_bytes() <= TOKENIZER_HEAP_BUDGET,
-            "the real file's table held {} of the {TOKENIZER_HEAP_BUDGET} bytes allowed",
-            table.heap_bytes()
+            table.heap_bytes() <= dynamic_tokenizer_heap_budget(),
+            "the real file's table held {} of the {} bytes allowed",
+            table.heap_bytes(),
+            dynamic_tokenizer_heap_budget()
         );
 
         for text in [
@@ -1931,7 +2312,7 @@ mod tests {
 
         host::println!(
             "REAL FILE {path}: vocab {}, {} matchable pieces, {} byte tokens from id {}, \
-             table holds {} of the {TOKENIZER_HEAP_BUDGET} bytes allowed; one build from a \
+             table holds {} of the {} bytes allowed; one build from a \
              {WINDOW}-byte prefix took {build_time:?}. NOT compared to any reference \
              tokenizer, because none is installed on this host.",
             table.declared_vocab(),
@@ -1939,6 +2320,7 @@ mod tests {
             table.byte_fallback_width(),
             table.byte_fallback_first_id().unwrap_or(0),
             table.heap_bytes(),
+            dynamic_tokenizer_heap_budget(),
         );
     }
 }
