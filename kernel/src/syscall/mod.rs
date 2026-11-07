@@ -771,10 +771,10 @@ pub fn sys_ipc_send(
             None => return SyscallResult::PermissionDenied,
         };
 
-        let is_inference = dest.0 == 0xFFFF_000C || dest.0 == 12
+        let is_inference = dest.0 == 0xFFFF_000C
             || crate::services::task_id(crate::services::ServiceId::Inference) == Some(dest)
             || msg_type == 0x454D_4244 || msg_type == 0x4747_5546 || msg_type == 0x4745_4E52 || msg_type == 0x4745_4E45 || msg_type == 0x5352_4348;
-        let is_search = dest.0 == 0xFFFF_000D || dest.0 == 13
+        let is_search = dest.0 == 0xFFFF_000D
             || crate::services::task_id(crate::services::ServiceId::Search) == Some(dest);
 
         // Zero ambient authority: Access to inference requires explicit InferenceService capability
@@ -811,10 +811,6 @@ pub fn sys_ipc_send(
         } else {
             dest
         }
-    } else if dest.0 == 12 {
-        crate::services::task_id(crate::services::ServiceId::Inference).unwrap_or(dest)
-    } else if dest.0 == 13 {
-        crate::services::task_id(crate::services::ServiceId::Search).unwrap_or(dest)
     } else {
         dest
     };
@@ -8675,6 +8671,28 @@ fn test_inference_ipc_security_denial_without_capability() {
 
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE));
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::READ));
+}
+
+#[test]
+fn raw_task_ids_do_not_inherit_service_ambient_authority() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    let caller_task = TaskId(9105);
+    let mut table = crate::capability::CapabilityTable::new_for_task(caller_task, 8);
+
+    // Grant InferenceService capability
+    table.insert(Capability {
+        id: CapabilityId(9106),
+        cap_type: CapabilityType::InferenceService,
+        rights: Rights::READ | Rights::INVOKE,
+        object_id: 0,
+    }).unwrap();
+
+    // Verify: holding InferenceService capability does NOT grant permission to send to arbitrary raw TaskId 12
+    // when TaskId 12 is not the registered inference service task.
+    let dest_task = TaskId(12);
+    assert_ne!(crate::services::task_id(crate::services::ServiceId::Inference), Some(dest_task));
+    assert!(table.verify_object(0, CapabilityType::IpcSend, Rights::WRITE, dest_task.0).is_err());
+    assert!(table.find_capability_for_object(CapabilityType::IpcSend, Rights::WRITE, dest_task.0).is_none());
 }
 
 #[test]
