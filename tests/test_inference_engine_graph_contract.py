@@ -685,3 +685,42 @@ def test_the_address_space_doc_contract_can_fail():
         "no artifact behind it" in d
         for d in _address_space_doc_defects(inference, services, unpinned)
     ), "losing the kernel's own figure left the doc's number uncheckable"
+
+
+def _weight_pricing_defects(inference: str) -> list[str]:
+    defects = []
+    if "pub fn parameter_count(&self) -> usize" not in inference:
+        defects.append("ModelConfig no longer defines parameter_count")
+    if "pub fn weight_bytes(&self, dtype: u32) -> usize" not in inference:
+        defects.append("ModelConfig no longer defines weight_bytes to price weights in the cost model")
+    if "12 MB/s" in inference or "12 MB" in inference:
+        defects.append("inference.rs still contains unmeasured throughput claim: '12 MB/s'")
+    if "conversational_2b_model_feasibility_verdict" in inference:
+        defects.append("inference.rs still names an invented 'feasibility verdict'")
+    if "test_model_config_prices_weight_bytes_against_memory_budget" not in inference:
+        defects.append("inference.rs no longer tests weight_bytes in test_model_config_prices_weight_bytes_against_memory_budget")
+    return defects
+
+
+def test_the_cost_model_prices_weight_bytes_and_refuses_unmeasured_throughput_claims():
+    """Weight footprints are priced in the cost model; unmeasured throughput claims are refused."""
+    defects = _weight_pricing_defects(read("inference.rs"))
+    assert defects == [], "; ".join(defects)
+
+
+def test_the_weight_pricing_gate_can_fail():
+    """Each detector above trips on the drift it exists for."""
+    inference = read("inference.rs")
+    assert _weight_pricing_defects(inference) == []
+
+    # 1. Reintroducing 12 MB/s unmeasured throughput
+    speed = inference.replace(
+        "test_model_config_prices_weight_bytes_against_memory_budget",
+        "// At 12 MB/s PIO\nfn test_model_config_prices_weight_bytes_against_memory_budget",
+        1,
+    )
+    assert any("unmeasured throughput claim" in d for d in _weight_pricing_defects(speed))
+
+    # 2. Removing weight_bytes from cost model
+    missing = inference.replace("pub fn weight_bytes(&self, dtype: u32) -> usize", "pub fn unpriced_weights(&self) -> usize", 1)
+    assert any("no longer defines weight_bytes" in d for d in _weight_pricing_defects(missing))

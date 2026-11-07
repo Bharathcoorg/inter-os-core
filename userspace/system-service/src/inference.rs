@@ -1028,6 +1028,45 @@ impl ModelConfig {
         self.kv_cache_bytes().saturating_add(Scratch::bytes_for(self))
     }
 
+    /// Computes the total parameter count across all attention, feed-forward,
+    /// normalization, and embedding tensors for this model configuration.
+    pub fn parameter_count(&self) -> usize {
+        let q_params = (self.num_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
+        let k_params = (self.num_kv_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
+        let v_params = (self.num_kv_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
+        let out_params = self.hidden_dim.saturating_mul(self.num_heads.saturating_mul(self.head_dim));
+        let ffn_params = self.intermediate_dim.saturating_mul(self.hidden_dim).saturating_mul(3);
+        let layer_norm_params = self.hidden_dim.saturating_mul(4);
+        let per_layer_params = q_params
+            .saturating_add(k_params)
+            .saturating_add(v_params)
+            .saturating_add(out_params)
+            .saturating_add(ffn_params)
+            .saturating_add(layer_norm_params);
+
+        let embed_params = self.vocab_size.saturating_mul(self.hidden_dim);
+        let final_norm_params = self.hidden_dim;
+
+        per_layer_params
+            .saturating_mul(self.num_layers)
+            .saturating_add(embed_params)
+            .saturating_add(final_norm_params)
+    }
+
+    /// Prices the weight bytes required to store this model configuration in memory
+    /// for a given quantisation dtype (e.g. Q4_K = 12, Q8_0 = 8, F16 = 1, F32 = 0).
+    pub fn weight_bytes(&self, dtype: u32) -> usize {
+        let params = self.parameter_count();
+        match dtype {
+            0 => params.saturating_mul(4),            // F32: 4 bytes/weight
+            1 => params.saturating_mul(2),            // F16: 2 bytes/weight
+            2 => (params.saturating_mul(18)) / 32,    // Q4_0: 4.5 bits/weight
+            8 => (params.saturating_mul(34)) / 32,    // Q8_0: 8.5 bits/weight
+            12 => (params.saturating_mul(144)) / 256, // Q4_K: 4.5 bits/weight
+            _ => (params.saturating_mul(34)) / 32,    // Default to Q8_0
+        }
+    }
+
     /// Bytes in the one buffer a run allocates that is biggest.
     ///
     /// WHY the total is not enough on its own: `KvCache::new` and `Scratch::new`
@@ -4294,38 +4333,14 @@ pub mod tests {
         );
     }
 
-    /// Feasibility verdict on conversational models (<=2B parameters) within the 120 MiB budget:
+    /// Prices weight bytes in the cost model against the available memory budget.
     ///
-    /// WHY this test exists: the platform truth contract forbids claiming on-device generative AI
-    /// when the hardware budget cannot host it. This test pins the physical and arithmetic proof:
-    /// - 2B parameters require at least 1.1 GiB (Q4_K) or 2.1 GiB (Q8_0) in weight storage.
-    /// - At 12 MB/s IDE synchronous PIO disk throughput, streaming 1.1 GiB for every generated
-    ///   token would require >80 seconds per token.
-    /// - In-memory execution exceeds SCRATCH_BYTE_BUDGET (120 MiB) by more than 2x for KV-cache alone
-    ///   and by more than 9x for weights.
-    /// Therefore, conversational models are provably unfeasible on-device and must be designated
-    /// as host-backed inference via the development bridge.
+    /// Verifies that conversational 2B models cannot run in-memory within SCRATCH_BYTE_BUDGET
+    /// and that weight footprints are priced directly from the declared model architecture
+    /// rather than invented transfer speeds or unmeasured throughput claims.
     #[test]
-    fn conversational_2b_model_feasibility_verdict_proves_on_device_unfeasible() {
-        // 1. Weight footprint arithmetic for 2B parameters
-        const PARAM_COUNT_2B: usize = 2_000_000_000;
-        let q4_weight_bytes = (PARAM_COUNT_2B * 9) / 16;
-        let q8_weight_bytes = (PARAM_COUNT_2B * 17) / 16;
-        assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
-        assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
-
-        // 2. Disk streaming latency at theoretical ceiling
-        // Note: Real physical throughput is device-dependent and unmeasured on-device.
-        // Even under the theoretical ATA PIO Mode 4 burst maximum of 16 MB/s, streaming
-        // >1.1 GiB weights would require >60s per token.
-        const THEORETICAL_IDE_PIO_MAX_UPPER_BOUND: usize = 16 * 1024 * 1024;
-        let sec_per_token_q4 = q4_weight_bytes / THEORETICAL_IDE_PIO_MAX_UPPER_BOUND;
-        assert!(
-            sec_per_token_q4 >= 60,
-            "Streaming 2B Q4 takes at least 60s per token under theoretical PIO ceiling"
-        );
-
-        // 3. ModelConfig scratch budget check fails for 2B architecture with 4 KV heads
+    fn test_model_config_prices_weight_bytes_against_memory_budget() {
+        // Conversational 2B model configuration
         let conv_2b = ModelConfig {
             hidden_dim: 2048,
             intermediate_dim: 16384,
@@ -4339,6 +4354,16 @@ pub mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
         };
+
+        // 1. Weight bytes priced from model configuration
+        let q4_weight_bytes = conv_2b.weight_bytes(12); // Q4_K
+        let q8_weight_bytes = conv_2b.weight_bytes(8);  // Q8_0
+        assert!(q4_weight_bytes > 1_000_000_000, "2B Q4 weights must exceed 1 GiB");
+        assert!(q8_weight_bytes > 2_000_000_000, "2B Q8 weights must exceed 2 GiB");
+        assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
+        assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
+
+        // 2. Scratch check refuses the 2B architecture cleanly
         let needed_scratch = conv_2b.scratch_bytes();
         assert!(needed_scratch > SCRATCH_BYTE_BUDGET * 2, "KV cache + scratch exceeds budget by 2x");
         assert_eq!(
