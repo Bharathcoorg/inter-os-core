@@ -87,15 +87,42 @@ const VP8_SCRATCH_EMPTY: Vp8Scratch = Vp8Scratch {
 
 /// Scratch arena for VP8 keyframe decoding.
 ///
-/// SAFETY: the scratch buffer is sound because callers in InterOS applications
-/// are strictly single-threaded and non-reentrant. Apps run a single event loop
-/// on one task and invoke decoding from that loop, never from an interrupt
-/// handler or a concurrent worker thread.
+/// Protected by `VP8_LOCK` spinlock to ensure deterministic, race-free decoding
+/// when multiple threads decode VP8 streams concurrently (such as in host test harnesses),
+/// while preserving `#![no_std]` zero-heap guarantees in userspace applications.
 static mut VP8_SCRATCH: Vp8Scratch = VP8_SCRATCH_EMPTY;
+static VP8_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub(crate) struct Vp8ScratchGuard;
+
+impl Vp8ScratchGuard {
+    #[inline]
+    pub fn as_mut(&mut self) -> &mut Vp8Scratch {
+        unsafe { &mut *core::ptr::addr_of_mut!(VP8_SCRATCH) }
+    }
+}
+
+impl Drop for Vp8ScratchGuard {
+    #[inline]
+    fn drop(&mut self) {
+        VP8_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
 
 #[inline]
-pub(crate) fn vp8_scratch() -> &'static mut Vp8Scratch {
-    unsafe { &mut *core::ptr::addr_of_mut!(VP8_SCRATCH) }
+pub(crate) fn vp8_scratch() -> Vp8ScratchGuard {
+    while VP8_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    Vp8ScratchGuard
 }
 
 
@@ -1486,7 +1513,8 @@ pub fn decode(chunk: &[u8], out_rgba: &mut [u8]) -> Result<(u32, u32, usize), ()
         return Err(());
     }
 
-    let scratch = vp8_scratch();
+    let mut _guard = vp8_scratch();
+    let scratch = _guard.as_mut();
     let w = width as usize;
     let h = height as usize;
 

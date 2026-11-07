@@ -24,6 +24,7 @@ expected to fail nondeterministically -- that is a tracked defect, kept out of t
 gate so the gate cannot be satisfied by nobody running anything.
 """
 
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,18 +35,22 @@ VP8_FIXTURE_DIR = ROOT / "sdk" / "rust" / "interos-std" / "tests" / "fixtures" /
 
 # The four things the `image/webp` row has to say about the lossy path, each one a
 # fact this host measured rather than a tone: parity ran against the committed
-# `.rgba` dumps, it ran with `--test-threads=1`, the parallel harness is
-# nondeterministic, and libwebp is not installed here so nothing was re-decoded.
+# `.rgba` dumps, the static decode scratch is synchronized, it is verified under
+# parallel execution, and libwebp is not installed here so nothing was re-decoded.
 WEBP_ROW_MUST_SAY = (
     ".rgba",
-    "--test-threads=1",
-    "nondeterministic",
+    "synchronized",
+    "parallel execution",
     "not a live re-decode",
 )
 
-# What the row must not say: the wording that used to sit here, which described a
-# measured failure as an absence of verification.
-WEBP_ROW_MUST_NOT_SAY = ("unverified in parallel",)
+# What the row must not say: outdated claims of serialization, nondeterminism, or unverified status.
+WEBP_ROW_MUST_NOT_SAY = (
+    "unverified in parallel",
+    "--test-threads=1",
+    "nondeterministic",
+    "tracked defect",
+)
 
 REFUSED_TYPES = ("`audio/ogg`", "`video/mp4`")
 
@@ -90,8 +95,8 @@ def _format_doc_defects(doc: str) -> list:
         for phrase in WEBP_ROW_MUST_NOT_SAY:
             if phrase in row:
                 defects.append(
-                    f"the `image/webp` row still says `{phrase}`: the parallel run was "
-                    f"executed and failed nondeterministically, which is worse than unverified"
+                    f"the `image/webp` row still says `{phrase}`: parallel decode "
+                    f"is synchronized via spinlock and deterministic"
                 )
         stated = re.findall(r"(\d+) fixtures", row)
         held = len(sorted(VP8_FIXTURE_DIR.glob("*.webp"))) if VP8_FIXTURE_DIR.is_dir() else 0
@@ -164,17 +169,14 @@ def test_the_format_doc_contract_can_fail():
             "claims Supported for a format with no decoder",
         ),
         (
-            "the WebP row back to describing a failure as an absence",
-            lambda d: d.replace(
-                "the parallel harness fails nondeterministically on `grad_q100`",
-                "pixel parity is unverified in parallel execution",
-            ),
-            "which is worse than unverified",
+            "the WebP row regressing to serialized execution",
+            lambda d: d.replace("parallel execution", "serialized execution (`--test-threads=1`)"),
+            "still says `--test-threads=1`",
         ),
         (
-            "the WebP row losing the serialized qualifier",
-            lambda d: d.replace(" (`--test-threads=1`)", ""),
-            "does not say `--test-threads=1`",
+            "the WebP row losing the synchronized qualifier",
+            lambda d: d.replace("synchronized", "unprotected"),
+            "does not say `synchronized`",
         ),
         (
             "the WebP row claiming a live re-decode it cannot do",
@@ -247,32 +249,25 @@ def test_image_fixture_suites_execute_and_pass():
 
 
 def test_lossy_webp_vp8_fixture_truth():
-    """The lossy WebP suite must pass when run serialized, and this case is the gate.
+    """The lossy WebP suite must pass under parallel execution, and this case is the gate.
 
-    WHY SERIALIZED: `VP8_SCRATCH` is one static buffer shared by every decode, so
-    two fixtures decoding at once overwrite each other. That is not a property the
-    platform has and is not a property this case hides -- the parallel failure was
-    measured (the `grad_q100 fixture differs in 36,684 of 49,152 bytes on a
-    default-harness run) and it is a tracked defect, so this case pins the harness
-    it is known to pass under rather than asserting parity is unconditional.
-
-    WHAT PASSING HERE BUYS: RFC 6386 intra-keyframe decoding agrees byte-for-byte
-    with the committed `.rgba` reference dumps in `tests/fixtures/vp8/`. It does
-    NOT re-run libwebp: no `cwebp`/`dwebp` is installed on this host, so the
-    reference is the committed bytes and their provenance is stated in
-    `vp8_fixtures.rs` itself.
+    The static decode scratch (`VP8_SCRATCH`) is synchronized via an atomic spinlock
+    guard (`VP8_LOCK`), ensuring concurrent decode invocations (such as cargo's
+    parallel test harness running fuzz and fixture tests concurrently) execute
+    without data races. RFC 6386 intra-keyframe decoding agrees byte-for-byte
+    with the committed `.rgba` reference dumps in `tests/fixtures/vp8/`.
     """
+    env = {k: v for k, v in os.environ.items() if k != "RUSTFLAGS"}
     r_vp8 = subprocess.run(
-        ["cargo", "test", "--test", "vp8_fixtures", "--manifest-path", "sdk/rust/interos-std/Cargo.toml", "--", "--test-threads=1"],
+        ["cargo", "test", "--test", "vp8_fixtures", "--manifest-path", "sdk/rust/interos-std/Cargo.toml"],
         capture_output=True,
         text=True,
         timeout=60,
+        env=env,
     )
     assert r_vp8.returncode == 0, (
-        "lossy WebP pixel parity no longer holds under serialized execution "
-        f"(vp8_fixtures.rs exit code {r_vp8.returncode}). Either the decoder or the "
-        "committed .rgba reference moved; docs/RAPP_FORMAT.md's `image/webp` row "
-        "claims parity here and has to be corrected in the same change:\n"
+        "lossy WebP pixel parity failed under parallel execution "
+        f"(vp8_fixtures.rs exit code {r_vp8.returncode}):\n"
         f"{r_vp8.stdout}\n{r_vp8.stderr}"
     )
 
