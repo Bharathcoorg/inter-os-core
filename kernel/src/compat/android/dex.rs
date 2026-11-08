@@ -13,6 +13,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub const DEX_MAGIC: &[u8; 8] = b"dex\n035\0";
+pub const DEX_MAGIC_037: &[u8; 8] = b"dex\n037\0";
+pub const DEX_MAGIC_038: &[u8; 8] = b"dex\n038\0";
+pub const DEX_MAGIC_039: &[u8; 8] = b"dex\n039\0";
+
+/// Validates whether the given magic bytes match a supported DEX format version (035, 037, 038, 039).
+#[inline]
+pub fn is_valid_dex_magic(magic: &[u8; 8]) -> bool {
+    magic == DEX_MAGIC || magic == DEX_MAGIC_037 || magic == DEX_MAGIC_038 || magic == DEX_MAGIC_039
+}
 pub const DEX_HEADER_SIZE: usize = 0x70; // 112 bytes
 pub const ENDIAN_CONSTANT: u32 = 0x12345678;
 
@@ -128,7 +137,7 @@ impl<'a> DexPackage<'a> {
         let hdr_ptr = raw.as_ptr() as *const DexHeader;
         let header: DexHeader = unsafe { core::ptr::read_unaligned(hdr_ptr) };
 
-        if &header.magic != DEX_MAGIC {
+        if !is_valid_dex_magic(&header.magic) {
             return Err(DexError::InvalidMagic);
         }
 
@@ -714,6 +723,30 @@ mod tests {
         assert_eq!(pkg.get_type_slice(1).unwrap(), "Ljava/lang/Object;");
         assert_eq!(pkg.get_type_slice(2).unwrap(), "Lorg/interos/TestActivity;");
         assert_eq!(pkg.get_type_slice(10), Err(DexError::TypeIndexOutOfBounds));
+    }
+
+    #[test]
+    fn test_dex_magic_versions() {
+        assert!(is_valid_dex_magic(b"dex\n035\0"));
+        assert!(is_valid_dex_magic(b"dex\n037\0"));
+        assert!(is_valid_dex_magic(b"dex\n038\0"));
+        assert!(is_valid_dex_magic(b"dex\n039\0"));
+        assert!(!is_valid_dex_magic(b"dex\n036\0"));
+        assert!(!is_valid_dex_magic(b"dey\n035\0"));
+        assert!(!is_valid_dex_magic(b"badmagic"));
+    }
+
+    #[test]
+    fn test_dex_version_038_acceptance() {
+        let mut raw = create_test_dex("Lorg/interos/ModernActivity;", "onCreate", "ModernDex");
+        // Overwrite magic with DEX 038
+        raw[0..8].copy_from_slice(b"dex\n038\0");
+        // Recompute Adler-32
+        let checksum = compute_adler32(&raw[12..]);
+        raw[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        let pkg = DexPackage::parse(&raw).expect("parse DEX 038");
+        assert_eq!(pkg.get_string_slice(2).unwrap(), "Lorg/interos/ModernActivity;");
     }
 }
 

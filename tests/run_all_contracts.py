@@ -58,6 +58,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_adversarial_security.py": 10,
     "tests/test_agent_manager_truth_contract.py": 39,
     "tests/test_android_apk_container_contract.py": 4,
+    "tests/test_android_app_verification_contract.py": 6,
     "tests/test_android_compat_contract.py": 3,
     "tests/test_android_guest_contract.py": 3,
     "tests/test_android_runtime_contract.py": 7,

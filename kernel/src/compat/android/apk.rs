@@ -796,3 +796,66 @@ pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
 
     apk
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apk_package_parse_and_manifest_extraction() {
+        let apk_bytes = create_test_apk("org.whispersystems.signal", &["android.permission.INTERNET", "android.permission.CAMERA"]);
+        let pkg = ApkPackage::parse(&apk_bytes).expect("parse valid APK");
+        assert_eq!(pkg.manifest.package_name, "org.whispersystems.signal");
+        assert_eq!(pkg.manifest.permissions.len(), 2);
+        assert!(pkg.has_classes_dex);
+        assert!(!pkg.is_signed);
+        assert_eq!(pkg.file_count, 2);
+    }
+
+    #[test]
+    fn test_apk_audit_unsigned_attestation_failure() {
+        let apk_bytes = create_test_apk("org.whispersystems.signal", &["android.permission.INTERNET"]);
+        let pkg = ApkPackage::parse(&apk_bytes).expect("parse valid APK");
+        let profile = pkg.audit_and_create_container(900);
+        assert_eq!(profile.status, AcrAuditStatus::AttestationFailed);
+        assert_eq!(profile.granted_caps_count, 0);
+        assert_eq!(profile.denied_perms_count, 1);
+    }
+
+    #[test]
+    fn test_apk_audit_ambient_authority_rejection() {
+        let apk_bytes = create_test_apk("com.rogue.installer", &["android.permission.INSTALL_PACKAGES"]);
+        let pkg = ApkPackage::parse(&apk_bytes).expect("parse APK with forbidden perm");
+        let profile = pkg.audit_and_create_container(950);
+        assert_eq!(profile.status, AcrAuditStatus::AmbientAuthorityDenied);
+        assert_eq!(profile.granted_caps_count, 0);
+    }
+
+    #[test]
+    fn test_apk_signature_verification_strictly_fails_closed() {
+        let apk_bytes = create_test_apk("org.interos.sample", &[]);
+        let sig_res = verify_apk_signature(&apk_bytes);
+        assert_eq!(sig_res, Err(ApkError::InvalidSignature));
+
+        let small = [0u8; 10];
+        assert_eq!(verify_apk_signature(&small), Err(ApkError::TooSmall));
+    }
+
+    #[test]
+    fn test_apk_zip_deflate_extraction() {
+        let apk_bytes = create_test_apk("org.interos.deflate", &["android.permission.INTERNET"]);
+        let zip = ZipArchive::parse(&apk_bytes).expect("parse zip");
+        let extracted = zip.extract_file("AndroidManifest.xml").expect("extract manifest");
+        assert!(!extracted.is_empty());
+        let missing = zip.extract_file("nonexistent.txt");
+        assert_eq!(missing, Err(ApkError::MissingManifest));
+    }
+
+    #[test]
+    fn test_apk_too_small_and_corrupt_rejected() {
+        assert_eq!(ZipArchive::parse(&[]).err(), Some(ApkError::TooSmall));
+        assert_eq!(ZipArchive::parse(&[1, 2, 3, 4]).err(), Some(ApkError::TooSmall));
+        let bad = [0u8; 30];
+        assert_eq!(ZipArchive::parse(&bad).err(), Some(ApkError::EndOfCentralDirectoryNotFound));
+    }
+}
