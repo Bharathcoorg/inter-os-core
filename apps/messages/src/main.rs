@@ -4935,6 +4935,150 @@ fn edit_search(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Sovereign AppMCP Tool Dispatcher (Zero-Allocation & Bounded)
+// -----------------------------------------------------------------------------
+
+fn format_u32_str(mut val: u32, out: &mut [u8]) -> usize {
+    if val == 0 {
+        if !out.is_empty() {
+            out[0] = b'0';
+            return 1;
+        }
+        return 0;
+    }
+    let mut temp = [0u8; 10];
+    let mut n = 0;
+    while val > 0 && n < temp.len() {
+        temp[n] = b'0' + (val % 10) as u8;
+        val /= 10;
+        n += 1;
+    }
+    let len = n.min(out.len());
+    for i in 0..len {
+        out[i] = temp[n - 1 - i];
+    }
+    len
+}
+
+fn parse_message_payload(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.is_empty() {
+        return (b"", b"");
+    }
+    let mut delim = None;
+    for (i, &b) in payload.iter().enumerate() {
+        if b == b'|' || b == 0 {
+            delim = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = delim {
+        let recip = &payload[..i];
+        let body = if i + 1 < payload.len() {
+            &payload[i + 1..]
+        } else {
+            b""
+        };
+        (recip, body)
+    } else {
+        (payload, b"")
+    }
+}
+
+fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_MESSAGES_SEND_SMS => {
+            let (recip, body) = parse_message_payload(req.payload());
+            if recip.is_empty() || body.is_empty() {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
+            if app.store.append(recip, body) {
+                app.sync_store_to_ledger();
+                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                    .with_payload(b"SMS saved to thread");
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        std::appmcp::TOOL_ID_MESSAGES_LIST => {
+            let mut summary = [0u8; 32];
+            let mut pos = 0usize;
+            for &b in b"threads:" {
+                summary[pos] = b;
+                pos += 1;
+            }
+            pos += format_u32_str(app.store.len() as u32, &mut summary[pos..]);
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(&summary[..pos]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_MESSAGES_DELETE => {
+            let (recip, _) = parse_message_payload(req.payload());
+            if let Some(idx) = app.store.find(recip) {
+                if app.store.remove(idx) {
+                    app.sync_store_to_ledger();
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                } else {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_INTERNAL_ERROR,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // WHY this does not announce a wire protocol: the app binds no
@@ -5053,6 +5197,16 @@ pub extern "C" fn _start() -> ! {
         std::log("[MESSAGES APP] Messages canvas presented to scanout buffer.",
         )
         .ok();
+    } else {
+        let mut rx = [0u8; 64];
+        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+            if handle_appmcp_request(&mut messages, &rx[..len], sender, msg_type) {
+                std::log("[MESSAGES APP] Headless AppMCP tool invocation handled successfully.").ok();
+                std::exit_with_code(0);
+            }
+        }
+        std::log("[MESSAGES APP] Display surface unavailable; refusing execution.").ok();
+        std::exit_with_code(1);
     }
 
     // 4. Sovereign Asynchronous Event Reactor Loop
@@ -5242,13 +5396,18 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log("[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
-                    )
-                    .ok();
-                    if messages.ledger.thread_count == 0 {
-                        std::log("[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
-                        )
-                        .ok();
+                    let mut rx = [0u8; 64];
+                    if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+                        if handle_appmcp_request(&mut messages, &rx[..len], sender, msg_type) {
+                            if surface > 0 {
+                                messages.sync_list_extent();
+                                messages.sync_convo_extent();
+                                render_messages_ui(surface, &messages);
+                                let _ = std::surface_flip();
+                            }
+                        } else {
+                            std::log("[MESSAGES APP] IPC message received (non-AppMCP).").ok();
+                        }
                     }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {

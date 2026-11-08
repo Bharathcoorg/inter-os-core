@@ -42,6 +42,7 @@ pub const APPMCP_STATUS_TOOL_NOT_FOUND: u32     = 3;
 pub const APPMCP_STATUS_INVALID_ARGUMENTS: u32  = 4;
 pub const APPMCP_STATUS_STORAGE_FULL: u32       = 5;
 pub const APPMCP_STATUS_UNAVAILABLE: u32        = 6;
+pub const APPMCP_STATUS_INTERNAL_ERROR: u32     = 7;
 
 // Predefined Tool Action IDs across canonical native applications
 // Notes:
@@ -52,14 +53,19 @@ pub const TOOL_ID_NOTES_DELETE: u32             = 0x4E54_444C; // b"NTDL"
 // Messages:
 pub const TOOL_ID_MESSAGES_SEND_SMS: u32        = 0x4D53_534E; // b"MSSN"
 pub const TOOL_ID_MESSAGES_LIST_THREADS: u32    = 0x4D53_4C53; // b"MSLS"
+pub const TOOL_ID_MESSAGES_LIST: u32            = TOOL_ID_MESSAGES_LIST_THREADS;
+pub const TOOL_ID_MESSAGES_DELETE: u32          = 0x4D53_444C; // b"MSDL"
 
 // Calendar:
 pub const TOOL_ID_CALENDAR_SCHEDULE: u32        = 0x4341_5343; // b"CASC"
 pub const TOOL_ID_CALENDAR_LIST_EVENTS: u32     = 0x4341_4C53; // b"CALS"
+pub const TOOL_ID_CALENDAR_LIST: u32            = TOOL_ID_CALENDAR_LIST_EVENTS;
+pub const TOOL_ID_CALENDAR_GET_DATE: u32        = 0x4341_4454; // b"CADT"
 
 // File Manager:
 pub const TOOL_ID_FILES_LIST: u32               = 0x464D_4C53; // b"FMLS"
 pub const TOOL_ID_FILES_READ: u32               = 0x464D_5244; // b"FMRD"
+pub const TOOL_ID_FILES_WRITE: u32              = 0x464D_5752; // b"FMWR"
 
 // Settings:
 pub const TOOL_ID_SETTINGS_GET: u32             = 0x5354_4754; // b"STGT"
@@ -165,6 +171,12 @@ impl AppMcpRequest {
             inline_payload,
         })
     }
+
+    /// Returns a slice to the inline payload bytes.
+    pub fn payload(&self) -> &[u8] {
+        let len = (self.payload_len as usize).min(36);
+        &self.inline_payload[..len]
+    }
 }
 
 /// Exactly 64-byte AppMCP Response structure.
@@ -229,6 +241,17 @@ impl AppMcpResponse {
         }
         self.output_len = copy_len as u32;
         self
+    }
+
+    /// Attaches an inline output slice (convenience alias for with_inline_output).
+    pub fn with_payload(self, data: &[u8]) -> Self {
+        self.with_inline_output(data)
+    }
+
+    /// Returns a slice to the inline output bytes.
+    pub fn output(&self) -> &[u8] {
+        let len = (self.output_len as usize).min(40);
+        &self.inline_output[..len]
     }
 
     /// Attaches a shared memory pipe for outputs exceeding 40 bytes.

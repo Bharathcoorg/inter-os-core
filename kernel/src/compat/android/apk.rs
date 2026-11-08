@@ -217,10 +217,41 @@ impl<'a> ZipArchive<'a> {
         None
     }
 
-    /// Returns an explicit failure for an APK member that requires a decompressor.
+    /// Extracts a file payload by filename, decompressing raw DEFLATE streams on-demand.
+    pub fn extract_file(&self, filename: &str) -> Result<Vec<u8>, ApkError> {
+        for entry in &self.entries {
+            if entry.name == filename {
+                let end = entry.data_offset.checked_add(entry.compressed_size as usize)
+                    .ok_or(ApkError::InvalidCentralDirectory)?;
+                if end > self.data.len() {
+                    return Err(ApkError::InvalidCentralDirectory);
+                }
+                let compressed = &self.data[entry.data_offset..end];
+                if entry.compression_method == 0 {
+                    let mut out = Vec::with_capacity(entry.uncompressed_size as usize);
+                    out.extend_from_slice(compressed);
+                    return Ok(out);
+                } else if entry.compression_method == 8 {
+                    let mut out = alloc::vec![0u8; entry.uncompressed_size as usize];
+                    match super::inflate::inflate_raw(compressed, &mut out) {
+                        Ok(len) => {
+                            out.truncate(len);
+                            return Ok(out);
+                        }
+                        Err(_) => return Err(ApkError::UnsupportedCompression),
+                    }
+                } else {
+                    return Err(ApkError::UnsupportedCompression);
+                }
+            }
+        }
+        Err(ApkError::MissingManifest)
+    }
+
+    /// Returns an explicit failure for an APK member that requires an unsupported decompressor.
     pub fn validate_compression(&self) -> Result<(), ApkError> {
         for entry in &self.entries {
-            if entry.compression_method != 0 {
+            if entry.compression_method != 0 && entry.compression_method != 8 {
                 return Err(ApkError::UnsupportedCompression);
             }
         }
@@ -466,10 +497,10 @@ impl ApkPackage {
     pub fn parse(apk_bytes: &[u8]) -> Result<Self, ApkError> {
         let zip = ZipArchive::parse(apk_bytes)?;
         zip.validate_compression()?;
-        let manifest_bytes = zip.get_file("AndroidManifest.xml").ok_or(ApkError::MissingManifest)?;
-        let manifest = decode_axml_manifest(manifest_bytes)?;
+        let manifest_bytes = zip.extract_file("AndroidManifest.xml").map_err(|_| ApkError::MissingManifest)?;
+        let manifest = decode_axml_manifest(&manifest_bytes)?;
 
-        let classes_dex = zip.get_file("classes.dex").map(|bytes| bytes.to_vec()).unwrap_or_default();
+        let classes_dex = zip.extract_file("classes.dex").unwrap_or_default();
         let has_classes_dex = !classes_dex.is_empty();
         let is_signed = verify_apk_signature(apk_bytes).is_ok();
 

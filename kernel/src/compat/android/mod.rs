@@ -14,6 +14,7 @@ pub mod bridge;
 pub mod dex;
 pub mod draw;
 pub mod framework;
+pub mod inflate;
 pub mod manifest;
 pub mod runtime;
 pub mod vfs;

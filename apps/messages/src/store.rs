@@ -433,7 +433,7 @@ impl ThreadStore {
         self.records.get(idx).filter(|_| idx < self.len as usize)
     }
 
-    fn find(&self, recip: &[u8]) -> Option<usize> {
+    pub fn find(&self, recip: &[u8]) -> Option<usize> {
         self.records[..self.len as usize]
             .iter()
             .position(|r| r.recipient() == recip)

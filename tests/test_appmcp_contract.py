@@ -16,7 +16,6 @@ matching the microkernel's IPC_MAX_PAYLOAD = 64 mailbox capacity.
 """
 
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,6 +26,21 @@ def _read_appmcp_rs() -> str:
 
 def _read_notes_main_rs() -> str:
     path = ROOT / "apps" / "notes" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+def _read_messages_main_rs() -> str:
+    path = ROOT / "apps" / "messages" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+def _read_calendar_main_rs() -> str:
+    path = ROOT / "apps" / "calendar" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+def _read_settings_main_rs() -> str:
+    path = ROOT / "apps" / "settings" / "src" / "main.rs"
     assert path.is_file(), f"missing {path}"
     return path.read_text(encoding="utf-8")
 
@@ -55,6 +69,10 @@ def test_appmcp_status_codes_and_tool_ids_are_defined():
     assert "TOOL_ID_NOTES_CREATE: u32             = 0x4E54_4352;" in src # b"NTCR"
     assert "TOOL_ID_NOTES_LIST: u32               = 0x4E54_4C53;" in src # b"NTLS"
     assert "TOOL_ID_NOTES_DELETE: u32             = 0x4E54_444C;" in src # b"NTDL"
+    assert "TOOL_ID_MESSAGES_SEND_SMS: u32        = 0x4D53_534E;" in src # b"MSSN"
+    assert "TOOL_ID_CALENDAR_SCHEDULE: u32        = 0x4341_5343;" in src # b"CASC"
+    assert "TOOL_ID_SETTINGS_GET: u32             = 0x5354_4754;" in src # b"STGT"
+    assert "TOOL_ID_SETTINGS_SET: u32             = 0x5354_5354;" in src # b"STST"
 
 def test_notes_dual_mode_reactor_handles_headless_appmcp():
     notes_src = _read_notes_main_rs()
@@ -67,3 +85,32 @@ def test_notes_dual_mode_reactor_handles_headless_appmcp():
     assert "std::appmcp::TOOL_ID_NOTES_DELETE" in notes_src
     assert "Headless AppMCP tool executed successfully." in notes_src
     assert "std::EVENT_IPC_MSG" in notes_src, "Notes event poll must listen for EVENT_IPC_MSG"
+
+def test_messages_dual_mode_reactor_handles_headless_appmcp():
+    msg_src = _read_messages_main_rs()
+    assert "fn handle_appmcp_request" in msg_src, "Messages app must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in msg_src
+    assert "std::appmcp::TOOL_ID_MESSAGES_SEND_SMS" in msg_src
+    assert "std::appmcp::TOOL_ID_MESSAGES_LIST" in msg_src
+    assert "std::appmcp::TOOL_ID_MESSAGES_DELETE" in msg_src
+    assert "Headless AppMCP tool invocation handled successfully." in msg_src
+    assert "std::EVENT_IPC_MSG" in msg_src
+
+def test_calendar_dual_mode_reactor_handles_headless_appmcp():
+    cal_src = _read_calendar_main_rs()
+    assert "fn handle_appmcp_request" in cal_src, "Calendar app must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in cal_src
+    assert "std::appmcp::TOOL_ID_CALENDAR_SCHEDULE" in cal_src
+    assert "std::appmcp::TOOL_ID_CALENDAR_GET_DATE" in cal_src
+    assert "std::appmcp::TOOL_ID_CALENDAR_LIST" in cal_src
+    assert "Headless AppMCP tool invocation handled successfully." in cal_src
+    assert "std::EVENT_IPC_MSG" in cal_src
+
+def test_settings_dual_mode_reactor_handles_headless_appmcp():
+    set_src = _read_settings_main_rs()
+    assert "fn handle_appmcp_request" in set_src, "Settings app must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in set_src
+    assert "std::appmcp::TOOL_ID_SETTINGS_GET" in set_src
+    assert "std::appmcp::TOOL_ID_SETTINGS_SET" in set_src
+    assert "Headless AppMCP tool invocation handled successfully." in set_src
+    assert "std::EVENT_IPC_MSG" in set_src

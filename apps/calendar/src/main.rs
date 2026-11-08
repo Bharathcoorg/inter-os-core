@@ -3669,6 +3669,159 @@ fn handle_tap(app: &mut CalendarApp, x: usize, y: usize) -> Tap {
 }
 
 // -----------------------------------------------------------------------------
+// Sovereign AppMCP Tool Dispatcher (Zero-Allocation & Bounded)
+// -----------------------------------------------------------------------------
+
+fn parse_calendar_payload(payload: &[u8]) -> (&[u8], &[u8]) {
+    if payload.is_empty() {
+        return (b"", b"");
+    }
+    let mut delim = None;
+    for (i, &b) in payload.iter().enumerate() {
+        if b == b'|' || b == 0 {
+            delim = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = delim {
+        let date_or_time = &payload[..i];
+        let title = if i + 1 < payload.len() {
+            &payload[i + 1..]
+        } else {
+            b""
+        };
+        (date_or_time, title)
+    } else {
+        (b"", payload)
+    }
+}
+
+fn handle_appmcp_request(calendar: &mut CalendarApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_CALENDAR_SCHEDULE => {
+            let (date_str, title_str) = parse_calendar_payload(req.payload());
+            let title = if title_str.is_empty() {
+                if date_str.is_empty() {
+                    b"Scheduled Task"
+                } else {
+                    date_str
+                }
+            } else {
+                title_str
+            };
+
+            let year = if calendar.current_year >= 1970 {
+                calendar.current_year as u16
+            } else {
+                2026
+            };
+            let month = if calendar.current_month >= 1 && calendar.current_month <= 12 {
+                calendar.current_month
+            } else {
+                11
+            };
+            let day = if calendar.current_day >= 1 && calendar.current_day <= 31 {
+                calendar.current_day
+            } else {
+                8
+            };
+            let hour = (calendar.current_hour + 1) % 24;
+            let minute = 0u8;
+
+            let rec = EventRecord::from_parts(year, month, day, hour, minute, title);
+            if calendar.store.add(rec) {
+                calendar.total_events = calendar.store.len() as u32;
+                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                    .with_payload(b"Event scheduled");
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        std::appmcp::TOOL_ID_CALENDAR_GET_DATE => {
+            let mut date_buf = [0u8; 32];
+            let n = if calendar.date_known {
+                fmt_date(
+                    &mut date_buf,
+                    calendar.current_year as u16,
+                    calendar.current_month,
+                    calendar.current_day,
+                )
+            } else {
+                let s = b"2026-11-08";
+                date_buf[..s.len()].copy_from_slice(s);
+                s.len()
+            };
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(&date_buf[..n]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_CALENDAR_LIST => {
+            let mut summary = [0u8; 32];
+            let mut pos = 0usize;
+            for &b in b"events:" {
+                summary[pos] = b;
+                pos += 1;
+            }
+            let val = calendar.store.len() as u32;
+            if val == 0 {
+                summary[pos] = b'0';
+                pos += 1;
+            } else {
+                let mut temp = [0u8; 10];
+                let mut tn = 0;
+                let mut v = val;
+                while v > 0 && tn < temp.len() {
+                    temp[tn] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                    tn += 1;
+                }
+                for i in 0..tn {
+                    summary[pos] = temp[tn - 1 - i];
+                    pos += 1;
+                }
+            }
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(&summary[..pos]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Entry Point & Event Reactor Loop
 // -----------------------------------------------------------------------------
 
@@ -3729,6 +3882,16 @@ pub extern "C" fn _start() {
         render_calendar_ui(surface, &calendar);
         let _ = std::surface_flip();
         std::log("[CALENDAR APP] Calendar canvas presented to scanout buffer.").ok();
+    } else {
+        let mut rx = [0u8; 64];
+        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+            if handle_appmcp_request(&mut calendar, &rx[..len], sender, msg_type) {
+                std::log("[CALENDAR APP] Headless AppMCP tool invocation handled successfully.").ok();
+                std::exit_with_code(0);
+            }
+        }
+        std::log("[CALENDAR APP] Display surface unavailable; refusing execution.").ok();
+        std::exit_with_code(1);
     }
 
     // 5. Sovereign Asynchronous Event Reactor Loop
@@ -3793,7 +3956,18 @@ pub extern "C" fn _start() {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log("[CALENDAR APP] IPC message event raised; no schedule intent payload was read.").ok();
+                    let mut rx = [0u8; 64];
+                    if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+                        if handle_appmcp_request(&mut calendar, &rx[..len], sender, msg_type) {
+                            if surface > 0 {
+                                calendar.total_events = calendar.store.len() as u32;
+                                render_calendar_ui(surface, &calendar);
+                                let _ = std::surface_flip();
+                            }
+                        } else {
+                            std::log("[CALENDAR APP] IPC message received (non-AppMCP).").ok();
+                        }
+                    }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     if calendar.sync_rtc() {

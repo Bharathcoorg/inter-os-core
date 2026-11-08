@@ -7577,6 +7577,94 @@ fn read_section_intent() -> Option<Section> {
     Some(section)
 }
 
+// -----------------------------------------------------------------------------
+// Sovereign AppMCP Tool Dispatcher (Zero-Allocation & Bounded)
+// -----------------------------------------------------------------------------
+
+fn handle_appmcp_request(_settings: &mut SettingsApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_SETTINGS_GET => {
+            let key_bytes = req.payload();
+            let key = core::str::from_utf8(key_bytes).unwrap_or("");
+            let mut buf = [0u8; 32];
+            match std::settings_get(key, &mut buf) {
+                Ok(n) => {
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                        .with_payload(&buf[..n]);
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+                Err(_) => {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+            }
+            true
+        }
+        std::appmcp::TOOL_ID_SETTINGS_SET => {
+            let payload = req.payload();
+            let mut delim = None;
+            for (i, &b) in payload.iter().enumerate() {
+                if b == b'|' || b == 0 {
+                    delim = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = delim {
+                let key = core::str::from_utf8(&payload[..i]).unwrap_or("");
+                let val = if i + 1 < payload.len() { &payload[i + 1..] } else { b"" };
+                if std::settings_set(key, val).is_ok() {
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                } else {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",
@@ -7650,6 +7738,16 @@ pub extern "C" fn _start() -> ! {
         render_settings_ui(surface, &settings);
         let _ = std::surface_flip();
         std::log("[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
+    } else {
+        let mut rx = [0u8; 64];
+        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+            if handle_appmcp_request(&mut settings, &rx[..len], sender, msg_type) {
+                std::log("[SETTINGS APP] Headless AppMCP tool invocation handled successfully.").ok();
+                std::exit_with_code(0);
+            }
+        }
+        std::log("[SETTINGS APP] Display surface unavailable; refusing execution.").ok();
+        std::exit_with_code(1);
     }
 
     // 6. Interactive Event Loop
@@ -7678,8 +7776,21 @@ pub extern "C" fn _start() -> ! {
                 let _ = std::surface_flip();
             }
         }
-        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
+        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            if (triggered & std::EVENT_IPC_MSG) != 0 {
+                let mut rx = [0u8; 64];
+                if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+                    if handle_appmcp_request(&mut settings, &rx[..len], sender, msg_type) {
+                        if surface > 0 {
+                            settings.refresh_hardware_inventory();
+                            settings.refresh_display_settings();
+                            render_settings_ui(surface, &settings);
+                            let _ = std::surface_flip();
+                        }
+                    }
+                }
+            }
             if (triggered & std::EVENT_TIMER_TICK) != 0 {
                 settings.frame_count = settings.frame_count.wrapping_add(1);
                 if settings.current_section.is_none() && !settings.sensors_open && !settings.screen_lock_open && !settings.wallpaper_open {

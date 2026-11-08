@@ -141,9 +141,180 @@ impl BinderMediator {
         Ok(BinderReturn::BrReply)
     }
 
+    /// Mediates a microG GMS service request into a sovereign, privacy-respecting response.
+    pub fn handle_microg_transaction(
+        &mut self,
+        target_handle: u32,
+        _code: u32,
+        _data: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize, BinderReturn> {
+        match target_handle {
+            HANDLE_MICROG_LOCATION => {
+                let mut writer = ParcelWriter::new(reply);
+                writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?; // has_location = false (honest no satellite fix)
+                Ok(writer.len())
+            }
+            HANDLE_MICROG_ADS_ID => {
+                let mut writer = ParcelWriter::new(reply);
+                writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                writer.write_string16_utf8("00000000-0000-0000-0000-000000000000")
+                    .map_err(|_| BinderReturn::BrFailedReply)?;
+                writer.write_i32(1).map_err(|_| BinderReturn::BrFailedReply)?; // limit_ad_tracking = 1
+                Ok(writer.len())
+            }
+            HANDLE_MICROG_GMS_BROKER => {
+                let mut writer = ParcelWriter::new(reply);
+                writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?;
+                Ok(writer.len())
+            }
+            HANDLE_MICROG_GCM_PUSH => {
+                let mut writer = ParcelWriter::new(reply);
+                writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                writer.write_string16_utf8("sovereign-interos-local-token")
+                    .map_err(|_| BinderReturn::BrFailedReply)?;
+                Ok(writer.len())
+            }
+            _ => Err(BinderReturn::BrSecurityDenied),
+        }
+    }
+
     /// Returns the total number of security violations intercepted and blocked.
     pub fn violation_count(&self) -> usize {
         self.audit_log.len()
+    }
+}
+
+/// Zero-allocation bounded AIDL Parcel reader for microG and Android Binder transactions.
+pub struct ParcelReader<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ParcelReader<'a> {
+    pub const fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    pub fn read_i32(&mut self) -> Option<i32> {
+        if self.offset + 4 > self.data.len() {
+            return None;
+        }
+        let val = i32::from_le_bytes([
+            self.data[self.offset],
+            self.data[self.offset + 1],
+            self.data[self.offset + 2],
+            self.data[self.offset + 3],
+        ]);
+        self.offset += 4;
+        Some(val)
+    }
+
+    pub fn read_u32(&mut self) -> Option<u32> {
+        self.read_i32().map(|v| v as u32)
+    }
+
+    pub fn read_i64(&mut self) -> Option<i64> {
+        if self.offset + 8 > self.data.len() {
+            return None;
+        }
+        let bytes: [u8; 8] = [
+            self.data[self.offset],
+            self.data[self.offset + 1],
+            self.data[self.offset + 2],
+            self.data[self.offset + 3],
+            self.data[self.offset + 4],
+            self.data[self.offset + 5],
+            self.data[self.offset + 6],
+            self.data[self.offset + 7],
+        ];
+        let val = i64::from_le_bytes(bytes);
+        self.offset += 8;
+        Some(val)
+    }
+
+    pub fn read_interface_token(&mut self) -> Option<&'a [u8]> {
+        let _strict_mode = self.read_i32()?;
+        let char_count = self.read_i32()? as usize;
+        let byte_len = char_count.checked_mul(2)?;
+        let padded_len = (byte_len + 3) & !3;
+        if self.offset + padded_len > self.data.len() {
+            return None;
+        }
+        let token_bytes = &self.data[self.offset..self.offset + byte_len];
+        self.offset += padded_len;
+        Some(token_bytes)
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.offset)
+    }
+}
+
+/// Zero-allocation bounded AIDL Parcel writer for microG responses.
+pub struct ParcelWriter<'a> {
+    buffer: &'a mut [u8],
+    offset: usize,
+}
+
+impl<'a> ParcelWriter<'a> {
+    pub fn new(buffer: &'a mut [u8]) -> Self {
+        Self { buffer, offset: 0 }
+    }
+
+    pub fn write_i32(&mut self, val: i32) -> Result<(), ()> {
+        if self.offset + 4 > self.buffer.len() {
+            return Err(());
+        }
+        self.buffer[self.offset..self.offset + 4].copy_from_slice(&val.to_le_bytes());
+        self.offset += 4;
+        Ok(())
+    }
+
+    pub fn write_u32(&mut self, val: u32) -> Result<(), ()> {
+        self.write_i32(val as i32)
+    }
+
+    pub fn write_i64(&mut self, val: i64) -> Result<(), ()> {
+        if self.offset + 8 > self.buffer.len() {
+            return Err(());
+        }
+        self.buffer[self.offset..self.offset + 8].copy_from_slice(&val.to_le_bytes());
+        self.offset += 8;
+        Ok(())
+    }
+
+    pub fn write_no_exception(&mut self) -> Result<(), ()> {
+        self.write_i32(0) // EX_NONE = 0
+    }
+
+    pub fn write_string16_utf8(&mut self, text: &str) -> Result<(), ()> {
+        let char_count = text.chars().count();
+        self.write_i32(char_count as i32)?;
+        let byte_len = char_count * 2;
+        let padded_len = (byte_len + 3) & !3;
+        if self.offset + padded_len > self.buffer.len() {
+            return Err(());
+        }
+        for (i, c) in text.encode_utf16().enumerate() {
+            let start = self.offset + i * 2;
+            self.buffer[start..start + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        for i in byte_len..padded_len {
+            self.buffer[self.offset + i] = 0;
+        }
+        self.offset += padded_len;
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.offset
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buffer[..self.offset]
     }
 }
 
@@ -272,5 +443,42 @@ mod tests {
             mediator.dispatch_transaction(TaskId(30), &empty_caps, 0, &oversized_tx),
             Err(BinderReturn::BrSecurityDenied)
         );
+    }
+
+    #[test]
+    fn test_parcel_reader_writer_roundtrip() {
+        let mut buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut buf);
+        writer.write_no_exception().unwrap();
+        writer.write_i32(42).unwrap();
+        writer.write_u32(100).unwrap();
+        writer.write_i64(0x0102030405060708).unwrap();
+        writer.write_string16_utf8("InterOS").unwrap();
+        let written_len = writer.len();
+
+        let mut reader = ParcelReader::new(&buf[..written_len]);
+        assert_eq!(reader.read_i32(), Some(0)); // no exception
+        assert_eq!(reader.read_i32(), Some(42));
+        assert_eq!(reader.read_u32(), Some(100));
+        assert_eq!(reader.read_i64(), Some(0x0102030405060708));
+    }
+
+    #[test]
+    fn test_handle_microg_transaction() {
+        let mut mediator = BinderMediator::new();
+        let mut reply = [0u8; 256];
+
+        // 1. Ads ID returns zeroed UUID + limit tracking = 1
+        let len = mediator.handle_microg_transaction(HANDLE_MICROG_ADS_ID, 1, &[], &mut reply).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(0)); // no exception
+        let char_count = reader.read_i32().unwrap();
+        assert_eq!(char_count, 36); // length of UUID string
+
+        // 2. Location returns honest no satellite fix
+        let len = mediator.handle_microg_transaction(HANDLE_MICROG_LOCATION, 1, &[], &mut reply).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(0)); // no exception
+        assert_eq!(reader.read_i32(), Some(0)); // has_location = false
     }
 }
