@@ -1292,9 +1292,15 @@ impl AgentManagerApp {
             clock_ok: false,
             probe: EmbedProbe::new(),
         };
+        let _ = app.chat.load_from_storage(agent_manager::CHAT_STORAGE_PATH);
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
         app
+    }
+
+    /// Persists the active conversation transcript to the sandboxed application storage.
+    pub fn persist_chat(&self) {
+        let _ = self.chat.save_to_storage(agent_manager::CHAT_STORAGE_PATH);
     }
 
     /// Records the result of the last action.
@@ -2851,6 +2857,7 @@ impl AgentManagerApp {
         prompt[..len].copy_from_slice(&self.chat.prompt_text()[..len]);
         self.chat.push(ChatRole::User, &prompt[..len]);
         self.chat.clear_prompt();
+        self.persist_chat();
 
         let availability = resolve_inference_service(&self.device.services);
         if !availability.is_available() {
@@ -2860,6 +2867,7 @@ impl AgentManagerApp {
             // here.
             self.chat
                 .push(ChatRole::Notice, availability.reason().as_bytes());
+            self.persist_chat();
             self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
             self.rebuild();
             return;
@@ -2953,6 +2961,7 @@ impl AgentManagerApp {
                 Tone::Unavailable,
             );
         }
+        self.persist_chat();
         self.rebuild();
     }
 
@@ -3000,6 +3009,7 @@ impl AgentManagerApp {
             ChatRole::Notice,
             b"The inference service sent no answer. Your prompt is still here.",
         );
+        self.persist_chat();
         self.set_action(b"No answer received within the wait.", Tone::Unavailable);
         self.rebuild();
         true
@@ -3057,6 +3067,7 @@ impl AgentManagerApp {
     fn close_answer(&mut self, status: u32, arrived: u32, offered: u32) -> bool {
         self.answer_deadline = 0;
         self.chat.finish_stream();
+        self.persist_chat();
         let kept = self.chat.last_text_len() as u32;
         if arrived < offered {
             let mut line = [0u8; 64];
@@ -3124,6 +3135,7 @@ impl AgentManagerApp {
                 self.set_action(b"The inference service refused the request.", Tone::Unavailable);
             }
         }
+        self.persist_chat();
     }
 
     /// Says that a reply arrived and is not one this app can read.
@@ -3132,6 +3144,7 @@ impl AgentManagerApp {
         self.chat.finish_stream();
         self.chat
             .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+        self.persist_chat();
         self.set_action(b"Unreadable reply from the inference service.", Tone::Unavailable);
         self.rebuild();
         true
@@ -3402,10 +3415,13 @@ impl AgentManagerApp {
     }
 
     /// Empties the conversation and the prompt.
-    pub fn clear_chat(&mut self) {        if self.chat.is_streaming {
+    pub fn clear_chat(&mut self) {
+        if self.chat.is_streaming {
             self.cancel_streaming();
         }
         self.chat = ChatSession::new();
+        self.persist_chat();
+        let _ = interos_std::fs_unlink(agent_manager::CHAT_STORAGE_PATH);
         self.set_action(b"Conversation cleared.", Tone::Muted);
         self.rebuild();
     }

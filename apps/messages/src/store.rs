@@ -47,6 +47,8 @@ use crate::ThreadStatus;
 const STORE_KEY: &str = "messages.threads.v1";
 /// Blob format version; a blob that does not start with this byte is not ours.
 const STORE_VERSION: u8 = 1;
+/// The default relative path inside the application sandbox for persistent thread store.
+pub const STORAGE_PATH: &str = "data/threads.bin";
 
 /// Recipient bytes one thread stores (a name or handle).
 const RECIP_MAX: usize = 24;
@@ -343,6 +345,11 @@ impl ThreadStore {
 
     fn write(&mut self) -> bool {
         let (blob, used) = self.encode();
+        if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_WRITE) {
+            let _ = std::fs_write(fd, &blob[..used]);
+            let _ = std::fs_fsync(fd);
+            let _ = std::fs_close(fd);
+        }
         let mut escaped = [0u8; 512];
         if let Ok(esc_len) = escape_store_blob(&blob[..used], &mut escaped) {
             std::settings_set(STORE_KEY, &escaped[..esc_len]).is_ok()
@@ -355,17 +362,44 @@ impl ThreadStore {
     pub fn load() -> Self {
         let mut store = ThreadStore::EMPTY;
         let mut raw = [0u8; 512];
-        match std::settings_get(STORE_KEY, &mut raw) {
+        let mut from_storage = false;
+        let read_res = match std::settings_get(STORE_KEY, &mut raw) {
+            Ok(n) if n > 0 => Ok(n),
+            _ => {
+                if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_READ) {
+                    let n = std::fs_read(fd, &mut raw).unwrap_or(0);
+                    let _ = std::fs_close(fd);
+                    if n > 0 {
+                        from_storage = true;
+                        Ok(n)
+                    } else {
+                        Err(-8)
+                    }
+                } else {
+                    Err(-8)
+                }
+            }
+        };
+        match read_res {
             Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
                 let mut blob = [0u8; STORE_BLOB_BYTES];
-                let decoded_len = if let Ok(u_len) = unescape_store_blob(&raw[..n], &mut blob) {
-                    u_len
-                } else if n <= STORE_BLOB_BYTES {
-                    blob[..n].copy_from_slice(&raw[..n]);
-                    n
+                let decoded_len = if !from_storage {
+                    if let Ok(u_len) = unescape_store_blob(&raw[..n], &mut blob) {
+                        u_len
+                    } else if n <= STORE_BLOB_BYTES {
+                        blob[..n].copy_from_slice(&raw[..n]);
+                        n
+                    } else {
+                        0
+                    }
                 } else {
-                    0
+                    if n <= STORE_BLOB_BYTES {
+                        blob[..n].copy_from_slice(&raw[..n]);
+                        n
+                    } else {
+                        0
+                    }
                 };
                 let header_count = if decoded_len >= 2 { blob[1] as usize } else { 0 };
                 let bad = decoded_len < 2

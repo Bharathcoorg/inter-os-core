@@ -23,6 +23,9 @@ use super::dex::{
     OP_IF_LT, OP_IF_GE, OP_IF_GT, OP_IF_LE,
     OP_IF_LTZ, OP_IF_GEZ, OP_IF_GTZ, OP_IF_LEZ,
     OP_AGET, OP_APUT, OP_IGET, OP_IPUT,
+    OP_CMPL_FLOAT, OP_CMPG_FLOAT,
+    OP_SGET, OP_SGET_BOOLEAN, OP_SPUT, OP_SPUT_BOOLEAN,
+    OP_INT_TO_FLOAT, OP_FLOAT_TO_INT, OP_INT_TO_BYTE, OP_INT_TO_CHAR, OP_INT_TO_SHORT,
     OP_ADD_INT, OP_SUB_INT, OP_MUL_INT, OP_DIV_INT, OP_REM_INT,
     OP_AND_INT, OP_OR_INT, OP_XOR_INT, OP_SHL_INT, OP_SHR_INT, OP_USHR_INT,
 };
@@ -119,6 +122,7 @@ pub struct DalvikVmState {
     pub call_depth: u8,
     objects: Vec<DalvikObject>,
     next_object_id: u32,
+    static_fields: Vec<(u16, u32)>,
 }
 
 impl DalvikVmState {
@@ -135,6 +139,21 @@ impl DalvikVmState {
             call_depth: 0,
             objects: Vec::new(),
             next_object_id: 1,
+            static_fields: Vec::new(),
+        }
+    }
+
+    /// Reads a static field value, returning 0 if uninitialized.
+    pub fn get_static_field(&self, field_idx: u16) -> u32 {
+        self.static_fields.iter().find(|(idx, _)| *idx == field_idx).map(|(_, v)| *v).unwrap_or(0)
+    }
+
+    /// Sets a static field value in the VM's static storage table.
+    pub fn set_static_field(&mut self, field_idx: u16, val: u32) {
+        if let Some(entry) = self.static_fields.iter_mut().find(|(idx, _)| *idx == field_idx) {
+            entry.1 = val;
+        } else if self.static_fields.len() < 256 {
+            self.static_fields.push((field_idx, val));
         }
     }
 
@@ -922,6 +941,128 @@ impl DalvikVmState {
                     obj.set_field(field_idx, val);
                     pc += 4;
                 }
+                OP_SGET | OP_SGET_BOOLEAN => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_dest >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_dest] = self.get_static_field(field_idx);
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_SPUT | OP_SPUT_BOOLEAN => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_src = insns[pc + 1] as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let val = self.registers[v_src];
+                    self.set_static_field(field_idx, val);
+                    pc += 4;
+                }
+                OP_INT_TO_FLOAT => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let int_val = self.registers[v_src] as i32;
+                    let float_val = int_val as f32;
+                    self.registers[v_dest] = float_val.to_bits();
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_FLOAT_TO_INT => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let float_val = f32::from_bits(self.registers[v_src]);
+                    let int_val = float_val as i32;
+                    self.registers[v_dest] = int_val as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_INT_TO_BYTE => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let byte_val = (self.registers[v_src] as i8) as i32;
+                    self.registers[v_dest] = byte_val as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_INT_TO_CHAR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_dest] = (self.registers[v_src] as u16) as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_INT_TO_SHORT => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let short_val = (self.registers[v_src] as i16) as i32;
+                    self.registers[v_dest] = short_val as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_CMPL_FLOAT | OP_CMPG_FLOAT => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest >= 32 || v_b >= 32 || v_c >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let fb = f32::from_bits(self.registers[v_b]);
+                    let fc = f32::from_bits(self.registers[v_c]);
+                    let res: i32 = if fb.is_nan() || fc.is_nan() {
+                        if opcode == OP_CMPL_FLOAT { -1 } else { 1 }
+                    } else if fb < fc {
+                        -1
+                    } else if fb > fc {
+                        1
+                    } else {
+                        0
+                    };
+                    self.registers[v_dest] = res as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
                 OP_RETURN_VOID => {
                     self.last_return_value = 0;
                     self.last_return_string = None;
@@ -1273,6 +1414,73 @@ mod tests {
         let insns = [OP_IGET, 0x12, 0x0A, 0x00, OP_RETURN, 0x02];
         let val = vm.interpret_insns(&dex, 3, &insns).unwrap();
         assert_eq!(val, 12345);
+    }
+
+    #[test]
+    fn test_dalvik_static_fields() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // sput v0 into static field 42
+        vm.registers[0] = 8888;
+        let insns = [OP_SPUT, 0x00, 0x2A, 0x00, OP_RETURN_VOID];
+        vm.interpret_insns(&dex, 1, &insns).unwrap();
+
+        // sget v1 from static field 42
+        let insns = [OP_SGET, 0x01, 0x2A, 0x00, OP_RETURN, 0x01];
+        let val = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(val, 8888);
+    }
+
+    #[test]
+    fn test_dalvik_conversions_and_float_comparisons() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // int-to-float: v1 = (float)v0 (42 -> 42.0f)
+        vm.registers[0] = 42;
+        let insns = [OP_INT_TO_FLOAT, 0x01, OP_RETURN, 0x01];
+        let f_bits = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(f32::from_bits(f_bits), 42.0f32);
+
+        // float-to-int: v2 = (int)v1
+        let insns = [OP_FLOAT_TO_INT, 0x12, OP_RETURN, 0x02];
+        let int_val = vm.interpret_insns(&dex, 3, &insns).unwrap();
+        assert_eq!(int_val, 42);
+
+        // int-to-byte: v3 = (byte)v0 (258 -> 2)
+        vm.registers[0] = 258;
+        let insns = [OP_INT_TO_BYTE, 0x03, OP_RETURN, 0x03];
+        let byte_val = vm.interpret_insns(&dex, 4, &insns).unwrap();
+        assert_eq!(byte_val, 2);
+
+        // int-to-char: v4 = (char)v0 (0x10041 -> 0x0041)
+        vm.registers[0] = 0x10041;
+        let insns = [OP_INT_TO_CHAR, 0x04, OP_RETURN, 0x04];
+        let char_val = vm.interpret_insns(&dex, 5, &insns).unwrap();
+        assert_eq!(char_val, 0x0041);
+
+        // int-to-short: v5 = (short)v0 (0x10005 -> 5)
+        vm.registers[0] = 0x10005;
+        let insns = [OP_INT_TO_SHORT, 0x05, OP_RETURN, 0x05];
+        let short_val = vm.interpret_insns(&dex, 6, &insns).unwrap();
+        assert_eq!(short_val, 5);
+
+        // cmpl-float: v0 = 1.5f, v1 = 2.5f -> v2 = -1
+        vm.registers[0] = 1.5f32.to_bits();
+        vm.registers[1] = 2.5f32.to_bits();
+        let insns = [OP_CMPL_FLOAT, 0x02, 0x00, 0x01, OP_RETURN, 0x02];
+        let cmp_res = vm.interpret_insns(&dex, 3, &insns).unwrap();
+        assert_eq!(cmp_res as i32, -1);
+
+        // cmpg-float: v0 = 3.0f, v1 = 2.0f -> v2 = 1
+        vm.registers[0] = 3.0f32.to_bits();
+        vm.registers[1] = 2.0f32.to_bits();
+        let insns = [OP_CMPG_FLOAT, 0x02, 0x00, 0x01, OP_RETURN, 0x02];
+        let cmp_res2 = vm.interpret_insns(&dex, 3, &insns).unwrap();
+        assert_eq!(cmp_res2 as i32, 1);
     }
 }
 

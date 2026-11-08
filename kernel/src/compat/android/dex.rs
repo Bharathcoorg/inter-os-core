@@ -79,6 +79,20 @@ pub const OP_APUT: u8 = 0x4B;
 pub const OP_IGET: u8 = 0x52;
 pub const OP_IPUT: u8 = 0x59;
 
+pub const OP_CMPL_FLOAT: u8 = 0x2D;
+pub const OP_CMPG_FLOAT: u8 = 0x2E;
+
+pub const OP_SGET: u8 = 0x60;
+pub const OP_SGET_BOOLEAN: u8 = 0x63;
+pub const OP_SPUT: u8 = 0x67;
+pub const OP_SPUT_BOOLEAN: u8 = 0x6A;
+
+pub const OP_INT_TO_FLOAT: u8 = 0x84;
+pub const OP_FLOAT_TO_INT: u8 = 0x87;
+pub const OP_INT_TO_BYTE: u8 = 0x8D;
+pub const OP_INT_TO_CHAR: u8 = 0x8E;
+pub const OP_INT_TO_SHORT: u8 = 0x8F;
+
 pub const OP_ADD_INT: u8 = 0x90;
 pub const OP_SUB_INT: u8 = 0x91;
 pub const OP_MUL_INT: u8 = 0x92;

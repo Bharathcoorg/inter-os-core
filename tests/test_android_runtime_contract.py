@@ -140,3 +140,25 @@ def test_android_dalvik_vm_opcode_matrix():
     assert "pub fn interpret_insns" in runtime
     assert "DivideByZero" in runtime
     assert "ArrayIndexOutOfBounds" in runtime
+
+
+def test_android_dalvik_vm_static_fields_and_conversions():
+    dex = read("kernel/src/compat/android/dex.rs")
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "pub const OP_SGET: u8 = 0x60;" in dex
+    assert "pub const OP_SPUT: u8 = 0x67;" in dex
+    assert "pub const OP_INT_TO_FLOAT: u8 = 0x84;" in dex
+    assert "pub const OP_FLOAT_TO_INT: u8 = 0x87;" in dex
+    assert "pub const OP_INT_TO_BYTE: u8 = 0x8D;" in dex
+    assert "pub const OP_INT_TO_CHAR: u8 = 0x8E;" in dex
+    assert "pub const OP_INT_TO_SHORT: u8 = 0x8F;" in dex
+    assert "pub const OP_CMPL_FLOAT: u8 = 0x2D;" in dex
+    assert "pub const OP_CMPG_FLOAT: u8 = 0x2E;" in dex
+    assert "OP_SGET | OP_SGET_BOOLEAN =>" in runtime
+    assert "OP_SPUT | OP_SPUT_BOOLEAN =>" in runtime
+    assert "OP_INT_TO_FLOAT =>" in runtime
+    assert "OP_FLOAT_TO_INT =>" in runtime
+    assert "OP_CMPL_FLOAT | OP_CMPG_FLOAT =>" in runtime
+    assert "pub fn get_static_field" in runtime
+    assert "pub fn set_static_field" in runtime
+

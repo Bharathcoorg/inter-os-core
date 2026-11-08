@@ -214,6 +214,9 @@ pub const CHAT_PROMPT_MAX: usize = 160;
 /// about which message was oldest.
 pub const CHAT_MAX_MESSAGES: usize = 10;
 
+/// The default relative path inside the application sandbox for persistent chat transcript.
+pub const CHAT_STORAGE_PATH: &str = "data/transcript.bin";
+
 /// One message in the conversation.
 #[derive(Clone, Copy)]
 pub struct ChatMessage {
@@ -538,7 +541,11 @@ impl ChatSession {
 
     /// Persists the chat transcript to the sandboxed application file system.
     pub fn save_to_storage(&self, path: &str) -> Result<(), i64> {
-        let fd = interos_std::fs_open(path, interos_std::FS_WRITE)?;
+        let fd = if path.starts_with('/') {
+            interos_std::fs_open(path, interos_std::FS_WRITE)?
+        } else {
+            interos_std::app_storage_open(path, interos_std::FS_WRITE)?
+        };
         let mut header = [0u8; 12];
         header[0..4].copy_from_slice(b"AGTC");
         header[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -565,7 +572,11 @@ impl ChatSession {
 
     /// Restores the chat transcript from the sandboxed application file system.
     pub fn load_from_storage(&mut self, path: &str) -> Result<usize, i64> {
-        let fd = interos_std::fs_open(path, interos_std::FS_READ)?;
+        let fd = if path.starts_with('/') {
+            interos_std::fs_open(path, interos_std::FS_READ)?
+        } else {
+            interos_std::app_storage_open(path, interos_std::FS_READ)?
+        };
         let mut header = [0u8; 12];
         let bytes_read = interos_std::fs_read(fd, &mut header)?;
         if bytes_read < 12 || &header[0..4] != b"AGTC" {
