@@ -2914,6 +2914,35 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
             let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
             true
         }
+        std::appmcp::TOOL_ID_NOTES_READ => {
+            let note_opt = if req.payload_len >= 4 {
+                let id = u32::from_le_bytes([
+                    req.inline_payload[0],
+                    req.inline_payload[1],
+                    req.inline_payload[2],
+                    req.inline_payload[3],
+                ]);
+                store.get_note(id)
+            } else {
+                store.get_by_index(0)
+            };
+            if let Some(note) = note_opt {
+                let mut out = [0u8; 40];
+                let copy_len = note.title_len.min(40);
+                out[..copy_len].copy_from_slice(&note.title[..copy_len]);
+                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                    .with_inline_output(&out[..copy_len]);
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_NOT_FOUND,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
         std::appmcp::TOOL_ID_NOTES_DELETE => {
             if req.payload_len >= 4 {
                 let id = u32::from_le_bytes([

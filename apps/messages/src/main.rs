@@ -5042,6 +5042,28 @@ fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_typ
             let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
             true
         }
+        std::appmcp::TOOL_ID_MESSAGES_READ => {
+            let (recip, _) = parse_message_payload(req.payload());
+            let thread_opt = if !recip.is_empty() {
+                app.store.find(recip).and_then(|idx| app.store.get(idx))
+            } else {
+                app.store.get(0)
+            };
+            if let Some(thread) = thread_opt {
+                let snippet = thread.last_snippet();
+                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                    .with_payload(snippet);
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_NOT_FOUND,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
         std::appmcp::TOOL_ID_MESSAGES_DELETE => {
             let (recip, _) = parse_message_payload(req.payload());
             if let Some(idx) = app.store.find(recip) {

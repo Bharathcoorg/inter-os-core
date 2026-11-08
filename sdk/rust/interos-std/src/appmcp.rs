@@ -75,6 +75,20 @@ pub const TOOL_ID_FILES_STAT: u32               = 0x464D_5354; // b"FMST"
 pub const TOOL_ID_SETTINGS_GET: u32             = 0x5354_4754; // b"STGT"
 pub const TOOL_ID_SETTINGS_SET: u32             = 0x5354_5354; // b"STST"
 
+// Calculator:
+pub const TOOL_ID_CALCULATOR_EVAL: u32          = 0x434C_4556; // b"CLEV"
+
+// Dialer:
+pub const TOOL_ID_DIALER_CALL: u32              = 0x444C_434C; // b"DLCL"
+pub const TOOL_ID_DIALER_HANGUP: u32            = 0x444C_4847; // b"DLHG"
+pub const TOOL_ID_DIALER_LOGS: u32              = 0x444C_4C47; // b"DLLG"
+
+// Music:
+pub const TOOL_ID_MUSIC_PLAY: u32               = 0x4D43_504C; // b"MCPL"
+pub const TOOL_ID_MUSIC_PAUSE: u32              = 0x4D43_5053; // b"MCPS"
+pub const TOOL_ID_MUSIC_STATUS: u32             = 0x4D43_5354; // b"MCST"
+pub const TOOL_ID_MUSIC_LIST: u32               = 0x4D43_4C53; // b"MCLS"
+
 /// Exactly 64-byte AppMCP Request structure.
 ///
 /// Layout (Natural 8-byte alignment, 0 padding bytes):
@@ -261,6 +275,11 @@ impl AppMcpResponse {
     pub fn output(&self) -> &[u8] {
         let len = (self.output_len as usize).min(40);
         &self.inline_output[..len]
+    }
+
+    /// Convenience alias returning the inline payload slice.
+    pub fn payload(&self) -> &[u8] {
+        self.output()
     }
 
     /// Attaches a shared memory pipe for outputs exceeding 40 bytes.

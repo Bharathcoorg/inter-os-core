@@ -17,6 +17,14 @@ use super::dex::{
     OP_NEW_INSTANCE, OP_GOTO, OP_GOTO_16, OP_IF_EQ, OP_IF_NE, OP_IF_EQZ, OP_IF_NEZ,
     OP_INVOKE_VIRTUAL, OP_INVOKE_DIRECT, OP_INVOKE_STATIC,
     OP_ADD_INT_2ADDR, OP_SUB_INT_2ADDR, OP_MUL_INT_2ADDR,
+    OP_DIV_INT_2ADDR, OP_REM_INT_2ADDR, OP_AND_INT_2ADDR, OP_OR_INT_2ADDR, OP_XOR_INT_2ADDR,
+    OP_SHL_INT_2ADDR, OP_SHR_INT_2ADDR, OP_USHR_INT_2ADDR,
+    OP_ARRAY_LENGTH, OP_NEW_ARRAY,
+    OP_IF_LT, OP_IF_GE, OP_IF_GT, OP_IF_LE,
+    OP_IF_LTZ, OP_IF_GEZ, OP_IF_GTZ, OP_IF_LEZ,
+    OP_AGET, OP_APUT, OP_IGET, OP_IPUT,
+    OP_ADD_INT, OP_SUB_INT, OP_MUL_INT, OP_DIV_INT, OP_REM_INT,
+    OP_AND_INT, OP_OR_INT, OP_XOR_INT, OP_SHL_INT, OP_SHR_INT, OP_USHR_INT,
 };
 
 /// Errors encountered during Dalvik bytecode execution.
@@ -30,6 +38,9 @@ pub enum DalvikVmError {
     SecurityViolationForbiddenApi,
     UnsupportedFrameworkApi,
     ObjectHeapLimitExceeded,
+    DivideByZero,
+    ArrayIndexOutOfBounds,
+    NullPointerDereference,
 }
 
 /// Decodes Dalvik format 35c's C/D/E/F/G register list and validates the count.
@@ -52,6 +63,40 @@ fn decode_invoke_registers(insns: &[u8], pc: usize) -> Result<([usize; 5], usize
 struct DalvikObject {
     id: u32,
     class_descriptor: String,
+    fields: Vec<(u16, u32)>,
+    array_elements: Option<Vec<u32>>,
+}
+
+impl DalvikObject {
+    fn new(id: u32, class_descriptor: &str) -> Self {
+        Self {
+            id,
+            class_descriptor: String::from(class_descriptor),
+            fields: Vec::new(),
+            array_elements: None,
+        }
+    }
+
+    fn new_array(id: u32, element_type: &str, length: usize) -> Self {
+        Self {
+            id,
+            class_descriptor: String::from(element_type),
+            fields: Vec::new(),
+            array_elements: Some(alloc::vec![0u32; length]),
+        }
+    }
+
+    fn get_field(&self, field_idx: u16) -> u32 {
+        self.fields.iter().find(|(k, _)| *k == field_idx).map(|(_, v)| *v).unwrap_or(0)
+    }
+
+    fn set_field(&mut self, field_idx: u16, val: u32) {
+        if let Some(entry) = self.fields.iter_mut().find(|(k, _)| *k == field_idx) {
+            entry.1 = val;
+        } else {
+            self.fields.push((field_idx, val));
+        }
+    }
 }
 
 const MAX_DALVIK_OBJECTS: usize = 256;
@@ -98,13 +143,34 @@ impl DalvikVmState {
         if self.objects.len() >= MAX_DALVIK_OBJECTS {
             return Err(DalvikVmError::ObjectHeapLimitExceeded);
         }
-        if !class_descriptor.starts_with('L') || !class_descriptor.ends_with(';') {
+        if (!class_descriptor.starts_with('L') || !class_descriptor.ends_with(';')) && !class_descriptor.starts_with('[') {
             return Err(DalvikVmError::InvalidBytecode);
         }
         let id = self.next_object_id;
         self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
-        self.objects.push(DalvikObject { id, class_descriptor: String::from(class_descriptor) });
+        self.objects.push(DalvikObject::new(id, class_descriptor));
         Ok(id)
+    }
+
+    fn allocate_array(&mut self, element_type: &str, length: usize) -> Result<u32, DalvikVmError> {
+        if self.objects.len() >= MAX_DALVIK_OBJECTS {
+            return Err(DalvikVmError::ObjectHeapLimitExceeded);
+        }
+        if length > 1024 {
+            return Err(DalvikVmError::ObjectHeapLimitExceeded);
+        }
+        let id = self.next_object_id;
+        self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
+        self.objects.push(DalvikObject::new_array(id, element_type, length));
+        Ok(id)
+    }
+
+    fn get_object(&self, id: u32) -> Result<&DalvikObject, DalvikVmError> {
+        self.objects.iter().find(|o| o.id == id).ok_or(DalvikVmError::NullPointerDereference)
+    }
+
+    fn get_object_mut(&mut self, id: u32) -> Result<&mut DalvikObject, DalvikVmError> {
+        self.objects.iter_mut().find(|o| o.id == id).ok_or(DalvikVmError::NullPointerDereference)
     }
 
     /// Invokes a specific method on a class by name, executing its Dalvik bytecode.
@@ -168,8 +234,20 @@ impl DalvikVmState {
         }
 
         let insns = &dex.raw[insns_start..insns_end];
+        self.interpret_insns(dex, method.registers_size, insns)
+    }
 
-        // 3. Dalvik Register Bytecode Interpreter Loop
+    /// Interprets a sequence of Dalvik bytecode instructions directly.
+    pub fn interpret_insns(
+        &mut self,
+        dex: &DexPackage,
+        registers_size: u16,
+        insns: &[u8],
+    ) -> Result<u32, DalvikVmError> {
+        struct MethodFrame {
+            registers_size: u16,
+        }
+        let method = MethodFrame { registers_size };
         let mut pc: usize = 0;
         let mut steps = 0;
         const STEP_LIMIT: usize = 4096;
@@ -525,6 +603,325 @@ impl DalvikVmState {
                     self.string_registers[v_a] = None;
                     pc += 2;
                 }
+                OP_DIV_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let divisor = self.registers[v_b] as i32;
+                    if divisor == 0 {
+                        return Err(DalvikVmError::DivideByZero);
+                    }
+                    let dividend = self.registers[v_a] as i32;
+                    self.registers[v_a] = dividend.wrapping_div(divisor) as u32;
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_REM_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let divisor = self.registers[v_b] as i32;
+                    if divisor == 0 {
+                        return Err(DalvikVmError::DivideByZero);
+                    }
+                    let dividend = self.registers[v_a] as i32;
+                    self.registers[v_a] = dividend.wrapping_rem(divisor) as u32;
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_AND_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_a] &= self.registers[v_b];
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_OR_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_a] |= self.registers[v_b];
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_XOR_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_a] ^= self.registers[v_b];
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_SHL_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let shift = self.registers[v_b] & 0x1F;
+                    self.registers[v_a] = self.registers[v_a].wrapping_shl(shift);
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_SHR_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let shift = self.registers[v_b] & 0x1F;
+                    self.registers[v_a] = (self.registers[v_a] as i32).wrapping_shr(shift) as u32;
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_USHR_INT_2ADDR => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let shift = self.registers[v_b] & 0x1F;
+                    self.registers[v_a] = self.registers[v_a].wrapping_shr(shift);
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_ADD_INT | OP_SUB_INT | OP_MUL_INT | OP_DIV_INT | OP_REM_INT
+                | OP_AND_INT | OP_OR_INT | OP_XOR_INT | OP_SHL_INT | OP_SHR_INT | OP_USHR_INT => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest >= 32 || v_b >= 32 || v_c >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let rb = self.registers[v_b];
+                    let rc = self.registers[v_c];
+                    let res = match opcode {
+                        OP_ADD_INT => rb.wrapping_add(rc),
+                        OP_SUB_INT => rb.wrapping_sub(rc),
+                        OP_MUL_INT => rb.wrapping_mul(rc),
+                        OP_DIV_INT => {
+                            let divisor = rc as i32;
+                            if divisor == 0 { return Err(DalvikVmError::DivideByZero); }
+                            (rb as i32).wrapping_div(divisor) as u32
+                        }
+                        OP_REM_INT => {
+                            let divisor = rc as i32;
+                            if divisor == 0 { return Err(DalvikVmError::DivideByZero); }
+                            (rb as i32).wrapping_rem(divisor) as u32
+                        }
+                        OP_AND_INT => rb & rc,
+                        OP_OR_INT => rb | rc,
+                        OP_XOR_INT => rb ^ rc,
+                        OP_SHL_INT => rb.wrapping_shl(rc & 0x1F),
+                        OP_SHR_INT => ((rb as i32).wrapping_shr(rc & 0x1F)) as u32,
+                        OP_USHR_INT => rb.wrapping_shr(rc & 0x1F),
+                        _ => 0,
+                    };
+                    self.registers[v_dest] = res;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_IF_LT | OP_IF_GE | OP_IF_GT | OP_IF_LE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let va = self.registers[v_a] as i32;
+                    let vb = self.registers[v_b] as i32;
+                    let cond = match opcode {
+                        OP_IF_LT => va < vb,
+                        OP_IF_GE => va >= vb,
+                        OP_IF_GT => va > vb,
+                        OP_IF_LE => va <= vb,
+                        _ => false,
+                    };
+                    if cond {
+                        let offset = (i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as isize) * 2;
+                        let next_pc = pc as isize + offset;
+                        if next_pc < 0 || next_pc as usize > insns.len() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        pc = next_pc as usize;
+                    } else {
+                        pc += 4;
+                    }
+                }
+                OP_IF_LTZ | OP_IF_GEZ | OP_IF_GTZ | OP_IF_LEZ => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    if v_dest >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let val = self.registers[v_dest] as i32;
+                    let cond = match opcode {
+                        OP_IF_LTZ => val < 0,
+                        OP_IF_GEZ => val >= 0,
+                        OP_IF_GTZ => val > 0,
+                        OP_IF_LEZ => val <= 0,
+                        _ => false,
+                    };
+                    if cond {
+                        let offset = (i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as isize) * 2;
+                        let next_pc = pc as isize + offset;
+                        if next_pc < 0 || next_pc as usize > insns.len() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        pc = next_pc as usize;
+                    } else {
+                        pc += 4;
+                    }
+                }
+                OP_ARRAY_LENGTH => {
+                    if pc + 2 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let obj_id = self.registers[v_b];
+                    let obj = self.get_object(obj_id)?;
+                    let len = obj.array_elements.as_ref().map(|a| a.len()).ok_or(DalvikVmError::NullPointerDereference)?;
+                    self.registers[v_a] = len as u32;
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_NEW_ARRAY => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let elem_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                    let length = self.registers[v_b] as usize;
+                    let obj_id = self.allocate_array(elem_type, length)?;
+                    self.registers[v_a] = obj_id;
+                    self.string_registers[v_a] = None;
+                    pc += 4;
+                }
+                OP_AGET => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_arr = insns[pc + 2] as usize;
+                    let v_idx = insns[pc + 3] as usize;
+                    if v_dest >= 32 || v_arr >= 32 || v_idx >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let arr_id = self.registers[v_arr];
+                    let idx = self.registers[v_idx] as usize;
+                    let obj = self.get_object(arr_id)?;
+                    let elements = obj.array_elements.as_ref().ok_or(DalvikVmError::NullPointerDereference)?;
+                    if idx >= elements.len() {
+                        return Err(DalvikVmError::ArrayIndexOutOfBounds);
+                    }
+                    self.registers[v_dest] = elements[idx];
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_APUT => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_val = insns[pc + 1] as usize;
+                    let v_arr = insns[pc + 2] as usize;
+                    let v_idx = insns[pc + 3] as usize;
+                    if v_val >= 32 || v_arr >= 32 || v_idx >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let arr_id = self.registers[v_arr];
+                    let idx = self.registers[v_idx] as usize;
+                    let val = self.registers[v_val];
+                    let obj = self.get_object_mut(arr_id)?;
+                    let elements = obj.array_elements.as_mut().ok_or(DalvikVmError::NullPointerDereference)?;
+                    if idx >= elements.len() {
+                        return Err(DalvikVmError::ArrayIndexOutOfBounds);
+                    }
+                    elements[idx] = val;
+                    pc += 4;
+                }
+                OP_IGET => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let obj_id = self.registers[v_b];
+                    let obj = self.get_object(obj_id)?;
+                    self.registers[v_a] = obj.get_field(field_idx);
+                    self.string_registers[v_a] = None;
+                    pc += 4;
+                }
+                OP_IPUT => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_a >= 32 || v_b >= 32 {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let val = self.registers[v_a];
+                    let obj_id = self.registers[v_b];
+                    let obj = self.get_object_mut(obj_id)?;
+                    obj.set_field(field_idx, val);
+                    pc += 4;
+                }
                 OP_RETURN_VOID => {
                     self.last_return_value = 0;
                     self.last_return_string = None;
@@ -690,4 +1087,192 @@ mod tests {
         );
         assert_eq!(res, Err(super::super::framework::AndroidFrameworkError::UnsupportedApi));
     }
+
+    #[test]
+    fn test_dalvik_arithmetic_2addr_operations() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // v0 = 100, v1 = 20
+        vm.registers[0] = 100;
+        vm.registers[1] = 20;
+
+        // div-int/2addr v0, v1 -> 100 / 20 = 5
+        let insns = [OP_DIV_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 5);
+
+        // rem-int/2addr v0, v1 -> 17 % 5 = 2
+        vm.registers[0] = 17;
+        vm.registers[1] = 5;
+        let insns = [OP_REM_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 2);
+
+        // and-int/2addr v0, v1 -> 0xFF & 0x0F = 0x0F
+        vm.registers[0] = 0xFF;
+        vm.registers[1] = 0x0F;
+        let insns = [OP_AND_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 0x0F);
+
+        // or-int/2addr v0, v1 -> 0xF0 | 0x0F = 0xFF
+        vm.registers[0] = 0xF0;
+        vm.registers[1] = 0x0F;
+        let insns = [OP_OR_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 0xFF);
+
+        // xor-int/2addr v0, v1 -> 0xAA ^ 0xFF = 0x55
+        vm.registers[0] = 0xAA;
+        vm.registers[1] = 0xFF;
+        let insns = [OP_XOR_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 0x55);
+
+        // shl-int/2addr v0, v1 -> 1 << 4 = 16
+        vm.registers[0] = 1;
+        vm.registers[1] = 4;
+        let insns = [OP_SHL_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 16);
+
+        // shr-int/2addr v0, v1 -> -16 >> 2 = -4
+        vm.registers[0] = (-16i32) as u32;
+        vm.registers[1] = 2;
+        let insns = [OP_SHR_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res as i32, -4);
+
+        // ushr-int/2addr v0, v1 -> 0xF0000000 >>> 4 = 0x0F000000
+        vm.registers[0] = 0xF000_0000;
+        vm.registers[1] = 4;
+        let insns = [OP_USHR_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 0x0F00_0000);
+    }
+
+    #[test]
+    fn test_dalvik_arithmetic_3reg_operations() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        vm.registers[1] = 40;
+        vm.registers[2] = 2;
+
+        // add-int v0, v1, v2 -> 42
+        let insns = [OP_ADD_INT, 0x00, 0x01, 0x02, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 3, &insns).unwrap(), 42);
+
+        // sub-int v0, v1, v2 -> 38
+        let insns = [OP_SUB_INT, 0x00, 0x01, 0x02, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 3, &insns).unwrap(), 38);
+
+        // mul-int v0, v1, v2 -> 80
+        let insns = [OP_MUL_INT, 0x00, 0x01, 0x02, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 3, &insns).unwrap(), 80);
+
+        // div-int v0, v1, v2 -> 20
+        let insns = [OP_DIV_INT, 0x00, 0x01, 0x02, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 3, &insns).unwrap(), 20);
+
+        // rem-int v0, v1, v2 -> 0
+        let insns = [OP_REM_INT, 0x00, 0x01, 0x02, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 3, &insns).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_dalvik_division_by_zero_fails_closed() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        vm.registers[0] = 50;
+        vm.registers[1] = 0;
+
+        let insns = [OP_DIV_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns), Err(DalvikVmError::DivideByZero));
+
+        let insns = [OP_REM_INT_2ADDR, 0x10, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns), Err(DalvikVmError::DivideByZero));
+
+        let insns = [OP_DIV_INT, 0x00, 0x00, 0x01, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns), Err(DalvikVmError::DivideByZero));
+    }
+
+    #[test]
+    fn test_dalvik_comparison_and_branch_operations() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // Test if-lt: v0 = 5, v1 = 10 -> branch +4 words (+8 bytes) to return 99
+        vm.registers[0] = 5;
+        vm.registers[1] = 10;
+        let insns = [
+            OP_IF_LT, 0x10, 0x04, 0x00,       // if v0 < v1 goto pc+8
+            OP_CONST_4, 0x00,                  // v0 = 0
+            OP_RETURN, 0x00,                   // return v0
+            OP_NOP, 0x00,                      // padding
+            OP_CONST_4, 0x30,                  // v0 = 3
+            OP_RETURN, 0x00,                   // return v0
+        ];
+        let res = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(res, 3);
+
+        // Test if-gtz: v0 = 10 -> branch to return 77
+        vm.registers[0] = 10;
+        let insns = [
+            OP_IF_GTZ, 0x00, 0x04, 0x00,      // if v0 > 0 goto pc+8
+            OP_CONST_4, 0x00,                 // v0 = 0
+            OP_RETURN, 0x00,                  // return v0
+            OP_NOP, 0x00,                     // padding
+            OP_CONST_4, 0x70,                 // v0 = 7
+            OP_RETURN, 0x00,                  // return v0
+        ];
+        let res = vm.interpret_insns(&dex, 1, &insns).unwrap();
+        assert_eq!(res, 7);
+    }
+
+    #[test]
+    fn test_dalvik_array_and_field_lifecycle() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Array allocation and indexing
+        let arr_id = vm.allocate_array("[I", 5).unwrap();
+        vm.registers[0] = arr_id;
+        // length opcode
+        let insns = [OP_ARRAY_LENGTH, 0x01, OP_RETURN, 0x01]; // v1 = length(v0), return v1
+        let len = vm.interpret_insns(&dex, 2, &insns).unwrap();
+        assert_eq!(len, 5);
+
+        // aput v2 into array[v0][v1]: v2 = 777, v1 = 3
+        vm.registers[0] = arr_id;
+        vm.registers[1] = 3;
+        vm.registers[2] = 777;
+        let insns = [OP_APUT, 0x02, 0x00, 0x01, OP_RETURN_VOID];
+        vm.interpret_insns(&dex, 3, &insns).unwrap();
+
+        // aget v3 from array[v0][v1]
+        let insns = [OP_AGET, 0x03, 0x00, 0x01, OP_RETURN, 0x03];
+        let val = vm.interpret_insns(&dex, 4, &insns).unwrap();
+        assert_eq!(val, 777);
+
+        // 2. Object field access (iput / iget)
+        let obj_id = vm.allocate_object("Lorg/interos/Test;").unwrap();
+        vm.registers[0] = 12345;
+        vm.registers[1] = obj_id;
+        let insns = [OP_IPUT, 0x10, 0x0A, 0x00, OP_RETURN_VOID]; // iput v0 into obj v1 at field 10
+        vm.interpret_insns(&dex, 2, &insns).unwrap();
+
+        // iget into v2 from obj v1 at field 10
+        let insns = [OP_IGET, 0x12, 0x0A, 0x00, OP_RETURN, 0x02];
+        let val = vm.interpret_insns(&dex, 3, &insns).unwrap();
+        assert_eq!(val, 12345);
+    }
 }
+

@@ -92,3 +92,51 @@ def test_android_apk_deflate_and_vfs_sandbox_isolation():
     assert "INTENT_BROWSER_URL" in bridge
     assert "INTENT_TELEPHONY_DIAL" in bridge
 
+
+
+def test_android_dalvik_vm_opcode_matrix():
+    dex = read("kernel/src/compat/android/dex.rs")
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    # Verify opcode definitions in DEX specification
+    assert "pub const OP_DIV_INT_2ADDR: u8 = 0xB3;" in dex
+    assert "pub const OP_REM_INT_2ADDR: u8 = 0xB4;" in dex
+    assert "pub const OP_AND_INT_2ADDR: u8 = 0xB5;" in dex
+    assert "pub const OP_OR_INT_2ADDR: u8 = 0xB6;" in dex
+    assert "pub const OP_XOR_INT_2ADDR: u8 = 0xB7;" in dex
+    assert "pub const OP_SHL_INT_2ADDR: u8 = 0xB8;" in dex
+    assert "pub const OP_SHR_INT_2ADDR: u8 = 0xB9;" in dex
+    assert "pub const OP_USHR_INT_2ADDR: u8 = 0xBA;" in dex
+    assert "pub const OP_ARRAY_LENGTH: u8 = 0x21;" in dex
+    assert "pub const OP_NEW_ARRAY: u8 = 0x23;" in dex
+    assert "pub const OP_AGET: u8 = 0x44;" in dex
+    assert "pub const OP_APUT: u8 = 0x4B;" in dex
+    assert "pub const OP_IGET: u8 = 0x52;" in dex
+    assert "pub const OP_IPUT: u8 = 0x59;" in dex
+    assert "pub const OP_ADD_INT: u8 = 0x90;" in dex
+    assert "pub const OP_SUB_INT: u8 = 0x91;" in dex
+    assert "pub const OP_MUL_INT: u8 = 0x92;" in dex
+    assert "pub const OP_DIV_INT: u8 = 0x93;" in dex
+    assert "pub const OP_REM_INT: u8 = 0x94;" in dex
+    assert "pub const OP_IF_LT: u8 = 0x34;" in dex
+    assert "pub const OP_IF_GE: u8 = 0x35;" in dex
+    assert "pub const OP_IF_GT: u8 = 0x36;" in dex
+    assert "pub const OP_IF_LE: u8 = 0x37;" in dex
+    assert "pub const OP_IF_LTZ: u8 = 0x3A;" in dex
+    assert "pub const OP_IF_GEZ: u8 = 0x3B;" in dex
+    assert "pub const OP_IF_GTZ: u8 = 0x3C;" in dex
+    assert "pub const OP_IF_LEZ: u8 = 0x3D;" in dex
+    # Verify opcode implementations in Dalvik VM runtime
+    assert "OP_DIV_INT_2ADDR =>" in runtime
+    assert "OP_REM_INT_2ADDR =>" in runtime
+    assert "OP_AND_INT_2ADDR =>" in runtime
+    assert "OP_OR_INT_2ADDR =>" in runtime
+    assert "OP_XOR_INT_2ADDR =>" in runtime
+    assert "OP_ARRAY_LENGTH =>" in runtime
+    assert "OP_NEW_ARRAY =>" in runtime
+    assert "OP_AGET =>" in runtime
+    assert "OP_APUT =>" in runtime
+    assert "OP_IGET =>" in runtime
+    assert "OP_IPUT =>" in runtime
+    assert "pub fn interpret_insns" in runtime
+    assert "DivideByZero" in runtime
+    assert "ArrayIndexOutOfBounds" in runtime

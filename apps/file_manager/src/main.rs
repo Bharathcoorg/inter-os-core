@@ -4937,6 +4937,60 @@ fn handle_appmcp_request(app: &mut FileManagerApp, raw: &[u8], sender: u64, msg_
             }
             true
         }
+        std::appmcp::TOOL_ID_FILES_STAT => {
+            let path_payload = req.payload();
+            if path_payload.is_empty() {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
+            if let Ok(path_str) = core::str::from_utf8(path_payload) {
+                let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
+                match std::fs_stat(path_str, &mut stat_buf) {
+                    Ok(_) => {
+                        if let Some(record) = std::FileStatRecord::parse(&stat_buf) {
+                            let mut out = [0u8; 32];
+                            let mut pos = 0usize;
+                            for &b in b"size:" {
+                                out[pos] = b;
+                                pos += 1;
+                            }
+                            pos += format_u32_str(record.size as u32, &mut out[pos..]);
+                            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                                .with_payload(&out[..pos]);
+                            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                        } else {
+                            let resp = std::appmcp::AppMcpResponse::error(
+                                std::appmcp::APPMCP_STATUS_INTERNAL_ERROR,
+                                req.tool_id,
+                                req.token,
+                            );
+                            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                        }
+                    }
+                    Err(_) => {
+                        let resp = std::appmcp::AppMcpResponse::error(
+                            std::appmcp::APPMCP_STATUS_NOT_FOUND,
+                            req.tool_id,
+                            req.token,
+                        );
+                        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    }
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
         _ => {
             let resp = std::appmcp::AppMcpResponse::error(
                 std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,

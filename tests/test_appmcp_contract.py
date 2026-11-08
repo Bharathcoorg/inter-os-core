@@ -49,6 +49,22 @@ def _read_file_manager_main_rs() -> str:
     assert path.is_file(), f"missing {path}"
     return path.read_text(encoding="utf-8")
 
+def _read_calculator_main_rs() -> str:
+    path = ROOT / "apps" / "calculator" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+def _read_dialer_main_rs() -> str:
+    path = ROOT / "apps" / "dialer" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+def _read_music_main_rs() -> str:
+    path = ROOT / "apps" / "music" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
+
 def test_appmcp_struct_sizes_are_compile_time_asserted_to_64_bytes():
     src = _read_appmcp_rs()
     assert "assert!(core::mem::size_of::<AppMcpRequest>() == 64)" in src, (
@@ -73,11 +89,17 @@ def test_appmcp_status_codes_and_tool_ids_are_defined():
     assert "APPMCP_STATUS_PERMISSION_DENIED: u32  = 1;" in src
     assert "TOOL_ID_NOTES_CREATE: u32             = 0x4E54_4352;" in src # b"NTCR"
     assert "TOOL_ID_NOTES_LIST: u32               = 0x4E54_4C53;" in src # b"NTLS"
+    assert "TOOL_ID_NOTES_READ: u32               = 0x4E54_5244;" in src # b"NTRD"
     assert "TOOL_ID_NOTES_DELETE: u32             = 0x4E54_444C;" in src # b"NTDL"
     assert "TOOL_ID_MESSAGES_SEND_SMS: u32        = 0x4D53_534E;" in src # b"MSSN"
+    assert "TOOL_ID_MESSAGES_READ: u32            = 0x4D53_5244;" in src # b"MSRD"
     assert "TOOL_ID_CALENDAR_SCHEDULE: u32        = 0x4341_5343;" in src # b"CASC"
     assert "TOOL_ID_SETTINGS_GET: u32             = 0x5354_4754;" in src # b"STGT"
     assert "TOOL_ID_SETTINGS_SET: u32             = 0x5354_5354;" in src # b"STST"
+    assert "TOOL_ID_FILES_STAT: u32               = 0x464D_5354;" in src # b"FMST"
+    assert "TOOL_ID_CALCULATOR_EVAL: u32          = 0x434C_4556;" in src # b"CLEV"
+    assert "TOOL_ID_DIALER_CALL: u32              = 0x444C_434C;" in src # b"DLCL"
+    assert "TOOL_ID_MUSIC_PLAY: u32               = 0x4D43_504C;" in src # b"MCPL"
 
 def test_notes_dual_mode_reactor_handles_headless_appmcp():
     notes_src = _read_notes_main_rs()
@@ -87,6 +109,7 @@ def test_notes_dual_mode_reactor_handles_headless_appmcp():
     )
     assert "std::appmcp::TOOL_ID_NOTES_CREATE" in notes_src
     assert "std::appmcp::TOOL_ID_NOTES_LIST" in notes_src
+    assert "std::appmcp::TOOL_ID_NOTES_READ" in notes_src
     assert "std::appmcp::TOOL_ID_NOTES_DELETE" in notes_src
     assert "Headless AppMCP tool executed successfully." in notes_src
     assert "std::EVENT_IPC_MSG" in notes_src, "Notes event poll must listen for EVENT_IPC_MSG"
@@ -97,6 +120,7 @@ def test_messages_dual_mode_reactor_handles_headless_appmcp():
     assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in msg_src
     assert "std::appmcp::TOOL_ID_MESSAGES_SEND_SMS" in msg_src
     assert "std::appmcp::TOOL_ID_MESSAGES_LIST" in msg_src
+    assert "std::appmcp::TOOL_ID_MESSAGES_READ" in msg_src
     assert "std::appmcp::TOOL_ID_MESSAGES_DELETE" in msg_src
     assert "Headless AppMCP tool invocation handled successfully." in msg_src
     assert "std::EVENT_IPC_MSG" in msg_src
@@ -127,6 +151,36 @@ def test_file_manager_dual_mode_appmcp_reactor():
     assert "std::appmcp::TOOL_ID_FILES_LIST" in fm_src
     assert "std::appmcp::TOOL_ID_FILES_READ" in fm_src
     assert "std::appmcp::TOOL_ID_FILES_WRITE" in fm_src
+    assert "std::appmcp::TOOL_ID_FILES_STAT" in fm_src
     assert "Headless AppMCP tool invocation handled successfully." in fm_src
     assert "std::EVENT_IPC_MSG" in fm_src
 
+
+def test_calculator_dual_mode_appmcp_reactor():
+    calc_src = _read_calculator_main_rs()
+    assert "fn handle_appmcp_request" in calc_src, "Calculator must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in calc_src
+    assert "std::appmcp::TOOL_ID_CALCULATOR_EVAL" in calc_src
+    assert "Headless AppMCP tool executed successfully." in calc_src
+    assert "std::EVENT_IPC_MSG" in calc_src
+
+def test_dialer_dual_mode_appmcp_reactor():
+    dialer_src = _read_dialer_main_rs()
+    assert "fn handle_appmcp_request" in dialer_src, "Dialer must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in dialer_src
+    assert "std::appmcp::TOOL_ID_DIALER_CALL" in dialer_src
+    assert "std::appmcp::TOOL_ID_DIALER_HANGUP" in dialer_src
+    assert "std::appmcp::TOOL_ID_DIALER_LOGS" in dialer_src
+    assert "Headless AppMCP tool executed successfully." in dialer_src
+    assert "std::EVENT_IPC_MSG" in dialer_src
+
+def test_music_dual_mode_appmcp_reactor():
+    music_src = _read_music_main_rs()
+    assert "fn handle_appmcp_request" in music_src, "Music must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in music_src
+    assert "std::appmcp::TOOL_ID_MUSIC_PLAY" in music_src
+    assert "std::appmcp::TOOL_ID_MUSIC_PAUSE" in music_src
+    assert "std::appmcp::TOOL_ID_MUSIC_STATUS" in music_src
+    assert "std::appmcp::TOOL_ID_MUSIC_LIST" in music_src
+    assert "Headless AppMCP tool executed successfully." in music_src
+    assert "std::EVENT_IPC_MSG" in music_src

@@ -6355,6 +6355,78 @@ fn handle_dialer_key(dialer: &mut DialerApp, key: std::InputKeyEvent) -> Tap<'st
     }
 }
 
+fn handle_appmcp_request(dialer: &mut DialerApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+
+    // Zero ambient authority check: caller must present a non-zero capability token
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_DIALER_CALL => {
+            let num_bytes = req.payload();
+            if let Ok(num_str) = core::str::from_utf8(num_bytes) {
+                let trimmed = num_str.trim();
+                if !trimmed.is_empty() {
+                    let _ = dialer.dial_internal(trimmed, false);
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                        .with_payload(b"status:dialing");
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    return true;
+                }
+            }
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_DIALER_HANGUP => {
+            dialer.hangup();
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(b"status:idle");
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_DIALER_LOGS => {
+            let mut buf = [0u8; 32];
+            let mut pos = 0;
+            let prefix = b"calls:";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            pos += prefix.len();
+            let count = dialer.recents_len as u32;
+            pos += put_decimal(count, &mut buf[pos..]);
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(&buf[..pos]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.",
@@ -6524,9 +6596,15 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log("[DIALER APP] Display surface unavailable; refusing headless call simulation.",
-            )
-            .ok();
+            std::log("[DIALER APP] Display surface unavailable; checking for headless AppMCP invocation.").ok();
+            let mut rx_buf = [0u8; 64];
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if handle_appmcp_request(&mut dialer, &rx_buf[..len], sender, msg_type) {
+                    std::log("[DIALER APP] Headless AppMCP tool executed successfully.").ok();
+                    std::exit_with_code(0);
+                }
+            }
+            std::log("[DIALER APP] Display surface unavailable; refusing headless call simulation.").ok();
             std::exit_with_code(1);
         }
     };
@@ -6568,6 +6646,15 @@ pub extern "C" fn _start() -> ! {
                     if n > 0 {
                         let _ = std::settings_set("dialer.simulate_notification", b"");
                         dialer.play_notification();
+                    }
+                }
+                if events & std::EVENT_IPC_MSG != 0 {
+                    let mut rx_buf = [0u8; 64];
+                    while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                        if handle_appmcp_request(&mut dialer, &rx_buf[..len], sender, msg_type) {
+                            render_dialer_ui(surface, &dialer);
+                            let _ = std::surface_flip();
+                        }
                     }
                 }
                 // WHY there is no work here any more: the tick used to advance

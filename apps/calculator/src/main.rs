@@ -2046,6 +2046,63 @@ fn read_device_record(fd: u32) -> DeviceRecord {
     }
 }
 
+fn handle_appmcp_request(calc: &mut CalculatorState, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+
+    // Zero ambient authority check: caller must present a non-zero capability token
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_CALCULATOR_EVAL => {
+            let expr = req.payload();
+            match calculator::evaluate_ascii(expr) {
+                Ok(dec) => {
+                    let mut out = [0u8; 32];
+                    let len = dec.format(&mut out);
+                    if let Ok(expr_str) = core::str::from_utf8(expr) {
+                        calc.history.push(expr_str, dec);
+                    }
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                        .with_payload(&out[..len]);
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    true
+                }
+                Err(_) => {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    true
+                }
+            }
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[CALCULATOR (Ring 3)] Open-Source Touch Calculator online.",
@@ -2073,9 +2130,15 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log("[CALCULATOR] Display surface unavailable; refusing headless execution.",
-            )
-            .ok();
+            std::log("[CALCULATOR] Display surface unavailable; checking for headless AppMCP invocation.").ok();
+            let mut rx_buf = [0u8; 64];
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if handle_appmcp_request(&mut calc, &rx_buf[..len], sender, msg_type) {
+                    std::log("[CALCULATOR] Headless AppMCP tool executed successfully.").ok();
+                    std::exit_with_code(0);
+                }
+            }
+            std::log("[CALCULATOR] Display surface unavailable; refusing headless execution.").ok();
             std::exit_with_code(1);
         }
     };
@@ -2112,7 +2175,7 @@ pub extern "C" fn _start() -> ! {
 
     // 5. Interactive Event Reactor Loop
     loop {
-        if let Ok(_events) = std::event_poll(std::EVENT_TOUCH_INPUT, 100) {
+        if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG, 100) {
             let mut input = std::InputEvent {
                 kind: 0,
                 x: 0,
@@ -2122,6 +2185,15 @@ pub extern "C" fn _start() -> ! {
                 scale_milli: 1000,
             };
             let mut dirty = Dirty::None;
+
+            if events & std::EVENT_IPC_MSG != 0 {
+                let mut rx_buf = [0u8; 64];
+                while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                    if handle_appmcp_request(&mut calc, &rx_buf[..len], sender, msg_type) {
+                        dirty = dirty.widen(Dirty::All);
+                    }
+                }
+            }
 
             // The contacts the platform publishes while the finger is down.
             //

@@ -535,6 +535,66 @@ impl ChatSession {
     pub fn prompt_is_empty(&self) -> bool {
         self.prompt_len == 0
     }
+
+    /// Persists the chat transcript to the sandboxed application file system.
+    pub fn save_to_storage(&self, path: &str) -> Result<(), i64> {
+        let fd = interos_std::fs_open(path, interos_std::FS_WRITE)?;
+        let mut header = [0u8; 12];
+        header[0..4].copy_from_slice(b"AGTC");
+        header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        header[8..12].copy_from_slice(&(self.message_count as u32).to_le_bytes());
+        let _ = interos_std::fs_write(fd, &header)?;
+
+        for i in 0..self.message_count as usize {
+            if let Some(msg) = self.message_at(i) {
+                let mut rec_hdr = [0u8; 3];
+                rec_hdr[0] = match msg.role {
+                    ChatRole::User => 1,
+                    ChatRole::Assistant => 2,
+                    ChatRole::Notice => 3,
+                };
+                rec_hdr[1..3].copy_from_slice(&msg.text_len.to_le_bytes());
+                let _ = interos_std::fs_write(fd, &rec_hdr)?;
+                let n = (msg.text_len as usize).min(CHAT_TEXT_MAX);
+                let _ = interos_std::fs_write(fd, &msg.text[..n])?;
+            }
+        }
+        let _ = interos_std::fs_close(fd);
+        Ok(())
+    }
+
+    /// Restores the chat transcript from the sandboxed application file system.
+    pub fn load_from_storage(&mut self, path: &str) -> Result<usize, i64> {
+        let fd = interos_std::fs_open(path, interos_std::FS_READ)?;
+        let mut header = [0u8; 12];
+        let bytes_read = interos_std::fs_read(fd, &mut header)?;
+        if bytes_read < 12 || &header[0..4] != b"AGTC" {
+            let _ = interos_std::fs_close(fd);
+            return Err(-22);
+        }
+        let count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+        let mut loaded = 0;
+        let mut text_buf = [0u8; CHAT_TEXT_MAX];
+
+        for _ in 0..count.min(CHAT_MAX_MESSAGES) {
+            let mut rec_hdr = [0u8; 3];
+            if interos_std::fs_read(fd, &mut rec_hdr)? < 3 {
+                break;
+            }
+            let role = match rec_hdr[0] {
+                1 => ChatRole::User,
+                2 => ChatRole::Assistant,
+                _ => ChatRole::Notice,
+            };
+            let text_len = u16::from_le_bytes([rec_hdr[1], rec_hdr[2]]) as usize;
+            let to_read = text_len.min(CHAT_TEXT_MAX);
+            let n = interos_std::fs_read(fd, &mut text_buf[..to_read])?;
+            self.push(role, &text_buf[..n]);
+            loaded += 1;
+        }
+        let _ = interos_std::fs_close(fd);
+        Ok(loaded)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2484,6 +2544,59 @@ impl ToolAuthority {
     }
 }
 
+/// Parses a u64 from an ASCII byte slice with zero allocations.
+fn parse_u64_ascii(s: &[u8]) -> Option<u64> {
+    let mut val = 0u64;
+    let mut has_digits = false;
+    for &b in s {
+        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
+            continue;
+        }
+        if b.is_ascii_digit() {
+            val = val.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+            has_digits = true;
+        } else {
+            return None;
+        }
+    }
+    if has_digits { Some(val) } else { None }
+}
+
+/// Invokes a remote tool via the Sovereign AppMCP IPC protocol.
+///
+/// Dispatches an `APPMCP_MSG_INVOKE` message holding an `AppMcpRequest` to `task_id`
+/// with the given `cap_handle`. Returns the reply payload if successful.
+pub fn call_appmcp_tool(
+    task_id: u64,
+    tool_id: u32,
+    payload: &[u8],
+    cap_handle: u64,
+) -> Result<([u8; 64], usize), u32> {
+    let mut req = interos_std::appmcp::AppMcpRequest::new(cap_handle, tool_id, 1);
+    req = req.with_payload(payload);
+    let bytes = req.to_bytes();
+
+    if interos_std::ipc_send(task_id, interos_std::appmcp::APPMCP_MSG_INVOKE, &bytes).is_err() {
+        return Err(interos_std::appmcp::APPMCP_STATUS_UNAVAILABLE);
+    }
+
+    let mut rx_buf = [0u8; 64];
+    if let Ok((_sender, _msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+        if let Some(resp) = interos_std::appmcp::AppMcpResponse::from_bytes(&rx_buf[..len]) {
+            if resp.status == interos_std::appmcp::APPMCP_STATUS_SUCCESS {
+                let mut out = [0u8; 64];
+                let p = resp.payload();
+                let n = p.len().min(64);
+                out[..n].copy_from_slice(&p[..n]);
+                return Ok((out, n));
+            } else {
+                return Err(resp.status);
+            }
+        }
+    }
+    Err(interos_std::appmcp::APPMCP_STATUS_INTERNAL_ERROR)
+}
+
 impl AgentToolOutcome {
     /// Executes a tool if the kernel holds the agent-task capability for this
     /// task.
@@ -2507,6 +2620,30 @@ impl AgentToolOutcome {
         if !authority.is_granted() {
             return outcome;
         }
+
+        // 1. If an explicit capability handle and calculator service are available, attempt remote AppMCP IPC
+        if let Some(handle) = authority.handle() {
+            let mut svc_buf = [0u8; 16];
+            if let Ok(n) = interos_std::settings_get("service.calculator", &mut svc_buf) {
+                if n > 0 {
+                    if let Some(task_id) = parse_u64_ascii(&svc_buf[..n]) {
+                        if let Ok((resp_buf, len)) = call_appmcp_tool(
+                            task_id,
+                            interos_std::appmcp::TOOL_ID_CALCULATOR_EVAL,
+                            expression,
+                            handle,
+                        ) {
+                            outcome.ok = true;
+                            outcome.output = resp_buf;
+                            outcome.output_len = len as u8;
+                            return outcome;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Local bounded execution fallback
         let mut output = [0u8; 64];
         match evaluate_integer_expression(expression) {
             Some(value) => {
@@ -4958,6 +5095,15 @@ mod tests {
             ModelInventory::classify(b"model.gguf", 10 * 1024 * 1024, Some(b"GGUF")),
             ModelClassification::Weights
         );
+    }
+
+    #[test]
+    fn parse_u64_ascii_validates_numeric_strings() {
+        assert_eq!(parse_u64_ascii(b"12345"), Some(12345));
+        assert_eq!(parse_u64_ascii(b"  42\n"), Some(42));
+        assert_eq!(parse_u64_ascii(b"0"), Some(0));
+        assert_eq!(parse_u64_ascii(b""), None);
+        assert_eq!(parse_u64_ascii(b"abc"), None);
     }
 
     #[test]

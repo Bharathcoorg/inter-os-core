@@ -3579,6 +3579,113 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
     }
 }
 
+fn handle_appmcp_request(music: &mut MusicApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+
+    // Zero ambient authority check: caller must present a non-zero capability token
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_MUSIC_PLAY => {
+            let ok = match music.surface_state() {
+                music::SurfaceState::Paused if music.player.holds(music.current_track_idx) => {
+                    music.player.resume();
+                    music.state = PlaybackState::Playing;
+                    music.clear_feedback();
+                    music.publish_now_playing();
+                    true
+                }
+                music::SurfaceState::Playing => true,
+                _ => {
+                    let started = music.start_selected();
+                    music.publish_now_playing();
+                    started
+                }
+            };
+            let resp = if ok {
+                std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(b"state:playing")
+            } else {
+                std::appmcp::AppMcpResponse::error(std::appmcp::APPMCP_STATUS_INTERNAL_ERROR, req.tool_id, req.token)
+            };
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_MUSIC_PAUSE => {
+            if music.surface_state() == music::SurfaceState::Playing {
+                music.player.pause();
+                music.player.poll();
+                music.state = PlaybackState::Paused;
+                music.clear_feedback();
+                music.publish_now_playing();
+            }
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(b"state:paused");
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_MUSIC_STATUS => {
+            let mut buf = [0u8; 32];
+            let state_name = music::surface_state_name(music.surface_state());
+            let n = state_name.len().min(buf.len());
+            buf[..n].copy_from_slice(&state_name[..n]);
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(&buf[..n]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_MUSIC_LIST => {
+            let mut buf = [0u8; 32];
+            let mut pos = 0;
+            let prefix = b"tracks:";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            pos += prefix.len();
+            let count = music.store.len();
+            let mut w = count;
+            let mut digits = [0u8; 10];
+            let mut dn = 0;
+            if w == 0 {
+                digits[0] = b'0';
+                dn = 1;
+            } else {
+                while w > 0 && dn < 10 {
+                    digits[dn] = b'0' + (w % 10) as u8;
+                    w /= 10;
+                    dn += 1;
+                }
+            }
+            for i in 0..dn {
+                if pos < buf.len() {
+                    buf[pos] = digits[dn - 1 - i];
+                    pos += 1;
+                }
+            }
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(&buf[..pos]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[MUSIC APP (Ring 3)] Native music player online.",
@@ -3638,7 +3745,17 @@ pub extern "C" fn _start() -> ! {
             std::log("[MUSIC APP] DRM/KMS Client Surface allocated (z=200).").ok();
             id
         }
-        Err(_) => 0,
+        Err(_) => {
+            std::log("[MUSIC APP] DRM surface unavailable; checking for headless AppMCP invocation.").ok();
+            let mut rx_buf = [0u8; 64];
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if handle_appmcp_request(&mut music, &rx_buf[..len], sender, msg_type) {
+                    std::log("[MUSIC APP] Headless AppMCP tool executed successfully.").ok();
+                    std::exit_with_code(0);
+                }
+            }
+            0
+        }
     };
     let surface_lap = laps.lap();
 
@@ -3776,9 +3893,15 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log("[MUSIC APP] IPC message event raised; no playback command was parsed from it.",
-                    )
-                    .ok();
+                    let mut rx_buf = [0u8; 64];
+                    while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                        if handle_appmcp_request(&mut music, &rx_buf[..len], sender, msg_type) {
+                            if surface > 0 {
+                                repaint(surface, &music, Dirty::All);
+                                let _ = std::surface_flip();
+                            }
+                        }
+                    }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // A dispatch may reach this app while it is already

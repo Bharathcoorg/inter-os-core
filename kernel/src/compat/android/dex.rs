@@ -52,6 +52,44 @@ pub const OP_INVOKE_STATIC: u8 = 0x71;
 pub const OP_ADD_INT_2ADDR: u8 = 0xB0;
 pub const OP_SUB_INT_2ADDR: u8 = 0xB1;
 pub const OP_MUL_INT_2ADDR: u8 = 0xB2;
+pub const OP_DIV_INT_2ADDR: u8 = 0xB3;
+pub const OP_REM_INT_2ADDR: u8 = 0xB4;
+pub const OP_AND_INT_2ADDR: u8 = 0xB5;
+pub const OP_OR_INT_2ADDR: u8 = 0xB6;
+pub const OP_XOR_INT_2ADDR: u8 = 0xB7;
+pub const OP_SHL_INT_2ADDR: u8 = 0xB8;
+pub const OP_SHR_INT_2ADDR: u8 = 0xB9;
+pub const OP_USHR_INT_2ADDR: u8 = 0xBA;
+
+pub const OP_ARRAY_LENGTH: u8 = 0x21;
+pub const OP_NEW_ARRAY: u8 = 0x23;
+
+pub const OP_IF_LT: u8 = 0x34;
+pub const OP_IF_GE: u8 = 0x35;
+pub const OP_IF_GT: u8 = 0x36;
+pub const OP_IF_LE: u8 = 0x37;
+pub const OP_IF_LTZ: u8 = 0x3A;
+pub const OP_IF_GEZ: u8 = 0x3B;
+pub const OP_IF_GTZ: u8 = 0x3C;
+pub const OP_IF_LEZ: u8 = 0x3D;
+
+pub const OP_AGET: u8 = 0x44;
+pub const OP_APUT: u8 = 0x4B;
+
+pub const OP_IGET: u8 = 0x52;
+pub const OP_IPUT: u8 = 0x59;
+
+pub const OP_ADD_INT: u8 = 0x90;
+pub const OP_SUB_INT: u8 = 0x91;
+pub const OP_MUL_INT: u8 = 0x92;
+pub const OP_DIV_INT: u8 = 0x93;
+pub const OP_REM_INT: u8 = 0x94;
+pub const OP_AND_INT: u8 = 0x95;
+pub const OP_OR_INT: u8 = 0x96;
+pub const OP_XOR_INT: u8 = 0x97;
+pub const OP_SHL_INT: u8 = 0x98;
+pub const OP_SHR_INT: u8 = 0x99;
+pub const OP_USHR_INT: u8 = 0x9A;
 
 /// Raw DEX File Header (112 bytes).
 #[derive(Clone, Copy, Debug)]
