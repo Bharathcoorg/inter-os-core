@@ -74,3 +74,53 @@ impl AndroidIntentBridge {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intent_view_browser_pay_maps() {
+        let i_pay = AndroidIntent::new("android.intent.action.VIEW", "upi://pay?pa=merchant@bank");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_pay), Ok("INTENT_PAY"));
+
+        let i_url = AndroidIntent::new("android.intent.action.VIEW", "https://interos.org/docs");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_url), Ok("INTENT_BROWSER_URL"));
+
+        let i_geo = AndroidIntent::new("android.intent.action.VIEW", "geo:37.7749,-122.4194");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_geo), Ok("INTENT_MAPS_VIEW"));
+
+        let i_def = AndroidIntent::new("android.intent.action.VIEW", "custom://item");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_def), Ok("INTENT_VIEW_DEFAULT"));
+    }
+
+    #[test]
+    fn test_intent_dial_call_send() {
+        let i_dial = AndroidIntent::new("android.intent.action.DIAL", "tel:+15551234");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_dial), Ok("INTENT_TELEPHONY_DIAL"));
+
+        let i_call = AndroidIntent::new("android.intent.action.CALL", "tel:+15551234");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_call), Ok("INTENT_TELEPHONY_DIAL"));
+
+        let i_send = AndroidIntent::new("android.intent.action.SEND", "text/plain");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_send), Ok("INTENT_SHARE_PAYLOAD"));
+    }
+
+    #[test]
+    fn test_intent_security_violations_rejected() {
+        let bad_file = AndroidIntent::new("android.intent.action.VIEW", "file:///system/etc/policy.json");
+        assert_eq!(AndroidIntentBridge::translate_intent(&bad_file), Err(AndroidBridgeError::SecurityViolation));
+
+        let bad_content = AndroidIntent::new("android.intent.action.VIEW", "content://com.android.providers/contacts");
+        assert_eq!(AndroidIntentBridge::translate_intent(&bad_content), Err(AndroidBridgeError::SecurityViolation));
+
+        let bad_traversal = AndroidIntent::new("android.intent.action.VIEW", "https://example.com/../../etc/passwd");
+        assert_eq!(AndroidIntentBridge::translate_intent(&bad_traversal), Err(AndroidBridgeError::SecurityViolation));
+    }
+
+    #[test]
+    fn test_intent_unsupported_action_fails_closed() {
+        let unknown = AndroidIntent::new("com.malicious.ACTION_TAKEOVER", "");
+        assert_eq!(AndroidIntentBridge::translate_intent(&unknown), Err(AndroidBridgeError::UnsupportedAction));
+    }
+}

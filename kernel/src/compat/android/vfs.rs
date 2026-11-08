@@ -126,3 +126,38 @@ impl AndroidSandboxFs {
 
 /// Global system-wide virtual Android sandbox filesystem.
 pub static ANDROID_SANDBOX_FS: Mutex<AndroidSandboxFs> = Mutex::new(AndroidSandboxFs::empty());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vfs_sandbox_defaults_and_creation() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+        assert_eq!(fs.security_violations(), 0);
+
+        // Attempting to read a directory should yield PermissionDenied
+        assert_eq!(fs.open_read("/system"), Err(AndroidFsError::PermissionDenied));
+        assert_eq!(fs.open_read("/nonexistent"), Err(AndroidFsError::NotFound));
+
+        // Create and read a regular file
+        fs.create_file("/data/data/app.txt", b"android sandbox test data");
+        let content = fs.open_read("/data/data/app.txt").expect("read created file");
+        assert_eq!(content, b"android sandbox test data");
+    }
+
+    #[test]
+    fn test_vfs_security_violations_intercepted() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+
+        // Host private directories must trigger SecurityViolation and increment counter
+        assert_eq!(fs.open_read("/system/etc/policy.json"), Err(AndroidFsError::SecurityViolation));
+        assert_eq!(fs.open_read("/packages/org.interos.vault.bin"), Err(AndroidFsError::SecurityViolation));
+        assert_eq!(fs.open_read("/data/audit.log"), Err(AndroidFsError::SecurityViolation));
+        assert_eq!(fs.open_read("/sdcard/../system/etc/shadow"), Err(AndroidFsError::SecurityViolation));
+
+        assert_eq!(fs.security_violations(), 4);
+    }
+}

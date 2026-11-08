@@ -49,12 +49,14 @@ pub const APPMCP_STATUS_NOT_FOUND: u32          = 8;
 // Notes:
 pub const TOOL_ID_NOTES_CREATE: u32             = 0x4E54_4352; // b"NTCR"
 pub const TOOL_ID_NOTES_LIST: u32               = 0x4E54_4C53; // b"NTLS"
+pub const TOOL_ID_NOTES_READ: u32               = 0x4E54_5244; // b"NTRD"
 pub const TOOL_ID_NOTES_DELETE: u32             = 0x4E54_444C; // b"NTDL"
 
 // Messages:
 pub const TOOL_ID_MESSAGES_SEND_SMS: u32        = 0x4D53_534E; // b"MSSN"
 pub const TOOL_ID_MESSAGES_LIST_THREADS: u32    = 0x4D53_4C53; // b"MSLS"
 pub const TOOL_ID_MESSAGES_LIST: u32            = TOOL_ID_MESSAGES_LIST_THREADS;
+pub const TOOL_ID_MESSAGES_READ: u32            = 0x4D53_5244; // b"MSRD"
 pub const TOOL_ID_MESSAGES_DELETE: u32          = 0x4D53_444C; // b"MSDL"
 
 // Calendar:
@@ -67,6 +69,7 @@ pub const TOOL_ID_CALENDAR_GET_DATE: u32        = 0x4341_4454; // b"CADT"
 pub const TOOL_ID_FILES_LIST: u32               = 0x464D_4C53; // b"FMLS"
 pub const TOOL_ID_FILES_READ: u32               = 0x464D_5244; // b"FMRD"
 pub const TOOL_ID_FILES_WRITE: u32              = 0x464D_5752; // b"FMWR"
+pub const TOOL_ID_FILES_STAT: u32               = 0x464D_5354; // b"FMST"
 
 // Settings:
 pub const TOOL_ID_SETTINGS_GET: u32             = 0x5354_4754; // b"STGT"
@@ -177,6 +180,11 @@ impl AppMcpRequest {
     pub fn payload(&self) -> &[u8] {
         let len = (self.payload_len as usize).min(36);
         &self.inline_payload[..len]
+    }
+
+    /// Attaches an inline payload slice (convenience alias for with_inline_payload).
+    pub fn with_payload(self, data: &[u8]) -> Self {
+        self.with_inline_payload(data)
     }
 }
 
@@ -387,5 +395,27 @@ mod tests {
         assert_eq!(parsed.status, APPMCP_STATUS_PERMISSION_DENIED);
         assert_eq!(parsed.tool_id, TOOL_ID_MESSAGES_SEND_SMS);
         assert_eq!(parsed.token, 77);
+    }
+
+    #[test]
+    fn test_appmcp_convenience_payload_helpers() {
+        let req = AppMcpRequest::new(100, TOOL_ID_FILES_LIST, 99)
+            .with_payload(b"/storage/photos");
+        assert_eq!(req.payload(), b"/storage/photos");
+        assert_eq!(req.pipe_id, u32::MAX);
+
+        let resp = AppMcpResponse::success(TOOL_ID_FILES_LIST, 99)
+            .with_payload(b"entries:5");
+        assert_eq!(resp.output(), b"entries:5");
+
+        let piped_req = AppMcpRequest::new(100, TOOL_ID_FILES_READ, 101)
+            .with_pipe(7, 4096);
+        assert_eq!(piped_req.pipe_id, 7);
+        assert_eq!(piped_req.payload_len, 4096);
+
+        let piped_resp = AppMcpResponse::success(TOOL_ID_FILES_READ, 101)
+            .with_pipe(7, 4096);
+        assert_eq!(piped_resp.pipe_id, 7);
+        assert_eq!(piped_resp.output_len, 4096);
     }
 }

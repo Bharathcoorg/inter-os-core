@@ -61,3 +61,34 @@ def test_android_runtime_has_bounded_validated_drawing_runtime():
     assert "write_surface_pixels" in draw
     assert "pub mod draw;" in mod
     assert "pub use draw::{" in mod
+
+
+def test_android_microg_parcel_and_binder_engine():
+    binder = read("kernel/src/compat/android/binder.rs")
+    framework = read("kernel/src/compat/android/framework.rs")
+    assert "pub struct ParcelReader<'a>" in binder
+    assert "pub struct ParcelWriter<'a>" in binder
+    assert "HANDLE_MICROG_GMS_BROKER: u32 = 0x1001" in binder
+    assert "HANDLE_MICROG_LOCATION: u32 = 0x1002" in binder
+    assert "HANDLE_MICROG_GCM_PUSH: u32 = 0x1003" in binder
+    assert "HANDLE_MICROG_ADS_ID: u32 = 0x1004" in binder
+    assert "pub fn handle_microg_transaction" in binder
+    assert "AndroidFrameworkService::Location" in framework
+    assert "android/location/LocationManager" in framework
+
+
+def test_android_apk_deflate_and_vfs_sandbox_isolation():
+    inflate = read("kernel/src/compat/android/inflate.rs")
+    vfs = read("kernel/src/compat/android/vfs.rs")
+    bridge = read("kernel/src/compat/android/bridge.rs")
+    apk = read("kernel/src/compat/android/apk.rs")
+    assert "pub fn inflate_raw" in inflate
+    assert "extract_file" in apk
+    assert "AndroidSandboxFs" in vfs
+    assert "SecurityViolation" in vfs
+    assert "security_violations" in vfs
+    assert "AndroidIntentBridge" in bridge
+    assert "INTENT_PAY" in bridge
+    assert "INTENT_BROWSER_URL" in bridge
+    assert "INTENT_TELEPHONY_DIAL" in bridge
+
