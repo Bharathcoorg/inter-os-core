@@ -2827,6 +2827,136 @@ fn persist_store(store: &NotesStore) -> bool {
 }
 
 // -----------------------------------------------------------------------------
+// Sovereign AppMCP Tool Dispatcher (Zero-Allocation & Bounded)
+// -----------------------------------------------------------------------------
+
+fn parse_note_payload(payload: &[u8]) -> (&str, &str) {
+    if payload.is_empty() {
+        return ("Untitled", "");
+    }
+    let mut delim = None;
+    for (i, &b) in payload.iter().enumerate() {
+        if b == b'|' || b == 0 {
+            delim = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = delim {
+        let title = core::str::from_utf8(&payload[..i]).unwrap_or("Untitled");
+        let body = if i + 1 < payload.len() {
+            core::str::from_utf8(&payload[i + 1..]).unwrap_or("")
+        } else {
+            ""
+        };
+        (title, body)
+    } else {
+        let title = core::str::from_utf8(payload).unwrap_or("Untitled");
+        (title, "")
+    }
+}
+
+fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+
+    // Zero ambient authority check: caller must present a non-zero capability token
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_NOTES_CREATE => {
+            let (title, body) = parse_note_payload(&req.inline_payload[..req.payload_len as usize]);
+            if let Some(id) = store.create_note(title, body) {
+                let _ = save_notes_to_storage(store);
+                if let Some(note) = store.get_note(id).copied() {
+                    let _ = library::publish_note(&note);
+                    library::refresh_index();
+                }
+                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                    .with_inline_output(&id.to_le_bytes());
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        std::appmcp::TOOL_ID_NOTES_LIST => {
+            let mut out = [0u8; 40];
+            let count = store.count().min(255) as u8;
+            out[0] = count;
+            let mut out_len = 1usize;
+            for i in 0..store.count().min(9) {
+                if let Some(note) = store.get_by_index(i) {
+                    if out_len + 4 <= 40 {
+                        out[out_len..out_len + 4].copy_from_slice(&note.id.to_le_bytes());
+                        out_len += 4;
+                    }
+                }
+            }
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_inline_output(&out[..out_len]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_NOTES_DELETE => {
+            if req.payload_len >= 4 {
+                let id = u32::from_le_bytes([
+                    req.inline_payload[0],
+                    req.inline_payload[1],
+                    req.inline_payload[2],
+                    req.inline_payload[3],
+                ]);
+                if store.delete_note(id) {
+                    let _ = save_notes_to_storage(store);
+                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                } else {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Ring-3 Entrypoint & Lifecycle
 // -----------------------------------------------------------------------------
 
@@ -2843,6 +2973,22 @@ pub extern "C" fn _start() -> ! {
     let surface = match std::surface_create(W as u32, H as u32, 200) {
         Ok(s) => s,
         Err(_) => {
+            // Check if there is a pending AppMCP tool request to execute headlessly
+            let mut rx_buf = [0u8; 64];
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                let mut headless_store = NotesStore::new();
+                let loaded = load_notes_from_storage(&mut headless_store);
+                if matches!(
+                    loaded,
+                    StorageState::Refused | StorageState::Corrupt | StorageState::Empty
+                ) {
+                    headless_store.new_empty();
+                }
+                if handle_appmcp_request(&mut headless_store, &rx_buf[..len], sender, msg_type) {
+                    std::log("[NOTES] Headless AppMCP tool executed successfully.").ok();
+                    std::exit_with_code(0);
+                }
+            }
             std::log("[NOTES] No surface could be created; refusing to draw.").ok();
             std::exit_with_code(1);
         }
@@ -2941,7 +3087,18 @@ pub extern "C" fn _start() -> ! {
             needs_redraw = true;
         }
 
-        if let Ok(_) = std::event_poll(std::EVENT_TOUCH_INPUT, 50) {
+        let poll_res = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG, 50);
+        if let Ok(mask) = poll_res {
+            if mask & std::EVENT_IPC_MSG != 0 {
+                let mut rx_buf = [0u8; 64];
+                while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                    if handle_appmcp_request(&mut state.store, &rx_buf[..len], sender, msg_type) {
+                        state.sync_list_extent();
+                        state.publish_notes();
+                        needs_redraw = true;
+                    }
+                }
+            }
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
                     if key.pressed {
