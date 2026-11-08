@@ -28,6 +28,7 @@ pub enum AndroidFrameworkService {
     Storage,
     Network,
     Telephony,
+    Location,
 }
 
 impl AndroidFrameworkService {
@@ -41,6 +42,7 @@ impl AndroidFrameworkService {
             Self::Storage => 6,
             Self::Network => 7,
             Self::Telephony => 8,
+            Self::Location => 9,
         }
     }
 
@@ -54,6 +56,7 @@ impl AndroidFrameworkService {
             Self::Storage => "storage",
             Self::Network => "connectivity",
             Self::Telephony => "phone",
+            Self::Location => "location",
         }
     }
 
@@ -67,6 +70,7 @@ impl AndroidFrameworkService {
             "storage" => Some(Self::Storage),
             "connectivity" => Some(Self::Network),
             "phone" => Some(Self::Telephony),
+            "location" => Some(Self::Location),
             _ => None,
         }
     }
@@ -376,6 +380,14 @@ pub fn dispatch(
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }
+        // Service calls: LocationManager (Sovereign microG Location Provider)
+        "android/location/LocationManager" => {
+            match method_name {
+                "isProviderEnabled" => Ok(AndroidFrameworkResult::Return(1)),
+                "getLastKnownLocation" => Ok(AndroidFrameworkResult::Return(1)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
         // Sovereign native microG shims: pure Rust, fail-closed, zero-heap
         "com/google/android/gms/common/GoogleApiAvailability" => {
             match method_name {
@@ -521,6 +533,7 @@ mod tests {
             ("storage", AndroidFrameworkService::Storage),
             ("connectivity", AndroidFrameworkService::Network),
             ("phone", AndroidFrameworkService::Telephony),
+            ("location", AndroidFrameworkService::Location),
         ] {
             assert_eq!(
                 dispatch("Landroid/content/Context;", "getSystemService", &[Some(name)], &mut logs),

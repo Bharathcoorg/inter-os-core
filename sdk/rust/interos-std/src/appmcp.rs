@@ -43,6 +43,7 @@ pub const APPMCP_STATUS_INVALID_ARGUMENTS: u32  = 4;
 pub const APPMCP_STATUS_STORAGE_FULL: u32       = 5;
 pub const APPMCP_STATUS_UNAVAILABLE: u32        = 6;
 pub const APPMCP_STATUS_INTERNAL_ERROR: u32     = 7;
+pub const APPMCP_STATUS_NOT_FOUND: u32          = 8;
 
 // Predefined Tool Action IDs across canonical native applications
 // Notes:

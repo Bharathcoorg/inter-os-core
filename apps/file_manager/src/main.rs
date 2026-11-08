@@ -4763,6 +4763,193 @@ fn long_press_hit(app: &FileManagerApp, x: usize, y: usize) -> Option<usize> {
 }
 
 // -----------------------------------------------------------------------------
+// Sovereign AppMCP Tool Dispatcher (Zero-Allocation & Bounded)
+// -----------------------------------------------------------------------------
+
+fn format_u32_str(mut val: u32, out: &mut [u8]) -> usize {
+    if val == 0 {
+        if !out.is_empty() {
+            out[0] = b'0';
+            return 1;
+        }
+        return 0;
+    }
+    let mut temp = [0u8; 10];
+    let mut n = 0;
+    while val > 0 && n < temp.len() {
+        temp[n] = b'0' + (val % 10) as u8;
+        val /= 10;
+        n += 1;
+    }
+    let len = n.min(out.len());
+    for i in 0..len {
+        out[i] = temp[n - 1 - i];
+    }
+    len
+}
+
+fn handle_appmcp_request(app: &mut FileManagerApp, raw: &[u8], sender: u64, msg_type: u32) -> bool {
+    if msg_type != std::appmcp::APPMCP_MSG_INVOKE {
+        return false;
+    }
+    let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
+        return false;
+    };
+    if req.cap_handle == 0 {
+        let resp = std::appmcp::AppMcpResponse::error(
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+            req.tool_id,
+            req.token,
+        );
+        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+        return true;
+    }
+
+    match req.tool_id {
+        std::appmcp::TOOL_ID_FILES_LIST => {
+            let path_payload = req.payload();
+            if !path_payload.is_empty() {
+                let copy_len = path_payload.len().min(app.current_path.len());
+                app.current_path[..copy_len].copy_from_slice(&path_payload[..copy_len]);
+                app.current_path_len = copy_len;
+            }
+            app.refresh_directory();
+            let mut summary = [0u8; 32];
+            let mut pos = 0usize;
+            for &b in b"entries:" {
+                summary[pos] = b;
+                pos += 1;
+            }
+            pos += format_u32_str(app.entry_count as u32, &mut summary[pos..]);
+            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                .with_payload(&summary[..pos]);
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+        std::appmcp::TOOL_ID_FILES_READ => {
+            let path_payload = req.payload();
+            if path_payload.is_empty() {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
+            if let Ok(path_str) = core::str::from_utf8(path_payload) {
+                match std::fs_open(path_str, std::FS_READ) {
+                    Ok(fd) => {
+                        let mut buf = [0u8; 36];
+                        let read_res = std::fs_read(fd, &mut buf);
+                        let _ = std::fs_close(fd);
+                        match read_res {
+                            Ok(bytes_read) => {
+                                let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
+                                    .with_payload(&buf[..bytes_read]);
+                                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                            }
+                            Err(_) => {
+                                let resp = std::appmcp::AppMcpResponse::error(
+                                    std::appmcp::APPMCP_STATUS_INTERNAL_ERROR,
+                                    req.tool_id,
+                                    req.token,
+                                );
+                                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        let resp = std::appmcp::AppMcpResponse::error(
+                            std::appmcp::APPMCP_STATUS_NOT_FOUND,
+                            req.tool_id,
+                            req.token,
+                        );
+                        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    }
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        std::appmcp::TOOL_ID_FILES_WRITE => {
+            let payload = req.payload();
+            let mut delim = None;
+            for (i, &b) in payload.iter().enumerate() {
+                if b == b'|' {
+                    delim = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = delim {
+                let path_bytes = &payload[..i];
+                let data_bytes = &payload[i + 1..];
+                if let Ok(path_str) = core::str::from_utf8(path_bytes) {
+                    match std::fs_open(path_str, std::FS_WRITE) {
+                        Ok(fd) => {
+                            let write_res = std::fs_write(fd, data_bytes);
+                            let _ = std::fs_close(fd);
+                            match write_res {
+                                Ok(_) => {
+                                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
+                                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                                }
+                                Err(_) => {
+                                    let resp = std::appmcp::AppMcpResponse::error(
+                                        std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                                        req.tool_id,
+                                        req.token,
+                                    );
+                                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let resp = std::appmcp::AppMcpResponse::error(
+                                std::appmcp::APPMCP_STATUS_INTERNAL_ERROR,
+                                req.tool_id,
+                                req.token,
+                            );
+                            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                        }
+                    }
+                } else {
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                }
+            } else {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            }
+            true
+        }
+        _ => {
+            let resp = std::appmcp::AppMcpResponse::error(
+                std::appmcp::APPMCP_STATUS_TOOL_NOT_FOUND,
+                req.tool_id,
+                req.token,
+            );
+            let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+            true
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Entry point and event reactor loop
 // -----------------------------------------------------------------------------
 
@@ -4807,6 +4994,16 @@ pub extern "C" fn _start() -> ! {
         render_file_manager_ui(surface, &app);
         let _ = std::surface_flip();
         std::log("[FILE_MANAGER] Files UI presented to scanout buffer.").ok();
+    } else {
+        let mut rx = [0u8; 64];
+        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+            if handle_appmcp_request(&mut app, &rx[..len], sender, msg_type) {
+                std::log("[FILE_MANAGER] Headless AppMCP tool invocation handled successfully.").ok();
+                std::exit_with_code(0);
+            }
+        }
+        std::log("[FILE_MANAGER] Display surface unavailable; refusing execution.").ok();
+        std::exit_with_code(1);
     }
 
     loop {
@@ -4826,9 +5023,24 @@ pub extern "C" fn _start() -> ! {
         if rung_moved {
             app.relayout_for_rung();
         }
-        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
+        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
         let mut repainted_wholly = false;
         if let Ok(triggered) = std::event_poll(interest, 100) {
+            if (triggered & std::EVENT_IPC_MSG) != 0 {
+                let mut rx = [0u8; 64];
+                if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx) {
+                    if handle_appmcp_request(&mut app, &rx[..len], sender, msg_type) {
+                        if surface > 0 {
+                            app.refresh_directory();
+                            render_file_manager_ui(surface, &app);
+                            let _ = std::surface_flip();
+                            repainted_wholly = true;
+                        }
+                    } else {
+                        std::log("[FILE_MANAGER] IPC message received (non-AppMCP).").ok();
+                    }
+                }
+            }
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
                     kind: 0,

@@ -44,6 +44,11 @@ def _read_settings_main_rs() -> str:
     assert path.is_file(), f"missing {path}"
     return path.read_text(encoding="utf-8")
 
+def _read_file_manager_main_rs() -> str:
+    path = ROOT / "apps" / "file_manager" / "src" / "main.rs"
+    assert path.is_file(), f"missing {path}"
+    return path.read_text(encoding="utf-8")
+
 def test_appmcp_struct_sizes_are_compile_time_asserted_to_64_bytes():
     src = _read_appmcp_rs()
     assert "assert!(core::mem::size_of::<AppMcpRequest>() == 64)" in src, (
@@ -114,3 +119,14 @@ def test_settings_dual_mode_reactor_handles_headless_appmcp():
     assert "std::appmcp::TOOL_ID_SETTINGS_SET" in set_src
     assert "Headless AppMCP tool invocation handled successfully." in set_src
     assert "std::EVENT_IPC_MSG" in set_src
+
+def test_file_manager_dual_mode_appmcp_reactor():
+    fm_src = _read_file_manager_main_rs()
+    assert "fn handle_appmcp_request" in fm_src, "File Manager must implement handle_appmcp_request"
+    assert "std::appmcp::APPMCP_STATUS_PERMISSION_DENIED" in fm_src
+    assert "std::appmcp::TOOL_ID_FILES_LIST" in fm_src
+    assert "std::appmcp::TOOL_ID_FILES_READ" in fm_src
+    assert "std::appmcp::TOOL_ID_FILES_WRITE" in fm_src
+    assert "Headless AppMCP tool invocation handled successfully." in fm_src
+    assert "std::EVENT_IPC_MSG" in fm_src
+
