@@ -3057,9 +3057,12 @@ pub fn init() {
     vfs.mkdir("/storage");
     vfs.mkdir("/storage/photos");
     vfs.mkdir("/storage/pictures");
+    vfs.mkdir("/storage/pictures/generated");
     vfs.mkdir("/storage/videos");
+    vfs.mkdir("/storage/videos/generated");
     vfs.mkdir("/storage/downloads");
     vfs.mkdir("/storage/music");
+    vfs.mkdir("/storage/music/generated");
     vfs.mkdir("/system/models");
 
     // Sovereign Storage Sample Media Files (Real PPM & WAV assets)

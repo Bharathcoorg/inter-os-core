@@ -22,6 +22,31 @@ pub const PATH_GENERATIVE_MODEL_DATA: &str = "/data/models/gemma4-2b.gguf";
 /// Fallback system path for Gemma 4 2B generative weights in `/system/models`.
 pub const PATH_GENERATIVE_MODEL_SYSTEM: &str = "/system/models/gemma4-2b.gguf";
 
+/// Canonical on-device path for Gemma 4 Mobile Lite (1.1 GB mixed quantization) weights in `/data/models`.
+pub const PATH_GEMMA4_MOBILE_LITE_DATA: &str = "/data/models/gemma4-mobile-lite.gguf";
+/// Fallback system path for Gemma 4 Mobile Lite in `/system/models`.
+pub const PATH_GEMMA4_MOBILE_LITE_SYSTEM: &str = "/system/models/gemma4-mobile-lite.gguf";
+
+/// Canonical on-device path for Whisper Tiny.en speech recognition model in `/data/models`.
+pub const PATH_WHISPER_TINY_DATA: &str = "/data/models/whisper-tiny.gguf";
+/// Fallback system path for Whisper Tiny.en in `/system/models`.
+pub const PATH_WHISPER_TINY_SYSTEM: &str = "/system/models/whisper-tiny.gguf";
+
+/// Canonical on-device path for Kokoro 82M voice synthesis model in `/data/models`.
+pub const PATH_KOKORO_82M_DATA: &str = "/data/models/kokoro-82m.gguf";
+/// Fallback system path for Kokoro 82M in `/system/models`.
+pub const PATH_KOKORO_82M_SYSTEM: &str = "/system/models/kokoro-82m.gguf";
+
+/// Canonical on-device path for SD-Turbo image generation model in `/data/models`.
+pub const PATH_SD_TURBO_DATA: &str = "/data/models/sd-turbo.gguf";
+/// Fallback system path for SD-Turbo in `/system/models`.
+pub const PATH_SD_TURBO_SYSTEM: &str = "/system/models/sd-turbo.gguf";
+
+/// Canonical on-device path for AnimateLCM-Tiny video generation model in `/data/models`.
+pub const PATH_ANIMATELCM_DATA: &str = "/data/models/animatelcm-tiny.gguf";
+/// Fallback system path for AnimateLCM-Tiny in `/system/models`.
+pub const PATH_ANIMATELCM_SYSTEM: &str = "/system/models/animatelcm-tiny.gguf";
+
 /// Where a model file the device installed itself is held.
 ///
 /// WHY one fixed path: the install is the platform moving bytes the person put
@@ -2230,6 +2255,8 @@ pub fn probe_embedding_model() -> Result<(GgufHeader, &'static str), GgufError> 
 /// Priority: `/data/models/gemma4-2b.gguf`, then `/system/models/gemma4-2b.gguf`.
 pub fn probe_generative_model() -> Result<(GgufHeader, &'static str), GgufError> {
     const CANDIDATES: &[&str] = &[
+        PATH_GEMMA4_MOBILE_LITE_DATA,
+        PATH_GEMMA4_MOBILE_LITE_SYSTEM,
         PATH_GENERATIVE_MODEL_DATA,
         PATH_GENERATIVE_MODEL_SYSTEM,
         "/data/models/gemma-2b.gguf",
