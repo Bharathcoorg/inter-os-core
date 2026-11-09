@@ -16,6 +16,7 @@ pub enum IconKind {
     Messages,
     Camera,
     Browser,
+    WebviewDemo,
     Files,
     Gallery,
     Settings,
@@ -56,9 +57,11 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Camera)
     } else if id == b"org.interos.browser" || id == b"browser" || id == b"app_browser" || id == b"WEB" || id == b"BROW"
         || id == b"Browser"
-        || id == b"org.interos.webview_demo" || id == b"webview_demo" || id == b"app_webview_demo" || id == b"WEBV"
     {
         Some(IconKind::Browser)
+    } else if id == b"org.interos.webview_demo" || id == b"webview_demo" || id == b"app_webview_demo" || id == b"WEBV"
+    {
+        Some(IconKind::WebviewDemo)
     } else if id == b"org.interos.file_manager" || id == b"file_manager" || id == b"files" || id == b"app_file_manager" || id == b"FILE"
         || id == b"Files" || id == b"File Manager"
     {
@@ -295,6 +298,29 @@ pub fn eval_icon_subpixel(kind: IconKind, fx: i32, fy: i32) -> bool {
                 false
             }
         }
+        IconKind::WebviewDemo => {
+            // Embedded-code window: a hollow rounded frame with a `< >` code mark
+            // and a slash inside. Same fixed-point kit as every other glyph --
+            // no curves faked with rectangles, no colour, no font -- and no
+            // shared silhouette with the Browser's ringed planet.
+            let ox = if fx.abs() > 150 { fx.abs() - 150 } else { 0 };
+            let oy = if fy.abs() > 118 { fy.abs() - 118 } else { 0 };
+            let outer = fx.abs() <= 175 && fy.abs() <= 143 && ox * ox + oy * oy <= 900;
+            let ix = if fx.abs() > 124 { fx.abs() - 124 } else { 0 };
+            let iy = if fy.abs() > 92 { fy.abs() - 92 } else { 0 };
+            let inner_hole = fx.abs() <= 149 && fy.abs() <= 117 && ix * ix + iy * iy <= 625;
+            let frame = outer && !inner_hole;
+            // Left chevron `<`: apex at (-84, 0), arms to (-44, +-40).
+            let lt = fx >= -84 && fx <= -44 && fy.abs() <= 44
+                && ((fx + 84) * 10 - fy.abs() * 11).abs() <= 16;
+            // Right chevron `>`: mirror of the left across the vertical axis.
+            let gt = fx <= 84 && fx >= 44 && fy.abs() <= 44
+                && ((84 - fx) * 10 - fy.abs() * 11).abs() <= 16;
+            // Slash `/` from (-22, 48) to (22, -48): points within a stroke of
+            // the line 24fx + 11fy = 0.
+            let slash = fx.abs() <= 22 && fy.abs() <= 48 && (24 * fx + 11 * fy).abs() <= 24;
+            frame || lt || gt || slash
+        }
         IconKind::Files => {
             // Folder top tab at upper left
             let tab = fx >= -150 && fx <= -30 && fy >= -145 && fy <= -80;
@@ -493,10 +519,49 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
         assert_eq!(match_icon_kind(b"work"), Some(IconKind::Briefcase));
         assert_eq!(match_icon_kind(b"org.interos.card_demo"), Some(IconKind::CardDemo));
-        assert_eq!(match_icon_kind(b"org.interos.webview_demo"), Some(IconKind::Browser));
-        assert_eq!(match_icon_kind(b"app_webview_demo"), Some(IconKind::Browser));
-        assert_eq!(match_icon_kind(b"WEBV"), Some(IconKind::Browser));
+        assert_eq!(match_icon_kind(b"org.interos.webview_demo"), Some(IconKind::WebviewDemo));
+        assert_eq!(match_icon_kind(b"app_webview_demo"), Some(IconKind::WebviewDemo));
+        assert_eq!(match_icon_kind(b"WEBV"), Some(IconKind::WebviewDemo));
         assert_eq!(match_icon_kind(b"org.custom.unknown"), None);
+    }
+
+    /// Ink footprint of a glyph over the standard tile box: (pixel count, FNV
+    /// hash of the on/off pattern). Two kinds with the same signature draw the
+    /// same pixels no matter what their enum names say.
+    fn ink_signature(kind: IconKind) -> (u32, u64) {
+        let mut count = 0u32;
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for y in 0..33u32 {
+            for x in 0..33u32 {
+                let on = rasterize_icon_pixel(kind, x as usize, y as usize, 16, 16, 0xFFFF_FFFF)
+                    .is_some();
+                hash = (hash ^ on as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                count += on as u32;
+            }
+        }
+        (count, hash)
+    }
+
+    #[test]
+    fn webview_demo_resolves_to_a_glyph_distinguishable_from_the_browser() {
+        let browser = match_icon_kind(b"org.interos.browser")
+            .expect("the Browser maps to a kit pictogram");
+        let webview = match_icon_kind(b"org.interos.webview_demo")
+            .expect("the Webview Demo maps to a kit pictogram");
+        assert_ne!(
+            browser, webview,
+            "Browser and Webview Demo resolve to {:?}: two apps one glyph is a home \
+             screen that cannot be aimed by eye",
+            browser
+        );
+        let (b_count, b_hash) = ink_signature(browser);
+        let (w_count, w_hash) = ink_signature(webview);
+        assert!(b_count > 10 && w_count > 10, "both marks must be drawn by the kit: browser inked {b_count}, webview inked {w_count}");
+        assert_ne!(
+            (b_count, b_hash),
+            (w_count, w_hash),
+            "the two kinds resolve differently but rasterise identically"
+        );
     }
 
     #[test]
@@ -506,6 +571,7 @@ mod tests {
             IconKind::Messages,
             IconKind::Camera,
             IconKind::Browser,
+            IconKind::WebviewDemo,
             IconKind::Files,
             IconKind::Gallery,
             IconKind::Settings,

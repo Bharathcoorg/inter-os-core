@@ -55,12 +55,15 @@ pub const MAX_LEVEL: u8 = 3;
 /// WHY they are repeated here rather than read from the screen: the drawer lives in
 /// the binary, and a binary cannot be imported by the library that has to test it. The
 /// drawer asserts that each of these equals its own constant, so the clamp and the
-/// layout cannot drift apart.
+/// layout cannot drift apart -- and because that assert is an equality, these two are
+/// the *same* rows the drawer paints, not a rounded recollection of them. The drawer's
+/// band is now derived from the navigation bar's top, so a change there has to be
+/// written down here on the same stroke or the build refuses.
 const NAME_SCALE: usize = type_scale::BODY;
 pub const DRAWER_ICON_D: usize = 80;
 pub const DRAWER_ICON_NAME_GAP: usize = 10;
-pub const DRAWER_ROWS: usize = 5;
-pub const DRAWER_GRID_H: usize = 895;
+pub const DRAWER_ROWS: usize = 6;
+pub const DRAWER_GRID_H: usize = 1133;
 pub const DRAWER_GUTTER: usize = GRID_20;
 
 /// The later of two layout edges.
@@ -158,13 +161,13 @@ pub const fn drawer_level_holds(level: u8) -> bool {
     group <= DRAWER_CELL_H
 }
 
-/// The shortest tile cell the drawer's grid can build: five rows in the drawer's
-/// grid band, less the gutters between them.
+/// The shortest tile cell the drawer's grid can build: `DRAWER_ROWS` rows in the
+/// drawer's grid band, less the gutters between them.
 ///
 /// WHY a face of this module: [`drawer_level_holds`] measures a tile against it, and a
 /// screen module cannot be reached from here. `layout::grid_fixed_columns` divides the
-/// band by the rows it actually needs, so a half-empty page gets *taller* cells -- five
-/// rows is the tightest case, and the one a name's rung has to fit inside.
+/// band by the rows it actually needs, so a half-empty page gets *taller* cells -- the
+/// full page is the tightest case, and the one a name's rung has to fit inside.
 pub const DRAWER_CELL_H: usize =
     (DRAWER_GRID_H - (DRAWER_ROWS - 1) * GRID_20) / DRAWER_ROWS;
 

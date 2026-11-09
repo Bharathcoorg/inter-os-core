@@ -251,6 +251,28 @@ fn paging_covers_every_item_exactly_once() {
 }
 
 #[test]
+fn the_drawer_pages_by_the_capacity_its_grid_mirrors() {
+    // WHY this is stated on the library side: the shell's swipe rule divided the
+    // catalogue by an authored twelve while the painter laid out the grid's own
+    // capacity, so a page of tiles the grid could not fill still counted as a page, and
+    // the dot row disagreed with the swipe. The row count is mirrored here -- these are
+    // the numbers the tile clamp measures against -- which is the only place a host test
+    // can see what one page is allowed to hold.
+    let per_page = 3 * crate::scale::DRAWER_ROWS;
+    assert_eq!(per_page, 18, "a page is the drawer's columns across its rows");
+    // WHY the old divisor is named: it is the defect, not a second valid answer. At
+    // twelve a full painted page overflows the rule that turns it.
+    assert_eq!(pages(15, 12), 2, "the authored twelve invented a page");
+    for (count, want) in [(0usize, 1usize), (15, 1), (18, 1), (19, 2), (32, 2)] {
+        assert_eq!(
+            pages(count, per_page),
+            want,
+            "{count} apps at the painted capacity"
+        );
+    }
+}
+
+#[test]
 fn paging_a_zero_per_page_does_not_divide_by_zero() {
     assert_eq!(pages(10, 0), 0);
     assert_eq!(page_slice(10, 0, 0), (0, 0));
@@ -2002,4 +2024,269 @@ fn the_at_faces_answer_the_ladder_faces_at_the_authored_rung() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The present gate: a beat presents only what it drew
+// ---------------------------------------------------------------------------
+//
+// WHY these are here and not only in the shell: `apps/launcher` is `#![no_main]`
+// with `test = false` on its binary, so cargo cannot attach a harness to the
+// event loop that holds the gate. What the harness can do is pin the semantics
+// the loop is built on, and the wiring itself is pinned by
+// `tests/test_launcher_present_truth_contract.py`.
+
+/// The 720x1440 guest panel, as the shell's own chunking sees it.
+const PANEL_W: usize = 720;
+const PANEL_ROWS: usize = 1440;
+const CHUNK: usize = 32768;
+
+/// Writes one whole-surface repaint's worth of chunks, the way `render_band` does.
+fn write_full_surface(gate: &mut crate::present::PresentGate) {
+    let total = PANEL_W * PANEL_ROWS;
+    let mut offset = 0usize;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        gate.note_write(count);
+        offset += count;
+    }
+}
+
+#[test]
+fn a_beat_that_wrote_nothing_earns_no_present() {
+    // WHY this is the headline defect: the shell logged
+    // `FRAMEBREAK draw=0 write=0 beat=0` and still flipped, over an app that had
+    // already presented. A flip is a claim about the whole panel, and a beat that
+    // put no bytes into the surface has no such claim to make.
+    let mut gate = crate::present::PresentGate::new();
+    assert!(!gate.take_permission(), "a zero-draw, zero-write beat must not present");
+    assert_eq!(gate.pixels(), 0);
+}
+
+#[test]
+fn the_second_present_of_one_beat_is_refused() {
+    // `render_view` presents, and 68 shell call sites flipped again on the next
+    // line. The second flip is the zero-draw present; the gate has to refuse it
+    // even though the first one was legitimate.
+    let mut gate = crate::present::PresentGate::new();
+    write_full_surface(&mut gate);
+    assert!(gate.take_permission(), "a beat that wrote the surface earns its present");
+    assert!(
+        !gate.take_permission(),
+        "the same beat may present once; the extra flip is what covered a launched app"
+    );
+}
+
+#[test]
+fn a_present_after_a_refused_present_still_needs_its_own_writes() {
+    // WHY: refusal must not bank permission for later. A beat that was turned away
+    // cannot present on the credit of a beat that already went by.
+    let mut gate = crate::present::PresentGate::new();
+    assert!(!gate.take_permission());
+    write_full_surface(&mut gate);
+    assert!(gate.take_permission());
+    assert!(!gate.take_permission());
+}
+
+#[test]
+fn the_gate_counts_the_pixels_a_band_actually_wrote() {
+    // The FRAMEBREAK line printed `px=1036800` for every frame, including a
+    // 60-row band, so it could not tell a full repaint from a bar. The number the
+    // gate carries is the answer to "what did this beat cost".
+    let mut gate = crate::present::PresentGate::new();
+    let band_rows = 60usize;
+    let total = PANEL_W * band_rows;
+    let mut offset = 0usize;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        gate.note_write(count);
+        offset += count;
+    }
+    assert_eq!(
+        gate.pixels(),
+        total,
+        "a nav-band repaint writes 43,200 pixels, not the whole 1,036,800-pixel panel"
+    );
+    assert!(gate.pixels() < PANEL_W * PANEL_ROWS);
+}
+
+#[test]
+fn a_zero_length_write_earns_nothing() {
+    // WHY: `surface_write` with an empty run is a syscall that moved no pixels.
+    // Counting it would let a beat that drew nothing present the panel.
+    let mut gate = crate::present::PresentGate::new();
+    gate.note_write(0);
+    gate.note_write(0);
+    assert!(!gate.take_permission());
+}
+
+#[test]
+fn a_window_change_can_present_without_writing_this_surface() {
+    // The volume HUD is its own window: retiring it changes the composited panel
+    // and touches none of the shell's pixels. The rule needs a named exception,
+    // not a hole -- and the exception is good for exactly one present.
+    let mut gate = crate::present::PresentGate::new();
+    gate.force_next();
+    assert!(gate.take_permission(), "a recompose the panel owes a window goes through");
+    assert!(
+        !gate.take_permission(),
+        "the forced present is spent; the beat is not permanently exempt"
+    );
+}
+
+#[test]
+fn writing_the_surface_clears_the_need_to_force() {
+    // WHY: a beat that both drew and forced still presents once, and the forced
+    // flag must not survive into the next beat.
+    let mut gate = crate::present::PresentGate::new();
+    gate.force_next();
+    gate.note_write(CHUNK);
+    assert!(gate.take_permission());
+    assert!(!gate.take_permission());
+}
+
+// ---------------------------------------------------------------------------
+// The painted-view record: the surface and the hit test are one decision
+// ---------------------------------------------------------------------------
+
+/// A stand-in for the shell's `ViewMode`, so this record is checked against the
+/// shape it is actually used with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeView {
+    Home,
+    Drawer,
+    Widgets,
+}
+
+#[test]
+fn a_band_of_a_view_the_surface_does_not_hold_is_refused() {
+    // This is defect B's mechanism: the periodic status-band repaint drew rows
+    // 0..48 of the view `current_view` named into a surface whose other rows still
+    // held the drawer. The record makes the mismatch something the shell can ask
+    // about instead of something it discovers on screen.
+    let painted = crate::present::PaintedView::new(ProbeView::Drawer);
+    assert!(painted.band_is_safe(ProbeView::Drawer));
+    assert!(
+        !painted.band_is_safe(ProbeView::Home),
+        "a home status band over drawer rows is the mixed frame that ate the tap"
+    );
+}
+
+#[test]
+fn only_a_full_paint_moves_the_painted_view() {
+    let mut painted = crate::present::PaintedView::new(ProbeView::Home);
+    assert_eq!(painted.painted(), ProbeView::Home);
+    assert_eq!(
+        painted.paint_full(ProbeView::Widgets),
+        ProbeView::Widgets,
+        "the painter is handed the view it must draw, so it cannot draw another"
+    );
+    assert_eq!(painted.painted(), ProbeView::Widgets);
+    assert!(painted.band_is_safe(ProbeView::Widgets));
+    assert!(!painted.band_is_safe(ProbeView::Home));
+}
+
+#[test]
+fn a_launched_app_leaves_the_painted_view_alone() {
+    // WHY this is the launch arm stated as a rule: launching from the drawer set
+    // `current_view = HomeScreen` and painted nothing, so the hit test moved while
+    // the surface did not. Launching is not a view transition -- the app covers
+    // the shell, and the reap path, which does paint, decides where the person
+    // lands.
+    let mut painted = crate::present::PaintedView::new(ProbeView::Drawer);
+    painted.paint_full(ProbeView::Drawer);
+    // ... the shell launches a child here and presents nothing of its own ...
+    assert_eq!(
+        painted.painted(),
+        ProbeView::Drawer,
+        "a launch that draws nothing must not claim the surface changed view"
+    );
+    assert!(painted.band_is_safe(ProbeView::Drawer));
+    assert!(!painted.band_is_safe(ProbeView::Home));
+}
+
+#[test]
+fn the_reap_path_and_the_painted_view_agree_after_an_app_exits() {
+    // The exit path names the view it lands on and then paints the whole surface,
+    // which is the one sequence that keeps the two in step.
+    let mut painted = crate::present::PaintedView::new(ProbeView::Drawer);
+    painted.paint_full(ProbeView::Home);
+    assert_eq!(painted.painted(), ProbeView::Home);
+    assert!(
+        painted.band_is_safe(ProbeView::Home),
+        "after the reap, a band of the home grid is drawn over home rows"
+    );
+}
+
+#[test]
+fn the_gate_spends_a_beats_pixels_on_its_first_present() {
+    // WHY this is the frame the shell actually produces: `render_view` paints,
+    // presents, and the old double-flip called `surface_flip_display` again with
+    // nothing left in the gate. The second answer must be "no" — that refusal is
+    // the whole of defect A, and it is what keeps a launched app on the panel.
+    let mut gate = crate::present::PresentGate::new();
+    write_full_surface(&mut gate);
+    assert!(gate.take_permission(), "the paint of the frame presents");
+    assert_eq!(gate.pixels(), 0, "the beat has nothing left to claim");
+    assert!(
+        !gate.take_permission(),
+        "a second present in the same beat is the zero-draw present that covered a launched app"
+    );
+    assert!(
+        !gate.take_permission(),
+        "a refused present leaves nothing owed either"
+    );
+}
+
+#[test]
+fn every_path_that_names_a_view_for_the_next_tap_is_the_path_that_painted_it() {
+    // WHY this reads the shell's own source: the defect was a handler that wrote
+    // `state.current_view` and painted something else, or nothing at all, so the
+    // next tap was hit-tested against pixels that did not show it. That is a
+    // wiring rule across ~85 sites in a `#![no_main]` binary no host harness can
+    // enter, and `include_str!` is the only way to test the code that ships.
+    let source = include_str!("main.rs");
+    // WHY a fixed window and not a `Vec`: this crate is `#![no_std]` with no heap
+    // even under the test harness, and the numbers are what the failure needs to
+    // point at, not the source lines themselves.
+    let mut offenders = [0usize; 32];
+    let mut count = 0usize;
+    for (number, line) in source.lines().enumerate() {
+        let text = line.trim();
+        let names_a_view = text.starts_with("state.current_view = ViewMode::")
+            || text.starts_with("state.current_view = view;");
+        if !names_a_view {
+            continue;
+        }
+        let paints = source
+            .lines()
+            .skip(number + 1)
+            .take(22)
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with("//"))
+            .any(|t| {
+                t.starts_with("render_view(")
+                    || t.starts_with("present_dirty(")
+                    || t.starts_with("present_surface(")
+                    || t.starts_with("render_band(")
+                    || t.starts_with("present_full(")
+                    || t.starts_with("present_shade(")
+                    || t.starts_with("present_drawer(")
+                    || t.starts_with("launcher_shell::")
+            });
+        if !paints {
+            if count < offenders.len() {
+                offenders[count] = number + 1;
+            }
+            count += 1;
+        }
+    }
+    let shown = count.min(offenders.len());
+    assert_eq!(
+        count,
+        0,
+        "a view named for the next tap without being painted desyncs the hit test from the \
+         surface. Offending lines (1-based, first 32): {:?}",
+        &offenders[..shown]
+    );
 }

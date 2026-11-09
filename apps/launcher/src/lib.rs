@@ -23,6 +23,8 @@
 //!   model-backed ranker plugs into.
 //! * [`recents`] — the task switcher's card model: what a running task is
 //!   called, what it is showing, and what a gesture on its card means.
+//! * [`present`] — the two decisions a frame is made of: whether this beat earned
+//!   a present, and which view the surface actually holds.
 //!
 //! Nothing here talks to the kernel, the package registry or the framebuffer. The
 //! shell supplies state; these modules decide where things go and what colour
@@ -41,6 +43,7 @@ pub use interos_std::font;
 pub mod icons;
 pub mod layout;
 pub mod nav;
+pub mod present;
 pub mod recents;
 pub mod scale;
 pub use interos_std::design::outline_text;

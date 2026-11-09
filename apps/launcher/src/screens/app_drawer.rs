@@ -28,12 +28,23 @@ use launcher::theme::{space, type_scale, Theme, CONTENT_PADDING, STATUS_BAR_HEIG
 
 /// Rows the drawer shows at once.
 ///
-/// WHY four: the band between the filter strip and the dot row is 1,072px tall, and
-/// a tile holds an icon, a gap and a line of name. Four rows keep the tile close to
-/// square (196x256 at three columns) instead of letting a two-row catalogue stretch
-/// each tile to 544px. It is a viewport capacity, not a description of the
-/// catalogue: what a page holds is `columns * DRAWER_ROWS`.
-const DRAWER_ROWS: usize = 5;
+/// WHY six: the band the grid owns runs from the filter strip down to the dot row,
+/// which is 1,133 rows, and `layout::grid_fixed_columns` divides that band by the rows
+/// it needs -- so the row count is what sizes a tile, and the tile is the thing a name
+/// has to fit inside. Six rows put a tile at 193x172 at three columns, which is the
+/// square-ish cell this screen's icon-plus-name group was authored for; five would have
+/// stretched it to 193x210 and four to 193x268, both of which read as a card with an
+/// icon lost in it. It is a viewport capacity, not a description of the catalogue: what
+/// a page holds is `columns * DRAWER_ROWS`.
+const DRAWER_ROWS: usize = 6;
+
+/// Columns in a page of the catalogue.
+///
+/// WHY named rather than written at the call site: the width a tile is drawn at and
+/// the capacity a page swipes by are the same two numbers multiplied two different
+/// ways, and a literal `3` in `current_grid` next to a literal `3` in
+/// `app_drawer_per_page` is a drift waiting to happen.
+const DRAWER_COLUMNS: usize = 3;
 
 /// Gap between tiles, off the theme's spacing scale.
 const TILE_GUTTER: usize = 20;
@@ -171,7 +182,38 @@ const LOG_TAIL: &[u8] = b"App drawer surface rendered.";
 /// inside a `Rect::new`, so a rung that grew a text box could not be checked against
 /// it at compile time at all.
 const GRID_Y: usize = 175;
-const GRID_H: usize = 895;
+/// The tile field's own columns, named with its rows so `frame()` builds one rectangle
+/// and `current_grid` splits that same one.
+const GRID_X: usize = 50;
+const GRID_W: usize = 620;
+
+/// The rows the pagination band reserves for itself, and the air it keeps from the
+/// navigation band above it and the tile field below it.
+const DOTS_H: usize = space::XL;
+const DOTS_ABOVE_NAV: usize = 20;
+const DOTS_BELOW_GRID: usize = TILE_GUTTER;
+
+/// The dot band's top, measured up from the one edge this screen does not own:
+/// `launcher::nav::BAND_TOP`, whose three equal thirds a tap is answered from and which
+/// this change deliberately did not move.
+const DOTS_Y: usize = launcher::nav::BAND_TOP - DOTS_ABOVE_NAV - DOTS_H;
+
+/// WHY the grid's foot is derived rather than chosen: the device ran a page of tiles
+/// out to row 1070 and left 310 rows of bare surface between it and the bar at 1380 --
+/// no scroll affordance, no continuation, nothing to say the catalogue had stopped
+/// there. The band now ends where the dot band begins and the dot band ends where the
+/// navigation band begins, so what sits under the last tile is chrome that answers a
+/// tap rather than a margin that answers nothing.
+const GRID_H: usize = DOTS_Y - DOTS_BELOW_GRID - GRID_Y;
+
+/// WHY swept instead of trusted: those reservations are the entire distance from the
+/// grid's first row to the navigation band's top. Drift one and the grid either paints
+/// over the dot row `app_drawer_dot_at` hit-tests, or stops short of it again -- which
+/// is the defect above, reintroduced as a number. The equality is what makes a
+/// hand-typed `GRID_H` fail the build rather than the eye.
+const _: () = assert!(
+    GRID_Y + GRID_H + DOTS_BELOW_GRID + DOTS_H + DOTS_ABOVE_NAV == launcher::nav::BAND_TOP
+);
 /// The top inset and the inter-run gap the empty state stacks with, read back from the
 /// rows it paints at.
 const EMPTY_HEAD_INSET: usize = 32;
@@ -180,9 +222,24 @@ const EMPTY_BODY_GAP: usize = 20;
 const TILE_ICON_D: usize = 80;
 const TILE_ICON_LABEL_GAP: usize = 10;
 /// The shortest cell the grid ever builds. `layout::grid_fixed_columns` divides the
-/// band by the rows it actually needs, so a half-empty page gets *taller* cells; five
-/// rows is the tightest case, and the one a name's rung has to fit inside.
+/// band by the rows it actually needs, so a half-empty page gets *taller* cells; the
+/// full `DRAWER_ROWS` is the tightest case, and the one a name's rung has to fit
+/// inside.
 const TILE_CELL_H: usize = (GRID_H - (DRAWER_ROWS - 1) * TILE_GUTTER) / DRAWER_ROWS;
+
+/// The width of that same cell, read off the same rectangle `frame()` paints and
+/// `slot_at` hit-tests.
+const TILE_CELL_W: usize = (GRID_W - (DRAWER_COLUMNS - 1) * TILE_GUTTER) / DRAWER_COLUMNS;
+
+/// WHY swept and not eyeballed: the row count above is argued from the shape it
+/// produces -- a tile is a disc over a name, not a banner -- and a band whose height is
+/// now derived from the navigation bar can be re-derived into a slab or a slot without
+/// anything saying so. A quarter of the tile's own width, either way, is the claim
+/// "square-ish" has to mean for a gate to check it.
+const _: () = assert!(
+    TILE_CELL_H * 4 >= TILE_CELL_W * 3 && TILE_CELL_W * 4 >= TILE_CELL_H * 3,
+    "a drawer tile has to stay within a quarter of its own width in height",
+);
 
 /// Both boxes above are derived from the ladder now, so the ladder is free to move --
 /// and these are the gates that notice when it has moved past the room the drawer
@@ -211,16 +268,14 @@ fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
     let search = Rect::new(content.x, 56, content.w, 48);
     let chips = layout::app_drawer_chip_row().band;
-    let dots = Rect::new(
-        content.x,
-        1095,
-        content.w,
-        space::XL,
-    );
+    // WHY these two come from the constants above and not from numbers here: this is
+    // the only place the chrome stack is written down, so `GRID_H`, `app_drawer_dot_at`
+    // and the hit-tested dot row are the same rows by construction.
+    let dots = Rect::new(content.x, DOTS_Y, content.w, DOTS_H);
     let grid = Rect::new(
-        50,
+        GRID_X,
         GRID_Y,
-        620,
+        GRID_W,
         GRID_H,
     );
     // WHY the bar's marks are not in this frame: they used to be `Rect::new`ed here
@@ -296,9 +351,9 @@ pub fn filter_band() -> (usize, usize) {
     (f.chips.y, f.dots.y + f.dots.h)
 }
 
-/// Columns the drawer lays out: strictly 3 columns (3x4 grid) matching Screen 3.
+/// Columns the drawer lays out: strictly [`DRAWER_COLUMNS`], matching Screen 3.
 pub fn drawer_columns(_state: &LauncherState) -> usize {
-    3
+    DRAWER_COLUMNS
 }
 
 /// How many apps one page of the drawer holds for the current catalogue.
@@ -384,7 +439,13 @@ pub fn app_drawer_page(state: &LauncherState) -> usize {
 /// The cell rectangle for slot `slot` of the current page, at the drawer's stable
 /// cell size.
 fn current_grid(capacity: usize) -> layout::Grid {
-    layout::grid_fixed_columns(capacity, frame().grid, 3, DRAWER_ROWS, TILE_GUTTER)
+    layout::grid_fixed_columns(
+        capacity,
+        frame().grid,
+        DRAWER_COLUMNS,
+        DRAWER_ROWS,
+        TILE_GUTTER,
+    )
 }
 
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
@@ -426,6 +487,16 @@ pub fn app_drawer_chip_at(x: usize, y: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Whether a touch at (`x`, `y`) landed on the search field the drawer paints.
+///
+/// WHY this lives here: the screen inks the field inside `frame().search` in
+/// `get_app_drawer_color`, and until now no tap handler asked that rectangle --
+/// a visible control that did nothing on a touch-only device. This resolves the
+/// tap against the same rect the painter used, so paint and hit test cannot drift.
+pub fn app_drawer_search_at(x: usize, y: usize) -> bool {
+    frame().search.contains(x, y)
 }
 
 /// Which page the pagination dot at (`x`, `y`) jumps to, if any.
@@ -526,6 +597,7 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Messages) => 0xFF30D158,
         Some(IconKind::Camera) => 0xFF2C2C2E,
         Some(IconKind::Browser) => 0xFF007AFF,
+        Some(IconKind::WebviewDemo) => 0xFF30B0C7,
         Some(IconKind::Files) => 0xFF0A84FF,
         Some(IconKind::Gallery) => 0xFF32ADE6,
         Some(IconKind::Settings) => 0xFF8E8E93,
@@ -949,9 +1021,9 @@ struct StatusPlan {
 /// Tiles this drawer can hold on one page.
 ///
 /// WHY it is `DRAWER_ROWS` times the grid's ceiling and not the current page size:
-/// `layout::grid_columns` caps a surface at six columns, so a page can never hold
-/// more than 24, and sizing the array by the catalogue would resize the plan under a
-/// swipe.
+/// `layout::grid_columns` caps a surface at six columns, so a page can never hold more
+/// than `DRAWER_ROWS * 6`, and sizing the array by the catalogue would resize the plan
+/// under a swipe.
 const MAX_TILES: usize = DRAWER_ROWS * 6;
 
 struct ChipPlan {

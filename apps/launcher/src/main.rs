@@ -45,6 +45,47 @@ const VOLUME_HUD_TICKS: u64 = 1_500;
 const CHUNK: usize = 32768;
 static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
+// The two decisions a frame is made of, in one place so they cannot be made
+// twice. See `launcher::present` for why they are library types.
+use launcher::present::{PaintedView, PresentGate};
+
+/// Whether the beat now running has earned a present, and what it wrote.
+///
+/// WHY a `static` and not a field on `LauncherState`: the functions that would
+/// have to reach it -- `surface_write_display`, `surface_flip_display`,
+/// `render_band` -- are called with `&LauncherState`, and turning the shell's
+/// whole paint path mutable to carry one counter would be a larger change than
+/// the invariant is worth. The shell is single-threaded bare metal, and this is
+/// the same idiom `CHUNK_BUF` above already uses.
+static mut PRESENT_GATE: PresentGate = PresentGate::new();
+
+/// Which view the surface is holding, written only by the code that drew it.
+///
+/// WHY it starts on the boot screen: `LauncherState::default` names the same view
+/// as its first frame, and the record is consulted before the first paint only by
+/// band paths, which a full paint has already been through by then.
+static mut PAINTED_VIEW: PaintedView<ViewMode> = PaintedView::new(ViewMode::BootScreen);
+
+/// The present gate for the beat now running.
+///
+/// WHY a raw pointer instead of borrowing the static directly: Rust 2024 rejects
+/// `&mut STATIC` (`static_mut_refs`), because two borrows of one shell-wide
+/// static is undefined behaviour. This tree's answer is `addr_of_mut!` -- see
+/// `apps/browser/src/main.rs` -- and taking it here in one named helper keeps
+/// every call site a plain method call whose borrow dies with the statement.
+#[inline(always)]
+fn present_gate() -> &'static mut PresentGate {
+    unsafe { &mut *core::ptr::addr_of_mut!(PRESENT_GATE) }
+}
+
+/// The view the surface actually holds.
+///
+/// WHY the same idiom: see [`present_gate`].
+#[inline(always)]
+fn painted_view() -> &'static mut PaintedView<ViewMode> {
+    unsafe { &mut *core::ptr::addr_of_mut!(PAINTED_VIEW) }
+}
+
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
 // -----------------------------------------------------------------------------
@@ -135,17 +176,47 @@ fn current_ticks_opt() -> Option<u64> {
 
 #[inline]
 fn surface_flip_display() {
+    // WHY the gate comes first: `sys_surface_flip` composites every surface and
+    // pushes the changed scanout rows, so a flip is a claim about the whole panel
+    // -- not about the caller. On the device a launched music app had presented
+    // its own frame and the shell flipped anyway on a beat that had drawn
+    // nothing, which is how an app that had the screen lost it. `render_view`
+    // presents, and the shell's call sites used to flip again on the next line;
+    // the gate spends the beat's permission on the first one and refuses the
+    // rest, so a present cannot outrun the pixels behind it.
+    //
     // WHY there is no capability argument: the kernel authorises the flip by
     // the capability's *type*, so the app names the authority it wants and
     // the kernel finds it. A slot number here would be a position in this
     // shell's capability table, and the position depends on the order the
     // kernel inserted the capabilities in.
+    let earned = present_gate().take_permission();
+    if !earned {
+        return;
+    }
     let _ = std::surface_flip();
+}
+
+/// Presents for a beat that changed the panel without touching this surface.
+///
+/// WHY this is a named call and not a hole in the rule: the volume HUD is its own
+/// window, and showing or retiring it changes the composited panel while writing
+/// not one pixel of the shell's surface. Those beats genuinely must present, so
+/// the exception is stated rather than assumed.
+#[inline]
+fn surface_recompose_display() {
+    present_gate().force_next();
+    surface_flip_display();
 }
 
 #[inline]
 fn surface_write_display(surface: u32, offset: usize, buf: &[u32]) {
-    let _ = std::surface_write(surface, offset, buf);
+    // WHY the result is inspected: the gate counts what the kernel accepted. A
+    // refused write moved nothing, and a beat of refused writes has no present in
+    // it -- which is the case that used to look like a repaint from the log.
+    if std::surface_write(surface, offset, buf).is_ok() {
+        present_gate().note_write(buf.len());
+    }
 }
 
 
@@ -600,7 +671,6 @@ impl LauncherState {
     }
 
     #[allow(dead_code)]
-    #[allow(dead_code)]
     fn recent_id(&self, index: usize) -> Option<&str> {
         if index >= 3 {
             return None;
@@ -612,7 +682,6 @@ impl LauncherState {
         core::str::from_utf8(&self.recent_apps[index][..len]).ok()
     }
 
-    #[allow(dead_code)]
     #[allow(dead_code)]
     fn recent_label(&self, index: usize) -> Option<&[u8]> {
         let id = self.recent_id(index)?;
@@ -808,7 +877,8 @@ fn refresh_wallpapers(state: &mut LauncherState) {
         std::log("[LAUNCHER] Lock wallpaper applied from store.").ok();
     }
     refresh_wallpaper_document(state);
-    if !answered {        std::log("[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
+    if !answered {
+        std::log("[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
         )
         .ok();
     } else {
@@ -1314,7 +1384,6 @@ fn refresh_open_shade(surface: u32, state: &mut LauncherState) {
     }
     std::log(line.as_str()).ok();
     render_view(surface, &state);
-    surface_flip_display();
 }
 
 /// Opens the notifications shade from a gesture: re-reads the store, then paints.
@@ -1341,7 +1410,6 @@ fn open_notifications_shade(surface: u32, state: &mut LauncherState, origin: &st
     }
     std::log(line.as_str()).ok();
     render_view(surface, &state);
-    surface_flip_display();
 }
 
 /// Small stack buffer for formatting a log line without an allocator.
@@ -1439,7 +1507,13 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         state.app_count += 1;
     }
 
-    let pages = if state.app_count == 0 { 1 } else { (state.app_count + 11) / 12 };
+    // WHY the clamp asks the drawer how many pages it paints: this divided by an
+    // authored twelve while the grid laid out `drawer_columns * DRAWER_ROWS` tiles a
+    // page, so a catalogue of thirteen had a second page the swipe rule would not turn
+    // to and a dot row that insisted existed. One accessor -- the same one the painter
+    // builds the grid through -- is what keeps the tiles, the dots and the swipe
+    // answering the same question.
+    let pages = screens::app_drawer::app_drawer_page_count(state);
     if state.app_drawer_page >= pages {
         state.app_drawer_page = pages.saturating_sub(1);
     }
@@ -1546,9 +1620,68 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
         interos_std::ai::MSG_TYPE_EMBED,
         req_bytes,
     ).is_ok() {
-        launcher::search::AiEmbeddingStatus::Available { abi_version }
+        let mut rx_buf = [0u8; 128];
+        if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+            if sender == interos_std::ai::SERVICE_INFERENCE_TASK_ID
+                && msg_type == interos_std::ai::MSG_TYPE_EMBED
+                && len >= core::mem::size_of::<interos_std::ai::AiInferenceResponse>()
+            {
+                launcher::search::AiEmbeddingStatus::Available { abi_version }
+            } else {
+                launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC reply invalid")
+            }
+        } else {
+            launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC pending/unanswered")
+        }
     } else {
         launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC unavailable")
+    }
+}
+
+/// The staleness bound on the cached AI answer, in kernel ticks (1 ms each).
+///
+/// WHY a bound at all: an answer is a claim about a service that can go away, and
+/// the platform contract forbids reporting a capability the runtime has not shown.
+/// Past the bound the keystroke path ranks without AI and says so, until the next
+/// search open re-probes and re-answers the cache.
+const AI_PROBE_STALE_TICKS: u64 = 30_000;
+
+/// The last answered AI probe and the tick it was answered at.
+///
+/// WHY statics and not state: the cache is a property of the service, not of a
+/// screen, it is one `Copy` word plus a timestamp, and the shell has no heap.
+static mut AI_PROBE_STATUS: Option<launcher::search::AiEmbeddingStatus> = None;
+static mut AI_PROBE_TICKS: u64 = 0;
+
+/// Records an answered probe. Only [`probe_system_ai_status`]'s caller -- the
+/// search-opening path, which may pay the round trip once -- writes through here.
+fn note_ai_probe(status: launcher::search::AiEmbeddingStatus) {
+    unsafe {
+        AI_PROBE_STATUS = Some(status);
+        AI_PROBE_TICKS = current_ticks();
+    }
+}
+
+/// The AI answer the keystroke path is allowed to use, without touching IPC.
+///
+/// WHY this exists: `probe_system_ai_status` ends in a blocking `receive_any`, and
+/// `rank_search_results` used to call it (twice) on every keystroke -- typing
+/// waited on a service that may never answer. A keystroke may only ever consume a
+/// probe that was already answered and is still inside the staleness bound; with
+/// no such answer this reports Unavailable, so the screen never claims semantic AI
+/// the service did not confirm.
+fn cached_ai_status() -> launcher::search::AiEmbeddingStatus {
+    unsafe {
+        match AI_PROBE_STATUS {
+            Some(status)
+                if current_ticks().saturating_sub(AI_PROBE_TICKS) <= AI_PROBE_STALE_TICKS =>
+            {
+                status
+            }
+            _ => launcher::search::AiEmbeddingStatus::Unavailable(
+                "no answered AI probe within the staleness bound; token prefix matching",
+            ),
+        }
     }
 }
 
@@ -1564,8 +1697,12 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
 /// fallback, because a model that is not running has to leave the search
 /// working: a search that silently stops answering is worse than one that
 /// answers exactly.
-fn search_ranker() -> launcher::search::SemanticRanker {
-    launcher::search::SemanticRanker::new(probe_system_ai_status())
+///
+/// WHY the status is a parameter: the factory used to probe for itself, so a
+/// caller that had just probed paid the blocking round trip twice per keystroke.
+/// The answer travels with the call instead.
+fn search_ranker(ai_status: launcher::search::AiEmbeddingStatus) -> launcher::search::SemanticRanker {
+    launcher::search::SemanticRanker::new(ai_status)
 }
 
 /// Rebuilds the search index from the platform, then ranks the query.
@@ -1657,7 +1794,13 @@ fn refresh_search_index(state: &mut LauncherState) {
     }
 
     // 4. System AI & embedding service status (probed via registry/VFS).
+    //
+    // WHY the probe lives here and not in `rank_search_results`: opening the
+    // search is the one moment a round trip is affordable -- there is no key
+    // stream waiting on it -- and its answer is written through to the cache the
+    // keystroke path reads, so typing never pays for IPC again.
     let ai_status = probe_system_ai_status();
+    note_ai_probe(ai_status);
     match ai_status {
         launcher::search::AiEmbeddingStatus::Available { .. } => {
             state.search_index.set_ai_state(launcher::search::SourceState::Ready);
@@ -1673,7 +1816,7 @@ fn refresh_search_index(state: &mut LauncherState) {
 /// Runs the query across the index.
 fn rank_search_results(state: &mut LauncherState) {
     let query = &state.search_query[..state.search_query_len];
-    let ai_status = probe_system_ai_status();
+    let ai_status = cached_ai_status();
     match ai_status {
         launcher::search::AiEmbeddingStatus::Available { .. } => {
             state.search_index.set_ai_state(launcher::search::SourceState::Ready);
@@ -1682,7 +1825,7 @@ fn rank_search_results(state: &mut LauncherState) {
             state.search_index.set_ai_state(launcher::search::SourceState::Unavailable(reason));
         }
     }
-    state.search_results = state.search_index.search(query, &search_ranker());
+    state.search_results = state.search_index.search(query, &search_ranker(ai_status));
 }
 
 /// Whether a package is one of the shell's own parts.
@@ -2388,12 +2531,30 @@ const LONG_PRESS: u8 = 3;
 // the arm that runs it, in the input loop.
 
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
-    let draw = screen_renderer(state.current_view);
     let min_y = min_y.min(H);
     let max_y = max_y.min(H);
     if min_y >= max_y {
         return;
     }
+    // WHY the painted-view record is consulted before a single pixel: a band
+    // redraws its rows and leaves every other row exactly as it found it, so it
+    // only tells the truth while the surface already holds the view this beat is
+    // answering from. When it does not, the untouched rows belong to another
+    // screen, and that mixture is precisely the frame where a tap on a painted
+    // drawer tile was hit-tested against the home grid and launched nothing.
+    //
+    // WHY a mismatch escalates to every row instead of refusing: the view this
+    // beat asked for is the one that has to be on the panel, and a band cannot
+    // put it there. Repainting the whole surface costs rows; it buys one surface
+    // and one view, decided together, which is what the tap is about to trust.
+    let view = state.current_view;
+    let (min_y, max_y) = if painted_view().band_is_safe(view) {
+        (min_y, max_y)
+    } else {
+        painted_view().paint_full(view);
+        (0, H)
+    };
+    let draw = screen_renderer(view);
     let start_offset = min_y * W;
     let end_offset = max_y * W;
     let mut offset = start_offset;
@@ -2406,6 +2567,7 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
     let mut draw_ticks = 0u64;
     let mut write_ticks = 0u64;
     let mut beat_ticks = 0u64;
+    let mut written = 0usize;
     while offset < end_offset {
         let t_beat = current_ticks_opt();
         let _ = std::service_heartbeat(10);
@@ -2426,11 +2588,20 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
         }
         let t_write = current_ticks_opt();
         draw_ticks += tick_delta(t_draw, t_write);
+        let before = present_gate().pixels();
         surface_write_display(surface, offset, unsafe { &CHUNK_BUF[..count] });
+        let after = present_gate().pixels();
+        written += after - before;
         write_ticks += tick_delta(t_write, current_ticks_opt());
         offset += count;
     }
-    log_frame_breakdown(draw_ticks, write_ticks, beat_ticks);
+    // WHY the count is the gate's and not `W * H`: this line used to print the
+    // panel's area for every frame, so a 60-row band and a whole-surface repaint
+    // were indistinguishable in the log, and the number quoted as evidence that
+    // the shell repainted 1,036,800 pixels after a launch was a constant. What
+    // gets reported is what the kernel took, which is the only pixel count this
+    // beat can honestly own.
+    log_frame_breakdown(draw_ticks, write_ticks, beat_ticks, written);
 }
 
 /// Emits `[LAUNCHER] FRAMEBREAK draw= write= beat= px=`.
@@ -2439,17 +2610,19 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
 /// exact substring and must keep working, and the breakdown is a different fact
 /// about the same frame. Splitting them lets a run attribute a slow frame
 /// without touching the contract the existing harness depends on.
-fn log_frame_breakdown(draw: u64, write: u64, beat: u64) {
+///
+/// WHY `px` is an argument: it is the count of pixels this band actually handed
+/// to the kernel, and the caller is the only thing that knows it. A constant
+/// here would make every frame look like a full-surface repaint, which is the
+/// false report this line used to file.
+fn log_frame_breakdown(draw: u64, write: u64, beat: u64, px: usize) {
     let mut line = LineBuf::<96>::new();
     {
         use core::fmt::Write;
         let _ = write!(
             line,
             "[LAUNCHER] FRAMEBREAK draw={} write={} beat={} px={}",
-            draw,
-            write,
-            beat,
-            W * H
+            draw, write, beat, px
         );
     }
     std::log(line.as_str()).ok();
@@ -2877,8 +3050,12 @@ fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
         screens::live_widgets::invalidate_widgets_cache();
     }
     if dirty == Dirty::All {
+        // WHY nothing presents here: `render_view` owns the whole-surface path and
+        // flips once, with this beat's writes behind it. The flip that used to sit
+        // on the next line was the second present of the beat -- the frame the
+        // device log showed as `draw=0 write=0`, filed over an app that had
+        // already presented its own.
         render_view(surface, state);
-        surface_flip_display();
         return;
     }
     let (y0, y1) = dirty.rows().unwrap_or((0, H));
@@ -2996,6 +3173,13 @@ fn log_view_rendered(state: &LauncherState) {
 /// wallpaper re-read and a power transition all move every row, so naming a band
 /// for them would claim a precision they do not have. Callers that know better
 /// go through [`present_dirty`].
+///
+/// WHY this presents and its callers must not: the flip below is the beat's one
+/// present, earned by the writes `render_band` just performed. A caller that
+/// flipped again after this call was presenting a beat that had drawn nothing —
+/// which over an app that had already put its own frame on the panel is how the
+/// app lost the screen. Those call sites are gone; the gate in
+/// [`surface_flip_display`] is what keeps them from coming back.
 fn render_view(surface: u32, state: &LauncherState) {
     launcher::outline_text::reset_slot_pool();
     screens::home::invalidate_paint_cache();
@@ -3004,42 +3188,18 @@ fn render_view(surface: u32, state: &LauncherState) {
     if state.current_view == ViewMode::ActivitySpace {
         screens::activity::invalidate_activity_frame();
     }
+    // WHY the record is committed here and nowhere else: a whole-surface paint is
+    // the only thing that can make the panel hold `state.current_view`, so this
+    // is the one place where the surface and the view being hit-tested become the
+    // same fact. A band that arrives while they differ escalates back through
+    // `render_band`.
+    painted_view().paint_full(state.current_view);
     let frame_start = current_ticks_opt();
     render_band(surface, state, 0, H);
     surface_flip_display();
     log_view_rendered(state);
     log_frame_ticks(tick_delta(frame_start, current_ticks_opt()));
 }
-
-pub fn capture_and_save_screenshot(state: &LauncherState) {
-    let mut ppm_buf = [0u8; 8192];
-    let header = b"P6\n36 72\n255\n";
-    let hlen = header.len();
-    ppm_buf[..hlen].copy_from_slice(header);
-
-    let draw = screen_renderer(state.current_view);
-    let mut idx = hlen;
-    for sy in 0..72 {
-        for sx in 0..36 {
-            let px = sx * 20 + 10;
-            let py = sy * 20 + 10;
-            let argb = draw(px, py, state);
-            ppm_buf[idx] = ((argb >> 16) & 0xFF) as u8;
-            ppm_buf[idx + 1] = ((argb >> 8) & 0xFF) as u8;
-            ppm_buf[idx + 2] = (argb & 0xFF) as u8;
-            idx += 3;
-        }
-    }
-
-    let ticks = current_ticks();
-    let mut path = LineBuf::<64>::new();
-    {
-        use core::fmt::Write;
-        let _ = write!(path, "/storage/photos/screenshot_{}.ppm", ticks);
-    }
-
-}
-
 
 fn package_id_by_suffix<'a>(state: &'a LauncherState, suffix: &[u8]) -> Option<&'a str> {
     for i in 0..state.app_count {
@@ -3189,11 +3349,13 @@ pub extern "C" fn _start() -> ! {
     }
 
     std::log("[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
+    // WHY one call covers Step 4 as well: `render_view` presents the frame it has
+    // just drawn, and that flip spends the beat's only permission. The separate
+    // flip that used to sit after this line presented a second frame the shell
+    // had not drawn -- the same zero-write present that let the shell cover an
+    // app that already owned the panel.
+    std::log("[LAUNCHER] Step 4: Presenting initial frame to scanout...").ok();
     render_view(surface, &state);
-    std::log("[LAUNCHER] Step 4: Presenting initial frame to scanout...",
-    )
-    .ok();
-    surface_flip_display();
     std::log("[LAUNCHER] Step 5: Initial presentation complete.").ok();
 
     let mut refresh_ticks: u64 = 0;
@@ -3291,7 +3453,6 @@ pub extern "C" fn _start() -> ! {
                         )
                         .ok();
                         render_view(surface, &state);
-                        surface_flip_display();
                     }
                     Err(code) if code != -30 => {
                         // Child exited or invalid PID: clear active_child
@@ -3324,7 +3485,6 @@ pub extern "C" fn _start() -> ! {
                         )
                         .ok();
                         render_view(surface, &state);
-                        surface_flip_display();
                     }
                     _ => {}
                 }
@@ -3372,7 +3532,6 @@ pub extern "C" fn _start() -> ! {
                                 let _ = std::app_stop(child_id);
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Home pressed; dismissed active child app.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -3403,7 +3562,6 @@ pub extern "C" fn _start() -> ! {
                                     state.pin_pad_visible = false;
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -3422,7 +3580,6 @@ pub extern "C" fn _start() -> ! {
                                     state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(std::UserLockState::Uninitialized);
                                     state.current_view = ViewMode::PinEntry;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Unlock gesture accepted; credential entry required.").ok();
                                 }
                             }
@@ -3430,7 +3587,6 @@ pub extern "C" fn _start() -> ! {
                             _ => {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                             }
                         }
                         continue;
@@ -3442,7 +3598,6 @@ pub extern "C" fn _start() -> ! {
                             screens::activity::refresh_previews(&mut state);
                             state.current_view = ViewMode::ActivitySpace;
                             render_view(surface, &state);
-                            surface_flip_display();
                         }
                         continue;
                     }
@@ -3457,7 +3612,6 @@ pub extern "C" fn _start() -> ! {
                             let _ = std::app_stop(child_id);
                             state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
-                            surface_flip_display();
                             std::log("[LAUNCHER] Back/Home pressed; dismissed active child app.").ok();
                             let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                             while std::input_event_poll(&mut drain).is_ok() {}
@@ -3466,15 +3620,22 @@ pub extern "C" fn _start() -> ! {
                         if state.current_view != ViewMode::HomeScreen {
                             state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
-                            surface_flip_display();
                             continue;
                         }
                     }
                     if input.kind == 9 { continue; }
                     if input.kind == std::INPUT_EVENT_KIND_KEY {
                         if let Some(key) = input.key_event() {
-                            if key.pressed && (key.code == b's' as u32 || key.code == b'S' as u32 || key.code == 0x1000C || key.code == std::input_key_code::SCREENSHOT) {
-                                capture_and_save_screenshot(&state);
+                            if key.pressed && key.code == std::input_key_code::SCREENSHOT {
+                                // WHY this answers unavailable: it used to call
+                                // `capture_and_save_screenshot`, which built a PPM
+                                // and a path and returned without writing anything
+                                // -- and because it also fired on the letters `s`
+                                // and `S`, the fake capture swallowed those keys
+                                // from every text field in the shell. A real capture
+                                // needs VFS write authority it does not hold, so the
+                                // key now reports what the build actually does.
+                                std::log("[LAUNCHER] Screenshot capture unavailable: this build writes no capture.").ok();
                                 continue;
                             }
                             if key.pressed && (key.code == 0x1000F || key.code == std::input_key_code::POWER) {
@@ -3501,7 +3662,6 @@ pub extern "C" fn _start() -> ! {
                                             state.auth_error = false;
                                             state.current_view = ViewMode::HomeScreen;
                                             render_view(surface, &state);
-                                            surface_flip_display();
                                             std::log("[LAUNCHER] Power key pressed on lock screen; unlocked to home screen.").ok();
                                         }
                                     }
@@ -3513,7 +3673,6 @@ pub extern "C" fn _start() -> ! {
                                         state.pin_len = 0;
                                         state.auth_error = false;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Power key pressed; locked to lock screen.").ok();
                                     }
                                 }
@@ -3663,7 +3822,6 @@ pub extern "C" fn _start() -> ! {
                                                 state.pin_setup_step = 0;
                                                 state.current_view = ViewMode::HomeScreen;
                                                 render_view(surface, &state);
-                                                surface_flip_display();
                                                 std::log("[LAUNCHER] First-boot credential established; device unlocked.").ok();
                                                 continue;
                                             }
@@ -3681,7 +3839,6 @@ pub extern "C" fn _start() -> ! {
                                         state.pin_error = 0;
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] User authentication succeeded; device unlocked.").ok();
                                         continue;
                                     } else {
@@ -3705,7 +3862,6 @@ pub extern "C" fn _start() -> ! {
                                 state.pin_error = 0;
                                 state.current_view = ViewMode::LockScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 continue;
                             }
                         }
@@ -3778,7 +3934,6 @@ pub extern "C" fn _start() -> ! {
                                     launcher::recents::Swipe::Home => {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Returned to home grid from the task switcher via swipe.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -3903,7 +4058,6 @@ pub extern "C" fn _start() -> ! {
                                     screens::activity::invalidate_activity_frame();
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Closed all running apps and returned to home instantly.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -3926,7 +4080,12 @@ pub extern "C" fn _start() -> ! {
                                     screens::activity::card_hit_at(&state, x, y)
                                 {
                                     if focus_recents_card(&mut state, slot) {
-                                        state.current_view = ViewMode::HomeScreen;
+                                        // WHY launching a task is not a view transition: the app
+                                        // paints its own surface over the panel, and the reap path
+                                        // that runs when it exits is the beat that both chooses
+                                        // the view and draws it. Naming a view here that nothing
+                                        // painted is how a tap landed on one screen while the
+                                        // shell answered from another.
                                         std::log("[LAUNCHER] Switched to a running app from the task switcher.")
                                             .ok();
                                         let mut drain = std::InputEvent {
@@ -3945,7 +4104,6 @@ pub extern "C" fn _start() -> ! {
                                 else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Returned to home grid from the task switcher via backdrop tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -3964,7 +4122,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dy <= -60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -4017,7 +4174,6 @@ pub extern "C" fn _start() -> ! {
                                         state.auth_error = false;
                                         state.current_view = ViewMode::LockScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Quick Controls locked screen.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -4033,7 +4189,6 @@ pub extern "C" fn _start() -> ! {
                                     screens::quick_controls::QuickControlAction::PowerMenu => {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Power menu opened from Quick Controls.",
                                         )
                                         .ok();
@@ -4042,7 +4197,6 @@ pub extern "C" fn _start() -> ! {
                                     screens::quick_controls::QuickControlAction::Dismiss => {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -4066,7 +4220,6 @@ pub extern "C" fn _start() -> ! {
                                         state.pin_pad_visible = false;
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
                                             .ok();
                                         let mut drain = std::InputEvent {
@@ -4086,7 +4239,6 @@ pub extern "C" fn _start() -> ! {
                                         state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(std::UserLockState::Uninitialized);
                                         state.current_view = ViewMode::PinEntry;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Unlock gesture accepted; credential entry required.")
                                             .ok();
                                     }
@@ -4123,7 +4275,6 @@ pub extern "C" fn _start() -> ! {
                                 if y <= 48 && x >= 480 {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -4213,7 +4364,6 @@ pub extern "C" fn _start() -> ! {
                                                                              state.pin_len = 0;
                                                                              state.current_view = ViewMode::HomeScreen;
                                                                              render_view(surface, &state);
-                                                                             surface_flip_display();
                                                                              std::log("[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
                                                                          }
                                                                          Err(_) => {
@@ -4254,7 +4404,6 @@ pub extern "C" fn _start() -> ! {
                                                                 state.auth_error = false;
                                                                 state.current_view = ViewMode::HomeScreen;
                                                                 render_view(surface, &state);
-                                                                surface_flip_display();
                                                                 std::log("[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
                                                                 let mut drain = std::InputEvent {
                                                                     kind: 0,
@@ -4324,7 +4473,6 @@ pub extern "C" fn _start() -> ! {
                                                                      state.pin_len = 0;
                                                                      state.current_view = ViewMode::HomeScreen;
                                                                      render_view(surface, &state);
-                                                                     surface_flip_display();
                                                                      std::log("[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
                                                                  }
                                                                  Err(_) => {
@@ -4359,7 +4507,6 @@ pub extern "C" fn _start() -> ! {
                                                      state.auth_error = false;
                                                      state.current_view = ViewMode::HomeScreen;
                                                      render_view(surface, &state);
-                                                     surface_flip_display();
                                                      std::log("[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
                                                      let mut drain = std::InputEvent {
                                                          kind: 0,
@@ -4439,7 +4586,9 @@ pub extern "C" fn _start() -> ! {
                                     if let Ok(task_id) = std::app_launch("org.interos.camera") {
                                         state.push_recent("org.interos.camera", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::LockScreen;
+                                        // WHY the lock screen stays the painted view: see the note
+                                        // above the recents card -- a launch covers the panel, it
+                                        // does not move the shell to a view it never drew.
                                         std::log("[LAUNCHER] Camera launched from lock screen shortcut.",
                                         )
                                         .ok();
@@ -4479,7 +4628,6 @@ pub extern "C" fn _start() -> ! {
                                 if y <= 48 && x >= 480 {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -4512,7 +4660,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dx >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Power menu dismissed via swipe.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -4539,7 +4686,6 @@ pub extern "C" fn _start() -> ! {
                                         state.auth_error = false;
                                         state.current_view = ViewMode::LockScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Device locked via power menu.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -4559,7 +4705,6 @@ pub extern "C" fn _start() -> ! {
                                         state.power_transition_progress = 0;
                                         state.current_view = ViewMode::PowerTransition;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         break;
                                     }
                                     screens::power::PowerMenuAction::PowerOff => {
@@ -4569,7 +4714,6 @@ pub extern "C" fn _start() -> ! {
                                         state.power_transition_progress = 0;
                                         state.current_view = ViewMode::PowerTransition;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         break;
                                     }
                                     screens::power::PowerMenuAction::Emergency => {
@@ -4577,7 +4721,6 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) = std::app_launch("org.interos.dialer") {
                                             state.push_recent("org.interos.dialer", task_id);
                                             state.active_child = Some(task_id);
-                                            state.current_view = ViewMode::HomeScreen;
                                             std::log("[LAUNCHER] Emergency dialer launched from power menu.").ok();
                                             let mut drain = std::InputEvent {
                                                 kind: 0,
@@ -4594,7 +4737,6 @@ pub extern "C" fn _start() -> ! {
                                     screens::power::PowerMenuAction::Cancel | screens::power::PowerMenuAction::Dismiss => {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Power menu dismissed.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -4638,7 +4780,6 @@ pub extern "C" fn _start() -> ! {
                                         } else {
                                             state.current_view = ViewMode::HomeScreen;
                                             render_view(surface, &state);
-                                            surface_flip_display();
                                         }
                                     } else if key.code == std::input_key_code::ENTER || key.code == 13 || key.code == 10 {
                                         let mut filtered = [0usize; 32];
@@ -4652,9 +4793,6 @@ pub extern "C" fn _start() -> ! {
                                                 if let Ok(task_id) = std::app_launch(target_app) {
                                                     state.push_recent(target_app, task_id);
                                                     state.active_child = Some(task_id);
-                                                    state.current_view = ViewMode::HomeScreen;
-                                                    render_view(surface, &state);
-                                                    surface_flip_display();
                                                 }
                                             }
                                         }
@@ -4674,7 +4812,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dy >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
@@ -4692,13 +4829,19 @@ pub extern "C" fn _start() -> ! {
                                 } else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 }
                                 break;
                             }
                             if is_drag(input.kind) && input.dx <= -60 {
-                                let pages = (state.app_count + 11) / 12;
+                                // WHY the drawer's own page count and not a division of
+                                // `app_count`: this rule turned to a page computed from an
+                                // authored twelve while the painter laid out the grid's
+                                // capacity, so a swipe could land on a page the dot row did
+                                // not count. Asking the screen that draws the tiles and the
+                                // dots is the one way the three cannot disagree, tab filter
+                                // and query included.
+                                let pages = screens::app_drawer::app_drawer_page_count(&state);
                                 if state.app_drawer_page + 1 < pages {
                                     state.app_drawer_page += 1;
                                     present_dirty(surface, &state, Dirty::DrawerPages);
@@ -4772,6 +4915,29 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
+                                if screens::app_drawer::app_drawer_search_at(input.x as usize, input.y as usize) {
+                                    // WHY this mirrors the home bar's arm: the drawer
+                                    // paints a search field from `frame().search` and
+                                    // nothing answered it. A tap now opens the one
+                                    // global search through the same path -- clear the
+                                    // query, rebuild the index from the platform, show
+                                    // the results -- so the two entries cannot drift.
+                                    state.search_query_len = 0;
+                                    refresh_search_index(&mut state);
+                                    state.current_view = ViewMode::Search;
+                                    render_view(surface, &state);
+                                    std::log("[LAUNCHER] Global search opened via app drawer search field tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
                                 if let Some(target_desc) = resolve_app_at_touch(&state, input.x, input.y) {
                                     let mut target_buf = [0u8; 32];
                                     let len = target_desc.len().min(32);
@@ -4781,7 +4947,16 @@ pub extern "C" fn _start() -> ! {
                                             Ok(task_id) => {
                                                 state.push_recent(target_app, task_id);
                                                 state.active_child = Some(task_id);
-                                                state.current_view = ViewMode::HomeScreen;
+                                                // WHY the drawer stays the painted view here: this
+                                                // is defect B. The surface holds the grid the
+                                                // person tapped, the app covers it, and the reap
+                                                // path that runs when the app exits is the beat
+                                                // that both chooses the view and draws it.
+                                                // Repainting home here drew a screen nobody could
+                                                // see and left `current_view` naming a view the
+                                                // panel never held, so the next tap hit-tested the
+                                                // home dashboard against drawer pixels and
+                                                // launched nothing.
                                                 std::log("[LAUNCHER] Launched registered application.").ok();
                                                 break;
                                             }
@@ -4790,10 +4965,16 @@ pub extern "C" fn _start() -> ! {
                                             }
                                         }
                                     }
-                                } else if y >= 1375 {
+                                } else if y >= nav::BAND_TOP {
+                                    // WHY the band's own constant and not a literal:
+                                    // this read `y >= 1375` while the drawer paints
+                                    // its navigation bar from `nav::BAND_TOP` at 1380,
+                                    // so rows 1375..1379 -- bare drawer surface above
+                                    // the bar, over no control -- silently dropped
+                                    // the person back to Home. The escape now ends
+                                    // where the painted band begins.
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     break;
                                 }
                             }
@@ -4820,7 +5001,6 @@ pub extern "C" fn _start() -> ! {
                             {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Returned to Home from Notifications.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -4853,7 +5033,6 @@ pub extern "C" fn _start() -> ! {
                                     state.notification_records_held = 0;
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
@@ -4890,7 +5069,6 @@ pub extern "C" fn _start() -> ! {
                                     } else {
                                         state.current_view = ViewMode::HomeScreen;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                     }
                                     std::log("[LAUNCHER] Notification action activated.").ok();
                                     break;
@@ -4946,7 +5124,6 @@ pub extern "C" fn _start() -> ! {
                             {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Returned to Home from Live Widgets.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -4970,7 +5147,8 @@ pub extern "C" fn _start() -> ! {
                                     {
                                         state.push_recent("org.interos.settings", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
+                                        // WHY the widgets dashboard stays the painted view for all
+                                        // five cards: the same reason as the drawer tile above.
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -4988,7 +5166,6 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) = std::app_launch("org.interos.calculator") {
                                         state.push_recent("org.interos.calculator", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -5006,7 +5183,6 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) = std::app_launch("org.interos.music") {
                                         state.push_recent("org.interos.music", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -5024,7 +5200,6 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) = std::app_launch("org.interos.calendar") {
                                         state.push_recent("org.interos.calendar", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -5042,7 +5217,6 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) = std::app_launch("org.interos.vault") {
                                         state.push_recent("org.interos.vault", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
                                             kind: 0,
                                             x: 0,
@@ -5091,7 +5265,6 @@ pub extern "C" fn _start() -> ! {
                                         } else {
                                             state.current_view = ViewMode::HomeScreen;
                                             render_view(surface, &state);
-                                            surface_flip_display();
                                         }
                                     } else if (32..=126).contains(&key.code)
                                         && state.search_query_len < state.search_query.len()
@@ -5120,7 +5293,9 @@ pub extern "C" fn _start() -> ! {
                                 let tapped = screens::search::result_at(x, y, &state);
                                 if let Some(rank) = tapped {
                                     if open_search_result(&mut state, rank) {
-                                        state.current_view = ViewMode::HomeScreen;
+                                        // WHY the search results stay painted: the result opened
+                                        // an app, and an app is a window over this surface, not a
+                                        // view the shell drew.
                                         std::log("[LAUNCHER] Opened a search result.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -5168,7 +5343,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dy >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Returned to home grid from search via swipe.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -5199,7 +5373,6 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == LONG_PRESS {
                                 state.current_view = ViewMode::PowerMenu;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Power menu opened via long-press.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -5234,7 +5407,6 @@ pub extern "C" fn _start() -> ! {
                                     let mut win_buf = [0u8; 1024];
                                     let _ = std::window_list(&mut win_buf);
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
                                 } else {
                                     refresh_package_catalog(&mut state);
@@ -5245,7 +5417,6 @@ pub extern "C" fn _start() -> ! {
                                     state.app_drawer_page = 0;
                                     state.search_query_len = 0;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] App Drawer opened via upward swipe gesture.",
                                     )
                                     .ok();
@@ -5295,7 +5466,6 @@ pub extern "C" fn _start() -> ! {
                                 } else {
                                     state.current_view = ViewMode::QuickControls;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
                                 }
                                 let mut drain = std::InputEvent {
@@ -5313,7 +5483,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dx <= -60 && input.x >= 650 {
                                 state.current_view = ViewMode::QuickControls;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Quick Controls shade opened via edge swipe gesture.").ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -5330,7 +5499,6 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && (input.dx <= -60 || input.dx >= 60) && input.x < 650 {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
-                                surface_flip_display();
                                 std::log("[LAUNCHER] Live Widgets opened via horizontal swipe gesture.",
                                 )
                                 .ok();
@@ -5355,7 +5523,6 @@ pub extern "C" fn _start() -> ! {
                                 if (64..235).contains(&y) && (460..680).contains(&x) {
                                     state.current_view = ViewMode::LiveWidgets;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Live Widgets opened via top weather card tap.",
                                     )
                                     .ok();
@@ -5378,12 +5545,10 @@ pub extern "C" fn _start() -> ! {
                                     } else if x >= 480 {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
                                     } else {
                                         state.current_view = ViewMode::QuickControls;
                                         render_view(surface, &state);
-                                        surface_flip_display();
                                         std::log("[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
                                     }
                                     let mut drain = std::InputEvent {
@@ -5504,7 +5669,6 @@ pub extern "C" fn _start() -> ! {
                                     // the next open.
                                     state.app_drawer_tab = 0;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -5535,7 +5699,6 @@ pub extern "C" fn _start() -> ! {
                                     refresh_search_index(&mut state);
                                     state.current_view = ViewMode::Search;
                                     render_view(surface, &state);
-                                    surface_flip_display();
                                     std::log("[LAUNCHER] Global search opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -5604,7 +5767,6 @@ pub extern "C" fn _start() -> ! {
                                             let mut win_buf = [0u8; 1024];
                                             let _ = std::window_list(&mut win_buf);
                                             render_view(surface, &state);
-                                            surface_flip_display();
                                             std::log("[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
                                         }
                                         NavTarget::Home => {
@@ -5686,7 +5848,6 @@ pub extern "C" fn _start() -> ! {
                     state.pin_len = 0;
                     state.auth_error = false;
                     render_view(surface, &state);
-                    surface_flip_display();
                     std::log("[LAUNCHER] Lock observed; presenting the lock screen.").ok();
                 }
             }
@@ -5704,7 +5865,12 @@ pub extern "C" fn _start() -> ! {
                 state.volume_hud_until = 0;
                 if let Some(id) = volume_surface {
                     let _ = std::window_set_geometry(id, 100, 220, 100, false);
-                    surface_flip_display();
+                    // WHY this beat is allowed to present without writing: hiding
+                    // the HUD changes the composited panel through the window
+                    // manager, not through the shell's surface, so there is no
+                    // write for the gate to count. It is the one exception in the
+                    // rule, named here instead of a hole in the gate.
+                    surface_recompose_display();
                 }
             }
 
@@ -5723,7 +5889,6 @@ pub extern "C" fn _start() -> ! {
                             state.pin_len = 0;
                             state.auth_error = false;
                             render_view(surface, &state);
-                            surface_flip_display();
                             std::log("[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
                         } else {
                             let _ = std::user_lock(1000);
@@ -5758,7 +5923,6 @@ pub extern "C" fn _start() -> ! {
                                 std::log("[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
                                 state.current_view = ViewMode::PowerMenu;
                                 render_view(surface, &state);
-                                surface_flip_display();
                             }
                         }
                     }
@@ -5806,7 +5970,6 @@ pub extern "C" fn _start() -> ! {
                         state.current_view = ViewMode::LockScreen;
                         state.boot_progress = 1000;
                         render_view(surface, &state);
-                        surface_flip_display();
                         std::log("[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
                     }
                     continue;
@@ -5844,7 +6007,6 @@ pub extern "C" fn _start() -> ! {
                         match state.current_view {
                             ViewMode::HomeScreen | ViewMode::AppDrawer => {
                                 render_view(surface, &state);
-                                surface_flip_display();
                             }
                             _ => {}
                         }
@@ -5955,13 +6117,11 @@ fn nav_panel_tap(
         NavTarget::Back => {
             state.current_view = ViewMode::HomeScreen;
             render_view(surface, state);
-            surface_flip_display();
             std::log("[LAUNCHER] Back revealed the home grid under the panel surface.").ok();
         }
         NavTarget::Home => {
             state.current_view = ViewMode::HomeScreen;
             render_view(surface, state);
-            surface_flip_display();
             std::log(home_log).ok();
         }
         NavTarget::Recents => {
@@ -5972,7 +6132,6 @@ fn nav_panel_tap(
             let mut win_buf = [0u8; 1024];
             let _ = std::window_list(&mut win_buf);
             render_view(surface, state);
-            surface_flip_display();
             std::log("[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
         }
     }
