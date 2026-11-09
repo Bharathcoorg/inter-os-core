@@ -50,6 +50,11 @@ use notes::{
     LIST_CARD_SNIPPET_LANE, LIST_CARD_TEXT_X, LIST_CARD_TITLE_LANE,
     LIST_CARD_TITLE_LANE_PINNED, LIST_CARD_W, LIST_CARD_X0, LIST_CARD_X1, PIN_GLYPH_CX,
     EMPTY_CARD_W, EMPTY_CARD_X, EMPTY_CARD_Y, EMPTY_SUBTITLE_LANE,
+    // The two labels the search field and the filter strip paint. They live in
+    // the library for the same reason the lanes do: the binary has no test
+    // harness, and a label authored in the painter is a label no test can read
+    // for the vocabulary it puts in front of a person.
+    PIN_FILTER_LABEL, SEARCH_PLACEHOLDER,
 };
 
 const RULE_X0: usize = notes::EDITOR_RULE_X0;
@@ -1098,7 +1103,12 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                     }
                 }
             } else {
-                let hint = b"Search your notes...";
+                // WHY the placeholder is the library's constant and not a
+                // literal here: the field used to paint `Search your notes...
+                // [0]`, and the bracketed token read as a key binding. The
+                // placeholder is the person's sentence and carries nothing
+                // else; what the store holds is said beside it, in words.
+                let hint = SEARCH_PLACEHOLDER;
                 if let Some(c) = test_text(x, y, SEARCH_TEXT_X, SEARCH_Y0 + 14, 2, hint, THEME.on_surface_variant, THEME.surface_container, false) {
                     return c;
                 }
@@ -1118,11 +1128,18 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
                 // WHY the count is written out in full: the store holds up to
                 // MAX_NOTES notes, and the old badge collapsed the count to a
                 // single digit, so a device with twelve notes reported nine.
-                let w = outline_text::drawn_advance(&badge[..n], 1, None)
-                    .unwrap_or_else(|| std::design::font::measure(&badge[..n], 1));
-                let bx = 682usize.saturating_sub(w);
-                if let Some(c) = test_text(x, y, bx, SEARCH_Y0 + 18, 1, &badge[..n], THEME.primary, THEME.surface_container, true) {
-                    return c;
+                //
+                // WHY an empty store paints nothing: the count is now said in
+                // the person's words ("12 notes") rather than in brackets, and
+                // a store with nothing in it has nothing to say -- the empty
+                // list below already says it.
+                if n > 0 {
+                    let w = outline_text::drawn_advance(&badge[..n], 1, None)
+                        .unwrap_or_else(|| std::design::font::measure(&badge[..n], 1));
+                    let bx = 682usize.saturating_sub(w);
+                    if let Some(c) = test_text(x, y, bx, SEARCH_Y0 + 18, 1, &badge[..n], THEME.primary, THEME.surface_container, true) {
+                        return c;
+                    }
                 }
             }
 
@@ -1190,7 +1207,7 @@ fn render_notes_list(x: usize, y: usize, state: &AppState) -> u32 {
             if let Some(c) = draw_pin_glyph(x, y, PIN_FILTER.0 + 22, PIN_FILTER.1 + 24, active, ink) {
                 return c;
             }
-            if let Some(c) = test_text(x, y, PIN_FILTER.0 + 40, CHIP_Y0 + 15, 1, b"PINNED", ink, fill, false) {
+            if let Some(c) = test_text(x, y, PIN_FILTER.0 + 40, CHIP_Y0 + 15, 1, PIN_FILTER_LABEL, ink, fill, false) {
                 return c;
             }
             return fill;
@@ -2876,7 +2893,7 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
 
     match req.tool_id {
         std::appmcp::TOOL_ID_NOTES_CREATE => {
-            let (title, body) = parse_note_payload(&req.inline_payload[..req.payload_len as usize]);
+            let (title, body) = parse_note_payload(req.payload());
             if let Some(id) = store.create_note(title, body) {
                 let _ = save_notes_to_storage(store);
                 if let Some(note) = store.get_note(id).copied() {
@@ -2915,17 +2932,23 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
             true
         }
         std::appmcp::TOOL_ID_NOTES_READ => {
-            let note_opt = if req.payload_len >= 4 {
-                let id = u32::from_le_bytes([
-                    req.inline_payload[0],
-                    req.inline_payload[1],
-                    req.inline_payload[2],
-                    req.inline_payload[3],
-                ]);
-                store.get_note(id)
-            } else {
-                store.get_by_index(0)
-            };
+            if req.payload().len() < 4 {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
+            let payload = req.payload();
+            let id = u32::from_le_bytes([
+                payload[0],
+                payload[1],
+                payload[2],
+                payload[3],
+            ]);
+            let note_opt = store.get_note(id);
             if let Some(note) = note_opt {
                 let mut out = [0u8; 40];
                 let copy_len = note.title_len.min(40);
@@ -2944,12 +2967,13 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
             true
         }
         std::appmcp::TOOL_ID_NOTES_DELETE => {
-            if req.payload_len >= 4 {
+            let payload = req.payload();
+            if payload.len() >= 4 {
                 let id = u32::from_le_bytes([
-                    req.inline_payload[0],
-                    req.inline_payload[1],
-                    req.inline_payload[2],
-                    req.inline_payload[3],
+                    payload[0],
+                    payload[1],
+                    payload[2],
+                    payload[3],
                 ]);
                 if store.delete_note(id) {
                     let _ = save_notes_to_storage(store);

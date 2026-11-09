@@ -758,6 +758,22 @@ pub const CATEGORY_NAMES: [&[u8]; 5] = [
     b"System",
 ];
 
+/// The search field's placeholder, in the person's own words.
+///
+/// WHY it lives here and not in the branch that inks it: the binary is built
+/// without a test harness, so a label authored in the painter is a label no
+/// test can read. The field used to carry a bracketed token after this run --
+/// the store's note count, written in config-file notation -- and it read to a
+/// person as a key they were being told to press.
+pub const SEARCH_PLACEHOLDER: &[u8] = b"Search your notes...";
+
+/// The pin filter's label.
+///
+/// WHY it lives here: the same reason as [`SEARCH_PLACEHOLDER`] -- it is a
+/// label a test has to be able to read. It is sentence-cased like the five
+/// category chips it stands beside.
+pub const PIN_FILTER_LABEL: &[u8] = b"Pinned";
+
 // =============================================================================
 // Civil Time: the only clock a note may ever carry
 // =============================================================================
@@ -982,22 +998,37 @@ pub fn format_timestamp(
     n + take
 }
 
-/// Formats the note-count badge as `[N]` and returns its length.
+/// Formats the note-count badge in the person's own words and returns its
+/// length: `1 note`, `12 notes`, and nothing at all for an empty store.
 ///
 /// WHY the count is written out in full: the store holds up to `MAX_NOTES`
 /// notes, and the badge used to be built as `b'0' + count.min(9)`, so a
 /// device holding twelve notes reported nine. A count is a measurement and
 /// has to survive the second digit.
+///
+/// WHY the bracket notation is gone: the badge used to be painted as `[12]`
+/// at the end of the search field's placeholder, where a person reads it as a
+/// key they are being told to press. Bracketed tokens are what a config file
+/// says, not what a phone says; the count is a fact about the store, so it is
+/// said as one.
+///
+/// WHY an empty store says nothing: "0 notes" beside a placeholder that
+/// already reads "Search your notes..." is the same sentence twice, and the
+/// empty list states it in full below.
 pub fn format_count_badge(count: usize, buf: &mut [u8]) -> usize {
-    if buf.is_empty() {
+    if count == 0 || buf.is_empty() {
         return 0;
     }
-    buf[0] = b'[';
-    let mut n = 1;
-    n += decimal_u16(count as u32, &mut buf[n..]);
-    if n < buf.len() {
-        buf[n] = b']';
+    let mut n = decimal_u16(count as u32, &mut buf[..]);
+    let word: &[u8] = if count == 1 { b"note" } else { b"notes" };
+    // WHY the word is written whole or not at all: a half-word is a truncated
+    // label, and a label the reader cannot finish reading is the same defect
+    // the bracket was -- text that says something the person has to guess at.
+    if buf.len() - n >= word.len() + 1 {
+        buf[n] = b' ';
         n += 1;
+        buf[n..n + word.len()].copy_from_slice(word);
+        n += word.len();
     }
     n
 }
@@ -1849,26 +1880,99 @@ mod tests {
         // WHY this test exists: the badge used to be `b'0' + count.min(9)`,
         // so a device holding twelve notes reported nine. A count is a
         // measurement and it has to survive the second digit.
+        //
+        // WHY the wording below is not the shipped `[N]` string: the brackets
+        // were the defect -- a bracketed token at the end of the search
+        // field's placeholder reads as a key binding, so the count is said in
+        // words now. Every digit still has to survive.
         let mut buf = [0u8; 8];
-        let n = format_count_badge(0, &mut buf);
-        assert_eq!(&buf[..n], b"[0]");
         let n = format_count_badge(9, &mut buf);
-        assert_eq!(&buf[..n], b"[9]");
+        assert_eq!(&buf[..n], b"9 notes");
         let n = format_count_badge(10, &mut buf);
-        assert_eq!(&buf[..n], b"[10]");
+        assert_eq!(&buf[..n], b"10 notes");
         let n = format_count_badge(12, &mut buf);
-        assert_eq!(&buf[..n], b"[12]");
+        assert_eq!(&buf[..n], b"12 notes");
         let n = format_count_badge(16, &mut buf);
-        assert_eq!(&buf[..n], b"[16]");
+        assert_eq!(&buf[..n], b"16 notes");
     }
 
     #[test]
     fn test_the_count_badge_stays_inside_its_buffer() {
         let mut buf = [0u8; 3];
-        // Three bytes hold "[9]" and nothing more; a wider count must not
-        // write past the end of the buffer.
+        // Three bytes hold "16" and nothing more; the word is dropped rather
+        // than truncated, and a wider count must not write past the end of the
+        // buffer.
         let n = format_count_badge(16, &mut buf);
         assert!(n <= buf.len());
+    }
+
+    /// The search field's placeholder is the person's own words and nothing else.
+    ///
+    /// WHY this test exists: the field was painted as `Search your notes...
+    /// [0]`, and a bracketed token at the end of a placeholder reads as a key
+    /// the person is being told to press. It was the store's note count,
+    /// written in the notation a config file uses -- developer vocabulary on a
+    /// consumer screen. The placeholder holds no token, so no binding can be
+    /// painted into it, and the count that sits beside it is said in words.
+    #[test]
+    fn test_the_search_placeholder_carries_no_binding_token() {
+        assert_eq!(SEARCH_PLACEHOLDER, b"Search your notes...");
+        for &byte in SEARCH_PLACEHOLDER {
+            assert!(
+                !matches!(byte, b'[' | b']'),
+                "the placeholder paints a bracketed token: {:?}",
+                core::str::from_utf8(SEARCH_PLACEHOLDER)
+            );
+            assert!(
+                !byte.is_ascii_digit(),
+                "the placeholder paints a count or a key number: {:?}",
+                core::str::from_utf8(SEARCH_PLACEHOLDER)
+            );
+        }
+    }
+
+    /// The note count is a fact about the store, so it is said as one.
+    #[test]
+    fn test_the_count_badge_is_consumer_words_not_bracket_notation() {
+        let mut buf = [0u8; 8];
+        // An empty store has nothing to count, so the placeholder stands alone
+        // and the field reads "Search your notes..." with no token after it.
+        assert_eq!(format_count_badge(0, &mut buf), 0);
+
+        let n = format_count_badge(1, &mut buf);
+        assert_eq!(&buf[..n], b"1 note");
+        let n = format_count_badge(12, &mut buf);
+        assert_eq!(&buf[..n], b"12 notes");
+
+        for count in 0..=MAX_NOTES {
+            let n = format_count_badge(count, &mut buf);
+            assert!(n <= buf.len(), "count {count} wrote past its buffer");
+            assert!(
+                !buf[..n].contains(&b'[') && !buf[..n].contains(&b']'),
+                "count {count} is painted in bracket notation: {:?}",
+                &buf[..n]
+            );
+        }
+    }
+
+    /// The pin filter reads like the five chips it stands beside.
+    ///
+    /// WHY this test exists: the chips say "All", "Work", "Personal", "Ideas"
+    /// and "System", and the filter beside them said "PINNED" -- one control
+    /// shouting while its neighbours spoke. The platform's own labels
+    /// (Calendar's "Month"/"Week"/"Day"/"Agenda") are sentence-cased.
+    #[test]
+    fn test_the_pin_filter_reads_like_the_chips_beside_it() {
+        assert_eq!(PIN_FILTER_LABEL, b"Pinned");
+        let mut rest = &PIN_FILTER_LABEL[1..];
+        while let Some(&byte) = rest.first() {
+            assert!(
+                !byte.is_ascii_uppercase(),
+                "the pin filter label shouts: {:?}",
+                core::str::from_utf8(PIN_FILTER_LABEL)
+            );
+            rest = &rest[1..];
+        }
     }
 
     #[test]

@@ -5044,11 +5044,16 @@ fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_typ
         }
         std::appmcp::TOOL_ID_MESSAGES_READ => {
             let (recip, _) = parse_message_payload(req.payload());
-            let thread_opt = if !recip.is_empty() {
-                app.store.find(recip).and_then(|idx| app.store.get(idx))
-            } else {
-                app.store.get(0)
-            };
+            if recip.is_empty() {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
+            let thread_opt = app.store.find(recip).and_then(|idx| app.store.get(idx));
             if let Some(thread) = thread_opt {
                 let snippet = thread.last_snippet();
                 let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token)
@@ -5066,6 +5071,15 @@ fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_typ
         }
         std::appmcp::TOOL_ID_MESSAGES_DELETE => {
             let (recip, _) = parse_message_payload(req.payload());
+            if recip.is_empty() {
+                let resp = std::appmcp::AppMcpResponse::error(
+                    std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+                    req.tool_id,
+                    req.token,
+                );
+                let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                return true;
+            }
             if let Some(idx) = app.store.find(recip) {
                 if app.store.remove(idx) {
                     app.sync_store_to_ledger();

@@ -546,28 +546,31 @@ impl ChatSession {
         } else {
             interos_std::app_storage_open(path, interos_std::FS_WRITE)?
         };
-        let mut header = [0u8; 12];
-        header[0..4].copy_from_slice(b"AGTC");
-        header[4..8].copy_from_slice(&1u32.to_le_bytes());
-        header[8..12].copy_from_slice(&(self.message_count as u32).to_le_bytes());
-        let _ = interos_std::fs_write(fd, &header)?;
+        let res = (|| -> Result<(), i64> {
+            let mut header = [0u8; 12];
+            header[0..4].copy_from_slice(b"AGTC");
+            header[4..8].copy_from_slice(&1u32.to_le_bytes());
+            header[8..12].copy_from_slice(&(self.message_count as u32).to_le_bytes());
+            let _ = interos_std::fs_write(fd, &header)?;
 
-        for i in 0..self.message_count as usize {
-            if let Some(msg) = self.message_at(i) {
-                let mut rec_hdr = [0u8; 3];
-                rec_hdr[0] = match msg.role {
-                    ChatRole::User => 1,
-                    ChatRole::Assistant => 2,
-                    ChatRole::Notice => 3,
-                };
-                rec_hdr[1..3].copy_from_slice(&msg.text_len.to_le_bytes());
-                let _ = interos_std::fs_write(fd, &rec_hdr)?;
-                let n = (msg.text_len as usize).min(CHAT_TEXT_MAX);
-                let _ = interos_std::fs_write(fd, &msg.text[..n])?;
+            for i in 0..self.message_count as usize {
+                if let Some(msg) = self.message_at(i) {
+                    let mut rec_hdr = [0u8; 3];
+                    rec_hdr[0] = match msg.role {
+                        ChatRole::User => 1,
+                        ChatRole::Assistant => 2,
+                        ChatRole::Notice => 3,
+                    };
+                    rec_hdr[1..3].copy_from_slice(&msg.text_len.to_le_bytes());
+                    let _ = interos_std::fs_write(fd, &rec_hdr)?;
+                    let n = (msg.text_len as usize).min(CHAT_TEXT_MAX);
+                    let _ = interos_std::fs_write(fd, &msg.text[..n])?;
+                }
             }
-        }
+            Ok(())
+        })();
         let _ = interos_std::fs_close(fd);
-        Ok(())
+        res
     }
 
     /// Restores the chat transcript from the sandboxed application file system.
@@ -577,34 +580,36 @@ impl ChatSession {
         } else {
             interos_std::app_storage_open(path, interos_std::FS_READ)?
         };
-        let mut header = [0u8; 12];
-        let bytes_read = interos_std::fs_read(fd, &mut header)?;
-        if bytes_read < 12 || &header[0..4] != b"AGTC" {
-            let _ = interos_std::fs_close(fd);
-            return Err(-22);
-        }
-        let count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
-        let mut loaded = 0;
-        let mut text_buf = [0u8; CHAT_TEXT_MAX];
-
-        for _ in 0..count.min(CHAT_MAX_MESSAGES) {
-            let mut rec_hdr = [0u8; 3];
-            if interos_std::fs_read(fd, &mut rec_hdr)? < 3 {
-                break;
+        let res = (|| -> Result<usize, i64> {
+            let mut header = [0u8; 12];
+            let bytes_read = interos_std::fs_read(fd, &mut header)?;
+            if bytes_read < 12 || &header[0..4] != b"AGTC" {
+                return Err(-22);
             }
-            let role = match rec_hdr[0] {
-                1 => ChatRole::User,
-                2 => ChatRole::Assistant,
-                _ => ChatRole::Notice,
-            };
-            let text_len = u16::from_le_bytes([rec_hdr[1], rec_hdr[2]]) as usize;
-            let to_read = text_len.min(CHAT_TEXT_MAX);
-            let n = interos_std::fs_read(fd, &mut text_buf[..to_read])?;
-            self.push(role, &text_buf[..n]);
-            loaded += 1;
-        }
+            let count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+            let mut loaded = 0;
+            let mut text_buf = [0u8; CHAT_TEXT_MAX];
+
+            for _ in 0..count.min(CHAT_MAX_MESSAGES) {
+                let mut rec_hdr = [0u8; 3];
+                if interos_std::fs_read(fd, &mut rec_hdr)? < 3 {
+                    break;
+                }
+                let role = match rec_hdr[0] {
+                    1 => ChatRole::User,
+                    2 => ChatRole::Assistant,
+                    _ => ChatRole::Notice,
+                };
+                let text_len = u16::from_le_bytes([rec_hdr[1], rec_hdr[2]]) as usize;
+                let to_read = text_len.min(CHAT_TEXT_MAX);
+                let n = interos_std::fs_read(fd, &mut text_buf[..to_read])?;
+                self.push(role, &text_buf[..n]);
+                loaded += 1;
+            }
+            Ok(loaded)
+        })();
         let _ = interos_std::fs_close(fd);
-        Ok(loaded)
+        res
     }
 }
 
@@ -2592,16 +2597,20 @@ pub fn call_appmcp_tool(
     }
 
     let mut rx_buf = [0u8; 64];
-    if let Ok((_sender, _msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
-        if let Some(resp) = interos_std::appmcp::AppMcpResponse::from_bytes(&rx_buf[..len]) {
-            if resp.status == interos_std::appmcp::APPMCP_STATUS_SUCCESS {
-                let mut out = [0u8; 64];
-                let p = resp.payload();
-                let n = p.len().min(64);
-                out[..n].copy_from_slice(&p[..n]);
-                return Ok((out, n));
-            } else {
-                return Err(resp.status);
+    if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+        if sender == task_id && msg_type == interos_std::appmcp::APPMCP_MSG_RESPONSE {
+            if let Some(resp) = interos_std::appmcp::AppMcpResponse::from_bytes(&rx_buf[..len]) {
+                if resp.token == req.token && resp.tool_id == tool_id {
+                    if resp.status == interos_std::appmcp::APPMCP_STATUS_SUCCESS {
+                        let mut out = [0u8; 64];
+                        let p = resp.payload();
+                        let n = p.len().min(64);
+                        out[..n].copy_from_slice(&p[..n]);
+                        return Ok((out, n));
+                    } else {
+                        return Err(resp.status);
+                    }
+                }
             }
         }
     }

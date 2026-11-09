@@ -3624,14 +3624,23 @@ fn handle_appmcp_request(music: &mut MusicApp, raw: &[u8], sender: u64, msg_type
             true
         }
         std::appmcp::TOOL_ID_MUSIC_PAUSE => {
-            if music.surface_state() == music::SurfaceState::Playing {
+            let ok = if music.surface_state() == music::SurfaceState::Playing {
                 music.player.pause();
                 music.player.poll();
                 music.state = PlaybackState::Paused;
                 music.clear_feedback();
                 music.publish_now_playing();
-            }
-            let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(b"state:paused");
+                true
+            } else if music.surface_state() == music::SurfaceState::Paused {
+                true
+            } else {
+                false
+            };
+            let resp = if ok {
+                std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(b"state:paused")
+            } else {
+                std::appmcp::AppMcpResponse::error(std::appmcp::APPMCP_STATUS_INTERNAL_ERROR, req.tool_id, req.token)
+            };
             let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
             true
         }
@@ -3754,7 +3763,7 @@ pub extern "C" fn _start() -> ! {
                     std::exit_with_code(0);
                 }
             }
-            0
+            std::exit_with_code(1);
         }
     };
     let surface_lap = laps.lap();
@@ -3907,8 +3916,10 @@ pub extern "C" fn _start() -> ! {
                     // A dispatch may reach this app while it is already
                     // running, so the slot is polled rather than pushed.
                     if music.handle_pending_intent() {
-                        repaint(surface, &music, Dirty::All);
-                        let _ = std::surface_flip();
+                        if surface > 0 {
+                            repaint(surface, &music, Dirty::All);
+                            let _ = std::surface_flip();
+                        }
                     }
                     if music.state == PlaybackState::Playing {
                         music.player.tick();

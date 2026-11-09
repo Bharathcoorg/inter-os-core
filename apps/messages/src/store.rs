@@ -323,6 +323,60 @@ pub struct ThreadStore {
     pub state: StoreState,
 }
 
+fn decode_store_blob_into(raw: &[u8], from_storage: bool, store: &mut ThreadStore) -> Option<StoreState> {
+    let mut blob = [0u8; STORE_BLOB_BYTES];
+    let decoded_len = if !from_storage {
+        if let Ok(u_len) = unescape_store_blob(raw, &mut blob) {
+            u_len
+        } else if raw.len() <= STORE_BLOB_BYTES {
+            blob[..raw.len()].copy_from_slice(raw);
+            raw.len()
+        } else {
+            0
+        }
+    } else {
+        if raw.len() <= STORE_BLOB_BYTES {
+            blob[..raw.len()].copy_from_slice(raw);
+            raw.len()
+        } else {
+            0
+        }
+    };
+    let header_count = if decoded_len >= 2 { blob[1] as usize } else { 0 };
+    let bad = decoded_len < 2
+        || decoded_len > STORE_BLOB_BYTES
+        || blob[0] != STORE_VERSION
+        || header_count > MAX_THREADS
+        || decoded_len != 2 + header_count * RECORD_BYTES;
+    if bad {
+        return None;
+    }
+    for i in 0..header_count {
+        let start = 2 + i * RECORD_BYTES;
+        if ThreadRecord::decode(&blob[start..start + RECORD_BYTES]).is_none() {
+            return None;
+        }
+    }
+    for i in 0..header_count {
+        let start = 2 + i * RECORD_BYTES;
+        if let Some(r) = ThreadRecord::decode(&blob[start..start + RECORD_BYTES]) {
+            store.records[i] = r;
+        }
+    }
+    store.len = header_count as u8;
+    store.next_id = store.records[..header_count]
+        .iter()
+        .map(|r| r.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    Some(if header_count == 0 {
+        StoreState::Empty
+    } else {
+        StoreState::Loaded
+    })
+}
+
 impl ThreadStore {
     pub const EMPTY: ThreadStore = ThreadStore {
         records: [ThreadRecord::EMPTY; MAX_THREADS],
@@ -358,91 +412,48 @@ impl ThreadStore {
         }
     }
 
-    /// Reads the table back out of the settings store, validating the whole blob.
+    /// Reads the table back out of the settings store, validating the whole blob,
+    /// with automatic fallback to sandboxed file storage if settings read fails or is invalid.
     pub fn load() -> Self {
         let mut store = ThreadStore::EMPTY;
         let mut raw = [0u8; 512];
-        let mut from_storage = false;
-        let read_res = match std::settings_get(STORE_KEY, &mut raw) {
-            Ok(n) if n > 0 => Ok(n),
-            _ => {
-                if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_READ) {
-                    let n = std::fs_read(fd, &mut raw).unwrap_or(0);
-                    let _ = std::fs_close(fd);
-                    if n > 0 {
-                        from_storage = true;
-                        Ok(n)
-                    } else {
-                        Err(-8)
-                    }
-                } else {
-                    Err(-8)
-                }
+        let mut settings_corrupt = false;
+
+        match std::settings_get(STORE_KEY, &mut raw) {
+            Ok(0) => {
+                store.state = StoreState::Empty;
+                return store;
             }
-        };
-        match read_res {
-            Ok(0) => store.state = StoreState::Empty,
             Ok(n) => {
-                let mut blob = [0u8; STORE_BLOB_BYTES];
-                let decoded_len = if !from_storage {
-                    if let Ok(u_len) = unescape_store_blob(&raw[..n], &mut blob) {
-                        u_len
-                    } else if n <= STORE_BLOB_BYTES {
-                        blob[..n].copy_from_slice(&raw[..n]);
-                        n
-                    } else {
-                        0
-                    }
+                if let Some(state) = decode_store_blob_into(&raw[..n], false, &mut store) {
+                    store.state = state;
+                    return store;
                 } else {
-                    if n <= STORE_BLOB_BYTES {
-                        blob[..n].copy_from_slice(&raw[..n]);
-                        n
-                    } else {
-                        0
-                    }
-                };
-                let header_count = if decoded_len >= 2 { blob[1] as usize } else { 0 };
-                let bad = decoded_len < 2
-                    || decoded_len > STORE_BLOB_BYTES
-                    || blob[0] != STORE_VERSION
-                    || header_count > MAX_THREADS
-                    || decoded_len != 2 + header_count * RECORD_BYTES;
-                if bad {
-                    store.state = StoreState::Invalid;
-                } else {
-                    let mut ok = true;
-                    for i in 0..header_count {
-                        let start = 2 + i * RECORD_BYTES;
-                        if ThreadRecord::decode(&blob[start..start + RECORD_BYTES]).is_none() {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    if !ok {
-                        store.state = StoreState::Invalid;
-                    } else {
-                        for i in 0..header_count {
-                            let start = 2 + i * RECORD_BYTES;
-                            if let Some(r) = ThreadRecord::decode(&blob[start..start + RECORD_BYTES]) {
-                                store.records[i] = r;
-                            }
-                        }
-                        store.len = header_count as u8;
-                        store.next_id = store.records[..header_count]
-                            .iter()
-                            .map(|r| r.id)
-                            .max()
-                            .unwrap_or(0)
-                            .saturating_add(1);
-                        store.state = if header_count == 0 {
-                            StoreState::Empty
-                        } else {
-                            StoreState::Loaded
-                        };
-                    }
+                    settings_corrupt = true;
                 }
             }
-            Err(_) => store.state = StoreState::ReadRefused,
+            Err(_) => {}
+        }
+
+        // Secondary storage tier: fall back to VFS sandbox storage if settings failed or returned invalid bytes
+        if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_READ) {
+            let n = std::fs_read(fd, &mut raw).unwrap_or(0);
+            let _ = std::fs_close(fd);
+            if n > 0 {
+                if let Some(state) = decode_store_blob_into(&raw[..n], true, &mut store) {
+                    store.state = state;
+                    return store;
+                } else {
+                    store.state = StoreState::Invalid;
+                    return store;
+                }
+            }
+        }
+
+        if settings_corrupt {
+            store.state = StoreState::Invalid;
+        } else {
+            store.state = StoreState::ReadRefused;
         }
         store
     }

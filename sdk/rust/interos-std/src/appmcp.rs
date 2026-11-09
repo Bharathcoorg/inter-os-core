@@ -176,6 +176,9 @@ impl AppMcpRequest {
         let token = u32::from_le_bytes([raw[16], raw[17], raw[18], raw[19]]);
         let pipe_id = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
         let payload_len = u32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]);
+        if pipe_id == u32::MAX && payload_len > 36 {
+            return None;
+        }
         let mut inline_payload = [0u8; 36];
         inline_payload.copy_from_slice(&raw[28..64]);
 
@@ -316,6 +319,9 @@ impl AppMcpResponse {
         let token = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
         let pipe_id = u32::from_le_bytes([raw[16], raw[17], raw[18], raw[19]]);
         let output_len = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
+        if pipe_id == u32::MAX && output_len > 40 {
+            return None;
+        }
         let mut inline_output = [0u8; 40];
         inline_output.copy_from_slice(&raw[24..64]);
 
