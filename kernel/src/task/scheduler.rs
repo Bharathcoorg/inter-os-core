@@ -949,7 +949,12 @@ impl Scheduler {
             let cr3 = task.cr3_frame
                 .map(|f| f.start_address().as_u64())
                 .or_else(|| task.page_table.as_ref().map(|pt| pt.lock().frame().start_address().as_u64()))
-                .unwrap_or_else(|| crate::memory::kernel_pml4().start_address().as_u64());
+                // `try_kernel_pml4` rather than `kernel_pml4`: this is telemetry,
+                // and a process table that panicked the guest it was reporting on
+                // would be a very expensive diagnostic. `0` is the honest answer
+                // for "no page table has been recorded yet", which is the only
+                // case where the frame is absent.
+                .unwrap_or_else(|| crate::memory::try_kernel_pml4().map(|f| f.start_address().as_u64()).unwrap_or(0));
             crate::serial_println!(
                 "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={:#x}",
                 task.id.0,

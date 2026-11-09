@@ -18,9 +18,9 @@ By default, Device Studio launches in **Focus Mode**:
 
 ### 2. Developer Telemetry Deck
 The **Developer Telemetry Deck** provides deep, transparent virtual machine and microkernel inspection tools:
-- **CPU Registers & State**: Live registers (RAX, RBX, RCX, RDX, RSI, RDI, RIP, RSP), CPU execution state, and active Task ID.
+- **CPU Registers & State (x86_64 Target)**: Live registers (RAX, RBX, RCX, RDX, RSI, RDI, RIP, RSP), CPU execution state, and active Task ID.
 - **Memory & VFS Block I/O**: Real QEMU RAM allocation, active block storage drive name, read ops, and sector I/O accounting.
-- **Live Process Supervisor**: Task list, Ring privilege level, thread states (`Running`, `Blocked`, `Sleeping`), and PID accounting.
+- **Live Process Supervisor**: Task list, hardware privilege level (Ring 0/3 on x86_64, EL1/0 on AArch64, S/U-Mode on RISC-V), thread states (`Running`, `Blocked`, `Sleeping`), and PID accounting.
 - **IPC Inspector**: Real-time shared-memory IPC ring buffer endpoints, futex events, and message router telemetry.
 - **Package Ingest & Sideloading**: Drag-and-drop classifies `.app` (ELF), `.wasm`, `.apk` and `.rapp` payloads on the host and answers `Analyzed; guest installation required` — an `.apk` drop reports DEX and signature *metadata* and explicitly performs no cryptographic verification. The signed install path is separate (`/api/rapp/install`), verifies the RAPP v2 Ed25519 signature and accepts x86_64 `.rapp` packages only. The guest package registry remains the only installed-app authority.
 

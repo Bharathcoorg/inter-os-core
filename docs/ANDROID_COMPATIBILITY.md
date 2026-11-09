@@ -1,6 +1,6 @@
 # Android Compatibility & Sovereign microG Architecture (Zone 4)
 
-InterOS Core provides a sandboxed, memory-bounded Android compatibility runtime operating within Ring 3 userspace and kernel-mediated Zone 4 boundaries. It allows lightweight Android applications and services to run securely without the bloat, battery drain, or surveillance telemetry of traditional Android Open Source Project (AOSP) or Google Play Services images.
+InterOS Core provides a sandboxed, memory-bounded Android compatibility runtime operating within unprivileged userspace (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode) and kernel-mediated Zone 4 boundaries. It allows lightweight Android applications and services to run securely without the bloat, battery drain, or surveillance telemetry of traditional Android Open Source Project (AOSP) or Google Play Services images.
 
 ---
 

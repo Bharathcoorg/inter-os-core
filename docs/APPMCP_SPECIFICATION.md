@@ -1,6 +1,6 @@
 # Sovereign AppMCP Specification (Model Context Protocol for InterOS Apps)
 
-The **Sovereign AppMCP (Application Model Context Protocol)** is a `#![no_std]`, zero-heap-allocation IPC protocol designed for InterOS Core. It enables local on-device AI inference engines (`aid`, PID 13) and the system Agent Manager (`agent_manager`, PID 15) to discover, inspect, and invoke tool actions across native applications in both headless and interactive graphical modes.
+The **Sovereign AppMCP (Application Model Context Protocol)** is a `#![no_std]`, zero-heap-allocation IPC protocol designed for InterOS Core. It enables local on-device AI inference service (`aid`, Service 12) and the system Agent Manager (`agent_manager`) to discover, inspect, and invoke tool actions across native applications in both headless and interactive graphical modes.
 
 ---
 

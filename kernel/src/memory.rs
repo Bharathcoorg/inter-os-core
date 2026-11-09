@@ -133,6 +133,19 @@ pub fn kernel_pml4() -> PhysFrame<Size4KiB> {
         .expect("Kernel PML4 frame not recorded during init_memory")
 }
 
+/// The kernel PML4 frame, or `None` before `init_memory` has recorded it.
+///
+/// WHY a fallible twin of `kernel_pml4`: telemetry must never be able to panic
+/// the thing it is describing. `Scheduler::dump_process_table` prints a `cr3=`
+/// for every task and runs on a diagnostic path -- from the console reply to
+/// `PROC_LIST` and from the kernel loop's change-triggered dump -- so a line
+/// that aborts the guest over a frame nobody had recorded yet is strictly
+/// worse than a line that reports `cr3=0`. In a booted guest the two functions
+/// return the same frame.
+pub fn try_kernel_pml4() -> Option<PhysFrame<Size4KiB>> {
+    *KERNEL_PML4_FRAME.lock()
+}
+
 /// Switches CPU CR3 back to the clean kernel PML4.
 pub fn switch_to_kernel_page_table() {
     let (current_frame, flags) = Cr3::read();

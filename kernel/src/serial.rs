@@ -8,6 +8,7 @@
 
 use core::fmt;
 use spin::Mutex;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
@@ -133,6 +134,38 @@ pub fn init() {
     *SERIAL1.lock() = Some(SerialPort(port));
 }
 
+/// Console lines captured for host tests.
+///
+/// WHY this exists: the guest's console is a UART, and a host test has none --
+/// `SERIAL1` stays `None`, so every `serial_println!` a test triggers is
+/// silently discarded and the test can only assert on internal state. Several
+/// serial verbs (`STUDIO_PKG_LIST`, `PROC_LIST`) answer *in the line itself*,
+/// and Device Studio parses exactly that text, so the only honest thing to
+/// assert about them is the bytes the guest put on the wire.
+///
+/// Behind `cfg(test)`: a guest build compiles this out entirely, so the hot
+/// print path is unchanged.
+#[cfg(test)]
+static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Lines retained by `CAPTURED`, oldest dropped first, so a whole test run
+/// cannot grow the buffer without bound.
+#[cfg(test)]
+const CAPTURE_MAX: usize = 4096;
+
+/// Drops everything captured so far. Call immediately before the command whose
+/// reply is under test.
+#[cfg(test)]
+pub fn capture_clear() {
+    CAPTURED.lock().clear();
+}
+
+/// The lines the console has "emitted" since the last `capture_clear`, in order.
+#[cfg(test)]
+pub fn capture_lines() -> Vec<String> {
+    CAPTURED.lock().clone()
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     let _ = _print_internal(args);
@@ -159,6 +192,15 @@ pub fn _print_internal(args: fmt::Arguments) -> bool {
 
     for _ in 0..10_000 {
         if let Some(mut guard) = SERIAL1.try_lock() {
+            #[cfg(test)]
+            {
+                let line = alloc::format!("{}", args);
+                let mut sink = CAPTURED.lock();
+                if sink.len() >= CAPTURE_MAX {
+                    sink.remove(0);
+                }
+                sink.push(line);
+            }
             if let Some(ref mut serial) = *guard {
                 let _ = serial.write_fmt(args);
             }
@@ -1267,6 +1309,143 @@ fn handle_tls_trust_command(s: &str) -> bool {
     false
 }
 
+/// What the live task table says about one package's process.
+///
+/// WHY this is derived and not stored: `emulator/server.py` publishes the
+/// `state=` field of a `[STUDIO_PKG]` line as `/api/apps/list`'s `status`, and
+/// the kernel-embedded half of the catalogue hardcoded `active` for all
+/// seventeen first-party packages. An installed app and a running one were
+/// therefore indistinguishable to anyone reading the panel -- the same
+/// distinction `PROC_LIST` already prints per pid, but here for every package
+/// whether or not it has a pid. The scheduler's task table is the only honest
+/// authority for it, so the catalogue now reads that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageRunState {
+    /// No task in the table carries the package's process name.
+    NotRunning,
+    /// A live task carries it and owns the surface the screen is showing.
+    Active,
+    /// A live task carries it, and its surfaces are hidden or it never had any.
+    Backgrounded,
+    /// The process exited and is waiting to be reaped.
+    Exited,
+}
+
+impl PackageRunState {
+    /// The `state=` token Studio renders for this state.
+    ///
+    /// WHY `active` is kept for the foreground case: it is the value the Studio
+    /// panel and any saved console log already speak, and a focused application
+    /// genuinely is active. The added values only replace a claim that was
+    /// never earned, and the field names and order of the line do not change,
+    /// because the untouchable parser splits on whitespace and `=`.
+    pub const fn field_value(self) -> &'static str {
+        match self {
+            PackageRunState::Active => "active",
+            PackageRunState::Backgrounded => "backgrounded",
+            PackageRunState::Exited => "exited",
+            PackageRunState::NotRunning => "not-running",
+        }
+    }
+
+    /// Ordering for the case where one process name is carried by several
+    /// tasks: the most alive instance is the honest answer about the package.
+    const fn rank(self) -> u8 {
+        match self {
+            PackageRunState::Active => 3,
+            PackageRunState::Backgrounded => 2,
+            PackageRunState::Exited => 1,
+            PackageRunState::NotRunning => 0,
+        }
+    }
+}
+
+/// The task whose window the screen is showing, or `None` when that cannot be
+/// told right now.
+///
+/// WHY the surface stack answers this and not `Scheduler::active_foreground_task`:
+/// that field is the realtime scheduler's hint, and no production path writes
+/// it, so treating it as the definition of "running" would leave
+/// `/api/apps/list` unable to call anything active -- a new untruth rather than
+/// a fix. What the window manager does maintain is visibility: every launch
+/// calls `hide_background_surfaces` and then raises the new task's surfaces, so
+/// the topmost visible surface's owner is the kernel's own answer to "which
+/// application is on screen".
+///
+/// WHY `try_lock` with a silent `None` on failure: the KMS lock is held across
+/// composites, and an app that is on screen but momentarily unmeasurable is
+/// reported as `backgrounded`. Under-claiming one running app is honest; the
+/// blanket value this replaces over-claimed every installed one.
+fn foreground_surface_owner() -> Option<u64> {
+    let kms = crate::drivers::display_kms::DRM_KMS.try_lock()?;
+    kms.surfaces
+        .iter()
+        .filter(|surface| surface.visible && surface.owner_task != 0)
+        .map(|surface| (surface.z_order, surface.owner_task))
+        .max()
+        .map(|(_, owner_task)| owner_task)
+}
+
+/// Resolves one package's process state by reading `sched` and `foreground_owner`.
+///
+/// `process_name` is the task name the kernel spawns the package under: the
+/// descriptor's `process_name` for a kernel-embedded package, and the package
+/// id for a verified `.rapp` (see `spawn_verified_rapp_process`). Both are the
+/// value the catalogue already prints in its `process=` field, so the state and
+/// the process name a reviewer sees are always describing the same task.
+///
+/// `foreground_owner` is taken as a parameter rather than read here so the
+/// reply is composed without holding the KMS lock while the scheduler lock is
+/// held: the two are taken in the other order elsewhere in the kernel.
+pub fn package_run_state(
+    sched: &crate::task::scheduler::Scheduler,
+    process_name: &str,
+    foreground_owner: Option<u64>,
+) -> PackageRunState {
+    use crate::task::TaskState;
+
+    let mut best = PackageRunState::NotRunning;
+    for task in sched.tasks_iter() {
+        if task.name != process_name {
+            continue;
+        }
+        let state = match task.state {
+            // Reaped-while-exiting tasks still occupy the table; reporting them
+            // as running is what `state=exited` exists to avoid.
+            TaskState::Zombie | TaskState::Terminated => PackageRunState::Exited,
+            _ if Some(task.id.0) == foreground_owner => PackageRunState::Active,
+            _ => PackageRunState::Backgrounded,
+        };
+        if state.rank() > best.rank() {
+            best = state;
+        }
+    }
+    best
+}
+
+/// The `state=` value for an installed `.rapp` entry.
+///
+/// WHY the install transaction answers first while a package is uncommitted:
+/// `staged` and `rolledback` are facts about the transaction that no process
+/// could express, and neither is a claim that anything is running. Once the
+/// package *is* committed, only the task table can say whether it is running.
+pub fn rapp_state_field(
+    sched: &crate::task::scheduler::Scheduler,
+    process_name: &str,
+    install: crate::package::PackageState,
+    foreground_owner: Option<u64>,
+) -> &'static str {
+    use crate::package::PackageState;
+
+    match install {
+        PackageState::Staged => "staged",
+        PackageState::RolledBack => "rolledback",
+        PackageState::Active => {
+            package_run_state(sched, process_name, foreground_owner).field_value()
+        }
+    }
+}
+
 fn handle_serial_command(cmd: &[u8]) {
     let s = if let Ok(s) = core::str::from_utf8(cmd) {
         s.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0')
@@ -1399,31 +1578,72 @@ fn handle_serial_command(cmd: &[u8]) {
     }
 
     if verb.eq_ignore_ascii_case("STUDIO_PKG_LIST") {
-        crate::package::PACKAGE_REGISTRY.lock().seed();
-        for pkg in crate::package::FIRST_PARTY_PACKAGES {
-            crate::serial_println!(
-                "[STUDIO_PKG] id={} name={} version=1.0.0 state=active process={} icon={}",
-                pkg.package_id, pkg.display_name, pkg.process_name, pkg.icon
+        // WHY the reply is composed before a byte of it is printed: the `state=`
+        // field now comes from the task table, and the console is written one
+        // byte at a time. Printing inside the scheduler lock would hold every
+        // task off the CPU for the length of seventeen lines; the registry lock
+        // is released first for the same reason, and because `seed` reaches VFS,
+        // which takes the scheduler in the other order.
+        let entries = {
+            let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+            registry.seed();
+            registry.entries().to_vec()
+        };
+        // WHY the surface stack is read first and released: the KMS lock is
+        // taken under the scheduler lock elsewhere in the kernel, so holding
+        // both here would invert that order. One `Option<u64>` is all that has
+        // to survive the trip.
+        let foreground_owner = foreground_surface_owner();
+        let catalog: Vec<String> = {
+            let sched = crate::task::SCHEDULER.lock();
+            let mut lines = Vec::with_capacity(
+                crate::package::FIRST_PARTY_PACKAGES.len() + entries.len(),
             );
-        }
-        let entries = crate::package::PACKAGE_REGISTRY.lock().entries().to_vec();
-        for entry in entries.iter() {
-            if crate::package::first_party_package(&entry.package_id).is_some() {
-                continue;
+            for pkg in crate::package::FIRST_PARTY_PACKAGES {
+                lines.push(format!(
+                    "[STUDIO_PKG] id={} name={} version=1.0.0 state={} process={} icon={}",
+                    pkg.package_id,
+                    pkg.display_name,
+                    package_run_state(&sched, pkg.process_name, foreground_owner).field_value(),
+                    pkg.process_name,
+                    pkg.icon
+                ));
             }
-            let state = match entry.state {
-                crate::package::PackageState::Active => "active",
-                crate::package::PackageState::Staged => "staged",
-                crate::package::PackageState::RolledBack => "rolledback",
-            };
-            crate::serial_println!(
-                "[STUDIO_PKG] id={} name={} version={}.{}.{} state={} process={} icon=RAPP",
-                entry.package_id, entry.package_id,
-                entry.version.0, entry.version.1, entry.version.2,
-                state, entry.package_id
-            );
+            for entry in entries.iter() {
+                if crate::package::first_party_package(&entry.package_id).is_some() {
+                    continue;
+                }
+                lines.push(format!(
+                    "[STUDIO_PKG] id={} name={} version={}.{}.{} state={} process={} icon=RAPP",
+                    entry.package_id,
+                    entry.package_id,
+                    entry.version.0,
+                    entry.version.1,
+                    entry.version.2,
+                    rapp_state_field(&sched, &entry.package_id, entry.state, foreground_owner),
+                    entry.package_id
+                ));
+            }
+            lines
+        };
+        for line in catalog.iter() {
+            crate::serial_println!("{}", line);
         }
         crate::serial_println!("[STUDIO_PKG] END");
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("PROC_LIST") {
+        // The process table, on request. WHY the verb exists: the table used to
+        // be put on the console every two seconds whether anyone was reading or
+        // not, which is most of what an idle device printed. Studio's process
+        // panel and the runtime suites read `[PROC]` lines straight off the
+        // console buffer, so the same table in the same shape has to stay
+        // reachable -- by asking, or when it actually changes.
+        match crate::interrupts::process_table_dump_now() {
+            Some(tasks) => crate::serial_println!("[PROC_LIST] END tasks={}", tasks),
+            None => crate::serial_println!("[PROC_LIST] UNAVAILABLE scheduler_busy"),
+        }
         return;
     }
 
@@ -2037,6 +2257,228 @@ mod tests {
         assert!(HARDWARE_KILLSWITCHES.lock().camera_cut);
         handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA OFF");
         assert!(!HARDWARE_KILLSWITCHES.lock().camera_cut);
+    }
+
+    /// The `field=value` pairs of one `[STUDIO_PKG]` catalogue line, exactly as
+    /// `emulator/server.py::guest_package_catalog` splits them.
+    fn pkg_fields(line: &str) -> Option<Vec<(String, String)>> {
+        use alloc::string::ToString;
+
+        let payload = line.strip_prefix("[STUDIO_PKG] id=")?;
+        Some(
+            core::iter::once(("id".to_string(), payload.split_whitespace().next().unwrap_or("").to_string()))
+                .chain(payload.split_whitespace().skip(1).filter_map(|part| {
+                    part.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+                }))
+                .collect(),
+        )
+    }
+
+    /// The one value Studio shows for one package, and the process name it was
+    /// derived from.
+    fn pkg_field(fields: &[(String, String)], key: &str) -> String {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Defect A: `/api/apps/list` showed every app as running.
+    ///
+    /// The kernel-embedded half of the catalogue hardcoded `state=active` for all
+    /// seventeen first-party packages, including the ones nobody had launched, so
+    /// a reviewer could not tell a running app from an installed one. The
+    /// catalogue is now derived from the live task table, which is the only
+    /// honest authority for "running": a package may claim an active process
+    /// exactly when a task carrying its process name is in the table.
+    #[test]
+    fn a_never_launched_package_is_not_reported_active() {
+        use crate::task::SCHEDULER;
+
+        capture_clear();
+        handle_serial_command(b"STUDIO_PKG_LIST");
+        let lines = capture_lines();
+
+        let mut catalog = Vec::new();
+        for raw in &lines {
+            if let Some(fields) = pkg_fields(raw.trim_end()) {
+                catalog.push(fields);
+            }
+        }
+        assert!(
+            !catalog.is_empty(),
+            "STUDIO_PKG_LIST returned no `[STUDIO_PKG] id=` lines to audit"
+        );
+
+        let mut never_launched = 0usize;
+        for fields in &catalog {
+            let process = pkg_field(fields, "process");
+            let reported = pkg_field(fields, "state");
+            let live = SCHEDULER.lock().find_live_task_named(&process);
+            if live.is_none() {
+                never_launched += 1;
+                assert_ne!(
+                    reported, "active",
+                    "`/api/apps/list` would show {} as a running app: process {:?} has no \
+                     live task in the process table",
+                    pkg_field(fields, "id"),
+                    process
+                );
+            }
+            assert!(
+                matches!(
+                    reported.as_str(),
+                    "active" | "backgrounded" | "not-running" | "exited" | "staged" | "rolledback"
+                ),
+                "{} reported the undocumented process state {:?}",
+                pkg_field(fields, "id"),
+                reported
+            );
+        }
+        assert!(
+            never_launched > 0,
+            "every package in the catalogue had a live task: the task table under test \
+             cannot demonstrate the installed-vs-running distinction"
+        );
+    }
+
+    /// Defect B, part one: the process table must stay reachable on demand.
+    ///
+    /// The table used to be printed on a two-second timer that nobody asked for,
+    /// which is what an idle device spent most of its serial budget on. Dropping
+    /// the timer is only acceptable if the same data is still obtainable by
+    /// asking, because `emulator/server.py::extract_real_processes` and the
+    /// runtime suites read `[PROC]` lines off the console. `PROC_LIST` is that
+    /// request, and it answers in the shape Studio already parses.
+    /// The four process states a package can be reported in, decided by the
+    /// task table alone.
+    ///
+    /// WHY a locally built scheduler: the distinction under test is between a
+    /// table that contains the process and one that does not, and the global
+    /// scheduler belongs to whichever test runs next.
+    #[test]
+    fn the_catalogue_reports_the_live_process_state() {
+        use crate::capability::CapabilityTable;
+        use crate::package;
+        use crate::task::process::PROCESS_TEST_LOCK;
+        use crate::task::scheduler::Scheduler;
+        use crate::task::{TaskId, TaskState};
+
+        extern "C" fn idle_entry() -> ! {
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+
+        let _serialized = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let notes = package::first_party_package("org.interos.notes").expect("notes is first-party");
+        let shell = package::first_party_package("org.interos.launcher").expect("launcher is first-party");
+        assert_eq!(notes.process_name, "app_notes");
+
+        // Nothing launched: installed only.
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, None),
+            PackageRunState::NotRunning
+        );
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, None).field_value(),
+            "not-running"
+        );
+
+        // Launched, but its surfaces are hidden behind the shell's, so the
+        // surface stack does not name it: running, not on screen.
+        let notes_task = sched.spawn(
+            notes.process_name,
+            idle_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+        );
+        let shell_task = sched.spawn(
+            shell.process_name,
+            idle_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+        );
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, None),
+            PackageRunState::Backgrounded
+        );
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, Some(shell_task.0)).field_value(),
+            "backgrounded",
+            "a task whose surfaces belong to someone else was called active"
+        );
+
+        // Launched and on screen: the surface stack names it as the topmost
+        // visible owner, which is what `active` has always been meant to say.
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, Some(notes_task.0)),
+            PackageRunState::Active
+        );
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, Some(notes_task.0)).field_value(),
+            "active"
+        );
+        assert_eq!(
+            package_run_state(&sched, shell.process_name, Some(notes_task.0)),
+            PackageRunState::Backgrounded,
+            "the shell kept a claim on the screen after an application took it"
+        );
+
+        // On screen, exited, and waiting to be reaped: not running, whatever
+        // the task table's row still says about its name.
+        assert!(sched.terminate_child(TaskId(0), notes_task, 0).is_ok());
+        assert_eq!(sched.get_task(notes_task).map(|t| t.state), Some(TaskState::Zombie));
+        assert_eq!(
+            package_run_state(&sched, notes.process_name, Some(notes_task.0)),
+            PackageRunState::Exited
+        );
+
+        // A staged or rolled-back install is a fact about the transaction, and
+        // is still reported as such rather than as a process state.
+        assert_eq!(
+            rapp_state_field(&sched, "org.example.staged", package::PackageState::Staged, None),
+            "staged"
+        );
+        assert_eq!(
+            rapp_state_field(&sched, "org.example.staged", package::PackageState::RolledBack, None),
+            "rolledback"
+        );
+        // Committed but never launched is not "active".
+        assert_eq!(
+            rapp_state_field(&sched, "org.example.staged", package::PackageState::Active, None),
+            "not-running"
+        );
+    }
+
+    #[test]
+    fn proc_list_answers_with_the_process_table_on_demand() {
+        capture_clear();
+        handle_serial_command(b"PROC_LIST");
+        let lines = capture_lines();
+
+        let header = lines
+            .iter()
+            .position(|l| l.starts_with("[OK] Emitting Kernel Process Table ("));
+        let completion = lines.iter().position(|l| l.starts_with("[PROC_LIST] END"));
+        assert!(
+            header.is_some() && completion.is_some(),
+            "PROC_LIST did not answer with a process table; captured {} line(s): {:?}",
+            lines.len(),
+            lines
+        );
+        // The request is answered as one complete table: the marker arrives after
+        // the header, so a reader can tell a finished reply from a dropped one.
+        assert!(
+            header.unwrap() < completion.unwrap(),
+            "PROC_LIST answered out of order: {:?}",
+            lines
+        );
     }
 
     #[test]

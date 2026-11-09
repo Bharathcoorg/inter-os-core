@@ -13,7 +13,7 @@ Every userspace pointer passed into a syscall must satisfy ten fundamental invar
 3. **Arithmetic Overflow Protection**: `addr.checked_add(len)` must not overflow `u64`.
 4. **Length Ceiling**: Individual transfers are bounded to `MAX_USER_TRANSFER_LEN` (16 MiB) to prevent denial of service or unbounded kernel stalls.
 5. **Multi-Page Inspection**: Every 4 KiB page spanned by `[addr, addr + len)` is individually inspected, not merely the initial page.
-6. **Hardware Permission Verification**: Every touched page must carry user-accessible mapping flags (`U/S = 1`), and destination buffers must carry writable permissions.
+6. **Hardware Permission Verification**: Every touched page must carry user-accessible mapping flags (x86_64 `U/S = 1`, AArch64 `AP[1] = 1`, RISC-V `U = 1`), and destination buffers must carry writable permissions.
 7. **Physical Frame Ownership**: The resolved physical memory frames must belong to the calling task's memory allocation.
 8. **Alignment Enforcement**: Typed pointers (`UserPtr<T>`) enforce `addr % core::mem::align_of::<T>() == 0`.
 9. **Elimination of Raw Slices**: The kernel syscall dispatcher must **never** construct `core::slice::from_raw_parts` directly over untrusted userspace pointers.

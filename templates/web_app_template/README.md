@@ -4,7 +4,7 @@ InterOS Core is an open-source research prototype of a smartphone operating syst
 
 > **Status Notice: Experimental Web Prototype Template**  
 > This template is an experimental client-side web application designed to run inside **Device Studio** (`http://localhost:4300`).  
-> **Native InterOS Applications**: Native applications for InterOS Core execute directly as bare-metal ELF binaries within isolated Ring-3 address spaces using the cryptographically signed `.rapp` package format. Web apps run as sandboxed web prototypes interacting with the Device Studio API server.
+> **Native InterOS Applications**: Native applications for InterOS Core execute directly as bare-metal ELF binaries within isolated userspace address spaces (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode) using the cryptographically signed `.rapp` package format. Web apps run as sandboxed web prototypes interacting with the Device Studio API server.
 
 ---
 

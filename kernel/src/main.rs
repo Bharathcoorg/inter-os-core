@@ -461,8 +461,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         // line buffer; the work happens here, in a normal context.
         kernel::serial::service_serial_commands();
         kernel::services::supervise();
-        // The process table the tick asks for is printed here, in a context where
-        // its bytes do not hold the timer or a touch interrupt off.
+        // The process table is printed here, in a context where its bytes do not
+        // hold the timer or a touch interrupt off -- and only when the task table
+        // has changed shape since the last one the console was shown.
         kernel::interrupts::service_deferred_diagnostics();
         // Reclaim terminated tasks here, never from inside the scheduler lock:
         // the hooks take VFS, whose own paths take the scheduler lock.

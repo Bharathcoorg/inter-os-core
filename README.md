@@ -62,7 +62,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Capability Security Model** | Present | **Unit-tested / QEMU-verified** | Per-process capability token table, rights bitmask (`READ`, `WRITE`, `EXECUTE`, `GRANT`) |
 | **Shared-Memory IPC** | Present | **Unit-tested / QEMU-verified** | Bounded ring buffers, atomic futex-like synchronization, capability endpoints |
 | **Cryptographic `.rapp` Packages** | Present | **Unit-tested / QEMU-verified** | `kernel/src/package/rapp.rs`; Ed25519 signatures, SHA-256 digests, RAPP v2/v3 parser |
-| **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
+| **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Preemptive userspace scheduler (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode), PID tracking, `WaitPid` & `ExitWithCode` syscalls |
 | **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | 720×1440 portrait scanout (ARGB8888, 32 bpp, `refresh_hz = 60` as a programmed target — no physical panel is bound) with 1:1 composition from the 720×1440 authoring space and no resampling, double-buffered scanout with dirty row band present (`present_dst_row_band`), and grayscale coverage anti-aliasing (8-bit coverage on the outline face, a 16-level ramp on the bitmap fallback; no subpixel rendering) |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
 | **Native Smartphone Applications** | Present | **Unit-tested / QEMU-verified** | 17 application crates in `apps/` (`launcher`, `settings`, `messages`, `dialer`, `camera`, `gallery`, `file_manager`, `calculator`, `vault`, `calendar`, `browser`, `music`, `notes`, `video_player`, `agent_manager`, `compositor`, `webview_demo`), all `#![no_std]` and `#![no_main]` with zero runtime heap allocations in render loops. All 17 carry a first-party package descriptor in `FIRST_PARTY_PACKAGES` (`kernel/src/package/mod.rs`) — `webview_demo` included, with `apps/webview_demo/manifest.json` — and the package registry seeds every one of them active (`kernel/src/package/registry.rs`). The launchable set counted from those sources is 15 applications: the app drawer skips `launcher` and `compositor`, which are the shell and the display service rather than user applications (`apps/launcher/src/main.rs`). |
@@ -160,7 +160,7 @@ InterOS Core implements a strict **Capability-Based Microkernel** architecture w
     PML4 / Sv39      Atomic Futex       Revocation
        │
        ▼
-           USERSPACE SERVICES (Ring 3 / EL0 / U-Mode)
+           USERSPACE SERVICES (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode)
        ┌────────┬────────┬────────┬────────┬────────┐
      init    displayd  inputd   storaged  netd   modemd
        │        │        │        │        │        │
@@ -301,7 +301,7 @@ For experimental bring-up and image documentation, see [docs/PHYSICAL_HARDWARE_F
 - [QEMU Phone Platform](docs/QEMU_PHONE_PLATFORM.md) — virtual hardware and transport specification.
 - [RAPP Package Format](docs/RAPP_FORMAT.md) — deterministic binary package specification.
 - [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md) — memory trust boundary invariants.
-- [System Services](docs/SYSTEM_SERVICES.md) — Ring-3 isolated service lifecycle and contracts.
+- [System Services](docs/SYSTEM_SERVICES.md) — Isolated userspace service lifecycle and contracts (Ring 3 / EL0 / U-Mode).
 - [Recovery and Secure Updates](docs/RECOVERY_AND_UPDATES.md) — authenticated A/B transactions and rollback.
 - [Diagnostics and Performance](docs/DIAGNOSTICS_AND_PERFORMANCE.md) — bounded diagnostics and telemetry.
 - [Developer Guide](docs/DEVELOPER_GUIDE.md) — comprehensive CLI and workflow manual.

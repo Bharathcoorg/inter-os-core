@@ -870,12 +870,27 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("FALLBACK_USER_ADDRESS_SPACE_LIMIT is not defined as 256 * 1024 * 1024 (256 MiB fallback) in inference.rs", _user_address_space_defects(user, services, m8_inference))
 
     def test_process_table_reports_real_cr3_values(self):
+        """The process table's cr3 column is read from a frame, never authored.
+
+        WHY the gate no longer names `crate::memory::kernel_pml4`: which accessor
+        supplies the kernel's own table is the kernel's business, and the
+        fallible one is the right answer here -- a diagnostic that panics the
+        guest it is reporting on is a very expensive diagnostic. What must not
+        drift is the claim itself: every value in the column comes from a real
+        frame, and the one case with no frame says so as `0` instead of inventing
+        an address.
+        """
         scheduler = self.read("kernel/src/task/scheduler.rs")
         start = scheduler.index("pub fn dump_process_table")
         end = scheduler.index("\n    }", start)
         body = scheduler[start:end]
         self.assertIn("frame().start_address().as_u64()", body)
-        self.assertIn("crate::memory::kernel_pml4()", body)
+        self.assertIn("crate::memory::", body)
+        # The kernel's own table is reached without a panicking path: an absent
+        # frame resolves to `0`, and nothing in the dump unwraps or expects.
+        self.assertIn(".unwrap_or(0)", body)
+        for panicking in (".unwrap()", ".expect("):
+            self.assertNotIn(panicking, body)
         self.assertNotIn("0x0000000000400000", body)
         self.assertNotIn("0x0000000000100000", body)
 

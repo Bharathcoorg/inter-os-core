@@ -17,11 +17,12 @@ InterOS Core is a research prototype of a smartphone operating system written in
 ```text
 +-------------------------------------------------------------------------+
 |                  InterOS Native Smartphone Applications                 |
-|   17 Ring-3 Apps: Launcher, Settings, Messages, Dialer, Camera, Gallery,|
+|   17 Apps: Launcher, Settings, Messages, Dialer, Camera, Gallery,       |
 |   Files, Calculator, Vault, Calendar, Browser, Music, Notes,            |
 |   Video Player, Agent Manager, Compositor, Webview Demo                 |
 +-------------------------------------------------------------------------+
-|                Userspace System Services & SDK (Ring 3 / EL0 / U-Mode)  |
+|                Userspace System Services & SDK                          |
+|           (x86_64 Ring 3  |  AArch64 EL0  |  RISC-V U-Mode)              |
 |   - Window Compositor (DRM/KMS Scanout)         - Audio Service (audiod) |
 |   - Cellular RIL / Serial AT Modem (modemd)     - Touch Digitizer (inputd)|
 |   - Block Storage & Records (storaged)          - Network Stack (netd)   |
@@ -31,7 +32,8 @@ InterOS Core is a research prototype of a smartphone operating system written in
 |                 Capability-Based Shared-Memory IPC Bus                  |
 |       Shared-Memory Ring Buffers + Atomic Futex Synchronization         |
 +-------------------------------------------------------------------------+
-|                   InterOS Microkernel Core (Ring 0 / EL1 / S-Mode)      |
+|                   InterOS Microkernel Core                              |
+|           (x86_64 Ring 0  |  AArch64 EL1  |  RISC-V S-Mode)              |
 |   - Preemptive Priority Scheduler           - Memory Paging & MMU       |
 |   - Software Keystore & Vault Controller     - Capability Token Matrix  |
 +-------------------------------------------------------------------------+
@@ -41,6 +43,23 @@ InterOS Core is a research prototype of a smartphone operating system written in
 |   - Linear DRM/KMS VBE       |   - SimpleFB Framebuffer         | - NS16550A  |
 +-------------------------------------------------------------------------+
 ```
+
+### 1.1 Hardware Privilege Separation Across Target Architectures
+
+InterOS enforces strict hardware-level privilege separation between the microkernel and userspace tasks. Because hardware privilege terminology differs across CPU architectures, the platform explicitly maps its capability and isolation model to each architecture's native execution modes:
+
+| Architecture | Microkernel (Privileged) | Userspace & System Services (Unprivileged) | Syscall / Trap Boundary | MMU / Paging Register |
+| :--- | :--- | :--- | :--- | :--- |
+| **x86_64** | **Ring 0** (Supervisor) | **Ring 3** (User Mode) | `syscall` / `sysret` (LSTAR MSR) | `CR3` (PML4) |
+| **AArch64** | **EL1** (Exception Level 1) | **EL0** (Exception Level 0) | `svc #0` (Synchronous Exception) | `TTBR0_EL1` (User) / `TTBR1_EL1` (Kernel) |
+| **RISC-V 64** | **S-Mode** (Supervisor Mode) | **U-Mode** (User Mode) | `ecall` / `sret` (`stvec` Trap) | `satp` (Sv39 Mode 8) |
+
+> [!IMPORTANT]
+> **Privilege Terminology Specification**:
+> - **Ring 3 does not exist in ARM (AArch64) or RISC-V**. "Ring 3" is strictly an x86/x86_64 privilege ring designation.
+> - In **AArch64**, unprivileged userspace runs exclusively at **EL0** (Exception Level 0), while the OS kernel executes at **EL1** (Exception Level 1).
+> - In **RISC-V 64**, unprivileged userspace runs exclusively in **U-Mode** (User Mode), while the OS kernel executes in **S-Mode** (Supervisor Mode).
+> - In generic cross-architecture contexts, InterOS uses the neutral term **unprivileged userspace** or explicitly specifies `(Ring 3 / EL0 / U-Mode)` to reflect each target's physical reality.
 
 ### The Fundamental Security Invariants
 Untrusted user processes cannot:
@@ -274,7 +293,7 @@ Applications and system services are packaged using the native, deterministic `.
 4. **Isolated Process Execution**:
    - Resolves declared capability IDs into per-task capability rights.
    - Maps ELF sections into a dedicated address space (`W^X` enforced).
-   - Launches child process in Ring 3 / EL0 userspace.
+   - Launches child process in unprivileged userspace (Ring 3 on x86_64, EL0 on AArch64, U-Mode on RISC-V).
 
 For complete binary layout details, see [RAPP Package Format](RAPP_FORMAT.md).
 

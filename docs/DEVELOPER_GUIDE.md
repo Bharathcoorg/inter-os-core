@@ -171,7 +171,7 @@ python tools/interos.py uninstall org.interos.my_app
 ## 6. Runtime Management & Observability
 
 ### `interos logs`
-Streams or follows live Ring-0 serial UART logs from the running microkernel:
+Streams or follows live microkernel serial UART logs (Ring 0 / EL1 / S-Mode):
 ```bash
 # View recent UART output:
 python tools/interos.py logs
@@ -187,7 +187,7 @@ python tools/interos.py shell [--port 4301]
 ```
 
 ### `interos trace`
-Queries and displays live CPU registers (`CR0`, `CR3`, `RIP`, `EAX`) directly from the QEMU monitor:
+Queries and displays live x86_64 CPU registers (`CR0`, `CR3`, `RIP`, `EAX`) directly from the QEMU monitor:
 ```bash
 python tools/interos.py trace
 ```

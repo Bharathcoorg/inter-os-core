@@ -48,7 +48,7 @@ InterOS Core enforces the following architectural security invariants:
 1. **Zero Ambient Authority:**
    No process or thread receives ambient access to memory, hardware registers, VFS inodes, or IPC endpoints. All operations require an explicit, unforgeable `CapHandle` checked by the kernel capability broker.
 2. **Process Isolation:**
-   Kernel and userspace memory spaces are strictly segregated with architecture-specific page tables (PML4 on x86_64, TTBR0/TTBR1 on AArch64, satp on RISC-V 64). Userspace applications run at ring 3 / EL0 / U-mode.
+   Kernel and userspace memory spaces are strictly segregated with architecture-specific page tables (PML4 on x86_64, TTBR0/TTBR1 on AArch64, satp on RISC-V 64). Userspace applications run at Ring 3 / EL0 / U-Mode.
 3. **Safe Syscall Memory Handling:**
    All userspace pointers passed across syscall boundaries undergo strict range validation, alignment verification, and bounds enforcement before dereferencing.
 4. **Untrusted Model Content:**

@@ -36,20 +36,8 @@ pub const PIT_DIVISOR: u16 = (PIT_BASE_HZ / SYSTEM_TICK_HZ) as u16;
 /// Global atomic system tick counter (milliseconds of real time since boot).
 pub static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Set by the timer tick when the process table is due to be printed, and
-/// consumed by the kernel's own loop.
-///
-/// WHY deferred rather than printed in the handler: the dump emits one `[PROC]`
-/// line per task, and an `x86-interrupt` handler runs with IF clear, so all of
-/// those byte-at-a-time transmits happened with the timer and a freshly arrived
-/// touch held off. That made the longest interrupt-off window in the kernel land
-/// on a fixed two-second cadence. Deferring keeps every `[PROC]` line and its
-/// period -- the Studio's process panel reads them -- and moves the cost to a
-/// context where it blocks nothing.
-pub static PROCESS_TABLE_DUMP_DUE: AtomicBool = AtomicBool::new(false);
-
-/// The one-second liveness line, printed by the kernel's loop for the same
-/// reason as the dump above.
+/// The one-second liveness line, printed by the kernel's loop rather than the
+/// tick that asks for it.
 ///
 /// One line is small, but a line written from the handler is written with IF
 /// clear, so a touch that arrives during its byte-at-a-time transmit waits for
@@ -57,6 +45,33 @@ pub static PROCESS_TABLE_DUMP_DUE: AtomicBool = AtomicBool::new(false);
 /// so the number stays the one the second actually crossed at.
 pub static TICK_HEARTBEAT_DUE: AtomicBool = AtomicBool::new(false);
 pub static TICK_HEARTBEAT_AT: AtomicU64 = AtomicU64::new(0);
+
+/// The last shape of the task table the console was shown, as a
+/// [`process_table_signature`].
+///
+/// `u64::MAX` is the sentinel "the console has not been shown a table yet", so
+/// the kernel's loop puts exactly one table up after boot and then says nothing
+/// until the table genuinely changes.
+///
+/// WHY this replaced `PROCESS_TABLE_DUMP_DUE`: that flag was armed by the timer
+/// tick every two seconds, so an idle device with sixteen tasks printed
+/// `17 lines / 2 s` of `[PROC]` table that nobody had asked for. Silence is the
+/// point of this OS's idle state, and the same rule the RTC follows applies
+/// here: report on change, not on the clock.
+pub static PROCESS_TABLE_SHOWN_SIGNATURE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Milliseconds between two looks at the task table.
+///
+/// WHY a bound on the *sampling* and not on the printing: whether a table is
+/// printed is decided purely by [`process_table_signature`] changing, but
+/// working that out walks the task list under the scheduler lock. Once a second
+/// is far more often than the table changes shape, and well inside the cost of
+/// `services::supervise`, which already takes the same lock on every pass of
+/// the kernel loop.
+pub const PROCESS_TABLE_SAMPLE_TICKS: u64 = 1_000;
+
+/// The tick at which the task table was last sampled for change.
+pub static PROCESS_TABLE_SAMPLED_AT: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Real-time clock source
@@ -767,9 +782,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         TICK_HEARTBEAT_AT.store(ticks, Ordering::Relaxed);
         TICK_HEARTBEAT_DUE.store(true, Ordering::Relaxed);
     }
-    if period_crossed(previous, ticks, 2000) {
-        PROCESS_TABLE_DUMP_DUE.store(true, Ordering::Relaxed);
-    }
+    // WHY nothing arms the process table here any more: the tick used to set a
+    // dump-due flag every 2000 ms, which put a header plus one `[PROC]` line per
+    // task on an idle console roughly four times a minute for as long as the
+    // device was powered. The kernel's loop now looks at the task table itself
+    // and prints only when its shape has changed, or when someone asks for it by
+    // name with `PROC_LIST`.
 
     unsafe {
         PICS.lock()
@@ -785,12 +803,83 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     crate::task::on_timer_tick(elapsed);
 }
 
-/// Prints the process table when the timer tick has asked for it.
+/// Signature of the task table's *lifecycle* shape.
+///
+/// WHY these four numbers rather than every field of the `[PROC]` lines: the
+/// per-task `state=` column flips `Ready` -> `Blocked` -> `Running` many times a
+/// second as tasks take IPC waits, event polls and time slices. That is not a
+/// change anyone asked to hear about, and printing on it would put the idle
+/// device's chatter straight back. What a reader of the process panel needs
+/// told is a process appearing, disappearing, dying, or taking the foreground,
+/// which is exactly what these count. Task ids are never reused, so no two
+/// different sets of ids can share a size and a sum.
+pub fn process_table_signature(sched: &crate::task::scheduler::Scheduler) -> u64 {
+    use crate::task::TaskState;
+
+    let mut live: u64 = 0;
+    let mut exiting: u64 = 0;
+    let mut id_sum: u64 = 0;
+    let foreground = sched.active_foreground_task().map(|id| id.0).unwrap_or(u64::MAX);
+    for task in sched.tasks_iter() {
+        match task.state {
+            TaskState::Zombie | TaskState::Terminated => exiting += 1,
+            _ => live += 1,
+        }
+        // Saturating, so a pathological number of tasks folds into the range
+        // instead of wrapping and hiding a change behind an equal sum.
+        id_sum = id_sum.saturating_add(task.id.0);
+    }
+    (live << 44) ^ (exiting << 24) ^ id_sum.rotate_left(7) ^ foreground.rotate_right(11)
+}
+
+/// Reports whether `sched`'s table differs from the one the console was last
+/// shown, and records it as shown.
+///
+/// WHY this is separate from the printing: the decision is the whole of the
+/// "on change, never on a timer" rule, and it has to be testable on the host,
+/// where `dump_process_table` cannot run because there is no page table to name
+/// in a `[PROC]` line.
+pub fn process_table_changed(sched: &crate::task::scheduler::Scheduler) -> bool {
+    let signature = process_table_signature(sched);
+    if signature == PROCESS_TABLE_SHOWN_SIGNATURE.load(Ordering::Relaxed) {
+        return false;
+    }
+    PROCESS_TABLE_SHOWN_SIGNATURE.store(signature, Ordering::Relaxed);
+    true
+}
+
+/// Prints the process table when its shape differs from the last one the
+/// console was shown, and reports whether it printed.
+pub fn dump_process_table_if_changed(sched: &crate::task::scheduler::Scheduler) -> bool {
+    if !process_table_changed(sched) {
+        return false;
+    }
+    sched.dump_process_table();
+    true
+}
+
+/// Prints the process table for an explicit `PROC_LIST` request and returns how
+/// many tasks it showed, or `None` if the scheduler was busy.
+///
+/// WHY the request also updates [`PROCESS_TABLE_SHOWN_SIGNATURE`]: the console
+/// has just been shown exactly that table. Leaving the signature stale would
+/// make the kernel's loop repeat the whole dump a second later, which is the
+/// chatter this change exists to remove.
+pub fn process_table_dump_now() -> Option<usize> {
+    let sched = crate::task::SCHEDULER.try_lock()?;
+    let tasks = sched.task_count();
+    PROCESS_TABLE_SHOWN_SIGNATURE.store(process_table_signature(&sched), Ordering::Relaxed);
+    sched.dump_process_table();
+    Some(tasks)
+}
+
+/// Prints what the tick deferred, in a context where its bytes block nothing.
 ///
 /// WHY this is called from the kernel's loop and not from the tick: the dump is
 /// one `[PROC]` line per task, and a handler writes them with IF clear, so the
-/// whole dump was an interrupt-off window. Cadence, content and the Studio panel
-/// that consumes it are unchanged -- only the context it runs in moved.
+/// whole dump was an interrupt-off window. Content and the Studio panel that
+/// consumes it are unchanged -- only the context it runs in moved, and the
+/// trigger moved from "two seconds passed" to "the task table changed".
 #[cfg(not(target_os = "windows"))]
 pub fn service_deferred_diagnostics() {
     if TICK_HEARTBEAT_DUE.swap(false, Ordering::Relaxed) {
@@ -799,11 +888,15 @@ pub fn service_deferred_diagnostics() {
             TICK_HEARTBEAT_AT.load(Ordering::Relaxed)
         );
     }
-    if !PROCESS_TABLE_DUMP_DUE.swap(false, Ordering::Relaxed) {
+
+    let now = SYSTEM_TICKS.load(Ordering::Relaxed);
+    let last_sample = PROCESS_TABLE_SAMPLED_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last_sample) < PROCESS_TABLE_SAMPLE_TICKS {
         return;
     }
+    PROCESS_TABLE_SAMPLED_AT.store(now, Ordering::Relaxed);
     if let Some(sched) = crate::task::SCHEDULER.try_lock() {
-        sched.dump_process_table();
+        dump_process_table_if_changed(&sched);
     }
 }
 
@@ -1017,6 +1110,102 @@ mod timekeeping_tests {
         assert!(period_crossed(900, 2_100, 1_000));
         assert!(period_crossed(5, 5, 2_000) == false);
         assert!(period_crossed(0, 0, 0) == false);
+    }
+
+    /// Defect B: an idle device printed roughly eight `[PROC]` lines a second.
+    ///
+    /// The timer tick armed a full process-table dump every two seconds, so a
+    /// guest doing nothing at all kept the console -- and the Studio's line
+    /// buffer, and anyone measuring `input_lines` -- busy. The table is now
+    /// printed when its shape changes and when someone asks for it. This test
+    /// holds the task table still and asserts the silence, then changes it one
+    /// way at a time to prove the notice is not lost.
+    ///
+    /// WHY a locally built scheduler: the global one belongs to whichever test
+    /// runs next, and the whole point of the rule under test is that output
+    /// depends only on whether the table changed.
+    #[test]
+    fn the_process_table_is_printed_only_when_it_changes() {
+        use crate::capability::CapabilityTable;
+        use crate::task::process::PROCESS_TEST_LOCK;
+        use crate::task::scheduler::Scheduler;
+        use crate::task::TaskId;
+        use core::sync::atomic::Ordering::Relaxed;
+
+        extern "C" fn idle_entry() -> ! {
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+
+        // `spawn` registers a process record in a global table, so this runs
+        // serialized with the scheduler's own tests rather than alongside them.
+        let _serialized = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        // Nothing has been shown to the console yet, so the first look shows it.
+        PROCESS_TABLE_SHOWN_SIGNATURE.store(u64::MAX, Relaxed);
+        assert!(
+            process_table_changed(&sched),
+            "the kernel loop has never shown a table, so it owes the console one"
+        );
+
+        // The idle case, and the defect: the same table sampled again and again
+        // must produce exactly nothing, forever.
+        for _ in 0..16 {
+            assert!(
+                !process_table_changed(&sched),
+                "an unchanged process table was printed again -- the old two-second \
+                 timer is still deciding what the console says"
+            );
+        }
+
+        // A process appearing is worth telling the console about.
+        let probe = sched.spawn(
+            "app_quiet_probe",
+            idle_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+        );
+        assert_ne!(probe, TaskId(0), "the probe task was not spawned");
+        assert!(
+            process_table_changed(&sched),
+            "a new process did not earn a process table"
+        );
+        assert!(!process_table_changed(&sched), "the same table printed twice");
+
+        // Taking the foreground is a change a reviewer reads; losing a time
+        // slice to a co-scheduled neighbour is not. Without this second half,
+        // gating on "any field of any line" would put the chatter straight back.
+        sched.set_active_foreground_task(Some(probe));
+        assert!(
+            process_table_changed(&sched),
+            "a foreground change did not earn a process table"
+        );
+        sched.block_task(probe);
+        assert!(
+            !process_table_changed(&sched),
+            "a Ready -> Blocked transition, which every waiting task goes through \
+             many times a second, printed the process table"
+        );
+        sched.unblock_task(probe);
+        assert!(
+            !process_table_changed(&sched),
+            "a Blocked -> Ready transition printed the process table"
+        );
+
+        // A process exiting is a change worth printing, even though the task is
+        // still in the table waiting to be reaped.
+        assert!(
+            sched.terminate_child(TaskId(0), probe, 0).is_ok(),
+            "the probe task could not be terminated"
+        );
+        assert!(
+            process_table_changed(&sched),
+            "a process moving to Zombie did not earn a process table"
+        );
     }
 }
 

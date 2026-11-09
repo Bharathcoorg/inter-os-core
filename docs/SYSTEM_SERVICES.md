@@ -2,7 +2,7 @@
 
 InterOS Core is an open-source research prototype of a smartphone operating system, running in QEMU only. It is not a commercial product. External contributions are not accepted at this stage and will open after the first stable release.
 
-InterOS Core isolates platform policy outside the microkernel. System services execute as standalone Ring-3 user processes (`userspace/system-service/`), acquire only the capability rights required for their specific operational role, and communicate with PID 1 via structured heartbeats and lifecycle protocols.
+InterOS Core isolates platform policy outside the microkernel. System services execute as standalone unprivileged userspace processes (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode, built from `userspace/system-service/`), acquire only the capability rights required for their specific operational role, and communicate with PID 1 via structured heartbeats and lifecycle protocols.
 
 ---
 
@@ -23,7 +23,7 @@ InterOS Core isolates platform policy outside the microkernel. System services e
 | **11** | `sensord` | Accelerometer, gyroscope, light sensor | Restart on failure | Present | **Unit-tested (emulated)** |
 | **12** | `aid` | AI request broker over the development-host bridge: capability-gated routing, retrieval for global search, and the refusals a request gets back when it cannot be answered | Restart on failure | Present | **QEMU-verified** for the service, its IPC bridge and its refusals. Inference itself is not verified: no model weights are installed in the image, so generative and embedding requests come back as refusals ("...no local model weights loaded") rather than answers |
 
-> *Note: Daemons 1–8, 11, and 12 are built from `userspace/system-service/`. Compositor (9) and Launcher (10) are standalone Ring-3 applications in `apps/` with system service registration.*
+> *Note: Daemons 1–8, 11, and 12 are built from `userspace/system-service/`. Compositor (9) and Launcher (10) are standalone userspace applications in `apps/` with system service registration.*
 
 ---
 
