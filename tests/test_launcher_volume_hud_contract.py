@@ -67,6 +67,69 @@ def tick_branch(source: str) -> str:
     return body
 
 
+def block_from(source: str, start: int) -> str:
+    """The Rust block whose header begins at `start`, measured by brace depth.
+
+    WHY measure the extent instead of slicing a fixed number of bytes: an earlier
+    version read 400 bytes past the flag clear. The hide then grew a comment
+    explaining why the beat is allowed to present without writing, the present
+    call slid past the slice, and the gate failed on source that was correct --
+    the same class of defect it exists to catch, only in the gate.
+    """
+    opening = source.index("{", start)
+    depth = 0
+    for offset in range(opening, len(source)):
+        if source[offset] == "{":
+            depth += 1
+        elif source[offset] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : offset + 1]
+    raise AssertionError("unbalanced braces in the shell's event loop")
+
+
+def shell_functions(source: str) -> dict:
+    """Every top-level `fn` in the shell, mapped to its body.
+
+    WHY top-level only: the present helpers are declared at column zero and their
+    bodies never put a brace there, so the closing `^}` is the whole delimiter.
+    """
+    return {
+        name: body
+        for name, body in re.findall(
+            r"^(?:pub )?fn ([A-Za-z_][A-Za-z0-9_]*)\([^)]*\)[^{]*\{\n(.*?)^\}", source, re.S | re.M
+        )
+    }
+
+
+def reaches_the_scanout(calls, source, functions=None) -> bool:
+    """True when one of `calls` reaches `std::surface_flip()` through the shell's helpers.
+
+    WHY resolve the call instead of naming one function: the expiry used to call
+    `surface_flip_display()` and now calls `surface_recompose_display()`, which
+    opens the present gate for a beat that changes the panel by hiding a window
+    rather than by writing pixels -- an exception the shell states by name
+    instead of leaving a hole in the rule. A gate pinned to either name would
+    fail on a rename that keeps the present, and pass on a helper that quietly
+    stopped presenting. What has to hold is that the beat reaches the syscall.
+    """
+    functions = shell_functions(source) if functions is None else functions
+    seen = set()
+    pending = list(calls)
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = functions.get(name)
+        if body is None:
+            continue
+        if "std::surface_flip()" in body:
+            return True
+        pending.extend(re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(\s*\)", body))
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 1. The budget is a named value whose units the kernel agrees with.
 # ---------------------------------------------------------------------------
@@ -139,13 +202,16 @@ def test_the_expiry_lowers_the_surface_it_raised():
     loop = loop_source()
     expiry = loop.index("state.volume_hud_until = 0;")
     guard = loop[: expiry].rindex("if state.volume_hud_until != 0")
-    window = loop[guard : expiry + 400]
+    window = block_from(loop, guard)
     assert "current_ticks()" in loop[guard:expiry], (
         "the expiry must compare against the same clock the arms wrote"
     )
     assert re.search(
         r"window_set_geometry\(\s*id,\s*100,\s*220,\s*100,\s*false\s*\)", window
     ), "the expiry must lower the HUD window it armed, with the same geometry"
-    assert "surface_flip_display()" in window, (
-        "hiding a window with no present leaves the frame on screen"
+    calls = set(re.findall(r"\b(surface_[a-z0-9_]+)\s*\(", window))
+    assert calls, "the expiry window no longer calls a present helper at all"
+    assert reaches_the_scanout(calls, shell_source()), (
+        f"hiding a window with no present leaves the frame on screen: neither of "
+        f"{sorted(calls)} reaches std::surface_flip()"
     )

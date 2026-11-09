@@ -230,6 +230,34 @@ def _card_fit_defects(notice_src: str) -> list:
     return defects
 
 
+def _reaches_scanout(source: str, body: str) -> bool:
+    """Whether the statements in `body` actually get pixels onto the panel.
+
+    WHY walk the calls instead of reading the one helper: the shell's present now
+    lives inside `render_view`, which paints and presents as one operation so that
+    a beat which wrote pixels cannot be missed and a beat which wrote none cannot
+    cover a launched app. A flat read of the repaint helper could only have asked
+    for a second flip next to the paint -- the exact redundancy the present gate
+    was built to refuse -- and would still pass on a paint helper that quietly
+    stopped presenting.
+    """
+    pending = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", _strip_comments(body))
+    code = _strip_comments(source)
+    seen = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if f"fn {name}(" not in code:
+            continue
+        callee = _body(source, f"fn {name}")
+        if "std::surface_flip()" in callee:
+            return True
+        pending.extend(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", callee))
+    return False
+
+
 def _shade_live_defects(shell_src: str) -> list:
     """An open shade has to notice a notice.
 
@@ -256,8 +284,10 @@ def _shade_live_defects(shell_src: str) -> list:
         defects.append("the shade repaint does not check that the shade is the screen being shown")
     if "notification_store_changed" not in repaint:
         defects.append("the shade repaints on every poll rather than when the store moved")
-    if "render_view(surface, &state)" not in repaint or "surface_flip_display()" not in repaint:
+    if "render_view(surface, &state)" not in repaint:
         defects.append("the shade repaint path paints nothing")
+    elif not _reaches_scanout(shell_src, repaint):
+        defects.append("the shade repaint path paints a surface it never presents")
     if not re.search(
         r"refresh_notifications\(&mut state\);\s*refresh_open_shade\(surface, &mut state\);",
         _strip_comments(shell_src),
@@ -482,10 +512,21 @@ def test_the_contract_can_fail():
     ):
         assert _account_defects(retire, notice), f"the account detector does not catch a notice that {label}"
 
-    def shell_source(refresh, repaint, poll):
+    presenting_view = (
+        "fn render_view(surface: u32, state: &S) {\n"
+        "  paint_surface(surface, state);\n  surface_flip_display();\n}\n"
+        "fn surface_flip_display() {\n  gate_permission();\n  std::surface_flip();\n}\n"
+    )
+    painting_without_presenting = (
+        "fn render_view(surface: u32, state: &S) {\n"
+        "  paint_surface(surface, state);\n}\n"
+        "fn surface_flip_display() {\n  gate_permission();\n  std::surface_flip();\n}\n"
+    )
+
+    def shell_source(refresh, repaint, poll, paint=presenting_view):
         return f"fn refresh_notifications(state: &mut S) -> usize {{\n{refresh}}}\n" \
                f"fn refresh_open_shade(surface: u32, state: &mut S) {{\n{repaint}}}\n" \
-               f"fn poll(surface: u32, state: &mut S) {{\n{poll}}}\n"
+               f"fn poll(surface: u32, state: &mut S) {{\n{poll}}}\n{paint}"
 
     current_store = (
         "  let seen = store_fingerprint(&buf[..n], count);\n"
@@ -494,7 +535,7 @@ def test_the_contract_can_fail():
     )
     paints_the_open_shade = (
         "  if state.current_view != ViewMode::Notifications || !state.notification_store_changed { return; }\n"
-        "  render_view(surface, &state);\n  surface_flip_display();\n"
+        "  render_view(surface, &state);\n"
     )
     poll_asks = "  refresh_notifications(&mut state);\n  refresh_open_shade(surface, &mut state);\n"
     assert not _shade_live_defects(
@@ -509,11 +550,14 @@ def test_the_contract_can_fail():
         ("repaints the shade on every poll",
          shell_source(current_store,
                       "  if state.current_view != ViewMode::Notifications { return; }\n"
-                      "  render_view(surface, &state);\n  surface_flip_display();\n", poll_asks)),
+                      "  render_view(surface, &state);\n", poll_asks)),
         ("repaints whatever screen is up",
          shell_source(current_store,
                       "  if !state.notification_store_changed { return; }\n"
-                      "  render_view(surface, &state);\n  surface_flip_display();\n", poll_asks)),
+                      "  render_view(surface, &state);\n", poll_asks)),
+        ("paints a surface it never presents",
+         shell_source(current_store, paints_the_open_shade, poll_asks,
+                      paint=painting_without_presenting)),
         ("reads the store and paints nothing",
          shell_source(current_store, "  if !state.notification_store_changed { return; }\n", poll_asks)),
         ("has the repaint but never reaches it",

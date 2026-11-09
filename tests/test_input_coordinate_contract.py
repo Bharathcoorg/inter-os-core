@@ -2,8 +2,30 @@
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def fn_body(source: str, name: str) -> str:
+    """What is inside the braces of a top-level `fn name`.
+
+    WHY extract the body instead of searching the file: `X appears in app_drawer.rs`
+    is satisfied by a comment, a doc example, or the same phrase in a different
+    function. Reading the one function that answers the question measures the code
+    that runs.
+    """
+    start = source.index(f"fn {name}(")
+    opening = source.index("{", start)
+    depth = 0
+    for offset in range(opening, len(source)):
+        if source[offset] == "{":
+            depth += 1
+        elif source[offset] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1 : offset]
+    raise AssertionError(f"unbalanced braces in `fn {name}`")
 
 
 def test_kernel_declares_coordinate_spaces():
@@ -220,14 +242,53 @@ def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
 
 
 def test_launcher_drawer_pagination_is_registry_backed():
+    """One capacity answers the tiles, the dots and the swipe; nothing re-divides.
+
+    The pin this replaces quoted `let pages = (state.app_count + 11) / 12`, an
+    authored twelve that the shell divided the raw catalogue by while the painter
+    laid out `columns * rows` tiles a page and the dot row drew what the painter
+    built. A catalogue of thirteen therefore had a page the swipe would not turn
+    to. The fix was to delete the shell's arithmetic, so a gate that still
+    demanded the deleted line would fail on the repaired source -- it now
+    measures that the shell asks the painter, and that what the painter answers
+    with is the grid it paints.
+    """
     source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     drawer = (ROOT / "apps/launcher/src/screens/app_drawer.rs").read_text(encoding="utf-8")
-    assert "let pages = (state.app_count + 11) / 12" in source
+
+    page_reads = re.findall(r"let pages = ([^\n]*)", source)
+    assert page_reads, "the shell no longer resolves a page count anywhere; re-audit"
+    for expr in page_reads:
+        assert "app_drawer_page_count(" in expr, (
+            f"the shell divided something to get a page count again: `let pages = {expr.strip()}`"
+        )
+    assert "+ 11) / 12" not in source and "+ 11) / 12" not in drawer, (
+        "the authored-twelve page count is back"
+    )
     assert "state.app_drawer_page += 1" in source
-    # Page extent and the index range shown on it are counted from the registry,
-    # not from a fixed twelve-item assumption inside the hit test.
-    assert "layout::pages(count, app_drawer_per_page(state))" in drawer
+
+    # The capacity the page arithmetic divides by is the grid, column by row.
+    page_count = fn_body(drawer, "app_drawer_page_count")
+    assert "filtered_indices(" in page_count, (
+        "the page count stopped counting the catalogue the drawer is showing: "
+        "it has to filter first, because a filtered page cannot be derived from "
+        "`state.app_count`"
+    )
+    assert "layout::pages(count, app_drawer_per_page(state))" in page_count
+    assert "drawer_columns(state) * DRAWER_ROWS" in fn_body(drawer, "app_drawer_per_page")
+    assert fn_body(drawer, "drawer_columns").strip().rstrip(";").strip() == "DRAWER_COLUMNS"
+
+    # The painter binds the same accessor, so capacity is one answer, not two.
+    assert "let capacity = app_drawer_per_page(state);" in drawer
+    assert "DRAWER_COLUMNS," in fn_body(drawer, "current_grid"), (
+        "the grid the tiles are laid out on stopped taking its columns from the "
+        "constant the page capacity multiplies"
+    )
     assert "state.app_drawer_page.min(pages - 1)" in drawer
+    assert "const _: () = assert!(scale::DRAWER_ROWS == DRAWER_ROWS);" in drawer, (
+        "the library's mirror of the row count stopped being checked against the "
+        "drawer's own, so the clamp measures a grid the screen may not paint"
+    )
 
 
 def test_app_drawer_open_paths_clear_the_filter_that_moves_every_slot():
