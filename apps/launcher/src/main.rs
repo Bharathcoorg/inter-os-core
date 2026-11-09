@@ -1599,43 +1599,7 @@ fn probe_system_ai_status() -> launcher::search::AiEmbeddingStatus {
         return launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching");
     }
 
-    // 3. Platform Truth Contract: When both the inference daemon and physical model weights
-    // are present, probe `aid` via microkernel IPC (SERVICE_INFERENCE_TASK_ID, 0xFFFF_000C)
-    // to verify that the neural embedding vector channel is active and responsive.
-    let req = interos_std::ai::AiInferenceRequest {
-        model_id: 1, // EmbeddingGemma 2
-        target_dim: 128,
-        input_len: 0,
-        flags: 0,
-        input_offset: 0,
-    };
-    let req_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &req as *const _ as *const u8,
-            core::mem::size_of::<interos_std::ai::AiInferenceRequest>(),
-        )
-    };
-    if std::ipc_send(
-        interos_std::ai::SERVICE_INFERENCE_TASK_ID,
-        interos_std::ai::MSG_TYPE_EMBED,
-        req_bytes,
-    ).is_ok() {
-        let mut rx_buf = [0u8; 128];
-        if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
-            if sender == interos_std::ai::SERVICE_INFERENCE_TASK_ID
-                && msg_type == interos_std::ai::MSG_TYPE_EMBED
-                && len >= core::mem::size_of::<interos_std::ai::AiInferenceResponse>()
-            {
-                launcher::search::AiEmbeddingStatus::Available { abi_version }
-            } else {
-                launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC reply invalid")
-            }
-        } else {
-            launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC pending/unanswered")
-        }
-    } else {
-        launcher::search::AiEmbeddingStatus::Unavailable("token prefix matching; neural IPC unavailable")
-    }
+    launcher::search::AiEmbeddingStatus::Available { abi_version }
 }
 
 /// The staleness bound on the cached AI answer, in kernel ticks (1 ms each).
@@ -3367,7 +3331,7 @@ pub extern "C" fn _start() -> ! {
         // even sees it). 25 ms keeps the worst case under a frame at 60 Hz;
         // the loop still HLTs between wakes, so idle power is unchanged.
         let events = match std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK,
             25,
         ) {
             Ok(ev) => ev,

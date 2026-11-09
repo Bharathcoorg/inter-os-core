@@ -87,7 +87,7 @@ pub fn run(service_id: u8, name: &str) -> ! {
             }
         }
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+            let _ = std::event_poll(std::EVENT_IPC_MSG, 50);
         } else {
             std::yield_now();
         }
@@ -431,7 +431,7 @@ pub fn run_wasm() -> ! {
         }
 
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+            let _ = std::event_poll(std::EVENT_IPC_MSG, 50);
         } else {
             std::yield_now();
         }
@@ -512,7 +512,7 @@ pub fn run_ai() -> ! {
         }
 
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+            let _ = std::event_poll(std::EVENT_IPC_MSG, 50);
         } else {
             std::yield_now();
         }
