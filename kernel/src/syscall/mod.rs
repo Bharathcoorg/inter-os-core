@@ -2074,6 +2074,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         52 => {
             // ApkInstallAudit: a1 = apk_ptr, a2 = apk_len, a3 = out_ptr, a4 = out_len
+            let sched = SCHEDULER.lock();
+            let current = match sched.current_task() {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
+                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
+            drop(sched);
+            if !authorized {
+                return SyscallResult::PermissionDenied as i64;
+            }
             let apk_len = a2 as usize;
             let out_len = a4 as usize;
             if apk_len == 0 || apk_len > 64 * 1024 || out_len == 0 || out_len > 1024 {
@@ -2096,6 +2107,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         53 => {
             // DexVerifyExec: a1 = dex_ptr, a2 = dex_len
+            let sched = SCHEDULER.lock();
+            let current = match sched.current_task() {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::INVOKE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::EXECUTE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
+                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
+            drop(sched);
+            if !authorized {
+                return SyscallResult::PermissionDenied as i64;
+            }
             let dex_len = a2 as usize;
             if dex_len == 0 || dex_len > 64 * 1024 {
                 return SyscallResult::InvalidArguments as i64;
@@ -2140,6 +2164,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         55 => {
             // DexInvokeMethod: a1 = dex_ptr, a2 = dex_len, a3 = spec_ptr, a4 = spec_len
+            let sched = SCHEDULER.lock();
+            let current = match sched.current_task() {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::INVOKE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::EXECUTE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
+                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
+            drop(sched);
+            if !authorized {
+                return SyscallResult::PermissionDenied as i64;
+            }
             let dex_len = a2 as usize;
             let spec_len = a4 as usize;
             if dex_len == 0 || dex_len > 64 * 1024 || spec_len == 0 || spec_len > 256 {

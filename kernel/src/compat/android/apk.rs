@@ -18,6 +18,7 @@ use super::manifest::AndroidManifest;
 pub const ZIP_LOCAL_FILE_HEADER_SIG: u32 = 0x04034b50;
 pub const ZIP_CENTRAL_DIR_SIG: u32 = 0x02014b50;
 pub const ZIP_END_OF_CENTRAL_DIR_SIG: u32 = 0x06054b50;
+pub const MAX_MEMBER_BYTES: usize = 128 * 1024 * 1024;
 
 // Android Binary XML (AXML) Chunk Types
 pub const RES_XML_TYPE: u16 = 0x0003;
@@ -228,13 +229,22 @@ impl<'a> ZipArchive<'a> {
                 }
                 let compressed = &self.data[entry.data_offset..end];
                 if entry.compression_method == 0 {
+                    if entry.uncompressed_size != entry.compressed_size || compressed.len() != entry.uncompressed_size as usize {
+                        return Err(ApkError::InvalidCentralDirectory);
+                    }
                     let mut out = Vec::with_capacity(entry.uncompressed_size as usize);
                     out.extend_from_slice(compressed);
                     return Ok(out);
                 } else if entry.compression_method == 8 {
+                    if entry.uncompressed_size as usize > MAX_MEMBER_BYTES {
+                        return Err(ApkError::InvalidCentralDirectory);
+                    }
                     let mut out = alloc::vec![0u8; entry.uncompressed_size as usize];
                     match super::inflate::inflate_raw(compressed, &mut out) {
                         Ok(len) => {
+                            if len != entry.uncompressed_size as usize {
+                                return Err(ApkError::InvalidCentralDirectory);
+                            }
                             out.truncate(len);
                             return Ok(out);
                         }

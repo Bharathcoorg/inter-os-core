@@ -211,6 +211,10 @@ impl<'a> DexPackage<'a> {
         // 1. Parse String Pool
         let string_ids_size = u32::from_le(header.string_ids_size) as usize;
         let string_ids_off = u32::from_le(header.string_ids_off) as usize;
+        let string_table_bytes = string_ids_size.checked_mul(4).ok_or(DexError::UnexpectedEof)?;
+        if string_ids_off.checked_add(string_table_bytes).map_or(true, |end| end > raw.len()) {
+            return Err(DexError::UnexpectedEof);
+        }
         let mut strings = Vec::with_capacity(string_ids_size);
 
         for i in 0..string_ids_size {
@@ -236,6 +240,10 @@ impl<'a> DexPackage<'a> {
         // 2. Parse Type IDs
         let type_ids_size = u32::from_le(header.type_ids_size) as usize;
         let type_ids_off = u32::from_le(header.type_ids_off) as usize;
+        let type_table_bytes = type_ids_size.checked_mul(4).ok_or(DexError::UnexpectedEof)?;
+        if type_ids_off.checked_add(type_table_bytes).map_or(true, |end| end > raw.len()) {
+            return Err(DexError::UnexpectedEof);
+        }
         let mut types = Vec::with_capacity(type_ids_size);
 
         for i in 0..type_ids_size {
@@ -253,6 +261,10 @@ impl<'a> DexPackage<'a> {
         // 3. Parse Method IDs
         let method_ids_size = u32::from_le(header.method_ids_size) as usize;
         let method_ids_off = u32::from_le(header.method_ids_off) as usize;
+        let method_table_bytes = method_ids_size.checked_mul(8).ok_or(DexError::UnexpectedEof)?;
+        if method_ids_off.checked_add(method_table_bytes).map_or(true, |end| end > raw.len()) {
+            return Err(DexError::UnexpectedEof);
+        }
         let mut method_entries = Vec::with_capacity(method_ids_size);
 
         for i in 0..method_ids_size {
@@ -274,6 +286,10 @@ impl<'a> DexPackage<'a> {
         // 4. Parse Class Defs & Code Items
         let class_defs_size = u32::from_le(header.class_defs_size) as usize;
         let class_defs_off = u32::from_le(header.class_defs_off) as usize;
+        let class_table_bytes = class_defs_size.checked_mul(32).ok_or(DexError::UnexpectedEof)?;
+        if class_defs_off.checked_add(class_table_bytes).map_or(true, |end| end > raw.len()) {
+            return Err(DexError::UnexpectedEof);
+        }
         let mut methods = Vec::new();
 
         for i in 0..class_defs_size {
