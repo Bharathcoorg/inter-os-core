@@ -192,16 +192,21 @@ fn decimal(value: u64, out: &mut [u8]) -> usize {
 /// inside the syscall boundary" with a success ink, whatever the keystore
 /// had answered. When the keystore does export a key, the key is in this
 /// app's memory and that sentence is false.
+///
+/// WHY the provenance is plain words: it used to quote the syscall and the
+/// privilege ring it returned through. The verdict keeps the platform's own
+/// word -- a reading the app did not name is not the app's to rename -- but
+/// the line under it answers the question the reader actually arrived with.
 pub fn key_material_row(derived: bool) -> (&'static str, &'static str) {
     if derived {
         (
-            "exported to this app",
-            "keystore_derive returned the key to Ring 3",
+            "handed to this app",
+            "the device handed the raw key to this app",
         )
     } else {
         (
             "never shown",
-            "the keystore refused to export raw key material",
+            "the device refused to hand over the key",
         )
     }
 }
@@ -373,10 +378,26 @@ mod tests {
         assert_eq!(value, "never shown");
         assert!(source.contains("refused"));
         let (value, source) = key_material_row(true);
-        assert_eq!(value, "exported to this app");
-        assert!(source.contains("keystore_derive"));
-        // The two readings must not say the same thing.
-        assert_ne!(value, "never shown");
+        // WHY measured by what the reading must carry rather than by one
+        // sentence: this app's copy belongs to the person reading it, and a
+        // gate that named the whole sentence failed every rewording that kept
+        // the claim. What may never come back is a derived reading that hides
+        // whose memory the raw key now sits in.
+        assert_ne!(value, "never shown", "a derived key is reported as if none was");
+        assert!(
+            value.contains("this app"),
+            "the derived verdict {value:?} never says the key reached this app"
+        );
+        // WHY the words changed: the provenance line quoted the syscall
+        // signature and the privilege ring it returned through. A person
+        // choosing whether to trust this device owns neither; what they own
+        // is the consequence, which is that the raw key is now in an app.
+        assert_plain_words(source);
+        assert!(
+            source.contains("raw key") && source.contains("this app"),
+            "the exported reading must still say whose key this is and where \
+             it now sits: {source:?}"
+        );
     }
 
     #[test]
@@ -562,11 +583,18 @@ mod tests {
     fn test_vault_ui_text_bounds_and_badges() {
         use interos_std::font;
         let card_w = 672;
-        let footer_note = b"The PIN opens this session; it does not release a keystore key";
+        let footer_note = b"The PIN opens this session; it releases no device key";
         assert!(font::measure(footer_note, 1) <= card_w);
 
         // Managed sector verdicts must fit within sector tile inner width (iw = 292, badge text available <= 266)
-        let verdicts = [b"round-trip verified".as_slice(), b"not tested".as_slice(), b"no record".as_slice()];
+        // The three words are the ones the tiles paint; a gate left naming a
+        // retired verdict measures nothing, so `the_keystore_and_entropy_...`
+        // tests re-read them from the painter and check they appear here.
+        let verdicts = [
+            b"opens back the same".as_slice(),
+            b"not checked yet".as_slice(),
+            b"no record".as_slice(),
+        ];
         for v in verdicts {
             let vw = font::measure_bold(v, 1);
             assert!(vw <= 266, "verdict {:?} exceeds badge text available space", v);
@@ -577,9 +605,9 @@ mod tests {
         // Status frame metric values must fit within metric row half badge capacity
         let metric_values = [
             b"written and validated".as_slice(),
-            b"checksum mismatch".as_slice(),
-            b"read back truncated".as_slice(),
-            b"read-back refused".as_slice(),
+            b"copy does not match".as_slice(),
+            b"copy came back short".as_slice(),
+            b"could not be read".as_slice(),
             b"settings write refused".as_slice(),
             b"not written yet".as_slice(),
         ];
@@ -653,7 +681,271 @@ mod tests {
         let modal = &main[start..start + end];
         assert!(!modal.contains("Hardware keystore root protected"));
         assert!(!modal.contains("Zero heap allocations"));
-        assert!(modal.contains("The PIN opens this session; it does not release a keystore key"));
+        // WHY measured as the note the modal actually paints, and over any
+        // phrasing of the denial: the sentence has since been re-worded for
+        // the person on the phone, and a gate quoting one sentence -- down to
+        // the platform's own name for its keys -- failed a rename that kept
+        // every claim true and asked for a word the glass may not use.
+        let open = modal
+            .find(r#"b"The PIN opens this session"#)
+            .expect("the modal still explains what the PIN does and does not do");
+        let note = literal_at(modal, open);
+        assert!(
+            (note.contains("no ") || note.contains("not ")) && note.contains("key"),
+            "the PIN note {note:?} no longer tells the reader the session opens \
+             without releasing a key"
+        );
+        assert!(
+            !note.contains("keystore"),
+            "the PIN note {note:?} answers with the platform's internal name for \
+             its keys instead of the device the reader is holding"
+        );
+    }
+
+    /// The inner width a `metric_row` caption is drawn into: the card minus
+    /// its two paddings, matching `INNER_W` in the painter.
+    const CAPTION_W: usize = 624;
+
+    /// How many `metric_row` call sites this test expects to find at most.
+    const MAX_ROWS: usize = 32;
+
+    /// Fails unless `words` reads as an answer to a person rather than as a
+    /// note to the next engineer: no syscall signature, no device node, no
+    /// privilege ring, no acronym, no trailing developer shrug.
+    ///
+    /// WHY a denylist and not an allowlist of sentences: the point is not that
+    /// the app says one particular thing, it is that the caption stops
+    /// requiring the reader to know the platform's internals to use it.
+    fn assert_plain_words(words: &str) {
+        for jargon in [
+            "keystore_derive",
+            "derive(",
+            "_read(",
+            "Ring 3",
+            "/dev/",
+            "IVs",
+            "IV ",
+            "syscall",
+            "probe;",
+            "not tested",
+        ] {
+            assert!(
+                !words.contains(jargon),
+                "the screen still quotes the mechanism {jargon:?} instead of answering: {words:?}"
+            );
+        }
+    }
+
+    /// Reads the contents of the byte literal whose opening quote pair begins
+    /// at `open`, so a caption can be tested as the painter wrote it.
+    fn literal_at(src: &str, open: usize) -> &str {
+        let body = &src[open + 2..];
+        let close = body.find('"').expect("the byte literal closes");
+        &body[..close]
+    }
+
+    /// Collects (label, caption) for every `metric_row` call site in the
+    /// painter, as the strings actually written there.
+    ///
+    /// WHY it reads the painter instead of a list kept in this file: a gate
+    /// that names its own expected strings keeps passing after production
+    /// moves on, which is how a screen ends up quoting a syscall again.
+    fn metric_row_captions<'a>(
+        main: &'a str,
+        out: &mut [Option<(&'a str, &'a str)>; MAX_ROWS],
+    ) -> usize {
+        let mut n = 0;
+        let mut at = 0;
+        while let Some(rel) = main[at..].find("if let Some(c) = metric_row(") {
+            let start = at + rel + "if let Some(c) = metric_row(".len();
+            let rest = &main[start..];
+            // A call written on one line hands its caption to a variable, so
+            // there is nothing to read here; skipping it beats borrowing the
+            // argument list of the next row.
+            if !rest.starts_with('\n') {
+                at = start;
+                continue;
+            }
+            // Stop at the next call site so the segment cannot run past this
+            // row's own argument list.
+            let seg = &rest[..rest.find("metric_row(").unwrap_or(rest.len())];
+            if let Some(close) = seg.find("\n        ) {") {
+                let args = &seg[..close];
+                if let (Some(first), Some(last)) = (args.find("b\""), args.rfind("b\"")) {
+                    if n < out.len() {
+                        out[n] = Some((literal_at(args, first), literal_at(args, last)));
+                    }
+                    n += 1;
+                }
+            }
+            at = start;
+        }
+        n
+    }
+
+    /// The key-slot and entropy captions must tell a person what the answer
+    /// means for them, in both views that draw them: the home card and the
+    /// status-frame view are separate call sites, and retitling one leaves the
+    /// other quoting the kernel at the reader.
+    #[test]
+    fn the_keystore_and_entropy_captions_answer_a_person() {
+        let main = include_str!("main.rs");
+        let mut rows = [None; MAX_ROWS];
+        let found = metric_row_captions(main, &mut rows);
+        assert!(found >= 8, "the metric rows vanished from the painter: {found}");
+
+        // What each row owes the reader: the root and storage keys name what
+        // they unlock and where the key that unlocks it lives, the entropy row
+        // names what the bytes are for and what happens when they are missing.
+        // WHY the place is "this device" and not the platform's own name for
+        // its key store: the reader is deciding whether to trust the phone in
+        // their hand, and a caption that answers with an internal component
+        // leaves them holding the question.
+        let owed: [(&str, &[&str]); 3] = [
+            ("Root key", &["unlocks", "this device"]),
+            ("Storage key", &["unlocks", "this device"]),
+            ("Random source", &["random", "without it"]),
+        ];
+        for (label, markers) in owed {
+            let mut seen = 0usize;
+            for row in rows.iter().flatten() {
+                if row.0 != label {
+                    continue;
+                }
+                let caption = row.1;
+                seen += 1;
+                assert_plain_words(caption);
+                for marker in markers {
+                    assert!(
+                        caption.contains(marker),
+                        "the {label:?} caption {caption:?} never says what the answer means \
+                         for the reader (it must mention {marker:?})"
+                    );
+                }
+                assert!(
+                    interos_std::font::measure(caption.as_bytes(), 1) <= CAPTION_W,
+                    "the {label:?} caption is wider than the card: {caption:?}",
+                );
+            }
+            assert!(
+                seen >= 2,
+                "only {seen} view(s) draw the {label:?} row; both the home card and the \
+                 status-frame view must answer for it"
+            );
+        }
+    }
+
+    /// Every caption the painter passes to `metric_row`, and every managed
+    /// sector verdict, must read as an answer: no syscall signature, no device
+    /// node, no privilege ring, no engineer's note left on the glass.
+    #[test]
+    fn no_caption_on_glass_quotes_a_mechanism() {
+        let main = include_str!("main.rs");
+        let mut rows = [None; MAX_ROWS];
+        let found = metric_row_captions(main, &mut rows);
+        let call_sites = main.matches("if let Some(c) = metric_row(\n").count();
+        assert_eq!(
+            found, call_sites,
+            "the scan read {found} of {call_sites} metric rows, so a caption escaped the gate"
+        );
+        for row in rows.iter().flatten() {
+            assert_plain_words(row.1);
+        }
+    }
+
+    /// The sector tiles paint one of three verdicts. A record that has no
+    /// round-trip evidence either way used to print the engineer's own note,
+    /// "not tested", next to two real verdicts; it now says what the reader
+    /// can conclude, and it keeps the neutral ink -- an absent proof is never
+    /// a success.
+    #[test]
+    fn the_sector_verdicts_report_evidence_and_never_a_dev_note() {
+        let main = include_str!("main.rs");
+        let anchor = "match vault.sectors[index].map(|s| s.authenticated)";
+        let start = main
+            .find(anchor)
+            .expect("the sector tiles still decide their verdict from the round-trip flag");
+        let rest = &main[start..];
+        let end = rest
+            .find("\n            };")
+            .expect("the sector verdict match closes");
+        let block = &rest[..end];
+
+        let mut verdicts = [""; 4];
+        let mut inks = [""; 4];
+        let mut n = 0;
+        let mut at = 0;
+        while let Some(rel) = block[at..].find("b\"") {
+            let open = at + rel;
+            let word = literal_at(&block[open..], 0);
+            // The whole arm line, so the ink the painter chose for this
+            // verdict can be read together with the verdict itself.
+            let line_start = block[..open].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = open + block[open..].find('\n').unwrap_or(block.len() - open);
+            let arm = block[line_start..line_end].trim();
+            if n < verdicts.len() {
+                verdicts[n] = word;
+                inks[n] = arm;
+            }
+            n += 1;
+            at = open + word.len() + 3;
+        }
+        assert_eq!(n, 3, "the sector verdict is no longer a three-way match: {n} arms");
+        // WHY this no longer quotes the sentence, and now forbids a word in it:
+        // the gate used to require "round-trip verified", so the screen could
+        // only ever answer with the engineer's name for the check. What the
+        // arm owes the reader is a stated result of the sector's own record,
+        // reached from the state that record is in.
+        assert!(inks[0].contains("Some(true)"), "the arm order changed: {}", inks[0]);
+        assert!(
+            !verdicts[0].is_empty() && verdicts[0].len() >= 8,
+            "the verified verdict must read as a result, got {:?}",
+            verdicts[0]
+        );
+        assert!(
+            !verdicts[0].contains("round-trip"),
+            "the success verdict {:?} still names the check instead \
+             of what the check showed",
+            verdicts[0]
+        );
+
+        // The middle arm is the one that leaked the developer's note.
+        assert!(inks[1].contains("Some(false)"), "the arm order changed: {}", inks[1]);
+        assert_ne!(
+            verdicts[1], "not tested",
+            "a tile still prints the engineer's note instead of the reader's conclusion"
+        );
+        assert!(
+            !verdicts[1].is_empty() && verdicts[1].len() >= 8,
+            "the no-evidence verdict must say so in words a reader can use, got {:?}",
+            verdicts[1]
+        );
+        assert!(
+            inks[1].contains("THEME.on_surface_variant") && !inks[1].contains("THEME.success"),
+            "an absent proof may never wear success ink: {}",
+            inks[1]
+        );
+        // Nor may it be confused with the third arm, the missing record.
+        assert_ne!(verdicts[1], verdicts[2], "the two no-evidence states read identically");
+        assert!(
+            inks[2].contains("THEME.warning"),
+            "a sector with no record is not a neutral state: {}",
+            inks[2]
+        );
+
+        // The width gate in this file must be measuring the verdicts the app
+        // actually paints; a gate left naming a retired string proves nothing.
+        let lib = include_str!("lib.rs");
+        for v in verdicts {
+            assert!(
+                lib.contains(v),
+                "the badge-width gate no longer measures the painted verdict {v:?}"
+            );
+            assert!(
+                interos_std::font::measure_bold(v.as_bytes(), 1) + 34 <= 292,
+                "the verdict {v:?} no longer fits its tile"
+            );
+        }
     }
 }
 

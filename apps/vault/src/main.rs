@@ -158,8 +158,8 @@ impl VaultApp {
             backup: BackupState::NotAttempted,
             total_encryptions: 0,
             total_decryptions: 0,
-            counter_buf: *b"0 enc, 0 dec\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
-            counter_len: 12,
+            counter_buf: *b"0 sealed, 0 opened\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+            counter_len: 18,
             status: [0u8; 64],
             status_len: 0,
             pin_modal_open: false,
@@ -176,12 +176,12 @@ impl VaultApp {
     pub fn update_counter_buf(&mut self) {
         let mut buf = [0u8; 32];
         let mut n = write_u64(self.total_encryptions as u64, &mut buf);
-        let mid = b" enc, ";
+        let mid = b" sealed, ";
         let m = mid.len().min(buf.len().saturating_sub(n));
         buf[n..n + m].copy_from_slice(&mid[..m]);
         n += m;
         n += write_u64(self.total_decryptions as u64, &mut buf[n..]);
-        let end = b" dec";
+        let end = b" opened";
         let e = end.len().min(buf.len().saturating_sub(n));
         buf[n..n + e].copy_from_slice(&end[..e]);
         self.counter_buf = buf;
@@ -507,7 +507,7 @@ const BACK_X: usize = std::design::back_button::X;
 const BACK_Y: usize = std::design::back_button::Y;
 const BACK_S: usize = std::design::back_button::SIZE;
 
-/// Header action pill ("RE-PROBE"): 44px tall, right-aligned to the margin.
+/// Header action pill ("RECHECK"): 44px tall, right-aligned to the margin.
 const ACTION_H: usize = 44;
 /// WHY two rows inside the back control's band: the pill is 44 tall beside a
 /// 48-tall control, and centring them is what keeps the row from reading crooked.
@@ -718,7 +718,7 @@ const AUDIT_CARD_H: usize = 210;
 const CRED_BTN_Y: usize = AUDIT_CARD_Y + AUDIT_CARD_H + CRED_SECTION_GAP;
 const CRED_BTN_H: usize = 56;
 const ACTION_X1: usize = W - MARGIN;
-const ACTION: &[u8] = b"RE-PROBE";
+const ACTION: &[u8] = b"RECHECK";
 
 const TITLE: &[u8] = b"Vault";
 /// The subtitle under the title.
@@ -873,7 +873,7 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             return c;
         }
         let (verdict, ink): (&[u8], u32) = if vault.pin_error {
-            (b"VERIFICATION FAILED", THEME.error)
+            (b"WRONG PIN", THEME.error)
         } else {
             (b"PIN REQUIRED", THEME.primary)
         };
@@ -935,7 +935,7 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         MARGIN,
         PIN_NOTE_Y,
         PIN_NOTE_RUNG,
-        b"The PIN opens this session; it does not release a keystore key",
+        b"The PIN opens this session; it releases no device key",
         CARD_W,
         THEME.on_surface_variant,
         THEME.surface,
@@ -1007,7 +1007,14 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         // values were typed into the painter, and no code in this app ever
         // read them. What it actually holds are the answers its own probes
         // got back, so the card is now called what it shows.
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 18, b"KEYSTORE PROBES", INNER_W) {
+        //
+        // WHY the row captions changed again: they quoted the syscall and the
+        // slot it was handed, which tells an engineer how the answer was
+        // fetched and tells a reader nothing to act on. Each caption now names
+        // what the key guards and where the answer came from. The verdict word
+        // itself is still the platform's own -- a reading this app did not
+        // name is not this app's to rename.
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, SECRETS_CARD_Y + 18, b"DEVICE SECRETS", INNER_W) {
             return c;
         }
         let slot0 = key_verdict(vault.key_probe[0]);
@@ -1018,10 +1025,10 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             SECRETS_CARD_Y + 54,
             CARD_W,
-            b"Root key, slot 0",
+            b"Root key",
             slot0,
             key_ink(vault.key_probe[0]),
-            b"keystore_derive(0), raw export to this app",
+            b"unlocks every other secret on this device",
         ) {
             return c;
         }
@@ -1031,10 +1038,10 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             SECRETS_CARD_Y + 128,
             CARD_W,
-            b"Storage key, slot 1",
+            b"Storage key",
             slot1,
             key_ink(vault.key_probe[1]),
-            b"keystore_derive(1), raw export to this app",
+            b"unlocks the records apps save on this device",
         ) {
             return c;
         }
@@ -1044,10 +1051,10 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             SECRETS_CARD_Y + 202,
             CARD_W,
-            b"Entropy source",
+            b"Random source",
             entropy_verdict(vault.entropy_probe),
             entropy_ink(vault.entropy_probe),
-            b"/dev/urandom probe; IVs fail closed without it",
+            b"randomness for every new secret; no proof without it",
         ) {
             return c;
         }
@@ -1061,7 +1068,7 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             b"Device identity",
             identity_word,
             identity_ink,
-            b"/system/etc/device_id, magic prefix only",
+            b"the device's own record, first letters only",
         ) {
             return c;
         }
@@ -1090,7 +1097,7 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             AUDIT_CARD_Y + 54,
             CARD_W,
-            b"Sector round-trips",
+            b"Sectors checked",
             &round_buf[..round_len],
             if verified == vault.sectors.len() {
                 THEME.success
@@ -1123,7 +1130,7 @@ fn credentials_view_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             } else {
                 THEME.warning
             },
-            b"a derived key sits in this app's memory, not the hardware's",
+            b"a key built for this app sits in its memory, not the hardware's",
         ) {
             return c;
         }
@@ -1452,7 +1459,7 @@ fn tile_origin(index: usize) -> (usize, usize) {
 /// the hint from it so the two cannot drift.
 fn sector_tile(index: usize) -> &'static [u8] {
     match index {
-        0 => b"Root keystore",
+        0 => b"Root key",
         1 => b"Media & documents",
         2 => b"Camera photos",
         3 => b"Messages & wire",
@@ -1469,18 +1476,6 @@ fn sector_tile(index: usize) -> &'static [u8] {
 /// built from.
 const _: () = assert!(TILE_COUNT == MANAGED_SECTORS.len());
 const _: () = assert!(TILE_ROW_Y.len() == TILE_ROWS && TILE_COL_X.len() == TILE_COLS);
-
-/// Kernel status code names, as the kernel spells them.
-#[allow(dead_code)]
-fn status_name(code: i64) -> &'static [u8] {
-    match code {
-        -1 => b"PermissionDenied",
-        -2 => b"InvalidSlot",
-        -3 => b"InvalidArguments",
-        -12 => b"DeviceError",
-        _ => b"refused",
-    }
-}
 
 // -----------------------------------------------------------------------------
 // Shape primitives
@@ -1750,7 +1745,7 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     }
     // Both pills stand in this row, and both are painted before the runs: the
     // runs therefore stop a gutter short of whichever reaches further left.
-    // The bound used to be the RE-PROBE pill alone, so the CREDENTIALS pill --
+    // The bound used to be the RECHECK pill alone, so the CREDENTIALS pill --
     // which sits to its left -- was inside the space the title was allowed to
     // use, and a longer name than "Vault" would lose its tail to the pill
     // rather than show it.
@@ -1821,7 +1816,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card A: hardware keystore ----------------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + CARD_CAPTION_Y, b"HARDWARE KEYSTORE", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + CARD_CAPTION_Y, b"DEVICE KEYS", INNER_W) {
             return c;
         }
         // The verdict carries the kernel's own status code, so the row never
@@ -1835,10 +1830,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_A_Y + CARD_FIRST_METRIC_Y,
             CARD_W,
-            b"Root key, slot 0",
+            b"Root key",
             slot0,
             key_ink(vault.key_probe[0]),
-            b"keystore_derive(0), raw export to Ring 3",
+            b"unlocks every other secret on this device",
         ) {
             return c;
         }
@@ -1848,10 +1843,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_A_Y + CARD_FIRST_METRIC_Y + METRIC_ROW_PITCH,
             CARD_W,
-            b"Storage key, slot 1",
+            b"Storage key",
             slot1,
             key_ink(vault.key_probe[1]),
-            b"keystore_derive(1), raw export to Ring 3",
+            b"unlocks the records apps save on this device",
         ) {
             return c;
         }
@@ -1865,7 +1860,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             b"Device identity",
             identity_word,
             identity_ink,
-            b"/system/etc/device_id, magic prefix only",
+            b"the device's own record, first letters only",
         ) {
             return c;
         }
@@ -1881,9 +1876,15 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             let (tx, ty) = tile_origin(index);
             let name = sector_tile(index);
             let (hint_buf, hint_len) = vault::sector_tile_hint(index);
+            // WHY the middle word changed: it read "not tested", which is the
+            // engineer's own note about the probe, not an answer for the
+            // reader. The state it stands for is a sector whose record exists
+            // but for which this app holds no round-trip evidence either way,
+            // so it now says that, and it keeps the neutral ink because an
+            // absent proof is never a success.
             let (verdict, verdict_ink) = match vault.sectors[index].map(|s| s.authenticated) {
-                Some(true) => (b"round-trip verified".as_slice(), THEME.success),
-                Some(false) => (b"not tested".as_slice(), THEME.on_surface_variant),
+                Some(true) => (b"opens back the same".as_slice(), THEME.success),
+                Some(false) => (b"not checked yet".as_slice(), THEME.on_surface_variant),
                 None => (b"no record".as_slice(), THEME.warning),
             };
             if let Some(c) = tile_pixel(
@@ -1904,14 +1905,14 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
     // ---- Card C: the status frame and entropy ------------------------------
     if let Some(fill) = card_pixel(x, y, MARGIN, CARD_C_Y, CARD_W, CARD_C_H) {
-        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + CARD_CAPTION_Y, b"STATUS FRAME & ENTROPY", INNER_W) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + CARD_CAPTION_Y, b"SAVED RECORD & RANDOMNESS", INNER_W) {
             return c;
         }
         let (backup_verdict, backup_ink) = match vault.backup {
             BackupState::WrittenAndValid => (b"written and validated".as_slice(), THEME.success),
-            BackupState::WrittenButChecksumMismatch => (b"checksum mismatch".as_slice(), THEME.error),
-            BackupState::WrittenButTruncated => (b"read back truncated".as_slice(), THEME.error),
-            BackupState::ReadRefused => (b"read-back refused".as_slice(), THEME.warning),
+            BackupState::WrittenButChecksumMismatch => (b"copy does not match".as_slice(), THEME.error),
+            BackupState::WrittenButTruncated => (b"copy came back short".as_slice(), THEME.error),
+            BackupState::ReadRefused => (b"could not be read".as_slice(), THEME.warning),
             BackupState::WriteRefused => (b"settings write refused".as_slice(), THEME.warning),
             BackupState::NotAttempted => (b"not written yet".as_slice(), THEME.on_surface_variant),
         };
@@ -1921,14 +1922,14 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_C_Y + CARD_FIRST_METRIC_Y,
             CARD_W,
-            b"Status frame",
+            b"Saved record",
             backup_verdict,
             backup_ink,
             // WHY the source line says what the frame is: the old one named
             // the syscall and the slot it used, which told the reader how the
             // frame was written and nothing about what it contained. The
             // frame is two counters and a checksum, in the clear.
-            b"counters and checksum, in the clear",
+            b"two tallies and a check figure, stored unencrypted",
         ) {
             return c;
         }
@@ -1939,10 +1940,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_C_Y + CARD_FIRST_METRIC_Y + METRIC_ROW_PITCH,
             CARD_W,
-            b"Encryptions / decryptions",
+            b"Seals and opens",
             counters,
             THEME.on_surface,
-            b"counters incremented by real vault calls",
+            b"tallies moved only by calls this app really made",
         ) {
             return c;
         }
@@ -1953,10 +1954,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             MARGIN,
             CARD_C_Y + CARD_FIRST_METRIC_Y + 2 * METRIC_ROW_PITCH,
             CARD_W,
-            b"Entropy source",
+            b"Random source",
             entropy_word,
             entropy_ink(vault.entropy_probe),
-            b"/dev/urandom probe; IVs fail closed without it",
+            b"randomness for every new secret; no proof without it",
         ) {
             return c;
         }
@@ -2000,7 +2001,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         // managed sectors without touching live data, so the button runs the
         // vault's own crypto round trip against the app's self-test block and
         // updates every sector row's verdict.
-        b"Verify vault crypto",
+        b"Verify the vault",
         false,
     ) {
         return c;
@@ -2017,7 +2018,7 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         // and a checksum, written in the clear to the settings store. It is
         // not a copy of the vault and it is not encrypted, so that label
         // overstated what the user gets.
-        b"Write status frame",
+        b"Save the record",
         false,
     ) {
         return c;
@@ -2085,24 +2086,13 @@ fn write_u64(mut v: u64, out: &mut [u8]) -> usize {
     n
 }
 
-/// "N enc, M dec" straight from the two counters.
-#[allow(dead_code)]
-fn counter_word(enc: u32, dec: u32) -> &'static [u8] {
-    // The counters start at zero and only ever move when a real syscall ran,
-    // so the only values this can ever report are the live ones.
-    match (enc, dec) {
-        (0, 0) => b"0 enc, 0 dec",
-        _ => b"see log for totals",
-    }
-}
-
 /// Verdict word for one key slot, without the status code.
 fn key_verdict(p: KeyProbe) -> &'static [u8] {
     match p {
-        KeyProbe::Derived => b"derived",
+        KeyProbe::Derived => b"handed over",
         KeyProbe::Short => b"short",
         KeyProbe::Refused(_) => b"unavailable",
-        KeyProbe::NotRun => b"not probed",
+        KeyProbe::NotRun => b"not checked",
     }
 }
 
@@ -2120,11 +2110,11 @@ fn key_ink(p: KeyProbe) -> u32 {
 /// refusal code is already reported on the serial log, not the screen.
 fn entropy_verdict(p: EntropyProbe) -> &'static [u8] {
     match p {
-        EntropyProbe::Read16 => b"16 bytes read",
-        EntropyProbe::AllZero => b"all zero bytes",
+        EntropyProbe::Read16 => b"answered in full",
+        EntropyProbe::AllZero => b"all zeros",
         EntropyProbe::Short => b"short read",
         EntropyProbe::Refused(_) => b"read refused",
-        EntropyProbe::NotRun => b"not probed",
+        EntropyProbe::NotRun => b"not checked",
     }
 }
 
@@ -2141,7 +2131,7 @@ fn entropy_ink(p: EntropyProbe) -> u32 {
 /// The device-identity probe's own words, with the ink that matches them.
 fn identity_verdict(p: IdentityState) -> (&'static [u8], u32) {
     match p {
-        IdentityState::Present => (b"DID: prefix present".as_slice(), THEME.success),
+        IdentityState::Present => (b"prefix present".as_slice(), THEME.success),
         IdentityState::Malformed => (b"present but malformed".as_slice(), THEME.warning),
         IdentityState::Unreadable => (b"not readable".as_slice(), THEME.warning),
         IdentityState::NotChecked => (b"not checked".as_slice(), THEME.on_surface_variant),
@@ -2246,7 +2236,7 @@ fn render_vault_band(surface: u32, vault: &VaultApp, y0: usize, y1: usize) {
 enum Dirty {
     /// Nothing moved; the surface is already correct, so do not render at all.
     None,
-    /// The RE-PROBE pill re-ran the keystore, entropy and identity probes:
+    /// The RECHECK pill re-ran the key, randomness and identity probes:
     /// Card A's three verdicts, Card C's entropy verdict and the status line.
     Reprobe,
     /// One sector tile was re-verified.
@@ -2387,7 +2377,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                 b'C' => {
                     vault.pin_len = 0;
                     vault.pin_error = false;
-                    status(vault, b"PIN buffer cleared");
+                    status(vault, b"PIN cleared");
                     std::audio_haptic_click().ok();
                     return Tap::Redraw(Dirty::All);
                 }
@@ -2467,7 +2457,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         std::audio_haptic_click().ok();
         status(
             vault,
-            b"re-probed keystore, entropy and device identity",
+            b"checked keys, randomness and identity again",
         );
         std::log("[VAULT] Re-probed keystore, entropy and device identity.").ok();
         return Tap::Redraw(Dirty::Reprobe);
@@ -2479,12 +2469,12 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         if in_round(x, y, tx, ty, TILE_W, TILE_H, 14) {
             let ok = vault.verify_sector(index);
             if ok {
-                status(vault, b"vault round-trip verified on block 1900");
+                status(vault, b"self-test block 1900 matched");
                 std::log("[VAULT] Sector card touched. Round-trip re-verified on the app's self-test block 1900; the managed sector was not written.",
                 )
                 .ok();
             } else {
-                status(vault, b"sector round-trip FAILED (see log)");
+                status(vault, b"sector check did not match");
                 std::log("[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
                 )
                 .ok();
@@ -2497,10 +2487,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     if in_round(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H, CARD_R) {
         let ok = vault.verify_sector(0);
         if ok {
-            status(vault, b"sector round-trip verified");
+            status(vault, b"sector check matched");
             std::log("[VAULT] Sector card touched. Round-trip re-verified.").ok();
         } else {
-            status(vault, b"sector round-trip FAILED (see log)");
+            status(vault, b"sector check did not match");
             std::log("[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
             )
             .ok();
@@ -2513,12 +2503,12 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         let all_ok = vault.verify_all_sectors();
         std::audio_haptic_click().ok();
         if all_ok {
-            status(vault, b"vault round-trip verified on block 1900");
+            status(vault, b"self-test block 1900 matched");
             std::log("[VAULT] All 6 sector rows re-verified against the app's self-test block 1900; the managed sectors were not written.",
             )
             .ok();
         } else {
-            status(vault, b"one or more sectors FAILED (see log)");
+            status(vault, b"some sectors did not match");
             std::log("[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
             )
             .ok();
@@ -2529,14 +2519,14 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
         // The function persists the frame, validates the read-back copy and
         // logs the exact outcome itself.
         match vault.export_backup() {
-            BackupState::WrittenAndValid => status(vault, b"backup frame stored; checksum valid"),
+            BackupState::WrittenAndValid => status(vault, b"record saved; the copy matched"),
             BackupState::WrittenButChecksumMismatch => {
-                status(vault, b"stored, but the checksum did not validate")
+                status(vault, b"stored, but the copy did not match")
             }
-            BackupState::WrittenButTruncated => status(vault, b"stored, but the read-back was short"),
-            BackupState::ReadRefused => status(vault, b"stored, but the read-back was refused"),
+            BackupState::WrittenButTruncated => status(vault, b"stored, but the copy came back short"),
+            BackupState::ReadRefused => status(vault, b"stored, but it could not be read back"),
             BackupState::WriteRefused => status(vault, b"the settings store refused the write"),
-            BackupState::NotAttempted => status(vault, b"backup not exported"),
+            BackupState::NotAttempted => status(vault, b"nothing has been saved yet"),
         }
         std::audio_haptic_click().ok();
         return Tap::Redraw(Dirty::Backup);
@@ -2630,7 +2620,7 @@ pub extern "C" fn _start() -> ! {
     // 3. Render initial UI and present
     status(
         &mut vault,
-        b"verification and backup export are user-triggered",
+        b"checking and saving happen when you tap",
     );
     repaint(surface, &vault, Dirty::All);
     let _ = std::surface_flip();
