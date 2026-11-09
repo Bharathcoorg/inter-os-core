@@ -1090,10 +1090,22 @@ const _: () = assert!(W == chrome::PANEL_W);
 /// y 0..48: System Status Bar
 const STATUS_H: usize = 48;
 
-/// y 48..116: Sovereign Top Omnibox App Bar
+/// y 48..116: the omnibox row.
+///
+/// WHY both edges now read off [`chrome`]: the band's rows were two literals, and
+/// the field, the two plates beside it and the progress hairline inside it were
+/// four more numbers each written where it was used. `chrome` derives the band
+/// from the platform's status bar, its control floor and the rung the address is
+/// set at, and gates that every plate fits inside the result.
 #[allow(dead_code)]
-const TOOLBAR_Y0: usize = STATUS_H;
-const TOOLBAR_Y1: usize = 116;
+const TOOLBAR_Y0: usize = chrome::OMNIBOX_Y0;
+const TOOLBAR_Y1: usize = chrome::OMNIBOX_Y1;
+
+/// WHY this gate: the band's top is the platform's status bar, and the app draws
+/// that bar itself. Two copies of its height, in two files, is how a row of blank
+/// chrome gets painted over a clock.
+const _: () = assert!(TOOLBAR_Y0 == STATUS_H);
+const _: () = assert!(chrome::OMNIBOX_Y0 == interos_std::design::viewport::STATUS_BAR_HEIGHT);
 
 /// Sovereign Omnibox URL Capsule (x 88..476)
 /// Appends bytes to a small buffer, truncating rather than overrunning.
@@ -1169,30 +1181,35 @@ fn append_signed_text(buf: &mut [u8], n: usize, value: i64) -> usize {
 /// and differed only in colour.
 const TYPE_H1_SCALE: usize = type_scale::BODY;
 
-/// The address capsule, clear of the platform's Back control at x 24..72.
+/// The address capsule: the whole content span left of the trailing cluster.
 ///
-/// WHY its left edge is the chip's right edge plus one grid step: the capsule
-/// used to start at x 16 and covered the canonical 48x48 rect, so the corner a
-/// person learns once in Settings, Dialer, Music, Camera and Vault answered
-/// here by focusing the keyboard instead of giving a way back. Its right edge
-/// stays at 476, where the reload control has always had its gutter, so only
-/// the field moves and no row of the bar does.
-const PILL: Rect = Rect::new(
-    back_button::X + back_button::SIZE + spacing::GRID_16,
-    56,
-    476 - (back_button::X + back_button::SIZE + spacing::GRID_16),
-    52,
-);
-const PILL_R: usize = 26;
-const PILL_TEXT_X: usize = PILL.x + 40;
-const PILL_TEXT_Y: usize = 70;
-const PILL_TEXT_MAX: usize = PILL.w - 80;
+/// WHY it now takes the panel's own gutter: the capsule used to start at the
+/// platform Back chip's right edge plus a grid step, because a chip stood at
+/// x 24..72 and a field laid over it answered a way back by opening the
+/// keyboard. This app does not put its navigation in the header -- the shell
+/// puts back/recents in the band at the foot of the panel, and the browser's own
+/// back and forward tiles stand in it -- so no column of the row is reserved for
+/// a control the row does not paint, and the address gets the air it never had.
+const PILL: Rect = chrome::OMNIBOX_FIELD;
+/// The capsule's corner: half its own height, which is what turns the plate into
+/// the pill the platform names.
+const PILL_R: usize = chrome::FIELD_H / 2;
 
-/// WHY these gates: the chip and the field are one row, and a field that creeps
-/// back under the chip, or a chip that grows past the band that paints it, is
-/// the defect this row was rewritten for.
-const _: () = assert!(PILL.x >= back_button::X + back_button::SIZE);
-const _: () = assert!(back_button::Y + back_button::SIZE <= TOOLBAR_Y1);
+/// WHY these gates: the field, its run and the plates beside it are one row, and
+/// `chrome` owns the sum. A row that crept past the band that paints it, or an
+/// address whose line box left the plate that carries it, fails the build here
+/// rather than showing up as a clipped descender on the device.
+///
+/// WHY the renderer names `chrome`'s text row, inset and lane at every call site
+/// instead of re-aliasing them here: an alias is a second name for one fact, and
+/// a row that inked its own remembered text row while `chrome` owned the measure
+/// is a row that could be edited on one side of the pair only.
+const _: () = assert!(PILL.x == chrome::SIDE_GUTTER);
+const _: () = assert!(PILL.y + PILL.h <= TOOLBAR_Y1);
+const _: () = assert!(
+    chrome::FIELD_TEXT_Y + font::line_height(chrome::FIELD_RUNG) <= PILL.y + PILL.h
+);
+const _: () = assert!(chrome::FIELD_TEXT_X + chrome::FIELD_TEXT_LANE <= PILL.x + PILL.w);
 
 /// The tab switcher's "+ New Tab" control.
 ///
@@ -1328,12 +1345,24 @@ const _: () = assert!(TAB_BADGE_X + TAB_BADGE_W <= TAB_TITLE_TEXT_X);
 const _: () = assert!(TAB_BADGE_Y + TAB_BADGE_H <= TAB_URL_DY);
 const _: () = assert!(TAB_EMPTY_Y + TAB_RUN_LINE_BOX <= TAB_CARD_H);
 
-/// Omnibox Right Controls
-const RELOAD_BTN: Rect = Rect::new(486, 60, 44, 44);
+/// The two controls that trail the address, from `chrome`'s cluster.
+///
+/// WHY they are `chrome`'s plates and not two rectangles here: the row used to
+/// carry four -- reload, a tab count, the overflow menu and a close mark -- and
+/// the last two were duplicates. The tab count was the navigation bar's own tile
+/// repeated in the header, so one screen printed the same number twice and a
+/// person could not tell whether the two agreed; the close mark quit the app from
+/// inside the field a person types an address into, which is the shell's home
+/// gesture wearing a different glyph. What the row owns is a way to re-request
+/// what is in the field and a way to open the menu, and both plates are now
+/// placed by the cluster's own width rather than by a remembered `486` and `596`.
+const RELOAD_BTN: Rect = chrome::omnibox_tile(0);
+const KEBAB_BTN: Rect = chrome::omnibox_tile(1);
 
 /// The square at the head of the address field that wears the page's own
 /// picture, where the padlock used to sit alone.
-const FAVICON_BOX: Rect = Rect::new(PILL.x + 14, 74, 16, 16);
+const FAVICON_BOX: Rect =
+    Rect::new(PILL.x + chrome::FIELD_MARK_DX, chrome::FIELD_MARK_Y, chrome::FIELD_MARK_SIDE, chrome::FIELD_MARK_SIDE);
 
 /// The centre the page's picture and the TLS mark share at the head of the
 /// field. WHY named: both are one mark about one address, drawn in one box, and
@@ -1344,9 +1373,13 @@ const MARK_CY: usize = FAVICON_BOX.y + FAVICON_BOX.h / 2;
 /// The pixels a page's face is drawn with: one RGBA quadruple for each pixel
 /// of [`FAVICON_BOX`].
 const FAVICON_FACE_PIXELS: usize = FAVICON_BOX.w * FAVICON_BOX.h;
-const TABS_TOP_BTN: Rect = Rect::new(540, 60, 46, 44);
-const KEBAB_BTN: Rect = Rect::new(596, 60, 44, 44);
-const CLOSE_BTN: Rect = Rect::new(650, 60, 44, 44);
+
+/// WHY this gate: the mark is the field's decoration, so it may not leave the
+/// plate that carries it, and the address starts past it.
+const _: () = assert!(FAVICON_BOX.x > PILL.x);
+const _: () = assert!(FAVICON_BOX.y + FAVICON_BOX.h <= PILL.y + PILL.h);
+const _: () = assert!(chrome::FIELD_TEXT_X >= FAVICON_BOX.x + FAVICON_BOX.w);
+
 /// The corner every chrome tile is cut with: the platform's control radius.
 ///
 /// WHY it is `chrome`'s and not a second 12: the radius of a tile is part of
@@ -1450,14 +1483,10 @@ fn tab_badge_box(rect: Rect) -> Rect {
 }
 
 /// WHY checked at compile time: a badge that outgrew its tile would ink rows the
-/// tile never paints, and the two Tiles controls are plates of different heights
-/// -- the header's is forty-four rows, the bar's is the platform chip's forty-
-/// eight -- so neither can be assumed to carry the other's room.
-const _: () = assert!(
-    font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_TOP_BTN.h
-        && font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_TOP_BTN.w,
-    "the header's tab badge must stand inside its tile",
-);
+/// tile never paints, and the digit is a whole line box of the rung it is set at
+/// while the plate is the platform chip's own height -- so the room cannot be
+/// assumed, it has to be measured. One Tiles control carries the count now; the
+/// header's copy was the same number on the same screen twice.
 const _: () = assert!(
     font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_BTN.h
         && font::line_height(chrome::HOME_CAPTION_RUNG) <= TABS_BTN.w,
@@ -1782,10 +1811,17 @@ const NAV_BTN_H: usize = back_button::SIZE;
 /// 1356 is a number that goes stale the moment the platform's control changes,
 /// and the control is what this row is sized against.
 const NAV_ROW_Y: usize = NAV_BAR_Y0 + (NAV_BAR_Y1 - NAV_BAR_Y0 - NAV_BTN_H) / 2;
-/// The Back tile. It stays the app's own rect, and for a real layout reason: the
-/// browser puts its navigation on the bar under the page, not in the header the
-/// SDK chip owns -- and the header chip is adopted here too, painted by
-/// `back_button::pixel_for_theme` and answered by `back_button::contains`.
+/// The Back tile -- the app's one back affordance, and the only one.
+///
+/// WHY the navigation lives here and not in the header: this device puts back,
+/// home and recents in the band at the foot of the panel -- `apps/launcher/src/nav.rs`
+/// splits its own bottom band into those three thirds, and `design::home_band`
+/// is the mark every app paints and answers for the home half of it. The browser
+/// used to put a second back affordance in the header as well, adopted from the
+/// SDK's `back_button` chip, so one screen offered two navigation models and the
+/// header copy carried the shell's exit as a fallback. The header no longer paints
+/// or answers a back control; this tile does, and it says whether there is
+/// anywhere to go back to.
 ///
 /// WHY painted == hit is structural: `bottom_bar_pixel` inks the whole plate
 /// through `chrome_control_px(x, y, BACK_BTN, BTN_R)` and the press tests the
@@ -6955,8 +6991,12 @@ const FRAME_BADGE_TEXT_Y: usize = (FRAME_BADGE_H - FRAME_LINE_BOX) / 2;
 /// The plate's width and the half-width the centred stack measures from.
 const FRAME_BADGE_W: usize = 360;
 
-/// The address capsule's rung, and the row its line sits on inside the pill.
-const PILL_RUNG: usize = type_scale::CAPTION;
+/// The address capsule's rung.
+///
+/// WHY it is `chrome`'s and not a second `CAPTION`: the capsule's height, the row
+/// its line sits on and the lane it is cut to are all one line box of this rung,
+/// and a rung written twice is a rung that can move on one side of the pair only.
+const PILL_RUNG: usize = chrome::FIELD_RUNG;
 
 const _: () = assert!(FRAME_TEXT_LANE == 560);
 const _: () = assert!(FRAME_BODY_TOP == 40);
@@ -7021,7 +7061,7 @@ impl Frame {
             pill_len: 0,
             pill_color: THEME.on_surface_variant,
             show_caret: false,
-            caret_x: PILL_TEXT_X,
+            caret_x: chrome::FIELD_TEXT_X,
             select_w: 0,
             head: [0; 96],
             head_len: 0,
@@ -7072,9 +7112,9 @@ impl Frame {
         } else {
             THEME.on_surface_variant
         };
-        f.pill_len = font::ellipsize(src, PILL_RUNG, PILL_TEXT_MAX, &mut f.pill);
+        f.pill_len = font::ellipsize(src, PILL_RUNG, chrome::FIELD_TEXT_LANE, &mut f.pill);
         f.show_caret = app.address_focused;
-        f.caret_x = PILL_TEXT_X + text_width(&f.pill[..f.pill_len], PILL_RUNG);
+        f.caret_x = chrome::FIELD_TEXT_X + text_width(&f.pill[..f.pill_len], PILL_RUNG);
         f.select_w = if app.select_all {
             text_width(&f.pill[..f.pill_len], PILL_RUNG)
         } else {
@@ -8000,18 +8040,20 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     // document on screen came off a channel whose handshake completed.
     let is_https = parsed.scheme == UriScheme::Https && app.document_tls_verified;
 
-    // Back control, painted from the SDK so the chip is the same one every
-    // other app puts in the same rect.
-    if let Some(c) = back_button::pixel_for_theme(x, y, &THEME) {
-        return c;
-    }
+    // No back control is painted here. The row used to draw the SDK's
+    // `back_button` chip at x 24..72 beside the field, and the navigation bar
+    // under the page drew its own back tile at the same column -- two
+    // affordances, one request, and only the bar's tile reported whether there
+    // was anywhere to go back to. The bar is this app's navigation model, and it
+    // is the one the shell uses for back at the foot of the panel; the header is
+    // the address row and carries nothing else.
 
     // Omnibox Capsule
     //
-    // WHY the resting ring is the chrome tile's ring: the field and the five
+    // WHY the resting ring is the chrome tile's ring: the field and the two
     // tiles to its right are one row of controls, and the field used to ring
     // itself with `Theme::border` -- `#E5E5E5` on a `#FAFAFA` bar, 1.21:1 -- so
-    // the row read as five outlined boxes beside a field that was not there.
+    // the row read as outlined boxes beside a field that was not there.
     // [`chrome::tile_ring`] is the role the theme documents for a focused or
     // selected control (`#0A0A0A`, 18.97:1 on the bar), which is what the
     // platform's own outlined field uses and what makes the capsule the loudest
@@ -8063,14 +8105,24 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
             return if is_https { THEME.primary } else { THEME.on_surface_variant };
         }
         let in_sel = f.select_w > 0
-            && x >= PILL_TEXT_X
-            && x < PILL_TEXT_X + f.select_w
-            && y >= PILL_TEXT_Y
-            && y < PILL_TEXT_Y + font::line_height(1);
+            && x >= chrome::FIELD_TEXT_X
+            && x < chrome::FIELD_TEXT_X + f.select_w
+            && y >= chrome::FIELD_TEXT_Y
+            && y < chrome::FIELD_TEXT_Y + font::line_height(chrome::FIELD_RUNG);
         let t = &f.pill[..f.pill_len];
         if !t.is_empty() {
             let bg = if in_sel { THEME.primary_container } else { c };
-            if let Some(px) = text_px(x, y, PILL_TEXT_X, PILL_TEXT_Y, 1, t, f.pill_color, bg, false) {
+            if let Some(px) = text_px(
+                x,
+                y,
+                chrome::FIELD_TEXT_X,
+                chrome::FIELD_TEXT_Y,
+                chrome::FIELD_RUNG,
+                t,
+                f.pill_color,
+                bg,
+                false,
+            ) {
                 return px;
             }
         }
@@ -8080,8 +8132,8 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         if f.show_caret
             && x >= f.caret_x
             && x < f.caret_x + 2
-            && y >= PILL_TEXT_Y
-            && y < PILL_TEXT_Y + font::line_height(1)
+            && y >= chrome::FIELD_TEXT_Y
+            && y < chrome::FIELD_TEXT_Y + font::line_height(chrome::FIELD_RUNG)
         {
             return THEME.primary;
         }
@@ -8097,25 +8149,6 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return c;
     }
 
-    // Tab Counter Badge `[N]` Button
-    //
-    // WHY the box is returned and not discarded: the badge inks only its own
-    // plate, and every pixel of the target outside it used to fall through to
-    // the bar's colour, so the rest of the 46x44 control a tap answers was
-    // invisible.
-    let tabs_top_state = if app.overlay == SheetOverlay::TabSwitcher {
-        chrome::ChromeState::Current
-    } else {
-        chrome::ChromeState::Resting
-    };
-    if let Some(c) = chrome_tile_px(x, y, TABS_TOP_BTN, BTN_R, tabs_top_state) {
-        let box_ = tab_badge_box(TABS_TOP_BTN);
-        if let Some(badge) = tab_badge_pixel(x, y, box_, app.tabs.tab_count(), tabs_top_state) {
-            return badge;
-        }
-        return c;
-    }
-
     // Overflow Kebab Menu Button (`⋮`)
     let kebab_state = if app.overlay == SheetOverlay::Menu {
         chrome::ChromeState::Current
@@ -8126,13 +8159,18 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         return c;
     }
 
-    // Close Button (dismisses app to launcher)
-    if let Some(c) = chrome_tile_mark_px(x, y, CLOSE_BTN, monochrome::Icon::Close, chrome::ChromeState::Resting) {
-        return c;
-    }
+    // The row paints no close mark.
+    //
+    // WHY it went: the tile sat at the trailing end of the field a person types
+    // an address into, wore the kit's `Close` glyph, and quit the app -- a third
+    // way out beside the navigation bar's own back chip and the shell's home
+    // band, and one a person reads as "close this page". The field's own clearing
+    // is the accessory strip's `Clear` chip, which appears only while the address
+    // is up for editing, and leaving the app is the home band, which every screen
+    // on this device answers the same way.
 
     // Blue Loading Progress Bar (y 114..116)
-    if y >= 114 && y < 116 {
+    if y >= chrome::PROGRESS_Y0 && y < chrome::OMNIBOX_Y1 {
         return if app.loading_progress > 0 {
             THEME.primary
         } else {
@@ -11385,11 +11423,10 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[BROWSER APP] Home gesture pressed. Exiting to launcher.");
     }
 
-    // Top Omnibox Close Button
-    if CLOSE_BTN.contains(x, y) {
-        let _ = std::audio_haptic_click();
-        return Tap::Leave("[BROWSER APP] Close control pressed. Exiting to launcher.");
-    }
+    // The header's close tile is gone, and so is its branch here: the mark at the
+    // trailing end of the address row quit the app, which is the home band's job
+    // above. The home box is now the app's only way out, and the one `Tap::Leave`
+    // this function can return.
 
     // Kebab Menu Button
     if KEBAB_BTN.contains(x, y) {
@@ -11398,17 +11435,6 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             SheetOverlay::None
         } else {
             SheetOverlay::Menu
-        };
-        return Tap::Redraw;
-    }
-
-    // Tabs Top Badge Button
-    if TABS_TOP_BTN.contains(x, y) {
-        let _ = std::audio_haptic_click();
-        app.overlay = if app.overlay == SheetOverlay::TabSwitcher {
-            SheetOverlay::None
-        } else {
-            SheetOverlay::TabSwitcher
         };
         return Tap::Redraw;
     }
@@ -11424,16 +11450,10 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw;
     }
 
-    // Back control, tested ahead of the capsule so the chip's box is never read
-    // as the field that no longer covers it.
-    if back_button::contains(x, y) {
-        let _ = std::audio_haptic_click();
-        if app.tabs.can_go_back() {
-            app.go_back();
-            return Tap::Redraw;
-        }
-        return Tap::Leave("[BROWSER APP] Back control pressed with no history. Exiting to launcher.");
-    }
+    // The header no longer answers a back control. Its SDK chip used to be tested
+    // ahead of the capsule here, so the row carried a second way back beside the
+    // navigation bar's own -- and, with no history to walk, it quit the app, which
+    // is the home band's job. Navigation is answered on the bar, below.
 
     // Omnibox URL Bar Tap
     if PILL.contains(x, y) {
@@ -12646,9 +12666,32 @@ pub extern "C" fn _start() -> ! {
                             }
                             continue;
                         }
-                        if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                            std::log("[BROWSER APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                        // The shell's Home gesture (kernel kind 7) is the only
+                        // system gesture that leaves this app, and only where
+                        // the screen inks the home pill and answers it -- the
+                        // same `HOME_HIT` box the tap path uses in
+                        // `handle_tap`. The block here used to test kinds 4,
+                        // 6, 7, 8 and 10 at any position, so a Pan -- the very
+                        // drag a person makes to scroll the page, reported at
+                        // Up with the release position -- quit the browser
+                        // with no confirmation and no control promising it.
+                        // Kind 4 (Pan) and kind 10 (Fling) are now consumed
+                        // by the scroll branch below. Kind 6 (Back) answers
+                        // the bar's painted back tile, which says whether
+                        // there is anywhere to go back to. Kind 8 (Recents)
+                        // is the shell's own surface, and this app paints no
+                        // affordance for it, so the honest reaction is none.
+                        if input.kind == 7 && HOME_HIT.contains(input.x as usize, input.y as usize) {
+                            std::log("[BROWSER APP] Home gesture pressed. Exiting to launcher.").ok();
                             destroy_and_exit(surface);
+                        }
+                        if input.kind == 6 {
+                            let _ = std::audio_haptic_click();
+                            browser.go_back();
+                            dirty = Dirty::All;
+                        }
+                        if input.kind == 8 {
+                            std::log("[BROWSER APP] Recents is the shell's own surface; this app paints no affordance for it and quits nothing. The shell answers.").ok();
                         }
                         // Touch drag / vertical scroll
                         //
@@ -12664,7 +12707,7 @@ pub extern "C" fn _start() -> ! {
                         // pan gesture reports. Negating it made the page travel
                         // against the finger, and against the top stop it simply
                         // refused to move.
-                        if input.kind == 2 && browser.status == PageStatus::Loaded {
+                        if (input.kind == 2 || input.kind == 4 || input.kind == 10) && browser.status == PageStatus::Loaded {
                             if input.dy != 0 {
                                 browser.scroll.apply_drag(input.dy);
                                 dirty = Dirty::All;
@@ -12791,3 +12834,4 @@ fn panic(info: &PanicInfo) -> ! {
     }
     std::exit();
 }
+

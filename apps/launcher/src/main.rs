@@ -4922,7 +4922,7 @@ pub extern "C" fn _start() -> ! {
                                     // global search through the same path -- clear the
                                     // query, rebuild the index from the platform, show
                                     // the results -- so the two entries cannot drift.
-                                    state.search_query_len = 0;
+                                    state.search_query_len = 0usize;
                                     refresh_search_index(&mut state);
                                     state.current_view = ViewMode::Search;
                                     render_view(surface, &state);

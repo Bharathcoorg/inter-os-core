@@ -67,6 +67,18 @@ impl VideoCodec {
             VideoCodec::Unknown => "UNKNOWN",
         }
     }
+
+    /// Whether this format carries a running time the player could advance.
+    ///
+    /// WHY this exists: the media library is the platform's inventory, not this
+    /// app's, and it hands back whatever a directory holds -- including a
+    /// Portable Pixmap, which is one still frame and has no clock to run. The
+    /// transport, the scrubber and the elapsed digits all have to answer "this
+    /// is not time-based media" for those instead of drawing a paused clip that
+    /// never was one.
+    pub const fn is_still_image(self) -> bool {
+        matches!(self, VideoCodec::PpmP6 | VideoCodec::RawRgb | VideoCodec::RawRgba)
+    }
 }
 
 /// Detects the codec from a file name extension.
@@ -250,6 +262,22 @@ impl LoopMode {
             LoopMode::None => "OFF",
             LoopMode::LoopOne => "ONE",
             LoopMode::LoopAll => "ALL",
+        }
+    }
+
+    /// The words the loop control paints: the feature and the state together.
+    ///
+    /// WHY a second face and not a changed [`label`]: `label()` is the state
+    /// name the platform truth contract pins, and it is what a log line and the
+    /// properties sheet quote. A chip that reads only `OFF` names no function --
+    /// a person looking at `1.0x  FIT  OFF  PIP` cannot tell that the third one
+    /// repeats the playlist -- so the plate paints the feature word with the
+    /// state on it, and the state name itself stays where it was.
+    pub const fn chip_label(self) -> &'static str {
+        match self {
+            LoopMode::None => "LOOP OFF",
+            LoopMode::LoopOne => "LOOP ONE",
+            LoopMode::LoopAll => "LOOP ALL",
         }
     }
 
@@ -708,6 +736,430 @@ pub fn format_time(seconds: u32, is_negative: bool, out: &mut [u8]) -> usize {
     }
 
     n
+}
+
+/// The words the scrubber row stands in place of a track bar when the media
+/// carries no running time at all.
+///
+/// WHY a sentence and not a dash cluster: the row used to paint `00:00` beside
+/// `--:--`, which a person reads as "a clip, paused at the start". It is neither
+/// -- there is no clock to pause -- and the mark itself is two hyphens, a colon
+/// and two more hyphens, which at the body rung's cap height does not read as a
+/// number or as a word. It reads as a glyph the font failed to draw.
+pub const NO_RUNNING_TIME: &[u8] = b"NO RUNNING TIME";
+
+/// The short form of [`NO_RUNNING_TIME`], for the columns a list row has.
+///
+/// WHY a second spelling: a library row gives its duration field the width left
+/// over by the size, the codec and the frame size it quotes first, and the
+/// eleven columns of the full sentence are not in it.
+pub const NO_TIME_SHORT: &[u8] = b"NO TIME";
+
+/// In `out`, the running time a known duration names, or the words that say no
+/// running time was ever read.
+///
+/// WHY the words exist: a duration of zero is what a header nobody has read --
+/// or a still image, which has no header to read -- yields, and drawing `0:00`
+/// for it would claim the media is empty instead of reporting that its length is
+/// not a thing this format has.
+pub fn duration_label(known: bool, seconds: u32, negative: bool, out: &mut [u8]) -> usize {
+    if !known {
+        let marker = if out.len() >= NO_RUNNING_TIME.len() {
+            NO_RUNNING_TIME
+        } else {
+            NO_TIME_SHORT
+        };
+        out[..marker.len()].copy_from_slice(marker);
+        return marker.len();
+    }
+    format_time(seconds, negative, out)
+}
+
+/// In `out`, what the system's audio output level is, in words.
+///
+/// WHY words: the read-out used to answer a level nobody reported with `--`, two
+/// hyphens on the page colour at the body rung, which is the same broken-glyph
+/// look as the scrubber's marker. Three states, three words, and none of them a
+/// mark the face has to be missing to produce.
+///
+/// WHY `UNKNOWN` rather than a zero: a failed `audio_query_volume` is not a
+/// muted output, and painting `0%` would report a level the system never gave.
+pub fn volume_readout(percent: u32, muted: bool, known: bool, out: &mut [u8]) -> usize {
+    if !known {
+        return put_word(UNKNOWN_LEVEL, out);
+    }
+    if muted {
+        return put_word(MUTED, out);
+    }
+    let mut n = 0usize;
+    let mut digits = [0u8; 4];
+    let mut dlen = 0usize;
+    let mut v = percent.min(100);
+    if v == 0 {
+        digits[0] = b'0';
+        dlen = 1;
+    } else {
+        while v > 0 && dlen < 4 {
+            digits[dlen] = b'0' + (v % 10) as u8;
+            v /= 10;
+            dlen += 1;
+        }
+    }
+    while n < dlen && n + 2 < out.len() {
+        out[n] = digits[dlen - 1 - n];
+        n += 1;
+    }
+    if n + 1 < out.len() {
+        out[n] = b'%';
+        n += 1;
+    }
+    n
+}
+
+/// The words [`volume_readout`] answers when the system never reported a level.
+pub const UNKNOWN_LEVEL: &[u8] = b"UNKNOWN";
+
+/// The words [`volume_readout`] answers while the output is muted.
+pub const MUTED: &[u8] = b"MUTED";
+
+/// Every word the level read-out can answer with: the two states and the widest
+/// number it reports at the ceiling.
+pub const VOLUME_READOUT_WORDS: [&[u8]; 3] = [UNKNOWN_LEVEL, MUTED, b"100%"];
+
+/// The column the surface gives the level read-out: three line boxes of the body
+/// rung at the largest level the setting can hold.
+///
+/// WHY authored here and read back by `main.rs`: the same reason
+/// [`CHIP_PLATE_ROOM`] is. The column is the number the read-out's words are
+/// sized against, and a copy kept inside `mod tests` -- where this one lived --
+/// is a number the screen never reads. `main.rs` derives `VOL_LABEL_COL` from
+/// the same two SDK faces and its compile-time gate says the two are one.
+pub const VOLUME_READOUT_COL: usize =
+    3 * std::design::font::line_height_for_user_scale(2, std::design::font::TEXT_SCALE_EXTRA_LARGE);
+
+/// The two rungs the read-out may stand on, largest first -- the ladder the
+/// painter hands [`label_rung`] at the plate row.
+const READOUT_RUNGS: [usize; 2] = [
+    std::design::typography::BODY_SCALE,
+    std::design::typography::CAPTION_SCALE,
+];
+
+/// The advance `text` takes at `scale` on `level`, in columns.
+///
+/// WHY this re-adds the face's advances instead of calling `label_w`: the
+/// measurement is the same sum the runtime face performs -- each glyph's advance
+/// scaled by the em, integer-divided, then totalled -- but `label_w` reaches the
+/// outline tables through a cached lookup that a `const` cannot make. It is
+/// spelled over the base table only, which is the table every word in
+/// [`VOLUME_READOUT_WORDS`] sits in; a byte outside it fails the gate rather
+/// than quietly measuring nothing.
+const fn readout_run_w(text: &[u8], scale: usize, level: u8) -> usize {
+    let em = std::design::font::em_for_user_scale(scale, level);
+    let upem = std::design::face::UNITS_PER_EM as u32;
+    let mut total = 0usize;
+    let mut i = 0usize;
+    while i < text.len() {
+        let b = text[i];
+        if b < std::design::face::FIRST_CHAR || b > std::design::face::LAST_CHAR {
+            return usize::MAX;
+        }
+        let adv = std::design::face::ADVANCE[(b - std::design::face::FIRST_CHAR) as usize] as u32;
+        total += ((adv * em) / upem) as usize;
+        i += 1;
+    }
+    total
+}
+
+/// WHAT THIS GATES: every word the level read-out can answer with stands inside
+/// [`VOLUME_READOUT_COL`] at every level the setting can hold -- on the narrowest
+/// rung the ladder offers at every level, and on the body rung at the platform's
+/// own level, so the word a person sees by default is never the stepped one.
+///
+/// WHY a compile-time gate beside the library's runtime test:
+/// `test_volume_readout_words_are_never_a_dash` inks the same words through the
+/// runtime face, and that test is not in the binary the phone runs. `main.rs`
+/// calls this from a `const`, so a column that stopped holding its own words
+/// fails the build rather than showing up as a clipped last letter.
+///
+/// WHY the narrowest rung is the claim: the step down is what keeps a word on the
+/// screen at a raised text size, so the rung that can still fail is the last one
+/// it is allowed to take. A word that does not fit even there is a word painted
+/// past its column, and there is no rung left to save it.
+pub const fn volume_readout_words_hold_at_every_level() -> bool {
+    let refuge = READOUT_RUNGS.len() - 1;
+    let mut level = 0u8;
+    while level <= std::design::font::TEXT_SCALE_EXTRA_LARGE {
+        let mut w = 0usize;
+        while w < VOLUME_READOUT_WORDS.len() {
+            let text = VOLUME_READOUT_WORDS[w];
+            if readout_run_w(text, READOUT_RUNGS[refuge], level) > VOLUME_READOUT_COL {
+                return false;
+            }
+            if level == std::design::font::TEXT_SCALE_NORMAL
+                && readout_run_w(text, READOUT_RUNGS[0], level) > VOLUME_READOUT_COL
+            {
+                return false;
+            }
+            w += 1;
+        }
+        level += 1;
+    }
+    true
+}
+
+fn put_word(word: &[u8], out: &mut [u8]) -> usize {
+    let n = word.len().min(out.len());
+    out[..n].copy_from_slice(&word[..n]);
+    n
+}
+
+// -----------------------------------------------------------------------------
+// One Run, One Plate: the rung a label is drawn at
+// -----------------------------------------------------------------------------
+
+/// The room a control plate gives its centred label: the plate's own width less
+/// the air it keeps at each end.
+///
+/// WHY one number in the library rather than a spelling in each target: the bin
+/// fits a run into this room when it paints a plate, and the host test fits
+/// words into it to prove a label cannot overflow. The bin carries `test =
+/// false`, so a second copy authored inside `mod tests` would be a number the
+/// screen never reads -- and `main.rs`'s compile-time gate beside
+/// `CHIP_LABEL_AIR` is what keeps this room equal to the plate it is derived
+/// from.
+pub const CHIP_PLATE_ROOM: usize = 154 - 2 * 4;
+
+/// The advance a run takes at `scale` on `level`, in the weight it is drawn in.
+///
+/// WHY this is the measurement and not `font::measure`: `measure` is the bitmap
+/// cell's arithmetic, and the screen's `draw_text*` faces answer the wider of
+/// the outline run and that cell. This is the same expression the painter's
+/// `run_w` reads, so a fit decided here is the fit the pixel path agrees with.
+pub fn label_w(text: &[u8], bold: bool, scale: usize, level: u8) -> usize {
+    if bold {
+        std::design::font::measure_bold_user_scale(text, scale, level)
+    } else {
+        std::design::font::measure_user_scale(text, scale, level)
+    }
+}
+
+/// The largest rung in `rungs`, first rung first, that `text` stands inside at
+/// `level`; the last one when none of them does.
+///
+/// WHY a rung ladder and not a clipped run: a control's word that will not fit
+/// its plate at a raised text size is still the word that names the control, and
+/// `...` on `LOOP ONE` says `LOOP O...` -- a label a person cannot finish. The
+/// fleet's own answer to this is the camera's refusal caption, which steps its
+/// rung down rather than inking the ring beside it. The same step here keeps the
+/// whole word, on the plate, at every level the setting holds.
+pub fn label_rung(text: &[u8], bold: bool, max_w: usize, level: u8, rungs: &[usize]) -> usize {
+    for &rung in rungs {
+        if label_w(text, bold, rung, level) <= max_w {
+            return rung;
+        }
+    }
+    match rungs.last() {
+        Some(&last) => last,
+        None => 0,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The transport band's three words
+// -----------------------------------------------------------------------------
+//
+// WHY the words are the library's and not the painter's: the band that holds
+// Prev, Play/Pause and Next has always inked three discs and nothing else, so on
+// a phone nobody has used before the only thing a person has to go on is that
+// three round marks in a row do *something* -- and a mark whose meaning has to be
+// guessed at is the same defect class as the mute plate that used to carry a red
+// cross. Every other control on this screen states its word (`LOOP OFF`,
+// `LIBRARY`, `MEDIA INFO`), so the transport states its three from the same
+// derivation: [`label_rung`] stepped between [`PLATE_RUNGS`], centred by
+// `paint_plate_label`, into the plate whose room is one of the two constants
+// below.
+//
+// WHY they live here rather than in `main.rs`: the bin target carries
+// `test = false`, so the only place a word can be measured against the room it is
+// painted into is this file, where the host test below inks the ladder directly.
+
+/// The word under the control that goes back to the start of the clip, or to the
+/// clip before it when the list holds one.
+///
+/// WHY `PREV` and not `RESTART`: the list is asked first -- `Playlist::prev`
+/// steps for every codec and `load_current_track` re-dispatches from the entry's
+/// own header, so the file before this one is opened, not this one re-read. The
+/// restart is the same mark's other half, the one every player answers within the
+/// first seconds of a clip, and with a single track in the list the previous
+/// position of the list *is* its first second.
+pub const PREV_WORD: &[u8] = b"PREV";
+/// The word under the control that steps to the next track the list holds.
+pub const NEXT_WORD: &[u8] = b"NEXT";
+/// The word under the play control while it is about to start the clip running.
+pub const PLAY_WORD: &[u8] = b"PLAY";
+/// The word under the play control while it is about to stop the clock.
+pub const PAUSE_WORD: &[u8] = b"PAUSE";
+
+/// The word the play control paints, for the action its own press performs.
+///
+/// WHY it is asked for by the same predicate the disc's glyph is drawn from: the
+/// disc shows the bars while the clip runs and the triangle while it does not, so
+/// a word that read `PLAY` under the bars would name the action the press does
+/// not perform -- which is exactly the defect class this band is being fixed for.
+pub const fn transport_action_word(playing: bool) -> &'static [u8] {
+    if playing {
+        PAUSE_WORD
+    } else {
+        PLAY_WORD
+    }
+}
+
+/// The columns the portrait transport row leaves a control's word: the distance
+/// between two neighbouring disc centres, less the air every plate label keeps at
+/// each end.
+///
+/// WHY the centre distance and not the disc: the word stands under the whole
+/// control, and the limit on it is the neighbour's word, not its own circle. Two
+/// runs centred on their own controls cannot meet while each stays inside half
+/// the distance between the centres, so the plate the painter fills is exactly
+/// `180` columns wide and the room inside it is what a word is measured against.
+pub const TRANSPORT_WORD_ROOM: usize = 180 - 2 * 4;
+
+/// [`TRANSPORT_WORD_ROOM`] for the landscape scrim, whose three controls stand
+/// `130` columns apart.
+pub const LAND_TRANSPORT_WORD_ROOM: usize = 130 - 2 * 4;
+
+// -----------------------------------------------------------------------------
+// The speaker glyph, on the platform's icon grid
+// -----------------------------------------------------------------------------
+//
+// WHY the geometry lives here and not in the painter: every screen in this
+// repository answers "what colour is pixel (x, y)", so a glyph's shape is a
+// property of arithmetic, and arithmetic this screen holds privately in a band
+// of `get_video_pixel` cannot be tested -- the bin target carries `test = false`.
+// The dialer's handset went through the same change for the same reason, and the
+// gate that now holds it shut re-derives the glyph's own expressions. Here the
+// host test can ink the grid directly.
+//
+// WHY the twenty-four unit grid: the platform's monochrome kit draws every icon
+// on it, because a glyph authored in pixels is a different shape at every size.
+// The kit's own `Icon` enum carries a mic, a bell and a play triangle, and no
+// speaker, so this is the kit's grid and the kit's method with one glyph added
+// by the app that needs it.
+
+/// The side of the grid a glyph is drawn on, in grid units.
+pub const ICON_GRID: i32 = 24;
+
+/// What the audio output is doing, as far as this player has been told.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpeakerState {
+    /// The system reported a level and the output is live: the horn carries
+    /// waves.
+    On,
+    /// The person muted it: the same space the waves take carries a strike.
+    Muted,
+    /// The volume query was never answered, so the app does not know which of
+    /// the two it is looking at. The horn is drawn alone -- no waves, because
+    /// nothing reported sound coming out, and no strike, because nothing said
+    /// it was shut off.
+    Unknown,
+}
+
+impl SpeakerState {
+    /// The state the volume fields describe.
+    ///
+    /// WHY mute answers first: a person who pressed the plate knows the output is
+    /// shut, and that is true whatever the last query reported; the unknown state
+    /// is only for a level nobody ever read.
+    pub const fn from_volume(muted: bool, known: bool) -> Self {
+        if muted {
+            SpeakerState::Muted
+        } else if !known {
+            SpeakerState::Unknown
+        } else {
+            SpeakerState::On
+        }
+    }
+}
+
+/// Whether the grid point `(gx, gy)` is the horn: the magnet's bar and the mouth
+/// it widens into.
+pub fn speaker_horn_hit(gx: i32, gy: i32) -> bool {
+    if gx < 3 || gx > 14 {
+        return false;
+    }
+    let dy = (gy - 12).abs();
+    if gx <= 8 {
+        dy <= 3
+    } else {
+        dy <= gx - 6
+    }
+}
+
+/// Whether the grid point is one sound wave: the arc of radius `r` the horn's
+/// mouth faces, in front of it.
+pub fn speaker_wave_hit(gx: i32, gy: i32, r: i32) -> bool {
+    let dx = gx - 13;
+    let dy = gy - 12;
+    if dx <= 0 {
+        return false;
+    }
+    let d2 = dx * dx + dy * dy;
+    d2 >= (r - 1) * (r - 1) && d2 <= (r + 1) * (r + 1)
+}
+
+/// Whether the grid point is the strike a muted output carries, in the same
+/// space the waves stand in when the output is live.
+///
+/// WHY it sits in front of the mouth and not across the whole glyph: the strike
+/// answers the waves, so it takes their place; drawn corner to corner it would
+/// cut the horn itself, and a person reading the plate is then looking at a
+/// crossed-out speaker rather than a speaker with nothing coming out of it.
+/// Its two endpoints keep the stroke's whole thickness inside the grid.
+pub fn speaker_strike_hit(gx: i32, gy: i32) -> bool {
+    segment_hit(gx, gy, 16, 6, 21, 18, 2)
+}
+
+/// Whether the grid point is inked by `state`'s speaker.
+pub fn speaker_hit(gx: i32, gy: i32, state: SpeakerState) -> bool {
+    if speaker_horn_hit(gx, gy) {
+        return true;
+    }
+    match state {
+        SpeakerState::On => speaker_wave_hit(gx, gy, 4) || speaker_wave_hit(gx, gy, 7),
+        SpeakerState::Muted => speaker_strike_hit(gx, gy),
+        SpeakerState::Unknown => false,
+    }
+}
+
+/// Whether the grid point lies within `t` units of the segment `(x0, y0)` to
+/// `(x1, y1)`.
+///
+/// WHY integers: the guest paints one pixel at a time inside a frame budget, and
+/// this runs for every pixel of every plate on the screen. The projection is
+/// carried in per-mille units so no division by the segment's own length loses
+/// the position.
+fn segment_hit(gx: i32, gy: i32, x0: i32, y0: i32, x1: i32, y1: i32, t: i32) -> bool {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0 {
+        let ddx = gx - x0;
+        let ddy = gy - y0;
+        return ddx * ddx + ddy * ddy <= t * t;
+    }
+    let mut u = ((gx - x0) * dx + (gy - y0) * dy) * 1000 / len2;
+    if u < 0 {
+        u = 0;
+    }
+    if u > 1000 {
+        u = 1000;
+    }
+    let cx = x0 + u * dx / 1000;
+    let cy = y0 + u * dy / 1000;
+    let ddx = gx - cx;
+    let ddy = gy - cy;
+    ddx * ddx + ddy * ddy <= t * t
 }
 
 /// Calculates the scrubber thumb X coordinate given track geometry.
@@ -1513,5 +1965,408 @@ mod tests {
 
         pl.select(0);
         assert_eq!(pl.current_item().unwrap().title_str(), "Clip1");
+    }
+
+    /// The ladder's own level -- one hundred per cent -- which is the level a
+    /// person who never touched Text size draws at, and the only level at which
+    /// a gate may insist on the body rung.
+    const LEVEL_NORMAL: u8 = std::design::font::TEXT_SCALE_NORMAL;
+
+    /// The volume read-out's column, as `main.rs` gives it: three line boxes of
+    /// the body rung at the largest level the setting can hold, which is the
+    /// widest word the read-out answers (`UNKNOWN`) is asked to stand inside.
+    ///
+    /// WHY read from the crate root rather than spelled again: the number the
+    /// runtime face sizes words against and the number the screen paints the
+    /// column from are one, and a second copy here would only ever test itself.
+    const VOL_READOUT_COL: usize = super::VOLUME_READOUT_COL;
+
+    #[test]
+    fn test_the_volume_readout_words_hold_their_column_at_build_time() {
+        // The same claim `main.rs` makes from a `const`, so the arithmetic the
+        // build is gated on is exercised by a name a person can run.
+        assert!(volume_readout_words_hold_at_every_level());
+        // The narrowest rung is the last one the read-out may take, so the words
+        // that stand on it are the ones the column was measured for.
+        assert!(readout_run_w(UNKNOWN_LEVEL, 1, LEVEL_NORMAL) <= VOL_READOUT_COL);
+        assert!(
+            readout_run_w(b"100%", 1, std::design::font::TEXT_SCALE_EXTRA_LARGE) <= VOL_READOUT_COL
+        );
+    }
+
+    #[test]
+    fn test_loop_chip_label_names_the_mode_it_sets() {
+        // The plate used to paint a bare `OFF`, which names no function. Each
+        // chip label now carries the feature word the press acts on, and the
+        // state on the end of it.
+        assert_eq!(LoopMode::None.chip_label(), "LOOP OFF");
+        assert_eq!(LoopMode::LoopOne.chip_label(), "LOOP ONE");
+        assert_eq!(LoopMode::LoopAll.chip_label(), "LOOP ALL");
+
+        // The state names the platform truth contract pins are untouched, so a
+        // log line and the properties sheet still quote `OFF` / `ONE` / `ALL`.
+        assert_eq!(LoopMode::None.label(), "OFF");
+        assert_eq!(LoopMode::LoopOne.label(), "ONE");
+        assert_eq!(LoopMode::LoopAll.label(), "ALL");
+
+        // Every mode the cycle reaches has a chip label, so no press can land on
+        // a plate that paints nothing.
+        let mut mode = LoopMode::None;
+        for _ in 0..6 {
+            assert!(mode.chip_label().starts_with("LOOP "));
+            assert!(mode.chip_label().len() > "LOOP ".len());
+            mode = mode.next();
+        }
+    }
+
+    #[test]
+    fn test_a_chip_label_stands_inside_its_plate_at_every_rung() {
+        // The six secondary plates are 154 columns and the row's labels are the
+        // widest words any of their states can answer.
+        let labels: [&[u8]; 12] = [
+            b"LOOP OFF",
+            b"LOOP ONE",
+            b"LOOP ALL",
+            b"0.5x",
+            b"0.75x",
+            b"1.0x",
+            b"1.25x",
+            b"1.5x",
+            b"2.0x",
+            b"STRETCH",
+            b"16:9",
+            b"4:3",
+        ];
+        // The two rungs `main.rs` steps a control's word between: the row's own
+        // body rung and the caption rung under it.
+        let rungs = [
+            std::design::typography::BODY_SCALE,
+            std::design::typography::CAPTION_SCALE,
+        ];
+        for level in 0..=3u8 {
+            for text in labels {
+                let rung = label_rung(text, true, CHIP_PLATE_ROOM, level, &rungs);
+                assert!(
+                    label_w(text, true, rung, level) <= CHIP_PLATE_ROOM,
+                    "{:?} at level {} has no rung inside {} columns: rung {} measures {}",
+                    core::str::from_utf8(text),
+                    level,
+                    CHIP_PLATE_ROOM,
+                    rung,
+                    label_w(text, true, rung, level),
+                );
+                // The step is only ever taken by a rung the person raised: at the
+                // platform's own level every word holds the body rung, so the
+                // control row keeps one type across the row for anybody who never
+                // touched Text size.
+                if level == LEVEL_NORMAL {
+                    assert_eq!(
+                        rung,
+                        std::design::typography::BODY_SCALE,
+                        "{:?} gave up the body rung at the platform level",
+                        core::str::from_utf8(text),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_transport_word_stands_inside_its_row_at_every_rung() {
+        // The words the transport band paints under its three discs. The play
+        // control is asked for both of its faces, because the face it answers is
+        // decided by the clip's state and not by the layout.
+        let words: [&[u8]; 4] = [
+            PREV_WORD,
+            NEXT_WORD,
+            transport_action_word(true),
+            transport_action_word(false),
+        ];
+
+        // The word under the play disc has to move with the action the press
+        // performs: one word for both faces would name an action the disc is not
+        // answering, which is the defect this band is being fixed for.
+        assert_ne!(
+            transport_action_word(true),
+            transport_action_word(false),
+            "the play control paints one word for two different presses"
+        );
+
+        // Nothing but letters the monochrome kit carries: an unsupported
+        // codepoint is drawn as a placeholder box, the same broken glyph this
+        // fleet already refuses on the mute plate.
+        for word in words {
+            for byte in word {
+                assert!(
+                    byte.is_ascii_uppercase(),
+                    "{:?} carries a byte the bitmap kit cannot ink",
+                    core::str::from_utf8(word),
+                );
+            }
+        }
+
+        let rungs = [
+            std::design::typography::BODY_SCALE,
+            std::design::typography::CAPTION_SCALE,
+        ];
+        // The room each orientation measures its words against: the portrait row
+        // and the landscape scrim are different widths, and each is the centre
+        // distance the discs stand on less the air a plate keeps.
+        for (name, room) in [
+            ("portrait", TRANSPORT_WORD_ROOM),
+            ("landscape", LAND_TRANSPORT_WORD_ROOM),
+        ] {
+            for level in 0..=3u8 {
+                for word in words {
+                    let rung = label_rung(word, true, room, level, &rungs);
+                    assert!(
+                        label_w(word, true, rung, level) <= room,
+                        "the {} row has no rung inside {} columns for {:?} at level {}: \
+                         rung {} measures {}",
+                        name,
+                        room,
+                        core::str::from_utf8(word),
+                        level,
+                        rung,
+                        label_w(word, true, rung, level),
+                    );
+                    if level == LEVEL_NORMAL {
+                        assert_eq!(
+                            rung,
+                            std::design::typography::BODY_SCALE,
+                            "{:?} gave up the body rung at the platform level on the {} row",
+                            core::str::from_utf8(word),
+                            name,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_still_image_formats_carry_no_running_time() {
+        // A Portable Pixmap is one frame, and a RAW buffer is one frame. They are
+        // in the library because the library is the filesystem, not because this
+        // player can run them.
+        assert!(VideoCodec::PpmP6.is_still_image());
+        assert!(VideoCodec::RawRgb.is_still_image());
+        assert!(VideoCodec::RawRgba.is_still_image());
+
+        // Time-based media keeps claiming a clock, and an unknown format claims
+        // nothing rather than being called a still it was never told about.
+        assert!(!VideoCodec::Avi.is_still_image());
+        assert!(!VideoCodec::Mjpeg.is_still_image());
+        assert!(!VideoCodec::H264.is_still_image());
+        assert!(!VideoCodec::Unknown.is_still_image());
+    }
+
+    #[test]
+    fn test_unknown_running_time_is_words_not_a_dash_cluster() {
+        let mut buf = [0u8; 24];
+
+        // A row that only has a column of its own gets the short form; the
+        // scrubber's full width gets the sentence.
+        let mut narrow = [0u8; 12];
+        let n = duration_label(false, 0, false, &mut narrow);
+        assert_eq!(&narrow[..n], NO_TIME_SHORT);
+        assert_eq!(core::str::from_utf8(&narrow[..n]).unwrap(), "NO TIME");
+
+        let s = duration_label(false, 0, true, &mut buf);
+        assert_eq!(&buf[..s], NO_RUNNING_TIME);
+
+        // Neither form is a hyphen-and-colon mark a person reads as a glyph the
+        // font is missing.
+        for out in [&buf[..s], &narrow[..n]] {
+            assert!(!core::str::from_utf8(out).unwrap().contains('-'));
+            assert!(!core::str::from_utf8(out).unwrap().contains(':'));
+        }
+
+        // A duration that was read still formats as a time, at the padded rows
+        // every other clock on this screen quotes.
+        let k = duration_label(true, 65, false, &mut buf);
+        assert_eq!(core::str::from_utf8(&buf[..k]).unwrap(), "01:05");
+        let k = duration_label(true, 65, true, &mut buf);
+        assert_eq!(core::str::from_utf8(&buf[..k]).unwrap(), "-01:05");
+    }
+
+    #[test]
+    fn test_volume_readout_words_are_never_a_dash() {
+        let mut buf = [0u8; 16];
+
+        // The state the device frame is in today: the system never answered the
+        // volume query, so the read-out says so in a word.
+        let n = volume_readout(0, false, false, &mut buf);
+        assert_eq!(&buf[..n], UNKNOWN_LEVEL);
+        assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "UNKNOWN");
+
+        let n = volume_readout(40, true, true, &mut buf);
+        assert_eq!(&buf[..n], MUTED);
+
+        let n = volume_readout(0, false, true, &mut buf);
+        assert_eq!(&buf[..n], b"0%");
+        let n = volume_readout(45, false, true, &mut buf);
+        assert_eq!(&buf[..n], b"45%");
+        let n = volume_readout(100, false, true, &mut buf);
+        assert_eq!(&buf[..n], b"100%");
+
+        // A level the person dragged past the ceiling is reported at the
+        // ceiling, not at the wrapped remainder.
+        let n = volume_readout(250, false, true, &mut buf);
+        assert_eq!(&buf[..n], b"100%");
+
+        // The column `main.rs` gives the read-out holds one of these words at
+        // every level the setting can hold, at the largest rung it fits: the
+        // same step the control row takes, so a raised text size costs this
+        // read-out air rather than a clipped last letter.
+        let rungs = [
+            std::design::typography::BODY_SCALE,
+            std::design::typography::CAPTION_SCALE,
+        ];
+        for level in 0..=3u8 {
+            for text in [UNKNOWN_LEVEL, MUTED, b"100%"] {
+                let rung = label_rung(text, false, VOL_READOUT_COL, level, &rungs);
+                assert!(
+                    label_w(text, false, rung, level) <= VOL_READOUT_COL,
+                    "{:?} at level {} does not stand in the read-out column: \
+                     rung {} measures {} against {}",
+                    core::str::from_utf8(text),
+                    level,
+                    rung,
+                    label_w(text, false, rung, level),
+                    VOL_READOUT_COL,
+                );
+                if level == LEVEL_NORMAL {
+                    assert_eq!(
+                        rung,
+                        std::design::typography::BODY_SCALE,
+                        "{:?} gave up the body rung at the platform level",
+                        core::str::from_utf8(text),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_the_speaker_glyph_is_a_horn_in_every_state() {
+        // The plate used to carry a red cross and a cone poked from four
+        // hand-written offsets, which on the page colour read as a box with a
+        // mark in it -- the look of a glyph the face is missing. Whatever the
+        // output is doing, the horn is drawn, so the plate is always the thing
+        // the press on it is named after.
+        for state in [SpeakerState::On, SpeakerState::Muted, SpeakerState::Unknown] {
+            assert!(speaker_hit(5, 12, state), "{:?} lost the magnet", state);
+            assert!(speaker_hit(14, 12, state), "{:?} lost the mouth", state);
+            // A horn and not a bar: the mouth is taller than the magnet it
+            // widens out of, and the magnet is not taller than the mouth.
+            assert!(speaker_hit(14, 5, state), "{:?} has no flare", state);
+            assert!(!speaker_hit(8, 5, state), "{:?} is a rectangle", state);
+
+            // Nothing reaches outside the grid the box maps into, at any state.
+            for gx in -8..(ICON_GRID + 8) {
+                for gy in -8..(ICON_GRID + 8) {
+                    if speaker_hit(gx, gy, state) {
+                        assert!(
+                            gx >= 0 && gx < ICON_GRID && gy >= 0 && gy < ICON_GRID,
+                            "{:?} inks ({}, {}), outside the twenty-four unit grid",
+                            state,
+                            gx,
+                            gy,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_muting_strikes_the_horn_instead_of_replacing_it() {
+        let inked = |state: SpeakerState| -> usize {
+            let mut n = 0;
+            for gx in 0..ICON_GRID {
+                for gy in 0..ICON_GRID {
+                    if speaker_hit(gx, gy, state) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let horn = {
+            let mut n = 0;
+            for gx in 0..ICON_GRID {
+                for gy in 0..ICON_GRID {
+                    if speaker_horn_hit(gx, gy) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        // A live output carries waves in front of the mouth, and the muted one
+        // carries a strike in the same space. The two claims are each other's
+        // absence: a grid point the waves ink and the strike misses, and one the
+        // strike inked where no wave ever reached.
+        let mut only_on = 0;
+        let mut only_muted = 0;
+        let mut both = 0;
+        for gx in 0..ICON_GRID {
+            for gy in 0..ICON_GRID {
+                let a = speaker_hit(gx, gy, SpeakerState::On);
+                let b = speaker_hit(gx, gy, SpeakerState::Muted);
+                if a && !b {
+                    only_on += 1;
+                } else if b && !a {
+                    only_muted += 1;
+                } else if a {
+                    both += 1;
+                }
+            }
+        }
+        assert!(
+            only_on >= 4 && only_muted >= 4,
+            "waves and strike are not two claims about the plate: {} pixels only \
+             on, {} only muted",
+            only_on,
+            only_muted,
+        );
+        assert!(both > 0, "the strike stands nowhere near the waves");
+
+        // Every state is a picture of a speaker: the horn is inked whole in all
+        // three, so no plate is a bare mark on an empty box.
+        for state in [SpeakerState::On, SpeakerState::Muted, SpeakerState::Unknown] {
+            assert!(inked(state) >= horn, "{:?} paints less than the horn", state);
+            for gx in 0..ICON_GRID {
+                for gy in 0..ICON_GRID {
+                    if speaker_horn_hit(gx, gy) {
+                        assert!(speaker_hit(gx, gy, state), "{:?} dropped the horn", state);
+                    }
+                }
+            }
+        }
+
+        // The two states that make a claim about the output make it in front of
+        // the mouth, so neither of them is the horn alone.
+        assert!(inked(SpeakerState::On) > horn);
+        assert!(inked(SpeakerState::Muted) > horn);
+
+        // The state nobody reported is the honest one: it claims neither waves
+        // nor a strike, only the horn.
+        for gx in 0..ICON_GRID {
+            for gy in 0..ICON_GRID {
+                if !speaker_horn_hit(gx, gy) {
+                    assert!(!speaker_hit(gx, gy, SpeakerState::Unknown));
+                }
+            }
+        }
+
+        // The painter hands this the same two fields its read-out quotes, and
+        // mute answers before a level nobody read.
+        assert_eq!(SpeakerState::from_volume(true, false), SpeakerState::Muted);
+        assert_eq!(SpeakerState::from_volume(true, true), SpeakerState::Muted);
+        assert_eq!(SpeakerState::from_volume(false, false), SpeakerState::Unknown);
+        assert_eq!(SpeakerState::from_volume(false, true), SpeakerState::On);
     }
 }

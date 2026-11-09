@@ -207,12 +207,19 @@ pub const KEY_COLS: usize = 4;
 /// WHY the layout lives here and not in the renderer: the renderer draws
 /// the keys, the hit test finds them and the tests check them, and three
 /// places that have to agree are better as one.
+///
+/// WHY every cell of the six-by-four grid holds exactly one key: the last
+/// row used to hold the modulo and the equals drawn across two columns each,
+/// so the keypad carried two plates of a different shape in a grid of
+/// identical ones -- and those two spare cells were where the two parentheses
+/// belong. One key per cell is what makes a wide plate unnecessary rather
+/// than merely hidden: it frees the room the labelled keys need.
 pub const fn button_action(row: usize, col: usize) -> Option<char> {
     match (row, col) {
         (0, 0) => Some('C'), // AC (All Clear): throws the whole expression away
         (0, 1) => Some('E'), // CE (Clear Entry): throws the number being typed away
         (0, 2) => Some('B'), // Backspace: takes the last character back
-        (0, 3) => Some('P'), // () Parentheses
+        (0, 3) => Some('p'), // %: the percentage of the number being typed
         (1, 0) => Some('7'),
         (1, 1) => Some('8'),
         (1, 2) => Some('9'),
@@ -229,8 +236,10 @@ pub const fn button_action(row: usize, col: usize) -> Option<char> {
         (4, 1) => Some('0'),
         (4, 2) => Some('.'), // . Decimal point
         (4, 3) => Some('+'), // + Add
-        (5, 0) => Some('%'), // mod: the binary modulo, the remainder of a division
-        (5, 2) => Some('='), // = Evaluate
+        (5, 0) => Some('('), // ( Opens a group
+        (5, 1) => Some(')'), // ) Closes it
+        (5, 2) => Some('%'), // mod: the binary modulo, the remainder of a division
+        (5, 3) => Some('='), // = Evaluate
         _ => None,
     }
 }
@@ -240,12 +249,21 @@ pub const fn button_action(row: usize, col: usize) -> Option<char> {
 /// WHY the modulo key reads "mod": the operation is a binary modulo, the
 /// remainder of one number divided by another, and a "%" on the key said
 /// percentage, which is a different operation with the same glyph.
+///
+/// WHY the two parentheses are two labels: one plate used to read "()" and
+/// the app guessed which glyph the person meant. A key that can do two things
+/// and says neither is not a key.
+///
+/// WHY the percentage key reads "%": it is the glyph the operation is written
+/// with, and the operation that shares it now says its own name.
 pub const fn button_label(action: char) -> &'static [u8] {
     match action {
         'C' => b"AC",
         'E' => b"CE",
         'B' => b"DEL",
-        'P' => b"()",
+        '(' => b"(",
+        ')' => b")",
+        'p' => b"%",
         '~' => b"+/-",
         '.' => b".",
         '%' => b"mod",
@@ -1190,14 +1208,21 @@ impl CalculatorState {
     ///
     /// WHY the keypad's own vocabulary and not the keyboard's: the keypad
     /// names a key by what it does -- `B` is the key that takes a
-    /// character back -- and the keyboard names it by the character it
-    /// types. The keypad's names are the ones that survive a keyboard that
-    /// has no key for them.
+    /// character back, `p` is the key that types a percentage -- and the
+    /// keyboard names it by the character it types. The keypad's names are
+    /// the ones that survive a keyboard that has no key for them.
+    ///
+    /// WHY `p` and not `%`: `%` is already the name of the binary modulo,
+    /// which the keypad labels `mod`, and one engine cannot have two
+    /// meanings for one character. The plate still reads `%`, which is
+    /// what the key writes into the expression.
     pub fn press_key(&mut self, action: char) -> bool {
         match action {
             '0'..='9' => self.push_digit((action as u8 - b'0') as i64),
             '+' | '-' | '*' | '/' | '%' => self.set_operation(action),
-            'P' => self.push_parenthesis(),
+            '(' => self.push_open_parenthesis(),
+            ')' => self.push_close_parenthesis(),
+            'p' => self.push_percent(),
             '.' => self.push_point(),
             '=' => {
                 // The keypad types an expression, so the answer is the
@@ -1257,11 +1282,10 @@ impl CalculatorState {
             self.evaluate();
             return;
         }
-        let mut end = self.expr_len;
-        while end > 0 && self.expr_buf[end - 1] == b' ' {
-            end -= 1;
-        }
-        if end > 0 && matches!(self.expr_buf[end - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
+        let mut end = self.trimmed_expr_len();
+        if end > 0 && matches!(self.expr_buf[end - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
+            && !Self::percent_is_postfix(&self.expr_buf[..end], end - 1)
+        {
             if end >= 2 && self.expr_buf[end - 2] == b' ' {
                 end -= 1;
             }
@@ -1333,22 +1357,17 @@ impl CalculatorState {
         // that result. Appending to the expression that produced it made
         // "1 + 2 =" then "× 4 =" evaluate the stale "1 + 2 × 4".
         if self.result_mode {
-            let shown = self
-                .display_len
-                .min(self.display_buf.len())
-                .min(self.expr_buf.len());
-            self.expr_buf[..shown].copy_from_slice(&self.display_buf[..shown]);
-            self.expr_len = shown;
+            self.restart_from_result();
         }
         self.result_mode = false;
 
         // One operator at a time: a second operator replaces the first
         // instead of queueing two in a row, which the parser rejects.
-        let mut last = self.expr_len;
-        while last > 0 && self.expr_buf[last - 1] == b' ' {
-            last -= 1;
-        }
-        if last > 0 && matches!(self.expr_buf[last - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^') {
+        let last = self.trimmed_expr_len();
+        if last > 0
+            && matches!(self.expr_buf[last - 1], b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
+            && !Self::percent_is_postfix(&self.expr_buf[..last], last - 1)
+        {
             self.expr_len = last;
             self.expr_buf[last - 1] = op as u8;
             if self.expr_len < self.expr_buf.len() {
@@ -1382,36 +1401,132 @@ impl CalculatorState {
         }
     }
 
-    pub fn push_parenthesis(&mut self) {
+    /// Types an opening bracket.
+    ///
+    /// WHY this does not also close a bracket: one plate used to read `()`
+    /// and the app counted the brackets already in the line to guess which
+    /// one the person meant. A key that can do two things and paints
+    /// neither is not a key; a plate that reads `(` has to type `(`.
+    pub fn push_open_parenthesis(&mut self) {
         if self.error {
             self.clear();
         }
-        let mut open_count = 0usize;
-        let mut close_count = 0usize;
+        if self.result_mode {
+            self.restart_from_result();
+        }
+        if matches!(self.last_byte(), Some(b'0'..=b'9' | b')' | b'%')) {
+            // The parser reads `(` as the start of a number, never as a
+            // multiplication, so the sign between them has to be typed.
+            self.push_char(' ');
+            self.push_char('*');
+            self.push_char(' ');
+        }
+        self.push_char('(');
+    }
+
+    /// Types a closing bracket, and types nothing when there is no bracket
+    /// open or no number for it to close.
+    ///
+    /// WHY it can refuse: a bracket with no partner, or one sitting straight
+    /// after an operator, is not a number the parser can read. Writing it
+    /// anyway would leave a line the person has to unpick with the backspace
+    /// key, and an error plate they did not ask for.
+    pub fn push_close_parenthesis(&mut self) {
+        if self.error {
+            self.clear();
+        }
+        let mut open = 0usize;
+        let mut closed = 0usize;
         for &b in &self.expr_buf[..self.expr_len] {
             if b == b'(' {
-                open_count += 1;
+                open += 1;
             } else if b == b')' {
-                close_count += 1;
+                closed += 1;
             }
         }
+        if open == closed {
+            return;
+        }
+        let tail = self.last_byte_without_spaces();
+        if !matches!(tail, Some(b'0'..=b'9' | b'.' | b')' | b'%')) {
+            return;
+        }
+        self.expr_len = self.trimmed_expr_len();
+        self.push_char(')');
+    }
 
-        let last_byte = if self.expr_len > 0 {
-            Some(self.expr_buf[self.expr_len - 1])
-        } else {
+    /// Types a percentage sign onto the end of the number being entered.
+    ///
+    /// WHY a sign and not an operator: the engine reads `50%` as fifty
+    /// hundredths and `50 % 3` as a remainder, so the percentage belongs to
+    /// the number it follows and carries no spaces of its own.
+    ///
+    /// WHY it can type nothing: a percentage of nothing is not a number, so
+    /// the key on an empty line or straight after an operator leaves the line
+    /// as it was rather than painting something the parser has to reject.
+    pub fn push_percent(&mut self) {
+        if self.error {
+            self.clear();
+        }
+        if self.result_mode {
+            // The number on the screen is the number being scaled.
+            self.restart_from_result();
+        }
+        if !matches!(self.last_byte_without_spaces(), Some(b'0'..=b'9' | b'.' | b')' | b'%')) {
+            return;
+        }
+        self.expr_len = self.trimmed_expr_len();
+        self.push_char('%');
+    }
+
+    /// The last byte of the expression, spaces included.
+    fn last_byte(&self) -> Option<u8> {
+        self.expr_buf.get(..self.expr_len).and_then(|b| b.last().copied())
+    }
+
+    /// The last byte of the expression that is not a space an operator left.
+    fn last_byte_without_spaces(&self) -> Option<u8> {
+        let end = self.trimmed_expr_len();
+        if end == 0 {
             None
-        };
-
-        if open_count > close_count && matches!(last_byte, Some(b'0'..=b'9' | b')' | b'%')) {
-            self.push_char(')');
         } else {
-            if matches!(last_byte, Some(b'0'..=b'9' | b')' | b'%')) {
-                self.push_char(' ');
-                self.push_char('*');
-                self.push_char(' ');
-            }
-            self.push_char('(');
+            Some(self.expr_buf[end - 1])
         }
+    }
+
+    /// The length of the expression with its trailing spaces removed.
+    fn trimmed_expr_len(&self) -> usize {
+        let mut end = self.expr_len;
+        while end > 0 && self.expr_buf[end - 1] == b' ' {
+            end -= 1;
+        }
+        end
+    }
+
+    /// Starts a fresh expression from the number on the screen.
+    ///
+    /// WHY: a key pressed on a result applies to that result. Appending to
+    /// the expression that produced the result instead made "1 + 2 =" and
+    /// then "x 4 =" evaluate the stale "1 + 2 x 4".
+    fn restart_from_result(&mut self) {
+        let shown = self
+            .display_len
+            .min(self.display_buf.len())
+            .min(self.expr_buf.len());
+        self.expr_buf[..shown].copy_from_slice(&self.display_buf[..shown]);
+        self.expr_len = shown;
+        self.result_mode = false;
+    }
+
+    /// Whether the `%` at `i` is the percentage sign written on the end of a
+    /// number rather than the modulo operator.
+    ///
+    /// WHY the two readings have to be told apart here: the keypad writes
+    /// the modulo with spaces around it ("50 % 3") and the percentage hard
+    /// against its number ("50%"). An edit that treated the postfix sign as
+    /// an operator would rewrite the tail of the number itself.
+    const fn percent_is_postfix(expr: &[u8], i: usize) -> bool {
+        i > 0 && expr[i] == b'%' && matches!(expr[i - 1], b'0'..=b'9' | b'.' | b')')
     }
 
     pub fn backspace(&mut self) {
@@ -2576,5 +2691,261 @@ mod tests {
     #[test]
     fn test_display_band_clears_the_keypad_top() {
         assert!(chrome::DISPLAY_Y1 <= 420);
+    }
+
+    /// The two parentheses are two keys, each with its own label.
+    ///
+    /// WHY this test exists: one plate carried both glyphs as `()`, and the
+    /// app guessed which one the person meant from what it had already typed.
+    /// A key with two possible meanings and no way to choose between them is
+    /// not a key -- on a phone the guess is the defect, because the person
+    /// cannot see what the app guessed until the answer is wrong.
+    #[test]
+    fn test_the_keypad_gives_each_parenthesis_its_own_key() {
+        let mut open = None;
+        let mut close = None;
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                match button_action(row, col) {
+                    Some('(') => open = Some((row, col)),
+                    Some(')') => close = Some((row, col)),
+                    _ => {}
+                }
+                // No plate carries both glyphs at once.
+                let act = button_action(row, col).unwrap_or(' ');
+                assert_ne!(
+                    button_label(act),
+                    b"()",
+                    "({row}, {col}) is one key carrying two meanings"
+                );
+            }
+        }
+        let open = open.expect("the keypad has no key that opens a parenthesis");
+        let close = close.expect("the keypad has no key that closes a parenthesis");
+        assert_ne!(open, close, "one plate carries both parentheses");
+        assert_eq!(button_label('('), b"(");
+        assert_eq!(button_label(')'), b")");
+
+        // What the two keys type is what the parser reads: (2 + 3) * 4 is
+        // twenty, and the keypad got there without the app guessing.
+        let mut calc = CalculatorState::new();
+        assert!(calc.press_key('('));
+        calc.press_key('2');
+        calc.press_key('+');
+        calc.press_key('3');
+        assert!(calc.press_key(')'));
+        calc.press_key('*');
+        calc.press_key('4');
+        calc.press_key('=');
+        assert_eq!(calc.display_str(), "20");
+    }
+
+    /// The keypad carries a `%` key, and it does what a `%` says.
+    ///
+    /// WHY this test exists: the engine reads a postfix `%` as a percentage
+    /// -- `50%` is half of fifty -- and the keypad had no key that typed one.
+    /// The only `%` a person could reach was the plate labelled `mod`,
+    /// because the two operations share a glyph. A screen that implies an
+    /// operation with no control for it is an operation the person cannot
+    /// find.
+    #[test]
+    fn test_the_keypad_has_a_percent_key_and_it_scales_the_entry() {
+        let mut percent = None;
+        let mut modulo = None;
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                match button_action(row, col) {
+                    Some('p') => percent = Some((row, col)),
+                    Some('%') => modulo = Some((row, col)),
+                    _ => {}
+                }
+            }
+        }
+        let percent = percent.expect("the keypad has no percentage key");
+        let modulo = modulo.expect("the keypad has no modulo key");
+        assert_ne!(percent, modulo, "one plate is both the percentage and the modulo");
+        assert_eq!(button_label('p'), b"%");
+        assert_eq!(button_label('%'), b"mod");
+
+        let mut calc = CalculatorState::new();
+        calc.press_key('5');
+        calc.press_key('0');
+        assert!(calc.press_key('p'));
+        assert_eq!(calc.expr_str(), "50%");
+        calc.press_key('=');
+        assert_eq!(calc.display_str(), "0.5");
+
+        // The percentage belongs to the entry it follows, and the expression
+        // that comes after it still reads.
+        let mut calc = CalculatorState::new();
+        calc.press_key('5');
+        calc.press_key('0');
+        calc.press_key('p');
+        calc.press_key('+');
+        calc.press_key('2');
+        calc.press_key('0');
+        calc.press_key('=');
+        assert_eq!(calc.display_str(), "20.5");
+
+        // A percentage of nothing is not a number, so the key types nothing
+        // onto an empty expression.
+        let mut calc = CalculatorState::new();
+        calc.press_key('p');
+        assert_eq!(calc.expr_str(), "");
+    }
+
+    /// Every cell of the grid holds exactly one key, and every key is one
+    /// cell.
+    ///
+    /// WHY this test exists: the last row's two keys were each drawn across
+    /// two columns, so the keypad carried two plates of a different shape in
+    /// a grid of identical ones -- and the four cells they covered were where
+    /// the two parentheses and the percentage could live. A grid where every
+    /// cell holds one key is what makes a wide plate unnecessary rather than
+    /// merely hidden.
+    #[test]
+    fn test_every_keypad_cell_holds_exactly_one_key() {
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                assert!(
+                    button_action(row, col).is_some(),
+                    "cell ({row}, {col}) holds no key, so its plate is either blank \
+                     or covered by a neighbour drawn wider than one cell"
+                );
+            }
+        }
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                let action = button_action(row, col).unwrap();
+                for other in 0..KEY_ROWS * KEY_COLS {
+                    let (orow, ocol) = (other / KEY_COLS, other % KEY_COLS);
+                    if (orow, ocol) == (row, col) {
+                        continue;
+                    }
+                    assert_ne!(
+                        button_action(orow, ocol).unwrap(),
+                        action,
+                        "the {action:?} key is on two cells"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What one press re-inks, printed for the gate that checks it.
+    ///
+    /// WHY the crate carries this and not a script: the arithmetic belongs to
+    /// `chrome::press_dirty`, which is the function the binary actually calls, and
+    /// a measurement taken anywhere else certifies a copy of it. The lines are
+    /// the regions and their pixel counts; `tests/test_calculator_truth_contract.py`
+    /// re-derives them from the geometry constants the classifier reads, so a
+    /// region widened, narrowed or typed in fails there rather than passing here.
+    ///
+    /// WHY the asserts stay beside the prints: the gate can only read what this
+    /// test was willing to say, and a claim nobody checked locally is a claim that
+    /// can be printed wrong on purpose.
+    #[test]
+    fn test_measured_dirty_regions() {
+        use chrome::{keys_dirty, press_dirty, Dirty};
+        use interos_std::design::primitives::Rect;
+        use std::{print, println};
+
+        /// One measured answer, in the shape the gate parses.
+        fn report(name: &str, dirty: &Dirty) {
+            print!(
+                "CALC-DIRTY name={name} rects={} pixels={}",
+                dirty.regions().len(),
+                dirty.pixels()
+            );
+            for (i, region) in dirty.regions().iter().enumerate() {
+                print!(" rect{i}={},{},{},{}", region.x, region.y, region.w, region.h);
+            }
+            println!();
+        }
+
+        let panel = Dirty::all();
+        let idle = Dirty::none();
+        // A digit: the expression changes and no key's shading does.
+        let digit = press_dirty(None, None);
+        // An operator handed over to the next one: the card's badge, the cap that
+        // stopped being armed and the cap that started.
+        let operator = press_dirty(Some('+'), Some('*'));
+        // The disarming a `C` types, which is the case that used to repaint the
+        // card alone and leave the armed key lit.
+        let disarmed = press_dirty(Some('/'), None);
+
+        report("panel", &panel);
+        report("none", &idle);
+        report("digit", &digit);
+        report("operator", &operator);
+        report("disarmed", &disarmed);
+
+        let width = interos_std::design::viewport::LOGICAL_WIDTH;
+        let height = interos_std::design::viewport::LOGICAL_HEIGHT;
+        let status_rows = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+        assert_eq!(panel.regions(), &[Rect::new(0, 0, width, height)]);
+        assert_eq!(panel.pixels(), width * height);
+        assert!(idle.is_none() && idle.pixels() == 0);
+
+        // The card, and nothing the press did not move.
+        assert_eq!(
+            digit.regions(),
+            &[Rect::new(0, chrome::DISPLAY_Y0, width, chrome::KEYPAD_TOP - chrome::DISPLAY_Y0)],
+            "a digit press re-inks the display rows and no others"
+        );
+        assert_eq!(operator.regions().len(), 3, "an operator press re-inks three regions");
+        assert_eq!(
+            operator.pixels(),
+            digit.pixels() + 2 * chrome::BTN_W * chrome::BTN_H,
+            "the two caps an operator press moves are two keycaps, not a band"
+        );
+        assert!(operator.pixels() * 3 <= panel.pixels());
+        assert_eq!(
+            disarmed.pixels(),
+            digit.pixels() + chrome::BTN_W * chrome::BTN_H,
+            "a disarming press still re-inks the cap it left behind"
+        );
+
+        // Every region a press names is inside the panel and past the status band.
+        for dirty in [digit, operator, disarmed] {
+            for region in dirty.regions() {
+                assert!(region.x + region.w <= width);
+                assert!(region.y + region.h <= height);
+                assert!(
+                    region.y >= status_rows,
+                    "a press re-inked row {}, inside the status band's own rows",
+                    region.y
+                );
+            }
+        }
+
+        // The caps the classifier names are the cells the grid actually holds.
+        for action in ['+', '-', '*', '/', '%', '=', 'C'] {
+            let (row, col) = chrome::key_cell_of(action)
+                .unwrap_or_else(|| panic!("the {action:?} key has no cell to repaint"));
+            assert_eq!(button_action(row, col), Some(action));
+            assert_eq!(
+                chrome::key_cap(row, col),
+                Some(Rect::new(
+                    chrome::COL_X[col],
+                    chrome::ROW_Y[row],
+                    chrome::BTN_W,
+                    chrome::BTN_H
+                ))
+            );
+        }
+
+        // A drawer that moved is the panel; a drawer that stayed is the press.
+        assert_eq!(keys_dirty(None, None, false, true), Dirty::all());
+        assert_eq!(keys_dirty(Some('+'), Some('-'), true, true), press_dirty(Some('+'), Some('-')));
+
+        // Widening past the model's bound answers the panel rather than losing a
+        // region: a dropped row is a wrong pixel, and wrong pixels are the defect.
+        let mut crowded = Dirty::rect(Rect::new(0, 100, width, 1));
+        for i in 0..chrome::MAX_DIRTY_REGIONS {
+            crowded = crowded.widen(Dirty::rect(Rect::new(0, 200 + i, width, 1)));
+        }
+        assert_eq!(crowded, Dirty::all());
     }
 }

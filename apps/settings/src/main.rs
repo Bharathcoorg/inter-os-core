@@ -2460,8 +2460,29 @@ const ORB_RIPPLE_FRAMES: u32 = 24;
 /// How long the landing stays up after an orb press so the ripple is seen.
 const ORB_OPEN_DELAY_MS: u64 = 260;
 
-/// Landing screen identity typography positions
-const IDENTITY_TITLE_Y: usize = 264;
+/// The air the landing keeps between the orb's halo and the screen title.
+const ORB_TITLE_GAP: usize = std::design::spacing::GRID_20;
+/// The first row of the band the screen title owns.
+///
+/// WHY derived from the orb and not remembered beside it: the orb is inked
+/// inside a disc of `HALO_R` about `ORB_CY`, and this used to be a literal 264
+/// that nothing tied to that disc, while `landing_pixel` asked the orb before
+/// it asked the title. The two bands did not meet at these numbers, but the
+/// day one of them moved the orb would have painted over the title's caps --
+/// the decoration answering for the word it was drawn on top of. Deriving the
+/// row from the halo's own foot makes the title follow the orb it sits under,
+/// and the gate after it is what refuses a halo that grows into the title.
+const IDENTITY_TITLE_Y: usize = ORB_CY + HALO_R + ORB_TITLE_GAP;
+/// WHY the gate: the sentence above is only a promise while the build checks
+/// it. This is the property the defect broke -- the orb's band ending at the
+/// row the title's band begins -- stated where both numbers are visible.
+const _: () = assert!(ORB_CY + HALO_R <= IDENTITY_TITLE_Y);
+/// WHY the title's own band is gated against the grid too: the landing does
+/// not scroll, so the title, the halo and four card rows have to share these
+/// rows by construction and not by the accident of today's rung.
+const _: () = assert!(
+    IDENTITY_TITLE_Y + std::design::font::line_height(TYPE_DISPLAY) <= GRID_Y
+);
 #[allow(dead_code)]
 const IDENTITY_SUB_Y: usize = 296;
 
@@ -3188,14 +3209,21 @@ type IconFn = fn(usize, usize, usize, usize, u32) -> Option<u32>;
 /// every break candidate per pixel would cost more than the whole card fill.
 /// The break points are content, not layout, so they live with the content and
 /// each phrase stays whole.
+/// WHY the words are the user's and not the machine's: these seven cards are
+/// the first screen a person reaches, and they used to advertise internals --
+/// "flight mode", "VFS partitions", "DVFS governor", "Keystore probe". None of
+/// those is a word on a phone. The radio switch is named the way the
+/// launcher's own shade names it ("Airplane" in `quick_controls.rs`,
+/// `airplane` in the platform's search keywords), because one thing that is
+/// called two things in one system is called nothing at all.
 fn category(i: usize) -> (&'static [u8], &'static [u8], &'static [u8], IconFn) {
     match i {
         0 => (b"Device", b"Display, brightness,", b"sound & diagnostics", icon_device),
-        1 => (b"Network", b"Wi-Fi, cellular,", b"flight mode & interfaces", icon_network),
+        1 => (b"Network", b"Wi-Fi, cellular,", b"Airplane mode", icon_network),
         2 => (b"Personal", b"Wallpapers, lockscreen", b"& preferences", icon_personal),
-        3 => (b"Apps & Storage", b"Installed apps", b"VFS partitions", icon_apps),
-        4 => (b"Power & Battery", b"Battery health", b"& DVFS governor", icon_battery),
-        5 => (b"Security & Privacy", b"PIN configuration,", b"Keystore probe", icon_security),
+        3 => (b"Apps & Storage", b"Installed apps", b"Storage space", icon_apps),
+        4 => (b"Power & Battery", b"Battery health", b"& performance mode", icon_battery),
+        5 => (b"Security & Privacy", b"PIN configuration,", b"encryption & privacy", icon_security),
         _ => (b"About InterOS", b"Version & target", b"uptime & memory", icon_gear),
     }
 }
@@ -3247,7 +3275,7 @@ fn row_count(section: Section) -> usize {
         Section::Personal => 6,
         Section::Apps => 4,
         Section::Power => 4,
-        Section::Security => 4,
+        Section::Security => 3,
         Section::System => 5,
     }
 }
@@ -3301,7 +3329,13 @@ const DIAG_ROW_TALL: usize = 112;
 /// a wishlist rather than a reading, and both were deleted. The fuel gauge
 /// and the screen orientation took the freed slots, because the platform does
 /// report both.
-const DIAG_ROWS: usize = 7;
+///
+/// WHY eight now: the key-derivation probe left the Security page. It answers
+/// a question no user asks -- did this app's one allowed derivation call
+/// succeed -- and it cannot be acted on, so on a consumer page it was a
+/// diagnostic wearing a setting's clothes. The reading is real, so it was not
+/// deleted; it moved here, beside the readings that are also only reports.
+const DIAG_ROWS: usize = 8;
 
 /// Height of diagnostic row `row`.
 ///
@@ -4582,6 +4616,49 @@ fn diag_row_pixel(
                 )
             }
         }
+        7 => {
+            // The key-derivation probe, moved off the Security page. WHY it
+            // stays: the answer is the kernel's own, from the one derivation
+            // this app is allowed to attempt, and the old row on the consumer
+            // page replaced it with a literal. WHY it is not on that page: a
+            // user can neither read nor act on whether an application key
+            // derived, so the row was a diagnostic wearing a setting's
+            // clothes - and the word "keystore" is not a word on a phone.
+            let (cap, badge, badge_ink): (&[u8], &[u8], u32) = match app.keystore {
+                KeystoreProbe::Derived => (
+                    b"Application key derivation succeeded",
+                    b"REPORTED",
+                    SUCCESS_LABEL,
+                ),
+                KeystoreProbe::Short => (
+                    b"Derivation returned a short, unusable key",
+                    b"REPORTED",
+                    THEME.on_surface_variant,
+                ),
+                KeystoreProbe::Refused => (
+                    b"Derivation refused by the kernel",
+                    b"REFUSED",
+                    THEME.on_surface_variant,
+                ),
+                KeystoreProbe::Untested => (
+                    b"Derivation has not been attempted",
+                    b"UNTESTED",
+                    THEME.on_surface_variant,
+                ),
+            };
+            diag_row_head(
+                x,
+                y,
+                cy,
+                b"Key derivation probe",
+                cap,
+                THEME.on_surface_variant,
+                b"",
+                badge,
+                badge_ink,
+                false,
+            )
+        }
         _ => {
             // The thermal zones: the platform's own per-zone temperatures,
             // its cooling state and its throttling flag.
@@ -4923,14 +5000,22 @@ fn row_pixel(
             }
             2 => {
                 // WHY this row no longer claims a radio is listening: the
-                // platform has no radio-control syscall, so there is no
-                // flight-mode state to report and nothing that is listening.
+                // platform has no radio-control call to ask, so there is no
+                // switch state to report and nothing that is listening.
+                //
+                // WHY the row is called "Airplane mode": it is the name the
+                // platform already uses for the switch -- the launcher's shade
+                // inks "Airplane" and the shared section keywords carry
+                // "airplane" -- and a row the user cannot switch on is still a
+                // row about something they can name. "Flight Mode Status" was
+                // the machine's phrase for it, and the caption below carries
+                // the answer, so the row cannot be read as a switch.
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
-                    b"Flight Mode Status",
-                    b"Flight mode not reported by the platform",
+                    b"Airplane mode",
+                    b"Not reported by the platform",
                     THEME.on_surface_variant,
                     b"UNAVAILABLE",
                     THEME.on_surface_variant,
@@ -5158,7 +5243,7 @@ fn row_pixel(
                     Some(bytes) => {
                         let mb = (bytes / (1024 * 1024)) as u32;
                         let sn = write_decimal(mb, &mut sbuf);
-                        let sn = push_suffix(&mut sbuf, sn, b" MB root block storage");
+                        let sn = push_suffix(&mut sbuf, sn, b" MB total storage");
                         (sn, &b"REPORTED"[..], SUCCESS_LABEL)
                     }
                     None => {
@@ -5172,7 +5257,11 @@ fn row_pixel(
                     x,
                     y,
                     cy,
-                    b"Storage & VFS Filesystem",
+                    // WHY the row is called "Storage": it answers one question
+                    // a user owns -- how much of this device is used -- and the
+                    // filesystem that holds it is not part of the answer. "VFS"
+                    // named the mechanism and said nothing about the space.
+                    b"Storage",
                     &sbuf[..sn],
                     if app.storage_bytes.is_some() { THEME.on_surface } else { THEME.on_surface_variant },
                     badge,
@@ -5273,14 +5362,23 @@ fn row_pixel(
                 }
             }
             1 => {
-                // CPU frequency scaling: observed governor (real query) plus a
-                // live DVFS profile selector whose result is reported honestly.
+                // The performance picker: what the device says it is doing
+                // today, the three settings it offers, and the answer to the
+                // last change asked of it.
+                //
+                // WHY the words changed: the row was titled "CPU Frequency
+                // Scaling" and its caption named the "governor" and the "DVFS"
+                // state. Those are the kernel's names for a scheduler policy,
+                // and a person choosing between a fast phone and a phone that
+                // lasts the day owns neither. The value the query returns is
+                // still printed as the platform spelled it -- a reading the app
+                // did not name is not the app's to rename.
                 let (gov_run, gov_ink): (&[u8], u32) = match app.governor {
-                    Some(0) => (b"Governor reported by the kernel: Performance", THEME.on_surface_variant),
-                    Some(1) => (b"Governor reported by the kernel: Power Saver", THEME.on_surface_variant),
-                    Some(2) => (b"Governor reported by the kernel: Interactive", THEME.on_surface_variant),
-                    Some(3) => (b"Governor reported by the kernel: Schedutil", THEME.on_surface_variant),
-                    _ => (b"DVFS state unavailable", THEME.on_surface_variant),
+                    Some(0) => (b"Mode reported by the kernel: Performance", THEME.on_surface_variant),
+                    Some(1) => (b"Mode reported by the kernel: Power Saver", THEME.on_surface_variant),
+                    Some(2) => (b"Mode reported by the kernel: Interactive", THEME.on_surface_variant),
+                    Some(3) => (b"Mode reported by the kernel: Schedutil", THEME.on_surface_variant),
+                    _ => (b"Mode not reported by the kernel", THEME.on_surface_variant),
                 };
                 let gov_reported = app.governor.is_some();
                 let (gov_badge, gov_badge_ink): (&[u8], u32) = if gov_reported {
@@ -5292,7 +5390,7 @@ fn row_pixel(
                     x,
                     y,
                     cy,
-                    b"CPU Frequency Scaling",
+                    b"Performance mode",
                     gov_run,
                     gov_ink,
                     gov_badge,
@@ -5372,7 +5470,7 @@ fn row_pixel(
                         x,
                         y,
                         cy,
-                        b"Thermal Governor",
+                        b"Device temperature",
                         &cap_buf[..n],
                         THEME.on_surface_variant,
                         b"REPORTED",
@@ -5402,7 +5500,7 @@ fn row_pixel(
                         x,
                         y,
                         cy,
-                        b"Thermal Governor",
+                        b"Device temperature",
                         &cap_buf[..n],
                         THEME.on_surface_variant,
                         badge,
@@ -5426,39 +5524,6 @@ fn row_pixel(
                 }
             }
             1 => {
-                // The keystore row reports the outcome of the one derivation
-                // probe this app is allowed to attempt, instead of a literal
-                // "status unavailable" that ignored the probe's result.
-                let (cap, badge, badge_ink): (&[u8], &[u8], u32) = match app.keystore {
-                    KeystoreProbe::Derived => (
-                        b"Application key derivation succeeded",
-                        b"REPORTED",
-                        SUCCESS_LABEL,
-                    ),
-                    KeystoreProbe::Short => (
-                        b"Derivation returned a short, unusable key",
-                        b"REPORTED",
-                        THEME.on_surface_variant,
-                    ),
-                    KeystoreProbe::Refused => (
-                        b"Derivation refused by the kernel",
-                        b"REFUSED",
-                        THEME.on_surface_variant,
-                    ),
-                    KeystoreProbe::Untested => (
-                        b"Derivation has not been attempted",
-                        b"UNTESTED",
-                        THEME.on_surface_variant,
-                    ),
-                };
-                if let Some(c) = row_head(
-                    x, y, cy, b"Hardware Keystore", cap, THEME.on_surface_variant, badge, badge_ink,
-                    RowBoxes::user(),
-                ) {
-                    return c;
-                }
-            }
-            2 => {
                 // WHY "no query" rather than "unavailable": the platform has
                 // no encryption-status syscall for the vault, so claiming the
                 // vault is unencrypted would be as invented as claiming it is
@@ -5803,11 +5868,16 @@ fn landing_card_pixel(x: usize, y: usize, i: usize, app: &SettingsApp) -> Option
         let (sub_a, sub_b): (&[u8], &[u8]) = match i {
             3 if app.landing_apps_line_len > 0 => (
                 &app.landing_apps_line[..app.landing_apps_line_len],
-                &b"VFS partitions"[..],
+                // WHY the card's own second line and not a second literal: the
+                // phrase below the live count is what the card says about
+                // itself when the registry has not answered, and it was written
+                // out twice -- once in `category` and once here, where it had
+                // gone stale as "VFS partitions".
+                static_b,
             ),
             6 if app.landing_version_line_len > 0 => (
                 &app.landing_version_line[..app.landing_version_line_len],
-                &b"uptime & memory"[..],
+                static_b,
             ),
             _ => (static_a, static_b),
         };
@@ -6039,17 +6109,14 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             }
         }
     }
-    // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
-    if let Some(c) = vitality_orb_pixel(
-        x,
-        y,
-        app.orb_state(),
-        app.frame_count,
-        app.orb_tap_frame,
-    ) {
-        return c;
-    }
-    // Device identity title below orb: "Settings" at TYPE_DISPLAY (scale 3)
+    // Device identity title, in its own band, asked before the orb.
+    //
+    // WHY this branch comes first: the two painters describe one canvas, and
+    // whichever is asked first owns the rows they share. The screen's word is
+    // the thing the reader came to read and the orb is its decoration, so the
+    // title answers and the halo gives way -- the order the landing used to
+    // keep the other way round, which is how a title ended up drawn under the
+    // thing next to it.
     let title = b"Settings";
     let tw = run_w(title, TYPE_DISPLAY, true);
     let tx = if tw < W { (W - tw) / 2 } else { CONTENT_X };
@@ -6064,6 +6131,16 @@ fn landing_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         THEME.on_surface,
         THEME.surface,
         true,
+    ) {
+        return c;
+    }
+    // Dynamic Device Vitality Orb centered at ORB_CX, ORB_CY
+    if let Some(c) = vitality_orb_pixel(
+        x,
+        y,
+        app.orb_state(),
+        app.frame_count,
+        app.orb_tap_frame,
     ) {
         return c;
     }

@@ -32,15 +32,18 @@ use std::design::accessibility::{DynamicType, UserTextScale};
 
 use video_player::avi::{self, AviChunk, AviError, AviInfo, AviStream};
 use video_player::theme::{
-    COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
+    spacing, type_scale, COLOR_ACCENT, COLOR_BG, COLOR_BORDER, COLOR_PLAY_FILL, COLOR_PLAY_GLYPH,
     COLOR_PROGRESS_ACTIVE, COLOR_PROGRESS_BG, COLOR_SHEET_CARD, COLOR_SURFACE,
     COLOR_SURFACE_SUNKEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY, MIN_TOUCH_TARGET, THEME,
 };
 use video_player::{
-    blend_argb, format_file_size, format_resolution, format_time, map_canvas_to_source,
-    map_coords_to_source, scrubber_seek_seconds, scrubber_thumb_x, volume_seek_percent,
+    blend_argb, duration_label, format_file_size, format_resolution, format_time, label_rung,
+    map_canvas_to_source, map_coords_to_source, scrubber_seek_seconds, scrubber_thumb_x,
+    speaker_hit, volume_readout, volume_readout_words_hold_at_every_level, volume_seek_percent,
     volume_thumb_x, AspectRatio, DecoderStatus, LoopMode, Orientation, PlaybackSpeed,
-    PlaybackState, Playlist, VideoCodec, CANVAS_H, CANVAS_W, NO_HW_H264_MSG,
+    PlaybackState, Playlist, SpeakerState, VideoCodec, CANVAS_H, CANVAS_W, CHIP_PLATE_ROOM,
+    ICON_GRID, NEXT_WORD, NO_HW_H264_MSG, NO_RUNNING_TIME, PREV_WORD, VOLUME_READOUT_COL,
+    transport_action_word,
 };
 
 // -----------------------------------------------------------------------------
@@ -663,15 +666,16 @@ const LAND_NEXT_HIT: Rect = Rect::new(
     LAND_STEP_R * 2,
 );
 
+const LAND_VOL_BAND_H: usize = 52;
 const LAND_VOL_X: usize = 120;
-const LAND_VOL_Y: usize = 1290;
+const LAND_VOL_Y: usize = LAND_PANEL.y + LAND_PANEL.h - LAND_VOL_BAND_H + 22;
 const LAND_VOL_W: usize = 460;
 const LAND_VOL_H: usize = 8;
 const LAND_VOL: Rect = Rect::new(LAND_VOL_X, LAND_VOL_Y, LAND_VOL_W, LAND_VOL_H);
 /// The volume band's foot: the panel's own bottom edge is 54 rows under the
 /// track, so the band takes 52 of them and leaves the scrim's last rows to the
 /// video the tap toggle still answers.
-const LAND_VOL_HIT: Rect = Rect::new(LAND_VOL_X - 10, LAND_VOL_Y - 16, LAND_VOL_W + 20, 52);
+const LAND_VOL_HIT: Rect = Rect::new(LAND_VOL_X - 10, LAND_PANEL.y + LAND_PANEL.h - LAND_VOL_BAND_H, LAND_VOL_W + 20, LAND_VOL_BAND_H);
 
 /// The landscape mute control: the plate the painter fills and the press
 /// answers, with its glyph centred on the plate rather than on a remembered
@@ -682,9 +686,7 @@ const LAND_VOL_HIT: Rect = Rect::new(LAND_VOL_X - 10, LAND_VOL_Y - 16, LAND_VOL_
 /// ever put there -- on a translucent panel over live video that reads as a
 /// mark on the picture, not as a button. The portrait mute control is now drawn
 /// the same way, and both are the app's own plate style.
-const LAND_MUTE_BTN: Rect = Rect::new(40, 1274, 52, 52);
-const LAND_MUTE_CX: usize = LAND_MUTE_BTN.x + LAND_MUTE_BTN.w / 2;
-const LAND_MUTE_CY: usize = LAND_MUTE_BTN.y + LAND_MUTE_BTN.h / 2;
+const LAND_MUTE_BTN: Rect = Rect::new(40, LAND_PANEL.y + LAND_PANEL.h - LAND_VOL_BAND_H, 52, 52);
 
 /// WHY checked at compile time: the first four gates are the painting itself --
 /// every band answers rows the scrim fills, and the transport presses are the
@@ -984,8 +986,33 @@ const SEEK_HIT: Rect = Rect::new(SEEK_X - 14, 584, (REMAIN_X - 2) - (SEEK_X - 14
 const _: () = assert!(SEEK_HIT.x + SEEK_HIT.w <= REMAIN_X);
 const _: () = assert!(SEEK_RECT.x >= SEEK_HIT.x && SEEK_RECT.x + SEEK_RECT.w <= SEEK_HIT.x + SEEK_HIT.w);
 
+/// The gutter a full-width row on this screen keeps at each edge.
+///
+/// WHY named rather than spelled twice: the sentence below is measured against
+/// it, and the control row starts on it, so the measurement and the painted row
+/// cannot drift apart -- which the gate under [`SCRUB_SENTENCE_ROOM`] checks
+/// against `SPEED_BTN`'s own left edge instead of against a second copy of the
+/// number.
+const BAND_EDGE_INSET: usize = 24;
+
+/// The room the band gives the sentence that stands in place of the two time
+/// columns when there is no running time to column: the panel's own width less
+/// the gutter every row on this screen keeps at each edge.
+///
+/// WHY a whole row rather than the two columns: `NO RUNNING TIME` is the band's
+/// only content in that state, and centring two words in the columns of a number
+/// that is not there is how the sentence would end up reading as one more clock.
+const SCRUB_SENTENCE_ROOM: usize = W - 2 * BAND_EDGE_INSET;
+const _: () = assert!(BAND_EDGE_INSET == SPEED_BTN.x);
+
+/// The landscape panel's own version of [`SCRUB_SENTENCE_ROOM`]: the scrim's
+/// width less the gutter every row on this screen keeps at each edge.
+const LAND_SCRUB_SENTENCE_ROOM: usize = LAND_PANEL.w - 2 * BAND_EDGE_INSET;
+
 // Transport
-const TRANSPORT_CY: usize = 740;
+const TRANSPORT_LABEL_H: usize = 26;
+const TRANSPORT_LABEL_Y0: usize = BAND3_Y1 - TRANSPORT_LABEL_H;
+const TRANSPORT_CY: usize = TRANSPORT_LABEL_Y0 - PLAY_R;
 const PLAY_CX: usize = 360;
 const PLAY_R: usize = 44; // 88px circle
 const PLAY_HIT: Rect = Rect::new(PLAY_CX - PLAY_R, TRANSPORT_CY - PLAY_R, PLAY_R * 2, PLAY_R * 2);
@@ -1018,12 +1045,121 @@ const _: () = assert!(PREV_HIT.y + PREV_HIT.h <= VOL_HIT.y);
 // Volume HUD
 const _VOL_CY: usize = 850;
 const VOL_MUTE_BTN: Rect = Rect::new(24, 824, 52, 52);
+
+/// The speaker glyph's box: the plate's own square with the platform's
+/// eight-column grid taken off every edge.
+///
+/// WHY the box is the plate minus a grid step and not a remembered size: the
+/// glyph is drawn on the twenty-four unit grid the platform's icon kit uses,
+/// because a shape authored in pixels is a different shape at every size, and the
+/// plate is the touch target the press answers. Deriving the box from the plate
+/// is what lets one function serve the portrait HUD's 52-column plate and the
+/// landscape scrim's, and keeps the ink off the hairline a rounded rect draws.
+const SPEAKER_ICON_AIR: usize = spacing::GRID_8;
+
+const fn speaker_icon_box(plate: Rect) -> Rect {
+    let side = plate.w.saturating_sub(2 * SPEAKER_ICON_AIR);
+    Rect::new(
+        plate.x + (plate.w.saturating_sub(side)) / 2,
+        plate.y + (plate.h.saturating_sub(side)) / 2,
+        side,
+        side,
+    )
+}
+
+/// WHY checked at compile time: the box is square, inside the plate it is cut
+/// from, and wide enough that two grid columns never collapse onto one pixel --
+/// at 24 grid units against a plate 52 columns wide, a smaller inset would have
+/// put a grid step on a fraction of a pixel and the horn's edges would round
+/// away. Both plates are gated because both are painted from here.
+const _: () = assert!(
+    speaker_icon_box(VOL_MUTE_BTN).w >= ICON_GRID as usize
+        && speaker_icon_box(LAND_MUTE_BTN).w >= ICON_GRID as usize
+);
+const _: () = assert!(
+    speaker_icon_box(VOL_MUTE_BTN).x > VOL_MUTE_BTN.x
+        && speaker_icon_box(VOL_MUTE_BTN).x
+            + speaker_icon_box(VOL_MUTE_BTN).w
+            < VOL_MUTE_BTN.x + VOL_MUTE_BTN.w
+);
+
+/// The colour of `(x, y)` where the mute plate's speaker inks it, or `None`.
+///
+/// WHY the app draws its own glyph at all: the platform's `Icon` set carries a
+/// microphone, a bell, a play triangle and no speaker, and its grid helpers are
+/// private. The shape therefore lives in `video_player::speaker_hit` -- on the
+/// kit's grid, by the kit's method, and measured by the library's own test suite
+/// -- and this is the pixel half of it: the same mapping from a rect to grid
+/// units that `monochrome::icon_px` performs for the icons the kit does have.
+fn speaker_px(x: usize, y: usize, plate: Rect, state: SpeakerState, ink: u32) -> Option<u32> {
+    let box_rect = speaker_icon_box(plate);
+    if box_rect.w == 0 || box_rect.h == 0 {
+        return None;
+    }
+    if x < box_rect.x
+        || x >= box_rect.x + box_rect.w
+        || y < box_rect.y
+        || y >= box_rect.y + box_rect.h
+    {
+        return None;
+    }
+    let gx = ((x - box_rect.x) as i32 * ICON_GRID) / box_rect.w as i32;
+    let gy = ((y - box_rect.y) as i32 * ICON_GRID) / box_rect.h as i32;
+    if speaker_hit(gx, gy, state) {
+        Some(ink)
+    } else {
+        None
+    }
+}
+
 const VOL_BAR_X: usize = 96;
 const VOL_BAR_Y: usize = 846;
-const VOL_BAR_W: usize = 490;
 const VOL_BAR_H: usize = 8;
+/// The thumb's radius, named because the track's right-hand end is gated against
+/// it: a thumb drawn at the last column of the bar reaches seven columns past the
+/// bar, and the read-out's column starts just there.
+const VOL_THUMB_R: usize = 7;
+/// The air between the track's foot and the read-out's column: the grid step the
+/// row's own controls keep, and half of what the thumb at the end of the track
+/// needs on top.
+const VOL_BAR_AIR: usize = spacing::GRID_12;
+/// Where the level read-out starts.
+///
+/// WHY the read-out owns a column and the track gives up the width: the
+/// read-out's longest honest word -- `UNKNOWN`, in a state the device is in
+/// whenever `audio_query_volume` refuses -- is wider at the body rung than the
+/// eighty-six columns this row used to leave it, and a number that has to step
+/// down a rung to be read is a number whose column was never measured for it. So
+/// the column comes first, from the ladder, and the bar is what is left.
+const VOL_LABEL_COL: usize = 3 * line_at(2, EXTRA_LARGE_LEVEL);
+const VOL_LABEL_X: usize = W - 24 - VOL_LABEL_COL;
+const VOL_BAR_W: usize = VOL_LABEL_X - VOL_BAR_AIR - VOL_BAR_X;
 const VOL_BAR_RECT: Rect = Rect::new(VOL_BAR_X, VOL_BAR_Y, VOL_BAR_W, VOL_BAR_H);
-const VOL_HIT: Rect = Rect::new(88, 824, 510, 52);
+
+/// WHY checked at compile time: the column above is the one this screen paints
+/// the read-out inside, and the library holds the words the read-out can answer
+/// with. Measured against a copy of the column written somewhere else, the fit
+/// would be a claim about that copy.
+const _: () = assert!(VOL_LABEL_COL == VOLUME_READOUT_COL);
+const _: () = assert!(volume_readout_words_hold_at_every_level());
+
+/// The bar's touch band: from the plate's foot to the read-out's column, padded
+/// by the same grid step on each side.
+///
+/// WHY the right edge is the column and not a remembered 598: the row already
+/// states the rule at the scrubber, where the seek band stopped twelve columns
+/// short of the remaining-time number because a band that ran under the first
+/// strokes of a read-out jumps the value a person meant to read. The volume row
+/// had the same two numbers written twice, and only the scrubber was gated.
+const VOL_HIT_X0: usize = VOL_MUTE_BTN.x + VOL_MUTE_BTN.w + 12;
+const VOL_HIT_X1: usize = VOL_LABEL_X - 12;
+const VOL_HIT: Rect = Rect::new(
+    VOL_HIT_X0,
+    VOL_MUTE_BTN.y,
+    VOL_HIT_X1 - VOL_HIT_X0,
+    VOL_MUTE_BTN.h,
+);
+
 /// WHY checked at compile time: the mute plate and the bar's touch band share one
 /// row and answer in that order, so the two must not overlap and the band must
 /// hold the track it seeks. Both bands here are padded past the 8-row tracks
@@ -1038,13 +1174,41 @@ const _: () = assert!(
 const _: () = assert!(VOL_HIT.w >= MIN_TOUCH_TARGET && VOL_HIT.h >= MIN_TOUCH_TARGET);
 const _: () = assert!(SEEK_HIT.w >= MIN_TOUCH_TARGET && SEEK_HIT.h >= MIN_TOUCH_TARGET);
 
+/// WHAT THIS GATES: the track and its thumb stop inside the read-out's column
+/// rather than under it, the press band stops where the column starts, and the
+/// column is wide enough to hold a stepped word's whole line box at every level
+/// the setting can hold.
+///
+/// WHY the words themselves are not measured here: the measurement is a runtime
+/// face of the ladder, and a `const` that called it would be a `const` that read
+/// the published cell at compile time. They are measured in the library's
+/// `test_volume_readout_words_are_never_a_dash`, which sizes the same column out
+/// of the same `3 * line_height_for_user_scale(2, EXTRA_LARGE)` this constant
+/// spells, at all four levels, for all three words.
+const fn volume_row_holds_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        if VOL_BAR_RECT.x + VOL_BAR_RECT.w + VOL_THUMB_R >= VOL_LABEL_X {
+            return false;
+        }
+        if VOL_HIT.x + VOL_HIT.w > VOL_LABEL_X {
+            return false;
+        }
+        if 3 * line_at(1, level) > VOL_LABEL_COL {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(volume_row_holds_at_every_level());
+
 /// The volume read-out's column, and the row it stands on at `level`.
 ///
 /// WHY a column constant at all: the run starts where the bar's touch band ends,
 /// and the 24 rows of gutter between them were only ever visible in two numbers
 /// the painter added in its head. Named, the gate beside it says the run never
 /// starts inside the track it sits beside.
-const VOL_LABEL_X: usize = 610;
 const _: () = assert!(VOL_BAR_RECT.x + VOL_BAR_RECT.w <= VOL_LABEL_X);
 
 /// The volume row as this screen authored it.
@@ -1154,8 +1318,48 @@ const _: () = assert!(
         && INFO_BTN.h == SPEED_BTN.h
 );
 
+/// The air a control plate keeps at each end of its label: the platform's
+/// smallest grid step.
+///
+/// WHY a named air and not the plate's own width: the question a plate asks is
+/// "does this word stand inside it", and a run that reaches the plate's hairline
+/// reads as clipped however wide the plate is. The room this leaves is
+/// `plate width - 2 * CHIP_LABEL_AIR`, and the gate under it pins that number to
+/// the one the library's own fit test measures, so the two spellings cannot
+/// drift apart.
+const CHIP_LABEL_AIR: usize = spacing::GRID_4;
+
+/// The two rungs a control's word may stand on, in the order it is asked for
+/// them: the row's own body rung, then the caption rung under it.
+const PLATE_RUNGS: [usize; 2] = [type_scale::BODY, type_scale::CAPTION];
+
+/// The rung `text` is inked at on `plate`, at the published text size.
+///
+/// WHY the plates cannot grow and the word can only step: they are touch
+/// targets whose height the platform contract names as a literal, so at a raised
+/// text size the only move left is the rung the label is drawn at -- the same
+/// move the camera's refusal caption makes. Clipping or ellipsising is not a
+/// move: `LOOP O...` is a label a person cannot finish, and the word is what
+/// names the control.
+#[inline]
+fn plate_label_rung(text: &[u8], plate: Rect) -> usize {
+    label_rung(
+        text,
+        true,
+        plate.w.saturating_sub(2 * CHIP_LABEL_AIR),
+        level(),
+        &PLATE_RUNGS,
+    )
+}
+
+/// WHY checked at compile time: the room the painter hands [`plate_label_rung`]
+/// and the room the library's fit test measures are the same number, spelled in
+/// two files. A `CHIP_LABEL_AIR` that moved here would leave the test fitting
+/// words into a plate the screen no longer has.
+const _: () = assert!(SPEED_BTN.w - 2 * CHIP_LABEL_AIR == CHIP_PLATE_ROOM);
+
 /// The row a plate's centred label starts on, as an offset from the plate's own
-/// top, at `level`.
+/// top, at `level`, for a label drawn at `rung`.
 ///
 /// WHY a function and not the six copies of
 /// `(PLATE.h.saturating_sub(line_u(2))) / 2` the painter carried: the same sum
@@ -1166,49 +1370,124 @@ const _: () = assert!(
 /// row -- which is why the rule below is written over the ink band (the cap
 /// height above the baseline) rather than over the box. A plate cannot hold a
 /// line box it did not reserve, but it can and must hold the glyphs.
-const fn plate_label_dy_at(level: u8, plate_h: usize) -> usize {
-    plate_h.saturating_sub(line_at(2, level)) / 2
+///
+/// WHY `rung` is an argument: the label no longer always stands on the body rung,
+/// and centring a caption-rung word in the leading a body rung reserved is how a
+/// stepped label ends up riding high on its plate.
+const fn plate_label_dy_at(level: u8, plate_h: usize, rung: usize) -> usize {
+    plate_h.saturating_sub(line_at(rung, level)) / 2
 }
 
 /// [`plate_label_dy_at`] at the published level.
 #[inline]
-fn plate_label_dy(plate_h: usize) -> usize {
-    plate_label_dy_at(level(), plate_h)
+fn plate_label_dy(plate_h: usize, rung: usize) -> usize {
+    plate_label_dy_at(level(), plate_h, rung)
 }
 
 /// The first row a plate label's ink occupies, relative to the plate's top.
-const fn plate_label_ink_top_at(level: u8, plate_h: usize) -> usize {
-    plate_label_dy_at(level, plate_h) + ascent_at(2, level) - cap_at(2, level) as usize
+const fn plate_label_ink_top_at(level: u8, plate_h: usize, rung: usize) -> usize {
+    plate_label_dy_at(level, plate_h, rung) + ascent_at(rung, level) - cap_at(rung, level) as usize
 }
 
 /// The row one past a plate label's last ink row, relative to the plate's top.
-const fn plate_label_ink_foot_at(level: u8, plate_h: usize) -> usize {
-    plate_label_dy_at(level, plate_h) + ascent_at(2, level)
+const fn plate_label_ink_foot_at(level: u8, plate_h: usize, rung: usize) -> usize {
+    plate_label_dy_at(level, plate_h, rung) + ascent_at(rung, level)
 }
 
-/// WHAT THIS GATES: at every level the setting can hold, a centred label's ink
-/// lands between its plate's first row and its last, so a raised text size can
-/// never print a control's word over the plate's border or outside the rounded
-/// rect that answers the press on it.
+/// The label of one control plate: its rung, its centred column, its row.
 ///
-/// WHY a loop: the authored-rung equality would only say that the plates were
-/// built around the rungs the ladder no longer draws alone.
+/// WHY one function for the six plates and the two header plates that read the
+/// same way: each of them used to place its own run at its own literal rung, so
+/// the step that keeps a word on its plate had to be remembered six times, and
+/// the one control whose words grew longest -- the loop mode, which answers
+/// `LOOP ONE` at the largest level -- is the one that would have kept the oldest
+/// placement.
+fn paint_plate_label(x: usize, y: usize, plate: Rect, text: &[u8], ink: u32, bg: u32) -> Option<u32> {
+    let rung = plate_label_rung(text, plate);
+    let lw = run_w(text, rung, true);
+    let lx = plate.x + (plate.w.saturating_sub(lw)) / 2;
+    let ly = plate.y + plate_label_dy(plate.h, rung);
+    draw_text_bold(x, y, lx, ly, rung, text, ink, bg)
+}
+
+/// WHAT THIS GATES: at every level the setting can hold, and at either rung a
+/// plate's word is stepped between, a centred label's ink lands between its
+/// plate's first row and its last, so a raised text size can never print a
+/// control's word over the plate's border or outside the rounded rect that
+/// answers the press on it.
+///
+/// WHY a loop over both rungs and not just the body one: the body rung alone
+/// would still be the claim the stepped word breaks, and the step is the reason
+/// the word is on the plate at all.
 const fn secondary_labels_hold_in_plates_at_every_level() -> bool {
     let mut level = 0u8;
     while level <= EXTRA_LARGE_LEVEL {
-        let top = plate_label_ink_top_at(level, SPEED_BTN.h);
-        let foot = plate_label_ink_foot_at(level, SPEED_BTN.h);
-        if top >= foot {
-            return false;
-        }
-        if foot > SPEED_BTN.h {
-            return false;
+        let mut rung = 0usize;
+        while rung < PLATE_RUNGS.len() {
+            let r = PLATE_RUNGS[rung];
+            let top = plate_label_ink_top_at(level, SPEED_BTN.h, r);
+            let foot = plate_label_ink_foot_at(level, SPEED_BTN.h, r);
+            if top >= foot {
+                return false;
+            }
+            if foot > SPEED_BTN.h {
+                return false;
+            }
+            rung += 1;
         }
         level += 1;
     }
     true
 }
 const _: () = assert!(secondary_labels_hold_in_plates_at_every_level());
+
+const TRANSPORT_STEP: usize = NEXT_CX - PLAY_CX;
+const _: () = assert!(TRANSPORT_STEP - 2 * CHIP_LABEL_AIR == video_player::TRANSPORT_WORD_ROOM);
+
+const LAND_TRANSPORT_STEP: usize = LAND_PLAY_CX - LAND_STEP_CX_LEFT;
+const _: () = assert!(LAND_TRANSPORT_STEP - 2 * CHIP_LABEL_AIR == video_player::LAND_TRANSPORT_WORD_ROOM);
+
+const LAND_TRANSPORT_LABEL_Y0: usize = LAND_TRANSPORT_CY + LAND_PLAY_R;
+
+const fn transport_label_plate(cx: usize, step: usize, row: usize, h: usize) -> Rect {
+    Rect::new(cx - (step / 2), row, step, h)
+}
+
+const PREV_LABEL_PLATE: Rect =
+    transport_label_plate(PREV_CX, TRANSPORT_STEP, TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+const PLAY_LABEL_PLATE: Rect =
+    transport_label_plate(PLAY_CX, TRANSPORT_STEP, TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+const NEXT_LABEL_PLATE: Rect =
+    transport_label_plate(NEXT_CX, TRANSPORT_STEP, TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+
+const LAND_PREV_LABEL_PLATE: Rect =
+    transport_label_plate(LAND_STEP_CX_LEFT, LAND_TRANSPORT_STEP, LAND_TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+const LAND_PLAY_LABEL_PLATE: Rect =
+    transport_label_plate(LAND_PLAY_CX, LAND_TRANSPORT_STEP, LAND_TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+const LAND_NEXT_LABEL_PLATE: Rect =
+    transport_label_plate(LAND_STEP_CX_RIGHT, LAND_TRANSPORT_STEP, LAND_TRANSPORT_LABEL_Y0, TRANSPORT_LABEL_H);
+
+const fn transport_labels_hold_in_their_plates_at_every_level() -> bool {
+    TRANSPORT_STEP >= 2 * CHIP_LABEL_AIR && LAND_TRANSPORT_STEP >= 2 * CHIP_LABEL_AIR
+}
+const _: () = assert!(transport_labels_hold_in_their_plates_at_every_level());
+
+const fn transport_label_row_clears_the_discs_at_every_size() -> bool {
+    if TRANSPORT_CY + PLAY_R > TRANSPORT_LABEL_Y0 {
+        return false;
+    }
+    if TRANSPORT_LABEL_Y0 + TRANSPORT_LABEL_H > BAND3_Y1 {
+        return false;
+    }
+    if LAND_TRANSPORT_CY + LAND_PLAY_R > LAND_TRANSPORT_LABEL_Y0 {
+        return false;
+    }
+    if LAND_TRANSPORT_LABEL_Y0 + TRANSPORT_LABEL_H > LAND_VOL_HIT.y {
+        return false;
+    }
+    true
+}
+const _: () = assert!(transport_label_row_clears_the_discs_at_every_size());
 
 // PIP Floating Preview Card (Bottom Right, 280x158)
 const PIP_W: usize = 280;
@@ -1447,6 +1726,129 @@ const _: () = assert!(library_rows_clear_at_every_level());
 const LIB_VIEW_Y1: usize = 1390;
 
 // -----------------------------------------------------------------------------
+// The Library Strip: the device's own tracks, under the control row
+// -----------------------------------------------------------------------------
+//
+// WHY THESE ROWS EXIST. The control row closes at 1020 and the system's home
+// band opens at 1392, and the three hundred and sixty rows between them were
+// `COLOR_BG` -- while the same files they hold are already listed behind a button
+// two rows above. The media library is the platform's inventory, read at launch
+// by `rescan_storage` from `/storage/videos` and `/storage/downloads`, so the
+// rows carry that inventory rather than a panel of this app's own invention.
+//
+// WHY one rect accessor for the paint and the press: a strip that painted its
+// rows from one sum and hit-tested them from another is the last partial row the
+// drawer used to show -- a visible track nobody could tap.
+
+/// The air between the control row's foot and the strip's own first line: the
+/// gutter the plate row keeps everywhere else.
+const TRACK_STRIP_AIR: usize = spacing::GRID_16;
+const TRACK_STRIP_Y0: usize = INFO_BTN.y + INFO_BTN.h + TRACK_STRIP_AIR;
+/// The strip's columns: the plate row's gutters, so a row lines up with the
+/// controls above it instead of authoring edges of its own.
+const TRACK_STRIP_X: usize = SPEED_BTN.x;
+const TRACK_STRIP_W: usize = W - 2 * SPEED_BTN.x;
+
+/// The ride below the source caption's line box, and the same air above the
+/// affordance that closes the strip: the grid step the drawer's own runs ride on.
+const TRACK_STRIP_RIDE: usize = spacing::GRID_8;
+
+/// The caption's reserved rows at `level`.
+///
+/// WHY the body rung's box for a run painted at the caption's: the caption is
+/// stepped by the same ladder every other control's word uses, so at a level
+/// where the sentence still stands on the body rung it is the body rung's box
+/// that has to be on the screen. Reserving the smaller one would be reserving
+/// the ink's descent for a glyph that is not drawn -- and the row under it would
+/// be painted through the caption's baseline.
+const fn track_strip_caption_h_at(level: u8) -> usize {
+    line_at(2, level) + TRACK_STRIP_RIDE
+}
+
+/// The `MORE IN LIBRARY` affordance's height: a control plate's own row, because
+/// it is a control and the platform's minimum is what a control costs.
+const TRACK_STRIP_MORE_H: usize = 52;
+
+/// The row the strip's first track stands on at `level`: below its caption.
+const fn track_strip_list_y0_at(level: u8) -> usize {
+    TRACK_STRIP_Y0 + track_strip_caption_h_at(level)
+}
+
+/// The last row one past the strip's final track at `level`.
+const fn track_strip_foot_at(level: u8) -> usize {
+    track_strip_list_y0_at(level) + TRACK_STRIP_ROWS * lib_row_h_at(level)
+}
+
+/// How many rows the strip can answer at `level` once its caption and its
+/// affordance have taken theirs.
+const fn track_strip_rows_at(level: u8) -> usize {
+    let reserved = track_strip_caption_h_at(level) + TRACK_STRIP_MORE_H;
+    let room = HOME_HIT.y.saturating_sub(track_strip_list_y0_at(level) + reserved);
+    let h = lib_row_h_at(level);
+    if h == 0 {
+        return 0;
+    }
+    room / h
+}
+
+/// The count every rung is measured against: the largest level the setting can
+/// hold, which leaves the least room. A strip sized at the platform's own rung
+/// would run past the home band the moment a person raised their text size.
+const TRACK_STRIP_ROWS: usize = track_strip_rows_at(EXTRA_LARGE_LEVEL);
+
+/// One track row -- the rect the painter fills and the press answers, from the
+/// same two sums.
+#[inline]
+fn track_row_rect(i: usize) -> Rect {
+    Rect::new(
+        TRACK_STRIP_X,
+        track_strip_list_y0_at(level()) + i * lib_row_h_at(level()),
+        TRACK_STRIP_W,
+        lib_row_h_at(level()),
+    )
+}
+
+/// The affordance that hands the rest of the list to the drawer, standing on the
+/// strip's own foot.
+#[inline]
+fn track_strip_more_rect() -> Rect {
+    Rect::new(
+        TRACK_STRIP_X,
+        track_strip_foot_at(level()),
+        TRACK_STRIP_W,
+        TRACK_STRIP_MORE_H,
+    )
+}
+
+/// WHAT THIS GATES: the strip closes above the system's home band at every level
+/// the setting can hold -- rows, caption and affordance together -- and still
+/// answers at least one track at the largest of them, so the surface below the
+/// controls carries a library rather than an empty promise.
+const fn track_strip_holds_at_every_level() -> bool {
+    let mut level = 0u8;
+    while level <= EXTRA_LARGE_LEVEL {
+        if !(track_strip_foot_at(level) <= HOME_HIT.y) {
+            return false;
+        }
+        if track_strip_foot_at(level) + TRACK_STRIP_MORE_H > HOME_HIT.y {
+            return false;
+        }
+        if TRACK_STRIP_ROWS == 0 {
+            return false;
+        }
+        level += 1;
+    }
+    true
+}
+const _: () = assert!(track_strip_holds_at_every_level());
+
+/// WHY checked at compile time besides: the strip is painted from the plate row's
+/// own foot, so a control row that grew into it would make the first row a track
+/// half-hidden behind a button.
+const _: () = assert!(TRACK_STRIP_Y0 >= INFO_BTN.y + INFO_BTN.h + spacing::GRID_4);
+const _: () = assert!(TRACK_STRIP_X == LIB_BTN.x);
+
+// -----------------------------------------------------------------------------
 // Static Bounded Buffers (Zero Dynamic Allocations)
 // -----------------------------------------------------------------------------
 
@@ -1665,6 +2067,29 @@ impl VideoApp {
 
     pub fn remaining_sec(&self) -> u32 {
         self.duration_sec.saturating_sub(self.elapsed_sec)
+    }
+
+    /// Opens playlist entry `index` and reports whether the screen may call it
+    /// playing.
+    ///
+    /// WHY one path for three callers: the strip, the drawer and a caller's
+    /// dispatch all select an entry and load it, and only the drawer used to
+    /// follow the decoder with the state -- so a dispatched file could be
+    /// refused by the decoder and still be reported as playing by whatever read
+    /// the state next. `false` is the honest answer for an index the inventory
+    /// does not hold, and the state says stopped for a file that decoded
+    /// nothing, which is what the canvas then paints.
+    pub fn open_track(&mut self, index: usize) -> bool {
+        if self.playlist.select(index).is_none() {
+            return false;
+        }
+        self.load_current_track();
+        self.state = if self.has_frame {
+            PlaybackState::Playing
+        } else {
+            PlaybackState::Stopped
+        };
+        true
     }
 
     /// Seeks to a keyframe position corresponding to `target_sec`.
@@ -2340,10 +2765,9 @@ impl VideoApp {
             return false;
         }
         self.rescan_storage();
-        for i in 0..self.playlist.count {
-            if self.playlist.items[i].path_str() == payload {
-                self.playlist.select(i);
-                self.load_current_track();
+        for row_idx in 0..self.playlist.count {
+            if self.playlist.items[row_idx].path_str() == payload {
+                self.open_track(row_idx);
                 std::log("[VIDEO PLAYER] Opened the video file a caller dispatched to this player.").ok();
                 return true;
             }
@@ -2351,19 +2775,6 @@ impl VideoApp {
         std::log("[VIDEO PLAYER] The dispatched video file was not listed in the shared storage.").ok();
         false
     }
-}
-
-/// In `out`, the running time a known duration names, or the unread marker.
-///
-/// WHY the marker exists: a duration of zero is what a header nobody has read
-/// yields, and drawing "0:00" for it would claim the media is empty instead of
-/// reporting that its length is unknown.
-fn duration_label(known: bool, seconds: u32, negative: bool, out: &mut [u8; 12]) -> usize {
-    if !known {
-        out[..5].copy_from_slice(b"--:--");
-        return 5;
-    }
-    format_time(seconds, negative, out)
 }
 
 // -----------------------------------------------------------------------------
@@ -2528,6 +2939,11 @@ fn sheet_value_caption(x: usize, y: usize, row_y: usize, s: &[u8]) -> Option<u32
 // -----------------------------------------------------------------------------
 
 fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
+    // The two tails a format badge joins to the codec's own name. Declared here
+    // because both orientations answer with them and neither may say more.
+    let still_tail: &[u8] = b" - STILL IMAGE";
+    let badge_join: &[u8] = b" - ";
+
     // WHY ahead of every mode below: the fullscreen video and the open drawer
     // both answer a press in this box, so both have to wear its mark.
     if let Some(ink) = std::design::home_band::pixel(x, y, COLOR_TEXT_MUTED) {
@@ -2634,17 +3050,23 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                     return col;
                 }
 
-                // Codec & Speed Badge
+                // Codec & Speed Badge -- the same verdict the portrait subtitle
+                // answers, because a rotated screen is the same media.
                 let c_label = app.current_codec().label().as_bytes();
                 let s_label = app.speed.label().as_bytes();
                 let mut badge_buf = [0u8; 32];
                 let mut bl = 0;
                 badge_buf[bl..bl + c_label.len()].copy_from_slice(c_label);
                 bl += c_label.len();
-                badge_buf[bl..bl + 3].copy_from_slice(b" - ");
-                bl += 3;
-                badge_buf[bl..bl + s_label.len()].copy_from_slice(s_label);
-                bl += s_label.len();
+                if app.current_codec().is_still_image() {
+                    badge_buf[bl..bl + still_tail.len()].copy_from_slice(still_tail);
+                    bl += still_tail.len();
+                } else {
+                    badge_buf[bl..bl + badge_join.len()].copy_from_slice(badge_join);
+                    bl += badge_join.len();
+                    badge_buf[bl..bl + s_label.len()].copy_from_slice(s_label);
+                    bl += s_label.len();
+                }
                 if let Some(col) = draw_text(x, y, 104, land_badge_y(), 1, &badge_buf[..bl], COLOR_TEXT_MUTED, bg_hud) {
                     return col;
                 }
@@ -2658,57 +3080,107 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             if bot_panel.contains(x, y) {
                 let bg_hud = blend_argb(video_pixel, COLOR_SURFACE_SUNKEN, 220);
 
-                // Scrubber: Timestamps & Bar
-                let mut ebuf = [0u8; 12];
-                let elen = format_time(app.elapsed_sec, false, &mut ebuf);
-                if let Some(col) = draw_text(
-                    x,
-                    y,
-                    40,
-                    land_time_y(),
-                    2,
-                    &ebuf[..elen],
-                    COLOR_TEXT_PRIMARY,
-                    bg_hud,
-                ) {
-                    return col;
-                }
+                // Scrubber: Timestamps & Bar.
+                //
+                // WHY the whole row stands on the duration: this is the same
+                // transport the portrait band answers, on a scrim. With no
+                // running time there is nothing for a track to be a fraction of,
+                // and `00:00` beside a thumb pinned at the left edge reads to the
+                // person as a clip paused at the start.
+                if app.duration_sec > 0 {
+                    let mut ebuf = [0u8; 12];
+                    let elen = format_time(app.elapsed_sec, false, &mut ebuf);
+                    if let Some(col) = draw_text(
+                        x,
+                        y,
+                        40,
+                        land_time_y(),
+                        2,
+                        &ebuf[..elen],
+                        COLOR_TEXT_PRIMARY,
+                        bg_hud,
+                    ) {
+                        return col;
+                    }
 
-                let mut rbuf = [0u8; 12];
-                let rlen = duration_label(
-                    app.duration_sec > 0,
-                    app.remaining_sec(),
-                    true,
-                    &mut rbuf,
-                );
-                if let Some(col) = draw_text(
-                    x,
-                    y,
-                    LAND_REMAIN_X,
-                    land_time_y(),
-                    2,
-                    &rbuf[..rlen],
-                    COLOR_TEXT_MUTED,
-                    bg_hud,
-                ) {
-                    return col;
-                }
+                    let mut rbuf = [0u8; 12];
+                    let rlen = duration_label(
+                        app.duration_sec > 0,
+                        app.remaining_sec(),
+                        true,
+                        &mut rbuf,
+                    );
+                    if let Some(col) = draw_text(
+                        x,
+                        y,
+                        LAND_REMAIN_X,
+                        land_time_y(),
+                        2,
+                        &rbuf[..rlen],
+                        COLOR_TEXT_MUTED,
+                        bg_hud,
+                    ) {
+                        return col;
+                    }
 
-                let l_seek_rect = LAND_SEEK;
-                let l_thumb_x =
-                    scrubber_thumb_x(LAND_SEEK_X, LAND_SEEK_W, app.elapsed_sec, app.duration_sec);
-                let dx = (x as i32) - (l_thumb_x as i32);
-                let dy = (y as i32) - ((LAND_SEEK_Y + LAND_SEEK_H / 2) as i32);
-                if dx * dx + dy * dy <= 64 {
-                    return COLOR_TEXT_PRIMARY;
-                }
-                if l_seek_rect.contains(x, y) {
-                    return if x <= l_thumb_x { COLOR_PROGRESS_ACTIVE } else { COLOR_PROGRESS_BG };
+                    let l_seek_rect = LAND_SEEK;
+                    let l_thumb_x = scrubber_thumb_x(
+                        LAND_SEEK_X,
+                        LAND_SEEK_W,
+                        app.elapsed_sec,
+                        app.duration_sec,
+                    );
+                    let dx = (x as i32) - (l_thumb_x as i32);
+                    let dy = (y as i32) - ((LAND_SEEK_Y + LAND_SEEK_H / 2) as i32);
+                    if dx * dx + dy * dy <= 64 {
+                        return COLOR_TEXT_PRIMARY;
+                    }
+                    if l_seek_rect.contains(x, y) {
+                        return if x <= l_thumb_x {
+                            COLOR_PROGRESS_ACTIVE
+                        } else {
+                            COLOR_PROGRESS_BG
+                        };
+                    }
+                } else {
+                    let rung = label_rung(
+                        NO_RUNNING_TIME,
+                        false,
+                        LAND_SCRUB_SENTENCE_ROOM,
+                        level(),
+                        &PLATE_RUNGS,
+                    );
+                    let nw = run_w(NO_RUNNING_TIME, rung, false);
+                    let nx = LAND_PANEL.x + (LAND_PANEL.w.saturating_sub(nw)) / 2;
+                    if let Some(col) = draw_text(
+                        x,
+                        y,
+                        nx,
+                        land_time_y(),
+                        rung,
+                        NO_RUNNING_TIME,
+                        COLOR_TEXT_PRIMARY,
+                        bg_hud,
+                    ) {
+                        return col;
+                    }
                 }
 
                 // Transport: Play/Pause, and the two track controls beside it.
                 // Each disc is drawn from the same centre and radius the press
                 // tests, so a tap answers the ink and nothing beyond it.
+                let playing = app.state == PlaybackState::Playing;
+
+                if let Some(col) = paint_plate_label(x, y, LAND_PREV_LABEL_PLATE, PREV_WORD, COLOR_TEXT_MUTED, bg_hud) {
+                    return col;
+                }
+                if let Some(col) = paint_plate_label(x, y, LAND_PLAY_LABEL_PLATE, transport_action_word(playing), COLOR_TEXT_MUTED, bg_hud) {
+                    return col;
+                }
+                if let Some(col) = paint_plate_label(x, y, LAND_NEXT_LABEL_PLATE, NEXT_WORD, COLOR_TEXT_MUTED, bg_hud) {
+                    return col;
+                }
+
                 let t_cy = LAND_TRANSPORT_CY;
                 if let Some(col) = draw_circle(
                     x,
@@ -2721,7 +3193,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 ) {
                     let pdx = (x as i32) - (LAND_PLAY_CX as i32);
                     let pdy = (y as i32) - (t_cy as i32);
-                    if app.state == PlaybackState::Playing {
+                    if playing {
                         if (pdx >= -8 && pdx <= -3 && pdy.abs() <= 12) || (pdx >= 3 && pdx <= 8 && pdy.abs() <= 12) {
                             return COLOR_PLAY_GLYPH;
                         }
@@ -2789,30 +3261,28 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
                 }
 
                 // Mute plate, with the speaker centred on it -- the same control
-                // the press answers, and the same state ink the portrait HUD uses
-                // so a press that muted the output visibly says so.
+                // the press answers.
+                //
+                // WHY this plate calls the same accessor the portrait band does:
+                // it used to poke its horn from four hand-written offsets around
+                // the plate's centre and, when the output was muted or the level
+                // had never been reported, cross it with two pixels of red on the
+                // plate's own colour -- which is what a glyph the face is missing
+                // looks like. A rotated screen is the same control, so it gets the
+                // same glyph, the same state and the same secondary ink for a
+                // level nobody reported.
+                let speaker_state = SpeakerState::from_volume(app.is_muted, app.volume_known);
+                let speaker_ink = if app.volume_known {
+                    COLOR_TEXT_PRIMARY
+                } else {
+                    COLOR_TEXT_MUTED
+                };
                 if let Some(col) =
                     draw_rounded_rect(x, y, LAND_MUTE_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
                 {
-                    let spk_dx = (x as i32) - (LAND_MUTE_CX as i32);
-                    let spk_dy = (y as i32) - (LAND_MUTE_CY as i32);
-                    if spk_dx >= -8 && spk_dx <= -3 && spk_dy.abs() <= 5 {
-                        return COLOR_TEXT_PRIMARY;
-                    }
-                    if spk_dx > -3 && spk_dx <= 5 && spk_dy.abs() <= (spk_dx + 3) * 8 / 8 {
-                        return COLOR_TEXT_PRIMARY;
-                    }
-                    if app.is_muted || !app.volume_known {
-                        if spk_dx >= 6 && spk_dx <= 14 && spk_dy.abs() <= 6
-                            && (((spk_dx - 10) - spk_dy).abs() <= 1 || ((spk_dx - 10) + spk_dy).abs() <= 1)
-                        {
-                            return 0xFFE05A68;
-                        }
-                    } else if spk_dx > 4 {
-                        let d_arc = spk_dx * spk_dx + spk_dy * spk_dy;
-                        if d_arc >= 64 && d_arc <= 100 {
-                            return COLOR_TEXT_PRIMARY;
-                        }
+                    if let Some(s_col) = speaker_px(x, y, LAND_MUTE_BTN, speaker_state, speaker_ink)
+                    {
+                        return s_col;
                     }
                     return col;
                 }
@@ -3121,17 +3591,29 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             return col;
         }
 
-        // Subtitle line (Format badge + Speed)
+        // Subtitle line (Format badge + Speed).
+        //
+        // WHY the format answers for the rate: a Portable Pixmap is one frame and
+        // nothing in this player can advance it, so `PPM P6 - 1.0x` promised a
+        // rate for something with no clock to run at -- the same claim the
+        // scrubber band refuses in the same state. [`VideoCodec::is_still_image`]
+        // is the header's own verdict and is host-tested; the surface repeats it
+        // rather than making one of its own.
         let codec_label = app.current_codec().label().as_bytes();
         let speed_label = app.speed.label().as_bytes();
         let mut sub_buf = [0u8; 32];
         let mut sl = 0;
         sub_buf[sl..sl + codec_label.len()].copy_from_slice(codec_label);
         sl += codec_label.len();
-        sub_buf[sl..sl + 3].copy_from_slice(b" - ");
-        sl += 3;
-        sub_buf[sl..sl + speed_label.len()].copy_from_slice(speed_label);
-        sl += speed_label.len();
+        if app.current_codec().is_still_image() {
+            sub_buf[sl..sl + still_tail.len()].copy_from_slice(still_tail);
+            sl += still_tail.len();
+        } else {
+            sub_buf[sl..sl + badge_join.len()].copy_from_slice(badge_join);
+            sl += badge_join.len();
+            sub_buf[sl..sl + speed_label.len()].copy_from_slice(speed_label);
+            sl += speed_label.len();
+        }
 
         let sw = run_w(&sub_buf[..sl], 1, false);
         let sx = (W.saturating_sub(sw)) / 2;
@@ -3325,37 +3807,62 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // Band 2: Scrubber (Scale 2 Elapsed, Seek Bar, Scale 2 Remaining)
     // -------------------------------------------------------------------------
     if y >= BAND2_Y0 && y < BAND2_Y1 {
-        // Elapsed Time Text in Scale 2 Body
-        let mut ebuf = [0u8; 12];
-        let elen = format_time(app.elapsed_sec, false, &mut ebuf);
-        if let Some(col) = draw_text(x, y, 24, 606, 2, &ebuf[..elen], COLOR_TEXT_PRIMARY, COLOR_BG) {
-            return col;
-        }
+        // WHY the whole band is gated on a duration: a media whose running time
+        // was never read -- a header nobody parsed, or a Portable Pixmap, which
+        // is one still frame and has no clock to run -- used to paint `00:00`
+        // beside `--:--` over a track with its thumb at the far left. That is a
+        // picture of a clip paused at the start, and the claim is not true of
+        // anything in that state. The band now says so in words and paints no
+        // track, because there is nothing for a track to be a fraction of.
+        if app.duration_sec > 0 {
+            // Elapsed Time Text in Scale 2 Body
+            let mut ebuf = [0u8; 12];
+            let elen = format_time(app.elapsed_sec, false, &mut ebuf);
+            if let Some(col) = draw_text(x, y, 24, 606, 2, &ebuf[..elen], COLOR_TEXT_PRIMARY, COLOR_BG) {
+                return col;
+            }
 
-        // Remaining Time Text in Scale 2 Body
-        let mut rbuf = [0u8; 12];
-        let rlen = duration_label(app.duration_sec > 0, app.remaining_sec(), true, &mut rbuf);
-        if let Some(col) = draw_text(x, y, REMAIN_X, 606, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, COLOR_BG) {
-            return col;
-        }
+            // Remaining Time Text in Scale 2 Body
+            let mut rbuf = [0u8; 12];
+            let rlen = duration_label(app.duration_sec > 0, app.remaining_sec(), true, &mut rbuf);
+            if let Some(col) = draw_text(x, y, REMAIN_X, 606, 2, &rbuf[..rlen], COLOR_TEXT_MUTED, COLOR_BG) {
+                return col;
+            }
 
-        // Seek Bar Track
-        let thumb_x = scrubber_thumb_x(SEEK_X, SEEK_W, app.elapsed_sec, app.duration_sec);
+            // Seek Bar Track
+            let thumb_x = scrubber_thumb_x(SEEK_X, SEEK_W, app.elapsed_sec, app.duration_sec);
 
-        // Circular Thumb (r=9)
-        let dx = (x as i32) - (thumb_x as i32);
-        let dy = (y as i32) - ((SEEK_Y + SEEK_H / 2) as i32);
-        if dx * dx + dy * dy <= 81 {
-            return COLOR_TEXT_PRIMARY;
-        }
+            // Circular Thumb (r=9)
+            let dx = (x as i32) - (thumb_x as i32);
+            let dy = (y as i32) - ((SEEK_Y + SEEK_H / 2) as i32);
+            if dx * dx + dy * dy <= 81 {
+                return COLOR_TEXT_PRIMARY;
+            }
 
-        // Bar Line
-        if SEEK_RECT.contains(x, y) {
-            return if x <= thumb_x {
-                COLOR_PROGRESS_ACTIVE
-            } else {
-                COLOR_PROGRESS_BG
-            };
+            // Bar Line
+            if SEEK_RECT.contains(x, y) {
+                return if x <= thumb_x {
+                    COLOR_PROGRESS_ACTIVE
+                } else {
+                    COLOR_PROGRESS_BG
+                };
+            }
+        } else {
+            let rung = label_rung(NO_RUNNING_TIME, false, SCRUB_SENTENCE_ROOM, level(), &PLATE_RUNGS);
+            let nw = run_w(NO_RUNNING_TIME, rung, false);
+            let nx = (W.saturating_sub(nw)) / 2;
+            if let Some(col) = draw_text(
+                x,
+                y,
+                nx,
+                606,
+                rung,
+                NO_RUNNING_TIME,
+                COLOR_TEXT_PRIMARY,
+                COLOR_BG,
+            ) {
+                return col;
+            }
         }
 
         return COLOR_BG;
@@ -3365,6 +3872,18 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // Band 3: Transport Controls (Prev, 88px Play/Pause, Next)
     // -------------------------------------------------------------------------
     if y >= BAND3_Y0 && y < BAND3_Y1 {
+        let playing = app.state == PlaybackState::Playing;
+
+        if let Some(col) = paint_plate_label(x, y, PREV_LABEL_PLATE, PREV_WORD, COLOR_TEXT_MUTED, COLOR_BG) {
+            return col;
+        }
+        if let Some(col) = paint_plate_label(x, y, PLAY_LABEL_PLATE, transport_action_word(playing), COLOR_TEXT_MUTED, COLOR_BG) {
+            return col;
+        }
+        if let Some(col) = paint_plate_label(x, y, NEXT_LABEL_PLATE, NEXT_WORD, COLOR_TEXT_MUTED, COLOR_BG) {
+            return col;
+        }
+
         // Previous Button (|◀◀)
         if let Some(col) = draw_circle(x, y, PREV_CX, TRANSPORT_CY, PREV_R, COLOR_SURFACE, Some(COLOR_BORDER)) {
             let dx = (x as i32) - (PREV_CX as i32);
@@ -3386,7 +3905,7 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
             let dx = (x as i32) - (PLAY_CX as i32);
             let dy = (y as i32) - (TRANSPORT_CY as i32);
 
-            if app.state == PlaybackState::Playing {
+            if playing {
                 if (dx >= -10 && dx <= -4 && dy.abs() <= 14) || (dx >= 4 && dx <= 10 && dy.abs() <= 14) {
                     return COLOR_PLAY_GLYPH;
                 }
@@ -3422,105 +3941,85 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // Band 4: Audio Volume HUD (Speaker, Bar, % Label)
     // -------------------------------------------------------------------------
     if y >= BAND4_Y0 && y < BAND4_Y1 {
-        // Speaker / Mute Button
+        // Speaker / Mute Button.
         //
-        // WHY the plate: the press answers a 52x52 square and the only ink in it
-        // was the cone, so on the page's own colour the control read as a mark
-        // beside the bar rather than as the button that mutes it. Same plate as
-        // the header controls and the secondary row.
+        // WHY the plate carries a horn: it used to carry a cone poked from four
+        // hand-written offsets and, when the output was muted or the level had
+        // never been reported, a two-pixel red cross. A mark in the middle of an
+        // empty plate on the plate's own colour is what a glyph the face is
+        // missing looks like, and this is the control the whole row is named
+        // after. The shape is the library's, on the platform's twenty-four unit
+        // grid; the state is the same two fields the read-out quotes.
+        let speaker_state = SpeakerState::from_volume(app.is_muted, app.volume_known);
+        // A level nobody reported is not a claim about the output, so the horn
+        // stands in the row's secondary ink rather than the primary one the
+        // words beside it use.
+        let speaker_ink = if app.volume_known {
+            COLOR_TEXT_PRIMARY
+        } else {
+            COLOR_TEXT_MUTED
+        };
         if let Some(col) =
             draw_rounded_rect(x, y, VOL_MUTE_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1)
         {
-            let cx = VOL_MUTE_BTN.x + VOL_MUTE_BTN.w / 2;
-            let cy = VOL_MUTE_BTN.y + VOL_MUTE_BTN.h / 2;
-            let dx = (x as i32) - (cx as i32);
-            let dy = (y as i32) - (cy as i32);
-
-            // Speaker cone
-            if dx >= -10 && dx <= -4 && dy.abs() <= 6 {
-                return COLOR_TEXT_PRIMARY;
-            }
-            if dx > -4 && dx <= 4 && dy.abs() <= (dx + 4) * 10 / 8 {
-                return COLOR_TEXT_PRIMARY;
-            }
-
-            if app.is_muted || !app.volume_known {
-                // Cross mark on muted, and on a level the system never reported.
-                if dx >= 6 && dx <= 14 && dy.abs() <= 6 && ((dx - 10) - dy).abs() <= 1 {
-                    return 0xFFE05A68;
-                }
-                if dx >= 6 && dx <= 14 && dy.abs() <= 6 && ((dx - 10) + dy).abs() <= 1 {
-                    return 0xFFE05A68;
-                }
-            } else {
-                // Sound wave arcs
-                let d_arc = dx * dx + dy * dy;
-                if dx > 4 && d_arc >= 64 && d_arc <= 100 {
-                    return COLOR_TEXT_PRIMARY;
-                }
+            if let Some(s_col) = speaker_px(x, y, VOL_MUTE_BTN, speaker_state, speaker_ink) {
+                return s_col;
             }
             return col;
         }
 
-        // Volume Bar
-        let eff_vol = if app.is_muted || !app.volume_known { 0 } else { app.volume_percent };
-        let thumb_x = volume_thumb_x(VOL_BAR_X, VOL_BAR_W, eff_vol);
+        // Volume Bar.
+        //
+        // WHY the thumb stands only on a reported level: a query that answered
+        // nothing is not a level of zero, and a thumb pinned to the end of the
+        // track would report that the person dragged it there. The track itself
+        // stays painted, because the press across it is real and sets a level.
+        if app.volume_known {
+            let eff_vol = if app.is_muted { 0 } else { app.volume_percent };
+            let thumb_x = volume_thumb_x(VOL_BAR_X, VOL_BAR_W, eff_vol);
 
-        // Circular Thumb (r=7)
-        let dx = (x as i32) - (thumb_x as i32);
-        let dy = (y as i32) - ((VOL_BAR_Y + VOL_BAR_H / 2) as i32);
-        if dx * dx + dy * dy <= 49 {
-            return COLOR_TEXT_PRIMARY;
+            // Circular Thumb
+            let dx = (x as i32) - (thumb_x as i32);
+            let dy = (y as i32) - ((VOL_BAR_Y + VOL_BAR_H / 2) as i32);
+            if dx * dx + dy * dy <= (VOL_THUMB_R * VOL_THUMB_R) as i32 {
+                return COLOR_TEXT_PRIMARY;
+            }
+
+            if VOL_BAR_RECT.contains(x, y) {
+                return if x <= thumb_x {
+                    COLOR_PROGRESS_ACTIVE
+                } else {
+                    COLOR_PROGRESS_BG
+                };
+            }
+        } else if VOL_BAR_RECT.contains(x, y) {
+            return COLOR_PROGRESS_BG;
         }
 
-        if VOL_BAR_RECT.contains(x, y) {
-            return if x <= thumb_x {
-                COLOR_PROGRESS_ACTIVE
-            } else {
-                COLOR_PROGRESS_BG
-            };
-        }
-
-        // Volume % Text in Scale 2 Body
-        let mut vbuf = [0u8; 8];
-        let mut vn = 0;
-        if app.is_muted {
-            vbuf[..4].copy_from_slice(b"MUTE");
-            vn = 4;
-        } else if !app.volume_known {
-            vbuf[..2].copy_from_slice(b"--");
-            vn = 2;
-        } else {
-            let mut v = app.volume_percent;
-            let mut digits = [0u8; 4];
-            let mut dlen = 0;
-            if v == 0 {
-                digits[0] = b'0';
-                dlen = 1;
-            } else {
-                while v > 0 && dlen < 4 {
-                    digits[dlen] = b'0' + (v % 10) as u8;
-                    v /= 10;
-                    dlen += 1;
-                }
-            }
-            for i in 0..dlen {
-                vbuf[vn] = digits[dlen - 1 - i];
-                vn += 1;
-            }
-            if vn < vbuf.len() {
-                vbuf[vn] = b'%';
-                vn += 1;
-            }
-        }
+        // The level, in words: `MUTED`, `UNKNOWN`, or the percent the system
+        // reported.
+        //
+        // WHY words and not the mark this row used to answer with: `--` at the
+        // body rung is a pair of hyphens a person reads as a glyph the font is
+        // missing, exactly like the scrubber's `--:--`, and it is the only answer
+        // the row had for a state the app genuinely is in. Three states, three
+        // words. WHY the rung steps: `UNKNOWN` is the widest of them, and the
+        // column was measured for it at the platform's level only -- see
+        // `VOL_LABEL_COL`.
+        let mut vbuf = [0u8; 16];
+        let vn = volume_readout(app.volume_percent, app.is_muted, app.volume_known, &mut vbuf);
+        let text = &vbuf[..vn];
+        let rung = label_rung(text, false, VOL_LABEL_COL, level(), &PLATE_RUNGS);
+        let vw = run_w(text, rung, false);
+        let vx = (W - 24).saturating_sub(vw);
         // The volume read-out, stood on the row [`vol_label_y`] derives.
         if let Some(col) = draw_text(
             x,
             y,
-            VOL_LABEL_X,
+            vx,
             vol_label_y(),
-            2,
-            &vbuf[..vn],
+            rung,
+            text,
             COLOR_TEXT_PRIMARY,
             COLOR_BG,
         ) {
@@ -3534,79 +4033,246 @@ fn get_video_pixel(x: usize, y: usize, app: &VideoApp) -> u32 {
     // Band 5: Secondary Controls & Info Sheet
     // -------------------------------------------------------------------------
     if y >= BAND5_Y0 && y < BAND6_Y0 {
-        // Speed Button (Scale 2 Body)
+        // Speed Button
         if let Some(col) = draw_rounded_rect(x, y, SPEED_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
-            let label = app.speed.label().as_bytes();
-            let lw = run_w(label, 2, true);
-            let lx = SPEED_BTN.x + (SPEED_BTN.w.saturating_sub(lw)) / 2;
-            let ly = SPEED_BTN.y + plate_label_dy(SPEED_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(t_col) = paint_plate_label(
+                x,
+                y,
+                SPEED_BTN,
+                app.speed.label().as_bytes(),
+                COLOR_TEXT_PRIMARY,
+                COLOR_SURFACE,
+            ) {
                 return t_col;
             }
             return col;
         }
 
-        // Aspect Ratio Button (Scale 2 Body)
+        // Aspect Ratio Button
         if let Some(col) = draw_rounded_rect(x, y, ASPECT_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
-            let label = app.aspect.label().as_bytes();
-            let lw = run_w(label, 2, true);
-            let lx = ASPECT_BTN.x + (ASPECT_BTN.w.saturating_sub(lw)) / 2;
-            let ly = ASPECT_BTN.y + plate_label_dy(ASPECT_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(t_col) = paint_plate_label(
+                x,
+                y,
+                ASPECT_BTN,
+                app.aspect.label().as_bytes(),
+                COLOR_TEXT_PRIMARY,
+                COLOR_SURFACE,
+            ) {
                 return t_col;
             }
             return col;
         }
 
-        // Loop Mode Button (Scale 2 Body)
+        // Loop Mode Button.
+        //
+        // WHY the chip spells the feature out in front of the state: the row
+        // reads `1.0x  FIT  <this>  PIP`, and three of those four are a value of
+        // a named thing. A plate answering `OFF` on its own tells a person what
+        // the mode is not, and never what it does -- and it is the only control
+        // on the screen whose press repeats the playlist. `label()` keeps its
+        // three state names exactly as the platform contract quotes them; the
+        // plate is where the feature word is added.
         if let Some(col) = draw_rounded_rect(x, y, LOOP_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
-            let label = app.loop_mode.label().as_bytes();
-            let lw = run_w(label, 2, true);
-            let lx = LOOP_BTN.x + (LOOP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LOOP_BTN.y + plate_label_dy(LOOP_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(t_col) = paint_plate_label(
+                x,
+                y,
+                LOOP_BTN,
+                app.loop_mode.chip_label().as_bytes(),
+                COLOR_TEXT_PRIMARY,
+                COLOR_SURFACE,
+            ) {
                 return t_col;
             }
             return col;
         }
 
-        // PIP Mode Button (Scale 2 Body)
+        // PIP Mode Button
         let pip_fill = if app.pip_mode { COLOR_ACCENT } else { COLOR_SURFACE };
         let pip_ink = if app.pip_mode { COLOR_PLAY_GLYPH } else { COLOR_TEXT_PRIMARY };
         if let Some(col) = draw_rounded_rect(x, y, PIP_BTN, 12, pip_fill, Some(COLOR_BORDER), 1) {
-            let label = b"PIP";
-            let lw = run_w(label, 2, true);
-            let lx = PIP_BTN.x + (PIP_BTN.w.saturating_sub(lw)) / 2;
-            let ly = PIP_BTN.y + plate_label_dy(PIP_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, pip_ink, pip_fill) {
+            if let Some(t_col) =
+                paint_plate_label(x, y, PIP_BTN, b"PIP", pip_ink, pip_fill)
+            {
                 return t_col;
             }
             return col;
         }
 
-        // Library Drawer Button (Scale 2 Body)
+        // Library Drawer Button
         if let Some(col) = draw_rounded_rect(x, y, LIB_BTN, 12, COLOR_SURFACE, Some(COLOR_BORDER), 1) {
-            let label = b"LIBRARY";
-            let lw = run_w(label, 2, true);
-            let lx = LIB_BTN.x + (LIB_BTN.w.saturating_sub(lw)) / 2;
-            let ly = LIB_BTN.y + plate_label_dy(LIB_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, COLOR_SURFACE) {
+            if let Some(t_col) = paint_plate_label(
+                x,
+                y,
+                LIB_BTN,
+                b"LIBRARY",
+                COLOR_TEXT_PRIMARY,
+                COLOR_SURFACE,
+            ) {
                 return t_col;
             }
             return col;
         }
 
-        // Info Sheet Button (Scale 2 Body)
+        // Info Sheet Button
         let info_fill = if app.info_open { COLOR_BORDER } else { COLOR_SURFACE };
         if let Some(col) = draw_rounded_rect(x, y, INFO_BTN, 12, info_fill, Some(COLOR_BORDER), 1) {
-            let label = b"MEDIA INFO";
-            let lw = run_w(label, 2, true);
-            let lx = INFO_BTN.x + (INFO_BTN.w.saturating_sub(lw)) / 2;
-            let ly = INFO_BTN.y + plate_label_dy(INFO_BTN.h);
-            if let Some(t_col) = draw_text_bold(x, y, lx, ly, 2, label, COLOR_TEXT_PRIMARY, info_fill) {
+            if let Some(t_col) =
+                paint_plate_label(x, y, INFO_BTN, b"MEDIA INFO", COLOR_TEXT_PRIMARY, info_fill)
+            {
                 return t_col;
             }
             return col;
+        }
+
+        // The Library Strip: this device's own tracks, stood under the controls.
+        //
+        // WHY the caption names two directories: this is the platform's
+        // inventory, read at launch by `rescan_storage`, and a list of files
+        // that does not say where it came from is a claim about this app. The
+        // rows are painted from [`track_row_rect`], which is the same accessor
+        // the press answers, and the meta run quotes the file's own header
+        // values -- the same four the drawer carries.
+        let source_caption: &[u8] = b"FROM /storage/videos & /storage/downloads";
+        let cap_rung = label_rung(source_caption, false, TRACK_STRIP_W, level(), &PLATE_RUNGS);
+        if let Some(col) = draw_text(
+            x,
+            y,
+            TRACK_STRIP_X,
+            TRACK_STRIP_Y0,
+            cap_rung,
+            source_caption,
+            COLOR_TEXT_MUTED,
+            COLOR_BG,
+        ) {
+            return col;
+        }
+
+        if app.playlist.count == 0 {
+            // The empty state is a state of the inventory, not of this app, so
+            // it says which of the two the person is looking at: nothing listed,
+            // above the caption that says where it looked.
+            let empty: &[u8] = b"NO VIDEO FILES";
+            let erung = label_rung(empty, true, TRACK_STRIP_W, level(), &PLATE_RUNGS);
+            let ew = run_w(empty, erung, true);
+            let ex = TRACK_STRIP_X + (TRACK_STRIP_W.saturating_sub(ew)) / 2;
+            if let Some(col) = draw_text(
+                x,
+                y,
+                ex,
+                track_strip_list_y0_at(level()),
+                erung,
+                empty,
+                COLOR_TEXT_MUTED,
+                COLOR_BG,
+            ) {
+                return col;
+            }
+        } else {
+            let mut row_idx = 0usize;
+            while row_idx < TRACK_STRIP_ROWS {
+                let row = track_row_rect(row_idx);
+                if row.contains(x, y) {
+                    if row_idx >= app.playlist.count {
+                        return COLOR_BG;
+                    }
+                    let is_current = row_idx == app.playlist.current;
+                    if is_current && x < row.x + 8 {
+                        return COLOR_ACCENT;
+                    }
+                    if y == row.y + lib_row_h_at(level()) - 1 {
+                        return COLOR_BORDER;
+                    }
+                    let item = &app.playlist.items[row_idx];
+
+                    let title_bytes = item.title_str().as_bytes();
+                    let mut tbuf = [0u8; 48];
+                    let tn = fit_run(title_bytes, 2, true, TRACK_STRIP_W - 40, &mut tbuf);
+                    let title_col = if is_current { COLOR_TEXT_PRIMARY } else { 0xFFE0E0E0 };
+                    if let Some(col) = draw_text_bold(
+                        x,
+                        y,
+                        row.x + 20,
+                        row.y + LIB_ROW_TITLE_DY,
+                        2,
+                        &tbuf[..tn],
+                        title_col,
+                        COLOR_BG,
+                    ) {
+                        return col;
+                    }
+
+                    // [Size] - [Codec] - [Resolution] - [Running time], the
+                    // file's own measurements and no fourth claim about them.
+                    let mut meta_buf = [0u8; 64];
+                    let mut ml = 0;
+                    let mut s_buf = [0u8; 16];
+                    let sn = format_file_size(item.file_size, &mut s_buf);
+                    meta_buf[ml..ml + sn].copy_from_slice(&s_buf[..sn]);
+                    ml += sn;
+                    meta_buf[ml..ml + 3].copy_from_slice(b" - ");
+                    ml += 3;
+                    let r_codec = item.codec.label().as_bytes();
+                    meta_buf[ml..ml + r_codec.len()].copy_from_slice(r_codec);
+                    ml += r_codec.len();
+                    meta_buf[ml..ml + 3].copy_from_slice(b" - ");
+                    ml += 3;
+                    let mut r_buf = [0u8; 16];
+                    let rn = format_resolution(item.width, item.height, &mut r_buf);
+                    meta_buf[ml..ml + rn].copy_from_slice(&r_buf[..rn]);
+                    ml += rn;
+                    meta_buf[ml..ml + 3].copy_from_slice(b" - ");
+                    ml += 3;
+                    let mut d_buf = [0u8; 12];
+                    let dn = duration_label(item.duration_sec > 0, item.duration_sec, false, &mut d_buf);
+                    meta_buf[ml..ml + dn].copy_from_slice(&d_buf[..dn]);
+                    ml += dn;
+
+                    let mut m_meta = [0u8; 64];
+                    let mn = fit_run(&meta_buf[..ml], 1, false, TRACK_STRIP_W - 40, &mut m_meta);
+                    if let Some(col) = draw_text(
+                        x,
+                        y,
+                        row.x + 20,
+                        row.y + lib_meta_dy(),
+                        1,
+                        &m_meta[..mn],
+                        COLOR_TEXT_MUTED,
+                        COLOR_BG,
+                    ) {
+                        return col;
+                    }
+                    return COLOR_BG;
+                }
+                row_idx += 1;
+            }
+
+            // What the strip did not show, said on the surface that did not
+            // show it: the rows are the ones the screen can answer, and the
+            // rest are behind the drawer this affordance opens.
+            if app.playlist.count > TRACK_STRIP_ROWS {
+                if let Some(col) = draw_rounded_rect(
+                    x,
+                    y,
+                    track_strip_more_rect(),
+                    12,
+                    COLOR_SURFACE,
+                    Some(COLOR_BORDER),
+                    1,
+                ) {
+                    let more: &[u8] = b"MORE IN LIBRARY";
+                    if let Some(t_col) = paint_plate_label(
+                        x,
+                        y,
+                        track_strip_more_rect(),
+                        more,
+                        COLOR_TEXT_PRIMARY,
+                        COLOR_SURFACE,
+                    ) {
+                        return t_col;
+                    }
+                    return col;
+                }
+            }
         }
 
         // Media Info Sheet Card Overlay
@@ -3828,6 +4494,23 @@ enum EventAction {
     Exit(&'static str),
 }
 
+const PREV_RESTART_SECONDS: u32 = 3;
+
+fn press_previous(app: &mut VideoApp) -> Dirty {
+    if app.elapsed_sec > PREV_RESTART_SECONDS {
+        app.elapsed_sec = 0;
+        return Dirty::Scrubber;
+    }
+    app.playlist.prev();
+    app.load_current_track();
+    app.state = if app.has_frame {
+        PlaybackState::Playing
+    } else {
+        PlaybackState::Stopped
+    };
+    Dirty::All
+}
+
 fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     let x = px as usize;
     let y = py as usize;
@@ -3852,8 +4535,11 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
             // Scrubber seek in landscape: the band `LAND_SEEK_HIT` names, which
             // is the box the panel paints the track inside and is gated to the
-            // platform's minimum height.
-            if LAND_SEEK_HIT.contains(x, y) {
+            // platform's minimum height. The duration guard is the portrait
+            // band's, and the rotated screen answers it for the same reason: the
+            // panel paints `NO RUNNING TIME` in place of the track, so there is
+            // no fraction of a clock for a press to name.
+            if app.duration_sec > 0 && LAND_SEEK_HIT.contains(x, y) {
                 let seek_sec =
                     scrubber_seek_seconds(x, LAND_SEEK_X, LAND_SEEK_W, app.duration_sec);
                 app.seek_to_sec(seek_sec);
@@ -3870,23 +4556,9 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
             // Previous and Next controls in landscape. They are drawn beside
             // the play control, so a tap on one has to do what it looks like.
             if LAND_PREV_HIT.contains(x, y) {
-                if app.avi.is_some() {
-                    app.load_current_track();
-                    app.state = if app.has_frame {
-                        PlaybackState::Playing
-                    } else {
-                        PlaybackState::Stopped
-                    };
-                } else if app.playlist.prev().is_some() {
-                    app.load_current_track();
-                    app.state = if app.has_frame {
-                        PlaybackState::Playing
-                    } else {
-                        PlaybackState::Stopped
-                    };
-                }
+                let dirty = press_previous(app);
                 let _ = std::audio_haptic_click();
-                return EventAction::Redraw(Dirty::All);
+                return EventAction::Redraw(dirty);
             }
             if LAND_NEXT_HIT.contains(x, y) {
                 if app.playlist.next(app.loop_mode).is_some() {
@@ -3959,22 +4631,11 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
         if y >= lib_list_y0() && y < LIB_VIEW_Y1 {
             let row_idx = ((y - lib_list_y0()) + app.library_scroll) / lib_row_h();
             if row_idx < app.playlist.count {
-                app.playlist.select(row_idx);
-                app.load_current_track();
-                // WHY the state follows the decoder: selecting a row used to
-                // claim playback even when the file was refused (an H.264
-                // stream with no hardware decoder, or a malformed container),
-                // so the screen read "playing" over an error canvas. A row
-                // is playing only when a frame was actually decoded.
-                app.state = if app.has_frame {
-                    PlaybackState::Playing
-                } else {
-                    PlaybackState::Stopped
-                };
-                let _ = std::audio_haptic_click();
+                app.open_track(row_idx);
                 if !app.pip_mode {
                     app.library_open = false;
                 }
+                let _ = std::audio_haptic_click();
                 return EventAction::Redraw(Dirty::All);
             }
         }
@@ -4015,8 +4676,13 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
         return EventAction::Redraw(Dirty::All);
     }
 
-    // Scrubber Touch / Seek
-    if SEEK_HIT.contains(x, y) {
+    // Scrubber Touch / Seek.
+    //
+    // WHY the duration comes before the rect: the band above answers `NO RUNNING
+    // TIME` and paints no track and no thumb in that state, and a press that
+    // still sought on those columns would be the claim this screen already
+    // refused -- that the media has a clock to move along.
+    if app.duration_sec > 0 && SEEK_HIT.contains(x, y) {
         let seek_sec = scrubber_seek_seconds(x, SEEK_X, SEEK_W, app.duration_sec);
         app.seek_to_sec(seek_sec);
         return EventAction::Redraw(Dirty::All);
@@ -4031,27 +4697,9 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
 
     // Prev Button
     if PREV_HIT.contains(x, y) {
-        if app.avi.is_some() {
-            // Restarting reopens and re-reads the stream; it is the only
-            // "previous" a non-seekable container can honour.
-            app.load_current_track();
-            app.state = if app.avi.is_some() {
-                PlaybackState::Playing
-            } else {
-                PlaybackState::Stopped
-            };
-            let _ = std::audio_haptic_click();
-            return EventAction::Redraw(Dirty::All);
-        }
-        if app.elapsed_sec > 3 {
-            app.elapsed_sec = 0;
-            return EventAction::Redraw(Dirty::Scrubber);
-        }
-        if app.playlist.prev().is_some() {
-            app.load_current_track();
-            let _ = std::audio_haptic_click();
-            return EventAction::Redraw(Dirty::All);
-        }
+        let dirty = press_previous(app);
+        let _ = std::audio_haptic_click();
+        return EventAction::Redraw(dirty);
     }
 
     // Next Button
@@ -4139,6 +4787,41 @@ fn handle_touch(app: &mut VideoApp, px: u32, py: u32) -> EventAction {
     // Secondary: Media Info Button
     if INFO_BTN.contains(x, y) {
         app.info_open = !app.info_open;
+        let _ = std::audio_haptic_click();
+        return EventAction::Redraw(Dirty::All);
+    }
+
+    // The properties sheet is an overlay, and it answers its own press.
+    //
+    // WHY it has to say so: the sheet's card sits on the library strip's
+    // columns, so a press inside the card used to fall through to the track
+    // painted under it -- and the screen changed what was playing while the
+    // person was reading a file's properties.
+    if app.info_open && SHEET_RECT.contains(x, y) {
+        let _ = std::audio_haptic_click();
+        return EventAction::None;
+    }
+
+    // The Library Strip: the rows the surface under the controls paints.
+    let mut row_idx = 0usize;
+    while row_idx < TRACK_STRIP_ROWS {
+        if track_row_rect(row_idx).contains(x, y) {
+            if app.open_track(row_idx) {
+                let _ = std::audio_haptic_click();
+                return EventAction::Redraw(Dirty::All);
+            }
+            // A row the strip painted where the inventory has no entry is the
+            // state the gate below the strip refuses; nothing is claimed here.
+            return EventAction::None;
+        }
+        row_idx += 1;
+    }
+
+    // The rest of the list is behind the drawer, and this says so by opening it.
+    if app.playlist.count > TRACK_STRIP_ROWS
+        && track_strip_more_rect().contains(x, y)
+    {
+        app.library_open = true;
         let _ = std::audio_haptic_click();
         return EventAction::Redraw(Dirty::All);
     }
@@ -4331,7 +5014,8 @@ pub extern "C" fn _start() -> ! {
                         }
 
                         // Touch tap (kind 1) or drag (kind 2)
-                        let in_seek = SEEK_HIT.contains(input.x as usize, input.y as usize);
+                        let in_seek = app.duration_sec > 0
+                            && SEEK_HIT.contains(input.x as usize, input.y as usize);
                         let in_vol = VOL_HIT.contains(input.x as usize, input.y as usize);
                         if input.kind == 1 || (input.kind == 2 && (in_seek || in_vol)) {
                             match handle_touch(&mut app, input.x, input.y) {

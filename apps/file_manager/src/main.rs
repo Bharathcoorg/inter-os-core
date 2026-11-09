@@ -43,8 +43,9 @@ pub use file_manager::{
 use file_manager::{
     action_for_slot, action_slot_rect, action_supported, apply_search_scope, breadcrumb_crumbs,
     build_details_with_provenance, category_row_at, control_label_lane, crumb_step,
-    entry_at_point, entry_row_rect, fit_details, format_mtime,
-    format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path, list_scroll,
+    entry_at_point, entry_row_rect, fit_details, recent_time_line,
+    format_probe_count, format_size_human, grid_at_point, grid_cell_rect, grid_scroll, join_path,
+    list_scroll, painted_row_count,
     parse_indexed_documents, problem_text, row_is_visible, search_needle_is_usable,
     sheet_button_rect, sheet_destination_rect, sort_documents, sort_entries, sort_recents,
     validate_operation, ActionTapOutcome, Crumb, DetailsView, evaluate_action_tap,
@@ -87,8 +88,8 @@ use file_manager::{
     header_h, header_readout_line1_y, header_readout_line2_y,
     header_title_y, home_browse_btn, home_card_line1_y,
     home_card_line2_y, home_card_title_y, home_category_title_y, home_note_y, home_recent_row_h,
-    home_recent_time_dy, home_recents_caption_y, home_recents_note_dy, home_recents_title_y,
-    home_recents_y0,
+    home_recent_time_dy, home_recents_caption_y, home_recents_note_dy, home_recents_rows,
+    home_recents_title_y, home_recents_y0,
     home_storage_card, PLATFORM_LEVEL, rows_at, run_line, run_rows, run_w, search_clear,
     search_field, search_glyph_dy,
     scope_all_pill, scope_this_pill, scope_row_y1, scope_y, sheet,
@@ -650,6 +651,7 @@ impl FileManagerApp {
                 let sorted = sort_recents(&mut self.recents, parsed);
                 self.recents_count = sorted.min(MAX_SEARCH_RESULTS);
                 self.refresh_recent_times();
+                self.set_home_count();
                 log_counted(
                     "[FILE_MANAGER] Document index recents: ",
                     self.recents_count as u64,
@@ -659,6 +661,7 @@ impl FileManagerApp {
             Err(code) => {
                 self.recents_error = code;
                 self.refresh_recent_times();
+                self.set_home_count();
                 log_counted(
                     "[FILE_MANAGER] The document index was refused, code -",
                     code.unsigned_abs(),
@@ -680,8 +683,11 @@ impl FileManagerApp {
                 continue;
             }
             let mtime = self.recents[index].mtime;
-            let value = if mtime > 0 { Some(mtime) } else { None };
-            self.recent_time_len[index] = format_mtime(value, &mut self.recent_time[index]);
+            // A document the index never stamped (mtime == 0) paints no
+            // modification line at all: a missing value is not rendered as a
+            // value, and a row has no room to explain the gap.
+            self.recent_time_len[index] =
+                recent_time_line(mtime, &mut self.recent_time[index]);
         }
     }
 
@@ -771,27 +777,73 @@ impl FileManagerApp {
         self.probe_label_len = n;
     }
 
-    /// Writes the folder's item count into the header.
-    fn set_probe_count(&mut self, count: usize) {
-        let mut buf = [0u8; 40];
-        let n = if count == 0 {
-            let message = b"Empty folder";
-            buf[..message.len()].copy_from_slice(message);
-            message.len()
-        } else {
-            let mut n = fmt_u64(count as u64, &mut buf);
-            let suffix: &[u8] = if count == 1 { b" item" } else { b" items" };
-            for &b in suffix {
-                if n < buf.len() {
-                    buf[n] = b;
-                    n += 1;
-                }
+    /// Refreshes the header's item-count badge from the rows the card shows.
+    ///
+    /// WHY it reads `card_item_count` rather than a raw field: the badge and
+    /// the row loop must answer the same question, and a badge fed the folder
+    /// count while the loop ran the search-result count is how a "5 items"
+    /// badge came to sit above four painted rows. WHY the refusal is left
+    /// alone: when `fs_list` refused the folder there is no row count to
+    /// report, and `record_probe` has already inked the real refusal; overwriting
+    /// it with "Empty folder" would be the app inventing an answer the platform
+    /// never gave.
+    fn set_count_badge(&mut self) {
+        if !self.searching && self.listing_state == ListingState::Refused {
+            // Re-ink the refusal the platform gave, so clearing a search over
+            // a folder that was refused restores "Refused (-N)" rather than
+            // leaving the last search's match count on the header.
+            let mut buf = [0u8; 40];
+            let prefix = b"Refused (-";
+            let p = prefix.len();
+            buf[..p].copy_from_slice(prefix);
+            let mut n = p + fmt_u64(self.listing_error.unsigned_abs(), &mut buf[p..]);
+            if n < buf.len() {
+                buf[n] = b')';
+                n += 1;
             }
-            n
-        };
+            self.probe_label = [0u8; 40];
+            self.probe_label[..n].copy_from_slice(&buf[..n]);
+            self.probe_label_len = n;
+            return;
+        }
+        let rows = self.card_item_count();
+        self.ink_count_badge(rows);
+    }
+
+    /// Inks the header badge from a row count the caller has already derived.
+    ///
+    /// WHY it takes the number instead of reading a field: every header claim
+    /// on this app must come from the same accessor that laid the rows out, and
+    /// the browse card and the home screen count different rows. Sharing the
+    /// ink means the two screens cannot drift into two different wordings.
+    fn ink_count_badge(&mut self, rows: usize) {
+        let mut buf = [0u8; 40];
+        let n = format_probe_count(self.searching, rows, &mut buf);
         self.probe_label = [0u8; 40];
         self.probe_label[..n].copy_from_slice(&buf[..n]);
         self.probe_label_len = n;
+    }
+
+    /// Writes the home header's count: the recents rows the screen draws.
+    ///
+    /// WHY the header does not take `self.entry_count`: the home screen lists
+    /// the document index's recents, not the browse listing, so the header once
+    /// read "5 items" over the four recent rows it drew -- two numbers from two
+    /// sources on one screen. It now inks the same row count the paint and the
+    /// press use, through the shared badge so both screens say it the same way.
+    pub fn set_home_count(&mut self) {
+        let rows = home_recents_rows(self.recents_count);
+        if rows == 0 {
+            // No recent rows are drawn, so the header claims no items: a
+            // missing count is not rendered as a count.
+            let message = b"No recent files";
+            self.probe_label = [0u8; 40];
+            let take = message.len().min(self.probe_label.len());
+            self.probe_label[..take].copy_from_slice(&message[..take]);
+            self.probe_label_len = take;
+            return;
+        }
+        self.ink_count_badge(rows);
     }
 
     /// Reads the current directory, sorts it, and rebuilds what depends on it.
@@ -809,7 +861,7 @@ impl FileManagerApp {
             } else {
                 ListingState::Listed
             };
-            self.set_probe_count(self.entry_count);
+            self.set_count_badge();
         } else {
             self.entry_count = 0;
         }
@@ -878,12 +930,13 @@ impl FileManagerApp {
     }
 
     /// The number of rows the card shows.
+    ///
+    /// WHY it answers through `painted_row_count`: this is the one source of
+    /// truth for "how many rows exist." The row loop, the count badge, the hit
+    /// tests and the scroll extent all read it, so the badge a person sees is
+    /// always the count of the rows they can actually tap.
     pub fn card_item_count(&self) -> usize {
-        if self.searching {
-            self.result_count
-        } else {
-            self.entry_count
-        }
+        painted_row_count(self.searching, self.result_count, self.entry_count)
     }
 
     pub fn card_item_name(&self, index: usize) -> &[u8] {
@@ -962,6 +1015,7 @@ impl FileManagerApp {
             self.scroll = self.scroll_for(0);
             self.set_scope();
             self.set_status();
+            self.set_count_badge();
             return;
         }
         let needle_str = core::str::from_utf8(&needle[..needle_len]).unwrap_or("");
@@ -1001,6 +1055,7 @@ impl FileManagerApp {
         self.scroll = self.scroll_for(0);
         self.set_scope();
         self.set_status();
+        self.set_count_badge();
     }
 
     /// Empties the search and goes back to the directory listing.
@@ -1015,6 +1070,7 @@ impl FileManagerApp {
         self.scroll = self.scroll_for(0);
         self.set_scope();
         self.set_status();
+        self.set_count_badge();
     }
 
     /// Toggles the list/grid layout without touching the selection.
@@ -2347,7 +2403,7 @@ fn build_home_frame(app: &FileManagerApp) -> HomeFrame {
     } else {
         let recent_row_h = home_recent_row_h();
         let stack_top = home_recents_y0();
-        let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
+        let visible = home_recents_rows(app.recents_count);
         // The name column ends at the row's right edge; the 24px inset matches
         // the browse rows so a long name cannot reach the border.
         let max_w = 684 - 100 - 24;
@@ -4383,6 +4439,7 @@ fn handle_back(app: &mut FileManagerApp) -> Tap {
             app.searching = false;
             app.query.clear();
             app.query.blur();
+            app.set_home_count();
             app.set_status();
             std::log("[FILE_MANAGER] Returned to the home screen.").ok();
         } else {
@@ -4397,7 +4454,7 @@ fn handle_back(app: &mut FileManagerApp) -> Tap {
 fn handle_home_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
     // A recent document opens its folder and its details card.
     if app.recents_error == 0 && app.recents_count > 0 {
-        let visible = app.recents_count.min(HOME_RECENTS_VISIBLE);
+        let visible = home_recents_rows(app.recents_count);
         let row_h = home_recent_row_h();
         for index in 0..visible {
             let top = home_recents_y0() + index * row_h;

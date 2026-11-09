@@ -1440,4 +1440,136 @@ mod tests {
         let short = interos_std::design::scroll::ScrollState::new(300, 400, 0);
         assert_eq!(short.max_offset(), 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Consumer language and the landing's title band.
+    // -----------------------------------------------------------------------
+
+    /// The words a regular user is shown instead of the machine's own names.
+    const INTERNAL_WORDS: [&str; 11] = [
+        "VFS", "DVFS", "Keystore", "keystore", "Governor", "governor", "Flight", "flight",
+        "partition", "Ring 3", "syscall",
+    ];
+
+    /// The landing's seven cards are the first screen a user reaches, and they
+    /// advertised internals -- "flight mode", "VFS partitions", "DVFS governor",
+    /// "Keystore probe" -- none of which is a word on a phone. The radio switch
+    /// is called "Airplane mode", which is what the launcher's shade already
+    /// calls it and what the platform's own search keywords expect.
+    #[test]
+    fn the_landing_cards_name_their_sections_in_ordinary_words() {
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn category(")
+            .expect("the landing's categories are still authored in one table");
+        let rest = &main[start..];
+        let end = rest
+            .find("\n/// Bounding rectangle")
+            .expect("the category table ends where the card rectangles begin");
+        let table = &rest[..end];
+
+        assert!(
+            table.contains("Airplane mode"),
+            "the Network card does not name the radio switch the way the platform's own shade does"
+        );
+
+        for internal in INTERNAL_WORDS {
+            assert!(
+                !table.contains(internal),
+                "the landing card table still speaks of {internal:?}"
+            );
+        }
+    }
+
+    /// The detail pages a user opens from those cards may report a reading the
+    /// kernel handed over, but they may not name the mechanism: no partition
+    /// table, no governor, no keystore probe, no privilege ring.
+    #[test]
+    fn the_consumer_detail_rows_do_not_speak_like_a_kernel_log() {
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn row_pixel(")
+            .expect("the detail rows are still drawn by one function");
+        let rest = &main[start..];
+        let end = rest
+            .find("\nfn detail_pixel")
+            .expect("the detail rows end where the page begins");
+        let body = &rest[..end];
+
+        // WHY the sweep walks `b"..."` literals and not the text of the
+        // function: the comments here argue with the kernel in the kernel's own
+        // vocabulary on purpose, and a user never reads a comment. A string
+        // only fails this contract when it can reach the screen.
+        let bytes = body.as_bytes();
+        let mut i = 0usize;
+        while i + 2 < bytes.len() {
+            if bytes[i] == b'b' && bytes[i + 1] == b'"' {
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    j += 1;
+                }
+                let run = &body[i + 2..j];
+                for internal in INTERNAL_WORDS {
+                    assert!(
+                        !run.contains(internal),
+                        "a consumer detail row paints {run:?}, which names {internal:?}"
+                    );
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// The screen title and the vitality orb used to be two numbers written
+    /// next to each other -- the orb's halo radius and a remembered row 264 --
+    /// with nothing tying them, and the orb's branch was tried first, so on any
+    /// row the two bands shared the orb painted over the title's caps.
+    ///
+    /// WHY the three checks: the title's row has to come from the orb's own
+    /// extent (so moving the orb moves the title with it), the build has to
+    /// refuse a band that overlaps (so the derivation cannot be undone by a
+    /// larger halo), and the title's run has to be tried before the orb's (so
+    /// the title, not the decoration, wins whatever row they meet on).
+    #[test]
+    fn the_landing_title_owns_a_band_the_orb_cannot_paint_over() {
+        let main = include_str!("main.rs");
+
+        let start = main
+            .find("const IDENTITY_TITLE_Y")
+            .expect("the landing still places its title by a named row");
+        let line_end = main[start..]
+            .find('\n')
+            .expect("the constant ends at its line");
+        let line = &main[start..start + line_end];
+        assert!(
+            line.contains("ORB_CY") && line.contains("HALO_R"),
+            "the title's row is a remembered number again: {line}"
+        );
+
+        assert!(
+            main.contains("assert!(ORB_CY + HALO_R <= IDENTITY_TITLE_Y"),
+            "nothing at compile time holds the orb's halo out of the title's band"
+        );
+
+        let lstart = main
+            .find("fn landing_pixel(")
+            .expect("the landing is still drawn by one function");
+        let lrest = &main[lstart..];
+        let lend = lrest
+            .find("\n// ----")
+            .expect("the landing painter ends at the next section");
+        let body = &lrest[..lend];
+        let title = body
+            .find("IDENTITY_TITLE_Y")
+            .expect("the title is still inked on the landing");
+        let orb = body
+            .find("vitality_orb_pixel(")
+            .expect("the orb is still inked on the landing");
+        assert!(
+            title < orb,
+            "the orb is still consulted before the title, so it paints over it"
+        );
+    }
 }

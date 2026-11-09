@@ -43,11 +43,31 @@ const R_MAJOR: usize = radius::MAJOR;
 const R_SHEET: usize = radius::SHEET;
 const R_SOFT: usize = radius::SOFT_PILL;
 
-const W: usize = 720;
-const H: usize = 1440;
+/// The panel this app paints: the platform's own authoring size, so a surface
+/// that ever moves is one number moving in one place.
+const W: usize = interos_std::design::viewport::LOGICAL_WIDTH;
+const H: usize = interos_std::design::viewport::LOGICAL_HEIGHT;
 const CHUNK: usize = 4096;
 
 const STATUS_BAR_HEIGHT: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+/// The status band's geometry for this panel, resolved once for the process.
+///
+/// WHY a `static` and not a `StatusBand::new(W)` in the pixel path: the band's
+/// box and its instrument strip are a function of the panel's width alone, and
+/// the pixel callback is asked for every pixel of the band's rows -- a million
+/// questions a frame, of which thirty-four thousand of them used to be "lay the
+/// instruments out again". A `static` is the allocation-free cache: it is built
+/// at compile time here, and the callback keeps being the arithmetic it is.
+static STATUS_BAND: components::StatusBand = components::StatusBand::new(W);
+
+/// The instruments this app draws, which it has never measured.
+///
+/// WHY the same treatment: `unmeasured()` is the band's third argument, and an
+/// app that asks the radio and the fuel gauge for nothing has one answer for
+/// every pixel of the band's rows. The `const fn` costs nothing to build, but it
+/// was still being built a million times a frame to say so.
+static STATUS_INSTRUMENTS: components::Instruments = components::Instruments::unmeasured();
 
 pub fn status_band() -> (usize, usize) {
     (0, STATUS_BAR_HEIGHT)
@@ -175,7 +195,7 @@ fn test_text(
 use calculator::chrome::{
     CLEAR_PILL, CLOSE_PILL, DISPLAY_PAD, DISPLAY_X0, DISPLAY_X1, DISPLAY_Y0, DRAWER_HEADER_Y0,
     DRAWER_HEADER_Y1, HISTORY_PILL, HIST_EXPR_DY, HIST_LIST_Y0, HOME_PILL, KEYPAD_TOP,
-    SCROLL_CHEVRON_X, SCROLL_PLATE_W, SCROLL_PLATE_X, TAPE_LINES, TAPE_TEXT_X1, TAPE_Y0, VALUE_GAP,
+    SCROLL_CHEVRON_X, SCROLL_PLATE_W, SCROLL_PLATE_X, TAPE_LINES, TAPE_TEXT_X1, TAPE_Y0,
     run_rows,
 };
 use calculator::chrome;
@@ -248,20 +268,23 @@ const TAPE_TEXT_X1_SCOLL: usize = SCROLL_PLATE_X.saturating_sub(6);
 
 // Button layout constants (Minimum 64pt targets: 144x140px)
 //
-// WHY there are six rows and not five: the keypad carries twenty-two keys
+// WHY there are six rows and not five: the keypad carries twenty-four keys
 // and a four-column grid holds sixteen in four rows. The clear-all,
 // clear-entry and backspace keys are three keys a person has to be able
 // to tell apart, and a five-row grid had no room for them.
-const BTN_W: usize = 144;
-const BTN_H: usize = calculator::KEYPAD_ROW_H;
-const COL_X: [usize; 4] = [28, 194, 360, 526];
-const ROW_Y: [usize; 6] = [420, 580, 740, 900, 1060, 1220];
-
-/// The width of a key that spans two columns of the grid.
-const WIDE_BTN_W: usize = BTN_W * 2 + (COL_X[1] - COL_X[0] - BTN_W);
-
-/// The x of the wide key in the last row's right half.
-const WIDE_BTN_X1: usize = COL_X[2];
+//
+// WHY one key per cell and no width but `BTN_W`: the last row used to hold
+// the modulo and the equals drawn across two columns each, and those four
+// cells were the room the two parentheses and the percentage key needed. A
+// grid where every cell holds one key is what makes a wide plate unnecessary
+// rather than hidden -- the shape a thumb reads is one plate, twenty-four
+// times.
+//
+// WHY the grid is read from `calculator::chrome` and not written here: the
+// painter inks these rects, the press answers them, and a repaint now has to
+// name ONE of them as the region it re-inks. Three readers, one owner -- see
+// `chrome`'s own header for what the two-reader version cost.
+use chrome::{BTN_W, BTN_H, COL_X, ROW_Y};
 
 /// The columns the drawer's ledger lives in: the divider at the sheet's head,
 /// the row plates below it and the band a row answers from are all this width.
@@ -293,20 +316,21 @@ const SHEET_Y1: usize = chrome::DRAWER_SHEET_Y1;
 // The touch floor, stated once against the plates this file inks.
 //
 // WHY here and not only in `calculator::chrome`: the chrome owns the header's
-// chips, the tape's scroll plate and the drawer's two pills, and it already holds
-// each of them to the floor. What it does not own is the keypad -- `COL_X` and
-// `ROW_Y` below are this file's -- nor the ledger column the drawer paints and
-// the press answers. The bin target is built `test = false`, so a `#[test]`
-// written beside these numbers would never run: these are build-time gates, and
-// a number that steps over the floor fails the build.
+// chips, the tape's scroll plate, the drawer's two pills and the keypad's grid,
+// and it already holds each of them to the floor. What it cannot check from
+// inside itself is what the plate costs against the panel this file paints --
+// `W`, `H` and the home strip the caps may not reach -- nor the ledger column
+// the drawer paints and the press answers. The bin target is built `test =
+// false`, so a `#[test]` written beside these numbers would never run: these are
+// build-time gates, and a number that steps over the floor fails the build.
 // -----------------------------------------------------------------------------
 const _: () = {
     use interos_std::design::touch::MIN_TARGET;
 
-    // A key is a `BTN_W` by `BTN_H` cap, and the wide keys are wider still.
+    // A key is a `BTN_W` by `BTN_H` cap, and every one of the twenty-four
+    // keys is that cap: there is no second shape to check.
     assert!(BTN_W >= MIN_TARGET);
     assert!(BTN_H >= MIN_TARGET);
-    assert!(WIDE_BTN_W >= BTN_W);
 
     // The grid: the rect `key_rect` hands the painter is the rect `key_hit`
     // hands the press, so what is checked is that rect -- on screen, floor-sized,
@@ -328,10 +352,6 @@ const _: () = {
         }
         r += 1;
     }
-
-    // The last row's two wide keys, which replace four cells of the grid.
-    assert!(COL_X[0] + WIDE_BTN_W <= WIDE_BTN_X1);
-    assert!(WIDE_BTN_X1 + WIDE_BTN_W <= W - 16);
 
     // The ledger's column, and a row at the platform's own text size.
     assert!(HIST_ROW_X0 >= DISPLAY_X0 && HIST_ROW_X1 <= DISPLAY_X1);
@@ -485,17 +505,18 @@ fn tape_chevron_pixel(x: usize, y: usize, up: bool, color: u32, plate_h: usize) 
 
 /// The rectangle of the key at (row, col), if the grid has one there.
 ///
-/// WHY the last row is two wide keys: the keypad carries twenty-two keys
-/// and a four-column grid holds sixteen in four rows, so the bottom row
-/// holds the two keys that are wider than one cell.
+/// WHY one shape for all twenty-four keys: the last row used to be two keys
+/// drawn across two columns each, which is a plate of a different shape in a
+/// grid of identical ones -- and the cells they covered were where the two
+/// parentheses belong. The grid has twenty-four cells and the keypad has
+/// twenty-four keys, so every key is one cell and one `BTN_W` by `BTN_H` cap.
+///
+/// WHY the chrome owns it now: the repaint has to name a single keycap as the
+/// region it re-inks, and a region the press cannot reach is a region the
+/// painter would be guessing at.
+#[inline]
 fn key_rect(row: usize, col: usize) -> Option<Rect> {
-    match (row, col) {
-        (5, 0) => Some(Rect::new(COL_X[0], ROW_Y[5], WIDE_BTN_W, BTN_H)),
-        (5, 2) => Some(Rect::new(WIDE_BTN_X1, ROW_Y[5], WIDE_BTN_W, BTN_H)),
-        (5, _) => None,
-        (r, c) if r < 5 && c < 4 => Some(Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H)),
-        _ => None,
-    }
+    chrome::key_cap(row, col)
 }
 
 /// The action of the key at (row, col), if there is one.
@@ -876,10 +897,17 @@ fn build_display_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
     // The card's geometry at the level this process publishes. The tape grows
     // its own line box, the result stands below it, and the whole card is
     // clamped clear of the keypad -- see `chrome::KEYPAD_TOP`.
+    //
+    // WHY the tape's lines are counted and not assumed: the card is the box
+    // that holds the runs this frame draws, and the tape draws nothing until a
+    // person types an expression. Reserving its two lines anyway is what made
+    // the screen a person opens a two-hundred-row plate with one number in its
+    // lower corner and a field of nothing above it.
+    let tape_lines = if calc.tape_count > 0 { TAPE_LINES } else { 0 };
     let expr_cap = chrome::cap_user(CAP_EXPRESSION);
     let tape_rows = chrome::run_rows(expr_cap);
-    let tape_y1 = TAPE_Y0 + TAPE_LINES * tape_rows;
-    let value_y0 = tape_y1 + VALUE_GAP;
+    let tape_y1 = TAPE_Y0 + tape_lines * tape_rows;
+    let value_y0 = chrome::value_y0_for_tape(tape_lines);
     let room = KEYPAD_TOP.saturating_sub(DISPLAY_PAD).saturating_sub(value_y0);
     let column = display_column_w();
 
@@ -953,7 +981,7 @@ fn build_display_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
         plan.error = planned_run(err_x, value_y0, err_cap, err_text, true);
         plan.is_error = true;
         plan.error_rows = run_rows(err_cap);
-        plan.card_y1 = chrome::card_y1(plan.error_rows);
+        plan.card_y1 = chrome::card_y1_for_tape(tape_lines, plan.error_rows);
     } else {
         let digits = &calc.display_buf[..calc.display_len];
         // WHY the result comes down a rung when it does not fit: the length
@@ -964,7 +992,7 @@ fn build_display_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
         let digits_x = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
         plan.result = planned_run(digits_x, value_y0, digits_cap, digits, true);
         plan.result_rows = run_rows(digits_cap);
-        plan.card_y1 = chrome::card_y1(plan.result_rows);
+        plan.card_y1 = chrome::card_y1_for_tape(tape_lines, plan.result_rows);
     }
 
     plan.tape_rows = tape_rows;
@@ -996,7 +1024,7 @@ fn build_display_plan(plan: &mut CalcFramePlan, calc: &CalculatorState) {
         34 + run_rows(digits_cap.max(err_cap)).saturating_sub(run_rows(RESULT_LADDER[0]));
 }
 
-/// The keypad's twenty-two key labels, placed once for the repaint.
+/// The keypad's twenty-four key labels, placed once for the repaint.
 ///
 /// WHY this is the dominant saving: the keypad is a little over half of the
 /// surface, and every pixel of it used to clamp a cap, measure a label, take a
@@ -1027,7 +1055,9 @@ fn build_keypad_plan(plan: &mut CalcFramePlan) {
                 continue;
             }
             let label: &[u8] = match act {
-                'C' | 'E' | 'B' | 'P' | '~' | '.' | '%' => calculator::button_label(act),
+                'C' | 'E' | 'B' | 'p' | '~' | '.' | '%' | '(' | ')' => {
+                    calculator::button_label(act)
+                }
                 _ => &[act as u8],
             };
             let w = calculator::text_width(label, key_cap);
@@ -1182,10 +1212,9 @@ fn chrome_level() -> u8 {
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcFramePlan) -> u32 {
     // 0. Status Band (y < STATUS_BAR_HEIGHT)
     if y < STATUS_BAR_HEIGHT {
-        let band = components::StatusBand::new(W);
         let clock = if calc.clock_ok { Some(&calc.clock[..]) } else { None };
-        return band
-            .pixel(x, y, clock, &components::Instruments::unmeasured(), &THEME)
+        return STATUS_BAND
+            .pixel(x, y, clock, &STATUS_INSTRUMENTS, &THEME)
             .unwrap_or(THEME.surface);
     }
 
@@ -1521,9 +1550,9 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
         return card.fill;
     }
 
-    // 4. Keypad Matrix (6 rows, 4 cols, the last row two wide keys)
-    for row in 0..6 {
-        for col in 0..4 {
+    // 4. Keypad Matrix (6 rows, 4 cols, every cell one key)
+    for row in 0..calculator::KEY_ROWS {
+        for col in 0..calculator::KEY_COLS {
             let Some(rect) = key_rect(row, col) else {
                 continue;
             };
@@ -1547,7 +1576,10 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
                 let is_clear = action == Some('C');
                 let is_clear_entry = action == Some('E');
                 let is_backspace = action == Some('B');
-                let is_fn = matches!(action, Some('P') | Some('%') | Some('~'));
+                let is_fn = matches!(
+                    action,
+                    Some('p') | Some('%') | Some('~') | Some('(') | Some(')')
+                );
 
                 // WHY the operators and the equals are the opposite of the page
                 // and not a colour of their own: the design the app is built
@@ -1644,56 +1676,49 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState, plan: &CalcF
     THEME.surface
 }
 
-fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
-    // WHY the plan is built here and not where it is read: this is one of the two
-    // walks of `get_calculator_pixel` the app has, and the walk crosses every
-    // section of the screen. A plan built inside the pixel function would place
-    // its runs again for every pixel that wants them, which is the cost this
-    // removes.
-    let plan = build_calc_plan(calc);
-    let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
-        let mut x = offset % W;
-        let mut y = offset / W;
-        for i in 0..count {
-            chunk[i] = get_calculator_pixel(x, y, calc, &plan);
-            x += 1;
-            if x == W {
-                x = 0;
-                y += 1;
-            }
-        }
-        let _ = std::surface_write(surface, offset, &chunk[..count]);
-        offset += count;
+/// Re-inks the regions `dirty` names, and only those.
+///
+/// WHY one walker for every repaint, the panel included: the app used to own two
+/// -- one that crossed the whole surface and one that crossed a band of rows --
+/// and a caller could hand a small region to the walker that ignored it, so the
+/// classifier's arithmetic stopped meaning anything. There is now one walk, and
+/// what it costs is what `dirty` says.
+///
+/// WHY the plan is built here and not where it is read: a plan built inside the
+/// pixel function places its runs again for every pixel that wants them, and one
+/// build per repaint is the cost this removes. It is one build for the whole
+/// repaint, not one per region: every region of this frame is answered out of
+/// the same plan, which is what keeps the tape, the card and the key labels at
+/// one text size.
+///
+/// WHY walking a sub-rectangle is the same picture and not an approximation:
+/// `get_calculator_pixel` is a function of (`x`, `y`, the state, the plan), so
+/// the pixels it answers for a region are the pixels a full walk would have
+/// written there. A smaller region is less work, never a different frame.
+fn render_dirty(surface: u32, calc: &CalculatorState, dirty: Dirty) {
+    if dirty.is_none() {
+        return;
     }
-}
-
-fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: usize) {
-    // WHY the plan is rebuilt for a band rather than reused from the last full
-    // repaint: the band is painted from the state it is about to draw, and a plan
-    // left over from an earlier state would paint the number the person has just
-    // replaced. One build per repaint is the cost; see `render_calculator_ui`.
     let plan = build_calc_plan(calc);
     let mut chunk = [0u32; CHUNK];
-    let mut offset = y0 * W;
-    let end = y1.min(H) * W;
-    while offset < end {
-        let count = (end - offset).min(CHUNK);
-        let mut x = offset % W;
-        let mut y = offset / W;
-        for i in 0..count {
-            chunk[i] = get_calculator_pixel(x, y, calc, &plan);
-            x += 1;
-            if x == W {
-                x = 0;
-                y += 1;
+    for region in dirty.regions() {
+        let x1 = (region.x + region.w).min(W);
+        let y1 = (region.y + region.h).min(H);
+        let mut y = region.y;
+        while y < y1 {
+            let row_start = y * W + region.x;
+            let width = x1 - region.x;
+            let mut done = 0;
+            while done < width {
+                let count = (width - done).min(CHUNK);
+                for i in 0..count {
+                    chunk[i] = get_calculator_pixel(region.x + done + i, y, calc, &plan);
+                }
+                let _ = std::surface_write(surface, row_start + done, &chunk[..count]);
+                done += count;
             }
+            y += 1;
         }
-        let _ = std::surface_write(surface, offset, &chunk[..count]);
-        offset += count;
     }
 }
 
@@ -1701,22 +1726,10 @@ fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: u
 // Input Handling and Event Dispatch
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Dirty {
-    None,
-    Display,
-    All,
-}
-
-impl Dirty {
-    fn widen(self, other: Dirty) -> Dirty {
-        match (self, other) {
-            (Dirty::None, d) | (d, Dirty::None) => d,
-            (a, b) if a == b => a,
-            _ => Dirty::All,
-        }
-    }
-}
+/// The regions a repaint re-inks. Owned by `calculator::chrome`, which holds the
+/// rects in it, so the press that names a region and the painter that walks it
+/// read the same geometry. See [`chrome::Dirty`].
+use chrome::Dirty;
 
 enum Tap {
     None,
@@ -1725,38 +1738,19 @@ enum Tap {
 }
 
 fn repaint(surface: u32, calc: &mut CalculatorState, dirty: Dirty) {
-    // WHY the level is re-adopted here and not only at launch: Settings writes
-    // the store and nothing tells this app that it did, so a person who makes
-    // the text larger while the calculator is open would otherwise see the next
-    // frame drawn at the size the app started with -- the same defect the row
-    // below closes. One settings query per repaint, and never inside the paint
-    // loop itself.
+    // WHY nothing is asked of the settings store here: the text size belongs to
+    // the wake that brought this repaint about, and `repaint` is called for
+    // every presented frame -- a digit press, a scroll, a headless tool call.
+    // Reading it here was one blocking IPC per repaint and a whole-panel walk
+    // whenever the answer differed, so an unrelated tap resized the screen under
+    // somebody who had not touched Settings. The event loop reads the rung once
+    // per wake and hands the whole panel down when it moved; see `_start`.
     //
-    // WHY the whole screen when it changed: the level moves the display card,
-    // the tape's stride, the drawer's rows and the keypad's labels, and a band
-    // repaint that only covers the card would leave every other region at the
-    // rung the previous frame used.
-    //
-    // WHY the tape is re-wrapped here too: the engine wrapped the expression
-    // into lanes sized at the level the last repaint published, and a raised
-    // rung draws those lines wider than the lane that justified them. The
-    // wrap reads the same published cap the painter does (see
-    // `CalculatorState::sync_tape`), so this is the one point where a moved
-    // level and a stale wrap can be reconciled before a single row is painted.
-    if publish_text_scale() {
-        calc.sync_tape();
-        render_calculator_ui(surface, calc);
-        return;
-    }
-    match dirty {
-        Dirty::None => {}
-        // WHY the band runs to the keypad's first row instead of to the ladder's
-        // card bottom: the card grows with the person's text size, and a band that
-        // repaints only the rows the ladder reserved leaves the last rows of a
-        // scaled card showing the previous frame.
-        Dirty::Display => render_calculator_band(surface, calc, DISPLAY_Y0, KEYPAD_TOP),
-        Dirty::All => render_calculator_ui(surface, calc),
-    }
+    // WHY the card's rows go as far as the keypad's first row rather than to the
+    // ladder's card bottom: the card grows with the person's text size, and a
+    // region that repaints only the rows the ladder reserved would leave the last
+    // rows of a scaled card showing the previous frame.
+    render_dirty(surface, calc, dirty);
 }
 
 fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
@@ -1786,9 +1780,17 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             calc.press_key('/');
             std::log("[CALCULATOR] Keypad operator selected.").ok();
         }
-        40 | 41 => {
-            calc.press_key('P');
-            std::log("[CALCULATOR] Keypad operator selected.").ok();
+        // WHY two codes and not one arm: the keyboard has a key for each
+        // bracket, so a press of `(` has to type `(`. The one arm that read
+        // `40 | 41` handed both to a plate that guessed which bracket the
+        // person meant, which is the merged key wearing a different name.
+        40 => {
+            calc.press_key('(');
+            std::log("[CALCULATOR] Keypad parenthesis typed.").ok();
+        }
+        41 => {
+            calc.press_key(')');
+            std::log("[CALCULATOR] Keypad parenthesis typed.").ok();
         }
         46 => {
             calc.press_key('.');
@@ -1819,9 +1821,16 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
         input_key_code::PAGE_DOWN => {
             calc.scroll_tape(TAPE_LINES as isize);
         }
+        // WHY this types the percentage and not the modulo: the keyboard
+        // names a key by the character it types, and the plate that carries
+        // this character is the percentage key. The modulo is the operation
+        // the plate reads `mod`, which no character spells, so it stays on
+        // the plate. Handing the character to the other operation would
+        // leave one glyph doing two things, which is the defect the keypad
+        // just stopped having.
         37 => {
-            calc.press_key('%');
-            std::log("[CALCULATOR] Modulo operation queued.").ok();
+            calc.press_key('p');
+            std::log("[CALCULATOR] Keypad percentage typed.").ok();
         }
         94 | 115 | 83 => {
             calc.square();
@@ -1861,9 +1870,15 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
     }
 
     // History toggle: the pill the header row paints.
+    //
+    // WHY the whole panel: the drawer's sheet runs from the header's bottom edge
+    // to row 1380, so opening it covers the card, the keypad and the rows between
+    // them, and the header pill's own state moves with it. There is no smaller set
+    // of rectangles that is also the truth, and this is the case the region model
+    // is not trying to shrink.
     if chrome::history_claims(x, y) {
         calc.toggle_history();
-        return Tap::Redraw(Dirty::All);
+        return Tap::Redraw(Dirty::all());
     }
 
     // History Drawer active interactions
@@ -1871,12 +1886,17 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
         // Close pill: the rect the drawer draws.
         if chrome::close_claims(x, y) {
             calc.show_history = false;
-            return Tap::Redraw(Dirty::All);
+            return Tap::Redraw(Dirty::all());
         }
         // Clear pill: the rect the drawer draws.
+        //
+        // WHY the sheet's rows and not the panel: clearing the ledger moves the
+        // ledger's rows and the empty notice inside the sheet, and the drawer
+        // stays open -- the sheet's own chrome, the header pill and everything the
+        // sheet is drawn over are painted from state this press did not touch.
         if chrome::clear_claims(x, y) {
             calc.history.clear();
-            return Tap::Redraw(Dirty::All);
+            return Tap::Redraw(Dirty::rows(DISPLAY_Y0, SHEET_Y1));
         }
         // History rows hit test
         //
@@ -1897,13 +1917,13 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
             if y >= row_y0 && y < row_y1 && in_hist_row_columns(x) {
                 calc.load_history_entry(i);
                 calc.show_history = false;
-                return Tap::Redraw(Dirty::All);
+                return Tap::Redraw(Dirty::all());
             }
         }
         // Tapping outside closes drawer
         if y >= SHEET_Y0 && y < SHEET_Y1 {
             calc.show_history = false;
-            return Tap::Redraw(Dirty::All);
+            return Tap::Redraw(Dirty::all());
         }
         return Tap::None;
     }
@@ -1920,7 +1940,7 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
             } else {
                 calc.scroll_tape(1);
             }
-            return Tap::Redraw(Dirty::Display);
+            return Tap::Redraw(Dirty::display());
         }
     }
 
@@ -1942,8 +1962,11 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                     '+' | '-' | '*' | '/' => {
                         std::log("[CALCULATOR] Keypad operator selected.").ok();
                     }
-                    'P' => {
-                        std::log("[CALCULATOR] Keypad operator selected.").ok();
+                    '(' | ')' => {
+                        std::log("[CALCULATOR] Keypad parenthesis typed.").ok();
+                    }
+                    'p' => {
+                        std::log("[CALCULATOR] Keypad percentage typed.").ok();
                     }
                     '%' => {
                         std::log("[CALCULATOR] Modulo operation queued.").ok();
@@ -1970,13 +1993,19 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                 // on the display has to be the value the key produced, and
                 // the keypad and the keyboard are two ways of pressing the
                 // same key.
+                //
+                // WHY the regions come from what the press MOVED and not from
+                // the name on the key: the keypad's only state-dependent ink is
+                // the armed operation's cap, so a key that neither armed nor
+                // disarmed one has moved the card and nothing else -- and a key
+                // that did has that cap and the one it replaced. Sorting by
+                // `is_op` got both halves wrong: it walked the panel for an
+                // operator, rows the press never touched included, and it walked
+                // the card alone for `C` and `=`, which disarm -- leaving the
+                // armed key shaded until something else repainted the row.
+                let op_before = calc.active_operation;
                 calc.press_key(action);
-                let is_op = matches!(action, '/' | '*' | '-' | '+' | '=');
-                if is_op {
-                    return Tap::Redraw(Dirty::All);
-                } else {
-                    return Tap::Redraw(Dirty::Display);
-                }
+                return Tap::Redraw(chrome::press_dirty(op_before, calc.active_operation));
             }
             return Tap::None;
         }
@@ -2167,7 +2196,7 @@ pub extern "C" fn _start() -> ! {
     let mut contact_answered = false;
 
     // 4. Render initial Calculator UI frame and present
-    repaint(surface, &mut calc, Dirty::All);
+    repaint(surface, &mut calc, Dirty::all());
     let _ = std::surface_flip();
     std::log("[CALCULATOR] Initial frame presented to hardware scanout.",
     )
@@ -2176,6 +2205,23 @@ pub extern "C" fn _start() -> ! {
     // 5. Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG, 100) {
+            // WHY here, on the wake and not in `repaint`: Settings writes the
+            // store and nothing tells this app that it did, so the rung has to be
+            // re-adopted while the screen is alive -- that behaviour is delivered
+            // and stays. What it must not be is a per-repaint debt: `repaint` runs
+            // for every presented frame, so reading the store there cost one
+            // blocking IPC plus a whole-panel walk per tap, whatever the tap was.
+            // This is one query per wake that brought work here, the same shape
+            // `agent_manager` and `messages` use, and a poll that timed out asks
+            // the store nothing.
+            //
+            // WHY a moved rung is the whole panel: the level lays out the card,
+            // the tape's stride, the drawer's rows and the keypad's labels, so no
+            // smaller set of regions is the truth. WHY the tape is re-wrapped with
+            // it: the engine wrapped the expression into lanes sized at the level
+            // the last frame published, and the plan below measures at the new one
+            // (see `CalculatorState::sync_tape`).
+            let rung_moved = events != 0 && publish_text_scale();
             let mut input = std::InputEvent {
                 kind: 0,
                 x: 0,
@@ -2184,13 +2230,22 @@ pub extern "C" fn _start() -> ! {
                 dy: 0,
                 scale_milli: 1000,
             };
-            let mut dirty = Dirty::None;
+            let mut dirty = Dirty::none();
+            if rung_moved {
+                calc.sync_tape();
+                dirty = dirty.widen(Dirty::all());
+            }
 
             if events & std::EVENT_IPC_MSG != 0 {
                 let mut rx_buf = [0u8; 64];
                 while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
                     if handle_appmcp_request(&mut calc, &rx_buf[..len], sender, msg_type) {
-                        dirty = dirty.widen(Dirty::All);
+                        // WHY the panel: a tool call types into the expression,
+                        // evaluates it and adds to the ledger from outside the
+                        // press paths, and this file cannot say which rows it
+                        // moved without restating what the tool did -- a second
+                        // answer to one question, and the expensive kind of guess.
+                        dirty = dirty.widen(Dirty::all());
                     }
                 }
             }
@@ -2232,8 +2287,21 @@ pub extern "C" fn _start() -> ! {
 
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
+                    // WHY the state is taken before the key goes in: the regions
+                    // a key moves are what the key CHANGED, and after the call
+                    // there is nothing left to compare -- the same reading the
+                    // finger's press is given. The drawer is the one difference:
+                    // a key that opened or closed it covered the card and the
+                    // keypad at once, whatever it typed while it was up.
+                    let op_before = calc.active_operation;
+                    let sheet_before = calc.show_history;
                     if key.pressed && handle_keyboard_key(&mut calc, key.code) {
-                        dirty = dirty.widen(if calc.show_history { Dirty::All } else { Dirty::Display });
+                        dirty = dirty.widen(chrome::keys_dirty(
+                            op_before,
+                            calc.active_operation,
+                            sheet_before,
+                            calc.show_history,
+                        ));
                     }
                     continue;
                 }
@@ -2273,10 +2341,14 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
             }
-            if dirty != Dirty::None {
+            if !dirty.is_none() {
                 // WHY the tape is re-wrapped here: the expression is what
                 // the tape shows, and the expression is what the input
                 // changed.
+                //
+                // WHY a flip only when something moved: a wake that answered no
+                // key re-inks no pixel and presents no frame, so it costs the
+                // panel nothing.
                 calc.sync_tape();
                 repaint(surface, &mut calc, dirty);
                 let _ = std::surface_flip();

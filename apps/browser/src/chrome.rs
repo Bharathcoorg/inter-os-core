@@ -187,6 +187,138 @@ pub const ICON: usize = interos_std::design::monochrome::ICON_BOX;
 const _: () = assert!(ICON == 24);
 const _: () = assert!(ICON < MIN_TARGET);
 
+// ---------------------------------------------------------------------------
+// The omnibox row: the address field and the two controls that trail it
+// ---------------------------------------------------------------------------
+//
+// WHY the row is a module and not four rectangles in the renderer: the header
+// used to paint the platform's Back chip, the field, reload, a tab count, the
+// overflow menu and a close mark, and every one of those six was placed by a
+// literal in the file that inked it. Two of them were duplicates of controls the
+// screen already had elsewhere -- the navigation bar's own back tile, and the
+// shell's home band, which is what this device uses to leave an app -- and a
+// third, the tab count, was the same number on the same screen twice. What the
+// row actually owns is the address, a way to re-request it, and a way to open
+// the menu, so that is what it now paints, and the three boxes are one sum of
+// the platform's status band, the platform's control floor and the rung the
+// address is set at.
+
+/// The rung the address is inked at.
+///
+/// WHY published rather than left as the `1` the renderer typed: the field's
+/// height, its text row and its caret's box are all one line box of this rung,
+/// and a size the ladder does not name is a size the platform's own rung
+/// contract rejects.
+pub const FIELD_RUNG: usize = crate::theme::type_scale::CAPTION;
+
+/// The platform's status band, which is the row above this one.
+pub const OMNIBOX_Y0: usize = interos_std::design::viewport::STATUS_BAR_HEIGHT;
+
+/// The air the band keeps between the status bar and the field's plate, and
+/// the same air again under it.
+pub const OMNIBOX_DY: usize = spacing::GRID_8;
+
+/// The field's plate height: the platform's control floor plus one grid step.
+///
+/// WHY not the rung alone: the plate is a thing a thumb is aimed at, so it may
+/// not go under [`MIN_TARGET`], and the run inside it is smaller than that floor.
+pub const FIELD_H: usize = MIN_TARGET + spacing::GRID_8;
+
+/// The field's top row, and the row one past the band.
+pub const FIELD_Y: usize = OMNIBOX_Y0 + OMNIBOX_DY;
+pub const OMNIBOX_Y1: usize = FIELD_Y + FIELD_H + OMNIBOX_DY;
+
+/// The band's own last rows: the hairline that reports a navigation in progress.
+///
+/// WHY it is named here: it is cut out of the band's bottom edge, so a band that
+/// grows keeps the hairline on its last rows instead of painting past the row the
+/// renderer hands to the page.
+pub const PROGRESS_H: usize = 2;
+pub const PROGRESS_Y0: usize = OMNIBOX_Y1 - PROGRESS_H;
+
+/// The plate every trailing control is cut to, and the gap two of them keep.
+pub const TILE: usize = MIN_TARGET;
+pub const TILE_GAP: usize = spacing::GRID_8;
+
+/// How many controls trail the field: reload, then the overflow menu.
+///
+/// WHY the count is a constant and not the length of a table the painter walks:
+/// the field's own width is what is left of the band once the cluster is placed,
+/// so adding a control here narrows the address lane by exactly one tile, and the
+/// gates below fail the build if the two ever stop agreeing.
+pub const OMNIBOX_TRAILING: usize = 2;
+
+/// The plate row of every trailing control: centred on the field, not on the
+/// band, so a taller field carries its controls with it.
+pub const fn omnibox_tile_y() -> usize {
+    FIELD_Y + (FIELD_H - TILE) / 2
+}
+
+/// The cluster's left edge: the trailing gutter, less the cluster's own width.
+const CLUSTER_X: usize =
+    PANEL_W - SIDE_GUTTER - OMNIBOX_TRAILING * TILE - (OMNIBOX_TRAILING - 1) * TILE_GAP;
+
+/// The plate of the `i`th control that trails the field, counted from the left.
+pub const fn omnibox_tile(i: usize) -> Rect {
+    Rect::new(CLUSTER_X + i * (TILE + TILE_GAP), omnibox_tile_y(), TILE, TILE)
+}
+
+/// The address field itself.
+pub const OMNIBOX_FIELD: Rect =
+    Rect::new(SIDE_GUTTER, FIELD_Y, CLUSTER_X - TILE_GAP - SIDE_GUTTER, FIELD_H);
+
+/// How far inside the field the page's own mark stands, and its square.
+///
+/// WHY the mark is placed from the field rather than the field from the mark: the
+/// picture is the field's decoration, and a plate that moves leaves its mark
+/// behind on the column the row above it now owns.
+pub const FIELD_MARK_DX: usize = spacing::GRID_16;
+pub const FIELD_MARK_SIDE: usize = 16;
+pub const FIELD_MARK_X: usize = SIDE_GUTTER + FIELD_MARK_DX;
+pub const FIELD_MARK_Y: usize = FIELD_Y + (FIELD_H - FIELD_MARK_SIDE) / 2;
+
+/// How far inside the field the address starts: past the mark, plus the air that
+/// separates a label from the glyph it labels.
+pub const FIELD_TEXT_DX: usize = FIELD_MARK_DX + FIELD_MARK_SIDE + spacing::GRID_8;
+pub const FIELD_TEXT_X: usize = SIDE_GUTTER + FIELD_TEXT_DX;
+
+/// The row the address's line box starts on, centred in the plate by its own
+/// height rather than by a remembered offset.
+pub const FIELD_TEXT_Y: usize = FIELD_Y + (FIELD_H - font::line_height(FIELD_RUNG)) / 2;
+
+/// The lane the address is cut to: the field, less the inset the run starts at
+/// and the same measure again from the trailing edge.
+///
+/// WHY symmetric: a run cut to the plate's whole remaining width ends its last
+/// glyph on the rounding the plate is drawn with, and this painter has no clip.
+pub const FIELD_TEXT_LANE: usize = OMNIBOX_FIELD.w - 2 * FIELD_TEXT_DX;
+
+const _: () = assert!(OMNIBOX_Y0 == interos_std::design::viewport::STATUS_BAR_HEIGHT);
+const _: () = assert!(FIELD_H >= MIN_TARGET);
+const _: () = assert!(OMNIBOX_Y1 > FIELD_Y + FIELD_H);
+const _: () = assert!(PROGRESS_Y0 + PROGRESS_H == OMNIBOX_Y1);
+const _: () = assert!(OMNIBOX_TRAILING >= 1);
+const _: () = assert!(CLUSTER_X > SIDE_GUTTER);
+const _: () = assert!(OMNIBOX_FIELD.w >= MIN_TARGET);
+const _: () = assert!(OMNIBOX_FIELD.y + OMNIBOX_FIELD.h <= PROGRESS_Y0);
+const _: () = assert!(omnibox_tile(0).x == CLUSTER_X);
+const _: () = assert!(
+    omnibox_tile(OMNIBOX_TRAILING - 1).x + TILE == PANEL_W - SIDE_GUTTER,
+    "the trailing cluster must end on the gutter the rest of the app keeps",
+);
+const _: () = assert!(omnibox_tile(0).y >= OMNIBOX_Y0);
+const _: () = assert!(omnibox_tile(0).y + TILE <= PROGRESS_Y0);
+const _: () = assert!(omnibox_tile(0).x >= OMNIBOX_FIELD.x + OMNIBOX_FIELD.w + TILE_GAP);
+/// The run fits the plate that carries it, with one air above and below.
+const _: () = assert!(font::line_height(FIELD_RUNG) <= FIELD_H);
+const _: () = assert!(FIELD_TEXT_Y - FIELD_Y == FIELD_Y + FIELD_H - (FIELD_TEXT_Y + font::line_height(FIELD_RUNG)));
+const _: () = assert!(FIELD_TEXT_DX > FIELD_MARK_DX + FIELD_MARK_SIDE);
+const _: () = assert!(FIELD_TEXT_X + FIELD_TEXT_LANE <= OMNIBOX_FIELD.x + OMNIBOX_FIELD.w);
+const _: () = assert!(FIELD_MARK_Y >= FIELD_Y && FIELD_MARK_Y + FIELD_MARK_SIDE <= FIELD_Y + FIELD_H);
+/// The mark and the run are one row: the mark's square sits inside the run's own
+/// line box, so a page with no picture still shows its mark on the address's line.
+const _: () = assert!(FIELD_MARK_SIDE <= font::line_height(FIELD_RUNG));
+
 /// The sheet header's top row, and how tall the header band is.
 ///
 /// WHY both: every sheet draws its title and its close control in this band,
@@ -730,6 +862,101 @@ mod tests {
     use interos_std::design::back_button;
     use interos_std::design::touch::MIN_TARGET;
 
+    /// The omnibox row is two plates and a field, and nothing else.
+    ///
+    /// WHY the count is pinned in a test: the row used to carry four plates --
+    /// reload, the tab count, the overflow menu and a close mark -- beside a
+    /// field whose left edge stopped short of the gutter because the platform's
+    /// Back chip stood there. Two of those plates duplicated controls the rest of
+    /// the screen already had (the bar's tab tile, and the shell's home band), and
+    /// the chip duplicated the bar's back tile, so one screen offered two
+    /// navigation models and three ways out. The row is now the field plus the two
+    /// controls that are only ever the row's own: reload the address, open the
+    /// menu.
+    #[test]
+    fn the_omnibox_row_holds_the_field_and_the_two_controls_that_trail_it() {
+        assert_eq!(OMNIBOX_TRAILING, 2);
+        // The field takes the panel's own gutter: no column is reserved for a
+        // header back affordance, because the row carries none.
+        assert_eq!(OMNIBOX_FIELD.x, SIDE_GUTTER);
+        assert_eq!(OMNIBOX_FIELD.y, FIELD_Y);
+        assert_eq!(OMNIBOX_FIELD.h, FIELD_H);
+
+        // The cluster ends on the trailing gutter the rest of the app keeps.
+        let last = omnibox_tile(OMNIBOX_TRAILING - 1);
+        assert_eq!(last.x + last.w, PANEL_W - SIDE_GUTTER);
+        for i in 0..OMNIBOX_TRAILING {
+            let tile = omnibox_tile(i);
+            assert!(tile.w >= MIN_TARGET && tile.h >= MIN_TARGET, "tile {i}");
+            assert!(tile.y >= OMNIBOX_Y0 && tile.y + tile.h <= OMNIBOX_Y1 - PROGRESS_H);
+            assert!(
+                tile.x >= OMNIBOX_FIELD.x + OMNIBOX_FIELD.w + TILE_GAP,
+                "tile {i} stands on the field it trails"
+            );
+            if i > 0 {
+                let prev = omnibox_tile(i - 1);
+                assert_eq!(prev.x + prev.w + TILE_GAP, tile.x, "tile {i}");
+            }
+        }
+    }
+
+    /// The omnibox band is the platform's rows, and the field fills them.
+    ///
+    /// WHY derived: the band's bottom edge, the field's top and the plates' top
+    /// were four literals (`116`, `56`, `60`, `52`) that only stayed correct while
+    /// nobody edited the status bar or the touch floor. Every one is now a sum of
+    /// the status band, the rung the address is set at and the platform's control
+    /// floor, and this test walks the band the sum produces.
+    #[test]
+    fn the_omnibox_band_is_measured_off_the_platform_not_authored() {
+        assert_eq!(
+            OMNIBOX_Y0,
+            interos_std::design::viewport::STATUS_BAR_HEIGHT
+        );
+        assert_eq!(OMNIBOX_Y1 - OMNIBOX_Y0, FIELD_H + 2 * OMNIBOX_DY);
+        assert_eq!(FIELD_H, MIN_TARGET + spacing::GRID_8);
+        // Every plate stops above the progress hairline the band also owns.
+        assert!(OMNIBOX_FIELD.y + OMNIBOX_FIELD.h <= OMNIBOX_Y1 - PROGRESS_H);
+        assert!(omnibox_tile(0).y + TILE <= OMNIBOX_Y1 - PROGRESS_H);
+        assert_eq!(PROGRESS_Y0 + PROGRESS_H, OMNIBOX_Y1);
+        assert!(PROGRESS_Y0 >= OMNIBOX_FIELD.y + OMNIBOX_FIELD.h);
+    }
+
+    /// The address run, its caret and its page mark all fit the field that
+    /// carries them, with the same air above as below.
+    ///
+    /// WHY this is the descender gate for this row: the painter has no clip, so a
+    /// run whose line box leaves the plate inks the band under it, and a run
+    /// centred by a remembered offset rather than by its own box leaves one side
+    /// tighter than the other -- the address used to sit at row `70` of a plate
+    /// running `56..108`, fourteen rows of air over eleven.
+    #[test]
+    fn the_address_run_fits_the_field_that_carries_it() {
+        let line_box = font::line_height(FIELD_RUNG);
+        assert!(FIELD_TEXT_Y >= FIELD_Y);
+        assert!(FIELD_TEXT_Y + line_box <= FIELD_Y + FIELD_H);
+        assert_eq!(
+            FIELD_TEXT_Y - FIELD_Y,
+            FIELD_Y + FIELD_H - (FIELD_TEXT_Y + line_box),
+            "the address is not centred in its own field"
+        );
+
+        // The run's lane starts past the mark and ends inside the plate.
+        assert!(FIELD_TEXT_X >= OMNIBOX_FIELD.x + FIELD_MARK_DX + FIELD_MARK_SIDE);
+        assert!(FIELD_TEXT_X + FIELD_TEXT_LANE <= OMNIBOX_FIELD.x + OMNIBOX_FIELD.w);
+        assert!(FIELD_TEXT_LANE >= MIN_TARGET, "the lane cannot hold an address");
+
+        // The page mark is centred on the same plate, and the run starts after it.
+        assert_eq!(
+            FIELD_MARK_Y + FIELD_MARK_SIDE / 2,
+            FIELD_Y + FIELD_H / 2,
+            "the mark is off the field's own middle"
+        );
+        assert!(FIELD_MARK_Y >= FIELD_Y);
+        assert!(FIELD_MARK_Y + FIELD_MARK_SIDE <= FIELD_Y + FIELD_H);
+        assert_eq!(FIELD_TEXT_DX, FIELD_MARK_DX + FIELD_MARK_SIDE + spacing::GRID_8);
+    }
+
     /// Every control box in this module clears the platform's touch floor.
     ///
     /// WHY a table and not one test per box: the floor is one rule, and a rule
@@ -738,7 +965,7 @@ mod tests {
     /// the person is asked to press.
     #[test]
     fn every_chrome_control_clears_the_platform_touch_floor() {
-        let boxes: [(&str, Rect); 15] = [
+        let boxes: [(&str, Rect); 18] = [
             ("sheet close", SHEET_CLOSE),
             ("filter card", FILTER_CARD),
             ("filter clear", FILTER_CLEAR),
@@ -754,6 +981,9 @@ mod tests {
             ("accessory dismiss", ACC_DISMISS),
             ("field clear", FIELD_CLEAR),
             ("field done", FIELD_DONE),
+            ("omnibox field", OMNIBOX_FIELD),
+            ("omnibox reload", omnibox_tile(0)),
+            ("omnibox menu", omnibox_tile(1)),
         ];
         for (name, r) in boxes {
             assert!(r.w >= MIN_TARGET, "{name} is {} wide", r.w);

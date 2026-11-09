@@ -173,10 +173,39 @@ pub fn tape_y1() -> usize {
     tape_y1_at(interos_std::font::user_text_scale())
 }
 
-/// The top the result run stands at, at `level`.
+/// The top the result run stands at, at `level`, when the card holds the tape.
 #[inline]
 pub const fn value_y0_at(level: u8) -> usize {
-    tape_y1_at(level) + VALUE_GAP
+    value_y0_for_tape_at(TAPE_LINES, level)
+}
+
+/// The top the result run stands at when the card holds `tape_lines` of
+/// expression, at `level`.
+///
+/// WHY the tape's lines are an argument and not a constant: the card is the
+/// box that holds the runs it draws, and the tape holds nothing until an
+/// expression is typed. Reserving the two caption lines anyway is how the
+/// screen a person opens became a two-hundred-row plate with one number in its
+/// lower corner and a field of nothing above it.
+///
+/// WHY the empty card starts at the card's own top pad: the result is then the
+/// first run on the card, in the same pad the tape stands at, so the plate
+/// reads as one box with the number in it rather than a number fallen to the
+/// bottom of a box that has nothing to say.
+#[inline]
+pub const fn value_y0_for_tape_at(tape_lines: usize, level: u8) -> usize {
+    if tape_lines == 0 {
+        DISPLAY_Y0 + DISPLAY_PAD
+    } else {
+        TAPE_Y0 + tape_lines * tape_line_rows_at(level) + VALUE_GAP
+    }
+}
+
+/// The top the result run stands at when the card holds `tape_lines`, at the
+/// published level.
+#[inline]
+pub fn value_y0_for_tape(tape_lines: usize) -> usize {
+    value_y0_for_tape_at(tape_lines, interos_std::font::user_text_scale())
 }
 
 /// The top the result run stands at, at the published level.
@@ -210,7 +239,22 @@ pub fn result_rows_room() -> usize {
 /// known, clamped so it never reaches the keypad's first row.
 #[inline]
 pub const fn card_y1_at(result_rows: usize, level: u8) -> usize {
-    let grown = value_y0_at(level) + result_rows + DISPLAY_PAD;
+    card_y1_for_tape_at(TAPE_LINES, result_rows, level)
+}
+
+/// The bottom of the display card at `level` when it holds `tape_lines` of
+/// expression above a result of `result_rows`.
+///
+/// WHY the tape's lines are in the answer: see [`value_y0_for_tape_at`] -- the
+/// card is the box that holds the runs this frame draws, and the plan is the
+/// only place that knows whether an expression stands on the tape.
+#[inline]
+pub const fn card_y1_for_tape_at(
+    tape_lines: usize,
+    result_rows: usize,
+    level: u8,
+) -> usize {
+    let grown = value_y0_for_tape_at(tape_lines, level) + result_rows + DISPLAY_PAD;
     // WHY an if and not `Ord::min`: a `const fn` cannot call the unstable
     // trait face, and the clamp has to be const for the gates beside it.
     if grown > KEYPAD_TOP {
@@ -224,6 +268,13 @@ pub const fn card_y1_at(result_rows: usize, level: u8) -> usize {
 #[inline]
 pub fn card_y1(result_rows: usize) -> usize {
     card_y1_at(result_rows, interos_std::font::user_text_scale())
+}
+
+/// The bottom of the display card at the published level, holding `tape_lines`
+/// of expression. See [`card_y1_for_tape_at`].
+#[inline]
+pub fn card_y1_for_tape(tape_lines: usize, result_rows: usize) -> usize {
+    card_y1_for_tape_at(tape_lines, result_rows, interos_std::font::user_text_scale())
 }
 
 /// The tape's scroll plate at `level`: the same chip the plan paints and the
@@ -391,6 +442,218 @@ pub const HISTORY_PILL: Rect = Rect::new(
 /// calculator is waiting on, and it answers nothing. It stands beside the
 /// result at `VALUE_Y0`, thirty-four rows tall.
 
+// -----------------------------------------------------------------------------
+// The keypad grid: the caps the painter inks and the press answers
+// -----------------------------------------------------------------------------
+//
+// WHY the grid lives here with the pills: it is the same kind of number -- a
+// control's rect, read by the renderer and by the hit test -- and the repaint
+// below has to be able to name one keycap without the binary's own constants.
+pub const BTN_W: usize = 144;
+pub const BTN_H: usize = crate::KEYPAD_ROW_H;
+pub const COL_X: [usize; 4] = [28, 194, 360, 526];
+pub const ROW_Y: [usize; 6] = [420, 580, 740, 900, 1060, 1220];
+
+/// The keycap at (`row`, `col`), or nothing when the grid has no such cell.
+#[inline]
+pub const fn key_cap(row: usize, col: usize) -> Option<Rect> {
+    if row < ROW_Y.len() && col < COL_X.len() {
+        Some(Rect::new(COL_X[col], ROW_Y[row], BTN_W, BTN_H))
+    } else {
+        None
+    }
+}
+
+/// The cell that holds `action`, when the grid holds it.
+///
+/// WHY a search and not a table: `button_action` is the one grid both the
+/// painter and the press already answer to, and a second copy of it here is a
+/// second answer to one question -- the key that would be repainted in the wrong
+/// place if either copy moved.
+pub const fn key_cell_of(action: char) -> Option<(usize, usize)> {
+    let mut row = 0;
+    while row < ROW_Y.len() {
+        let mut col = 0;
+        while col < COL_X.len() {
+            if let Some(found) = crate::button_action(row, col) {
+                if found == action {
+                    return Some((row, col));
+                }
+            }
+            col += 1;
+        }
+        row += 1;
+    }
+    None
+}
+
+/// The cap an armed `operation` shades, when it shades one.
+const fn armed_cap(operation: Option<char>) -> Option<Rect> {
+    match operation {
+        Some(action) => match key_cell_of(action) {
+            Some((row, col)) => key_cap(row, col),
+            None => None,
+        },
+        None => None,
+    }
+}
+// -----------------------------------------------------------------------------
+// What one repaint re-inks
+// -----------------------------------------------------------------------------
+
+/// The most regions one repaint can be handed.
+///
+/// WHY a bound and a fallback rather than a growable list: this is a `no_std`
+/// binary with no heap in its event loop, and a press that somehow named a fifth
+/// region has to be answered -- the answer is the whole panel, which is correct
+/// if slower, and never a dropped row.
+pub const MAX_DIRTY_REGIONS: usize = 4;
+
+/// The regions a repaint re-inks, in surface order.
+///
+/// WHY a set of rectangles and not an enum of named bands: an enum that carries
+/// `Display` and `All` can only say "these rows" or "every row", and the truth
+/// about an operator press is neither -- it is the card's rows and two keycaps.
+/// The pixel path is a pure function of (`x`, `y`, the state, the plan), so
+/// walking a sub-rectangle of the panel lands the same pixels a full walk would:
+/// a smaller region is less work, not a different picture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Dirty {
+    regions: [Rect; MAX_DIRTY_REGIONS],
+    len: usize,
+}
+
+impl Dirty {
+    /// Nothing moved: re-ink no pixel.
+    pub const fn none() -> Self {
+        Dirty { regions: [Rect::new(0, 0, 0, 0); MAX_DIRTY_REGIONS], len: 0 }
+    }
+
+    /// Every pixel of the panel: what the first frame, a drawer, a moved text
+    /// rung and a headless tool call have in common -- they all change rows in
+    /// more than one region at once.
+    pub const fn all() -> Self {
+        Dirty::rect(Rect::new(
+            0,
+            0,
+            interos_std::design::viewport::LOGICAL_WIDTH,
+            interos_std::design::viewport::LOGICAL_HEIGHT,
+        ))
+    }
+
+    /// `y0` up to `y1`, across the panel: the band form, used by the card's rows.
+    pub const fn rows(y0: usize, y1: usize) -> Self {
+        Dirty::rect(Rect::new(
+            0,
+            y0,
+            interos_std::design::viewport::LOGICAL_WIDTH,
+            y1.saturating_sub(y0),
+        ))
+    }
+
+    /// The display card's rows, from its top to the keypad's first row.
+    pub const fn display() -> Self {
+        Dirty::rows(DISPLAY_Y0, KEYPAD_TOP)
+    }
+
+    /// One region. A zero-sized rect is an unused slot, so an empty answer stays
+    /// empty instead of walking a row nobody asked for.
+    pub const fn rect(region: Rect) -> Self {
+        let mut dirty = Dirty::none();
+        if region.w > 0 && region.h > 0 {
+            dirty.regions[0] = region;
+            dirty.len = 1;
+        }
+        dirty
+    }
+
+    /// Both regions, appending rather than intersecting: two things that moved
+    /// are two things to re-ink.
+    pub const fn widen(self, other: Self) -> Self {
+        let mut out = self;
+        let mut i = 0;
+        while i < other.len {
+            if out.len >= MAX_DIRTY_REGIONS {
+                return Dirty::all();
+            }
+            out.regions[out.len] = other.regions[i];
+            out.len += 1;
+            i += 1;
+        }
+        out
+    }
+
+    /// Whether this repaint has anything to walk.
+    pub const fn is_none(self) -> bool {
+        self.len == 0
+    }
+
+    /// The regions to walk, in order.
+    pub fn regions(&self) -> &[Rect] {
+        &self.regions[..self.len]
+    }
+
+    /// How many pixels a walk of these regions answers.
+    ///
+    /// WHY this is here and not in the binary: it is the number the app's cost is
+    /// made of, and a measurement of it has to reach the same arithmetic the
+    /// painter walks.
+    pub const fn pixels(self) -> usize {
+        let mut total = 0;
+        let mut i = 0;
+        while i < self.len {
+            total += self.regions[i].w * self.regions[i].h;
+            i += 1;
+        }
+        total
+    }
+}
+
+/// The regions a keypad or keyboard press re-inks.
+///
+/// WHY the card is always in the answer: the press typed into the expression, and
+/// the tape and the result are the expression. WHY the caps are in it only when
+/// the armed operation moved: the only state the keypad's ink reads is which
+/// operation is waiting, so an arming or a disarming re-shades that key and the
+/// one it replaced -- and a digit, which moves nothing on the grid, re-inks no
+/// key at all. Before this, an operator press walked the panel (the status band,
+/// the header, the home strip and twenty-three unchanged caps included) and a
+/// `C` press walked the card only, which left the disarmed operator's shading on
+/// the glass until something else repainted the row.
+/// WHY not a `const fn`: the two operations it compares are the state the press
+/// left behind and the state it made, which are only known when the press is
+/// over. The regions themselves are built from `const` geometry above.
+pub fn press_dirty(op_before: Option<char>, op_after: Option<char>) -> Dirty {
+    let dirty = Dirty::display();
+    if op_before == op_after {
+        return dirty;
+    }
+    match (armed_cap(op_before), armed_cap(op_after)) {
+        (Some(before), Some(after)) => dirty.widen(Dirty::rect(before)).widen(Dirty::rect(after)),
+        (Some(before), None) => dirty.widen(Dirty::rect(before)),
+        (None, Some(after)) => dirty.widen(Dirty::rect(after)),
+        (None, None) => dirty,
+    }
+}
+
+/// As [`press_dirty`], for a keyboard event that may also have opened or closed
+/// the history drawer.
+///
+/// WHY the drawer is the whole panel: its sheet runs from the header's bottom
+/// edge to row 1380, so it covers the card, the keypad and the space between
+/// them, and closing it changes the header pill's state with it.
+pub fn keys_dirty(
+    op_before: Option<char>,
+    op_after: Option<char>,
+    sheet_before: bool,
+    sheet_after: bool,
+) -> Dirty {
+    if sheet_before != sheet_after {
+        return Dirty::all();
+    }
+    press_dirty(op_before, op_after)
+}
+
 // WHY these gates sit next to the numbers: every one of them is a control's
 // own floor, and a floor that is only written down in a comment is a floor
 // the next edit can step over.
@@ -543,6 +806,56 @@ mod tests {
             assert!(plate.h >= MIN_TARGET);
             assert!(plate.w >= MIN_TARGET);
             assert!(plate.y + plate.h <= card_y1_at(result_rows_room_at(level), level));
+        }
+    }
+
+    /// The display card reserves the rows its runs actually hold.
+    ///
+    /// WHY this test exists: the card always reserved the tape's two lines,
+    /// whether or not an expression stood on them, so the screen a person
+    /// opens was a two-hundred-row plate with one number in its lower corner
+    /// and a field of nothing above it. The card is the box that holds the
+    /// runs it draws, and with no tape it holds the result and nothing else.
+    ///
+    /// WHY the geometry is read from the ladder and the level rather than
+    /// measured in rows: the plate is what the person's text size moves, and
+    /// a card authored at one size is a card that clips at another.
+    #[test]
+    fn the_display_card_holds_only_the_runs_it_draws() {
+        let normal = font::TEXT_SCALE_NORMAL;
+        let result_rows = run_rows_at(typography::DISPLAY_CAP_PX, normal);
+
+        // An empty tape reserves no rows, so the result stands at the card's
+        // own top pad; a full tape reserves exactly its lines.
+        assert_eq!(value_y0_for_tape_at(0, normal), DISPLAY_Y0 + DISPLAY_PAD);
+        assert_eq!(
+            value_y0_for_tape_at(TAPE_LINES, normal),
+            value_y0_at(normal)
+        );
+
+        let empty = card_y1_for_tape_at(0, result_rows, normal);
+        let full = card_y1_for_tape_at(TAPE_LINES, result_rows, normal);
+        assert_eq!(full, card_y1_at(result_rows, normal));
+        assert_eq!(
+            empty,
+            DISPLAY_Y0 + DISPLAY_PAD + result_rows + DISPLAY_PAD
+        );
+        assert!(empty < full, "an empty tape still reserves its rows");
+        assert_eq!(
+            full - empty,
+            TAPE_LINES * tape_line_rows_at(normal) + VALUE_GAP
+        );
+
+        // Neither card reaches the keypad, at any text size, and the result
+        // always stands inside the card that holds it.
+        for level in font::TEXT_SCALE_COMPACT..=font::TEXT_SCALE_EXTRA_LARGE {
+            let rows = run_rows_at(typography::DISPLAY_CAP_PX, level);
+            assert!(card_y1_for_tape_at(0, rows, level) <= KEYPAD_TOP);
+            assert!(card_y1_for_tape_at(TAPE_LINES, rows, level) <= KEYPAD_TOP);
+            assert!(value_y0_for_tape_at(0, level) >= DISPLAY_Y0 + DISPLAY_PAD);
+            assert!(
+                card_y1_for_tape_at(0, rows, level) > value_y0_for_tape_at(0, level) + rows - 1
+            );
         }
     }
 

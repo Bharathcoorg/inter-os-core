@@ -1609,6 +1609,31 @@ pub const HOME_RECENT_ROW_H: usize =
     HOME_RECENT_TIME_DY + interos_std::font::line_height(1) + 6;
 /// How many recents the home screen shows.
 pub const HOME_RECENTS_VISIBLE: usize = 4;
+
+/// The number of recents rows the home screen actually draws and answers.
+///
+/// WHY one accessor for three consumers: the header, the paint and the press
+/// each used to derive the recents count their own way -- the header from the
+/// browse listing's `entry_count`, the paint and the press from
+/// `recents_count.min(HOME_RECENTS_VISIBLE)`. On the captured screen that put
+/// "5 items" in the header over the four rows the list drew: two numbers, two
+/// sources, one screen. Every consumer now names this function, so the number
+/// the person reads is the number of rows the screen lays out and the tap
+/// answers, and the three cannot drift apart again.
+pub const fn home_recents_rows(total: usize) -> usize {
+    if total > HOME_RECENTS_VISIBLE {
+        HOME_RECENTS_VISIBLE
+    } else {
+        total
+    }
+}
+
+// The cap is the visible-rows count, and it never exceeds it: a listing of any
+// length answers at most the rows the block lays out.
+const _: () = assert!(home_recents_rows(HOME_RECENTS_VISIBLE) == HOME_RECENTS_VISIBLE);
+const _: () = assert!(home_recents_rows(HOME_RECENTS_VISIBLE + 1) == HOME_RECENTS_VISIBLE);
+const _: () = assert!(home_recents_rows(0) == 0);
+
 /// Where the recents block ends, and so where the section under it begins.
 pub const HOME_RECENTS_Y1: usize = HOME_RECENTS_Y0 + HOME_RECENTS_VISIBLE * HOME_RECENT_ROW_H;
 
@@ -3760,6 +3785,70 @@ pub fn format_mtime(mtime: Option<u64>, out: &mut [u8]) -> usize {
             append_bytes(out, n, b" platform ticks")
         }
     }
+}
+
+/// The bytes a recents row paints for a document's modification line.
+///
+/// WHY it can answer with nothing: the row draws what the index answered. When
+/// the index answered zero ticks -- the platform never stamped the document,
+/// which is the case for the storage inodes the recents list shows, since the
+/// filesystem stamps `ctime` but never `mtime` -- the row paints NO line at
+/// all. A missing value must not be rendered as a value, and a row has no room
+/// to explain the gap, so the honest answer is an empty run rather than the
+/// placeholder sentence [`format_mtime`] writes for the details card. That card
+/// keeps its explanatory line; this is the row, and it draws nothing.
+pub fn recent_time_line(mtime: u64, out: &mut [u8]) -> usize {
+    if mtime == 0 {
+        return 0;
+    }
+    format_mtime(Some(mtime), out)
+}
+
+/// The one number of rows a listing paints.
+///
+/// WHY a single source of truth: the count badge and every row loop used to
+/// read the same fact through two different doors -- the badge from the raw
+/// directory entry count (written only when a folder was (re)listed), the loop
+/// from whatever the card currently shows. A search over a folder that held
+/// five entries but matched four therefore inked a badge of "5" above a list of
+/// four rows. Both doors now read this one answer, so a badge that counts a
+/// row the loop does not paint cannot be written at all.
+pub fn painted_row_count(searching: bool, result_count: usize, entry_count: usize) -> usize {
+    if searching {
+        result_count
+    } else {
+        entry_count
+    }
+}
+
+/// Writes the item-count badge for the rows the listing paints.
+///
+/// WHY the count is a parameter and not a field: the badge is only honest when
+/// the number it prints is the number of rows the loop runs. The caller passes
+/// `painted_row_count` (through `card_item_count`) so the badge and the list
+/// cannot disagree. WHY the wording is search-aware: "5 items" over four search
+/// results is the same lie as "4 items" -- the mode has to name what it counts,
+/// and a search that matched nothing is not an empty folder.
+pub fn format_probe_count(searching: bool, rows: usize, out: &mut [u8]) -> usize {
+    if rows == 0 {
+        let message: &[u8] = if searching { b"No matches" } else { b"Empty folder" };
+        return append_bytes(out, 0, message);
+    }
+    let n = fmt_u64(rows as u64, out);
+    let suffix: &[u8] = if searching {
+        if rows == 1 {
+            b" match"
+        } else {
+            b" matches"
+        }
+    } else {
+        if rows == 1 {
+            b" item"
+        } else {
+            b" items"
+        }
+    };
+    append_bytes(out, n, suffix)
 }
 
 /// Builds the details card from the facts the platform actually answered.
@@ -6240,5 +6329,90 @@ mod tests {
         }
         assert_eq!(widths[0], 1, "a backwards triangle puts its point on the left");
         assert_eq!(widths[10], 21);
+    }
+
+    // ---------------------------------------------------------------------
+    // DEFECT #319b -- the item-count badge and the list of rows must be the
+    // same number. Before the fix the header badge was written from the raw
+    // directory entry count, and only when a directory was (re)listed, while
+    // every row loop ran over `card_item_count()`. A search over a five-entry
+    // folder that matched four rows therefore painted a badge of "5" above a
+    // list of four. The single source of truth for "how many rows exist" is
+    // `painted_row_count`, and the badge's wording is produced from that same
+    // number by `format_probe_count`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn the_row_count_is_one_number_for_the_badge_and_the_loop_under_search() {
+        // Searching: the rows that exist are the search results, not the folder.
+        assert_eq!(painted_row_count(true, 4, 5), 4);
+        // Not searching: the rows that exist are the directory entries.
+        assert_eq!(painted_row_count(false, 4, 5), 5);
+        // The empty ends of both axes, so a cap cannot resurrect a phantom row.
+        assert_eq!(painted_row_count(true, 0, 5), 0);
+        assert_eq!(painted_row_count(false, 9, 0), 0);
+    }
+
+    #[test]
+    fn the_count_badge_names_the_result_count_during_a_search() {
+        let mut buf = [0u8; 40];
+        // Four rows painted in a search: the badge says "4 matches", never the
+        // folder's five entries.
+        let n = format_probe_count(true, 4, &mut buf);
+        assert_eq!(&buf[..n], b"4 matches");
+        let n = format_probe_count(true, 1, &mut buf);
+        assert_eq!(&buf[..n], b"1 match");
+        // A search that matched nothing must not claim a folder is empty and
+        // must not print a bare, value-looking "0".
+        let n = format_probe_count(true, 0, &mut buf);
+        assert_eq!(&buf[..n], b"No matches");
+    }
+
+    #[test]
+    fn the_count_badge_names_the_entry_count_when_browsing() {
+        let mut buf = [0u8; 40];
+        let n = format_probe_count(false, 5, &mut buf);
+        assert_eq!(&buf[..n], b"5 items");
+        let n = format_probe_count(false, 1, &mut buf);
+        assert_eq!(&buf[..n], b"1 item");
+        let n = format_probe_count(false, 0, &mut buf);
+        assert_eq!(&buf[..n], b"Empty folder");
+    }
+
+    // ---------------------------------------------------------------------
+    // DEFECT #319a guard -- an unknown modified time must say that it is
+    // unknown. It must never be dressed up as a value, a calendar date, or an
+    // empty run, and a real stamp must be reported as the ticks the platform
+    // actually carries rather than an invented time.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn an_unknown_modified_time_says_it_is_unknown_and_is_never_a_value() {
+        let mut buf = [0u8; MAX_DETAILS_LINE];
+        let n = format_mtime(None, &mut buf);
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(n > 0, "the unknown case must not render nothing");
+        assert!(text.contains("not reported"), "an unknown date must say so: {text}");
+        assert!(
+            !text.chars().any(|c| c.is_ascii_digit()),
+            "an unknown date must not carry a fabricated number: {text}"
+        );
+        // A zero stamp is the platform saying "no time", not 1970 or a zero.
+        let mut zero = [0u8; MAX_DETAILS_LINE];
+        let zn = format_mtime(Some(0), &mut zero);
+        assert_eq!(
+            core::str::from_utf8(&zero[..zn]).unwrap(),
+            "Modified: not reported by the platform"
+        );
+        // The recents caption is a 56-byte buffer; the honest run must fit it
+        // whole so the row never paints a truncated fragment that could read
+        // like a value.
+        let mut recents = [0u8; 56];
+        let rn = format_mtime(None, &mut recents);
+        assert_eq!(&recents[..rn], b"Modified: not reported by the platform");
+        // A real stamp is reported as ticks, labelled as such, never a date.
+        let mut known = [0u8; MAX_DETAILS_LINE];
+        let kn = format_mtime(Some(12345), &mut known);
+        assert_eq!(&known[..kn], b"Modified: 12345 platform ticks");
     }
 }
