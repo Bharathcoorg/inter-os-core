@@ -1398,18 +1398,16 @@ impl DrmKmsController {
                     DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
                 ) && s_w == sw && s_h == sh && sx == 0 && sy == 0 && surface.opacity == 255
             {
+                // Identity full cover: the base surface matches the entire scanout.
+                // Always copy the entire surface so that clean rows never retain
+                // stale PLATFORM_BACKGROUND fill bytes in the back buffer, and narrow
+                // only the presented band to the damaged rows.
+                self.back_buffer.copy_from_slice(&surface.pixels);
                 if surface.dirty_rows.1 > surface.dirty_rows.0 {
                     let y0 = surface.dirty_rows.0.min(sh as usize);
                     let y1 = surface.dirty_rows.1.min(sh as usize);
-                    let w = sw as usize;
-                    let start = y0 * w;
-                    let end = y1 * w;
-                    if end <= surface.pixels.len() && end <= self.back_buffer.len() {
-                        self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
-                        union_rows(&mut present_band, y0, y1);
-                    }
+                    union_rows(&mut present_band, y0, y1);
                 } else {
-                    self.back_buffer.copy_from_slice(&surface.pixels);
                     union_rows(&mut present_band, 0, sh as usize);
                 }
                 surface.dirty = false;
@@ -1952,18 +1950,12 @@ impl DrmKmsController {
     /// Fast slice copy for full-screen identity surfaces respecting dirty row bounds.
     pub fn blit_opaque_identity_damaged(&mut self, surface: &mut DrmSurface) {
         if surface.pixels.len() == self.back_buffer.len() {
+            self.back_buffer.copy_from_slice(&surface.pixels);
             if surface.dirty_rows.1 > surface.dirty_rows.0 {
                 let y0 = surface.dirty_rows.0.min(self.scanout_height as usize);
                 let y1 = surface.dirty_rows.1.min(self.scanout_height as usize);
-                let w = self.scanout_width as usize;
-                let start = y0 * w;
-                let end = y1 * w;
-                if end <= surface.pixels.len() && end <= self.back_buffer.len() {
-                    self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
-                    union_rows(&mut self.present_dirty_rows, y0, y1);
-                }
+                union_rows(&mut self.present_dirty_rows, y0, y1);
             } else {
-                self.back_buffer.copy_from_slice(&surface.pixels);
                 self.mark_present_full();
             }
             surface.dirty = false;
