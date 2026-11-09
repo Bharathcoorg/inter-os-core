@@ -66,6 +66,13 @@ def _calculator_lib():
     return (ROOT / "apps" / "calculator" / "src" / "lib.rs").read_text(encoding="utf-8")
 
 
+def _calculator_chrome():
+    chrome_path = ROOT / "apps" / "calculator" / "src" / "chrome.rs"
+    if chrome_path.exists():
+        return chrome_path.read_text(encoding="utf-8")
+    return ""
+
+
 def _rust_code(source: str) -> str:
     """Strips `//` line and `/* */` block comments from Rust source.
 
@@ -201,7 +208,10 @@ def test_the_marker_is_emitted_after_the_surface_flip_it_reports():
 def test_the_marker_cannot_fire_without_an_input_triggered_redraw():
     """It must sit inside the `dirty != Dirty::None` branch, not beside it."""
     source = _calculator_main()
-    branch = source.index("if dirty != Dirty::None {")
+    try:
+        branch = source.index("if dirty != Dirty::None {")
+    except ValueError:
+        branch = source.index("if !dirty.is_none() {")
     marker = source.index(btl.POST_FLIP_MARKER)
     assert marker > branch, "the marker must be inside the input-triggered redraw branch"
     # The branch must still close after the marker, so the log is inside it.
@@ -306,7 +316,8 @@ def test_keypad_coordinates_come_from_the_apps_own_geometry():
     """
     main = _rust_code(_calculator_main())
     lib = _rust_code(_calculator_lib())
-    consts, tables = _app_layout(main, lib)
+    chrome = _rust_code(_calculator_chrome())
+    consts, tables = _app_layout(main, lib, chrome)
 
     col_x = _read_table(consts, tables, "COL_X")
     row_y = _read_table(consts, tables, "ROW_Y")
@@ -328,7 +339,10 @@ def test_keypad_coordinates_come_from_the_apps_own_geometry():
     # `(row, col) -> Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H)`; if that arm took
     # another shape, the centre computed below would pin nothing.
     assert "fn key_rect(row: usize, col: usize) -> Option<Rect>" in main
-    assert "Some(Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H))" in main
+    assert (
+        "Some(Rect::new(COL_X[c], ROW_Y[r], BTN_W, BTN_H))" in main
+        or "Some(Rect::new(COL_X[col], ROW_Y[row], BTN_W, BTN_H))" in chrome
+    )
     assert "let rect = key_rect(row, col)?;" in main            # key_edges -- the ink
     assert "let Some(rect) = key_rect(row, col) else { return false; };" in main  # key_hit -- the press
 

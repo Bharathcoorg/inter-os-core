@@ -635,7 +635,7 @@ def test_the_search_offers_only_destinations_that_exist():
     assert "interos_std::settings::Section::ALL" in _code_only(shell)
     # And the model-backed ranking seam is marked as such.
     assert "pub trait Ranker" in read("apps/launcher/src/search.rs")
-    assert "fn search_ranker()" in _code_only(shell)
+    assert "fn search_ranker(" in _code_only(shell)
 
 
 def _fn_body(source: str, signature: str) -> str:
@@ -948,8 +948,16 @@ def test_settings_never_advertises_unobserved_hardware_or_governor_state():
     ):
         assert fabricated not in source
     assert 'b"Battery telemetry unavailable"' in source
-    assert 'b"DVFS state unavailable"' in source
+    assert 'b"Mode not reported by the kernel"' in source
     assert 'b"Temperature telemetry unavailable"' in source
+    # The governor's own vocabulary is what this second half pins: "DVFS" and
+    # "governor" are the kernel's names for a scheduler policy, and the person
+    # choosing between a fast phone and a phone that lasts the day owns neither.
+    # The reading itself stays in the kernel's words -- a value the app did not
+    # name is not the app's to rename -- only the caption around it changed.
+    assert 'b"DVFS state unavailable"' not in source, (
+        "the Power detail advertises the kernel's scheduler vocabulary to the"
+        " person instead of the choice they are making")
 
 
 def test_calendar_reports_the_clock_once_per_civil_date_not_once_per_tick():
@@ -1454,7 +1462,7 @@ def test_unavailable_settings_services_use_neutral_not_success_styling():
     # is `on_surface_variant` and "the success ink" is `success`. The claim
     # under test is unchanged: an unavailable service is reported in the
     # neutral ink and never in the success ink.
-    assert 'b"DVFS state unavailable", THEME.on_surface_variant' in source
+    assert 'b"Mode not reported by the kernel", THEME.on_surface_variant' in source
     # The rows are multi-line calls, so the assertions match the argument
     # sequence with whitespace flattened: caption, ink, badge, badge ink.
     compact = " ".join(source.split())
@@ -1540,7 +1548,7 @@ def test_the_back_affordance_paints_the_box_a_person_can_tap():
     assert "const BACK: Rect = Rect::new(24," not in flat["music"]
     assert "BACK.contains(x, y)" not in flat["music"]
 
-    # The two overrides with a real layout reason keep their own rect, but the
+    # The overrides with a real layout reason keep their own rect, but the
     # rect is built from the SDK's control size, and one rect feeds both the
     # painter and the press.
     browser = read("apps/browser/src/main.rs")
@@ -1551,8 +1559,15 @@ def test_the_back_affordance_paints_the_box_a_person_can_tap():
     # Painted == hit is structural: both branches name the same rect.
     assert "chrome_control_px(x, y, BACK_BTN, BTN_R)" in browser
     assert "if BACK_BTN.contains(x, y)" in browser
-    assert "back_button::pixel_for_theme(x, y, &THEME)" in browser
-    assert "if back_button::contains(x, y)" in browser
+    # The browser's back belongs to the shell's bottom band, so the SDK's
+    # header chip must NOT also be painted or hit-tested here: two nav sets
+    # on one panel is the defect, and the header chip's "no history means
+    # quit" fallback made it a second, unlabeled way to leave the app.
+    assert "back_button::pixel_for_theme(x, y, &THEME)" not in browser, (
+        "the browser paints the platform's header back chip beside its own "
+        "bottom-row back, giving the panel two competing navigation sets")
+    assert "if back_button::contains(x, y)" not in browser, (
+        "the browser hit-tests a second back control the bottom row already owns")
 
     video = read("apps/video_player/src/main.rs")
     assert "const LAND_BACK_X: usize = LAND_BAR.x + LAND_BAR_AIR;" in video

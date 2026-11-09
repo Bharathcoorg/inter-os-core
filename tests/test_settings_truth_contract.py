@@ -52,6 +52,29 @@ def rendered_literals(source: str) -> list:
     return re.findall(r'b"([^"\\]*)"', source)
 
 
+def row_head_claims(source: str) -> list:
+    """Every `(label, caption, badge)` triple a `row_head` call paints.
+
+    WHY the triples are read off the call sites: a row makes three claims at
+    once -- what it is called, what it says underneath, and the one word on its
+    badge -- and the previous spelling of this gate quoted one full sentence it
+    expected to find. That sentence was the app's own phrasing for the answer,
+    so renaming the row for the person reading it (the machine's "Flight Mode
+    Status" became the platform's "Airplane mode", the name the shade and the
+    search keywords already use) broke a gate that had nothing to do with the
+    name. Reading the slots keeps the claim -- which slot may say what -- and
+    lets the words be the app's.
+    """
+    triples = []
+    for match in re.finditer(r"row_head\(", source):
+        window = source[match.end() : match.end() + 420]
+        end = window.find("RowBoxes")
+        literals = re.findall(r'b"([^"\\]*)"', window[:end] if end != -1 else window)
+        if len(literals) >= 3:
+            triples.append((literals[0], literals[1], literals[2]))
+    return triples
+
+
 def query_buffer_size(source: str, call: str) -> int:
     """The size of the buffer the app passes to `call`.
 
@@ -577,12 +600,41 @@ def test_the_settings_app_does_not_claim_radios_are_enabled_and_listening():
 
     The card used to say the sovereign radios were enabled and listening,
     under a badge that said the opposite.
+
+    WHY the row is found by its subject and not by its caption: the platform has
+    no switch to report, so the only thing that may change here is which slot
+    says so. The row is now named "Airplane mode" -- the name the launcher's
+    shade inks and the shared search keywords carry -- with the refusal in the
+    caption slot and `UNAVAILABLE` on the badge. A gate that quoted the whole
+    old sentence failed on a rename that kept every claim true; a gate that
+    reads the three slots fails the moment any of them claims a listening radio.
     """
     source = app_source()
 
     assert "enabled & listening" not in source
     assert "All sovereign radios" not in source
-    assert "Flight mode not reported by the platform" in source
+
+    rows = [
+        claim
+        for claim in row_head_claims(source)
+        if re.search(r"airplane|flight", claim[0], re.IGNORECASE)
+    ]
+    assert rows, "the Settings app no longer renders the airplane-mode row at all"
+    label, caption, badge = rows[0]
+
+    # The caption answers the question the row asks, in the platform's terms.
+    assert "not reported" in caption.lower(), (
+        f"the {label!r} row's caption {caption!r} reports a switch state the "
+        "platform never gave, instead of saying it does not answer"
+    )
+    # The badge must not contradict the caption it sits beside.
+    assert badge.upper() in {"UNAVAILABLE", "NOT REPORTED", "NO"}, (
+        f"the {label!r} row badges {badge!r} beside a caption that says the "
+        "platform does not report the switch"
+    )
+    assert not re.search(r"\b(ON|ENABLED|LISTENING|ACTIVE|AVAILABLE|REPORTED)\b", badge.upper()), (
+        f"the airplane-mode row is back to claiming {badge!r}"
+    )
 
 
 def test_the_haptic_motor_is_not_claimed_and_the_sound_path_is_asked_about():

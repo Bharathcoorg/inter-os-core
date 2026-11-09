@@ -104,6 +104,7 @@ def _holds_the_surface(text, name, platform_const, literal):
     return (
         f"const {name}: usize = {literal};" in text
         or f"const {name}: usize = viewport::{platform_const};" in text
+        or f"const {name}: usize = interos_std::design::viewport::{platform_const};" in text
     )
 
 

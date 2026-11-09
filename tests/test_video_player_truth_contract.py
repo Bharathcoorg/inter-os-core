@@ -23,10 +23,12 @@ Enforces:
    - Nothing interactive is authored inside the system status band, and a control is
      only drawn where its own press path answers it.
 5. Real execution evidence:
-   - Executes apps/video_player cargo test suite (33 unit tests) over real AVI and image fixtures.
+   - Executes apps/video_player cargo test suite over real AVI and image fixtures,
+     and requires it to run exactly the unit cases the sources declare.
 """
 
 from pathlib import Path
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -373,6 +375,14 @@ def test_video_player_suite_executes_and_passes():
     - Raw and PPM P6 frame decoders
     - Translucent HUD ARGB alpha blending and canvas mapping
     - Touch seek, volume, speed, orientation, and aspect ratio controls
+
+    WHY the count is derived and not typed: this gate used to compare the
+    suite's output against a literal "33 passed" someone had written down.
+    Every case added since then broke a gate that had nothing to do with the
+    new case, and the pull of that is to lower the number until it goes green.
+    The suite now has to run exactly the cases the sources declare, so a test
+    that stops being collected -- a module left out of the build, a `cfg` that
+    hides it -- fails here by name instead of printing a smaller green.
     """
     res = subprocess.run(
         ["cargo", "test", "--manifest-path", "apps/video_player/Cargo.toml"],
@@ -381,7 +391,19 @@ def test_video_player_suite_executes_and_passes():
         timeout=120,
     )
     assert res.returncode == 0, f"video_player cargo test suite failed:\n{res.stdout}\n{res.stderr}"
-    assert "33 passed" in res.stdout, f"Expected 33 video_player tests to pass, got:\n{res.stdout}"
+    results = re.findall(r"test result: \w+\. (\d+) passed; (\d+) failed", res.stdout)
+    assert results, f"the video player suite reported no result line:\n{res.stdout}"
+    passed = sum(int(p) for p, _ in results)
+    failed = sum(int(f) for _, f in results)
+    declared = sum(
+        len(re.findall(r"^\s*#\[test\]", src.read_text(encoding="utf-8"), re.M))
+        for src in sorted((ROOT / "apps/video_player/src").rglob("*.rs"))
+    )
+    assert failed == 0, f"{failed} video_player unit test(s) failed:\n{res.stdout}"
+    assert passed == declared, (
+        f"apps/video_player declares {declared} #[test] cases but the suite ran "
+        f"{passed}; a case stopped being collected -- find it before touching this gate"
+    )
 
 
 if __name__ == "__main__":

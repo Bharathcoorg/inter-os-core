@@ -1001,3 +1001,115 @@ def test_a_progress_tick_repaints_the_rows_the_painter_inks():
         "`status_rows` stopped counting the rows the ladder rows the status line out"
     )
 
+
+
+def home_recents_visible_value(lib: str) -> int:
+    """The literal HOME_RECENTS_VISIBLE the gate reads out of production.
+
+    WHY the gate reads the number rather than hard-coding 4: the cap is the
+    screen's own geometry, and a gate that re-typed it would pass on a stale
+    value the day the row stack changed.
+    """
+    match = re.search(r"pub const HOME_RECENTS_VISIBLE: usize = (\d+);", lib)
+    assert match, "HOME_RECENTS_VISIBLE is no longer a literal the gate can read"
+    return int(match.group(1))
+
+
+def test_the_home_header_counts_the_recents_rows_the_screen_draws_and_answers():
+    """The home header claimed the browse listing's size while the body listed
+    the document index's recents.
+
+    On the captured screen the header read "/storage - 5 items" over the four
+    recent rows the home screen actually drew: two numbers, from two sources, on
+    one screen. The painted recents rows and the recents press are both bounded
+    by HOME_RECENTS_VISIBLE, so the header now names that same single accessor --
+    the number the person reads is the number of rows the screen draws and the
+    tap answers, and it cannot drift back.
+    """
+    lib = fm_lib()
+    main = fm_main()
+
+    # 1. One accessor caps the recents rows, and it caps at HOME_RECENTS_VISIBLE.
+    assert "pub const fn home_recents_rows(total: usize) -> usize" in lib, (
+        "there is no single accessor for the recents rows the home screen draws"
+    )
+    home_recents_visible_value(lib)  # the cap is a readable literal
+    rows_start = lib.index("pub const fn home_recents_rows(total: usize) -> usize")
+    rows_body = lib[rows_start : lib.index("\n}", rows_start)]
+    assert "HOME_RECENTS_VISIBLE" in rows_body, (
+        "home_recents_rows no longer caps at the visible-rows constant"
+    )
+
+    # 2. A compile-time binding pins the cap, so the accessor cannot silently
+    #    grow past the rows the screen lays out.
+    assert re.search(
+        r"const _:\s*\(\)\s*=\s*assert!\(\s*home_recents_rows\(", lib
+    ), "the recents-row cap lost its compile-time binding to HOME_RECENTS_VISIBLE"
+
+    # 3. The paint and the press resolve the recents count through the SAME
+    #    accessor -- not `.min(HOME_RECENTS_VISIBLE)` written twice, and not the
+    #    raw `recents_count`.
+    assert "home_recents_rows(app.recents_count)" in main, (
+        "the recents paint/press stopped sharing the header's accessor"
+    )
+    assert main.count("app.recents_count.min(HOME_RECENTS_VISIBLE)") == 0, (
+        "the recents paint/press went back to a hand-written cap that can drift "
+        "from the header's number"
+    )
+
+    # 4. The home header's number comes from home_recents_rows, not the browse
+    #    entry count. `set_home_count` is the single place that writes it.
+    assert "pub fn set_home_count(&mut self)" in main, (
+        "the home header count is not built by one accessor"
+    )
+    sc_start = main.index("pub fn set_home_count(&mut self)")
+    sc_body = main[sc_start : main.index("\n    }", sc_start)]
+    assert "home_recents_rows(self.recents_count)" in sc_body, (
+        "the home header count is no longer the rows the screen draws"
+    )
+    assert "self.entry_count" not in sc_body and "card_item_count" not in sc_body, (
+        "the home header went back to counting the browse listing instead of the "
+        "recents rows it shows"
+    )
+
+
+def test_a_recent_row_paints_no_modified_line_when_the_index_answered_zero():
+    """The recents rows read "Modified: not reported by the platform" for every
+    document the device holds.
+
+    The kernel's storage inodes carry no modification time: `create_file` stamps
+    `ctime` but never `mtime`, so the document index answers `mtime == 0` for
+    these documents. The row-building path fed that zero to `format_mtime`,
+    which painted a placeholder sentence into the row's caption slot -- a
+    missing value rendered as a value. The row now asks `recent_time_line`,
+    which paints NOTHING when the index answered zero: the line is simply not
+    drawn, not replaced by a dash, while the details card keeps its explanatory
+    `format_mtime` line. The row's other boxes stay derived from the same
+    `home_recent_row_h`/`home_recent_time_dy` accessors, so a blank caption
+    leaves no hole in the geometry.
+    """
+    lib = fm_lib()
+    main = fm_main()
+
+    # 1. The row has its own accessor, and it paints nothing for the zero answer.
+    assert "pub fn recent_time_line(mtime: u64, out: &mut [u8]) -> usize" in lib, (
+        "the recents row has no accessor that can answer the index's zero with "
+        "no line at all"
+    )
+    start = lib.index("pub fn recent_time_line(mtime: u64, out: &mut [u8]) -> usize")
+    body = lib[start : lib.index("\n}", start)]
+    assert re.search(r"mtime\s*==\s*0\s*\{[^}]*return\s+0", body), (
+        "recent_time_line no longer paints nothing when the index answered zero"
+    )
+
+    # 2. The recents row path routes through that accessor and no longer feeds
+    #    the row's caption slot to format_mtime (the placeholder producer).
+    rstart = main.index("fn refresh_recent_times(&mut self)")
+    rbody = main[rstart : main.index("\n    }", rstart)]
+    assert "recent_time_line(" in rbody, (
+        "the recents row stopped asking the accessor that can draw nothing"
+    )
+    assert "format_mtime(" not in rbody, (
+        "the recents row went back to painting the placeholder line for a "
+        "modification time the platform never reported"
+    )
