@@ -794,24 +794,156 @@ def test_the_app_says_the_launcher_path_is_not_wired_up():
         )
 
 
+def _rust_sum(expression: str, values: dict, where: str) -> int:
+    """The number a Rust arithmetic expression adds up to once its names have values.
+
+    WHY arithmetic and not a string match: the rule this serves is about how
+    many pixels the button needs. A pin on how the sum is *written* passes
+    while the sum is wrong and fails when someone rewrites it correctly, so
+    the expression is evaluated with the app's own constants instead.
+    """
+    text = " ".join(expression.split())
+    for name in sorted(values, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(name)}\b", str(values[name]), text)
+    leftover = re.sub(r"[\d\s+\-*/().]+", "", text)
+    assert not leftover, (
+        f"{where} is written as {expression!r}, which this gate cannot reduce to "
+        "a plain sum of the app's constants -- read what it evaluates to and pin "
+        "the geometry, not the spelling"
+    )
+    return int(eval(text, {"__builtins__": {}}, {}))
+
+
+def _rust_rect_arguments(code: str) -> list:
+    """The arguments of every `Rect::new(..)` in `code`, as written, one list per call.
+
+    WHY a balanced scan rather than one regex: a call nested in the arguments --
+    `app.body_bottom()`, a helper that itself builds a `Rect` -- ends a lazy
+    `\\(.*?\\)` at the wrong paren, and the gate then measures a box the app
+    never built.
+    """
+    calls = []
+    for match in re.finditer(r"Rect::new\s*\(", code):
+        parts, depth, current = [], 1, ""
+        for char in code[match.end() :]:
+            if char in "([{":
+                depth += 1
+                current += char
+            elif char in ")]}":
+                depth -= 1
+                if depth == 0:
+                    parts.append(current.strip())
+                    calls.append(parts)
+                    break
+                current += char
+            elif char == "," and depth == 1:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += char
+    return [[arg for arg in box if arg] for box in calls]
+
+
 def test_the_floating_button_does_not_sit_on_a_value():
     """A button that covers a value hides the value.
 
-    The agent manager's floating button floats over the bottom-right of the
-    body, so the body has to reserve a band under the last card for that card
-    to be scrolled into. Without the band the button lands on whatever value
-    happens to be at the bottom-right, and a value under a button is a value
-    nobody can read.
+    The floating button sits over the bottom-right of the body, so the body has
+    to reserve a band under the last card wide enough that the card can always
+    be scrolled clear of the button. The old version of this rule looked for one
+    spelling of the reserve sum, which kept passing after the reserve stopped
+    reaching the scrollable height at all; it now measures the button's box out
+    of `fab_rect` and compares it with what the layout actually reserves, so a
+    shrunk reserve, a reserve that is never added, a button moved by an authored
+    pixel number, and a tap radius that drifts from the painted radius each fail
+    on their own.
     """
+    BODY_BOTTOM = 100_000  # only distances from it are read, so its value is free
     for path, (lib, main, _theme) in SOURCES.items():
-        source = lib + main
-        radius = _const(source, "FAB_R")
-        margin = _const(source, "FAB_MARGIN")
-        assert radius > 0, f"{path} has no floating button to reserve room for"
-        assert margin >= 0, f"{path} has a negative floating button margin"
-        assert "FAB_R * 2 + FAB_MARGIN" in _code(source), (
-            f"{path} does not reserve a band under the last card for the "
-            "floating button"
+        values = {"FAB_R": _const(main, "FAB_R"), "FAB_MARGIN": _const(main, "FAB_MARGIN")}
+        place = dict(values)
+        place["bottom"] = BODY_BOTTOM
+
+        rect_body = _body(main, "fn fab_rect")
+        boxes = _rust_rect_arguments(rect_body)
+        assert boxes, f"{path} no longer builds the floating button as a Rect"
+        placed = [
+            box for box in boxes if any(re.search(r"\bbottom\b", arg) for arg in box)
+        ]
+        assert placed, (
+            f"{path} places the floating button from authored pixel numbers "
+            f"{boxes[-1]} rather than from the bottom edge of the body it floats "
+            "over, so the band reserved under the last card cannot follow it"
+        )
+        assert len(placed) == 1, f"{path} places the floating button {len(placed)} times"
+        parts = placed[0]
+        assert len(parts) == 4, f"{path} builds the button from {len(parts)} arguments"
+        _x, y_expr, w_expr, h_expr = parts
+        top = _rust_sum(y_expr, place, "the button's top edge")
+        width = _rust_sum(w_expr, place, "the button's width")
+        height = _rust_sum(h_expr, place, "the button's height")
+        assert re.search(r"let\s+bottom\s*=\s*[^;]*body_bottom\(\)", rect_body), (
+            f"{path} anchors the button to a `bottom` that is not the body's own "
+            "bottom edge, so the layout and the button no longer share a reference"
+        )
+        assert width == height, f"{path} draws a button {width} wide and {height} tall"
+        assert top < BODY_BOTTOM and top + height <= BODY_BOTTOM, (
+            f"{path} puts the button at {top}..{top + height} inside a body ending "
+            f"at {BODY_BOTTOM}, which is off the screen rather than over a value"
+        )
+        clearance = BODY_BOTTOM - top
+
+        layout = _body(main, "fn layout")
+        reserve = re.search(
+            r"let\s+reserved\s*=\s*if\s+([^{]*?)\s*\{\s*([^{}]*)\s*\}\s*else\s*\{\s*([^{}]*)\s*\}",
+            layout,
+        )
+        assert reserve, (
+            f"{path} no longer switches the band under the last card by surface, so "
+            "the screen that has no button reserves empty space and the one that has "
+            "a button reserves nothing"
+        )
+        condition, hidden, shown = reserve.group(1), reserve.group(2), reserve.group(3)
+        assert _rust_sum(hidden, place, "the reserve where the button is absent") == 0, (
+            f"{path} reserves {hidden.strip()!r} on the surface that draws no button"
+        )
+        reserved = _rust_sum(shown, place, "the band reserved under the last card")
+        assert reserved >= clearance, (
+            f"{path} reserves {reserved} pixels below the last card, but the button "
+            f"starts {clearance} above the body's bottom edge, so a card can still be "
+            "left under it"
+        )
+        assert "Surface::Chat" in condition and "Surface::Chat" in rect_body, (
+            f"{path} hides the button and reserves its band on two different tests "
+            "for the same surface"
+        )
+        assert re.search(r"let\s+content\s*=[^;]*\breserved\b", layout), (
+            f"{path} computes a reserved band and never adds it to the scrollable "
+            "height, so the last card still stops under the button"
+        )
+
+        painted = re.search(
+            r"circle_px\([^,]+,[^,]+,[^,]+,[^,]+,\s*([^,]+),", _body(main, "fn fab_pixel")
+        )
+        assert painted, f"{path} no longer rounds the button with the kit's circle"
+        tap_body = _body(main, "fn handle_tap")
+        asks = tap_body.find("fab_rect(")
+        assert asks >= 0, (
+            f"{path} answers the floating button without asking the placement "
+            "function where the button is, so the painted box and the tappable "
+            "one are allowed to disagree"
+        )
+        pressed = re.search(
+            r"dx\s*\*\s*dx\s*\+\s*dy\s*\*\s*dy\s*<=\s*\(\s*([A-Za-z_0-9]+)\s*\*\s*\1\s*\)",
+            tap_body[asks:],
+        )
+        assert pressed, (
+            f"{path} no longer answers the button with a distance test, so the round "
+            "control is tapped by a square nobody drew"
+        )
+        radius = _rust_sum(painted.group(1), values, "the painted button's radius")
+        tap_radius = _rust_sum(pressed.group(1), values, "the button's tap radius")
+        assert radius == values["FAB_R"] and tap_radius == radius, (
+            f"{path} paints a button of radius {radius} and taps one of {tap_radius}"
         )
 
 
