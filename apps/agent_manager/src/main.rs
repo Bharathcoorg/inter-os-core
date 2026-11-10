@@ -37,7 +37,7 @@ use core::panic::PanicInfo;
 
 use interos_std as std;
 use std::design::accessibility::{DynamicType, UserTextScale};
-use std::design::components;
+use std::design::components::{self, KeyAction};
 use std::design::font;
 use std::design::monochrome::{self, Icon};
 use std::design::primitives::Rect;
@@ -57,7 +57,7 @@ use agent_manager::{
     CHAT_TEXT_MAX, EMBED_NOTICE_TEXT_MAX, MAILBOX_PAYLOAD_MAX, MATRYOSHKA_DEFAULT_DIM,
     MAX_RESULTS_DEFAULT, MODEL_DIRECTORIES, MODEL_DIRECTORY_COUNT, PROBE_REQUEST_TEXT_MAX,
     REQUEST_HEADER_BYTES, SELF_TEST_DETAIL_MAX, SERVICE_ABI_MAX_ID, SIMILARITY_DEFAULT_Q15,
-    TOOL_LABEL_MAX,
+    TOOL_LABEL_MAX, keyboard::{AgentKeyboard, KB_Y0, KB_Y1},
 };
 
 // -----------------------------------------------------------------------------
@@ -1227,6 +1227,8 @@ pub struct AgentManagerApp {
     /// whether an answer has been read, so a request that is still standing is
     /// never painted as one that was answered.
     pub probe: EmbedProbe,
+    /// On-screen virtual keyboard for touch prompt typing.
+    pub keyboard: AgentKeyboard,
 }
 
 // WHY at compile time: the app is a stack local in `_start`, and the user
@@ -1291,6 +1293,7 @@ impl AgentManagerApp {
             clock: [b' '; CLOCK_LEN],
             clock_ok: false,
             probe: EmbedProbe::new(),
+            keyboard: AgentKeyboard::new(),
         };
         let _ = app.chat.load_from_storage(agent_manager::CHAT_STORAGE_PATH);
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
@@ -1729,6 +1732,15 @@ impl AgentManagerApp {
     // Building the body
     // -------------------------------------------------------------------------
 
+    /// The top of the composer band on the current surface.
+    pub fn composer_top(&self) -> usize {
+        if self.keyboard.is_visible() {
+            KB_Y0.saturating_sub(composer_h())
+        } else {
+            ACTION_TOP.saturating_sub(composer_h())
+        }
+    }
+
     /// The bottom of the body's band on the current surface.
     ///
     /// WHY the band moves: the chat surface carries a composer, and a
@@ -1736,7 +1748,7 @@ impl AgentManagerApp {
     /// cannot be reached while the answer is being read.
     pub fn body_bottom(&self) -> usize {
         if self.surface == Surface::Chat {
-            ACTION_TOP - composer_h()
+            self.composer_top()
         } else {
             ACTION_TOP
         }
@@ -4000,6 +4012,15 @@ fn get_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
         appbar_pixel(x, y, app)
     } else if y < body_top() {
         tab_pixel(x, y, app)
+    } else if app.surface == Surface::Chat && app.keyboard.is_visible() {
+        let comp_top = app.composer_top();
+        if y < comp_top {
+            body_pixel(x, y, app).unwrap_or(THEME.surface)
+        } else if y < KB_Y0 {
+            composer_pixel(x, y, app)
+        } else {
+            app.keyboard.widget().render_pixel(x, y, &THEME).unwrap_or(THEME.surface_container)
+        }
     } else {
         let bottom = app.body_bottom();
         if y < bottom {
@@ -4651,7 +4672,7 @@ fn composer_pixel(x: usize, y: usize, app: &AgentManagerApp) -> u32 {
     if app.surface != Surface::Chat {
         return colour;
     }
-    let top = ACTION_TOP - composer_h();
+    let top = app.composer_top();
     if y == top {
         colour = THEME.border;
     }
@@ -4875,22 +4896,48 @@ fn hit_body(app: &AgentManagerApp, x: usize, y: usize) -> Option<i8> {
 fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     let ux = x as usize;
     let uy = y as usize;
+    app.keyboard.clear_pressed();
 
     // The back control in the app bar.
-    //
-    // WHY the rows are the control's own: the region used to reach up into the
-    // band and stop short of the control's bottom, so a tap on the lower half
-    // of the button the reader was looking at did nothing and a tap on the band
-    // did.
-    //
-    // WHY the columns are the control's own, too: the bar paints the chip
-    // through `back_button::pixel_for_theme`, whose plate is 24..72, while this
-    // press ran to 88. The 16 columns past the plate are the gap the bar keeps
-    // before the surface's name at `APPBAR_TITLE_X`, so the old band made an
-    // invisible strip answer as a button. One rect now serves the painter and
-    // this test.
     if std::design::back_button::contains(ux, uy) {
         return Tap::Leave("[AGENT_MGR] Back button tapped. Returning to the launcher.");
+    }
+
+    // The on-screen soft keyboard docked at the bottom of the screen.
+    //
+    // Handled before the home indicator and action buttons because when the
+    // keyboard is up, it covers that bottom portion of the screen.
+    if app.surface == Surface::Chat && app.keyboard.is_visible() && uy >= KB_Y0 && uy < KB_Y1 {
+        if let Some(action) = app.keyboard.hit_test(ux, uy) {
+            app.keyboard.set_pressed(Some(action));
+            match action {
+                KeyAction::Char(c) => {
+                    app.chat.push_prompt_char(c);
+                    app.rebuild();
+                }
+                KeyAction::Backspace => {
+                    app.chat.pop_prompt_char();
+                    app.rebuild();
+                }
+                KeyAction::Enter => {
+                    if app.chat.is_streaming {
+                        app.cancel_streaming();
+                    } else {
+                        app.send_prompt();
+                    }
+                }
+                KeyAction::Shift => {
+                    app.keyboard.toggle_shift();
+                }
+                KeyAction::Hide => {
+                    app.keyboard.hide();
+                    app.rebuild();
+                }
+            }
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw;
+        }
+        return Tap::Redraw;
     }
 
     // The home indicator: the box the mark stands in, answered ahead of every
@@ -4935,6 +4982,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     // The app bar's search control.
     if appbar_search_rect().contains(ux, uy) {
         if app.surface != Surface::Search {
+            app.keyboard.hide();
             app.surface = Surface::Search;
             app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
             app.rebuild();
@@ -4956,6 +5004,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         let index = (ux.saturating_sub(GUTTER)) / (segment_w + TAB_GAP);
         if let Some(surface) = Surface::from_index(index) {
             if surface != app.surface {
+                app.keyboard.hide();
                 app.surface = surface;
                 app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                 app.rebuild();
@@ -5006,21 +5055,30 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
         return Tap::None;
     }
 
-    // The composer's send button.
-    if app.surface == Surface::Chat && uy >= ACTION_TOP - composer_h() && uy < ACTION_TOP {
-        let send_cx = W - GUTTER - COMPOSER_SEND_R;
-        let send_cy = ACTION_TOP - composer_h() + composer_h() / 2;
-        let dx = ux as i64 - send_cx as i64;
-        let dy = uy as i64 - send_cy as i64;
-        if dx * dx + dy * dy <= (COMPOSER_SEND_R * COMPOSER_SEND_R) as i64 {
-            if app.chat.is_streaming {
-                app.cancel_streaming();
-            } else {
-                app.send_prompt();
+    // The composer's send button and text input field.
+    if app.surface == Surface::Chat {
+        let comp_top = app.composer_top();
+        if uy >= comp_top && uy < comp_top + composer_h() {
+            let send_cx = W - GUTTER - COMPOSER_SEND_R;
+            let send_cy = comp_top + composer_h() / 2;
+            let dx = ux as i64 - send_cx as i64;
+            let dy = uy as i64 - send_cy as i64;
+            if dx * dx + dy * dy <= (COMPOSER_SEND_R * COMPOSER_SEND_R) as i64 {
+                if app.chat.is_streaming {
+                    app.cancel_streaming();
+                } else {
+                    app.send_prompt();
+                }
+                return Tap::Redraw;
             }
-            return Tap::Redraw;
+            let field_right = send_cx.saturating_sub(COMPOSER_SEND_R + 12);
+            if ux >= GUTTER && ux < field_right {
+                app.keyboard.show();
+                app.rebuild();
+                return Tap::Redraw;
+            }
+            return Tap::None;
         }
-        return Tap::None;
     }
 
     // The floating action button.

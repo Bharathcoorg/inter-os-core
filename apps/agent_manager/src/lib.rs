@@ -24,6 +24,8 @@
 
 pub use interos_std::ai::MatryoshkaDim;
 
+pub mod keyboard;
+
 /// The vector dimension the agent manager uses when the platform holds none.
 ///
 /// WHY this is a constant and not a guess at run time: the platform's
