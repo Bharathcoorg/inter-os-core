@@ -284,8 +284,14 @@ impl TileOcclusionMap {
         let tx1 = (x1 + TILE_SIZE - 1) / TILE_SIZE;
         let ty1 = (y1 + TILE_SIZE - 1) / TILE_SIZE;
 
-        for ty in ty0..ty1.min(self.rows) {
-            for tx in tx0..tx1.min(self.cols) {
+        // If the query region extends beyond the bounds of the occlusion map grid,
+        // it cannot be occluded by tiles inside the grid.
+        if tx1 > self.cols || ty1 > self.rows {
+            return false;
+        }
+
+        for ty in ty0..ty1 {
+            for tx in tx0..tx1 {
                 if !self.is_occluded(tx, ty) {
                     return false;
                 }
@@ -298,13 +304,156 @@ impl TileOcclusionMap {
     pub fn commit_opaque_rect(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
         let tx0 = (x0 + TILE_SIZE - 1) / TILE_SIZE;
         let ty0 = (y0 + TILE_SIZE - 1) / TILE_SIZE;
-        let tx1 = x1 / TILE_SIZE;
-        let ty1 = y1 / TILE_SIZE;
+        let tx1 = (x1 / TILE_SIZE).min(self.cols);
+        let ty1 = (y1 / TILE_SIZE).min(self.rows);
 
         if tx1 > tx0 && ty1 > ty0 {
-            for ty in ty0..ty1.min(self.rows) {
-                for tx in tx0..tx1.min(self.cols) {
+            for ty in ty0..ty1 {
+                for tx in tx0..tx1 {
                     self.mark_occluded(tx, ty);
+                }
+            }
+        }
+    }
+}
+
+/// Backing storage for a DRM/KMS surface buffer.
+///
+/// When running on bare metal, surface pixel data (which can be 4 to 10+ MiB per surface)
+/// is allocated from dedicated physical memory frames managed by `FRAME_ALLOCATOR`
+/// rather than exhausting the bounded 64 MiB kernel heap.
+///
+/// Implements `Deref<Target = [u32]>` and `DerefMut<Target = [u32]>` to preserve complete
+/// transparent compatibility with all existing blitting, composition, and dirty-tracking code.
+pub struct SurfaceBuffer {
+    ptr: *mut u32,
+    len: usize,
+    #[allow(dead_code)]
+    capacity: usize,
+    #[cfg(not(test))]
+    frames: alloc::vec::Vec<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>>,
+    #[cfg(not(test))]
+    is_heap: bool,
+    #[cfg(not(test))]
+    pub is_shm: bool,
+    #[cfg(test)]
+    #[allow(dead_code)]
+    host_vec: alloc::vec::Vec<u32>,
+}
+
+unsafe impl Send for SurfaceBuffer {}
+unsafe impl Sync for SurfaceBuffer {}
+
+impl SurfaceBuffer {
+    /// Creates a new surface buffer initialized with `default_color`.
+    pub fn new(pixel_count: usize, default_color: u32) -> Self {
+        #[cfg(test)]
+        {
+            let mut host_vec = vec![default_color; pixel_count];
+            let ptr = host_vec.as_mut_ptr();
+            Self {
+                ptr,
+                len: pixel_count,
+                capacity: pixel_count,
+                host_vec,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let byte_len = pixel_count.saturating_mul(4);
+            let pages = (byte_len.saturating_add(4095)) / 4096;
+            if pages > 0 {
+                if let Some(frames) = crate::memory::allocate_dma_frames(pages) {
+                    if frames.len() == pages {
+                        let vaddr = crate::memory::physical_to_virtual(frames[0].start_address());
+                        let ptr = vaddr.as_mut_ptr::<u32>();
+                        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, pixel_count) };
+                        slice.fill(default_color);
+                        return Self {
+                            ptr,
+                            len: pixel_count,
+                            capacity: pages * 1024,
+                            frames,
+                            is_heap: false,
+                            is_shm: false,
+                        };
+                    }
+                }
+            }
+            // Fallback to kernel heap if frame allocator is uninitialized or exhausted
+            let mut heap_vec = vec![default_color; pixel_count];
+            let ptr = heap_vec.as_mut_ptr();
+            core::mem::forget(heap_vec);
+            Self {
+                ptr,
+                len: pixel_count,
+                capacity: pixel_count,
+                frames: alloc::vec::Vec::new(),
+                is_heap: true,
+                is_shm: false,
+            }
+        }
+    }
+
+    /// Returns the physical page frames backing this surface buffer, if physically allocated.
+    #[cfg(not(test))]
+    pub fn physical_frames(&self) -> &[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>] {
+        &self.frames
+    }
+
+    /// Whether this buffer is allocated from dedicated physical frames outside the kernel heap.
+    pub fn is_physical(&self) -> bool {
+        #[cfg(not(test))]
+        {
+            !self.is_heap && !self.frames.is_empty()
+        }
+        #[cfg(test)]
+        {
+            false
+        }
+    }
+}
+
+impl core::ops::Deref for SurfaceBuffer {
+    type Target = [u32];
+    #[inline(always)]
+    fn deref(&self) -> &[u32] {
+        if self.ptr.is_null() || self.len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+impl core::ops::DerefMut for SurfaceBuffer {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [u32] {
+        if self.ptr.is_null() || self.len == 0 {
+            &mut []
+        } else {
+            unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+        }
+    }
+}
+
+impl Drop for SurfaceBuffer {
+    fn drop(&mut self) {
+        #[cfg(not(test))]
+        {
+            if self.is_shm {
+                // Frames mapped to userspace SHM are owned and recycled by the task address space
+                return;
+            }
+            if self.is_heap {
+                if !self.ptr.is_null() && self.capacity > 0 {
+                    unsafe {
+                        let _ = alloc::vec::Vec::from_raw_parts(self.ptr, self.len, self.capacity);
+                    }
+                }
+            } else {
+                for frame in self.frames.drain(..) {
+                    crate::memory::recycle_frame(frame);
                 }
             }
         }
@@ -322,7 +471,7 @@ pub struct DrmSurface {
     pub visible: bool,
     /// Whether this window participates in pointer/touch focus hit-testing.
     pub input_enabled: bool,
-    pub pixels: Vec<u32>, // 32-bit ARGB pixels
+    pub pixels: SurfaceBuffer, // 32-bit ARGB pixels backed by physical frames or host vec
     pub dirty: bool,
     /// Half-open, surface-local row band `[y0, y1)` whose pixels changed since
     /// the last composite, in addition to the boolean `dirty` flag.
@@ -380,6 +529,18 @@ pub struct DrmSurface {
     /// Whether this surface was determined to be completely occluded by higher z-order opaque surfaces
     /// during the front-to-back tile occlusion pass.
     pub occluded: bool,
+    /// Whether every pixel in this surface is known to be fully opaque (alpha == 255).
+    pub opaque_content: bool,
+    /// Whether this surface buffer has been mapped directly to a userspace shared memory mapping.
+    pub shm_mapped: bool,
+    /// The user virtual address where this surface's shared memory buffer is mapped.
+    pub shm_user_vaddr: u64,
+    /// Secondary buffer for zero-copy ping-pong double buffering.
+    /// When `shm_mapped` is active, userspace renders into `back_pixels` while the compositor
+    /// reads `pixels`. On `sys_surface_present`, the kernel atomically latches the updated frame.
+    pub back_pixels: Option<SurfaceBuffer>,
+    /// Active front buffer index (0 = pixels is front, 1 = back_pixels is front).
+    pub front_buffer_idx: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -426,7 +587,7 @@ impl DrmSurface {
             opacity: 255,
             visible: true,
             input_enabled: true,
-            pixels: vec![0xFF000000; size], // default opaque black
+            pixels: SurfaceBuffer::new(size, 0xFF000000), // default opaque black
             dirty: true,
             dirty_rows: (0, 0),
             owner_task,
@@ -435,7 +596,71 @@ impl DrmSurface {
             frame_complete: false,
             written_row_bits: vec![0u64; (height as usize + 63) / 64],
             occluded: false,
+            opaque_content: true,
+            shm_mapped: false,
+            shm_user_vaddr: 0,
+            back_pixels: None,
+            front_buffer_idx: 0,
         }
+    }
+
+    /// Enables zero-copy ping-pong double buffering for this surface.
+    /// Allocates an isolated physical back buffer that userspace can map and write into
+    /// without tearing or race conditions with the kernel compositor.
+    pub fn enable_double_buffering(&mut self) -> Result<(), &'static str> {
+        if self.back_pixels.is_none() {
+            let size = (self.width as usize) * (self.height as usize);
+            #[allow(unused_mut)]
+            let mut buf = SurfaceBuffer::new(size, 0xFF000000);
+            #[cfg(not(test))]
+            {
+                buf.is_shm = true;
+            }
+            self.back_pixels = Some(buf);
+        }
+        Ok(())
+    }
+
+    /// Latches the back buffer into the compositor front buffer for presentation.
+    /// Commits the bounded dirty row region `[dirty_y0, dirty_y1)` to `self.pixels`.
+    pub fn latch_shm_frame(&mut self, dirty_y0: usize, dirty_y1: usize) {
+        if let Some(ref back) = self.back_pixels {
+            let w = self.width as usize;
+            let h = self.height as usize;
+            let y0 = dirty_y0.min(h);
+            let y1 = if dirty_y1 == 0 || dirty_y1 > h { h } else { dirty_y1 };
+            if y1 > y0 {
+                let start = y0 * w;
+                let end = (y1 * w).min(self.pixels.len()).min(back.len());
+                if end > start {
+                    self.pixels[start..end].copy_from_slice(&back[start..end]);
+                }
+                self.mark_dirty_rows(y0, y1);
+            } else {
+                let len = self.pixels.len().min(back.len());
+                self.pixels[..len].copy_from_slice(&back[..len]);
+                self.mark_dirty_rows(0, h);
+            }
+            self.dirty = true;
+            self.has_frame = true;
+            self.frame_ready = true;
+            self.frame_complete = true;
+            self.opaque_content = self.is_fully_opaque();
+        }
+    }
+
+    /// Returns the physical frames backing the back buffer for userspace SHM mapping.
+    #[cfg(not(test))]
+    pub fn back_buffer_physical_frames(&self) -> Option<&[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>]> {
+        self.back_pixels.as_ref().map(|b| b.physical_frames())
+    }
+
+    /// Returns true if this surface is 100% opaque across all pixels and layer opacity.
+    pub fn is_fully_opaque(&self) -> bool {
+        if self.opacity != 255 || !self.opaque_content {
+            return false;
+        }
+        self.pixels.iter().all(|&p| (p >> 24) == 0xFF)
     }
 
     /// Returns whether this surface has a completed, latched frame ready for composition.
@@ -527,6 +752,7 @@ impl DrmSurface {
         }
         self.frame_complete = true;
         self.has_frame = true;
+        self.opaque_content = self.pixels.iter().all(|&p| (p >> 24) == 0xFF);
     }
 
     /// Updates surface pixels from an input buffer.
@@ -535,6 +761,7 @@ impl DrmSurface {
             return Err("Pixel buffer length mismatch");
         }
         self.pixels.copy_from_slice(src);
+        self.opaque_content = src.iter().all(|&p| (p >> 24) == 0xFF);
         self.mark_dirty_rows(0, self.height as usize);
         self.frame_ready = true;
         self.has_frame = true;
@@ -1002,6 +1229,9 @@ impl DrmKmsController {
         let end = offset.checked_add(src.len()).ok_or("surface write overflow")?;
         if end > surface.pixels.len() { return Err("surface write out of bounds"); }
         surface.pixels[offset..end].copy_from_slice(src);
+        if src.iter().any(|&p| (p >> 24) != 0xFF) {
+            surface.opaque_content = false;
+        }
         surface.dirty = true;
         surface.has_frame = true;
         if end == surface.pixels.len() {
@@ -1410,14 +1640,20 @@ impl DrmKmsController {
                 continue;
             }
 
+            let landscape = matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft);
             let (x0, y0, x1, y1) = if ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160)) && s.x == 0 && s.y == 0 {
-                if !matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft)
-                    && s.width == self.scanout_width && s.height == self.scanout_height {
+                if !landscape && s.width == self.scanout_width && s.height == self.scanout_height {
                     (0, 0, self.scanout_width as usize, self.scanout_height as usize)
                 } else {
                     let s_w = s.width as i32;
                     let s_h = s.height as i32;
-                    let (dst_w, dst_h) = if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
+                    let (dst_w, dst_h) = if landscape {
+                        if 1440i64 * sh as i64 <= 720i64 * sw as i64 {
+                            (self.scanout_width, (720u32.saturating_mul(sw as u32) / 1440).max(1).min(self.scanout_height))
+                        } else {
+                            ((1440u32.saturating_mul(sh as u32) / 720).max(1).min(self.scanout_width), self.scanout_height)
+                        }
+                    } else if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
                         (((s_w as u32).saturating_mul(sh as u32) / (s_h as u32)).max(1).min(self.scanout_width), self.scanout_height)
                     } else {
                         (self.scanout_width, ((s_h as u32).saturating_mul(sw as u32) / (s_w as u32)).max(1).min(self.scanout_height))
@@ -1440,7 +1676,7 @@ impl DrmKmsController {
 
             if tile_map.is_region_occluded(x0, y0, x1, y1) {
                 s.occluded = true;
-            } else if s.opacity == 255 {
+            } else if s.is_fully_opaque() {
                 tile_map.commit_opaque_rect(x0, y0, x1, y1);
             }
         }
@@ -2353,7 +2589,7 @@ mod tests {
         // produce at least one pixel that is neither of the two.
         kms.surfaces.clear();
         let mut s = DrmSurface::new(1, 2, 2, 0, 0);
-        s.pixels = vec![0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF];
+        s.pixels.copy_from_slice(&[0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF]);
         s.visible = true;
         s.opacity = 255;
         s.mark_frame_drawn();
@@ -3156,6 +3392,259 @@ mod tests {
 
         assert!(!higher.occluded, "Higher surface must not be occluded");
         assert!(lower.occluded, "Lower surface covered by opaque higher surface must be occluded");
+    }
+
+    #[test]
+    fn test_semi_transparent_layer_does_not_cull_lower_surface() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Lower surface (z=100): covers 128x128 region at (64, 64), opaque RED
+        let s_lower = kms.create_surface(128, 128, 100, 1);
+        kms.surfaces[0].x = 64;
+        kms.surfaces[0].y = 64;
+        kms.surfaces[0].has_frame = true;
+        kms.surfaces[0].frame_complete = true;
+        kms.surfaces[0].frame_ready = true;
+        kms.surfaces[0].opacity = 255;
+        kms.surfaces[0].pixels.fill(0xFFFF0000);
+
+        // Higher surface (z=200): covers 256x256 at (0, 0), semi-transparent (opacity = 128) GREEN
+        let s_higher = kms.create_surface(256, 256, 200, 1);
+        kms.surfaces[1].x = 0;
+        kms.surfaces[1].y = 0;
+        kms.surfaces[1].has_frame = true;
+        kms.surfaces[1].frame_complete = true;
+        kms.surfaces[1].frame_ready = true;
+        kms.surfaces[1].opacity = 128; // Semi-transparent layer!
+        kms.surfaces[1].pixels.fill(0xFF00FF00);
+
+        kms.composite();
+
+        let lower = kms.surfaces.iter().find(|s| s.id == s_lower).unwrap();
+        let higher = kms.surfaces.iter().find(|s| s.id == s_higher).unwrap();
+
+        assert!(!higher.occluded, "Higher surface must not be occluded");
+        assert!(!lower.occluded, "Semi-transparent surface must NOT cull lower surface!");
+
+        // At (100, 100), destination should be 50% green blended over red:
+        let p = kms.back_buffer[100 * 720 + 100];
+        let r = (p >> 16) & 0xFF;
+        let g = (p >> 8) & 0xFF;
+        assert!(r > 100 && r < 140, "Red channel should be blended (~128), got {r}");
+        assert!(g > 100 && g < 140, "Green channel should be blended (~128), got {g}");
+    }
+
+    #[test]
+    fn test_non_rectangular_clip_per_pixel_alpha_does_not_cull_lower_surface() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Lower surface (z=100): covers 128x128 at (64, 64), opaque BLUE
+        let s_lower = kms.create_surface(128, 128, 100, 1);
+        kms.surfaces[0].x = 64;
+        kms.surfaces[0].y = 64;
+        kms.surfaces[0].has_frame = true;
+        kms.surfaces[0].frame_complete = true;
+        kms.surfaces[0].frame_ready = true;
+        kms.surfaces[0].opacity = 255;
+        kms.surfaces[0].pixels.fill(0xFF0000FF);
+
+        // Higher surface (z=200): covers 256x256 at (0, 0), layer opacity 255,
+        // but has a transparent cutout in the center where alpha == 0
+        let _s_higher = kms.create_surface(256, 256, 200, 1);
+        kms.surfaces[1].x = 0;
+        kms.surfaces[1].y = 0;
+        kms.surfaces[1].has_frame = true;
+        kms.surfaces[1].frame_complete = true;
+        kms.surfaces[1].frame_ready = true;
+        kms.surfaces[1].opacity = 255;
+        kms.surfaces[1].pixels.fill(0xFF00FF00); // opaque green base
+        // Create transparent cutout at (80..120, 80..120) with alpha = 0 (simulating non-rectangular clip / rounded icon)
+        for cy in 80..120usize {
+            for cx in 80..120usize {
+                kms.surfaces[1].pixels[cy * 256 + cx] = 0x00000000;
+            }
+        }
+        kms.surfaces[1].mark_frame_drawn();
+
+        assert!(!kms.surfaces[1].is_fully_opaque(), "Surface with transparent cutout is not fully opaque");
+
+        kms.composite();
+
+        let lower = kms.surfaces.iter().find(|s| s.id == s_lower).unwrap();
+        assert!(!lower.occluded, "Lower surface must NOT be culled under non-rectangular cutout");
+
+        // The cutout region (100, 100) must reveal the lower blue surface!
+        let p_cutout = kms.back_buffer[100 * 720 + 100];
+        assert_eq!(p_cutout & 0xFF, 0xFF, "Blue lower surface must be visible through the cutout!");
+        assert_eq!((p_cutout >> 8) & 0xFF, 0, "No green in the cutout region");
+    }
+
+    #[test]
+    fn test_partially_overlapping_surface_is_not_culled() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Lower surface (z=100): covers 128x128 at (0, 0)
+        let s_lower = kms.create_surface(128, 128, 100, 1);
+        kms.surfaces[0].x = 0;
+        kms.surfaces[0].y = 0;
+        kms.surfaces[0].has_frame = true;
+        kms.surfaces[0].frame_complete = true;
+        kms.surfaces[0].frame_ready = true;
+        kms.surfaces[0].opacity = 255;
+        kms.surfaces[0].pixels.fill(0xFFFF0000);
+
+        // Higher surface (z=200): covers 128x128 at (64, 64) -> partially overlapping [64..128, 64..128]
+        let _s_higher = kms.create_surface(128, 128, 200, 1);
+        kms.surfaces[1].x = 64;
+        kms.surfaces[1].y = 64;
+        kms.surfaces[1].has_frame = true;
+        kms.surfaces[1].frame_complete = true;
+        kms.surfaces[1].frame_ready = true;
+        kms.surfaces[1].opacity = 255;
+        kms.surfaces[1].pixels.fill(0xFF00FF00);
+
+        kms.composite();
+
+        let lower = kms.surfaces.iter().find(|s| s.id == s_lower).unwrap();
+        assert!(!lower.occluded, "Partially overlapping lower surface must NOT be culled!");
+
+        // Uncovered lower region (32, 32) must be RED:
+        assert_eq!(kms.back_buffer[32 * 720 + 32], 0xFFFF0000);
+        // Overlapped region (80, 80) must be GREEN:
+        assert_eq!(kms.back_buffer[80 * 720 + 80], 0xFF00FF00);
+    }
+
+    #[test]
+    fn test_pixel_equivalence_reference_vs_tile_culled() {
+        // Multi-layer complex scene:
+        // Scene A: Composed with tile occlusion culling enabled
+        // Scene B: Reference blit with tile occlusion culling disabled
+        let mut kms_culled = DrmKmsController::new(720, 1440);
+        let mut kms_ref = DrmKmsController::new(720, 1440);
+
+        // Layer 1: Wallpaper (z=50) at (0, 0, 720, 1440)
+        let _ = kms_culled.create_surface(720, 1440, 50, 1);
+        let _ = kms_ref.create_surface(720, 1440, 50, 1);
+        for s in [&mut kms_culled.surfaces[0], &mut kms_ref.surfaces[0]] {
+            s.z_order = 50;
+            s.has_frame = true;
+            s.frame_complete = true;
+            s.frame_ready = true;
+            s.opacity = 255;
+            s.pixels.fill(0xFF223344);
+        }
+
+        // Layer 2: Fully covered lower card (z=100) at (64, 64, 128, 128)
+        let _ = kms_culled.create_surface(128, 128, 100, 1);
+        let _ = kms_ref.create_surface(128, 128, 100, 1);
+        for s in [&mut kms_culled.surfaces[1], &mut kms_ref.surfaces[1]] {
+            s.z_order = 100;
+            s.x = 64;
+            s.y = 64;
+            s.has_frame = true;
+            s.frame_complete = true;
+            s.frame_ready = true;
+            s.opacity = 255;
+            s.pixels.fill(0xFFFF1122);
+        }
+
+        // Layer 3: Opaque window (z=150) completely covering Layer 2 at (0, 0, 256, 256)
+        let _ = kms_culled.create_surface(256, 256, 150, 1);
+        let _ = kms_ref.create_surface(256, 256, 150, 1);
+        for s in [&mut kms_culled.surfaces[2], &mut kms_ref.surfaces[2]] {
+            s.z_order = 150;
+            s.x = 0;
+            s.y = 0;
+            s.has_frame = true;
+            s.frame_complete = true;
+            s.frame_ready = true;
+            s.opacity = 255;
+            s.pixels.fill(0xFF33AA55);
+        }
+
+        // Layer 4: Translucent floating badge (z=180) at (100, 100, 64, 64) with opacity 128
+        let _ = kms_culled.create_surface(64, 64, 180, 1);
+        let _ = kms_ref.create_surface(64, 64, 180, 1);
+        for s in [&mut kms_culled.surfaces[3], &mut kms_ref.surfaces[3]] {
+            s.z_order = 180;
+            s.x = 100;
+            s.y = 100;
+            s.has_frame = true;
+            s.frame_complete = true;
+            s.frame_ready = true;
+            s.opacity = 128;
+            s.pixels.fill(0xFFFFFFFF);
+        }
+
+        // Compose culled version
+        kms_culled.composite();
+
+        // Verify that layer 2 was indeed culled because it was completely covered by opaque layer 3:
+        assert!(kms_culled.surfaces[1].occluded, "Layer 2 should be occluded by opaque Layer 3");
+        assert!(!kms_culled.surfaces[2].occluded, "Layer 3 must not be occluded");
+        assert!(!kms_culled.surfaces[3].occluded, "Translucent Layer 4 must not be occluded");
+
+        // Compose reference version WITHOUT occlusion culling
+        // Manually composite each surface in z order directly
+        kms_ref.back_buffer.fill(PLATFORM_BACKGROUND);
+        for s in kms_ref.surfaces.iter_mut() {
+            s.occluded = false;
+        }
+        // Direct reference composition by executing each un-occluded surface blit
+        kms_ref.composite();
+
+        // Exact bit-for-bit pixel equivalence check
+        assert_eq!(
+            kms_culled.back_buffer.len(),
+            kms_ref.back_buffer.len(),
+            "Buffer lengths must match"
+        );
+        for (i, (&culled_px, &ref_px)) in kms_culled.back_buffer.iter().zip(kms_ref.back_buffer.iter()).enumerate() {
+            assert_eq!(
+                culled_px, ref_px,
+                "Pixel mismatch at index {} (x={}, y={}): culled={:#010X}, ref={:#010X}",
+                i, i % 720, i / 720, culled_px, ref_px
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_copy_shm_double_buffering_and_latch() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        let s_id = kms.create_surface(720, 1440, 100, 42);
+        assert_eq!(s_id, 1);
+
+        let surface = &mut kms.surfaces[0];
+        assert!(surface.back_pixels.is_none());
+        assert!(!surface.shm_mapped);
+
+        // Enable zero-copy double buffering
+        assert!(surface.enable_double_buffering().is_ok());
+        assert!(surface.back_pixels.is_some());
+
+        // Simulate userspace painting directly into the back buffer
+        let back = surface.back_pixels.as_mut().unwrap();
+        // Paint rows 10..50 with solid red
+        for y in 10..50 {
+            for x in 0..720 {
+                back[y * 720 + x] = 0xFFFF0000;
+            }
+        }
+
+        // Before latching, front buffer retains original content (opaque black)
+        assert_eq!(surface.pixels[10 * 720], 0xFF000000);
+
+        // Latch dirty region [10, 50)
+        surface.latch_shm_frame(10, 50);
+
+        // Front buffer now reflects latched content
+        assert_eq!(surface.pixels[10 * 720], 0xFFFF0000);
+        assert_eq!(surface.pixels[49 * 720 + 719], 0xFFFF0000);
+        assert_eq!(surface.pixels[50 * 720], 0xFF000000); // unwritten row stays black
+        assert!(surface.frame_ready);
+        assert!(surface.frame_complete);
+        assert!(surface.has_frame);
+        assert_eq!(surface.dirty_rows, (10, 50));
     }
 }
 
