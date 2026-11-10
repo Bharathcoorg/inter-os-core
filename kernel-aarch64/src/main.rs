@@ -457,7 +457,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 16. AArch64 MMU Virtual Memory Architecture & 4-Level Translation Tables
     kprintln!("--- [Initializing AArch64 MMU & Translation Tables] ---");
-    mmu::ArmMmu::init_and_enable();
+    mmu::ArmMmu::init_and_enable(ram_base, ram_size);
     let mmu_active = mmu::ArmMmu::is_enabled();
     assert!(mmu_active, "MMU activation failed");
     kprintln!("[OK] AArch64 MMU: 4-level translation tables, TTBR0_EL1 loaded, L1/L2 caches enabled (SCTLR_EL1.M=1).");

@@ -65,10 +65,22 @@ static mut L2_HIGH_TABLES: [PageTable; HIGH_TABLE_SLOTS] =
 /// Gigabyte each pooled table describes, or `usize::MAX` when it is free.
 static mut L2_HIGH_OWNER: [usize; HIGH_TABLE_SLOTS] = [usize::MAX; HIGH_TABLE_SLOTS];
 
+/// Discovered physical RAM base address.
+pub static ACTIVE_RAM_BASE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x4000_0000);
+/// Discovered physical RAM size in bytes.
+pub static ACTIVE_RAM_SIZE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(1024 * 1024 * 1024);
+
 pub struct ArmMmu;
 
 impl ArmMmu {
-    pub fn init_and_enable() {
+    pub fn init_and_enable(ram_base: u64, ram_size: u64) {
+        let base = if ram_base == 0 { 0x4000_0000 } else { ram_base };
+        let size = if ram_size == 0 { 1024 * 1024 * 1024 } else { ram_size };
+        ACTIVE_RAM_BASE.store(base, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_RAM_SIZE.store(size, core::sync::atomic::Ordering::Relaxed);
+
         unsafe {
             // 1. Clear tables
             L1_TABLE = PageTable::empty();
@@ -79,19 +91,43 @@ impl ArmMmu {
             // 2. Level 1 Entry 0: Point to L2 Table for lower 1 GB (0x0000_0000 .. 0x3FFF_FFFF)
             L1_TABLE.entries[0] = l2_phys | DESC_TABLE | DESC_VALID;
 
-            // 3. Level 1 Entry 1: Map 1 GB DRAM (0x4000_0000 .. 0x7FFF_FFFF) as Normal Cacheable Memory (Kernel)
-            L1_TABLE.entries[1] = 0x4000_0000
-                | DESC_AF
-                | DESC_SH_INNER
-                | DESC_AP_RW_EL1
-                | DESC_ATTR_NORMAL
-                | DESC_UXN
-                | DESC_BLOCK
-                | DESC_VALID;
+            // 3. Dynamically map discovered RAM gigapages
+            const GIGABYTE: u64 = 0x4000_0000;
+            let start_gb = (base / GIGABYTE) as usize;
+            let num_gbs = ((size + GIGABYTE - 1) / GIGABYTE).max(1) as usize;
+
+            for gb_idx in start_gb..(start_gb + num_gbs).min(512) {
+                if gb_idx == 0 {
+                    continue;
+                }
+                L1_TABLE.entries[gb_idx] = ((gb_idx as u64) * GIGABYTE)
+                    | DESC_AF
+                    | DESC_SH_INNER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_NORMAL
+                    | DESC_UXN
+                    | DESC_BLOCK
+                    | DESC_VALID;
+            }
+
+            // Fallback: always ensure 0x4000_0000 (QEMU virt default DRAM base) is mapped
+            if L1_TABLE.entries[1] == 0 {
+                L1_TABLE.entries[1] = 0x4000_0000
+                    | DESC_AF
+                    | DESC_SH_INNER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_NORMAL
+                    | DESC_UXN
+                    | DESC_BLOCK
+                    | DESC_VALID;
+            }
 
             // 4. Level 2 Table: Populate 2MB blocks for peripheral MMIO & EL0 Userspace
-            // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB) - Executable at EL0, PXN at EL1
-            L2_TABLE.entries[2] = 0x4400_0000
+            // User code region (2MB) - mapped from discovered RAM offset + 64MB (0x0400_0000)
+            let user_code_phys = base + 0x0400_0000;
+            let user_stack_phys = base + 0x0420_0000;
+
+            L2_TABLE.entries[2] = user_code_phys
                 | DESC_AF
                 | DESC_SH_INNER
                 | DESC_AP_RW_ALL
@@ -100,8 +136,8 @@ impl ArmMmu {
                 | DESC_BLOCK
                 | DESC_VALID;
 
-            // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB) - Non-executable (PXN + UXN)
-            L2_TABLE.entries[4] = 0x4420_0000
+            // User stack region (2MB) - Non-executable (PXN + UXN)
+            L2_TABLE.entries[4] = user_stack_phys
                 | DESC_AF
                 | DESC_SH_INNER
                 | DESC_AP_RW_ALL
@@ -533,21 +569,45 @@ impl ArmMmu {
 
         let l2_phys = user_l2.as_ref() as *const PageTable as u64;
 
+        let r_base = ACTIVE_RAM_BASE.load(core::sync::atomic::Ordering::Relaxed);
+        let r_size = ACTIVE_RAM_SIZE.load(core::sync::atomic::Ordering::Relaxed);
+        const GIGABYTE: u64 = 0x4000_0000;
+        let start_gb = (r_base / GIGABYTE) as usize;
+        let num_gbs = ((r_size + GIGABYTE - 1) / GIGABYTE).max(1) as usize;
+
         // Level 1 Entry 0: points to user L2 table
         user_l1.entries[0] = l2_phys | DESC_TABLE | DESC_VALID;
 
-        // Level 1 Entry 1: Map 1 GB DRAM with DESC_AP_RW_EL1 (Kernel ONLY, EL0 forbidden!)
-        user_l1.entries[1] = 0x4000_0000
-            | DESC_AF
-            | DESC_SH_INNER
-            | DESC_AP_RW_EL1
-            | DESC_ATTR_NORMAL
-            | DESC_BLOCK
-            | DESC_VALID;
+        // Map all discovered RAM gigapages as Kernel-only (DESC_AP_RW_EL1)
+        for gb_idx in start_gb..(start_gb + num_gbs).min(512) {
+            if gb_idx == 0 {
+                continue;
+            }
+            user_l1.entries[gb_idx] = ((gb_idx as u64) * GIGABYTE)
+                | DESC_AF
+                | DESC_SH_INNER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_NORMAL
+                | DESC_BLOCK
+                | DESC_VALID;
+        }
+
+        if user_l1.entries[1] == 0 {
+            user_l1.entries[1] = 0x4000_0000
+                | DESC_AF
+                | DESC_SH_INNER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_NORMAL
+                | DESC_BLOCK
+                | DESC_VALID;
+        }
+
+        let user_code_phys = r_base + 0x0400_0000;
+        let user_stack_phys = r_base + 0x0420_0000;
 
         // Populate User L2:
         // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB) with DESC_AP_RW_EL0
-        user_l2.entries[2] = 0x4400_0000
+        user_l2.entries[2] = user_code_phys
             | DESC_AF
             | DESC_SH_INNER
             | DESC_AP_RW_EL0
@@ -556,7 +616,7 @@ impl ArmMmu {
             | DESC_VALID;
 
         // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB) with DESC_AP_RW_EL0
-        user_l2.entries[4] = 0x4420_0000
+        user_l2.entries[4] = user_stack_phys
             | DESC_AF
             | DESC_SH_INNER
             | DESC_AP_RW_EL0
