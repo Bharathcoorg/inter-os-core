@@ -228,7 +228,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Prefer a simple-framebuffer the device tree actually declares (from U-Boot).
     // When the platform exposes none, render into a kernel-heap surface for rasterizer test.
     let (mut fb, display_from_fdt) = match dtb.as_ref().and_then(|p| {
-        SimpleFramebuffer::probe_from_fdt(p).ok()
+        SimpleFramebuffer::from_fdt(p, "framebuffer", 0)
+            .or_else(|_| SimpleFramebuffer::probe_from_fdt(p))
+            .ok()
     }) {
         Some(mut framebuffer) => {
             // Dynamically map physical scanout buffer into the kernel's virtual address space
