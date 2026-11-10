@@ -743,16 +743,36 @@ pub(crate) fn capabilities_from_rapp_with_trust(
     Ok(caps)
 }
 
+/// Maximum number of unique package names interned into static storage.
+/// Bounded to prevent heap exhaustion / denial-of-service from rapid process spawns.
+pub const MAX_INTERNED_PACKAGES: usize = 128;
+/// Maximum length of an interned package name (bytes).
+pub const MAX_PACKAGE_NAME_LEN: usize = 64;
+/// Fallback label when intern table capacity is reached.
+pub const FALLBACK_PACKAGE_NAME: &'static str = "rapp.overflow";
+
 static INTERNED_PACKAGE_NAMES: crate::sync::Mutex<alloc::vec::Vec<&'static str>> =
     crate::sync::Mutex::new(alloc::vec::Vec::new());
 
-/// Interns dynamic package IDs into persistent string slices without unbounded heap leakage.
+/// Interns dynamic package IDs into persistent string slices with strict bounds.
+///
+/// Bounded to `MAX_INTERNED_PACKAGES` entries and `MAX_PACKAGE_NAME_LEN` length to prevent
+/// denial-of-service / kernel heap exhaustion from untrusted processes requesting rapid spawns.
 pub fn intern_package_name(package_id: &str) -> &'static str {
+    let sanitized_id = if package_id.len() > MAX_PACKAGE_NAME_LEN {
+        &package_id[..MAX_PACKAGE_NAME_LEN]
+    } else {
+        package_id
+    };
+
     let mut registry = INTERNED_PACKAGE_NAMES.lock();
-    if let Some(&existing) = registry.iter().find(|&&name| name == package_id) {
+    if let Some(&existing) = registry.iter().find(|&&name| name == sanitized_id) {
         return existing;
     }
-    let leaked: &'static str = alloc::boxed::Box::leak(alloc::string::String::from(package_id).into_boxed_str());
+    if registry.len() >= MAX_INTERNED_PACKAGES {
+        return FALLBACK_PACKAGE_NAME;
+    }
+    let leaked: &'static str = alloc::boxed::Box::leak(alloc::string::String::from(sanitized_id).into_boxed_str());
     registry.push(leaked);
     leaked
 }
@@ -2442,6 +2462,29 @@ mod tests {
         assert_eq!(default_limits.max_address_space_bytes, user_address_space_limit() as u64);
         assert_eq!(default_limits.max_address_space_bytes, 1536 * 1024 * 1024);
         assert!(default_limits.max_address_space_bytes > 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_intern_package_name_bounds() {
+        // Interning the same name returns the identical pointer
+        let name1 = intern_package_name("org.interos.test_pkg");
+        let name2 = intern_package_name("org.interos.test_pkg");
+        assert_eq!(name1, "org.interos.test_pkg");
+        assert_eq!(name1.as_ptr(), name2.as_ptr());
+
+        // Oversized name is clamped to MAX_PACKAGE_NAME_LEN
+        let long_name = "b".repeat(MAX_PACKAGE_NAME_LEN + 20);
+        let clamped = intern_package_name(&long_name);
+        assert_eq!(clamped.len(), MAX_PACKAGE_NAME_LEN);
+
+        // Bounded capacity: when reaching MAX_INTERNED_PACKAGES, falls back safely to FALLBACK_PACKAGE_NAME
+        for i in 0..MAX_INTERNED_PACKAGES + 10 {
+            let pkg = alloc::format!("org.interos.stress_pkg_{}", i);
+            let res = intern_package_name(&pkg);
+            assert!(!res.is_empty());
+        }
+        let overflow = intern_package_name("org.interos.overflow_pkg_test");
+        assert_eq!(overflow, FALLBACK_PACKAGE_NAME);
     }
 }
 

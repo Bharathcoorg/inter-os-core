@@ -22,8 +22,9 @@ pub use relocate::apply_relocations;
 pub fn init() {
     crate::serial_println!("--- [Multi-Architecture Hardware & Boot Image Layer] ---");
 
+    // Initialize FPU/SSE hardware state in control registers CR0/CR4
+    crate::task::context::init_fpu();
+
     // 1. Fastboot Android Boot Image Verification
     test_fastboot_boot_image();
-
-
 }

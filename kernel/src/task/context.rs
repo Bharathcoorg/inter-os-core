@@ -6,6 +6,29 @@
 //! Provides the low-level hardware register state saving and restoring
 //! mechanism for cooperative and preemptive multitasking.
 
+/// 512-byte FPU/SSE/AVX hardware state buffer guaranteed to have 16-byte alignment.
+///
+/// Intel SDM Vol 2A: `FXSAVE` and `FXRSTOR` require memory operands to be aligned
+/// on a 16-byte boundary; otherwise a General Protection exception (`#GP(0)`) is raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, align(16))]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    /// Creates an FPU state initialized with standard masked exception control words.
+    ///
+    /// - FCW (bytes 0..2) = 0x037F: all x87 exceptions masked, 64-bit precision, round to nearest.
+    /// - MXCSR (bytes 24..28) = 0x1F80: all SSE exceptions masked, round to nearest.
+    pub const fn empty() -> Self {
+        let mut data = [0u8; 512];
+        data[0] = 0x7F;
+        data[1] = 0x03;
+        data[24] = 0x80;
+        data[25] = 0x1F;
+        Self(data)
+    }
+}
+
 /// CPU execution context holding the kernel stack pointer and FPU/SIMD state.
 ///
 /// Callee-saved registers (`rbx`, `rbp`, `r12`, `r13`, `r14`, `r15`, `rflags`)
@@ -19,16 +42,24 @@ pub struct TaskContext {
     /// 16-byte alignment padding.
     pub _pad: u64,
     /// 512-byte FXSAVE/FXRSTOR hardware state buffer (offset 16, 16-byte aligned).
-    pub fxsave_area: [u8; 512],
+    pub fxsave_area: FpuState,
 }
 
+// Compile-time verification of struct layout requirements for FXSAVE64/FXRSTOR64
+const _: () = {
+    assert!(core::mem::align_of::<TaskContext>() == 16);
+    assert!(core::mem::align_of::<FpuState>() == 16);
+    assert!(core::mem::offset_of!(TaskContext, fxsave_area) == 16);
+    assert!(core::mem::size_of::<TaskContext>() % 16 == 0);
+};
+
 impl TaskContext {
-    /// Creates an empty context with null stack pointer and zeroed FPU state.
+    /// Creates an empty context with null stack pointer and sanitized initial FPU state.
     pub const fn empty() -> Self {
         Self {
             rsp: 0,
             _pad: 0,
-            fxsave_area: [0; 512],
+            fxsave_area: FpuState::empty(),
         }
     }
 
@@ -70,20 +101,30 @@ impl TaskContext {
         *frame.add(1) = 0;                          // r15
         *frame.add(0) = 0x0202;                     // rflags (IF = 1)
 
-        let mut fx = [0u8; 512];
-        // Standard initial x87/SSE configuration:
-        // FCW = 0x037F (all FPU exceptions masked, double extended precision, round to nearest)
-        fx[0] = 0x7F;
-        fx[1] = 0x03;
-        // MXCSR = 0x1F80 (all SSE exceptions masked, round to nearest)
-        fx[24] = 0x80;
-        fx[25] = 0x1F;
-
         Self {
             rsp: frame as usize as u64,
             _pad: 0,
-            fxsave_area: fx,
+            fxsave_area: FpuState::empty(),
         }
+    }
+}
+
+/// Ensures CPU CR4 and CR0 control registers have FXSAVE/FXRSTOR and SSE enabled.
+pub fn init_fpu() {
+    #[cfg(all(target_arch = "x86_64", not(test)))]
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        // Clear EM (bit 2) and TS (bit 3), set MP (bit 1)
+        cr0 &= !((1u64 << 2) | (1u64 << 3));
+        cr0 |= 1u64 << 1;
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        // Set OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
+        cr4 |= (1u64 << 9) | (1u64 << 10);
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
     }
 }
 
@@ -91,7 +132,8 @@ impl TaskContext {
 ///
 /// Saves callee-saved registers, RFLAGS, and FPU/SSE state of the current task,
 /// stores the current RSP into `*prev`, then loads RSP and restores FPU/SSE and
-/// registers from `*next`, and returns (`ret`) into the new task.
+/// registers from `*next`, sanitizes scratch registers to prevent information leakage,
+/// and returns (`ret`) into the new task.
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
     core::arch::naked_asm!(
@@ -125,7 +167,38 @@ pub unsafe extern "C" fn switch_context(prev: *mut TaskContext, next: *const Tas
         "pop rbp",
         "pop rbx",
 
+        // Sanitize scratch / caller-saved registers to prevent kernel pointer leakage
+        // (prev and next in rdi/rsi) and cross-task data remanence
+        "xor eax, eax",
+        "xor ecx, ecx",
+        "xor edx, edx",
+        "xor esi, esi",
+        "xor edi, edi",
+        "xor r8d, r8d",
+        "xor r9d, r9d",
+        "xor r10d, r10d",
+        "xor r11d, r11d",
+
         // Return into next task (pops instruction pointer from stack)
         "ret"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_context_and_fpu_state_alignment() {
+        assert_eq!(core::mem::align_of::<TaskContext>(), 16);
+        assert_eq!(core::mem::align_of::<FpuState>(), 16);
+        assert_eq!(core::mem::offset_of!(TaskContext, fxsave_area), 16);
+        assert_eq!(core::mem::size_of::<TaskContext>() % 16, 0);
+
+        let ctx = TaskContext::empty();
+        assert_eq!(ctx.fxsave_area.0[0], 0x7F);
+        assert_eq!(ctx.fxsave_area.0[1], 0x03);
+        assert_eq!(ctx.fxsave_area.0[24], 0x80);
+        assert_eq!(ctx.fxsave_area.0[25], 0x1F);
+    }
 }

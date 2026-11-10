@@ -6756,7 +6756,12 @@ pub fn sys_futex_wait(uaddr: u64, expected_val: u32, timeout_ns: u64) -> Result<
         0
     };
 
-    let pid = crate::task::process::process_for_task(current_id).unwrap_or(crate::task::process::ProcessId(0));
+    let pid = {
+        let sched = SCHEDULER.lock();
+        sched.current_task().and_then(|t| t.process_id).unwrap_or_else(|| {
+            crate::task::process::process_for_task(current_id).unwrap_or(crate::task::process::ProcessId(0))
+        })
+    };
     crate::task::futex::FUTEX_MANAGER.lock().add_waiter(current_id, pid, uaddr, deadline_ticks);
 
     x86_64::instructions::interrupts::without_interrupts(|| {
@@ -6790,7 +6795,9 @@ pub fn sys_futex_wake(uaddr: u64, max_count: u32) -> Result<u32, SyscallResult> 
     let pid = {
         let sched = SCHEDULER.lock();
         let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
-        crate::task::process::process_for_task(current_id).unwrap_or(crate::task::process::ProcessId(0))
+        sched.current_task().and_then(|t| t.process_id).unwrap_or_else(|| {
+            crate::task::process::process_for_task(current_id).unwrap_or(crate::task::process::ProcessId(0))
+        })
     };
     let woken = crate::task::futex::FUTEX_MANAGER.lock().wake(pid, uaddr, max_count as usize);
     let count = woken.len() as u32;

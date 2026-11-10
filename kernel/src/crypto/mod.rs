@@ -25,6 +25,24 @@ pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in 0..32 {
         diff |= a[i] ^ b[i];
     }
-    diff == 0
+    core::hint::black_box(diff) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq_32() {
+        let a = [0x5Au8; 32];
+        let b = [0x5Au8; 32];
+        assert!(constant_time_eq_32(&a, &b));
+
+        for i in 0..32 {
+            let mut c = a;
+            c[i] ^= 0x01;
+            assert!(!constant_time_eq_32(&a, &c));
+        }
+    }
 }
 

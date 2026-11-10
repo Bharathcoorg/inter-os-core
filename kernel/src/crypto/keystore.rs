@@ -374,13 +374,9 @@ impl SecureKeystore {
 }
 
 /// Constant-time byte array equality comparison preventing side-channel leaks.
-#[inline(never)]
+#[inline(always)]
 fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    super::constant_time_eq_32(a, b)
 }
 
 pub static SECURE_KEYSTORE: Mutex<SecureKeystore> = Mutex::new(SecureKeystore::new());

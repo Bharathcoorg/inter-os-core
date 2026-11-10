@@ -137,6 +137,17 @@ pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
     None
 }
 
+/// Returns the number of live threads currently bound to `process`.
+pub fn live_threads_for_process(process: ProcessId) -> usize {
+    for _ in 0..10_000 {
+        if let Some(threads) = THREAD_TABLE.try_lock() {
+            return threads.iter().flatten().filter(|r| r.process == process).count();
+        }
+        core::hint::spin_loop();
+    }
+    0
+}
+
 pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
     let process = process_for_task(task).ok_or("process not found")?;
     let mut table = PROCESS_TABLE.lock();
