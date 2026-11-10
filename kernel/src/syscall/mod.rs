@@ -6509,7 +6509,7 @@ static NEXT_ANONYMOUS_MMAP_ADDR: core::sync::atomic::AtomicU64 = core::sync::ato
 /// boundary guard pages. Requires `CapType::MemoryHeap`.
 pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, SyscallResult> {
     // 1. Zero Ambient Authority: Check capability on calling task
-    let (_current_id, page_table_arc, process_id) = {
+    let (_current_id, page_table_arc, pid_opt) = {
         let sched = SCHEDULER.lock();
         let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
         // Check MemoryHeap capability token
@@ -6519,8 +6519,8 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
             return Err(SyscallResult::PermissionDenied);
         }
         let pt = current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?;
-        let pid = current_task.process_id.unwrap_or(crate::task::ProcessId(1));
-        (current_task.id, pt, pid)
+        let pid_opt = current_task.process_id;
+        (current_task.id, pt, pid_opt)
     };
 
     // 2. Validate length
@@ -6536,8 +6536,11 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
         return Err(SyscallResult::PermissionDenied);
     }
 
-    // 4. Reserve address space accounting
-    let _ = crate::task::process::reserve_address_space(process_id, len_aligned as usize);
+    // 4. Reserve address space accounting (strictly enforces process address-space limits)
+    if let Some(pid) = pid_opt {
+        crate::task::process::reserve_address_space(pid, len_aligned as usize)
+            .map_err(|_| SyscallResult::OutOfMemory)?;
+    }
 
     // 5. Determine target virtual address with guard pages
     let vaddr_start = if addr == 0 {
@@ -6547,12 +6550,16 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
         base + 4096
     } else {
         if addr % 4096 != 0 || addr < 0x1000 {
-            crate::task::process::release_address_space(process_id, len_aligned as usize);
+            if let Some(pid) = pid_opt {
+                crate::task::process::release_address_space(pid, len_aligned as usize);
+            }
             return Err(SyscallResult::InvalidArguments);
         }
         let end = addr.checked_add(len_aligned).ok_or(SyscallResult::InvalidArguments)?;
         if end >= 0x0000_8000_0000_0000 {
-            crate::task::process::release_address_space(process_id, len_aligned as usize);
+            if let Some(pid) = pid_opt {
+                crate::task::process::release_address_space(pid, len_aligned as usize);
+            }
             return Err(SyscallResult::InvalidArguments);
         }
         addr
@@ -6607,7 +6614,9 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
             let _ = pt.unmap_user_page(p);
         }
         drop(pt);
-        crate::task::process::release_address_space(process_id, len_aligned as usize);
+        if let Some(pid) = pid_opt {
+            crate::task::process::release_address_space(pid, len_aligned as usize);
+        }
         return Err(SyscallResult::OutOfMemory);
     }
 
@@ -6616,7 +6625,7 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
 
 /// Unmaps a mapped user memory region. Requires `CapType::MemoryHeap`.
 pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
-    let (page_table_arc, process_id) = {
+    let (page_table_arc, pid_opt) = {
         let sched = SCHEDULER.lock();
         let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
         if !current_task.cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE)
@@ -6625,8 +6634,8 @@ pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
             return Err(SyscallResult::PermissionDenied);
         }
         let pt = current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?;
-        let pid = current_task.process_id.unwrap_or(crate::task::ProcessId(1));
-        (pt, pid)
+        let pid_opt = current_task.process_id;
+        (pt, pid_opt)
     };
 
     if len == 0 || addr % 4096 != 0 || addr < 0x1000 {
@@ -6645,7 +6654,9 @@ pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
     }
     drop(pt);
 
-    crate::task::process::release_address_space(process_id, len_aligned as usize);
+    if let Some(pid) = pid_opt {
+        crate::task::process::release_address_space(pid, len_aligned as usize);
+    }
     Ok(())
 }
 
