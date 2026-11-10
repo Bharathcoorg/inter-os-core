@@ -52,7 +52,7 @@ impl SignedIpcFrame {
     /// Verifies the cryptographic HMAC-SHA256 signature against the shared session key.
     pub fn verify(&self, key: &[u8; 32]) -> bool {
         let expected = self.compute_hmac(key);
-        expected == self.hmac_signature
+        crate::crypto::constant_time_eq_32(&expected, &self.hmac_signature)
     }
 }
 

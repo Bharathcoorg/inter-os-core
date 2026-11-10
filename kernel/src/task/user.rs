@@ -743,6 +743,20 @@ pub(crate) fn capabilities_from_rapp_with_trust(
     Ok(caps)
 }
 
+static INTERNED_PACKAGE_NAMES: crate::sync::Mutex<alloc::vec::Vec<&'static str>> =
+    crate::sync::Mutex::new(alloc::vec::Vec::new());
+
+/// Interns dynamic package IDs into persistent string slices without unbounded heap leakage.
+pub fn intern_package_name(package_id: &str) -> &'static str {
+    let mut registry = INTERNED_PACKAGE_NAMES.lock();
+    if let Some(&existing) = registry.iter().find(|&&name| name == package_id) {
+        return existing;
+    }
+    let leaked: &'static str = alloc::boxed::Box::leak(alloc::string::String::from(package_id).into_boxed_str());
+    registry.push(leaked);
+    leaked
+}
+
 /// Launches a verified RAPP v2 payload as a Ring-3 child process.
 ///
 /// The caller must have already called parse_rapp; that verification step
@@ -766,9 +780,7 @@ pub fn spawn_verified_rapp_process(
     }
     let is_system = crate::package::REVOCATION_REGISTRY.lock().is_system_publisher(&manifest.publisher_key);
     let caps = capabilities_from_rapp_with_trust(&manifest.capabilities, parent_id.0, is_system)?;
-    let process_name: &'static str = alloc::boxed::Box::leak(
-        manifest.package_id.clone().into_boxed_str()
-    );
+    let process_name: &'static str = intern_package_name(&manifest.package_id);
     spawn_user_process_with_parent(process_name, elf_payload, caps, 6, parent_id)
 }
 

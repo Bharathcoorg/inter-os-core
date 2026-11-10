@@ -56,12 +56,12 @@ ARCH_MAP = {
 }
 
 WEB_PERMISSION_MAP = {
-    "camera": {"names": ["CameraCapture"], "ids": [4]},
-    "cameracapture": {"names": ["CameraCapture"], "ids": [4]},
-    "microphone": {"names": ["Microphone"], "ids": [7]},
-    "mic": {"names": ["Microphone"], "ids": [7]},
-    "geolocation": {"names": ["Location"], "ids": [8]},
-    "location": {"names": ["Location"], "ids": [8]},
+    "camera": {"names": ["CameraCapture"], "ids": [22]},
+    "cameracapture": {"names": ["CameraCapture"], "ids": [22]},
+    "microphone": {"names": ["MicrophoneCapture"], "ids": [23]},
+    "mic": {"names": ["MicrophoneCapture"], "ids": [23]},
+    "geolocation": {"names": ["LocationAccess"], "ids": [24]},
+    "location": {"names": ["LocationAccess"], "ids": [24]},
     "storage": {"names": ["FileSystemRead", "FileSystemWrite"], "ids": [9, 10]},
     "persistent-storage": {"names": ["FileSystemRead", "FileSystemWrite"], "ids": [9, 10]},
     "filesystemread": {"names": ["FileSystemRead"], "ids": [9]},
@@ -69,25 +69,25 @@ WEB_PERMISSION_MAP = {
     "vfs.read": {"names": ["FileSystemRead"], "ids": [9]},
     "vfs.write": {"names": ["FileSystemWrite"], "ids": [10]},
     "files": {"names": ["FileSystemRead", "FileSystemWrite"], "ids": [9, 10]},
-    "notifications": {"names": ["Notifications"], "ids": [14]},
-    "notification": {"names": ["Notifications"], "ids": [14]},
-    "sensor": {"names": ["Sensors"], "ids": [12]},
-    "sensors": {"names": ["Sensors"], "ids": [12]},
-    "accelerometer": {"names": ["Sensors"], "ids": [12]},
-    "gyroscope": {"names": ["Sensors"], "ids": [12]},
-    "telemetry": {"names": ["Sensors"], "ids": [12]},
-    "telemetry.battery": {"names": ["Sensors"], "ids": [12]},
-    "audio": {"names": ["AudioSynthesis"], "ids": [5]},
-    "audio.feedback": {"names": ["AudioSynthesis"], "ids": [5]},
-    "audiosynthesis": {"names": ["AudioSynthesis"], "ids": [5]},
+    "notifications": {"names": ["EventPoll"], "ids": [17]},
+    "notification": {"names": ["EventPoll"], "ids": [17]},
+    "sensor": {"names": ["SensorsRead"], "ids": [25]},
+    "sensors": {"names": ["SensorsRead"], "ids": [25]},
+    "accelerometer": {"names": ["SensorsRead"], "ids": [25]},
+    "gyroscope": {"names": ["SensorsRead"], "ids": [25]},
+    "telemetry": {"names": ["BatteryStatusRead"], "ids": [26]},
+    "telemetry.battery": {"names": ["BatteryStatusRead"], "ids": [26]},
+    "audio": {"names": ["AudioStream"], "ids": [28]},
+    "audio.feedback": {"names": ["AudioStream"], "ids": [28]},
+    "audiosynthesis": {"names": ["AudioStream"], "ids": [28]},
     "network": {"names": ["NetworkSocket", "NetworkSend", "NetworkReceive"], "ids": [12, 13, 14]},
     "networksocket": {"names": ["NetworkSocket"], "ids": [12]},
     "networksend": {"names": ["NetworkSend"], "ids": [13]},
     "networkreceive": {"names": ["NetworkReceive"], "ids": [14]},
-    "telephony": {"names": ["TelephonyModem"], "ids": [1]},
-    "telephonymodem": {"names": ["TelephonyModem"], "ids": [1]},
-    "phone": {"names": ["TelephonyModem"], "ids": [1]},
-    "sms": {"names": ["TelephonyModem"], "ids": [1]},
+    "telephony": {"names": ["TelephonyModem"], "ids": [27]},
+    "telephonymodem": {"names": ["TelephonyModem"], "ids": [27]},
+    "phone": {"names": ["TelephonyModem"], "ids": [27]},
+    "sms": {"names": ["TelephonyModem"], "ids": [27]},
 }
 
 
@@ -348,9 +348,9 @@ def parse_and_canonicalize_manifest(staging_dir, name_override=None, id_override
         except Exception:
             pass
 
-    # Ensure safe baseline defaults for web applications
+    # Zero Ambient Authority: undeclared permissions remain strictly empty
     if not declared_perms:
-        declared_perms.update(["network", "storage", "notifications"])
+        declared_perms = set()
 
     # Map to InterOS Capability IDs and canonical names
     canonical_permission_names = set()

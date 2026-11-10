@@ -104,20 +104,20 @@ class TestWebPortingContract(unittest.TestCase):
         self.assertEqual(int.from_bytes(data[6:8], "little"), 3)  # Arch 3 = Web
 
         # Verify capabilities:
-        # camera -> 4 (CameraCapture)
-        # geolocation -> 8 (Location)
+        # camera -> 22 (CameraCapture)
+        # geolocation -> 24 (LocationAccess)
         # storage -> 9 (FileSystemRead), 10 (FileSystemWrite)
-        # notifications -> 14 (Notifications)
+        # notifications -> 17 (EventPoll)
         caps_count = int.from_bytes(data[0x4E:0x50], "little")
         caps = [
             int.from_bytes(data[0xB4 + i*2 : 0xB4 + (i+1)*2], "little")
             for i in range(caps_count)
         ]
-        self.assertIn(4, caps, "CameraCapture (4) missing from mapped capabilities")
-        self.assertIn(8, caps, "Location (8) missing from mapped capabilities")
+        self.assertIn(22, caps, "CameraCapture (22) missing from mapped capabilities")
+        self.assertIn(24, caps, "LocationAccess (24) missing from mapped capabilities")
         self.assertIn(9, caps, "FileSystemRead (9) missing from mapped capabilities")
         self.assertIn(10, caps, "FileSystemWrite (10) missing from mapped capabilities")
-        self.assertIn(14, caps, "Notifications (14) missing from mapped capabilities")
+        self.assertIn(17, caps, "Notifications/EventPoll (17) missing from mapped capabilities")
 
         # Verify Ed25519 signature
         pub_key = bytes(data[0x28:0x48])

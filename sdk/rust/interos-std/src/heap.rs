@@ -59,34 +59,57 @@ unsafe impl GlobalAlloc for InterOsHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.acquire();
 
-        let needed_size = (layout.size().max(16) + 15) & !15;
+        let align = layout.align().max(16);
+        let needed_size = (layout.size().max(align) + (align - 1)) & !(align - 1);
         let head_ptr = self.head.get();
         let mut curr = *head_ptr;
 
         // 1. Search for existing suitable free block
         while !curr.is_null() {
-            if (*curr).is_free && (*curr).size >= needed_size {
-                // Split block if remaining space is sufficient
-                if (*curr).size >= needed_size + HEADER_SIZE + 16 {
-                    let rem_size = (*curr).size - needed_size - HEADER_SIZE;
-                    let split_ptr = (curr as *mut u8).add(HEADER_SIZE + needed_size) as *mut BlockHeader;
-                    (*split_ptr).size = rem_size;
-                    (*split_ptr).is_free = true;
-                    (*split_ptr).next = (*curr).next;
+            if (*curr).is_free {
+                let raw_payload = curr as usize + HEADER_SIZE;
+                let rem = raw_payload % align;
+                let offset = if rem == 0 { 0 } else { align - rem };
 
-                    (*curr).next = split_ptr;
-                    (*curr).size = needed_size;
+                if (*curr).size >= needed_size + offset {
+                    // If alignment offset is needed, insert an alignment header
+                    let active_block = if offset > 0 {
+                        let rem_orig = (*curr).size - offset;
+                        let aligned_ptr = (curr as *mut u8).add(offset) as *mut BlockHeader;
+                        (*aligned_ptr).size = rem_orig;
+                        (*aligned_ptr).is_free = true;
+                        (*aligned_ptr).next = (*curr).next;
+
+                        let prefix_size = offset.saturating_sub(HEADER_SIZE);
+                        (*curr).size = prefix_size;
+                        (*curr).next = aligned_ptr;
+                        aligned_ptr
+                    } else {
+                        curr
+                    };
+
+                    // Split block if remaining space is sufficient
+                    if (*active_block).size >= needed_size + HEADER_SIZE + 16 {
+                        let rem_size = (*active_block).size - needed_size - HEADER_SIZE;
+                        let split_ptr = (active_block as *mut u8).add(HEADER_SIZE + needed_size) as *mut BlockHeader;
+                        (*split_ptr).size = rem_size;
+                        (*split_ptr).is_free = true;
+                        (*split_ptr).next = (*active_block).next;
+
+                        (*active_block).next = split_ptr;
+                        (*active_block).size = needed_size;
+                    }
+
+                    (*active_block).is_free = false;
+                    self.release();
+                    return (active_block as *mut u8).add(HEADER_SIZE);
                 }
-
-                (*curr).is_free = false;
-                self.release();
-                return (curr as *mut u8).add(HEADER_SIZE);
             }
             curr = (*curr).next;
         }
 
         // 2. No suitable block found; map a new chunk from kernel
-        let total_needed = needed_size + HEADER_SIZE;
+        let total_needed = needed_size + HEADER_SIZE + align;
         let chunk_size = total_needed.max(MIN_CHUNK_SIZE);
         let chunk_size_aligned = (chunk_size + 4095) & !4095;
 
@@ -111,21 +134,40 @@ unsafe impl GlobalAlloc for InterOsHeap {
         (*new_chunk).next = *head_ptr;
         *head_ptr = new_chunk;
 
-        // Split new chunk if possible
-        if (*new_chunk).size >= needed_size + HEADER_SIZE + 16 {
-            let rem_size = (*new_chunk).size - needed_size - HEADER_SIZE;
-            let split_ptr = (new_chunk as *mut u8).add(HEADER_SIZE + needed_size) as *mut BlockHeader;
+        // Recursively allocate from newly mapped chunk with lock held
+        let raw_payload = new_chunk as usize + HEADER_SIZE;
+        let rem = raw_payload % align;
+        let offset = if rem == 0 { 0 } else { align - rem };
+
+        let active_block = if offset > 0 {
+            let rem_orig = (*new_chunk).size - offset;
+            let aligned_ptr = (new_chunk as *mut u8).add(offset) as *mut BlockHeader;
+            (*aligned_ptr).size = rem_orig;
+            (*aligned_ptr).is_free = true;
+            (*aligned_ptr).next = (*new_chunk).next;
+
+            let prefix_size = offset.saturating_sub(HEADER_SIZE);
+            (*new_chunk).size = prefix_size;
+            (*new_chunk).next = aligned_ptr;
+            aligned_ptr
+        } else {
+            new_chunk
+        };
+
+        if (*active_block).size >= needed_size + HEADER_SIZE + 16 {
+            let rem_size = (*active_block).size - needed_size - HEADER_SIZE;
+            let split_ptr = (active_block as *mut u8).add(HEADER_SIZE + needed_size) as *mut BlockHeader;
             (*split_ptr).size = rem_size;
             (*split_ptr).is_free = true;
-            (*split_ptr).next = (*new_chunk).next;
+            (*split_ptr).next = (*active_block).next;
 
-            (*new_chunk).next = split_ptr;
-            (*new_chunk).size = needed_size;
+            (*active_block).next = split_ptr;
+            (*active_block).size = needed_size;
         }
 
-        (*new_chunk).is_free = false;
+        (*active_block).is_free = false;
         self.release();
-        (new_chunk as *mut u8).add(HEADER_SIZE)
+        (active_block as *mut u8).add(HEADER_SIZE)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {

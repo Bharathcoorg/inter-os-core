@@ -3313,7 +3313,7 @@ def verify_and_install_rapp(body, pkg_name):
     capabilities = []
     for i in range(cap_count):
         cap = int.from_bytes(body[HEADER_SIZE + i * 2:HEADER_SIZE + i * 2 + 2], "little")
-        if cap < 1 or cap > 18:
+        if cap < 1 or cap > 33:
             return False, f"Unknown RAPP capability ID {cap}.", None
         capabilities.append(cap)
 

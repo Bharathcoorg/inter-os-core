@@ -58,7 +58,7 @@ impl VaultBlock {
     /// Validates block integrity tag against the vault key.
     pub fn verify(&self, key: &[u8; 32]) -> bool {
         let expected = self.compute_hmac(key);
-        expected == self.hmac_tag
+        crate::crypto::constant_time_eq_32(&expected, &self.hmac_tag)
     }
 }
 

@@ -10,10 +10,12 @@
 use alloc::vec::Vec;
 use crate::sync::Mutex;
 use crate::task::TaskId;
+use crate::task::process::ProcessId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FutexWaiter {
     pub task_id: TaskId,
+    pub process_id: ProcessId,
     pub uaddr: u64,
     pub deadline_ticks: u64,
     pub woken: bool,
@@ -30,14 +32,16 @@ impl FutexManager {
         }
     }
 
-    pub fn add_waiter(&mut self, task_id: TaskId, uaddr: u64, deadline_ticks: u64) {
+    pub fn add_waiter(&mut self, task_id: TaskId, process_id: ProcessId, uaddr: u64, deadline_ticks: u64) {
         if let Some(w) = self.waiters.iter_mut().find(|w| w.task_id == task_id) {
+            w.process_id = process_id;
             w.uaddr = uaddr;
             w.deadline_ticks = deadline_ticks;
             w.woken = false;
         } else {
             self.waiters.push(FutexWaiter {
                 task_id,
+                process_id,
                 uaddr,
                 deadline_ticks,
                 woken: false,
@@ -58,11 +62,11 @@ impl FutexManager {
         }
     }
 
-    pub fn wake(&mut self, uaddr: u64, max_count: usize) -> Vec<TaskId> {
+    pub fn wake(&mut self, process_id: ProcessId, uaddr: u64, max_count: usize) -> Vec<TaskId> {
         let mut woken = Vec::new();
         let mut count = 0;
         for w in self.waiters.iter_mut() {
-            if w.uaddr == uaddr && !w.woken {
+            if w.process_id == process_id && w.uaddr == uaddr && !w.woken {
                 w.woken = true;
                 woken.push(w.task_id);
                 count += 1;
@@ -99,49 +103,64 @@ mod tests {
     #[test]
     fn test_futex_manager_wait_and_wake() {
         let mut mgr = FutexManager::new();
+        let p1 = ProcessId(1);
+        let p2 = ProcessId(2);
         let t1 = TaskId(101);
         let t2 = TaskId(102);
         let t3 = TaskId(103);
+        let t4_other_proc = TaskId(104);
         let uaddr = 0x2000_1000;
 
-        mgr.add_waiter(t1, uaddr, 0);
-        mgr.add_waiter(t2, uaddr, 0);
-        mgr.add_waiter(t3, 0x2000_2000, 0);
+        mgr.add_waiter(t1, p1, uaddr, 0);
+        mgr.add_waiter(t2, p1, uaddr, 0);
+        mgr.add_waiter(t3, p1, 0x2000_2000, 0);
+        mgr.add_waiter(t4_other_proc, p2, uaddr, 0); // Same virtual address, different process
 
         assert!(!mgr.is_woken(t1));
         assert!(!mgr.is_woken(t2));
+        assert!(!mgr.is_woken(t4_other_proc));
 
-        // Wake 1 waiter on uaddr
-        let woken = mgr.wake(uaddr, 1);
+        // Wake 1 waiter in process p1 on uaddr
+        let woken = mgr.wake(p1, uaddr, 1);
         assert_eq!(woken.len(), 1);
         assert_eq!(woken[0], t1);
         assert!(mgr.is_woken(t1));
         assert!(!mgr.is_woken(t2));
+        assert!(!mgr.is_woken(t4_other_proc)); // Other process MUST NOT be woken
 
-        // Wake another waiter on uaddr
-        let woken2 = mgr.wake(uaddr, 1);
+        // Wake another waiter in process p1 on uaddr
+        let woken2 = mgr.wake(p1, uaddr, 1);
         assert_eq!(woken2.len(), 1);
         assert_eq!(woken2[0], t2);
         assert!(mgr.is_woken(t2));
+        assert!(!mgr.is_woken(t4_other_proc)); // Still untouched
 
         // Waiter on different uaddr is untouched
         assert!(!mgr.is_woken(t3));
+
+        // Wake waiter in process p2 on uaddr
+        let woken_p2 = mgr.wake(p2, uaddr, 1);
+        assert_eq!(woken_p2.len(), 1);
+        assert_eq!(woken_p2[0], t4_other_proc);
+        assert!(mgr.is_woken(t4_other_proc));
 
         // Removing waiter returns woken status
         assert!(mgr.remove_waiter(t1));
         assert!(mgr.remove_waiter(t2));
         assert!(!mgr.remove_waiter(t3));
+        assert!(mgr.remove_waiter(t4_other_proc));
     }
 
     #[test]
     fn test_futex_manager_timeouts_and_cleanup() {
         let mut mgr = FutexManager::new();
+        let p1 = ProcessId(1);
         let t1 = TaskId(201);
         let t2 = TaskId(202);
         let uaddr = 0x3000_1000;
 
-        mgr.add_waiter(t1, uaddr, 100);
-        mgr.add_waiter(t2, uaddr, 200);
+        mgr.add_waiter(t1, p1, uaddr, 100);
+        mgr.add_waiter(t2, p1, uaddr, 200);
 
         let expired_at_50 = mgr.check_timeouts(50);
         assert!(expired_at_50.is_empty());
