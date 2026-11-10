@@ -317,6 +317,11 @@ impl TileOcclusionMap {
     }
 }
 
+pub use crate::memory::SurfaceFrameTracker;
+pub use crate::memory::recycle_frame;
+pub use crate::memory::allocate_dma_frames;
+pub use crate::memory::physical_to_virtual;
+
 /// Backing storage for a DRM/KMS surface buffer.
 ///
 /// When running on bare metal, surface pixel data (which can be 4 to 10+ MiB per surface)
@@ -330,15 +335,8 @@ pub struct SurfaceBuffer {
     len: usize,
     #[allow(dead_code)]
     capacity: usize,
-    #[cfg(not(test))]
-    frames: alloc::vec::Vec<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>>,
-    #[cfg(not(test))]
-    is_heap: bool,
-    #[cfg(not(test))]
+    pub tracker: Option<alloc::sync::Arc<SurfaceFrameTracker>>,
     pub is_shm: bool,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    host_vec: alloc::vec::Vec<u32>,
 }
 
 /// Safety Invariant: SurfaceBuffer owns exclusive access to its underlying pixel buffer.
@@ -356,82 +354,114 @@ impl SurfaceBuffer {
                 ptr: core::ptr::null_mut(),
                 len: 0,
                 capacity: 0,
-                #[cfg(not(test))]
-                frames: alloc::vec::Vec::new(),
-                #[cfg(not(test))]
-                is_heap: false,
-                #[cfg(not(test))]
+                tracker: None,
                 is_shm: false,
-                #[cfg(test)]
-                host_vec: alloc::vec::Vec::new(),
             };
         }
-        #[cfg(test)]
-        {
-            let mut host_vec = vec![default_color; pixel_count];
-            let ptr = host_vec.as_mut_ptr();
-            let capacity = host_vec.capacity();
-            Self {
-                ptr,
-                len: pixel_count,
-                capacity,
-                host_vec,
-            }
-        }
-        #[cfg(not(test))]
-        {
-            let byte_len = pixel_count.saturating_mul(4);
-            let pages = (byte_len.saturating_add(4095)) / 4096;
-            if pages > 0 {
-                if let Some(frames) = crate::memory::allocate_dma_frames(pages) {
-                    if frames.len() == pages {
-                        let vaddr = crate::memory::physical_to_virtual(frames[0].start_address());
-                        let ptr = vaddr.as_mut_ptr::<u32>();
-                        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, pixel_count) };
-                        slice.fill(default_color);
-                        return Self {
-                            ptr,
-                            len: pixel_count,
-                            capacity: pages * 1024,
-                            frames,
-                            is_heap: false,
-                            is_shm: false,
-                        };
-                    }
+
+        let byte_len = pixel_count.saturating_mul(4);
+        let pages = (byte_len.saturating_add(4095)) / 4096;
+        if pages > 0 {
+            if let Some(frames) = crate::memory::allocate_dma_frames(pages) {
+                if frames.len() == pages {
+                    let vaddr = crate::memory::physical_to_virtual(frames[0].start_address());
+                    let ptr = vaddr.as_mut_ptr::<u32>();
+                    let slice = unsafe { core::slice::from_raw_parts_mut(ptr, pixel_count) };
+                    slice.fill(default_color);
+                    let tracker = SurfaceFrameTracker::new_physical(frames);
+                    return Self {
+                        ptr,
+                        len: pixel_count,
+                        capacity: pages * 1024,
+                        tracker: Some(tracker),
+                        is_shm: false,
+                    };
                 }
             }
-            // Fallback to kernel heap if frame allocator is uninitialized or exhausted
-            let mut heap_vec = vec![default_color; pixel_count];
-            let ptr = heap_vec.as_mut_ptr();
-            let capacity = heap_vec.capacity();
-            core::mem::forget(heap_vec);
-            Self {
-                ptr,
-                len: pixel_count,
-                capacity,
-                frames: alloc::vec::Vec::new(),
-                is_heap: true,
-                is_shm: false,
-            }
+        }
+
+        // Fallback to kernel heap if frame allocator is uninitialized or exhausted
+        let mut heap_vec = vec![default_color; pixel_count];
+        let ptr = heap_vec.as_mut_ptr();
+        let capacity = heap_vec.capacity();
+        core::mem::forget(heap_vec);
+        let tracker = SurfaceFrameTracker::new_heap(ptr, pixel_count, capacity);
+        Self {
+            ptr,
+            len: pixel_count,
+            capacity,
+            tracker: Some(tracker),
+            is_shm: false,
+        }
+    }
+
+    /// Creates a surface buffer explicitly backed by physical frames (e.g. for testing).
+    pub fn from_physical_frames(
+        frames: alloc::vec::Vec<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>>,
+        pixel_count: usize,
+        default_color: u32,
+    ) -> Self {
+        let vaddr = crate::memory::physical_to_virtual(frames[0].start_address());
+        let ptr = vaddr.as_mut_ptr::<u32>();
+        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, pixel_count) };
+        slice.fill(default_color);
+        let tracker = SurfaceFrameTracker::new_physical(frames);
+        Self {
+            ptr,
+            len: pixel_count,
+            capacity: pixel_count,
+            tracker: Some(tracker),
+            is_shm: false,
         }
     }
 
     /// Returns the physical page frames backing this surface buffer, if physically allocated.
-    #[cfg(not(test))]
     pub fn physical_frames(&self) -> &[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>] {
-        &self.frames
+        if let Some(ref tracker) = self.tracker {
+            &tracker.frames
+        } else {
+            &[]
+        }
     }
 
     /// Whether this buffer is allocated from dedicated physical frames outside the kernel heap.
     pub fn is_physical(&self) -> bool {
-        #[cfg(not(test))]
-        {
-            !self.is_heap && !self.frames.is_empty()
-        }
-        #[cfg(test)]
-        {
+        if let Some(ref tracker) = self.tracker {
+            !tracker.is_heap && !tracker.frames.is_empty()
+        } else {
             false
         }
+    }
+
+    /// Whether this buffer is backed by the kernel heap fallback.
+    pub fn is_heap(&self) -> bool {
+        if let Some(ref tracker) = self.tracker {
+            tracker.is_heap
+        } else {
+            false
+        }
+    }
+
+    /// Maps this surface buffer into a task's page table.
+    pub fn map_to_task(
+        &mut self,
+        page_table: &mut crate::memory::TaskPageTable,
+        start_page: x86_64::structures::paging::Page<x86_64::structures::paging::Size4KiB>,
+        flags: x86_64::structures::paging::PageTableFlags,
+    ) -> Result<(), &'static str> {
+        let tracker = self.tracker.as_ref().ok_or("No frame tracker in surface buffer")?;
+        page_table.map_shared_surface(start_page, tracker.clone(), flags)?;
+        self.is_shm = true;
+        Ok(())
+    }
+
+    /// Unmaps this surface buffer from a task's page table.
+    pub fn unmap_from_task(
+        &mut self,
+        page_table: &mut crate::memory::TaskPageTable,
+        start_page: x86_64::structures::paging::Page<x86_64::structures::paging::Size4KiB>,
+    ) -> Result<(), &'static str> {
+        page_table.unmap_shared_surface(start_page)
     }
 }
 
@@ -460,19 +490,8 @@ impl core::ops::DerefMut for SurfaceBuffer {
 
 impl Drop for SurfaceBuffer {
     fn drop(&mut self) {
-        #[cfg(not(test))]
-        {
-            if self.is_heap {
-                if !self.ptr.is_null() && self.capacity > 0 {
-                    unsafe {
-                        let _ = alloc::vec::Vec::from_raw_parts(self.ptr, self.len, self.capacity);
-                    }
-                }
-            } else {
-                for frame in self.frames.drain(..) {
-                    crate::memory::recycle_frame(frame);
-                }
-            }
+        if let Some(tracker) = self.tracker.take() {
+            tracker.mark_surface_dropped();
         }
     }
 }
@@ -627,12 +646,8 @@ impl DrmSurface {
     pub fn enable_double_buffering(&mut self) -> Result<(), &'static str> {
         if self.back_pixels.is_none() {
             let size = (self.width as usize) * (self.height as usize);
-            #[allow(unused_mut)]
             let mut buf = SurfaceBuffer::new(size, 0xFF000000);
-            #[cfg(not(test))]
-            {
-                buf.is_shm = true;
-            }
+            buf.is_shm = true;
             self.back_pixels = Some(buf);
         }
         Ok(())
@@ -667,7 +682,6 @@ impl DrmSurface {
     }
 
     /// Returns the physical frames backing the back buffer for userspace SHM mapping.
-    #[cfg(not(test))]
     pub fn back_buffer_physical_frames(&self) -> Option<&[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>]> {
         self.back_pixels.as_ref().map(|b| b.physical_frames())
     }
@@ -3680,6 +3694,155 @@ mod tests {
         assert_eq!(buf[0], 0x12345678);
         assert_eq!(buf[99], 0x12345678);
         assert!(buf.capacity >= 100);
+    }
+
+    #[test]
+    fn test_surface_destroyed_before_task() {
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::PhysAddr::new(0x200000),
+        );
+        let tracker = SurfaceFrameTracker::new_physical(vec![frame]);
+        crate::memory::reset_test_recycled_frame_count();
+
+        // 1. Task maps the surface buffer
+        tracker.add_mapping();
+        assert_eq!(tracker.mapping_count(), 1);
+
+        // 2. Surface is destroyed while task mapping is active
+        tracker.mark_surface_dropped();
+        assert!(tracker.is_surface_dropped());
+        // Frame must NOT be recycled while task still maps it
+        assert_eq!(crate::memory::test_recycled_frame_count(), 0);
+        assert!(!tracker.is_recycled());
+
+        // 3. Task unmaps/exits: last reference released triggers recycling exactly once
+        tracker.remove_mapping();
+        assert_eq!(tracker.mapping_count(), 0);
+        assert!(tracker.is_recycled());
+        assert_eq!(crate::memory::test_recycled_frame_count(), 1);
+    }
+
+    #[test]
+    fn test_task_destroyed_before_surface() {
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::PhysAddr::new(0x300000),
+        );
+        let tracker = SurfaceFrameTracker::new_physical(vec![frame]);
+        crate::memory::reset_test_recycled_frame_count();
+
+        // 1. Task maps the surface buffer
+        tracker.add_mapping();
+        assert_eq!(tracker.mapping_count(), 1);
+
+        // 2. Task unmaps/exits before surface is destroyed
+        tracker.remove_mapping();
+        assert_eq!(tracker.mapping_count(), 0);
+        // Frame must NOT be recycled because surface is still live
+        assert_eq!(crate::memory::test_recycled_frame_count(), 0);
+        assert!(!tracker.is_recycled());
+
+        // 3. Surface is now destroyed: single authority recycles frame
+        tracker.mark_surface_dropped();
+        assert!(tracker.is_recycled());
+        assert_eq!(crate::memory::test_recycled_frame_count(), 1);
+    }
+
+    #[test]
+    fn test_multiple_task_mappings_single_authority() {
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::PhysAddr::new(0x400000),
+        );
+        let tracker = SurfaceFrameTracker::new_physical(vec![frame]);
+        crate::memory::reset_test_recycled_frame_count();
+
+        // Three active task mappings
+        tracker.add_mapping();
+        tracker.add_mapping();
+        tracker.add_mapping();
+        assert_eq!(tracker.mapping_count(), 3);
+
+        // Surface is dropped
+        tracker.mark_surface_dropped();
+        assert_eq!(crate::memory::test_recycled_frame_count(), 0);
+
+        // First two tasks unmap
+        tracker.remove_mapping();
+        tracker.remove_mapping();
+        assert_eq!(tracker.mapping_count(), 1);
+        assert_eq!(crate::memory::test_recycled_frame_count(), 0);
+
+        // Final task unmaps: triggers recycling
+        tracker.remove_mapping();
+        assert_eq!(tracker.mapping_count(), 0);
+        assert!(tracker.is_recycled());
+        assert_eq!(crate::memory::test_recycled_frame_count(), 1);
+    }
+
+    #[test]
+    fn test_mapping_failure_clean_rollback() {
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::PhysAddr::new(0x500000),
+        );
+        let tracker = SurfaceFrameTracker::new_physical(vec![frame]);
+
+        // Marking surface dropped prevents subsequent mapping
+        tracker.mark_surface_dropped();
+        assert!(tracker.is_surface_dropped());
+
+        // Heap tracker rejects MMU mapping
+        let heap_tracker = SurfaceFrameTracker::new_heap(core::ptr::null_mut(), 0, 0);
+        assert!(heap_tracker.is_heap);
+    }
+
+    #[test]
+    fn test_repeated_cleanup_is_idempotent() {
+        let frame = x86_64::structures::paging::PhysFrame::<x86_64::structures::paging::Size4KiB>::containing_address(
+            x86_64::PhysAddr::new(0x600000),
+        );
+        let tracker = SurfaceFrameTracker::new_physical(vec![frame]);
+        crate::memory::reset_test_recycled_frame_count();
+
+        tracker.mark_surface_dropped();
+        assert_eq!(crate::memory::test_recycled_frame_count(), 1);
+
+        // Subsequent cleanup calls must be complete no-ops
+        tracker.recycle_internal();
+        tracker.recycle_internal();
+        tracker.mark_surface_dropped();
+        assert_eq!(crate::memory::test_recycled_frame_count(), 1);
+    }
+
+    #[test]
+    fn test_back_buffer_replacement_cleans_up() {
+        let mut surface = DrmSurface::new(1, 320, 240, 0, 1);
+        assert!(surface.enable_double_buffering().is_ok());
+        assert!(surface.back_pixels.is_some());
+
+        let old_tracker = surface.back_pixels.as_ref().unwrap().tracker.clone().unwrap();
+        assert!(!old_tracker.is_surface_dropped());
+
+        // Replace back buffer with a new buffer
+        let new_buf = SurfaceBuffer::new(320 * 240, 0xFF00FF00);
+        surface.back_pixels = Some(new_buf);
+
+        // The old back buffer was dropped upon replacement
+        assert!(old_tracker.is_surface_dropped());
+    }
+
+    #[test]
+    fn test_heap_fallback_allocation_and_destruction_exact_capacity() {
+        let buf = SurfaceBuffer::new(256, 0xAABBCCDD);
+        assert!(buf.is_heap());
+        assert_eq!(buf.len(), 256);
+        assert_eq!(buf[0], 0xAABBCCDD);
+        assert_eq!(buf[255], 0xAABBCCDD);
+
+        let tracker = buf.tracker.as_ref().unwrap().clone();
+        assert_eq!(tracker.heap_capacity, buf.capacity);
+
+        drop(buf);
+        assert!(tracker.is_surface_dropped());
+        assert!(tracker.is_recycled());
     }
 }
 

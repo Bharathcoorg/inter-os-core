@@ -121,27 +121,138 @@ impl TaskContext {
     }
 }
 
-/// Returns whether the CPU reports support for FXSAVE/FXRSTOR via CPUID.1.EDX[bit 24].
-pub fn cpu_supports_fxsave() -> bool {
+/// Detailed CPU SIMD / FPU hardware capability matrix detected via CPUID.
+///
+/// Intel/AMD Architecture Clarification:
+/// Setting `CR4.OSFXSR` enables the execution of `FXSAVE`/`FXRSTOR` instructions and
+/// establishes the 128-bit SSE execution environment (enabling access to XMM0..XMM15).
+/// Setting `CR4.OSXMMEXCPT` configures unmasked SIMD floating-point exceptions to route
+/// to the `#XM` exception vector (19) rather than `#UD`.
+///
+/// Crucially, neither `CR4.OSFXSR` nor `CR4.OSXMMEXCPT` independently enables instruction
+/// set extensions SSE3, SSSE3, SSE4.1, or SSE4.2. Availability of these instruction set
+/// extensions is governed strictly by silicon hardware capability reported via `CPUID.1.ECX`.
+///
+/// Furthermore, AVX (256-bit YMM) and AVX-512 (512-bit ZMM) require `XSAVE`/`XRSTOR`, `XCR0`,
+/// and `CR4.OSXSAVE`. Because `FXSAVE64` only preserves 128-bit XMM registers, InterOS
+/// intentionally keeps `CR4.OSXSAVE` (bit 18) CLEARED (0). This ensures that any attempt
+/// by user or kernel code to execute VEX/EVEX instructions traps immediately to `#UD`,
+/// preventing silent register corruption across context switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuSimdCapabilities {
+    /// FXSAVE and FXRSTOR instructions supported (CPUID.1.EDX[24])
+    pub fxsr: bool,
+    /// Streaming SIMD Extensions (SSE) (CPUID.1.EDX[25])
+    pub sse: bool,
+    /// Streaming SIMD Extensions 2 (SSE2) (CPUID.1.EDX[26])
+    pub sse2: bool,
+    /// Streaming SIMD Extensions 3 (SSE3 / Prescott) (CPUID.1.ECX[0])
+    pub sse3: bool,
+    /// Supplemental Streaming SIMD Extensions 3 (SSSE3) (CPUID.1.ECX[9])
+    pub ssse3: bool,
+    /// Streaming SIMD Extensions 4.1 (SSE4.1) (CPUID.1.ECX[19])
+    pub sse4_1: bool,
+    /// Streaming SIMD Extensions 4.2 (SSE4.2) (CPUID.1.ECX[20])
+    pub sse4_2: bool,
+    /// XSAVE / XRSTOR hardware support (CPUID.1.ECX[26])
+    pub xsave_hardware: bool,
+    /// OSXSAVE enabled in CR4 (CPUID.1.ECX[27])
+    pub osxsave: bool,
+    /// Advanced Vector Extensions (AVX) silicon capability (CPUID.1.ECX[28])
+    pub avx_hardware: bool,
+    /// Advanced Vector Extensions 2 (AVX2) silicon capability (CPUID.7.0.EBX[5])
+    pub avx2_hardware: bool,
+    /// AVX-512 Foundation (AVX512F) silicon capability (CPUID.7.0.EBX[16])
+    pub avx512f_hardware: bool,
+    /// Whether AVX is enabled by InterOS kernel policy (strictly false: CR4.OSXSAVE is 0)
+    pub avx_os_enabled: bool,
+    /// Whether AVX-512 is enabled by InterOS kernel policy (strictly false: CR4.OSXSAVE is 0)
+    pub avx512_os_enabled: bool,
+}
+
+impl CpuSimdCapabilities {
+    /// Decodes raw CPUID register outputs into the structured capability matrix.
+    pub const fn decode(edx1: u32, ecx1: u32, ebx7: u32) -> Self {
+        let fxsr = (edx1 & (1 << 24)) != 0;
+        let sse = (edx1 & (1 << 25)) != 0;
+        let sse2 = (edx1 & (1 << 26)) != 0;
+        let sse3 = (ecx1 & (1 << 0)) != 0;
+        let ssse3 = (ecx1 & (1 << 9)) != 0;
+        let sse4_1 = (ecx1 & (1 << 19)) != 0;
+        let sse4_2 = (ecx1 & (1 << 20)) != 0;
+        let xsave_hardware = (ecx1 & (1 << 26)) != 0;
+        let osxsave = (ecx1 & (1 << 27)) != 0;
+        let avx_hardware = (ecx1 & (1 << 28)) != 0;
+        let avx2_hardware = (ebx7 & (1 << 5)) != 0;
+        let avx512f_hardware = (ebx7 & (1 << 16)) != 0;
+
+        // Platform truth contract: AVX and AVX-512 require XSAVE/XRSTOR and XCR0 management.
+        // InterOS keeps CR4.OSXSAVE cleared, meaning AVX/AVX-512 instructions trigger #UD.
+        Self {
+            fxsr,
+            sse,
+            sse2,
+            sse3,
+            ssse3,
+            sse4_1,
+            sse4_2,
+            xsave_hardware,
+            osxsave,
+            avx_hardware,
+            avx2_hardware,
+            avx512f_hardware,
+            avx_os_enabled: false,
+            avx512_os_enabled: false,
+        }
+    }
+}
+
+/// Queries CPUID leaf 1 (EDX, ECX) and leaf 7.0 (EBX) to detect the exact hardware SIMD matrix.
+pub fn detect_cpu_simd() -> CpuSimdCapabilities {
     #[cfg(all(target_arch = "x86_64", not(test)))]
     unsafe {
-        let edx: u32;
+        let (edx1, ecx1): (u32, u32);
         core::arch::asm!(
             "push rbx",
             "mov eax, 1",
             "cpuid",
             "pop rbx",
-            lateout("edx") edx,
+            lateout("edx") edx1,
+            lateout("ecx") ecx1,
             out("eax") _,
-            out("ecx") _,
             options(nomem, nostack)
         );
-        (edx & (1 << 24)) != 0
+
+        let ebx7: u32;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 7",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "pop rbx",
+            out(reg) ebx7,
+            out("eax") _,
+            out("ecx") _,
+            out("edx") _,
+            options(nomem, nostack)
+        );
+
+        CpuSimdCapabilities::decode(edx1, ecx1, ebx7)
     }
     #[cfg(any(not(target_arch = "x86_64"), test))]
     {
-        true
+        CpuSimdCapabilities::decode(
+            (1 << 24) | (1 << 25) | (1 << 26),
+            (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 26) | (1 << 28),
+            (1 << 5) | (1 << 16),
+        )
     }
+}
+
+/// Returns whether the CPU reports support for FXSAVE/FXRSTOR via CPUID.1.EDX[bit 24].
+pub fn cpu_supports_fxsave() -> bool {
+    detect_cpu_simd().fxsr
 }
 
 /// Ensures CPU CR4 and CR0 control registers have FXSAVE/FXRSTOR and SSE enabled.
@@ -153,11 +264,22 @@ pub fn cpu_supports_fxsave() -> bool {
 /// - CR0.NE (bit 5) is set (native numeric exceptions via #MF rather than legacy IRQ13).
 /// - CR4.OSFXSR (bit 9) is set (enables FXSAVE/FXRSTOR instructions and 128-bit XMM).
 /// - CR4.OSXMMEXCPT (bit 10) is set (unmasked SIMD exceptions trigger #XM exception).
-/// - CR4.OSXSAVE (bit 18) remains cleared (AVX/XSAVE disabled).
+/// - CR4.OSXSAVE (bit 18) strictly remains cleared (AVX/XSAVE disabled, trapping VEX to #UD).
 pub fn init_fpu() {
+    let caps = detect_cpu_simd();
+    crate::serial_println!(
+        "[FPU] CPU SIMD Matrix: FXSR={} SSE={} SSE2={} SSE3={} SSSE3={} SSE4.1={} SSE4.2={} XSAVE_HW={} AVX_HW={} AVX2_HW={} AVX512F_HW={}",
+        caps.fxsr, caps.sse, caps.sse2, caps.sse3, caps.ssse3, caps.sse4_1, caps.sse4_2,
+        caps.xsave_hardware, caps.avx_hardware, caps.avx2_hardware, caps.avx512f_hardware
+    );
+    crate::serial_println!(
+        "[FPU] AVX Policy: AVX_OS_ENABLED={} AVX512_OS_ENABLED={} (CR4.OSXSAVE=0 enforced)",
+        caps.avx_os_enabled, caps.avx512_os_enabled
+    );
+
     #[cfg(all(target_arch = "x86_64", not(test)))]
     unsafe {
-        if !cpu_supports_fxsave() {
+        if !caps.fxsr {
             crate::serial_println!("[FPU] FATAL: CPU does not support FXSAVE/FXRSTOR (CPUID.1.EDX[24] = 0)");
             return;
         }
@@ -250,5 +372,46 @@ mod tests {
         assert_eq!(ctx.fxsave_area.0[1], 0x03);
         assert_eq!(ctx.fxsave_area.0[24], 0x80);
         assert_eq!(ctx.fxsave_area.0[25], 0x1F);
+    }
+
+    #[test]
+    fn test_cpu_simd_capabilities_decoding_and_avx_policy() {
+        // Case 1: Baseline x86_64 CPU with only FXSR, SSE, SSE2
+        let caps_base = CpuSimdCapabilities::decode(
+            (1 << 24) | (1 << 25) | (1 << 26),
+            0,
+            0,
+        );
+        assert!(caps_base.fxsr);
+        assert!(caps_base.sse);
+        assert!(caps_base.sse2);
+        assert!(!caps_base.sse3);
+        assert!(!caps_base.ssse3);
+        assert!(!caps_base.sse4_1);
+        assert!(!caps_base.sse4_2);
+        assert!(!caps_base.avx_hardware);
+        assert!(!caps_base.avx_os_enabled);
+        assert!(!caps_base.avx512_os_enabled);
+
+        // Case 2: Advanced modern CPU with SSE4.2, AVX, AVX2, AVX512F silicon
+        let caps_adv = CpuSimdCapabilities::decode(
+            (1 << 24) | (1 << 25) | (1 << 26),
+            (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 26) | (1 << 28),
+            (1 << 5) | (1 << 16),
+        );
+        assert!(caps_adv.fxsr);
+        assert!(caps_adv.sse3);
+        assert!(caps_adv.ssse3);
+        assert!(caps_adv.sse4_1);
+        assert!(caps_adv.sse4_2);
+        assert!(caps_adv.xsave_hardware);
+        assert!(caps_adv.avx_hardware);
+        assert!(caps_adv.avx2_hardware);
+        assert!(caps_adv.avx512f_hardware);
+
+        // Platform truth contract: Even on modern AVX-512 silicon, OS policy
+        // keeps AVX and AVX-512 disabled because FXSAVE only saves 128-bit XMM.
+        assert!(!caps_adv.avx_os_enabled);
+        assert!(!caps_adv.avx512_os_enabled);
     }
 }

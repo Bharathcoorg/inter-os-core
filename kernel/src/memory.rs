@@ -418,11 +418,138 @@ pub fn allocate_frame() -> Option<PhysFrame<Size4KiB>> {
     FRAME_ALLOCATOR.lock().as_mut()?.allocate_frame()
 }
 
+#[cfg(test)]
+static RECYCLED_FRAME_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn test_recycled_frame_count() -> usize {
+    RECYCLED_FRAME_COUNT.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub fn reset_test_recycled_frame_count() {
+    RECYCLED_FRAME_COUNT.store(0, core::sync::atomic::Ordering::SeqCst);
+}
+
 /// Recycles a task-owned physical frame after its address space is destroyed.
 pub fn recycle_frame(frame: PhysFrame<Size4KiB>) {
+    #[cfg(test)]
+    {
+        RECYCLED_FRAME_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
     if let Some(allocator) = FRAME_ALLOCATOR.lock().as_mut() {
         allocator.recycle_frame(frame);
     }
+}
+
+/// Tracks physical page frames backing a display surface or shared-memory mapping.
+/// Enforces single recycling authority: physical frames are returned to the frame
+/// allocator exactly once, only after BOTH the SurfaceBuffer is dropped AND all
+/// userspace task mappings referencing it have been unmapped.
+#[derive(Debug)]
+pub struct SurfaceFrameTracker {
+    pub frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    pub is_heap: bool,
+    pub heap_ptr: *mut u32,
+    pub heap_len: usize,
+    pub heap_capacity: usize,
+    /// Number of active userspace virtual page table mappings referencing this buffer
+    pub mapping_count: core::sync::atomic::AtomicUsize,
+    /// Whether the owning SurfaceBuffer has been destroyed
+    pub surface_dropped: core::sync::atomic::AtomicBool,
+    /// Atomic guard ensuring cleanup executes exactly once
+    pub recycled: core::sync::atomic::AtomicBool,
+}
+
+unsafe impl Send for SurfaceFrameTracker {}
+unsafe impl Sync for SurfaceFrameTracker {}
+
+impl SurfaceFrameTracker {
+    pub fn new_physical(frames: alloc::vec::Vec<PhysFrame<Size4KiB>>) -> alloc::sync::Arc<Self> {
+        alloc::sync::Arc::new(Self {
+            frames,
+            is_heap: false,
+            heap_ptr: core::ptr::null_mut(),
+            heap_len: 0,
+            heap_capacity: 0,
+            mapping_count: core::sync::atomic::AtomicUsize::new(0),
+            surface_dropped: core::sync::atomic::AtomicBool::new(false),
+            recycled: core::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub fn new_heap(ptr: *mut u32, len: usize, capacity: usize) -> alloc::sync::Arc<Self> {
+        alloc::sync::Arc::new(Self {
+            frames: alloc::vec::Vec::new(),
+            is_heap: true,
+            heap_ptr: ptr,
+            heap_len: len,
+            heap_capacity: capacity,
+            mapping_count: core::sync::atomic::AtomicUsize::new(0),
+            surface_dropped: core::sync::atomic::AtomicBool::new(false),
+            recycled: core::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub fn add_mapping(&self) {
+        self.mapping_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn remove_mapping(&self) {
+        let prev = self.mapping_count.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        if prev == 1 && self.surface_dropped.load(core::sync::atomic::Ordering::SeqCst) {
+            self.recycle_internal();
+        }
+    }
+
+    pub fn mark_surface_dropped(&self) {
+        self.surface_dropped.store(true, core::sync::atomic::Ordering::SeqCst);
+        if self.mapping_count.load(core::sync::atomic::Ordering::SeqCst) == 0 {
+            self.recycle_internal();
+        }
+    }
+
+    pub fn is_recycled(&self) -> bool {
+        self.recycled.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn mapping_count(&self) -> usize {
+        self.mapping_count.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn is_surface_dropped(&self) -> bool {
+        self.surface_dropped.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn recycle_internal(&self) {
+        if self.recycled.compare_exchange(false, true, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_ok() {
+            if self.is_heap {
+                if !self.heap_ptr.is_null() && self.heap_capacity > 0 {
+                    unsafe {
+                        let _ = alloc::vec::Vec::from_raw_parts(self.heap_ptr, self.heap_len, self.heap_capacity);
+                    }
+                }
+            } else {
+                for &frame in &self.frames {
+                    recycle_frame(frame);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SurfaceFrameTracker {
+    fn drop(&mut self) {
+        self.recycle_internal();
+    }
+}
+
+/// Shared surface memory mapping tracked inside a task's address space.
+#[derive(Debug, Clone)]
+pub struct SharedSurfaceMapping {
+    pub start_page: Page<Size4KiB>,
+    pub page_count: usize,
+    pub tracker: alloc::sync::Arc<SurfaceFrameTracker>,
 }
 
 /// Initializes the 1 MiB kernel heap using the global page mapper and frame allocator.
@@ -443,6 +570,7 @@ pub fn init_kernel_heap() -> Result<(), MapToError<Size4KiB>> {
 pub struct TaskPageTable {
     pub pml4_frame: PhysFrame<Size4KiB>,
     pub allocated_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    pub shared_mappings: alloc::vec::Vec<SharedSurfaceMapping>,
     /// Bytes of user virtual memory currently backed by leaf mappings.
     pub user_mapped_bytes: usize,
 }
@@ -484,6 +612,7 @@ impl TaskPageTable {
         Ok(Self {
             pml4_frame,
             allocated_frames: allocated,
+            shared_mappings: alloc::vec::Vec::new(),
             user_mapped_bytes: 0,
         })
     }
@@ -509,16 +638,15 @@ impl TaskPageTable {
         self.user_mapped_bytes
     }
 
-    /// Maps a virtual page to a physical frame in this process's isolated page table.
-    /// Intermediate tables (PDPT, PD, PT) are dynamically allocated with USER_ACCESSIBLE flags.
-    pub fn map_user_page(
+    /// Maps a raw virtual page to a physical frame in this process's page table.
+    /// Intermediate tables (PDPT, PD, PT) are dynamically allocated if needed and recorded
+    /// in `self.allocated_frames`. Does NOT push `frame` into `self.allocated_frames`.
+    pub fn map_leaf_raw(
         &mut self,
         page: Page<Size4KiB>,
         frame: PhysFrame<Size4KiB>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
-        // Reject impossible user permissions before allocating any page-table
-        // frames. This keeps W^X failures side-effect free.
         if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
             return Err("W^X violation: writable user mapping must be non-executable");
         }
@@ -537,8 +665,6 @@ impl TaskPageTable {
             new_p2: bool,
             new_p1: bool,
         | {
-            // Unlink newly-created tables before recycling them. Otherwise a
-            // later mapping could follow a recycled physical frame.
             if new_p1 {
                 let pml4_ptr = (phys_offset + table.pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
                 let pml4 = unsafe { &mut *pml4_ptr };
@@ -595,12 +721,6 @@ impl TaskPageTable {
             pml4[p4_idx].frame().map(|f| *owned == f).unwrap_or(false)
         }) {
             return Err("Cannot map user page into mirrored kernel PML4 entry");
-        }
-        if self.allocated_frames.iter().any(|owned| *owned == frame) {
-            return Err("physical frame already owned by address space");
-        }
-        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
-            return Err("W^X violation: writable user mapping must be non-executable");
         }
 
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -664,19 +784,99 @@ impl TaskPageTable {
             return Err("Virtual page already mapped");
         }
 
-        // User mappings are never allowed to be simultaneously writable and executable.
-        // Enforce W^X at the single mapping primitive so callers cannot bypass the
-        // ELF loader's segment-level policy by constructing a mapping directly.
         let leaf_flags = (flags & !PageTableFlags::PRESENT) | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
-        self.allocated_frames.push(frame);
-        self.user_mapped_bytes = self.user_mapped_bytes.saturating_add(4096);
 
         let (active_cr3, _) = Cr3::read();
         if active_cr3 == self.pml4_frame {
             x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
         }
 
+        Ok(())
+    }
+
+    /// Maps a virtual page to a physical frame in this process's isolated page table.
+    /// Intermediate tables (PDPT, PD, PT) and the mapped frame itself are tracked in
+    /// `self.allocated_frames` for exclusive task ownership and recycling on exit.
+    pub fn map_user_page(
+        &mut self,
+        page: Page<Size4KiB>,
+        frame: PhysFrame<Size4KiB>,
+        flags: PageTableFlags,
+    ) -> Result<(), &'static str> {
+        if self.allocated_frames.iter().any(|owned| *owned == frame) {
+            return Err("physical frame already owned by address space");
+        }
+        self.map_leaf_raw(page, frame, flags)?;
+        self.allocated_frames.push(frame);
+        self.user_mapped_bytes = self.user_mapped_bytes.saturating_add(4096);
+        Ok(())
+    }
+
+    /// Maps a shared surface buffer's physical frames into this task's address space.
+    /// Intermediate page tables are created if needed and tracked in `self.allocated_frames`.
+    /// The surface frames themselves are tracked under `self.shared_mappings` and registered
+    /// with `tracker.add_mapping()`. If any step fails, all partially mapped pages are rolled
+    /// back cleanly without leaks or dangling mappings.
+    pub fn map_shared_surface(
+        &mut self,
+        start_page: Page<Size4KiB>,
+        tracker: alloc::sync::Arc<SurfaceFrameTracker>,
+        flags: PageTableFlags,
+    ) -> Result<(), &'static str> {
+        if tracker.is_heap || tracker.frames.is_empty() {
+            return Err("Cannot map non-physical surface buffer into hardware MMU");
+        }
+        if tracker.is_surface_dropped() {
+            return Err("Cannot map an already destroyed surface buffer");
+        }
+        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+
+        let page_count = tracker.frames.len();
+        let start_vaddr = start_page.start_address().as_u64();
+        let span_bytes = (page_count as u64).checked_mul(4096).ok_or("Overflow in surface span")?;
+        let end_vaddr = start_vaddr.checked_add(span_bytes).ok_or("Overflow in surface virtual end")?;
+        if end_vaddr >= 0x0000_8000_0000_0000 {
+            return Err("Shared surface virtual range extends into kernel address space");
+        }
+
+        // Verify none of the pages in the target span are already mapped
+        for i in 0..page_count {
+            let page_addr = VirtAddr::new(start_vaddr + (i as u64 * 4096));
+            if self.translate(page_addr).is_some() {
+                return Err("Virtual page in target shared surface range is already mapped");
+            }
+        }
+
+        let mut mapped_count = 0;
+        for i in 0..page_count {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(start_vaddr + (i as u64 * 4096)));
+            let frame = tracker.frames[i];
+
+            match self.map_leaf_raw(page, frame, flags) {
+                Ok(()) => {
+                    mapped_count += 1;
+                }
+                Err(err) => {
+                    // Rollback partially mapped pages
+                    for r in 0..mapped_count {
+                        let roll_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start_vaddr + (r as u64 * 4096)));
+                        let _ = self.clear_leaf_pte(roll_page);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        tracker.add_mapping();
+        self.shared_mappings.push(SharedSurfaceMapping {
+            start_page,
+            page_count,
+            tracker,
+        });
+        self.user_mapped_bytes = self.user_mapped_bytes.saturating_add(page_count * 4096);
         Ok(())
     }
 
@@ -724,6 +924,65 @@ impl TaskPageTable {
             x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
         }
         recycle_frame(frame);
+        Ok(())
+    }
+
+    /// Unlinks the leaf page-table entry for `page` and flushes the TLB if this table is active.
+    /// Does NOT remove from `allocated_frames` or call `recycle_frame`.
+    pub fn clear_leaf_pte(&mut self, page: Page<Size4KiB>) -> Result<PhysFrame<Size4KiB>, &'static str> {
+        let vaddr = page.start_address().as_u64();
+        if vaddr >= 0x0000_8000_0000_0000 {
+            return Err("Cannot unmap a kernel address from a user page table");
+        }
+
+        let phys_offset = phys_mem_offset();
+        let pml4_ptr = (phys_offset + self.pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let pml4 = unsafe { &*pml4_ptr };
+        let p4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+        let p3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        let p2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let p1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+        let p3_frame = pml4[p4_idx].frame().map_err(|_| "userspace PML4 entry missing")?;
+        let p3_ptr = (phys_offset + p3_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let p3 = unsafe { &*p3_ptr };
+        let p2_frame = p3[p3_idx].frame().map_err(|_| "userspace PDPT entry missing")?;
+        let p2_ptr = (phys_offset + p2_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let p2 = unsafe { &*p2_ptr };
+        let p1_frame = p2[p2_idx].frame().map_err(|_| "userspace PD entry missing")?;
+        let p1_ptr = (phys_offset + p1_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+        let p1 = unsafe { &mut *p1_ptr };
+        if !p1[p1_idx].flags().contains(PageTableFlags::PRESENT) {
+            return Err("userspace page is not mapped");
+        }
+
+        let frame = p1[p1_idx].frame().map_err(|_| "userspace leaf frame missing")?;
+        p1[p1_idx].set_unused();
+
+        let (active_cr3, _) = Cr3::read();
+        if active_cr3 == self.pml4_frame {
+            x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
+        }
+
+        Ok(frame)
+    }
+
+    /// Unmaps a shared surface buffer from this task's address space.
+    /// Clears leaf PTEs and TLB entries, updates user_mapped_bytes, and notifies the tracker
+    /// via `tracker.remove_mapping()`. Does NOT recycle the physical frames (the tracker retains authority).
+    pub fn unmap_shared_surface(&mut self, start_page: Page<Size4KiB>) -> Result<(), &'static str> {
+        let Some(pos) = self.shared_mappings.iter().position(|m| m.start_page == start_page) else {
+            return Err("No shared surface mapping found at specified virtual address");
+        };
+        let mapping = self.shared_mappings.swap_remove(pos);
+        for i in 0..mapping.page_count {
+            let page = Page::<Size4KiB>::containing_address(
+                VirtAddr::new(mapping.start_page.start_address().as_u64() + (i as u64 * 4096))
+            );
+            let _ = self.clear_leaf_pte(page);
+        }
+        self.user_mapped_bytes = self.user_mapped_bytes.saturating_sub(mapping.page_count * 4096);
+        mapping.tracker.remove_mapping();
         Ok(())
     }
 
@@ -833,7 +1092,21 @@ impl Drop for TaskPageTable {
         if active_cr3 == self.pml4_frame {
             switch_to_kernel_page_table();
         }
-        // Clear owned mappings before returning frames to the allocator.
+
+        // 1. Unmap all shared surface mappings and release their tracker reference.
+        // Clears leaf PTEs and updates the tracker without recycling the shared frames.
+        let shared = core::mem::take(&mut self.shared_mappings);
+        for mapping in shared {
+            for i in 0..mapping.page_count {
+                let page = Page::<Size4KiB>::containing_address(
+                    VirtAddr::new(mapping.start_page.start_address().as_u64() + (i as u64 * 4096))
+                );
+                let _ = self.clear_leaf_pte(page);
+            }
+            mapping.tracker.remove_mapping();
+        }
+
+        // 2. Clear exclusively owned mappings before returning frames to the allocator.
         for frame in self.allocated_frames.drain(..) {
             recycle_frame(frame);
         }

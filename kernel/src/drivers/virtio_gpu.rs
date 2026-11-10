@@ -530,6 +530,7 @@ pub const VIRTIO_GPU_MAX_CMD_SLOTS: usize = 16;
 pub struct VirtioGpuDmaSlot {
     pub req_bytes: [u8; 128],
     pub req_len: u32,
+    pub _pad: [u8; 12],
     pub resp: VirtioGpuCtrlHdr,
     pub head_desc: u16,
     pub in_flight: bool,
@@ -541,6 +542,7 @@ impl VirtioGpuDmaSlot {
         Self {
             req_bytes: [0u8; 128],
             req_len: 0,
+            _pad: [0u8; 12],
             resp: VirtioGpuCtrlHdr::new(0),
             head_desc: 0,
             in_flight: false,
@@ -548,6 +550,11 @@ impl VirtioGpuDmaSlot {
         }
     }
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(VirtioGpuDmaSlot, req_bytes) % 16 == 0);
+    assert!(core::mem::offset_of!(VirtioGpuDmaSlot, resp) % 16 == 0);
+};
 
 /// Hardware-accurate VirtQueue 0 (Control Queue) for VirtIO-GPU control commands.
 #[derive(Debug, Clone)]
@@ -658,8 +665,20 @@ impl VirtioGpuControlQueue {
 
         let req_vaddr = x86_64::VirtAddr::new(req_addr);
         let resp_vaddr = x86_64::VirtAddr::new(resp_addr);
-        let req_gpa = crate::memory::virtual_to_physical(req_vaddr).map(|p| p.as_u64()).unwrap_or(req_addr);
-        let resp_gpa = crate::memory::virtual_to_physical(resp_vaddr).map(|p| p.as_u64()).unwrap_or(resp_addr);
+        let req_gpa = crate::memory::virtual_to_physical(req_vaddr)
+            .ok_or("VirtIO request DMA buffer GPA translation failed")?
+            .as_u64();
+        let resp_gpa = crate::memory::virtual_to_physical(resp_vaddr)
+            .ok_or("VirtIO response DMA buffer GPA translation failed")?
+            .as_u64();
+
+        // Enforce address range and VirtIO alignment invariants
+        if req_gpa == 0 || resp_gpa == 0 {
+            return Err("VirtIO DMA buffer GPA cannot be zero");
+        }
+        if req_gpa % 16 != 0 || resp_gpa % 16 != 0 {
+            return Err("VirtIO DMA buffer GPA must be 16-byte aligned");
+        }
 
         // d0: device reads request from driver DMA slot
         self.desc[d0 as usize].addr = req_gpa;
@@ -692,6 +711,12 @@ impl VirtioGpuControlQueue {
         resp_addr: u64,
         resp_len: u32,
     ) -> Result<u16, &'static str> {
+        if req_addr == 0 || resp_addr == 0 {
+            return Err("VirtIO DMA address cannot be zero");
+        }
+        if req_addr % 16 != 0 || resp_addr % 16 != 0 {
+            return Err("VirtIO DMA address must be 16-byte aligned");
+        }
         if self.num_free < 2 {
             return Err("VirtIO control queue descriptor ring full");
         }
@@ -796,53 +821,73 @@ impl VirtioGpuDriver {
     /// Probes the PCI bus for a VirtIO-GPU device (0x1AF4:0x1050 or 0x1010).
     /// When detected, cleanly attaches as primary display presentation device for 60/90 fps scanout.
     pub fn probe(&mut self) -> Result<(), &'static str> {
-        if let Some(dev) = find_virtio_gpu() {
-            dev.enable_memory_and_bus_master();
-            self.pci_device = Some(dev.clone());
-            self.transport = VirtioGpuTransportType::Pci;
-            self.present = true;
-            self.is_primary = true;
-            self.target_fps = 60;
-            self.scanout_width = 1080;
-            self.scanout_height = 2160;
-            self.active_resource_id = 1;
-
-            // Execute VirtIO 1.0 feature negotiation state machine
-            let _ = self.feature_negotiation.acknowledge();
-            let _ = self.feature_negotiation.driver_init();
-            let offered_features = VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID;
-            let _ = self.feature_negotiation.negotiate(offered_features, VIRTIO_F_VERSION_1);
-            let _ = self.feature_negotiation.driver_ok();
-
-            // Configure VirtQueue 0
-            let desc_vaddr = x86_64::VirtAddr::new(self.control_queue.desc.as_ptr() as usize as u64);
-            let avail_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.avail) as usize as u64);
-            let used_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.used) as usize as u64);
-
-            let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr).map(|p| p.as_u64()).unwrap_or(desc_vaddr.as_u64());
-            let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr).map(|p| p.as_u64()).unwrap_or(avail_vaddr.as_u64());
-            let used_gpa = crate::memory::virtual_to_physical(used_vaddr).map(|p| p.as_u64()).unwrap_or(used_vaddr.as_u64());
-
-            let _ = self.queue_config.configure(
-                VIRTQ_MAX_QUEUE_SIZE as u16,
-                VIRTQ_MAX_QUEUE_SIZE as u16,
-                desc_gpa,
-                avail_gpa,
-                used_gpa,
-            );
-
-            crate::serial_println!(
-                "[VIRTIO-GPU] Discovered VirtIO-GPU controller at PCI {:02x}:{:02x}.{} (scanout={}x{} @ {}fps, primary={})",
-                dev.addr.bus, dev.addr.device, dev.addr.function,
-                self.scanout_width, self.scanout_height, self.target_fps, self.is_primary
-            );
-            Ok(())
-        } else {
+        let Some(dev) = find_virtio_gpu() else {
             self.present = false;
             self.is_primary = false;
             self.transport = VirtioGpuTransportType::None;
-            Err("No VirtIO-GPU PCI display adapter found")
+            return Err("No VirtIO-GPU PCI display adapter found");
+        };
+
+        dev.enable_memory_and_bus_master();
+
+        // Advance VirtIO 1.0 feature negotiation state machine
+        self.feature_negotiation.reset();
+        self.feature_negotiation.acknowledge()?;
+        self.feature_negotiation.driver_init()?;
+        let offered_features = VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID;
+        self.feature_negotiation.negotiate(offered_features, VIRTIO_F_VERSION_1)?;
+        self.feature_negotiation.driver_ok()?;
+
+        // Configure VirtQueue 0 with strict GPA derivations (no fallback to virtual addresses)
+        let desc_vaddr = x86_64::VirtAddr::new(self.control_queue.desc.as_ptr() as usize as u64);
+        let avail_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.avail) as usize as u64);
+        let used_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.used) as usize as u64);
+
+        let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr)
+            .ok_or("VirtIO PCI queue descriptor table GPA translation failed")?
+            .as_u64();
+        let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr)
+            .ok_or("VirtIO PCI queue available ring GPA translation failed")?
+            .as_u64();
+        let used_gpa = crate::memory::virtual_to_physical(used_vaddr)
+            .ok_or("VirtIO PCI queue used ring GPA translation failed")?
+            .as_u64();
+
+        // Enforce VirtIO specification alignment rules (§2.6)
+        if desc_gpa % 16 != 0 {
+            return Err("VirtQueue descriptor table must be 16-byte aligned");
         }
+        if avail_gpa % 2 != 0 {
+            return Err("VirtQueue available ring must be 2-byte aligned");
+        }
+        if used_gpa % 4 != 0 {
+            return Err("VirtQueue used ring must be 4-byte aligned");
+        }
+
+        self.queue_config.configure(
+            VIRTQ_MAX_QUEUE_SIZE as u16,
+            VIRTQ_MAX_QUEUE_SIZE as u16,
+            desc_gpa,
+            avail_gpa,
+            used_gpa,
+        )?;
+
+        // Mark operational only after full initialization succeeds
+        self.pci_device = Some(dev.clone());
+        self.transport = VirtioGpuTransportType::Pci;
+        self.present = true;
+        self.is_primary = true;
+        self.target_fps = 60;
+        self.scanout_width = 1080;
+        self.scanout_height = 2160;
+        self.active_resource_id = 1;
+
+        crate::serial_println!(
+            "[VIRTIO-GPU] Discovered VirtIO-GPU controller at PCI {:02x}:{:02x}.{} (scanout={}x{} @ {}fps, primary={})",
+            dev.addr.bus, dev.addr.device, dev.addr.function,
+            self.scanout_width, self.scanout_height, self.target_fps, self.is_primary
+        );
+        Ok(())
     }
 
     /// Probes an MMIO region for a VirtIO-GPU device.
@@ -856,56 +901,118 @@ impl VirtioGpuDriver {
         if magic != VIRTIO_MMIO_MAGIC {
             return Err("VirtIO MMIO magic mismatch");
         }
-        let device_id = unsafe { core::ptr::read_volatile((base_addr + 0x08) as *const u32) };
+        let version = unsafe { core::ptr::read_volatile((base_addr + VIRTIO_MMIO_VERSION) as *const u32) };
+        if version != 2 {
+            return Err("VirtIO MMIO version is not 2 (VirtIO 1.0 modern MMIO required)");
+        }
+        let device_id = unsafe { core::ptr::read_volatile((base_addr + VIRTIO_MMIO_DEVICE_ID) as *const u32) };
         if device_id != VIRTIO_MMIO_DEVICE_GPU {
             return Err("VirtIO MMIO device ID is not GPU");
         }
-        self.mmio_base = Some(base_addr);
-        self.mmio_size = Some(size);
-        self.transport = VirtioGpuTransportType::Mmio;
-        self.present = true;
-        self.is_primary = true;
-        self.target_fps = 60;
-        self.scanout_width = 1080;
-        self.scanout_height = 2160;
-        self.active_resource_id = 1;
 
-        // Read device features from MMIO register
-        let dev_features_low = unsafe { core::ptr::read_volatile((base_addr + VIRTIO_MMIO_DEVICE_FEATURES) as *const u32) } as u64;
-        let dev_features = dev_features_low | VIRTIO_F_VERSION_1;
+        let status_reg = (base_addr + VIRTIO_MMIO_STATUS) as *mut u32;
 
-        // Reset device
+        // Reset device (§3.1.1 Step 1)
         unsafe {
-            let status_reg = (base_addr + VIRTIO_MMIO_STATUS) as *mut u32;
             core::ptr::write_volatile(status_reg, VIRTIO_STATUS_RESET);
+            // Step 2: Set ACKNOWLEDGE status bit
             core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE);
+            // Step 3: Set DRIVER status bit
             core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
-
-            // Write driver features
-            let driver_feat_reg = (base_addr + VIRTIO_MMIO_DRIVER_FEATURES) as *mut u32;
-            core::ptr::write_volatile(driver_feat_reg, dev_features as u32);
-            core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
         }
 
-        // Advance VirtIO 1.0 feature negotiation state machine
-        let _ = self.feature_negotiation.acknowledge();
-        let _ = self.feature_negotiation.driver_init();
-        let _ = self.feature_negotiation.negotiate(dev_features, VIRTIO_F_VERSION_1);
-        let _ = self.feature_negotiation.driver_ok();
+        // Step 4: Read both feature banks using DEVICE_FEATURES_SEL (§4.2.2)
+        let dev_features_sel = (base_addr + VIRTIO_MMIO_DEVICE_FEATURES_SEL) as *mut u32;
+        let dev_features_reg = (base_addr + VIRTIO_MMIO_DEVICE_FEATURES) as *const u32;
+        let (dev_features_low, dev_features_high) = unsafe {
+            core::ptr::write_volatile(dev_features_sel, 0);
+            let low = core::ptr::read_volatile(dev_features_reg);
+            core::ptr::write_volatile(dev_features_sel, 1);
+            let high = core::ptr::read_volatile(dev_features_reg);
+            (low, high)
+        };
+        let dev_features = (dev_features_low as u64) | ((dev_features_high as u64) << 32);
 
-        // Configure VirtQueue 0
+        // Modern VirtIO 1.0 MANDATES that the device offers VIRTIO_F_VERSION_1
+        if (dev_features & VIRTIO_F_VERSION_1) == 0 {
+            unsafe { core::ptr::write_volatile(status_reg, VIRTIO_STATUS_FAILED); }
+            return Err("Device does not offer mandatory VIRTIO_F_VERSION_1");
+        }
+
+        // Advance VirtIO 1.0 feature negotiation state machine:
+        // Negotiate only features ACTUALLY OFFERED by the device!
+        self.feature_negotiation.reset();
+        self.feature_negotiation.acknowledge()?;
+        self.feature_negotiation.driver_init()?;
+        let requested_features = VIRTIO_F_VERSION_1 | (dev_features & (VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_VIRGL));
+        let negotiated = self.feature_negotiation.negotiate(dev_features, requested_features)?;
+
+        // Write both driver feature banks using DRIVER_FEATURES_SEL (§4.2.2)
+        let drv_features_sel = (base_addr + VIRTIO_MMIO_DRIVER_FEATURES_SEL) as *mut u32;
+        let drv_features_reg = (base_addr + VIRTIO_MMIO_DRIVER_FEATURES) as *mut u32;
+        unsafe {
+            core::ptr::write_volatile(drv_features_sel, 0);
+            core::ptr::write_volatile(drv_features_reg, (negotiated & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile(drv_features_sel, 1);
+            core::ptr::write_volatile(drv_features_reg, ((negotiated >> 32) & 0xFFFFFFFF) as u32);
+
+            // Step 5: Set FEATURES_OK status bit
+            core::ptr::write_volatile(
+                status_reg,
+                VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK,
+            );
+
+            // Step 6: Re-read status to ensure FEATURES_OK is still set!
+            let confirmed_status = core::ptr::read_volatile(status_reg);
+            if (confirmed_status & VIRTIO_STATUS_FEATURES_OK) == 0 {
+                core::ptr::write_volatile(status_reg, VIRTIO_STATUS_FAILED);
+                return Err("VirtIO MMIO device rejected negotiated features (FEATURES_OK cleared)");
+            }
+        }
+
+        // Validate QUEUE_NUM_MAX before configuring the queue
+        let q_sel = (base_addr + VIRTIO_MMIO_QUEUE_SEL) as *mut u32;
+        let q_num_max = (base_addr + VIRTIO_MMIO_QUEUE_NUM_MAX) as *const u32;
+        unsafe {
+            core::ptr::write_volatile(q_sel, 0);
+        }
+        let max_q_size = unsafe { core::ptr::read_volatile(q_num_max) };
+        if max_q_size == 0 {
+            unsafe { core::ptr::write_volatile(status_reg, VIRTIO_STATUS_FAILED); }
+            return Err("VirtIO MMIO control queue 0 unavailable on device (QUEUE_NUM_MAX is 0)");
+        }
+        if (max_q_size as usize) < VIRTQ_MAX_QUEUE_SIZE {
+            unsafe { core::ptr::write_volatile(status_reg, VIRTIO_STATUS_FAILED); }
+            return Err("VirtIO MMIO control queue QUEUE_NUM_MAX is smaller than driver queue size");
+        }
+
+        // Configure VirtQueue 0 addresses: derive valid GPAs, never fall back to virtual!
         let desc_vaddr = x86_64::VirtAddr::new(self.control_queue.desc.as_ptr() as usize as u64);
         let avail_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.avail) as usize as u64);
         let used_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.used) as usize as u64);
 
-        let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr).map(|p| p.as_u64()).unwrap_or(desc_vaddr.as_u64());
-        let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr).map(|p| p.as_u64()).unwrap_or(avail_vaddr.as_u64());
-        let used_gpa = crate::memory::virtual_to_physical(used_vaddr).map(|p| p.as_u64()).unwrap_or(used_vaddr.as_u64());
+        let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr)
+            .ok_or("VirtIO control queue descriptor table GPA translation failed")?
+            .as_u64();
+        let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr)
+            .ok_or("VirtIO control queue available ring GPA translation failed")?
+            .as_u64();
+        let used_gpa = crate::memory::virtual_to_physical(used_vaddr)
+            .ok_or("VirtIO control queue used ring GPA translation failed")?
+            .as_u64();
+
+        // Validate alignments (§2.6)
+        if desc_gpa % 16 != 0 {
+            return Err("VirtQueue descriptor table must be 16-byte aligned");
+        }
+        if avail_gpa % 2 != 0 {
+            return Err("VirtQueue available ring must be 2-byte aligned");
+        }
+        if used_gpa % 4 != 0 {
+            return Err("VirtQueue used ring must be 4-byte aligned");
+        }
 
         unsafe {
-            let q_sel = (base_addr + VIRTIO_MMIO_QUEUE_SEL) as *mut u32;
-            core::ptr::write_volatile(q_sel, 0);
-
             let q_num = (base_addr + VIRTIO_MMIO_QUEUE_NUM) as *mut u32;
             core::ptr::write_volatile(q_num, VIRTQ_MAX_QUEUE_SIZE as u32);
 
@@ -927,20 +1034,37 @@ impl VirtioGpuDriver {
             let q_ready = (base_addr + VIRTIO_MMIO_QUEUE_READY) as *mut u32;
             core::ptr::write_volatile(q_ready, 1);
 
-            let status_reg = (base_addr + VIRTIO_MMIO_STATUS) as *mut u32;
+            let ready_confirmed = core::ptr::read_volatile(q_ready);
+            if ready_confirmed != 1 {
+                core::ptr::write_volatile(status_reg, VIRTIO_STATUS_FAILED);
+                return Err("VirtIO MMIO queue 0 failed to reach READY state");
+            }
+
+            // Step 7: Set DRIVER_OK
             core::ptr::write_volatile(
                 status_reg,
                 VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK,
             );
         }
 
-        let _ = self.queue_config.configure(
+        self.queue_config.configure(
             VIRTQ_MAX_QUEUE_SIZE as u16,
             VIRTQ_MAX_QUEUE_SIZE as u16,
             desc_gpa,
             avail_gpa,
             used_gpa,
-        );
+        )?;
+
+        // Only after all initialization succeeds do we mark device operational!
+        self.mmio_base = Some(base_addr);
+        self.mmio_size = Some(size);
+        self.transport = VirtioGpuTransportType::Mmio;
+        self.present = true;
+        self.is_primary = true;
+        self.target_fps = 60;
+        self.scanout_width = 1080;
+        self.scanout_height = 2160;
+        self.active_resource_id = 1;
 
         crate::serial_println!(
             "[VIRTIO-GPU] Discovered VirtIO-GPU MMIO controller at {:#x} (scanout={}x{} @ {}fps, primary={})",
@@ -1050,6 +1174,9 @@ impl VirtioGpuDriver {
         }
         if length == 0 {
             return Err("Zero-length backing buffer");
+        }
+        if addr == 0 || addr % 4096 != 0 {
+            return Err("Backing buffer physical address must be page-aligned and non-zero");
         }
         Ok((
             VirtioGpuResourceAttachBacking {
@@ -1265,6 +1392,30 @@ impl VirtioGpuDriver {
             completed += 1;
         }
         Ok(completed)
+    }
+
+    /// Polls for completions with a bounded spin timeout.
+    /// If the device fails to complete within `max_spins` iterations, or returns an error,
+    /// triggers a hardware reset via `reset_device()` and returns an Err.
+    pub fn poll_completions_timeout(&mut self, max_spins: u32) -> Result<u32, &'static str> {
+        let mut spins = 0;
+        loop {
+            match self.poll_completions() {
+                Ok(n) if n > 0 => return Ok(n),
+                Ok(_) => {
+                    spins += 1;
+                    if spins >= max_spins {
+                        self.reset_device();
+                        return Err("VirtIO-GPU device command timed out; device reset executed");
+                    }
+                    core::hint::spin_loop();
+                }
+                Err(e) => {
+                    self.reset_device();
+                    return Err(e);
+                }
+            }
+        }
     }
 
     /// Helper for scanout presentation of row-band dirty rectangles.
@@ -1509,10 +1660,13 @@ mod tests {
         let mut driver = VirtioGpuDriver::new();
         assert_eq!(driver.probe_mmio(0, 0), Err("Invalid MMIO parameters for VirtIO-GPU"));
 
-        // Simulated MMIO buffer
+        // Simulated modern VirtIO 1.0 MMIO register space (at least 256 bytes = 64 u32s)
         let mut simulated_mmio = [0u32; 64];
-        simulated_mmio[0] = 0x74726976; // 'virt'
-        simulated_mmio[2] = 16;         // GPU device ID
+        simulated_mmio[0] = 0x74726976; // 'virt' magic (offset 0x00)
+        simulated_mmio[1] = 2;          // Version 2 (offset 0x04)
+        simulated_mmio[2] = 16;         // GPU device ID (offset 0x08)
+        simulated_mmio[4] = 1;          // Device features (offset 0x10, bit 32 = VIRTIO_F_VERSION_1)
+        simulated_mmio[13] = 64;        // QUEUE_NUM_MAX >= 64 (offset 0x34)
         let ptr = simulated_mmio.as_ptr() as usize;
 
         assert_eq!(driver.probe_mmio(ptr, 256), Ok(()));
@@ -1521,9 +1675,21 @@ mod tests {
         assert_eq!(driver.transport, VirtioGpuTransportType::Mmio);
         assert_eq!(driver.target_fps, 60);
 
+        // Version mismatch (< 2) fails closed
+        let mut bad_ver_mmio = [0u32; 64];
+        bad_ver_mmio[0] = 0x74726976;
+        bad_ver_mmio[1] = 1; // Legacy v1
+        bad_ver_mmio[2] = 16;
+        let mut bad_ver_driver = VirtioGpuDriver::new();
+        assert_eq!(
+            bad_ver_driver.probe_mmio(bad_ver_mmio.as_ptr() as usize, 256),
+            Err("VirtIO MMIO version is not 2 (VirtIO 1.0 modern MMIO required)")
+        );
+
         // Mismatched device ID fails
         let mut bad_mmio = [0u32; 64];
         bad_mmio[0] = 0x74726976;
+        bad_mmio[1] = 2;
         bad_mmio[2] = 1; // Net, not GPU
         let mut bad_driver = VirtioGpuDriver::new();
         assert_eq!(
@@ -1676,5 +1842,48 @@ mod tests {
         assert!(VIRTIO_GPU_HARDWARE_LIMITS.coherent_dma);
         assert!(!VIRTIO_GPU_HARDWARE_LIMITS.supports_virgl_3d);
         assert_eq!(VIRTIO_GPU_HARDWARE_LIMITS.maximum_scanouts, 16);
+    }
+
+    #[test]
+    fn test_virtio_gpu_dma_address_validation_fails_on_zero_or_misaligned() {
+        let mut queue = VirtioGpuControlQueue::new();
+        // Zero address fails closed
+        assert!(queue.submit_command(0, 64, 0x2000, 24).is_err());
+        assert!(queue.submit_command(0x1000, 64, 0, 24).is_err());
+
+        // Misaligned address (must be 16-byte aligned) fails closed
+        assert!(queue.submit_command(0x1001, 64, 0x2000, 24).is_err());
+        assert!(queue.submit_command(0x1000, 64, 0x2003, 24).is_err());
+
+        // Properly aligned 16-byte GPA succeeds
+        assert!(queue.submit_command(0x1000, 64, 0x2000, 24).is_ok());
+    }
+
+    #[test]
+    fn test_virtio_gpu_attach_backing_validation() {
+        let mut driver = VirtioGpuDriver::new();
+        driver.present = true;
+
+        // Zero physical address rejected
+        assert!(driver.attach_backing(1, 0, 4096).is_err());
+
+        // Unaligned physical address rejected (must be 4096 page-aligned)
+        assert!(driver.attach_backing(1, 0x1001, 4096).is_err());
+        assert!(driver.attach_backing(1, 0x1080, 4096).is_err());
+
+        // Page-aligned physical address accepted
+        assert!(driver.attach_backing(1, 0x4000, 4096).is_ok());
+    }
+
+    #[test]
+    fn test_virtio_gpu_poll_timeout_triggers_reset() {
+        let mut driver = VirtioGpuDriver::new();
+        driver.present = true;
+        driver.queue_config.enabled = true;
+
+        // With nothing in the used ring, polling with bounded timeout times out and executes reset
+        let res = driver.poll_completions_timeout(5);
+        assert!(res.is_err());
+        assert!(!driver.queue_config.enabled);
     }
 }
