@@ -219,6 +219,185 @@ pub enum VirtioGpuTransportType {
     Mmio,
 }
 
+pub const VIRTQ_MAX_QUEUE_SIZE: usize = 64;
+pub const VIRTQ_DESC_F_NEXT: u16 = 1;
+pub const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+/// Standard VirtIO descriptor table entry (16 bytes, 16-byte aligned).
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtqDesc {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+    pub next: u16,
+}
+
+impl VirtqDesc {
+    pub const fn empty() -> Self {
+        Self {
+            addr: 0,
+            len: 0,
+            flags: 0,
+            next: 0,
+        }
+    }
+}
+
+/// Standard VirtIO available ring header and index table.
+#[repr(C, align(2))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtqAvail {
+    pub flags: u16,
+    pub idx: u16,
+    pub ring: [u16; VIRTQ_MAX_QUEUE_SIZE],
+}
+
+impl VirtqAvail {
+    pub const fn new() -> Self {
+        Self {
+            flags: 0,
+            idx: 0,
+            ring: [0; VIRTQ_MAX_QUEUE_SIZE],
+        }
+    }
+}
+
+/// Element in the VirtIO used ring representing a finished request descriptor.
+#[repr(C, align(4))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VirtqUsedElem {
+    pub id: u32,
+    pub len: u32,
+}
+
+/// Standard VirtIO used ring header and ring buffer.
+#[repr(C, align(4))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtqUsed {
+    pub flags: u16,
+    pub idx: u16,
+    pub ring: [VirtqUsedElem; VIRTQ_MAX_QUEUE_SIZE],
+}
+
+impl VirtqUsed {
+    pub const fn new() -> Self {
+        Self {
+            flags: 0,
+            idx: 0,
+            ring: [VirtqUsedElem { id: 0, len: 0 }; VIRTQ_MAX_QUEUE_SIZE],
+        }
+    }
+}
+
+/// Hardware-accurate VirtQueue 0 (Control Queue) for VirtIO-GPU control commands.
+#[derive(Debug, Clone)]
+pub struct VirtioGpuControlQueue {
+    pub desc: [VirtqDesc; VIRTQ_MAX_QUEUE_SIZE],
+    pub avail: VirtqAvail,
+    pub used: VirtqUsed,
+    pub free_head: u16,
+    pub num_free: u16,
+    pub last_used_idx: u16,
+}
+
+impl VirtioGpuControlQueue {
+    pub const fn new() -> Self {
+        let mut desc = [VirtqDesc::empty(); VIRTQ_MAX_QUEUE_SIZE];
+        let mut i = 0;
+        while i < VIRTQ_MAX_QUEUE_SIZE {
+            desc[i].next = (i + 1) as u16;
+            i += 1;
+        }
+        Self {
+            desc,
+            avail: VirtqAvail::new(),
+            used: VirtqUsed::new(),
+            free_head: 0,
+            num_free: VIRTQ_MAX_QUEUE_SIZE as u16,
+            last_used_idx: 0,
+        }
+    }
+
+    /// Allocates a single descriptor from the freelist.
+    pub fn alloc_desc(&mut self) -> Option<u16> {
+        if self.num_free == 0 {
+            return None;
+        }
+        let head = self.free_head;
+        self.free_head = self.desc[head as usize].next;
+        self.num_free -= 1;
+        self.desc[head as usize].flags = 0;
+        self.desc[head as usize].next = 0;
+        Some(head)
+    }
+
+    /// Releases a chain of descriptors starting at `head` back to the freelist.
+    pub fn free_chain(&mut self, mut head: u16) {
+        while (head as usize) < VIRTQ_MAX_QUEUE_SIZE {
+            let next = self.desc[head as usize].next;
+            let has_next = (self.desc[head as usize].flags & VIRTQ_DESC_F_NEXT) != 0;
+            self.desc[head as usize].next = self.free_head;
+            self.desc[head as usize].flags = 0;
+            self.free_head = head;
+            self.num_free += 1;
+            if !has_next {
+                break;
+            }
+            head = next;
+        }
+    }
+
+    /// Submits a request/response pair into the control queue descriptor ring.
+    /// Sets up descriptor chaining (request read -> response write) and publishes
+    /// the head index to the Available ring.
+    pub fn submit_command(
+        &mut self,
+        req_addr: u64,
+        req_len: u32,
+        resp_addr: u64,
+        resp_len: u32,
+    ) -> Result<u16, &'static str> {
+        if self.num_free < 2 {
+            return Err("VirtIO control queue descriptor ring full");
+        }
+        let d0 = self.alloc_desc().ok_or("No free descriptors")?;
+        let d1 = self.alloc_desc().ok_or("No free descriptors")?;
+
+        // d0: device reads request
+        self.desc[d0 as usize].addr = req_addr;
+        self.desc[d0 as usize].len = req_len;
+        self.desc[d0 as usize].flags = VIRTQ_DESC_F_NEXT;
+        self.desc[d0 as usize].next = d1;
+
+        // d1: device writes response
+        self.desc[d1 as usize].addr = resp_addr;
+        self.desc[d1 as usize].len = resp_len;
+        self.desc[d1 as usize].flags = VIRTQ_DESC_F_WRITE;
+        self.desc[d1 as usize].next = 0;
+
+        // Publish to available ring
+        let avail_slot = (self.avail.idx as usize) % VIRTQ_MAX_QUEUE_SIZE;
+        self.avail.ring[avail_slot] = d0;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        self.avail.idx = self.avail.idx.wrapping_add(1);
+
+        Ok(d0)
+    }
+
+    /// Polls for completed descriptors returned by the device in the Used ring.
+    pub fn poll_used(&mut self) -> Option<(u32, u32)> {
+        if self.last_used_idx == self.used.idx {
+            return None;
+        }
+        let used_slot = (self.last_used_idx as usize) % VIRTQ_MAX_QUEUE_SIZE;
+        let elem = self.used.ring[used_slot];
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
+        self.free_chain(elem.id as u16);
+        Some((elem.id, elem.len))
+    }
+}
+
 /// Driver state manager for modern VirtIO-GPU PCI and MMIO controllers.
 pub struct VirtioGpuDriver {
     pub pci_device: Option<PciDevice>,
@@ -234,6 +413,7 @@ pub struct VirtioGpuDriver {
     pub flushes_completed: u64,
     pub bytes_transferred: u64,
     pub last_dirty_rect: VirtioGpuRect,
+    pub control_queue: VirtioGpuControlQueue,
 }
 
 impl VirtioGpuDriver {
@@ -252,6 +432,7 @@ impl VirtioGpuDriver {
             flushes_completed: 0,
             bytes_transferred: 0,
             last_dirty_rect: VirtioGpuRect { x: 0, y: 0, width: 0, height: 0 },
+            control_queue: VirtioGpuControlQueue::new(),
         }
     }
 
@@ -545,6 +726,20 @@ impl VirtioGpuDriver {
         let transfer = self.transfer_to_host_2d(resource_id, x, y, width, height, offset)?;
         let flush = self.flush_resource(resource_id, x, y, width, height)?;
 
+        // Enqueue transfer and flush commands into VirtQueue 0 control ring
+        let _ = self.control_queue.submit_command(
+            (core::ptr::addr_of!(transfer) as usize) as u64,
+            core::mem::size_of::<VirtioGpuTransferToHost2d>() as u32,
+            0,
+            core::mem::size_of::<VirtioGpuCtrlHdr>() as u32,
+        );
+        let _ = self.control_queue.submit_command(
+            (core::ptr::addr_of!(flush) as usize) as u64,
+            core::mem::size_of::<VirtioGpuResourceFlush>() as u32,
+            0,
+            core::mem::size_of::<VirtioGpuCtrlHdr>() as u32,
+        );
+
         self.flushes_completed = self.flushes_completed.saturating_add(1);
         self.bytes_transferred = self.bytes_transferred.saturating_add((width as u64) * (height as u64) * 4);
         self.last_dirty_rect = VirtioGpuRect::new(x, y, width, height);
@@ -815,5 +1010,42 @@ mod tests {
             bad_driver.probe_mmio(bad_mmio.as_ptr() as usize, 256),
             Err("VirtIO MMIO device ID is not GPU")
         );
+    }
+
+    #[test]
+    fn control_queue_enqueues_and_advances_descriptors() {
+        let mut queue = VirtioGpuControlQueue::new();
+        assert_eq!(queue.num_free, VIRTQ_MAX_QUEUE_SIZE as u16);
+        assert_eq!(queue.avail.idx, 0);
+
+        // Submit pair (request + response)
+        let head = queue
+            .submit_command(0x1000_0000, 64, 0x1000_1000, 32)
+            .expect("submit pair");
+        assert_eq!(head, 0);
+        assert_eq!(queue.num_free, (VIRTQ_MAX_QUEUE_SIZE - 2) as u16);
+        assert_eq!(queue.avail.idx, 1);
+        assert_eq!(queue.avail.ring[0], 0);
+
+        // Verify descriptor chaining: d0 -> d1
+        assert_eq!(queue.desc[0].addr, 0x1000_0000);
+        assert_eq!(queue.desc[0].len, 64);
+        assert_eq!(queue.desc[0].flags, VIRTQ_DESC_F_NEXT);
+        assert_eq!(queue.desc[0].next, 1);
+
+        assert_eq!(queue.desc[1].addr, 0x1000_1000);
+        assert_eq!(queue.desc[1].len, 32);
+        assert_eq!(queue.desc[1].flags, VIRTQ_DESC_F_WRITE);
+        assert_eq!(queue.desc[1].next, 0);
+
+        // Simulate host completing request in used ring
+        queue.used.ring[0] = VirtqUsedElem { id: 0, len: 32 };
+        queue.used.idx = 1;
+
+        let completed = queue.poll_used();
+        assert_eq!(completed, Some((0, 32)));
+        assert_eq!(queue.last_used_idx, 1);
+        assert_eq!(queue.num_free, VIRTQ_MAX_QUEUE_SIZE as u16);
+        assert_eq!(queue.poll_used(), None);
     }
 }
