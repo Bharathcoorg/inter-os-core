@@ -145,17 +145,20 @@ jobs:
             cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
           done
 
-      - name: Check x86_64 Microkernel Target
-        run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+      - name: Build x86_64 Microkernel Target
+        run: cargo build --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
 
-      - name: Check AArch64 Microkernel Target
-        run: cargo check --manifest-path kernel-aarch64/Cargo.toml --target aarch64-unknown-none
+      - name: Build AArch64 Microkernel Target
+        run: cargo build --manifest-path kernel-aarch64/Cargo.toml --target aarch64-unknown-none
 
-      - name: Check RISC-V 64 Microkernel Target
-        run: cargo check --manifest-path kernel-riscv64/Cargo.toml --target riscv64gc-unknown-none-elf
+      - name: Build RISC-V 64 Microkernel Target
+        run: cargo build --manifest-path kernel-riscv64/Cargo.toml --target riscv64gc-unknown-none-elf
 
       - name: Run Microkernel Host Unit Tests
         run: cargo test --manifest-path kernel/Cargo.toml
+
+      - name: Run AArch64 Sovereign Boot Invariant Verification
+        run: python tools/interos.py test --target aarch64
 
   tier3-packaging-demo:
     name: "Tier 3: Packaging & Demo Disk Image Generation"
