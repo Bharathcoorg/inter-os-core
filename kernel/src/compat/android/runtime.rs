@@ -149,11 +149,15 @@ impl DalvikVmState {
     }
 
     /// Sets a static field value in the VM's static storage table.
-    pub fn set_static_field(&mut self, field_idx: u16, val: u32) {
+    pub fn set_static_field(&mut self, field_idx: u16, val: u32) -> Result<(), DalvikVmError> {
         if let Some(entry) = self.static_fields.iter_mut().find(|(idx, _)| *idx == field_idx) {
             entry.1 = val;
+            Ok(())
         } else if self.static_fields.len() < 256 {
             self.static_fields.push((field_idx, val));
+            Ok(())
+        } else {
+            Err(DalvikVmError::ObjectHeapLimitExceeded)
         }
     }
 
@@ -201,6 +205,12 @@ impl DalvikVmState {
     ) -> Result<u32, DalvikVmError> {
         if self.call_depth >= 32 {
             return Err(DalvikVmError::ExecutionStepLimit);
+        }
+        if self.call_depth == 0 {
+            self.registers = [0u32; 32];
+            for r in self.string_registers.iter_mut() {
+                *r = None;
+            }
         }
         self.call_depth += 1;
         let result = self.invoke_method_inner(dex, class_name, method_name);
@@ -921,6 +931,9 @@ impl DalvikVmState {
                     }
                     let obj_id = self.registers[v_b];
                     let obj = self.get_object(obj_id)?;
+                    if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
                     self.registers[v_a] = obj.get_field(field_idx);
                     self.string_registers[v_a] = None;
                     pc += 4;
@@ -938,6 +951,9 @@ impl DalvikVmState {
                     let val = self.registers[v_a];
                     let obj_id = self.registers[v_b];
                     let obj = self.get_object_mut(obj_id)?;
+                    if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
                     obj.set_field(field_idx, val);
                     pc += 4;
                 }
@@ -964,7 +980,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let val = self.registers[v_src];
-                    self.set_static_field(field_idx, val);
+                    self.set_static_field(field_idx, val)?;
                     pc += 4;
                 }
                 OP_INT_TO_FLOAT => {

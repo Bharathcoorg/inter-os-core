@@ -204,7 +204,7 @@ impl<'a> DexPackage<'a> {
         // Verify Adler-32 Checksum
         let expected_checksum = u32::from_le(header.checksum);
         let computed_checksum = compute_adler32(&raw[12..]);
-        if expected_checksum != 0 && computed_checksum != expected_checksum {
+        if computed_checksum != expected_checksum {
             return Err(DexError::ChecksumMismatch);
         }
 
@@ -463,7 +463,7 @@ impl<'a> DexPackage<'a> {
         // 1. Verify Adler-32 Checksum
         let expected_checksum = u32::from_le(self.header.checksum);
         let computed_checksum = compute_adler32(&self.raw[12..]);
-        if expected_checksum != 0 && computed_checksum != expected_checksum {
+        if computed_checksum != expected_checksum {
             return Err(DexError::ChecksumMismatch);
         }
 
@@ -544,7 +544,7 @@ impl<'a> DexPackage<'a> {
                             pc += 6;
                         }
                         OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
-                            if pc + 4 > insns.len() {
+                            if pc + 6 > insns.len() {
                                 return Err(DexError::UnexpectedEof);
                             }
                             let method_ref = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;

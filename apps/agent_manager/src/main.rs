@@ -1514,6 +1514,7 @@ impl AgentManagerApp {
                     self.install_deadline = 0;
                     self.chat
                         .push(ChatRole::Notice, b"The platform sent no install report.");
+                    self.persist_chat();
                     self.set_action(b"No install report received.", Tone::Unavailable);
                     self.device = DeviceState::measure();
                     self.rebuild();
@@ -1541,6 +1542,7 @@ impl AgentManagerApp {
                         self.install_deadline = 0;
                         self.chat
                             .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+                        self.persist_chat();
                         self.set_action(
                             b"Unreadable install report from the inference service.",
                             Tone::Unavailable,
@@ -1556,6 +1558,7 @@ impl AgentManagerApp {
                     self.install_deadline = 0;
                     self.chat
                         .push(ChatRole::Notice, b"A reply arrived that this app cannot read.");
+                    self.persist_chat();
                     self.set_action(
                         b"Unreadable install report from the inference service.",
                         Tone::Unavailable,
@@ -1580,6 +1583,7 @@ impl AgentManagerApp {
     fn take_install_report(&mut self, status: u32, text: &[u8], offered: u32) -> bool {
         self.install_deadline = 0;
         self.chat.push(ChatRole::Notice, text);
+        self.persist_chat();
         let arrived = text.len() as u32;
         if arrived < offered {
             let mut line = [0u8; 64];

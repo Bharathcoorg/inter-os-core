@@ -388,6 +388,30 @@ pub struct ChatSession {
     pub stream_prompt_len: u8,
 }
 
+fn write_all(fd: u32, mut buf: &[u8]) -> Result<(), i64> {
+    while !buf.is_empty() {
+        let n = interos_std::fs_write(fd, buf)?;
+        if n == 0 {
+            return Err(-28); // ENOSPC / short write
+        }
+        buf = &buf[n..];
+    }
+    Ok(())
+}
+
+fn drain_bytes(fd: u32, mut count: usize) -> Result<(), i64> {
+    let mut scratch = [0u8; 64];
+    while count > 0 {
+        let chunk = count.min(scratch.len());
+        let n = interos_std::fs_read(fd, &mut scratch[..chunk])?;
+        if n == 0 {
+            return Err(-5); // Unexpected EOF
+        }
+        count -= n;
+    }
+    Ok(())
+}
+
 impl ChatSession {
     /// An empty conversation.
     pub const fn new() -> Self {
@@ -551,7 +575,7 @@ impl ChatSession {
             header[0..4].copy_from_slice(b"AGTC");
             header[4..8].copy_from_slice(&1u32.to_le_bytes());
             header[8..12].copy_from_slice(&(self.message_count as u32).to_le_bytes());
-            let _ = interos_std::fs_write(fd, &header)?;
+            write_all(fd, &header)?;
 
             for i in 0..self.message_count as usize {
                 if let Some(msg) = self.message_at(i) {
@@ -562,15 +586,21 @@ impl ChatSession {
                         ChatRole::Notice => 3,
                     };
                     rec_hdr[1..3].copy_from_slice(&msg.text_len.to_le_bytes());
-                    let _ = interos_std::fs_write(fd, &rec_hdr)?;
+                    write_all(fd, &rec_hdr)?;
                     let n = (msg.text_len as usize).min(CHAT_TEXT_MAX);
-                    let _ = interos_std::fs_write(fd, &msg.text[..n])?;
+                    write_all(fd, &msg.text[..n])?;
                 }
             }
+            let _ = interos_std::fs_fsync(fd);
             Ok(())
         })();
-        let _ = interos_std::fs_close(fd);
-        res
+        let close_res = interos_std::fs_close(fd);
+        if res.is_err() {
+            let _ = interos_std::fs_unlink(path);
+            res
+        } else {
+            close_res.and(res)
+        }
     }
 
     /// Restores the chat transcript from the sandboxed application file system.
@@ -584,6 +614,10 @@ impl ChatSession {
             let mut header = [0u8; 12];
             let bytes_read = interos_std::fs_read(fd, &mut header)?;
             if bytes_read < 12 || &header[0..4] != b"AGTC" {
+                return Err(-22);
+            }
+            let version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+            if version != 1 {
                 return Err(-22);
             }
             let count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
@@ -605,6 +639,9 @@ impl ChatSession {
                 let n = interos_std::fs_read(fd, &mut text_buf[..to_read])?;
                 self.push(role, &text_buf[..n]);
                 loaded += 1;
+                if text_len > to_read {
+                    let _ = drain_bytes(fd, text_len - to_read);
+                }
             }
             Ok(loaded)
         })();
@@ -2636,10 +2673,15 @@ impl AgentToolOutcome {
     /// the surface shows is this evaluator's answer for the expression it
     /// was given, or an explicit refusal.
     pub fn execute_expression_with_authority(expression: &[u8], authority: &ToolAuthority) -> Self {
-        let mut outcome = Self::execute_with_authority(AgentTool::Calculator, authority);
         if !authority.is_granted() {
-            return outcome;
+            return Self::refused(AgentTool::Calculator);
         }
+        let mut outcome = Self {
+            tool: AgentTool::Calculator,
+            ok: false,
+            output: [0u8; 64],
+            output_len: 0,
+        };
 
         // 1. If an explicit capability handle and calculator service are available, attempt remote AppMCP IPC
         if let Some(handle) = authority.handle() {
@@ -2701,17 +2743,7 @@ impl AgentToolOutcome {
 
         match tool {
             AgentTool::Calculator => {
-                match evaluate_integer_expression(CALCULATOR_DEMO_EXPRESSION) {
-                    Some(value) => {
-                        output_len = format_i64(value, &mut output);
-                        ok = true;
-                    }
-                    None => {
-                        let err = b"Calculator: expression not evaluable";
-                        output[..err.len()].copy_from_slice(err);
-                        output_len = err.len();
-                    }
-                }
+                return Self::execute_expression_with_authority(CALCULATOR_DEMO_EXPRESSION, authority);
             }
             AgentTool::CalendarClock => {
                 let mut time_buf = [0u8; 64];

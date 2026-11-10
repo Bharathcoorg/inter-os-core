@@ -3639,7 +3639,7 @@ fn handle_appmcp_request(music: &mut MusicApp, raw: &[u8], sender: u64, msg_type
             let resp = if ok {
                 std::appmcp::AppMcpResponse::success(req.tool_id, req.token).with_payload(b"state:paused")
             } else {
-                std::appmcp::AppMcpResponse::error(std::appmcp::APPMCP_STATUS_INTERNAL_ERROR, req.tool_id, req.token)
+                std::appmcp::AppMcpResponse::error(std::appmcp::APPMCP_STATUS_UNAVAILABLE, req.tool_id, req.token)
             };
             let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
             true

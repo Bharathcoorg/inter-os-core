@@ -343,11 +343,12 @@ fn decode_store_blob_into(raw: &[u8], from_storage: bool, store: &mut ThreadStor
         }
     };
     let header_count = if decoded_len >= 2 { blob[1] as usize } else { 0 };
+    let expected_len = 2 + header_count * RECORD_BYTES;
     let bad = decoded_len < 2
         || decoded_len > STORE_BLOB_BYTES
         || blob[0] != STORE_VERSION
         || header_count > MAX_THREADS
-        || decoded_len != 2 + header_count * RECORD_BYTES;
+        || if from_storage { decoded_len < expected_len } else { decoded_len != expected_len };
     if bad {
         return None;
     }
@@ -399,9 +400,12 @@ impl ThreadStore {
 
     fn write(&mut self) -> bool {
         let (blob, used) = self.encode();
+        let _ = std::fs_unlink(STORAGE_PATH);
         if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_WRITE) {
-            let _ = std::fs_write(fd, &blob[..used]);
-            let _ = std::fs_fsync(fd);
+            let written = std::fs_write(fd, &blob[..used]).unwrap_or(0);
+            if written == used {
+                let _ = std::fs_fsync(fd);
+            }
             let _ = std::fs_close(fd);
         }
         let mut escaped = [0u8; 512];
@@ -418,11 +422,11 @@ impl ThreadStore {
         let mut store = ThreadStore::EMPTY;
         let mut raw = [0u8; 512];
         let mut settings_corrupt = false;
+        let mut settings_empty = false;
 
         match std::settings_get(STORE_KEY, &mut raw) {
             Ok(0) => {
-                store.state = StoreState::Empty;
-                return store;
+                settings_empty = true;
             }
             Ok(n) => {
                 if let Some(state) = decode_store_blob_into(&raw[..n], false, &mut store) {
@@ -435,7 +439,7 @@ impl ThreadStore {
             Err(_) => {}
         }
 
-        // Secondary storage tier: fall back to VFS sandbox storage if settings failed or returned invalid bytes
+        // Secondary storage tier: fall back to VFS sandbox storage if settings failed, was empty, or returned invalid bytes
         if let Ok(fd) = std::app_storage_open(STORAGE_PATH, std::FS_READ) {
             let n = std::fs_read(fd, &mut raw).unwrap_or(0);
             let _ = std::fs_close(fd);
@@ -452,6 +456,8 @@ impl ThreadStore {
 
         if settings_corrupt {
             store.state = StoreState::Invalid;
+        } else if settings_empty {
+            store.state = StoreState::Empty;
         } else {
             store.state = StoreState::ReadRefused;
         }
