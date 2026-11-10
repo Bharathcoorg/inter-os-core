@@ -2242,6 +2242,107 @@ pub fn cache_control_allows_store(value: &[u8]) -> bool {
     !contains_token(value, b"no-store")
 }
 
+/// Decodes an HTTP/1.1 chunked transfer encoded body in-place without heap allocations.
+///
+/// Chunks in HTTP/1.1 format have `<hex-chunk-size>\r\n<chunk-data>\r\n...0\r\n\r\n`.
+/// The hex chunk size is parsed, chunk data bytes are moved forward in-place to
+/// compact the body, advancing across CRLF delimiters until the terminating chunk
+/// `0\r\n\r\n` (and optional trailers) is reached.
+///
+/// Returns the decoded body length, or `Err(())` if the chunk stream is malformed or truncated.
+pub fn decode_chunked_body_in_place(buf: &mut [u8]) -> Result<usize, ()> {
+    let mut cursor = 0usize;
+    let mut out_len = 0usize;
+
+    loop {
+        // 1. Parse hex chunk size
+        let mut chunk_size: usize = 0;
+        let mut digit_count: usize = 0;
+
+        while cursor < buf.len() {
+            let b = buf[cursor];
+            let digit = match b {
+                b'0'..=b'9' => (b - b'0') as usize,
+                b'a'..=b'f' => (b - b'a' + 10) as usize,
+                b'A'..=b'F' => (b - b'A' + 10) as usize,
+                _ => break,
+            };
+            chunk_size = chunk_size
+                .checked_mul(16)
+                .ok_or(())?
+                .checked_add(digit)
+                .ok_or(())?;
+            cursor += 1;
+            digit_count += 1;
+        }
+
+        if digit_count == 0 {
+            return Err(());
+        }
+
+        // 2. Advance across optional chunk extensions and CRLF
+        while cursor < buf.len() && buf[cursor] != b'\r' && buf[cursor] != b'\n' {
+            cursor += 1;
+        }
+        if cursor < buf.len() && buf[cursor] == b'\r' {
+            cursor += 1;
+        }
+        if cursor >= buf.len() || buf[cursor] != b'\n' {
+            return Err(());
+        }
+        cursor += 1; // skip '\n'
+
+        // 3. Terminating chunk (size 0)
+        if chunk_size == 0 {
+            // Consume trailing CRLF or trailer section until final CRLF
+            if cursor < buf.len() && buf[cursor] == b'\r' {
+                cursor += 1;
+            }
+            if cursor < buf.len() && buf[cursor] == b'\n' {
+                return Ok(out_len);
+            }
+            // Consume trailers if present until empty line
+            while cursor < buf.len() {
+                if buf[cursor] == b'\r' {
+                    cursor += 1;
+                    if cursor < buf.len() && buf[cursor] == b'\n' {
+                        return Ok(out_len);
+                    }
+                } else if buf[cursor] == b'\n' {
+                    return Ok(out_len);
+                } else {
+                    while cursor < buf.len() && buf[cursor] != b'\n' {
+                        cursor += 1;
+                    }
+                    if cursor < buf.len() && buf[cursor] == b'\n' {
+                        cursor += 1;
+                    }
+                }
+            }
+            return Ok(out_len);
+        }
+
+        // 4. Verify bounds for chunk data
+        if cursor.checked_add(chunk_size).ok_or(())? > buf.len() {
+            return Err(());
+        }
+
+        // Copy chunk bytes in-place (cursor >= out_len is guaranteed)
+        buf.copy_within(cursor..cursor + chunk_size, out_len);
+        out_len += chunk_size;
+        cursor += chunk_size;
+
+        // 5. Advance across chunk data CRLF
+        if cursor < buf.len() && buf[cursor] == b'\r' {
+            cursor += 1;
+        }
+        if cursor >= buf.len() || buf[cursor] != b'\n' {
+            return Err(());
+        }
+        cursor += 1; // skip '\n'
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2999,5 +3100,66 @@ mod tests {
         assert_eq!(parse_ipv4(b"1.2.3.4.5"), None);
         assert_eq!(parse_ipv4(b"example.com"), None);
         assert_eq!(parse_ipv4(b""), None);
+    }
+
+    #[test]
+    fn test_decode_chunked_body_single_chunk() {
+        let mut data = *b"5\r\nHello\r\n0\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("chunked decode");
+        assert_eq!(&data[..len], b"Hello");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_multi_chunk() {
+        let mut data = *b"4\r\nWiki\r\n6\r\npedia \r\n2\r\nis\r\n0\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("multi chunk decode");
+        assert_eq!(&data[..len], b"Wikipedia is");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_with_chunk_extension() {
+        let mut data = *b"4;ext=test\r\nWiki\r\n0\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("chunk ext decode");
+        assert_eq!(&data[..len], b"Wiki");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_hex_cases() {
+        let mut data = *b"a\r\n0123456789\r\n0\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("hex lowercase");
+        assert_eq!(&data[..len], b"0123456789");
+
+        let mut data_upper = *b"F\r\n0123456789abcde\r\n0\r\n\r\n";
+        let len_upper = decode_chunked_body_in_place(&mut data_upper).expect("hex uppercase");
+        assert_eq!(&data_upper[..len_upper], b"0123456789abcde");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_empty() {
+        let mut data = *b"0\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("empty chunked");
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_decode_chunked_body_with_trailers() {
+        let mut data = *b"5\r\nHello\r\n0\r\nExpires: never\r\n\r\n";
+        let len = decode_chunked_body_in_place(&mut data).expect("trailers decode");
+        assert_eq!(&data[..len], b"Hello");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_malformed_errors() {
+        let mut bad_hex = *b"ZZ\r\n";
+        assert_eq!(decode_chunked_body_in_place(&mut bad_hex), Err(()));
+
+        let mut truncated_data = *b"5\r\nHel";
+        assert_eq!(decode_chunked_body_in_place(&mut truncated_data), Err(()));
+
+        let mut missing_crlf = *b"5\r\nHello";
+        assert_eq!(decode_chunked_body_in_place(&mut missing_crlf), Err(()));
+
+        let mut unterminated = *b"5\r\nHello\r\n";
+        assert_eq!(decode_chunked_body_in_place(&mut unterminated), Err(()));
     }
 }

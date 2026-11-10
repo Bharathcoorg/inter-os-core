@@ -3766,15 +3766,6 @@ impl BrowserApp {
         if declared.is_empty() || room == 0 {
             return 0;
         }
-        // The same rule the pictures are held to, and for the same reason: a
-        // stylesheet carried in plaintext under a verified document is bytes a
-        // middlebox may choose, and the page is being shown as though it was
-        // not. This transport passes `false` for TLS, so the file would go out
-        // in the open whatever its address says.
-        if images::mixed_content_block(self.document_tls_verified, true) {
-            self.log_stylesheet_blocked_as_insecure();
-            return 0;
-        }
         // Copied out of the document before anything is fetched: the reply
         // lands in the same transport buffer the page's own bytes came
         // through, and the address is read out of the text arena that buffer
@@ -3788,20 +3779,82 @@ impl BrowserApp {
         else {
             return 0;
         };
-        let mut request = [0u8; 1024];
-        let request_len = browser::format_proxy_request(&url[..len], &mut request);
-        if request_len + 128 > request.len() {
-            return 0;
+
+        // If the document is TLS verified and the subresource is HTTPS, fetch
+        // directly via TLS without routing plaintext through the gateway.
+        let sub_is_https = url[..len].starts_with(b"https://");
+        let subresource_via_gateway = !(self.document_tls_verified && sub_is_https);
+        if subresource_via_gateway {
+            if images::mixed_content_block(self.document_tls_verified, true) {
+                self.log_stylesheet_blocked_as_insecure();
+                return 0;
+            }
+        } else {
+            let _ = images::mixed_content_block(self.document_tls_verified, false);
         }
-        let local_port = self.take_local_port();
-        let outcome = fetch_over_tcp(
-            [10, 0, 2, 2],
-            4300,
-            local_port,
-            &request[..request_len],
-            STYLESHEET_WINDOW_BYTES,
-            false,
-        );
+
+        let outcome = if !subresource_via_gateway {
+            let sub_parsed = parse_uri(&url[..len]);
+            let Ok(host_str) = core::str::from_utf8(sub_parsed.host) else {
+                self.log_stylesheet_failed(-1);
+                return 0;
+            };
+            set_current_server_name(sub_parsed.host);
+            let ip = if let Some(ip) = parse_ipv4(sub_parsed.host) {
+                ip
+            } else {
+                match std::dns_resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        self.log_stylesheet_failed(-1);
+                        return 0;
+                    }
+                }
+            };
+            let dst_port = if sub_parsed.port != 0 { sub_parsed.port } else { 443 };
+            let mut request = [0u8; 1024];
+            let request_len = browser::format_http_get(sub_parsed.host, sub_parsed.path, &mut request);
+            if request_len == 0 || request_len > request.len() {
+                self.log_stylesheet_failed(-1);
+                return 0;
+            }
+            let host: Option<&'static str> = unsafe {
+                if TLS_HOSTNAME_REFUSED {
+                    None
+                } else {
+                    let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
+                    core::str::from_utf8(&buf[..TLS_HOSTNAME_LEN]).ok()
+                }
+            };
+            let Some(valid_host) = host else {
+                self.log_stylesheet_failed(-1);
+                return 0;
+            };
+            let local_port = self.take_local_port();
+            fetch_over_tls(
+                ip,
+                dst_port,
+                local_port,
+                valid_host,
+                &request[..request_len],
+                STYLESHEET_WINDOW_BYTES,
+            )
+        } else {
+            let mut request = [0u8; 1024];
+            let request_len = browser::format_proxy_request(&url[..len], &mut request);
+            if request_len + 128 > request.len() {
+                return 0;
+            }
+            let local_port = self.take_local_port();
+            fetch_over_tcp(
+                [10, 0, 2, 2],
+                4300,
+                local_port,
+                &request[..request_len],
+                STYLESHEET_WINDOW_BYTES,
+                false,
+            )
+        };
         let buffer = unsafe { &*core::ptr::addr_of!(RESPONSE_BUF) };
         let reply = &buffer[..outcome.bytes];
         if outcome.bytes == 0 {
@@ -3836,8 +3889,16 @@ impl BrowserApp {
             }
             kept
         } else {
-            let len = response.body.len().min(style.len());
+            let is_chunked = browser::http::find_header(reply, b"transfer-encoding")
+                .map(|v| v.eq_ignore_ascii_case(b"chunked"))
+                .unwrap_or(false);
+            let mut len = response.body.len().min(style.len());
             style[..len].copy_from_slice(&response.body[..len]);
+            if is_chunked {
+                if let Ok(decoded_len) = browser::http::decode_chunked_body_in_place(&mut style[..len]) {
+                    len = decoded_len;
+                }
+            }
             len
         };
         // The file's `--token` definitions are read before anything is cut
@@ -4042,46 +4103,105 @@ impl BrowserApp {
         &mut self,
         url: &[u8],
     ) -> (images::ImageStatus, Option<std::image::Bitmap<'static>>, u32, u32) {
-        // A document whose own bytes came off a channel whose TLS handshake
-        // completed is shown with the mark that says so. This transport is
-        // plaintext -- the `false` below is the whole of it -- so fetching the
-        // picture here would put it on an unencrypted hop under a padlock, and
-        // anything on that path could hand back different bytes. Refuse the
-        // fetch, and let the placeholder card on the page say why.
-        if images::mixed_content_block(self.document_tls_verified, true) {
-            return (
-                images::ImageStatus::Refused(images::ImageRefusal::InsecureSubresource),
-                None,
-                0,
-                0,
-            );
+        // If the document is TLS verified and the subresource is HTTPS, fetch
+        // directly via TLS without routing plaintext through the gateway.
+        let sub_is_https = url.starts_with(b"https://");
+        let subresource_via_gateway = !(self.document_tls_verified && sub_is_https);
+        if subresource_via_gateway {
+            if images::mixed_content_block(self.document_tls_verified, true) {
+                return (
+                    images::ImageStatus::Refused(images::ImageRefusal::InsecureSubresource),
+                    None,
+                    0,
+                    0,
+                );
+            }
+        } else {
+            let _ = images::mixed_content_block(self.document_tls_verified, false);
         }
-        // WHY this is wide: the address goes on the wire percent-encoded,
-        // and a query string of separators alone triples it. A request
-        // buffer that ran out would send half an address and be answered
-        // with half a picture, so an address that cannot be sent whole is
-        // refused for its own reason before a byte is written. The rest of
-        // the request — method line, Host, User-Agent, Close — is 108
-        // bytes, which is what the margin below is sized against.
-        let mut request = [0u8; 1024];
-        let request_len = browser::format_proxy_request(url, &mut request);
-        if request_len + 128 > request.len() {
-            return (
-                images::ImageStatus::Refused(images::ImageRefusal::SourceTooLong),
-                None,
-                0,
-                0,
-            );
-        }
-        let local_port = self.take_local_port();
-        let outcome = fetch_over_tcp(
-            [10, 0, 2, 2],
-            4300,
-            local_port,
-            &request[..request_len],
-            MAX_RESPONSE_BYTES,
-            false,
-        );
+        let outcome = if !subresource_via_gateway {
+            let sub_parsed = parse_uri(url);
+            let Ok(host_str) = core::str::from_utf8(sub_parsed.host) else {
+                return (
+                    images::ImageStatus::Refused(images::ImageRefusal::BadHeader),
+                    None,
+                    0,
+                    0,
+                );
+            };
+            set_current_server_name(sub_parsed.host);
+            let ip = if let Some(ip) = parse_ipv4(sub_parsed.host) {
+                ip
+            } else {
+                match std::dns_resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        return (
+                            images::ImageStatus::Refused(images::ImageRefusal::FetchFailed { code: -1 }),
+                            None,
+                            0,
+                            0,
+                        );
+                    }
+                }
+            };
+            let dst_port = if sub_parsed.port != 0 { sub_parsed.port } else { 443 };
+            let mut request = [0u8; 1024];
+            let request_len = browser::format_http_get(sub_parsed.host, sub_parsed.path, &mut request);
+            if request_len == 0 || request_len > request.len() {
+                return (
+                    images::ImageStatus::Refused(images::ImageRefusal::SourceTooLong),
+                    None,
+                    0,
+                    0,
+                );
+            }
+            let host: Option<&'static str> = unsafe {
+                if TLS_HOSTNAME_REFUSED {
+                    None
+                } else {
+                    let buf = &*core::ptr::addr_of!(TLS_HOSTNAME_BUF);
+                    core::str::from_utf8(&buf[..TLS_HOSTNAME_LEN]).ok()
+                }
+            };
+            let Some(valid_host) = host else {
+                return (
+                    images::ImageStatus::Refused(images::ImageRefusal::BadHeader),
+                    None,
+                    0,
+                    0,
+                );
+            };
+            let local_port = self.take_local_port();
+            fetch_over_tls(
+                ip,
+                dst_port,
+                local_port,
+                valid_host,
+                &request[..request_len],
+                MAX_RESPONSE_BYTES,
+            )
+        } else {
+            let mut request = [0u8; 1024];
+            let request_len = browser::format_proxy_request(url, &mut request);
+            if request_len + 128 > request.len() {
+                return (
+                    images::ImageStatus::Refused(images::ImageRefusal::SourceTooLong),
+                    None,
+                    0,
+                    0,
+                );
+            }
+            let local_port = self.take_local_port();
+            fetch_over_tcp(
+                [10, 0, 2, 2],
+                4300,
+                local_port,
+                &request[..request_len],
+                MAX_RESPONSE_BYTES,
+                false,
+            )
+        };
         if outcome.bytes == 0 {
             return (
                 images::ImageStatus::Refused(images::ImageRefusal::FetchFailed {
@@ -4121,7 +4241,20 @@ impl BrowserApp {
         // and the placeholder has to say which of the two it ran into.
         let truncated = outcome.truncated
             || browser::http_header_value(raw, b"x-interos-truncated").is_some();
-        let body = response.body;
+        let mut body = response.body;
+        if !browser::is_browser_envelope(raw) {
+            let is_chunked = browser::http::find_header(raw, b"transfer-encoding")
+                .map(|v| v.eq_ignore_ascii_case(b"chunked"))
+                .unwrap_or(false);
+            if is_chunked {
+                let body_offset = response.body.as_ptr() as usize - raw.as_ptr() as usize;
+                let body_len = response.body.len();
+                let buf_mut = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+                if let Ok(decoded_len) = browser::http::decode_chunked_body_in_place(&mut buf_mut[body_offset..body_offset + body_len]) {
+                    body = &buf_mut[body_offset..body_offset + decoded_len];
+                }
+            }
+        }
         if truncated {
             return (
                 images::ImageStatus::Refused(images::ImageRefusal::CutShort { bytes: body.len() }),
@@ -6637,8 +6770,20 @@ impl BrowserApp {
             let full_content_type =
                 browser::http::find_header(rx_slice, b"content-type").unwrap_or(resp.content_type);
             let charset = browser::http::charset_from_content_type(full_content_type);
+            let is_chunked = browser::http::find_header(rx_slice, b"transfer-encoding")
+                .map(|v| v.eq_ignore_ascii_case(b"chunked"))
+                .unwrap_or(false);
+            let mut body = resp.body;
+            if is_chunked {
+                let body_offset = resp.body.as_ptr() as usize - rx_slice.as_ptr() as usize;
+                let body_len = resp.body.len();
+                let rx_mut = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE_BUF) };
+                if let Ok(decoded_len) = browser::http::decode_chunked_body_in_place(&mut rx_mut[body_offset..body_offset + body_len]) {
+                    body = &rx_mut[body_offset..body_offset + decoded_len];
+                }
+            }
             let html = unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) };
-            let decoded = browser::http::decode_text(resp.body, charset, html);
+            let decoded = browser::http::decode_text(body, charset, html);
             document_len = decoded.written;
             final_truncated = outcome.truncated || decoded.truncated;
             invalid_sequences += decoded.invalid;
@@ -12646,7 +12791,8 @@ pub extern "C" fn _start() -> ! {
             render_browser_ui(surface, &browser);
             let _ = std::surface_flip();
         }
-        match std::event_poll(interest_mask, 150) {
+        let poll_timeout = if browser.scroll.is_flinging() { 4 } else { 150 };
+        match std::event_poll(interest_mask, poll_timeout) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
@@ -12660,6 +12806,7 @@ pub extern "C" fn _start() -> ! {
                     let mut dirty = Dirty::None;
                     while std::input_event_poll(&mut input).is_ok() {
                         if let Some(key) = input.key_event() {
+                            browser.scroll.stop_fling();
                             let changed = handle_browser_key(&mut browser, key);
                             if changed != Dirty::None {
                                 dirty = Dirty::All;
@@ -12682,10 +12829,12 @@ pub extern "C" fn _start() -> ! {
                         // is the shell's own surface, and this app paints no
                         // affordance for it, so the honest reaction is none.
                         if input.kind == 7 && HOME_HIT.contains(input.x as usize, input.y as usize) {
+                            browser.scroll.stop_fling();
                             std::log("[BROWSER APP] Home gesture pressed. Exiting to launcher.").ok();
                             destroy_and_exit(surface);
                         }
                         if input.kind == 6 {
+                            browser.scroll.stop_fling();
                             let _ = std::audio_haptic_click();
                             browser.go_back();
                             dirty = Dirty::All;
@@ -12711,9 +12860,15 @@ pub extern "C" fn _start() -> ! {
                             if input.dy != 0 {
                                 browser.scroll.apply_drag(input.dy);
                                 dirty = Dirty::All;
+                                if input.kind == 10 {
+                                    browser.scroll.start_fling(input.dy);
+                                } else {
+                                    browser.scroll.stop_fling();
+                                }
                             }
                         }
                         if input.kind == 1 {
+                            browser.scroll.stop_fling();
                             match handle_tap(&mut browser, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();
@@ -12774,6 +12929,12 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
+                    if browser.scroll.is_flinging() && browser.status == PageStatus::Loaded {
+                        if browser.scroll.step_fling() && surface > 0 {
+                            render_browser_ui(surface, &browser);
+                            let _ = std::surface_flip();
+                        }
+                    }
                     std::yield_now();
                 }
             }

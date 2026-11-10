@@ -11,13 +11,21 @@ pub struct ScrollState {
     pub content_h: usize,
     pub viewport_h: usize,
     pub offset: usize,
+    pub velocity_y: i32,
+    pub subpixel_y: i32,
 }
 
 impl ScrollState {
     pub const fn new(content_h: usize, viewport_h: usize, offset: usize) -> Self {
         let max = if content_h > viewport_h { content_h - viewport_h } else { 0 };
         let clamped = if offset > max { max } else { offset };
-        Self { content_h, viewport_h, offset: clamped }
+        Self {
+            content_h,
+            viewport_h,
+            offset: clamped,
+            velocity_y: 0,
+            subpixel_y: 0,
+        }
     }
 
     #[inline]
@@ -38,6 +46,56 @@ impl ScrollState {
             self.offset = self.offset.saturating_sub(dy as usize);
         }
         self.clamp();
+    }
+
+    #[inline]
+    pub fn is_flinging(&self) -> bool {
+        self.velocity_y != 0
+    }
+
+    #[inline]
+    pub fn start_fling(&mut self, dy: i32) {
+        self.velocity_y = dy.saturating_mul(1000);
+        self.subpixel_y = 0;
+    }
+
+    #[inline]
+    pub fn stop_fling(&mut self) {
+        self.velocity_y = 0;
+        self.subpixel_y = 0;
+    }
+
+    /// Advances inertial kinetic scrolling by one 240Hz tick (4.167ms interval).
+    /// Decays velocity with subpixel friction and steps the scroll offset.
+    /// Returns true if scroll offset changed.
+    pub fn step_fling(&mut self) -> bool {
+        if self.velocity_y == 0 {
+            return false;
+        }
+        // Decays velocity with subpixel friction at 240Hz (4.167ms tick intervals).
+        // 980 / 1000 retains ~92% per 16ms frame (0.98^4 ~= 0.922).
+        self.velocity_y = (self.velocity_y * 980) / 1000;
+        if self.velocity_y.abs() < 20 {
+            self.velocity_y = 0;
+            self.subpixel_y = 0;
+            return false;
+        }
+        self.subpixel_y += self.velocity_y;
+        let step_px = self.subpixel_y / 1000;
+        self.subpixel_y %= 1000;
+        if step_px != 0 {
+            let prev_offset = self.offset;
+            self.apply_drag(step_px);
+            if self.offset == prev_offset {
+                // Reached boundary, halt fling
+                self.velocity_y = 0;
+                self.subpixel_y = 0;
+                return false;
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Computes scrollbar thumb geometry `(thumb_y, thumb_h)` along a track `[track_y, track_y + track_h)`.
@@ -93,5 +151,25 @@ mod tests {
     fn test_thumb_none_when_content_fits() {
         let scroll = ScrollState::new(300, 500, 0);
         assert_eq!(scroll.thumb_rect(0, 400, 20), None);
+    }
+
+    #[test]
+    fn test_inertial_fling_240hz_decay() {
+        let mut scroll = ScrollState::new(2000, 500, 0);
+        assert!(!scroll.is_flinging());
+
+        // Fling downwards (negative dy increases offset)
+        scroll.start_fling(-30);
+        assert!(scroll.is_flinging());
+
+        let mut stepped = 0;
+        while scroll.is_flinging() {
+            if scroll.step_fling() {
+                stepped += 1;
+            }
+        }
+        assert!(stepped > 0, "Fling must step offset across ticks");
+        assert!(scroll.offset > 0, "Fling must advance scroll offset");
+        assert!(!scroll.is_flinging(), "Fling must eventually halt due to friction");
     }
 }

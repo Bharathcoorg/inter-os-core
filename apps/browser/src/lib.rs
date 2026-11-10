@@ -7,7 +7,8 @@ pub use interos_std as std;
 pub use interos_std::tls;
 
 pub use http::{
-    parse_ipv4, perform_tls_handshake, FetchErrorKind, TcpSocketStream,
+    decode_chunked_body_in_place, parse_ipv4, perform_tls_handshake, FetchErrorKind,
+    TcpSocketStream,
 };
 
 /// The app's view of the platform's design system.
