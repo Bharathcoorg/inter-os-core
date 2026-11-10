@@ -370,6 +370,7 @@ pub struct TensorRef {
 /// The table is the only thing this loader holds across blocks, and its size is
 /// reported: on the published file it is 316 entries over names no longer than 33
 /// bytes, tens of kilobytes, against the 333 MB the file is.
+#[derive(Clone)]
 pub struct TensorTable {
     entries: Vec<TensorEntry>,
     /// The position every descriptor's offset counts from, as the file's own
@@ -482,6 +483,58 @@ impl TensorTable {
         self.entries
             .iter()
             .fold(0usize, |acc, entry| acc + fixed + entry.name.len())
+    }
+
+    /// Reconstructs a `TensorTable` from a resident cached tensor directory without
+    /// reading from disk or reparsing GGUF headers.
+    pub fn from_resident_cache(cache: &crate::inference::ResidentTensorCache) -> Self {
+        let mut entries = Vec::new();
+        let _ = entries.try_reserve_exact(cache.count);
+        for i in 0..cache.count {
+            let e = &cache.entries[i];
+            entries.push(TensorEntry {
+                name: e.name[..e.name_len as usize].to_vec(),
+                dtype: e.dtype,
+                cols: e.cols,
+                rows: e.rows,
+                n_dims: e.n_dims,
+                byte_len: e.byte_len,
+                stated_offset: e.offset,
+                position: e.position,
+            });
+        }
+        Self {
+            entries,
+            data_start: cache.data_start,
+            alignment: cache.alignment,
+            window_pulls: 0,
+        }
+    }
+
+    /// Populates a resident tensor cache from this table.
+    pub fn populate_resident_cache(&self, cache: &mut crate::inference::ResidentTensorCache) {
+        let count = self.entries.len().min(crate::inference::RESIDENT_TENSOR_CAP);
+        cache.count = count;
+        cache.data_start = self.data_start;
+        cache.alignment = self.alignment;
+        for i in 0..count {
+            let e = &self.entries[i];
+            let mut name = [0u8; 64];
+            let len = e.name.len().min(64);
+            name[..len].copy_from_slice(&e.name[..len]);
+            cache.entries[i] = crate::inference::ResidentTensorEntry {
+                name_len: len as u16,
+                name,
+                dtype: e.dtype,
+                cols: e.cols,
+                rows: e.rows,
+                n_dims: e.n_dims,
+                byte_len: e.byte_len,
+                offset: e.stated_offset,
+                position: e.position,
+            };
+        }
+        cache.initialized = true;
     }
 }
 

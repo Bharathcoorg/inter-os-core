@@ -884,6 +884,14 @@ pub fn swiglu(gate: &[f32], up: &[f32], out: &mut [f32]) {
     }
 }
 
+/// GeGLU non-linear activation function: out = gelu_tanh(gate) * up
+pub fn geglu(gate: &[f32], up: &[f32], out: &mut [f32]) {
+    let len = gate.len().min(up.len()).min(out.len());
+    for i in 0..len {
+        out[i] = gelu_tanh(gate[i]) * up[i];
+    }
+}
+
 /// Softmax activation over a mutable slice in-place.
 pub fn softmax(logits: &mut [f32]) {
     if logits.is_empty() {
@@ -908,14 +916,49 @@ pub fn softmax(logits: &mut [f32]) {
     }
 }
 
+pub const DEFAULT_TOP_K: usize = 40;
+pub const DEFAULT_TOP_P: f32 = 0.9;
+pub const TOP_K_CANDIDATE_CAP: usize = 64;
+
+static SAMPLING_RNG_STATE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x853c_49e6_748f_ea9b);
+
+fn next_sample_random_f32() -> f32 {
+    let mut state = SAMPLING_RNG_STATE.load(core::sync::atomic::Ordering::Relaxed);
+    if state == 0 {
+        state = 0x853c_49e6_748f_ea9b;
+    }
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    SAMPLING_RNG_STATE.store(state, core::sync::atomic::Ordering::Relaxed);
+    ((state & 0x00ff_ffff) as f32) / 16777216.0f32
+}
+
 /// Samples the next token ID from logits.
 ///
-/// Uses argmax sampling when temperature <= 1e-4, or temperature-scaled sampling.
+/// Uses deterministic argmax when temperature < 1e-4, or calibrated sampling with
+/// temperature scaling, Top-K, and Top-P (nucleus) filtering without heap allocations.
 pub fn sample_token(logits: &[f32], temperature: f32) -> u32 {
+    sample_token_calibrated(logits, temperature, DEFAULT_TOP_K, DEFAULT_TOP_P, 0)
+}
+
+/// Calibrated token sampling with configurable Top-K, Top-P, and optional seed.
+///
+/// Zero heap allocations: all candidate ranking and probability calculations use
+/// fixed-size stack buffers.
+pub fn sample_token_calibrated(
+    logits: &[f32],
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    seed: u64,
+) -> u32 {
     if logits.is_empty() {
         return 0;
     }
-    if temperature <= 1e-4 {
+    // Deterministic argmax when temperature < 1e-4
+    if temperature < 1e-4 {
         let mut best_id = 0u32;
         let mut best_score = logits[0];
         for (idx, &score) in logits.iter().enumerate() {
@@ -927,23 +970,186 @@ pub fn sample_token(logits: &[f32], temperature: f32) -> u32 {
         return best_id;
     }
 
-    // Temperature-scaled argmax
     let inv_t = 1.0f32 / temperature;
-    let mut best_id = 0u32;
-    let mut best_score = logits[0] * inv_t;
-    for (idx, &score) in logits.iter().enumerate() {
-        let scaled = score * inv_t;
-        if scaled > best_score {
-            best_score = scaled;
-            best_id = idx as u32;
+    let k_bound = top_k.min(TOP_K_CANDIDATE_CAP).min(logits.len()).max(1);
+
+    let mut cand_indices = [0u32; TOP_K_CANDIDATE_CAP];
+    let mut cand_logits = [f32::NEG_INFINITY; TOP_K_CANDIDATE_CAP];
+    let mut count = 0usize;
+
+    // 1. Top-K filtering: maintain sorted top-K candidates
+    for (idx, &raw_logit) in logits.iter().enumerate() {
+        let scaled_logit = raw_logit * inv_t;
+        if count < k_bound {
+            let mut pos = count;
+            while pos > 0 && cand_logits[pos - 1] < scaled_logit {
+                cand_logits[pos] = cand_logits[pos - 1];
+                cand_indices[pos] = cand_indices[pos - 1];
+                pos -= 1;
+            }
+            cand_logits[pos] = scaled_logit;
+            cand_indices[pos] = idx as u32;
+            count += 1;
+        } else if scaled_logit > cand_logits[k_bound - 1] {
+            let mut pos = k_bound - 1;
+            while pos > 0 && cand_logits[pos - 1] < scaled_logit {
+                cand_logits[pos] = cand_logits[pos - 1];
+                cand_indices[pos] = cand_indices[pos - 1];
+                pos -= 1;
+            }
+            cand_logits[pos] = scaled_logit;
+            cand_indices[pos] = idx as u32;
         }
     }
-    best_id
+
+    if count == 0 {
+        return 0;
+    }
+
+    // 2. Softmax over the top-K candidates
+    let max_logit = cand_logits[0];
+    let mut cand_probs = [0.0f32; TOP_K_CANDIDATE_CAP];
+    let mut sum_exp = 0.0f32;
+    for i in 0..count {
+        let p = f32_exp(cand_logits[i] - max_logit);
+        cand_probs[i] = p;
+        sum_exp += p;
+    }
+    if sum_exp > 0.0 {
+        let inv_sum = 1.0f32 / sum_exp;
+        for i in 0..count {
+            cand_probs[i] *= inv_sum;
+        }
+    } else {
+        return cand_indices[0];
+    }
+
+    // 3. Top-P (nucleus) filtering: keep candidates until cumulative probability >= top_p
+    let mut cum_prob = 0.0f32;
+    let mut nucleus_count = 1usize;
+    for i in 0..count {
+        cum_prob += cand_probs[i];
+        nucleus_count = i + 1;
+        if cum_prob >= top_p {
+            break;
+        }
+    }
+
+    // Re-normalize nucleus probabilities
+    let mut nucleus_sum = 0.0f32;
+    for i in 0..nucleus_count {
+        nucleus_sum += cand_probs[i];
+    }
+    if nucleus_sum > 0.0 {
+        let inv_n_sum = 1.0f32 / nucleus_sum;
+        for i in 0..nucleus_count {
+            cand_probs[i] *= inv_n_sum;
+        }
+    }
+
+    // 4. Sample from nucleus
+    let r = if seed != 0 {
+        let mut s = seed;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        ((s & 0x00ff_ffff) as f32) / 16777216.0f32
+    } else {
+        next_sample_random_f32()
+    };
+
+    let mut cumulative = 0.0f32;
+    for i in 0..nucleus_count {
+        cumulative += cand_probs[i];
+        if r <= cumulative || i == nucleus_count - 1 {
+            return cand_indices[i];
+        }
+    }
+
+    cand_indices[0]
+}
+
+/// Maximum number of tensor entries cached in resident memory.
+pub const RESIDENT_TENSOR_CAP: usize = 384;
+
+/// Resident representation of a GGUF tensor descriptor for offset caching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentTensorEntry {
+    pub name_len: u16,
+    pub name: [u8; 64],
+    pub dtype: u32,
+    pub cols: u64,
+    pub rows: u64,
+    pub n_dims: u32,
+    pub byte_len: u64,
+    pub offset: u64,
+    pub position: u64,
+}
+
+impl ResidentTensorEntry {
+    pub const fn empty() -> Self {
+        Self {
+            name_len: 0,
+            name: [0u8; 64],
+            dtype: 0,
+            cols: 0,
+            rows: 0,
+            n_dims: 0,
+            byte_len: 0,
+            offset: 0,
+            position: 0,
+        }
+    }
+
+    pub fn matches(&self, target_name: &[u8]) -> bool {
+        self.name_len as usize == target_name.len()
+            && &self.name[..self.name_len as usize] == target_name
+    }
+}
+
+/// Static / resident cache of GGUF tensor offsets, names, and dimensions.
+pub struct ResidentTensorCache {
+    pub count: usize,
+    pub entries: [ResidentTensorEntry; RESIDENT_TENSOR_CAP],
+    pub data_start: u64,
+    pub alignment: u64,
+    pub initialized: bool,
+}
+
+impl ResidentTensorCache {
+    pub const fn new() -> Self {
+        Self {
+            count: 0,
+            entries: [ResidentTensorEntry::empty(); RESIDENT_TENSOR_CAP],
+            data_start: 0,
+            alignment: 32,
+            initialized: false,
+        }
+    }
+
+    pub fn find(&self, name: &[u8]) -> Option<&ResidentTensorEntry> {
+        if !self.initialized {
+            return None;
+        }
+        for i in 0..self.count {
+            if self.entries[i].matches(name) {
+                return Some(&self.entries[i]);
+            }
+        }
+        None
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Transformer Layer & Model Architecture
 // -----------------------------------------------------------------------------
+
+/// Non-linear feed-forward activation function type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationType {
+    SwiGLU,
+    GeGLU,
+}
 
 /// Architecture hyper-parameters for Gemma / EmbeddingGemma models.
 ///
@@ -981,6 +1187,7 @@ pub struct ModelConfig {
     pub sliding_window: Option<usize>,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
+    pub activation: ActivationType,
 }
 
 /// Run length for a file that states no `<arch>.context_length`.
@@ -1018,6 +1225,7 @@ impl ModelConfig {
             sliding_window: None,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
+            activation: ActivationType::SwiGLU,
         }
     }
 
@@ -1219,7 +1427,11 @@ impl ModelConfig {
     /// holds, and `run_block` folds each query head onto it, which is what the
     /// architecture means and what this build runs.
     pub fn check_attention_shape(&self) -> Result<(), InferenceError> {
-        if self.num_kv_heads > 1 {
+        if self.num_kv_heads == 0
+            || (self.num_kv_heads > 1
+                && (self.num_kv_heads > self.num_heads
+                    || (self.num_heads % self.num_kv_heads != 0)))
+        {
             let stated = u32::try_from(self.num_kv_heads).ok();
             return Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count_kv",
@@ -1292,12 +1504,10 @@ impl ModelConfig {
         };
 
         // A file that states no count is the format's own multi-head case: one KV
-        // head per query head. The cache prices either answer; the kernel only
-        // walks one, which `check_attention_shape` is left to say.
+        // head per query head. The cache prices either answer; the kernel walks
+        // the declared count, which `check_attention_shape` validates.
         let num_kv_heads = match info.num_kv_heads {
-            Some(kv) if kv > 0 && usize::try_from(kv).unwrap_or(usize::MAX) <= num_heads => {
-                kv as usize
-            }
+            Some(kv) if kv > 0 => usize::try_from(kv).unwrap_or(usize::MAX),
             _ => num_heads,
         };
 
@@ -1313,6 +1523,11 @@ impl ModelConfig {
             _ => None,
         };
 
+        let activation = match info.architecture() {
+            Some(arch) if arch.starts_with("gemma") => ActivationType::GeGLU,
+            _ => ActivationType::SwiGLU,
+        };
+
         let config = Self {
             hidden_dim,
             intermediate_dim,
@@ -1325,6 +1540,7 @@ impl ModelConfig {
             sliding_window,
             rms_norm_eps: info.rms_norm_eps.unwrap_or(1e-6),
             rope_theta: info.rope_theta.unwrap_or(10000.0),
+            activation,
         };
 
         // Checked in the order the graph is built: the head geometry first, since
@@ -2125,10 +2341,13 @@ pub fn run_block(
         apply_rope(&mut k[at..at + hd], pos, hd, config.rope_theta);
     }
 
-    // 5. Cache the one key/value head this build's kernel walks. `KvCache::write`
+    // 5. Cache the key/value heads the model declared. `KvCache::write`
     // refuses a slice that is not exactly `head_dim` long, so the row is the whole
     // declared head: nothing is dropped and nothing is zero-padded to reach it.
-    kv_cache.write(block, pos, 0, &k[..hd], &v_vec[..hd])?;
+    for kv_head in 0..config.num_kv_heads {
+        let at = kv_head * hd;
+        kv_cache.write(block, pos, kv_head, &k[at..at + hd], &v_vec[at..at + hd])?;
+    }
 
     // 6. Attention scores and softmax, then the weighted sum of values.
     //
@@ -2147,11 +2366,13 @@ pub fn run_block(
     for value in attn_out[..h_dim].iter_mut() {
         *value = 0.0f32;
     }
+    let group_size = config.num_heads / config.num_kv_heads.max(1);
     for head in 0..config.num_heads {
+        let kv_head = head / group_size;
         let h_base = head * hd;
         for t in span_start..span_end {
             let key_row = kv_cache
-                .k_row(block, t, 0)
+                .k_row(block, t, kv_head)
                 .ok_or(InferenceError::ContextLengthExceeded)?;
             let mut dot = 0.0f32;
             for d in 0..hd {
@@ -2162,7 +2383,7 @@ pub fn run_block(
         softmax(&mut scores[span_start..span_end]);
         for t in span_start..span_end {
             let value_row = kv_cache
-                .v_row(block, t, 0)
+                .v_row(block, t, kv_head)
                 .ok_or(InferenceError::ContextLengthExceeded)?;
             let weight = scores[t];
             for d in 0..hd {
@@ -2184,7 +2405,14 @@ pub fn run_block(
     rms_norm(&mut x_norm[..h_dim], lw.ffn_norm, config.rms_norm_eps);
     gemv(lw.ffn_gate, lw.weight_type, &x_norm[..h_dim], &mut gate[..inter_dim], inter_dim, h_dim)?;
     gemv(lw.ffn_up, lw.weight_type, &x_norm[..h_dim], &mut up[..inter_dim], inter_dim, h_dim)?;
-    swiglu(&gate[..inter_dim], &up[..inter_dim], &mut ffn_hidden[..inter_dim]);
+    match config.activation {
+        ActivationType::SwiGLU => {
+            swiglu(&gate[..inter_dim], &up[..inter_dim], &mut ffn_hidden[..inter_dim]);
+        }
+        ActivationType::GeGLU => {
+            geglu(&gate[..inter_dim], &up[..inter_dim], &mut ffn_hidden[..inter_dim]);
+        }
+    }
     gemv(lw.ffn_down, lw.weight_type, &ffn_hidden[..inter_dim], &mut ffn_out[..h_dim], h_dim, inter_dim)?;
     rms_norm(&mut ffn_out[..h_dim], lw.post_ffn_norm, config.rms_norm_eps);
     for i in 0..h_dim {
@@ -3083,15 +3311,15 @@ pub mod tests {
             );
         }
 
-        // Two key/value heads where the kernel walks one is the graph's gap, and it
-        // is reported as the declaration that says so rather than as a size.
+        // Key/value heads that do not evenly divide query heads (3 does not divide 2)
+        // are refused on head geometry.
         assert_eq!(
             forward_step(
                 crate::tokenizer::TOKEN_BOS,
                 0,
                 &model,
                 &ModelConfig {
-                    num_kv_heads: 2,
+                    num_kv_heads: 3,
                     ..base
                 },
                 &mut kv_cache,
@@ -3099,7 +3327,7 @@ pub mod tests {
             ),
             Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count_kv",
-                Some(2),
+                Some(3),
                 1
             ))
         );
@@ -3454,27 +3682,20 @@ pub mod tests {
     #[test]
     fn test_model_config_refuses_more_than_one_key_value_head() {
         let mut shared = declared(64, 128, 1, 2, 32, 290);
-        shared.num_kv_heads = Some(2);
+        shared.num_kv_heads = Some(3);
         assert_eq!(
             ModelConfig::from_gguf(&shared),
             Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count_kv",
-                Some(2),
+                Some(3),
                 1
             ))
         );
 
-        // A file that states no count is the format's multi-head case, and the
-        // refusal reports the count that follows rather than nothing at all.
+        // A file that states no count is the format's multi-head case: num_kv_heads == num_heads = 2.
+        // With GQA, 2 KV heads evenly divides 2 query heads, so it is accepted.
         let unstated = declared(64, 128, 1, 2, 32, 290);
-        assert_eq!(
-            ModelConfig::from_gguf(&unstated),
-            Err(InferenceError::ModelDeclaration(
-                "<arch>.attention.head_count_kv",
-                Some(2),
-                1
-            ))
-        );
+        assert!(ModelConfig::from_gguf(&unstated).is_ok());
 
         // One shared head is what the cache is shaped for.
         let mut single = declared(64, 128, 1, 2, 32, 290);
@@ -3780,6 +4001,7 @@ pub mod tests {
             sliding_window: None,
             rms_norm_eps: 1e-6,
             rope_theta: 1_000_000.0,
+            activation: ActivationType::SwiGLU,
         }
     }
 
@@ -4403,12 +4625,13 @@ pub mod tests {
             num_layers: 18,
             num_heads: 8,
             head_dim: 256,
-            num_kv_heads: 4,
+            num_kv_heads: 5,
             seq_len: 2048,
             vocab_size: 256000,
             sliding_window: None,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
+            activation: ActivationType::SwiGLU,
         };
 
         // 1. Weight bytes priced from model configuration
@@ -4420,12 +4643,12 @@ pub mod tests {
         assert!(q4_weight_bytes > SCRATCH_BYTE_BUDGET * 8, "2B Q4 weights exceed budget by 8x");
         assert!(q8_weight_bytes > SCRATCH_BYTE_BUDGET * 16, "2B Q8 weights exceed budget by 16x");
 
-        // 2. Admission check refuses 2B architecture with 4 KV heads on head count
+        // 2. Admission check refuses 2B architecture with 5 KV heads on head count
         assert_eq!(
             conv_2b.check_admission(Some(8)),
             Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count_kv",
-                Some(4),
+                Some(5),
                 1
             ))
         );
@@ -4488,5 +4711,118 @@ pub mod tests {
             extract_embedding(&too_long, &weights, &config, &mut out),
             Err(InferenceError::ContextLengthExceeded)
         );
+    }
+
+    #[test]
+    fn test_geglu_activation() {
+        let gate = [0.0f32, 1.0f32, -1.0f32, 2.0f32];
+        let up = [1.0f32, 2.0f32, 3.0f32, -0.5f32];
+        let mut out = [0.0f32; 4];
+        geglu(&gate, &up, &mut out);
+        for i in 0..4 {
+            let expected = gelu_tanh(gate[i]) * up[i];
+            let diff = (out[i] - expected).abs();
+            assert!(diff < 1e-5, "geglu output {i} mismatch: got {}, expected {}", out[i], expected);
+        }
+    }
+
+    #[test]
+    fn test_sample_token_calibrated_temperature_and_argmax() {
+        let logits = [-10.0f32, 2.5f32, 15.0f32, 8.0f32, -1.0f32];
+        // Argmax with T = 0.0
+        let token_argmax = sample_token(&logits, 0.0);
+        assert_eq!(token_argmax, 2, "T=0.0 must choose index 2 (logit 15.0)");
+
+        // Argmax with T < 1e-4
+        let token_low_t = sample_token(&logits, 5e-5);
+        assert_eq!(token_low_t, 2, "T < 1e-4 must choose index 2");
+
+        // Calibrated sampling with top_k = 1 must also choose index 2
+        let token_top1 = sample_token_calibrated(&logits, 1.0, 1, 0.9, 42);
+        assert_eq!(token_top1, 2, "top_k=1 must choose index 2");
+
+        // Calibrated sampling with fixed seed must be deterministic
+        let t1 = sample_token_calibrated(&logits, 0.8, 10, 0.95, 12345);
+        let t2 = sample_token_calibrated(&logits, 0.8, 10, 0.95, 12345);
+        assert_eq!(t1, t2, "calibrated sampling with identical seed must be deterministic");
+    }
+
+    #[test]
+    fn test_grouped_query_attention_config_and_step() {
+        // Valid GQA: 4 query heads, 2 KV heads (k = 2)
+        let gqa_config = ModelConfig {
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            num_layers: 1,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            vocab_size: 290,
+            seq_len: 64,
+            sliding_window: None,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            activation: ActivationType::SwiGLU,
+        };
+        assert_eq!(gqa_config.check_attention_shape(), Ok(()));
+
+        // Invalid GQA: 4 query heads, 3 KV heads (3 does not divide 4)
+        let invalid_gqa = ModelConfig {
+            num_kv_heads: 3,
+            ..gqa_config
+        };
+        assert_eq!(
+            invalid_gqa.check_attention_shape(),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(3),
+                1
+            ))
+        );
+
+        // Invalid GQA: 4 query heads, 8 KV heads (8 > 4)
+        let invalid_gqa_excess = ModelConfig {
+            num_kv_heads: 8,
+            ..gqa_config
+        };
+        assert_eq!(
+            invalid_gqa_excess.check_attention_shape(),
+            Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count_kv",
+                Some(8),
+                1
+            ))
+        );
+    }
+
+    #[test]
+    fn test_resident_tensor_cache_roundtrip() {
+        let mut cache = ResidentTensorCache::new();
+        assert!(!cache.initialized);
+        assert_eq!(cache.count, 0);
+
+        let mut entry = ResidentTensorEntry::empty();
+        let name = b"blk.0.attn_q.weight";
+        entry.name_len = name.len() as u16;
+        entry.name[..name.len()].copy_from_slice(name);
+        entry.dtype = 1;
+        entry.cols = 64;
+        entry.rows = 64;
+        entry.n_dims = 2;
+        entry.byte_len = 8192;
+        entry.offset = 4096;
+        entry.position = 8192;
+
+        assert!(entry.matches(name));
+        assert!(!entry.matches(b"blk.0.attn_k.weight"));
+
+        cache.entries[0] = entry;
+        cache.count = 1;
+        cache.data_start = 4096;
+        cache.alignment = 32;
+        cache.initialized = true;
+
+        assert_eq!(cache.find(name), Some(&entry));
+        assert_eq!(cache.find(b"nonexistent"), None);
     }
 }

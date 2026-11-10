@@ -130,19 +130,8 @@ pub fn run_display() -> ! {
 pub fn run_input() -> ! {
     let _ = std::log("[inputd] userspace input manager online.");
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
-    let mut event = std::InputEvent {
-        kind: 0,
-        x: 0,
-        y: 0,
-        dx: 0,
-        dy: 0,
-        scale_milli: 1000,
-    };
     loop {
         let _ = std::service_heartbeat(2);
-        if std::input_event_poll(&mut event).is_ok() {
-            let _ = std::log("[inputd] normalized input event received.");
-        }
         if has_epoll {
             let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
         } else {
@@ -407,8 +396,6 @@ pub fn run_wasm() -> ! {
     let mut rx_buf = [0u8; 1024];
 
     loop {
-        let _ = std::service_heartbeat(12);
-
         // Non-allocating IPC listener and execution scaffolding for userspace .rapp WASM tasks
         if let Some(_) = ipc_slot {
             if let Ok(len) = std::ipc_recv(&mut rx_buf) {
@@ -453,8 +440,9 @@ pub fn run_ai() -> ! {
 
     // Probe storage for real physical GGUF model weights on startup
     let mut probed_models = gguf::probe_all_models();
-    if let Some((_hdr, _path)) = probed_models.embedding {
+    if let Some((_hdr, path)) = probed_models.embedding {
         let _ = std::log("[aid] verified physical EmbeddingGemma 2 weights in storage.");
+        init_resident_model_cache(path);
     } else {
         let _ = std::log("[aid] physical EmbeddingGemma 2 weights absent; lexical baseline active.");
     }
@@ -475,7 +463,11 @@ pub fn run_ai() -> ! {
         // this probe reads, and a probe only taken at startup keeps answering
         // "no weights" about a model the service itself just installed.
         if MODEL_NAMESPACE_CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            invalidate_resident_model_cache();
             probed_models = gguf::probe_all_models();
+            if let Some((_hdr, path)) = probed_models.embedding {
+                init_resident_model_cache(path);
+            }
             let _ = std::log("[aid] re-probed the model namespace after an install.");
         }
 
@@ -1676,6 +1668,85 @@ enum FileEmbedError {
     Load(weights::LoadError),
 }
 
+struct ResidentEmbeddingState {
+    cache: inference::ResidentTensorCache,
+    info: Option<crate::gguf::GgufModelInfo>,
+    path: [u8; 128],
+    path_len: usize,
+}
+
+struct SyncResidentCache {
+    state: core::cell::UnsafeCell<ResidentEmbeddingState>,
+}
+
+unsafe impl Sync for SyncResidentCache {}
+
+static RESIDENT_EMBEDDING_CACHE: SyncResidentCache = SyncResidentCache {
+    state: core::cell::UnsafeCell::new(ResidentEmbeddingState {
+        cache: inference::ResidentTensorCache::new(),
+        info: None,
+        path: [0u8; 128],
+        path_len: 0,
+    }),
+};
+
+fn get_resident_model_cache(path: &str) -> Option<(weights::TensorTable, crate::gguf::GgufModelInfo)> {
+    let p_bytes = path.as_bytes();
+    unsafe {
+        let state = &*RESIDENT_EMBEDDING_CACHE.state.get();
+        if state.cache.initialized
+            && state.path_len == p_bytes.len()
+            && &state.path[..state.path_len] == p_bytes
+        {
+            if let Some(info) = state.info {
+                let table = weights::TensorTable::from_resident_cache(&state.cache);
+                return Some((table, info));
+            }
+        }
+    }
+    None
+}
+
+fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &crate::gguf::GgufModelInfo) {
+    let p_bytes = path.as_bytes();
+    let len = p_bytes.len().min(128);
+    unsafe {
+        let state = &mut *RESIDENT_EMBEDDING_CACHE.state.get();
+        table.populate_resident_cache(&mut state.cache);
+        state.info = Some(*info);
+        state.path[..len].copy_from_slice(&p_bytes[..len]);
+        state.path_len = len;
+    }
+}
+
+pub fn invalidate_resident_model_cache() {
+    unsafe {
+        let state = &mut *RESIDENT_EMBEDDING_CACHE.state.get();
+        state.cache.initialized = false;
+        state.cache.count = 0;
+        state.info = None;
+        state.path_len = 0;
+    }
+}
+
+pub fn init_resident_model_cache(path: &str) {
+    if let Ok(fd) = std::fs_open(path, std::FS_READ) {
+        let table = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            weights::TensorTable::walk(&mut stream)
+        };
+        let info = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            gguf::read_model_info_stream(&mut stream)
+        };
+        let _ = std::fs_close(fd);
+        if let (Ok(table), Ok(info)) = (table, info) {
+            set_resident_model_cache(path, &table, &info);
+            let _ = std::log("[aid] cached resident GGUF tensor offsets and model metadata.");
+        }
+    }
+}
+
 /// Reads the installed file one block at a time and runs it over `tokens`.
 ///
 /// This is the hop the service had never taken on the device: `weights` had been
@@ -1690,28 +1761,34 @@ fn run_installed_embedding(
     let fd = std::fs_open(path, std::FS_READ).map_err(|_| FileEmbedError::Open)?;
     let source = weights::ModelFileDescriptor { fd };
 
-    let walked = {
-        let mut stream = GgufStream::buffered_from_file(fd);
-        weights::TensorTable::walk(&mut stream)
-    };
-    let table = match walked {
-        Ok(table) => table,
-        Err(error) => {
-            let _ = std::fs_close(fd);
-            return Err(FileEmbedError::Load(error));
-        }
-    };
+    let (table, info) = if let Some((cached_table, cached_info)) = get_resident_model_cache(path) {
+        (cached_table, cached_info)
+    } else {
+        let walked = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            weights::TensorTable::walk(&mut stream)
+        };
+        let table = match walked {
+            Ok(table) => table,
+            Err(error) => {
+                let _ = std::fs_close(fd);
+                return Err(FileEmbedError::Load(error));
+            }
+        };
 
-    let read = {
-        let mut stream = GgufStream::buffered_from_file(fd);
-        gguf::read_model_info_stream(&mut stream)
-    };
-    let info = match read {
-        Ok(info) => info,
-        Err(error) => {
-            let _ = std::fs_close(fd);
-            return Err(FileEmbedError::Load(weights::LoadError::Reader(error)));
-        }
+        let read = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            gguf::read_model_info_stream(&mut stream)
+        };
+        let info = match read {
+            Ok(info) => info,
+            Err(error) => {
+                let _ = std::fs_close(fd);
+                return Err(FileEmbedError::Load(weights::LoadError::Reader(error)));
+            }
+        };
+        set_resident_model_cache(path, &table, &info);
+        (table, info)
     };
     let config = match ModelConfig::from_gguf(&info) {
         Ok(config) => config,
@@ -2851,7 +2928,10 @@ pub fn handle_ipc_inference_query(
         notice.word(b"PRE-HEAD: this file declares no pooling head]");
     }
     let notice = notice.finish();
-    emit_response_as(sender_task_id, STATUS_SUCCESS, MSG_TYPE_EMBED, notice, tx_buf);
+    if let Ok(notice_str) = core::str::from_utf8(notice) {
+        let _ = std::log(notice_str);
+    }
+    return;
 }
 
 #[cfg(test)]

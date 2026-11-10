@@ -16,6 +16,7 @@ a measurement of what arrived.
 """
 
 import re
+import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -3507,6 +3508,14 @@ def test_the_derived_budget_contract_can_fail():
     assert _budget_defects(tokenizer, unpriced_scratch), (
         "a run priced against the floor rather than the guest's free RAM passed"
     )
+
+
+def load_tests(loader, standard_tests, pattern):
+    suite = unittest.TestSuite()
+    tests = [name for name in globals() if name.startswith("test_") and callable(globals()[name])]
+    for name in sorted(tests):
+        suite.addTest(unittest.FunctionTestCase(globals()[name]))
+    return suite
 
 
 def main() -> int:
