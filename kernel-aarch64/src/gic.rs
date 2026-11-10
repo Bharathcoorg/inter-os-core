@@ -4,13 +4,18 @@
 //! ARM Generic Interrupt Controller (GICv2) Driver for AArch64
 //!
 //! Provides bare-metal hardware interrupt routing, CPU core affinity,
-//! and priority masking for ARM Cortex-A smartphone SoCs and QEMU `virt`.
+//! and priority masking for ARM Cortex-A mobile platforms:
+//! - QEMU `virt`: GICD @ `0x08000000`, GICC @ `0x08010000`
+//! - PinePhone A64 (Allwinner A64): GICD @ `0x01c81000`, GICC @ `0x01c82000`
 
 use crate::fdt::ArmFdtParser;
 use alloc::vec::Vec;
 
 pub const DEFAULT_GICD_BASE: usize = 0x08000000;
 pub const DEFAULT_GICC_BASE: usize = 0x08010000;
+
+pub const PINEPHONE_GICD_BASE: usize = 0x01c81000;
+pub const PINEPHONE_GICC_BASE: usize = 0x01c82000;
 
 pub const GICD_CTLR: usize = 0x000;
 pub const GICD_TYPER: usize = 0x004;
@@ -50,8 +55,30 @@ pub enum IntcDescription {
 /// next base address.
 fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<usize>> {
     let reg = parser.get_node_property(node, "reg").ok()?;
-    let address_cells = cell_count(parser, node, "#address-cells").unwrap_or(1);
-    let size_cells = cell_count(parser, node, "#size-cells").unwrap_or(0);
+    if reg.is_empty() {
+        return None;
+    }
+
+    let mut address_cells = cell_count(parser, node, "#address-cells").unwrap_or(0);
+    let mut size_cells = cell_count(parser, node, "#size-cells").unwrap_or(0);
+
+    // If cell counts are not defined on the node itself, deduce them from the layout.
+    // In Devicetree, parent bus nodes define #address-cells and #size-cells.
+    if address_cells == 0 || size_cells == 0 {
+        if reg.len() >= 32 && reg[0..4] == [0, 0, 0, 0] {
+            // 64-bit addresses and sizes (QEMU virt 64-bit bus)
+            address_cells = 2;
+            size_cells = 2;
+        } else if reg.len() >= 16 {
+            // 32-bit addresses and sizes (Allwinner A64 32-bit SoC bus)
+            address_cells = 1;
+            size_cells = 1;
+        } else {
+            address_cells = 1;
+            size_cells = 0;
+        }
+    }
+
     if address_cells == 0 || address_cells > 2 || size_cells > 2 {
         return None;
     }
@@ -70,6 +97,19 @@ fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<V
         bases.push(value as usize);
         cursor += stride;
     }
+
+    // Safety check: if bases[1] looks like a region size (< 64 KiB) instead of a
+    // peripheral base address, and we have additional entries, the parser stride
+    // may have skipped sizes incorrectly. Fall back to direct (addr, size) parsing.
+    if bases.len() >= 2 && bases[1] < 0x10000 && reg.len() >= 16 {
+        // Direct parse for 32-bit (addr, size) pairs
+        let gicd = u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]) as usize;
+        let gicc = u32::from_be_bytes([reg[8], reg[9], reg[10], reg[11]]) as usize;
+        if gicd >= 0x0010_0000 && gicc >= 0x0010_0000 {
+            return Some(alloc::vec![gicd, gicc]);
+        }
+    }
+
     if bases.is_empty() {
         None
     } else {
@@ -153,7 +193,9 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
 fn classify(text: &str) -> Option<&'static str> {
     match text {
         // GICv2: distributor and CPU interface in one node.
-        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic" => Some("arm,gic-400"),
+        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic" | "arm,arm11mp-gic" => {
+            Some("arm,gic-400")
+        }
         // Same device family, different register model.
         "arm,gic-v2m" | "arm,gic-v2m-frame" => Some("arm,gic-v2m"),
         "arm,gic-v3" | "arm,gic-v3-frame" => Some("arm,gic-v3"),
@@ -165,7 +207,7 @@ fn classify(text: &str) -> Option<&'static str> {
 fn is_gicv2_compatible(text: &str) -> bool {
     matches!(
         text,
-        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic"
+        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic" | "arm,arm11mp-gic"
     )
 }
 

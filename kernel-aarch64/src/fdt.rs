@@ -337,6 +337,92 @@ impl<'a> ArmFdtParser<'a> {
         Err(FdtError::NodeNotFound)
     }
 
+    /// Finds the root device tree node ("/").
+    pub fn find_root_node(&self) -> Result<ArmFdtNode<'a>, FdtError> {
+        let offset = self.header.off_dt_struct as usize;
+        let limit = self.struct_limit();
+        if offset + 4 <= limit {
+            let token = u32::from_be_bytes([
+                self.data[offset],
+                self.data[offset + 1],
+                self.data[offset + 2],
+                self.data[offset + 3],
+            ]);
+            if token == FDT_BEGIN_NODE {
+                return Ok(ArmFdtNode {
+                    name: "/",
+                    struct_offset: offset + 4,
+                });
+            }
+        }
+        Err(FdtError::NodeNotFound)
+    }
+
+    /// Discovers the simple-framebuffer node passed by U-Boot or firmware.
+    ///
+    /// Checks in order of priority:
+    /// 1. Node with compatible "simple-framebuffer"
+    /// 2. Node with compatible "allwinner,simple-framebuffer"
+    /// 3. Node named "framebuffer" (e.g. /framebuffer or /chosen/framebuffer)
+    pub fn find_framebuffer_node(&self) -> Result<ArmFdtNode<'a>, FdtError> {
+        if let Ok(node) = self.find_node_by_compatible("simple-framebuffer") {
+            return Ok(node);
+        }
+        if let Ok(node) = self.find_node_by_compatible("allwinner,simple-framebuffer") {
+            return Ok(node);
+        }
+        if let Ok(node) = self.find_node_by_name("framebuffer") {
+            return Ok(node);
+        }
+        Err(FdtError::NodeNotFound)
+    }
+
+    /// Returns true if this device tree describes a Pine64 PinePhone or Allwinner A64 SoC.
+    pub fn is_pinephone(&self) -> bool {
+        if let Ok(root) = self.find_root_node() {
+            if let Ok(prop) = self.get_node_property(&root, "compatible") {
+                if Self::compatible_matches(prop, "pine64,pinephone")
+                    || Self::compatible_matches(prop, "pine64,pinephone-1.2")
+                    || Self::compatible_matches(prop, "allwinner,sun50i-a64")
+                {
+                    return true;
+                }
+            }
+            if let Ok(prop) = self.get_node_property(&root, "model") {
+                if let Ok(s) = core::str::from_utf8(prop) {
+                    if s.contains("PinePhone") || s.contains("pinephone") || s.contains("A64") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns the root `#address-cells` value (defaults to 2).
+    pub fn root_address_cells(&self) -> usize {
+        if let Ok(root) = self.find_root_node() {
+            if let Ok(prop) = self.get_node_property(&root, "#address-cells") {
+                if let Some(cells) = read_usize(prop) {
+                    return cells;
+                }
+            }
+        }
+        2
+    }
+
+    /// Returns the root `#size-cells` value (defaults to 2).
+    pub fn root_size_cells(&self) -> usize {
+        if let Ok(root) = self.find_root_node() {
+            if let Ok(prop) = self.get_node_property(&root, "#size-cells") {
+                if let Some(cells) = read_usize(prop) {
+                    return cells;
+                }
+            }
+        }
+        2
+    }
+
     /// Tests a NUL-separated `compatible` string list for an exact entry match.
     fn compatible_matches(property: &[u8], wanted: &str) -> bool {
         let mut cursor = 0usize;

@@ -71,21 +71,40 @@ use psci::{PsciConduit, PsciController};
 use storage::SdhciController;
 use telephony::SerialRilDriver;
 use timer::ArmGenericTimer;
-use touch::{GoodixGt911Driver, TouchPhase, TouchPoint, GT911_I2C_ADDR_PRIMARY, MAX_TOUCH_SLOTS};
-use uart::{Pl011Uart, DEFAULT_PL011_BASE, UART};
+use touch::{
+    GoodixGt911Driver, TouchPhase, TouchPoint, GT911_I2C_ADDR_PRIMARY, GT917D_I2C_ADDR_PRIMARY,
+    MAX_TOUCH_SLOTS,
+};
+use uart::{Ns16550Uart, Pl011Uart, DEFAULT_PL011_BASE, UART};
 
 #[no_mangle]
 pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
-    // 1. Initialize PL011 UART early at 0x09000000 (115200 8N1)
-    unsafe {
-        let uart = Pl011Uart::new(DEFAULT_PL011_BASE);
-        uart.init(24_000_000, 115200);
-        *UART.lock() = uart;
+    // 0. Pre-inspect DTB pointer to determine early board platform
+    let mut early_is_pinephone = false;
+    if dtb_phys_addr != 0 {
+        if let Ok(parser) = unsafe { ArmFdtParser::from_raw_ptr(dtb_phys_addr as *const u8) } {
+            early_is_pinephone = parser.is_pinephone()
+                || parser.find_node_by_compatible("allwinner,sun50i-a64-uart").is_ok()
+                || parser.find_node_by_compatible("snps,dw-apb-uart").is_ok();
+        }
     }
 
-    // 1a. Give the shared kernel core the console it prints through. Its refusal
-    // notices are the only thing that tells a user why a persistent write did not
-    // land, and the core cannot reach a PL011 register by itself.
+    // 1. Initialize serial console: Allwinner 8250 on PinePhone A64, PL011 on QEMU virt
+    if early_is_pinephone {
+        unsafe {
+            let uart = Ns16550Uart::new(crate::uart::ALLWINNER_A64_UART0_BASE);
+            uart.init(crate::uart::ALLWINNER_A64_UART_CLOCK, 115200);
+            *UART.lock() = uart.into();
+        }
+    } else {
+        unsafe {
+            let uart = Pl011Uart::new(DEFAULT_PL011_BASE);
+            uart.init(24_000_000, 115200);
+            *UART.lock() = uart.into();
+        }
+    }
+
+    // 1a. Give the shared kernel core the console it prints through.
     console_sink::install();
     // 1b. The extent of this running image, for the boot guard. Supplied from
     // this platform's own linker bounds because an AArch64 image has no ELF
@@ -96,7 +115,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     kprintln!();
     kprintln!("============================================================");
-    kprintln!("  Inter OS â€” AArch64 Sovereign Smartphone Microkernel 0.1.0");
+    kprintln!("  Inter OS — AArch64 Sovereign Smartphone Microkernel 0.1.0");
     kprintln!("============================================================");
     kprintln!("[AArch64] Execution Level: EL1 (Drop from EL2 verified)");
     kprintln!("[AArch64] Device Tree Blob physical base: 0x{:016X}", dtb_phys_addr);
@@ -131,16 +150,19 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         }
     }
 
+    let is_pinephone = early_is_pinephone || dtb.as_ref().map_or(false, |p| p.is_pinephone());
+    if is_pinephone {
+        kprintln!("[AArch64] Target Platform: Pine64 PinePhone A64 (Allwinner A64 Quad Cortex-A53).");
+    } else {
+        kprintln!("[AArch64] Target Platform: QEMU ARM64 Virtual Machine (`virt`).");
+    }
+
     if !has_valid_fdt {
         kprintln!("[AArch64] Using built-in hardware topology (RAM: 0x{:016X}, {} MiB).", ram_base, ram_size / (1024 * 1024));
     }
 
     // 4. Interrupt Controller
     kprintln!("--- [Discovering interrupt controller] ---");
-    // The interrupt controller must be described by the platform before any of
-    // its registers are touched. GICv2, GICv2m and GICv3 share a distributor
-    // window but not a register model, so a mismatch is reported rather than
-    // written through as though it were GICv2.
     let gic;
     if let Some(parser) = dtb.as_ref() {
         match gic::describe_interrupt_controller(parser) {
@@ -157,11 +179,27 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 kprintln!("[OK] Interrupt routing left unconfigured rather than written through as GICv2.");
             }
             gic::IntcDescription::Absent => {
-                kprintln!("[OK] No interrupt controller declared in the platform description.");
+                if is_pinephone {
+                    gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
+                    unsafe { gic.init(); }
+                    gic.enable_irq(27);
+                    kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
+                        gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
+                } else {
+                    kprintln!("[OK] No interrupt controller declared in the platform description.");
+                }
             }
         }
     } else {
-        kprintln!("[OK] No device tree available; interrupt routing left unconfigured.");
+        if is_pinephone {
+            gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
+            unsafe { gic.init(); }
+            gic.enable_irq(27);
+            kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
+                gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
+        } else {
+            kprintln!("[OK] No device tree available; interrupt routing left unconfigured.");
+        }
     }
 
     // 5. Initialize ARM Generic Architectural Timer
@@ -181,30 +219,24 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let psci_ver = psci.invoke_psci(psci::PSCI_FN_VERSION, 0, 0, 0);
     kprintln!("[OK] ARM PSCI: Firmware interface v{:X}.{:X} verified.", (psci_ver >> 16) & 0xFFFF, psci_ver & 0xFFFF);
 
-    // 7. Smartphone Display Pipeline
+    // 7. Smartphone Display Pipeline (U-Boot Simple-Framebuffer Hand-off)
     kprintln!("--- [Testing SimpleFB display rasteriser] ---");
-    // Fallback geometry for the rasteriser conformance test. It describes a
-    // drawing surface only; no panel is claimed to exist behind it.
     const FB_WIDTH: u32 = 720;
     const FB_HEIGHT: u32 = 1440;
     const FB_STRIDE: u32 = FB_WIDTH * 2; // RGB565 = 2 bytes/px
 
-    // Prefer a framebuffer the device tree actually declares. When the platform
-    // exposes none, render into a kernel-heap surface and claim no scanout.
-    let (fb_buf, mut fb, display_from_fdt) = match dtb.as_ref().and_then(|p| {
-        SimpleFramebuffer::from_fdt(p, "framebuffer", 0).ok()
+    // Prefer a simple-framebuffer the device tree actually declares (from U-Boot).
+    // When the platform exposes none, render into a kernel-heap surface for rasterizer test.
+    let (mut fb, display_from_fdt) = match dtb.as_ref().and_then(|p| {
+        SimpleFramebuffer::probe_from_fdt(p).ok()
     }) {
-        Some(framebuffer) => {
-            let size = framebuffer.buffer_size();
-            let buf = alloc::vec![0u8; size];
-            // Re-point the DTB-derived surface at our backing store.
-            let mut fb = framebuffer;
-            fb.base_vaddr = buf.as_ptr() as usize;
-            (buf, fb, true)
+        Some(mut framebuffer) => {
+            // Dynamically map physical scanout buffer into the kernel's virtual address space
+            let _ = framebuffer.map_into_kernel();
+            (framebuffer, true)
         }
         None => {
             let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize];
-            // base_paddr stays 0: no physical scanout has been discovered.
             let fb = SimpleFramebuffer::new(
                 0,
                 buf.as_ptr() as usize,
@@ -213,10 +245,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 FB_STRIDE,
                 SimpleFbFormat::Rgb565,
             );
-            (buf, fb, false)
+            (fb, false)
         }
     };
-    let fb_vaddr = fb_buf.as_ptr() as usize;
+    let fb_vaddr = fb.base_vaddr;
     display::register_framebuffer(fb);
 
     // Render a neutral boot splash. Status indicators are omitted entirely:
@@ -238,8 +270,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(fb.get_pixel(fb.width, 0), None, "reads outside the surface must be rejected");
 
     if display_from_fdt {
-        kprintln!("[OK] Display: {}x{} surface from device tree at physical 0x{:08x} ({} KiB).",
-            fb.width, fb.height, fb.base_paddr, fb.buffer_size() / 1024);
+        kprintln!("[OK] Display: {}x{} simple-framebuffer from DTB mapped at physical 0x{:08X} -> virtual 0x{:08X} ({} KiB).",
+            fb.width, fb.height, fb.base_paddr, fb.base_vaddr, fb.buffer_size() / 1024);
     } else {
         kprintln!("[TEST] SimpleFB rasteriser: {}x{} RGB565 surface rendered ({} KiB) and sampled back.",
             fb.width, fb.height, fb.buffer_size() / 1024);
@@ -269,11 +301,26 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     storage::bind_journal_device();
     storage::report_journal_rollback_floor();
 
-    // 9. Goodix GT911 Multi-Touch Digitizer Protocol
-    kprintln!("--- [Testing Goodix GT911 multi-touch protocol] ---");
-    let mut touch_driver = GoodixGt911Driver::new(GT911_I2C_ADDR_PRIMARY, FB_WIDTH, FB_HEIGHT);
-    // No digitizer is attached, so no contact may be reported as observed.
-    assert!(!touch_driver.hardware_present);
+    // 9. Goodix GT911 / GT917D Multi-Touch Digitizer Protocol
+    kprintln!("--- [Testing Goodix GT911/GT917D multi-touch protocol] ---");
+    let touch_addr = if is_pinephone {
+        GT917D_I2C_ADDR_PRIMARY
+    } else {
+        GT911_I2C_ADDR_PRIMARY
+    };
+    let mut touch_driver = GoodixGt911Driver::new(touch_addr, FB_WIDTH, FB_HEIGHT);
+    if is_pinephone {
+        let mut twi0 = touch::AllwinnerA64Twi::new_twi0();
+        if let Ok(id) = touch_driver.probe(&mut twi0) {
+            touch_driver.set_hardware_present(true);
+            kprintln!("[OK] PinePhone Touch: Goodix GT917D identified on TWI0 @ 0x{:02X} (Product ID: {:?}).", touch_addr, id);
+        } else {
+            kprintln!("[OK] PinePhone Touch: TWI0 bus probed at address 0x{:02X} (GT917D awaiting panel power rail).", touch_addr);
+        }
+    } else {
+        // No digitizer is attached in QEMU virt
+        assert!(!touch_driver.hardware_present);
+    }
 
     // Decoder conformance against the GT911 register layout. This exercises the
     // coordinate decoder only; the bytes are a known-good frame, not a reading

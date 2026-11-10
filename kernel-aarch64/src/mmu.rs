@@ -147,6 +147,40 @@ impl ArmMmu {
                 | DESC_BLOCK
                 | DESC_VALID;
 
+            // Block 8 (0x0100_0000): Allwinner DE2 Display Engine & DSI (2MB) - Device MMIO (PXN + UXN)
+            L2_TABLE.entries[8] = 0x0100_0000
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+
+            // Block 14 (0x01c0_0000): Allwinner UART0 (0x01c28000), TWI0/I2C0 (0x01c2ac00),
+            // GICD (0x01c81000), GICC (0x01c82000) (2MB) - Device MMIO (PXN + UXN)
+            L2_TABLE.entries[14] = 0x01c0_0000
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+
+            // Block 15 (0x01e0_0000): Allwinner Clock, Reset, and SysCon Registers (2MB) - Device MMIO (PXN + UXN)
+            L2_TABLE.entries[15] = 0x01e0_0000
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+
             // Block 64 (0x0800_0000): GICv2 Distributor & CPU Interface (2MB) - Device MMIO (PXN + UXN)
             L2_TABLE.entries[64] = 0x0800_0000
                 | DESC_AF
@@ -178,20 +212,17 @@ impl ArmMmu {
                 // T0SZ = 25 (39-bit VA space, Level 1 is root table)
                 // TG0 = 0b00 (4KB granule)
                 // IRGN0 = 0b01, ORGN0 = 0b01 (Write-Back)
-// SH0 = 0b11 (Inner Shareable)
-// IPS = 0b100 (48-bit physical addressing).
-        //
-        // WHY 48 bits: QEMU's `virt` machine places the PCIe ECAM window at
-        // 0x4010_0000, which needs 40 bits. At the previous 36-bit setting the
-        // address was outside the physical address field, so every translation
-        // failed and the bus read back all ones for every slot.
-        let tcr_val: u64 = (25 << 0)          // T0SZ = 25 (39-bit VA, L1 root)
-    | (1 << 8)                        // IRGN0 = 0b01 (Inner WB WA)
-    | (1 << 10)                       // ORGN0 = 0b01 (Outer WB WA)
-    | (3 << 12)                       // SH0 = 0b11 (Inner Shareable)
-    | (0 << 14)                       // TG0 = 0b00 (4KB Granule)
-    | (4u64 << 32);                   // IPS = 0b100 (48-bit PA)
-    core::arch::asm!("msr tcr_el1, {}", in(reg) tcr_val);
+                // SH0 = 0b11 (Inner Shareable)
+                // EPD1 = 1 (Disable TTBR1 walks to isolate upper VA space)
+                // IPS = 0b100 (48-bit physical addressing).
+                let tcr_val: u64 = (25 << 0)          // T0SZ = 25 (39-bit VA, L1 root)
+                    | (1 << 8)                        // IRGN0 = 0b01 (Inner WB WA)
+                    | (1 << 10)                       // ORGN0 = 0b01 (Outer WB WA)
+                    | (3 << 12)                       // SH0 = 0b11 (Inner Shareable)
+                    | (0 << 14)                       // TG0 = 0b00 (4KB Granule)
+                    | (1 << 23)                       // EPD1 = 1 (Disable unconfigured TTBR1 table walks)
+                    | (4u64 << 32);                   // IPS = 0b100 (48-bit PA)
+                core::arch::asm!("msr tcr_el1, {}", in(reg) tcr_val);
 
 
                 // 7. Install TTBR0_EL1
@@ -606,44 +637,110 @@ impl ArmMmu {
         let user_stack_phys = r_base + 0x0420_0000;
 
         // Populate User L2:
-        // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB) with DESC_AP_RW_EL0
+        // Block 2 (0x0040_0000): EL0 Userspace Code Region (2MB) with DESC_AP_RW_EL0 + PXN
+        // PXN prevents EL1 supervisor from executing code placed in user space (ret2usr / PAN protection).
         user_l2.entries[2] = user_code_phys
             | DESC_AF
             | DESC_SH_INNER
             | DESC_AP_RW_EL0
             | DESC_ATTR_NORMAL
+            | DESC_PXN
             | DESC_BLOCK
             | DESC_VALID;
 
-        // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB) with DESC_AP_RW_EL0
+        // Block 4 (0x0080_0000): EL0 Userspace Stack Region (2MB) - Strictly Non-Executable (PXN + UXN)
+        // Enforces W^X / Data Execution Prevention (DEP) on user stack.
         user_l2.entries[4] = user_stack_phys
             | DESC_AF
             | DESC_SH_INNER
             | DESC_AP_RW_EL0
             | DESC_ATTR_NORMAL
+            | DESC_PXN
+            | DESC_UXN
             | DESC_BLOCK
             | DESC_VALID;
 
-        // Device MMIO (GIC and UART) mapped with DESC_AP_RW_EL1 (Kernel ONLY!)
+        // PinePhone A64 MMIO: Block 8 (DE2 Display Engine) (Kernel ONLY, PXN + UXN)
+        user_l2.entries[8] = 0x0100_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+
+        // PinePhone A64 MMIO: Block 14 (UART0, TWI0, GIC-400) (Kernel ONLY, PXN + UXN)
+        user_l2.entries[14] = 0x01c0_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+
+        // PinePhone A64 MMIO: Block 15 (Clock/SysCon) (Kernel ONLY, PXN + UXN)
+        user_l2.entries[15] = 0x01e0_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+
+        // QEMU virt MMIO: Block 64 (GICv2) (Kernel ONLY, PXN + UXN)
         user_l2.entries[64] = 0x0800_0000
             | DESC_AF
             | DESC_SH_OUTER
             | DESC_AP_RW_EL1
             | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
             | DESC_BLOCK
             | DESC_VALID;
 
+        // QEMU virt MMIO: Block 72 (PL011 UART) (Kernel ONLY, PXN + UXN)
         user_l2.entries[72] = 0x0900_0000
             | DESC_AF
             | DESC_SH_OUTER
             | DESC_AP_RW_EL1
             | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
             | DESC_BLOCK
             | DESC_VALID;
 
         let root_phys = Box::into_raw(user_l1) as u64;
         let _ = Box::into_raw(user_l2); // prevent deallocation
         root_phys
+    }
+
+    /// Ensures that physical address range `paddr..paddr+size` is mapped in the
+    /// active translation tables. If it is already mapped, returns true immediately.
+    /// Otherwise, maps 2 MiB blocks covering the range as device memory.
+    pub fn ensure_mapped(paddr: u64, size: u64) -> bool {
+        const L2_BLOCK: u64 = 0x20_0000;
+        if size == 0 || paddr == 0 {
+            return false;
+        }
+        let first = paddr / L2_BLOCK;
+        let last = (paddr + size - 1) / L2_BLOCK;
+        let mut all_mapped = true;
+        for idx in first..=last {
+            if !Self::block_is_mapped(idx) {
+                all_mapped = false;
+                break;
+            }
+        }
+        if all_mapped {
+            return true;
+        }
+        Self::map_device_blocks(paddr, size, 0, 0)
     }
 
     /// Switches the active TTBR0_EL1 register to the given task's page table.

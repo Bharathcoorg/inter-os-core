@@ -178,71 +178,110 @@ impl SimpleFramebuffer {
 
     pub fn from_fdt(parser: &ArmFdtParser, node_name: &str, base_vaddr: usize) -> Result<Self, &'static str> {
         let node = parser.find_node_by_name(node_name).map_err(|_| "Framebuffer node not found in DTB")?;
+        let mut fb = Self::from_fdt_node(parser, &node)?;
+        if base_vaddr != 0 {
+            fb.base_vaddr = base_vaddr;
+        }
+        Ok(fb)
+    }
 
-        let w_bytes = parser.get_node_property(&node, "width").map_err(|_| "Missing width property")?;
+    /// Discovers and constructs a SimpleFramebuffer by querying the DTB for
+    /// simple-framebuffer compatible strings or node names.
+    pub fn probe_from_fdt(parser: &ArmFdtParser) -> Result<Self, &'static str> {
+        let node = parser
+            .find_framebuffer_node()
+            .map_err(|_| "No simple-framebuffer node in DTB")?;
+        Self::from_fdt_node(parser, &node)
+    }
+
+    /// Constructs a SimpleFramebuffer from a discovered device tree node.
+    pub fn from_fdt_node(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Result<Self, &'static str> {
+        let w_bytes = parser.get_node_property(node, "width").map_err(|_| "Missing width property")?;
         if w_bytes.len() < 4 { return Err("Invalid width in DTB"); }
         let width = u32::from_be_bytes([w_bytes[0], w_bytes[1], w_bytes[2], w_bytes[3]]);
 
-        let h_bytes = parser.get_node_property(&node, "height").map_err(|_| "Missing height property")?;
+        let h_bytes = parser.get_node_property(node, "height").map_err(|_| "Missing height property")?;
         if h_bytes.len() < 4 { return Err("Invalid height in DTB"); }
         let height = u32::from_be_bytes([h_bytes[0], h_bytes[1], h_bytes[2], h_bytes[3]]);
 
-        let s_bytes = parser.get_node_property(&node, "stride").map_err(|_| "Missing stride property")?;
+        let s_bytes = parser.get_node_property(node, "stride").map_err(|_| "Missing stride property")?;
         if s_bytes.len() < 4 { return Err("Invalid stride in DTB"); }
         let stride = u32::from_be_bytes([s_bytes[0], s_bytes[1], s_bytes[2], s_bytes[3]]);
 
-        let fmt_bytes = parser.get_node_property(&node, "format").map_err(|_| "Missing format property")?;
+        let fmt_bytes = parser.get_node_property(node, "format").map_err(|_| "Missing format property")?;
         let len = if !fmt_bytes.is_empty() && fmt_bytes[fmt_bytes.len() - 1] == 0 {
             fmt_bytes.len() - 1
         } else {
             fmt_bytes.len()
         };
         let fmt_str = core::str::from_utf8(&fmt_bytes[..len]).map_err(|_| "Corrupted format string")?;
-let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
+        let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
 
-    // Validate the geometry before any surface is built from it. Every value
-    // comes from a device tree supplied by the bootloader, so a zero or forged
-    // dimension would otherwise turn into a divide-by-zero, a wrapped
-    // allocation or an out-of-bounds pixel offset.
-    if width == 0 || height == 0 {
-        return Err("Framebuffer geometry is zero");
-    }
-    let bpp = format.bytes_per_pixel() as u64;
-    let min_stride = (width as u64)
-        .checked_mul(bpp)
-        .ok_or("Framebuffer row size overflow")?;
-    if (stride as u64) < min_stride {
-        return Err("Framebuffer stride is smaller than one scanline");
-    }
-    let buffer_size = (stride as u64)
-        .checked_mul(height as u64)
-        .ok_or("Framebuffer size overflow")?;
-    if buffer_size == 0 || buffer_size > usize::MAX as u64 {
-        return Err("Framebuffer size is invalid");
+        // Validate the geometry before any surface is built from it.
+        if width == 0 || height == 0 {
+            return Err("Framebuffer geometry is zero");
+        }
+        let bpp = format.bytes_per_pixel() as u64;
+        let min_stride = (width as u64)
+            .checked_mul(bpp)
+            .ok_or("Framebuffer row size overflow")?;
+        if (stride as u64) < min_stride {
+            return Err("Framebuffer stride is smaller than one scanline");
+        }
+        let buffer_size = (stride as u64)
+            .checked_mul(height as u64)
+            .ok_or("Framebuffer size overflow")?;
+        if buffer_size == 0 || buffer_size > usize::MAX as u64 {
+            return Err("Framebuffer size is invalid");
+        }
+
+        // Parse physical base address honoring 32-bit vs 64-bit cell layouts.
+        let reg = parser
+            .get_node_property(node, "reg")
+            .map_err(|_| "Missing framebuffer reg property")?;
+        let base_paddr = if reg.len() >= 16 {
+            // 64-bit address, 64-bit size
+            u64::from_be_bytes([
+                reg[0], reg[1], reg[2], reg[3], reg[4], reg[5], reg[6], reg[7],
+            ]) as usize
+        } else if reg.len() >= 8 {
+            // On 32-bit SoC bus (Allwinner A64 / U-Boot), reg is <addr size> = 8 bytes.
+            // If the first 4 bytes are non-zero, it is a 32-bit address.
+            if reg[0..4] != [0, 0, 0, 0] {
+                u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]) as usize
+            } else {
+                u64::from_be_bytes([
+                    reg[0], reg[1], reg[2], reg[3], reg[4], reg[5], reg[6], reg[7],
+                ]) as usize
+            }
+        } else if reg.len() >= 4 {
+            u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]) as usize
+        } else {
+            return Err("Framebuffer reg property is too short");
+        };
+
+        if base_paddr == 0 {
+            return Err("Framebuffer reg property has no base address");
+        }
+
+        // Initially, virtual address matches physical address (identity mapping)
+        Ok(Self::new(base_paddr, base_paddr, width, height, stride, format))
     }
 
-    // A display-backed surface needs a physical base address. Falling back to the
-    // supplied virtual address would present a heap or identity-mapped range as
-    // though it were a scanout.
-    let base_paddr = parser
-        .get_node_property(&node, "reg")
-        .map_err(|_| "Missing framebuffer reg property")?;
-    let base_paddr = if base_paddr.len() >= 8 {
-        u64::from_be_bytes([
-            base_paddr[0], base_paddr[1], base_paddr[2], base_paddr[3],
-            base_paddr[4], base_paddr[5], base_paddr[6], base_paddr[7],
-        ]) as usize
-    } else if base_paddr.len() >= 4 {
-        u32::from_be_bytes([base_paddr[0], base_paddr[1], base_paddr[2], base_paddr[3]]) as usize
-    } else {
-        return Err("Framebuffer reg property is too short");
-    };
-    if base_paddr == 0 {
-        return Err("Framebuffer reg property has no base address");
+    /// Dynamically maps the physical framebuffer into the kernel's virtual memory
+    /// and points `base_vaddr` directly at the mapped physical scanout.
+    pub fn map_into_kernel(&mut self) -> Result<(), &'static str> {
+        if self.base_paddr == 0 {
+            return Err("Cannot map framebuffer without physical base address");
+        }
+        let size = self.buffer_size();
+        let mapped = crate::mmu::ArmMmu::ensure_mapped(self.base_paddr as u64, size as u64);
+        if !mapped {
+            return Err("Failed to map physical framebuffer into MMU translation tables");
+        }
+        self.base_vaddr = self.base_paddr;
+        Ok(())
     }
-
-    Ok(Self::new(base_paddr, base_vaddr, width, height, stride, format))
-}
 
     pub const fn buffer_size(&self) -> usize {
         (self.stride as usize) * (self.height as usize)
