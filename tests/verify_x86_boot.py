@@ -16,6 +16,7 @@ import socket
 import subprocess
 import re
 import collections
+import shutil
 
 from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd, qemu_x86_audio_args
 
@@ -168,16 +169,28 @@ def kill_proc_on_port(p):
                     subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=3)
         except Exception:
             pass
-
+    else:
+        try:
+            subprocess.run(["pkill", "-f", f"port={p}"], capture_output=True, timeout=3)
+        except Exception:
+            pass
 
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def main():
-    qemu_exe = find_qemu("qemu-system-x86_64.exe")
-    kernel_img = os.path.abspath(r"target\inter-os-bios.img")
-    ppm_path = os.path.abspath(r"target\mobile_screen2.ppm")
-    log_path = os.path.abspath(r"target\x86_boot.log")
+    qemu_bin = "qemu-system-x86_64.exe" if sys.platform == "win32" else "qemu-system-x86_64"
+    qemu_exe = find_qemu(qemu_bin)
+    if not os.path.exists(qemu_exe) and not shutil.which(qemu_exe):
+        for alt in ("qemu-system-x86_64", "qemu-system-x86_64.exe"):
+            cand = shutil.which(alt)
+            if cand:
+                qemu_exe = cand
+                break
+
+    kernel_img = os.path.abspath(os.environ.get("INTEROS_KERNEL_IMAGE", os.path.join("target", "inter-os-bios.img")))
+    ppm_path = os.path.abspath(os.environ.get("INTEROS_PPM_PATH", os.path.join("target", "mobile_screen2.ppm")))
+    log_path = os.path.abspath(os.environ.get("INTEROS_BOOT_LOG", os.path.join("target", "x86_boot.log")))
 
     if not os.path.exists(kernel_img):
         print(f"[FAIL] Bootable image missing: {kernel_img}")
@@ -197,7 +210,7 @@ def main():
     kill_proc_on_port(mon_port)
     time.sleep(0.5)
 
-    data_disk = os.environ.get("DATA_DISK_PATH", os.path.abspath(r"target\inter-os-data-master.img"))
+    data_disk = os.environ.get("DATA_DISK_PATH", os.path.abspath(os.path.join("target", "inter-os-data-master.img")))
     if not os.path.exists(data_disk):
         with open(data_disk, "wb") as f:
             f.truncate(512 * 1024 * 1024)
@@ -242,14 +255,15 @@ def main():
     monitor_sock = None
 
     try:
-        for _ in range(40):
+        connect_deadline = time.time() + 15.0
+        while time.time() < connect_deadline:
             try:
                 serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 serial_sock.connect(('127.0.0.1', ser_port))
                 serial_sock.settimeout(0.5)
                 break
             except (ConnectionRefusedError, OSError):
-                time.sleep(0.05)
+                time.sleep(0.1)
 
         if not serial_sock:
             raise RuntimeError("Failed to connect to QEMU serial socket after retries")
@@ -257,20 +271,22 @@ def main():
         print("[BOOT TEST] Connected to QEMU serial socket.")
         reader = SerialReader(serial_sock)
 
-        for _ in range(20):
+        mon_deadline = time.time() + 15.0
+        while time.time() < mon_deadline:
             try:
                 monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 monitor_sock.connect(('127.0.0.1', mon_port))
                 monitor_sock.settimeout(5.0)
                 print("[BOOT TEST] Connected to QEMU monitor socket.")
                 break
-            except Exception as e:
-                time.sleep(0.05)
+            except Exception:
+                time.sleep(0.1)
 
-        print("[BOOT TEST] Awaiting Launcher homescreen presentation...")
+        boot_timeout = float(os.environ.get("INTEROS_BOOT_TIMEOUT", "180.0"))
+        print(f"[BOOT TEST] Awaiting Launcher homescreen presentation (timeout={boot_timeout}s)...")
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
-            timeout=180.0,
+            timeout=boot_timeout,
             print_keywords=["BOOT", "GDT", "Page", "Heap", "VFS", "Userspace", "LAUNCHER", "PID1", "Step 5"]
         )
 

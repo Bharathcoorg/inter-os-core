@@ -1,0 +1,264 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
+name: InterOS Core CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  tier1-host-tests:
+    name: "Tier 1: Host Unit Tests & Contracts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-15
+          components: rust-src, llvm-tools-preview
+
+      - name: Install x86_64 Bare-Metal Target
+        run: rustup target add x86_64-unknown-none --toolchain nightly-2026-09-15
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Host Python Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest cryptography psutil
+
+      - name: Cache Cargo Dependencies and Target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-tier1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tier1-
+            ${{ runner.os }}-cargo-
+
+      - name: Report Workspace Architecture & Member Truth
+        run: |
+          echo "============================================================"
+          echo "  PLATFORM TRUTH: Cargo Workspace Member Audit"
+          echo "============================================================"
+          echo "Workspace Members (Validated by cargo check/test --workspace):"
+          echo "  - sdk/rust/interos-std"
+          echo "  - userspace/init"
+          echo "  - userspace/system-service"
+          echo "  - apps (17 sovereign applications):"
+          echo "      agent_manager, browser, calculator, calendar, camera,"
+          echo "      compositor, dialer, file_manager, gallery, launcher,"
+          echo "      messages, music, notes, settings, vault, video_player, webview_demo"
+          echo ""
+          echo "Excluded Components (NOT validated by cargo test --workspace):"
+          echo "  - boot (BIOS bootloader, x86_64 hosted tool)"
+          echo "  - kernel (x86_64 bare-metal microkernel, #![no_std])"
+          echo "  - kernel-aarch64 (AArch64 bare-metal microkernel, #![no_std])"
+          echo "  - kernel-riscv64 (RISC-V 64 bare-metal microkernel, #![no_std])"
+          echo "  - kernel/src/compat/android/shared"
+          echo "  - tools/mkbootimg"
+          echo "  - tests/rust/fdt"
+          echo "============================================================"
+
+      - name: Cargo Check Workspace
+        run: cargo check --workspace
+
+      - name: Cargo Test Workspace (Host Unit Tests)
+        run: cargo test --workspace
+
+      - name: Build Ring-3 System Services (Fault-Injection Mode)
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --bins --features ci-fault-injection
+
+      - name: Build Userspace Applications & Init for Image Embedding
+        run: |
+          cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
+          for app in agent_manager browser calculator calendar camera compositor dialer file_manager gallery launcher messages music notes settings vault video_player webview_demo; do
+            cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
+          done
+
+      - name: Run Full Contract Test Battery
+        run: python tests/run_all_contracts.py
+
+  tier2-multiarch-microkernel:
+    name: "Tier 2: Microkernel & Multi-Architecture Builds"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-15
+          components: rust-src, llvm-tools-preview
+
+      - name: Install Bare-Metal Multi-Architecture Targets
+        run: |
+          rustup target add x86_64-unknown-none --toolchain nightly-2026-09-15
+          rustup target add aarch64-unknown-none --toolchain nightly-2026-09-15
+          rustup target add riscv64gc-unknown-none-elf --toolchain nightly-2026-09-15
+
+      - name: Cache Cargo Dependencies and Target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-tier2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tier2-
+            ${{ runner.os }}-cargo-
+
+      - name: Build Ring-3 System Services
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --bins
+
+      - name: Build Ring-3 Userspace Binaries Required for Microkernel Embedding
+        run: |
+          cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
+          for app in agent_manager browser calculator calendar camera compositor dialer file_manager gallery launcher messages music notes settings vault video_player webview_demo; do
+            cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
+          done
+
+      - name: Check x86_64 Microkernel Target
+        run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+
+      - name: Check AArch64 Microkernel Target
+        run: cargo check --manifest-path kernel-aarch64/Cargo.toml --target aarch64-unknown-none
+
+      - name: Check RISC-V 64 Microkernel Target
+        run: cargo check --manifest-path kernel-riscv64/Cargo.toml --target riscv64gc-unknown-none-elf
+
+      - name: Run Microkernel Host Unit Tests
+        run: cargo test --manifest-path kernel/Cargo.toml
+
+  tier3-packaging-demo:
+    name: "Tier 3: Packaging & Demo Disk Image Generation"
+    needs: [tier1-host-tests, tier2-multiarch-microkernel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-15
+          components: rust-src, llvm-tools-preview
+
+      - name: Install x86_64 Bare-Metal Target
+        run: rustup target add x86_64-unknown-none --toolchain nightly-2026-09-15
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Cargo Dependencies and Target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-tier3-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tier3-
+            ${{ runner.os }}-cargo-
+
+      - name: Configure Portable Bare-Metal Crypto Backend
+        run: echo 'RUSTFLAGS=--cfg curve25519_dalek_backend="serial"' >> "$GITHUB_ENV"
+
+      - name: Package Canonical Demo Disk Image via CLI
+        run: python tools/interos.py build demo
+
+      - name: Verify BIOS Bootable Disk Image Output
+        run: |
+          test -s target/inter-os-bios.img
+          ls -lh target/inter-os-bios.img
+
+      - name: Upload Bootable BIOS Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inter-os-bios-image
+          path: target/inter-os-bios.img
+          retention-days: 7
+
+  tier4-qemu-verification:
+    name: "Tier 4: QEMU Boot Verification"
+    needs: tier3-packaging-demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Host Python Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install psutil
+
+      - name: Install QEMU System Emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Download Bootable BIOS Image Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: inter-os-bios-image
+          path: target
+
+      - name: Verify Downloaded Image Artifact
+        run: |
+          test -s target/inter-os-bios.img
+          ls -lh target/inter-os-bios.img
+
+      - name: Run QEMU Canonical Boot Verification
+        env:
+          INTEROS_BOOT_TIMEOUT: "180"
+          INTEROS_DISABLE_AUDIO: "1"
+        run: python tests/verify_x86_boot.py
+
+      - name: Upload QEMU Boot Logs and Screendump Evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-boot-evidence
+          path: |
+            target/*.log
+            target/*.ppm
+          if-no-files-found: warn
+          retention-days: 7
