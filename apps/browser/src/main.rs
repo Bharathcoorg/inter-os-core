@@ -8942,54 +8942,59 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
         }
     }
 
-    // 5. Text runs: PAGE_LAYOUT.runs (only runs in viewport range)
+    // 5. Text runs: PAGE_LAYOUT.runs (monotonically ordered by top edge ry)
     for i in 0..layout.run_count {
         let run = layout.runs[i];
-        let rx = run.x as isize;
         let ry = run.y as isize;
-        let rw = run.w as isize;
+        if ry > doc_y {
+            break;
+        }
         let rh = (run.h as isize).max(font::line_height(run.scale as usize) as isize);
+        if ry + rh <= doc_y {
+            continue;
+        }
+        let rx = run.x as isize;
+        let rw = run.w as isize;
+        if doc_x < rx || doc_x >= rx + rw {
+            continue;
+        }
+
         let screen_sy = READER_TOP_Y as isize + ry - app.scroll.offset as isize;
         let screen_sx = browser::CONTENT_PADDING as isize + rx;
+        if screen_sy < 0 || screen_sx < 0 {
+            continue;
+        }
 
-        if (y as isize) >= screen_sy
-            && (y as isize) < screen_sy + rh
-            && (x as isize) >= screen_sx
-            && (x as isize) < screen_sx + rw
-            && screen_sy >= 0
-            && screen_sx >= 0
-        {
-            let bytes = run.bytes(dom);
-            if !bytes.is_empty() {
-                    let color = if run.link != layout::NO_LINK {
-                        THEME.primary
-                    } else if run.has_color {
-                        run.color
-                    } else {
-                        THEME.on_surface
-                    };
-                    if let Some(px) = text_px(
-                        x,
-                        y,
-                        screen_sx as usize,
-                        screen_sy as usize,
-                        run.scale as usize,
-                        bytes,
-                        color,
-                        THEME.surface,
-                        run.bold,
-                    ) {
-                        return px;
-                    }
-                    if run.link != layout::NO_LINK {
-                        let underline_y = screen_sy + font::line_height(run.scale as usize) as isize - 2;
-                        if (y as isize) == underline_y && (x as isize) >= screen_sx && (x as isize) < screen_sx + rw {
-                            return THEME.primary;
-                        }
-                    }
+        let bytes = run.bytes(dom);
+        if !bytes.is_empty() {
+            let color = if run.link != layout::NO_LINK {
+                THEME.primary
+            } else if run.has_color {
+                run.color
+            } else {
+                THEME.on_surface
+            };
+            if let Some(px) = text_px(
+                x,
+                y,
+                screen_sx as usize,
+                screen_sy as usize,
+                run.scale as usize,
+                bytes,
+                color,
+                THEME.surface,
+                run.bold,
+            ) {
+                return px;
+            }
+            if run.link != layout::NO_LINK {
+                let underline_y = screen_sy + font::line_height(run.scale as usize) as isize - 2;
+                if (y as isize) == underline_y {
+                    return THEME.primary;
                 }
             }
         }
+    }
 
     // 6. Images: PAGE_LAYOUT.images
     for i in 0..layout.image_count {
