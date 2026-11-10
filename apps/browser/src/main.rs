@@ -8950,12 +8950,17 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
         let rw = run.w as isize;
         let rh = (run.h as isize).max(font::line_height(run.scale as usize) as isize);
         let screen_sy = READER_TOP_Y as isize + ry - app.scroll.offset as isize;
+        let screen_sx = browser::CONTENT_PADDING as isize + rx;
 
-        if (y as isize) >= screen_sy && (y as isize) < screen_sy + rh {
-            let screen_sx = browser::CONTENT_PADDING as isize + rx;
-            if screen_sy >= 0 && screen_sx >= 0 {
-                let bytes = run.bytes(dom);
-                if !bytes.is_empty() {
+        if (y as isize) >= screen_sy
+            && (y as isize) < screen_sy + rh
+            && (x as isize) >= screen_sx
+            && (x as isize) < screen_sx + rw
+            && screen_sy >= 0
+            && screen_sx >= 0
+        {
+            let bytes = run.bytes(dom);
+            if !bytes.is_empty() {
                     let color = if run.link != layout::NO_LINK {
                         THEME.primary
                     } else if run.has_color {
@@ -8985,7 +8990,6 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
                 }
             }
         }
-    }
 
     // 6. Images: PAGE_LAYOUT.images
     for i in 0..layout.image_count {

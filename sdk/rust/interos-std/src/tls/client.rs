@@ -58,13 +58,12 @@ const TRANSPORT_READ_BYTES: usize = 2048;
 
 /// The largest handshake message a [`HandshakeReader`] will rejoin.
 ///
-/// WHY 8 KiB: the chain a public server sends is the message that decides this.
+/// WHY 32 KiB: the chain a public server sends is the message that decides this.
 /// Measured on the wire, `developer.mozilla.org` writes a 4113-byte certificate
-/// message and `example.com` a 3686-byte one, and the trust store holds four
-/// anchors of at most 2 KiB, so no chain this client may accept needs more room
-/// than that. A bigger message is refused rather than read in pieces, because a
-/// half-parsed certificate would be blamed on the peer.
-pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 8192;
+/// message and `example.com` a 3686-byte one, while large modern hosts with multiple
+/// intermediate certificates, SCT extensions, and OCSP stapling can reach 16-24 KiB.
+/// 32 KiB accommodates these chains while remaining strictly bounded.
+pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 32768;
 
 /// Handshake messages rejoined across the record boundaries a server chose.
 ///
