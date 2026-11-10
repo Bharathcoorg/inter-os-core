@@ -6,7 +6,19 @@
 //! Provides the low-level hardware register state saving and restoring
 //! mechanism for cooperative and preemptive multitasking.
 
-/// 512-byte FPU/SSE/AVX hardware state buffer guaranteed to have 16-byte alignment.
+/// 512-byte FPU/SSE legacy/streaming hardware state buffer guaranteed to have 16-byte alignment.
+///
+/// Hardware layout saved and restored by `FXSAVE64` and `FXRSTOR64`:
+/// - Bytes 0..31: x87 FPU environment (FCW, FSW, FTW, FOP, FIP, FDP).
+/// - Bytes 32..159: x87 / MMX registers ST0/MM0 .. ST7/MM7 (8 x 16-byte slots, 10 bytes used each).
+/// - Bytes 160..287: SSE XMM0 .. XMM7 registers (8 x 16 bytes).
+/// - Bytes 288..415: SSE XMM8 .. XMM15 registers (8 x 16 bytes in 64-bit mode).
+/// - Bytes 416..511: Reserved / implementation specific.
+///
+/// Note on AVX / AVX-512: AVX upper halves (YMM0..YMM15 upper 128 bits) and AVX-512 (ZMM registers)
+/// require `XSAVE`/`XRSTOR` and OS management via `XCR0` and `CR4.OSXSAVE`. InterOS currently operates
+/// with `CR4.OSXSAVE` disabled, strictly supporting 128-bit SSE/SSE2/SSE3/SSSE3/SSE4. AVX/AVX-512 are
+/// disabled at the CPU level (#UD on attempt).
 ///
 /// Intel SDM Vol 2A: `FXSAVE` and `FXRSTOR` require memory operands to be aligned
 /// on a 16-byte boundary; otherwise a General Protection exception (`#GP(0)`) is raised.
@@ -109,21 +121,59 @@ impl TaskContext {
     }
 }
 
+/// Returns whether the CPU reports support for FXSAVE/FXRSTOR via CPUID.1.EDX[bit 24].
+pub fn cpu_supports_fxsave() -> bool {
+    #[cfg(all(target_arch = "x86_64", not(test)))]
+    unsafe {
+        let edx: u32;
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 1",
+            "cpuid",
+            "pop rbx",
+            lateout("edx") edx,
+            out("eax") _,
+            out("ecx") _,
+            options(nomem, nostack)
+        );
+        (edx & (1 << 24)) != 0
+    }
+    #[cfg(any(not(target_arch = "x86_64"), test))]
+    {
+        true
+    }
+}
+
 /// Ensures CPU CR4 and CR0 control registers have FXSAVE/FXRSTOR and SSE enabled.
+///
+/// Invariants:
+/// - CR0.EM (bit 2) is cleared (FPU emulation off; native FPU/SSE execution allowed).
+/// - CR0.TS (bit 3) is cleared (task switch flag off).
+/// - CR0.MP (bit 1) is set (monitor coprocessor).
+/// - CR0.NE (bit 5) is set (native numeric exceptions via #MF rather than legacy IRQ13).
+/// - CR4.OSFXSR (bit 9) is set (enables FXSAVE/FXRSTOR instructions and 128-bit XMM).
+/// - CR4.OSXMMEXCPT (bit 10) is set (unmasked SIMD exceptions trigger #XM exception).
+/// - CR4.OSXSAVE (bit 18) remains cleared (AVX/XSAVE disabled).
 pub fn init_fpu() {
     #[cfg(all(target_arch = "x86_64", not(test)))]
     unsafe {
+        if !cpu_supports_fxsave() {
+            crate::serial_println!("[FPU] FATAL: CPU does not support FXSAVE/FXRSTOR (CPUID.1.EDX[24] = 0)");
+            return;
+        }
+
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
-        // Clear EM (bit 2) and TS (bit 3), set MP (bit 1)
+        // Clear EM (bit 2) and TS (bit 3), set MP (bit 1) and NE (bit 5)
         cr0 &= !((1u64 << 2) | (1u64 << 3));
-        cr0 |= 1u64 << 1;
+        cr0 |= (1u64 << 1) | (1u64 << 5);
         core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
 
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        // Set OSFXSR (bit 9) and OSXMMEXCPT (bit 10)
+        // Set OSFXSR (bit 9) and OSXMMEXCPT (bit 10), ensure OSXSAVE (bit 18) is cleared
         cr4 |= (1u64 << 9) | (1u64 << 10);
+        cr4 &= !(1u64 << 18);
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
     }
 }

@@ -13,6 +13,8 @@ use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::Mapper;
+#[cfg(not(test))]
+use x86_64::structures::paging::Translate;
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
 };
@@ -265,6 +267,30 @@ pub fn allocate_dma_frames(count: usize) -> Option<alloc::vec::Vec<PhysFrame<Siz
 /// Converts a physical address into its bootloader-provided direct-map virtual address.
 pub fn physical_to_virtual(physical: PhysAddr) -> VirtAddr {
     phys_mem_offset() + physical.as_u64()
+}
+
+/// Converts a virtual address into its guest physical address (GPA).
+///
+/// Handles addresses in the bootloader's direct physical memory map (fast path)
+/// as well as mapped higher-half or heap virtual addresses via page table translation.
+pub fn virtual_to_physical(virtual_addr: VirtAddr) -> Option<PhysAddr> {
+    #[cfg(test)]
+    {
+        Some(PhysAddr::new(virtual_addr.as_u64()))
+    }
+    #[cfg(not(test))]
+    {
+        let offset = phys_mem_offset();
+        if virtual_addr.as_u64() >= offset.as_u64() {
+            // Fast path: direct physical memory map offset
+            Some(PhysAddr::new(virtual_addr.as_u64() - offset.as_u64()))
+        } else {
+            // General path: query active page tables
+            let mapper_lock = MEMORY_MAPPER.lock();
+            let mapper = mapper_lock.as_ref()?;
+            mapper.translate_addr(virtual_addr)
+        }
+    }
 }
 
 /// Maps a physical linear framebuffer range into the kernel address space with

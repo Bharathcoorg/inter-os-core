@@ -341,20 +341,40 @@ pub struct SurfaceBuffer {
     host_vec: alloc::vec::Vec<u32>,
 }
 
+/// Safety Invariant: SurfaceBuffer owns exclusive access to its underlying pixel buffer.
+/// Moving it between execution contexts (threads/tasks) does not cause data races.
 unsafe impl Send for SurfaceBuffer {}
+/// Safety Invariant: Immutable references to SurfaceBuffer allow concurrent reads of pixels.
+/// Mutation is mediated exclusively through `&mut self` (`DerefMut`).
 unsafe impl Sync for SurfaceBuffer {}
 
 impl SurfaceBuffer {
     /// Creates a new surface buffer initialized with `default_color`.
     pub fn new(pixel_count: usize, default_color: u32) -> Self {
+        if pixel_count == 0 {
+            return Self {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+                capacity: 0,
+                #[cfg(not(test))]
+                frames: alloc::vec::Vec::new(),
+                #[cfg(not(test))]
+                is_heap: false,
+                #[cfg(not(test))]
+                is_shm: false,
+                #[cfg(test)]
+                host_vec: alloc::vec::Vec::new(),
+            };
+        }
         #[cfg(test)]
         {
             let mut host_vec = vec![default_color; pixel_count];
             let ptr = host_vec.as_mut_ptr();
+            let capacity = host_vec.capacity();
             Self {
                 ptr,
                 len: pixel_count,
-                capacity: pixel_count,
+                capacity,
                 host_vec,
             }
         }
@@ -383,11 +403,12 @@ impl SurfaceBuffer {
             // Fallback to kernel heap if frame allocator is uninitialized or exhausted
             let mut heap_vec = vec![default_color; pixel_count];
             let ptr = heap_vec.as_mut_ptr();
+            let capacity = heap_vec.capacity();
             core::mem::forget(heap_vec);
             Self {
                 ptr,
                 len: pixel_count,
-                capacity: pixel_count,
+                capacity,
                 frames: alloc::vec::Vec::new(),
                 is_heap: true,
                 is_shm: false,
@@ -441,10 +462,6 @@ impl Drop for SurfaceBuffer {
     fn drop(&mut self) {
         #[cfg(not(test))]
         {
-            if self.is_shm {
-                // Frames mapped to userspace SHM are owned and recycled by the task address space
-                return;
-            }
             if self.is_heap {
                 if !self.ptr.is_null() && self.capacity > 0 {
                     unsafe {
@@ -3645,6 +3662,24 @@ mod tests {
         assert!(surface.frame_complete);
         assert!(surface.has_frame);
         assert_eq!(surface.dirty_rows, (10, 50));
+    }
+
+    #[test]
+    fn test_surface_buffer_zero_length_is_safe() {
+        let mut buf = SurfaceBuffer::new(0, 0);
+        assert_eq!(buf.len(), 0);
+        assert!(buf.is_empty());
+        assert_eq!(&buf[..], &[]);
+        assert_eq!(&mut buf[..], &mut []);
+    }
+
+    #[test]
+    fn test_surface_buffer_capacity_reconstruction() {
+        let buf = SurfaceBuffer::new(100, 0x12345678);
+        assert_eq!(buf.len(), 100);
+        assert_eq!(buf[0], 0x12345678);
+        assert_eq!(buf[99], 0x12345678);
+        assert!(buf.capacity >= 100);
     }
 }
 

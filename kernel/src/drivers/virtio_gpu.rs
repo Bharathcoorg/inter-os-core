@@ -135,6 +135,15 @@ impl VirtioFeatureNegotiation {
         }
     }
 
+    /// Resets feature negotiation state machine back to Reset state.
+    pub fn reset(&mut self) {
+        self.state = VirtioDeviceState::Reset;
+        self.device_features = 0;
+        self.driver_features = 0;
+        self.negotiated_features = 0;
+        self.features_ok = false;
+    }
+
     /// Transitions to ACKNOWLEDGE state (OS recognizes device).
     pub fn acknowledge(&mut self) -> Result<(), &'static str> {
         if self.state != VirtioDeviceState::Reset {
@@ -647,14 +656,19 @@ impl VirtioGpuControlQueue {
         let req_addr = slot.req_bytes.as_ptr() as usize as u64;
         let resp_addr = core::ptr::addr_of!(slot.resp) as usize as u64;
 
+        let req_vaddr = x86_64::VirtAddr::new(req_addr);
+        let resp_vaddr = x86_64::VirtAddr::new(resp_addr);
+        let req_gpa = crate::memory::virtual_to_physical(req_vaddr).map(|p| p.as_u64()).unwrap_or(req_addr);
+        let resp_gpa = crate::memory::virtual_to_physical(resp_vaddr).map(|p| p.as_u64()).unwrap_or(resp_addr);
+
         // d0: device reads request from driver DMA slot
-        self.desc[d0 as usize].addr = req_addr;
+        self.desc[d0 as usize].addr = req_gpa;
         self.desc[d0 as usize].len = req_bytes.len() as u32;
         self.desc[d0 as usize].flags = VIRTQ_DESC_F_NEXT;
         self.desc[d0 as usize].next = d1;
 
         // d1: device writes response into driver DMA slot
-        self.desc[d1 as usize].addr = resp_addr;
+        self.desc[d1 as usize].addr = resp_gpa;
         self.desc[d1 as usize].len = core::mem::size_of::<VirtioGpuCtrlHdr>() as u32;
         self.desc[d1 as usize].flags = VIRTQ_DESC_F_WRITE;
         self.desc[d1 as usize].next = 0;
@@ -801,9 +815,14 @@ impl VirtioGpuDriver {
             let _ = self.feature_negotiation.driver_ok();
 
             // Configure VirtQueue 0
-            let desc_gpa = self.control_queue.desc.as_ptr() as usize as u64;
-            let avail_gpa = core::ptr::addr_of!(self.control_queue.avail) as usize as u64;
-            let used_gpa = core::ptr::addr_of!(self.control_queue.used) as usize as u64;
+            let desc_vaddr = x86_64::VirtAddr::new(self.control_queue.desc.as_ptr() as usize as u64);
+            let avail_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.avail) as usize as u64);
+            let used_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.used) as usize as u64);
+
+            let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr).map(|p| p.as_u64()).unwrap_or(desc_vaddr.as_u64());
+            let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr).map(|p| p.as_u64()).unwrap_or(avail_vaddr.as_u64());
+            let used_gpa = crate::memory::virtual_to_physical(used_vaddr).map(|p| p.as_u64()).unwrap_or(used_vaddr.as_u64());
+
             let _ = self.queue_config.configure(
                 VIRTQ_MAX_QUEUE_SIZE as u16,
                 VIRTQ_MAX_QUEUE_SIZE as u16,
@@ -855,6 +874,19 @@ impl VirtioGpuDriver {
         let dev_features_low = unsafe { core::ptr::read_volatile((base_addr + VIRTIO_MMIO_DEVICE_FEATURES) as *const u32) } as u64;
         let dev_features = dev_features_low | VIRTIO_F_VERSION_1;
 
+        // Reset device
+        unsafe {
+            let status_reg = (base_addr + VIRTIO_MMIO_STATUS) as *mut u32;
+            core::ptr::write_volatile(status_reg, VIRTIO_STATUS_RESET);
+            core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE);
+            core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+
+            // Write driver features
+            let driver_feat_reg = (base_addr + VIRTIO_MMIO_DRIVER_FEATURES) as *mut u32;
+            core::ptr::write_volatile(driver_feat_reg, dev_features as u32);
+            core::ptr::write_volatile(status_reg, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
+        }
+
         // Advance VirtIO 1.0 feature negotiation state machine
         let _ = self.feature_negotiation.acknowledge();
         let _ = self.feature_negotiation.driver_init();
@@ -862,9 +894,46 @@ impl VirtioGpuDriver {
         let _ = self.feature_negotiation.driver_ok();
 
         // Configure VirtQueue 0
-        let desc_gpa = self.control_queue.desc.as_ptr() as usize as u64;
-        let avail_gpa = core::ptr::addr_of!(self.control_queue.avail) as usize as u64;
-        let used_gpa = core::ptr::addr_of!(self.control_queue.used) as usize as u64;
+        let desc_vaddr = x86_64::VirtAddr::new(self.control_queue.desc.as_ptr() as usize as u64);
+        let avail_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.avail) as usize as u64);
+        let used_vaddr = x86_64::VirtAddr::new(core::ptr::addr_of!(self.control_queue.used) as usize as u64);
+
+        let desc_gpa = crate::memory::virtual_to_physical(desc_vaddr).map(|p| p.as_u64()).unwrap_or(desc_vaddr.as_u64());
+        let avail_gpa = crate::memory::virtual_to_physical(avail_vaddr).map(|p| p.as_u64()).unwrap_or(avail_vaddr.as_u64());
+        let used_gpa = crate::memory::virtual_to_physical(used_vaddr).map(|p| p.as_u64()).unwrap_or(used_vaddr.as_u64());
+
+        unsafe {
+            let q_sel = (base_addr + VIRTIO_MMIO_QUEUE_SEL) as *mut u32;
+            core::ptr::write_volatile(q_sel, 0);
+
+            let q_num = (base_addr + VIRTIO_MMIO_QUEUE_NUM) as *mut u32;
+            core::ptr::write_volatile(q_num, VIRTQ_MAX_QUEUE_SIZE as u32);
+
+            let desc_low = (base_addr + VIRTIO_MMIO_QUEUE_DESC_LOW) as *mut u32;
+            let desc_high = (base_addr + VIRTIO_MMIO_QUEUE_DESC_HIGH) as *mut u32;
+            core::ptr::write_volatile(desc_low, desc_gpa as u32);
+            core::ptr::write_volatile(desc_high, (desc_gpa >> 32) as u32);
+
+            let driver_low = (base_addr + 0x090) as *mut u32;
+            let driver_high = (base_addr + 0x094) as *mut u32;
+            core::ptr::write_volatile(driver_low, avail_gpa as u32);
+            core::ptr::write_volatile(driver_high, (avail_gpa >> 32) as u32);
+
+            let device_low = (base_addr + 0x0a0) as *mut u32;
+            let device_high = (base_addr + 0x0a4) as *mut u32;
+            core::ptr::write_volatile(device_low, used_gpa as u32);
+            core::ptr::write_volatile(device_high, (used_gpa >> 32) as u32);
+
+            let q_ready = (base_addr + VIRTIO_MMIO_QUEUE_READY) as *mut u32;
+            core::ptr::write_volatile(q_ready, 1);
+
+            let status_reg = (base_addr + VIRTIO_MMIO_STATUS) as *mut u32;
+            core::ptr::write_volatile(
+                status_reg,
+                VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK,
+            );
+        }
+
         let _ = self.queue_config.configure(
             VIRTQ_MAX_QUEUE_SIZE as u16,
             VIRTQ_MAX_QUEUE_SIZE as u16,
@@ -901,6 +970,21 @@ impl VirtioGpuDriver {
     /// Detaches the VirtIO-GPU device from primary display presentation, enabling graceful fallback to DRM/KMS software blit.
     pub fn detach(&mut self) {
         self.is_primary = false;
+    }
+
+    /// Resets the VirtIO-GPU device, clearing status and resetting queues.
+    pub fn reset_device(&mut self) {
+        if let Some(base) = self.mmio_base {
+            unsafe {
+                let status_reg = (base + VIRTIO_MMIO_STATUS) as *mut u32;
+                core::ptr::write_volatile(status_reg, VIRTIO_STATUS_RESET);
+            }
+        }
+        self.feature_negotiation.reset();
+        self.queue_config.enabled = false;
+        self.control_queue = VirtioGpuControlQueue::new();
+        self.last_transfer_slot = None;
+        self.last_flush_slot = None;
     }
 
     /// Configures the scanout target refresh rate (e.g., 60 Hz or 90 Hz).
