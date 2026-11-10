@@ -1600,7 +1600,7 @@ fn encode_with_installed_file(path: &str, text: &[u8]) -> TextIds {
     if path.is_empty() || text.is_empty() {
         return TextIds::NotAttempted;
     }
-    let table = match tokenizer::FileTokenizer::build_from_file(path) {
+    let table = match get_or_build_resident_tokenizer(path) {
         Ok(table) => table,
         Err(error) => return TextIds::Refused(error),
     };
@@ -1719,7 +1719,58 @@ fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &cra
     }
 }
 
+struct ResidentTokenizerState {
+    path: [u8; 128],
+    path_len: usize,
+    tokenizer: Option<tokenizer::FileTokenizer>,
+}
+
+struct SyncResidentTokenizerCache {
+    state: core::cell::UnsafeCell<ResidentTokenizerState>,
+}
+
+unsafe impl Sync for SyncResidentTokenizerCache {}
+
+static RESIDENT_TOKENIZER_CACHE: SyncResidentTokenizerCache = SyncResidentTokenizerCache {
+    state: core::cell::UnsafeCell::new(ResidentTokenizerState {
+        path: [0u8; 128],
+        path_len: 0,
+        tokenizer: None,
+    }),
+};
+
+fn get_or_build_resident_tokenizer(
+    path: &str,
+) -> Result<&'static tokenizer::FileTokenizer, tokenizer::TokenizerError> {
+    let p_bytes = path.as_bytes();
+    unsafe {
+        let state = &mut *RESIDENT_TOKENIZER_CACHE.state.get();
+        if state.tokenizer.is_some()
+            && state.path_len == p_bytes.len()
+            && &state.path[..state.path_len] == p_bytes
+        {
+            return Ok(state.tokenizer.as_ref().unwrap());
+        }
+
+        let built = tokenizer::FileTokenizer::build_from_file(path)?;
+        state.tokenizer = Some(built);
+        let len = p_bytes.len().min(128);
+        state.path[..len].copy_from_slice(&p_bytes[..len]);
+        state.path_len = len;
+        Ok(state.tokenizer.as_ref().unwrap())
+    }
+}
+
+pub fn invalidate_resident_tokenizer_cache() {
+    unsafe {
+        let state = &mut *RESIDENT_TOKENIZER_CACHE.state.get();
+        state.tokenizer = None;
+        state.path_len = 0;
+    }
+}
+
 pub fn invalidate_resident_model_cache() {
+    invalidate_resident_tokenizer_cache();
     unsafe {
         let state = &mut *RESIDENT_EMBEDDING_CACHE.state.get();
         state.cache.initialized = false;
@@ -1745,6 +1796,7 @@ pub fn init_resident_model_cache(path: &str) {
             let _ = std::log("[aid] cached resident GGUF tensor offsets and model metadata.");
         }
     }
+    let _ = get_or_build_resident_tokenizer(path);
 }
 
 /// Reads the installed file one block at a time and runs it over `tokens`.

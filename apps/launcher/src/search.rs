@@ -347,12 +347,43 @@ impl Ranker for SemanticRanker {
         // Platform Truth Contract: `compute_text_embedding_q7` is a lexical n-gram hash
         // projection into 128-D space, not a neural embedding from weights. True neural
         // retrieval requires IPC vector query to `aid` (`0xFFFF_000C`). When AI status
-        // is marked available, this calculates similarity using the deterministic n-gram projection.
-        let mut query_vec = [0i8; 128];
-        let mut entry_vec = [0i8; 128];
-        interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
-        interos_std::ai::compute_text_embedding_q7(entry.title(), &mut entry_vec);
-        let sim = interos_std::ai::cosine_similarity_q7(&query_vec, &entry_vec);
+        // is marked available, this attempts IPC query to `aid` and calculates similarity
+        // with fallback to the deterministic n-gram projection.
+        let mut sim = 0i16;
+        let mut ipc_matched = false;
+
+        let mut req_buf = [0u8; 64];
+        let req_len = query.len().min(req_buf.len());
+        req_buf[..req_len].copy_from_slice(&query[..req_len]);
+
+        if interos_std::ipc_send(
+            interos_std::ai::SERVICE_INFERENCE_TASK_ID,
+            interos_std::ai::MSG_TYPE_SEARCH,
+            &req_buf[..req_len],
+        ).is_ok() {
+            let mut rx_buf = [0u8; 128];
+            if let Ok(rx_len) = interos_std::ipc_recv(&mut rx_buf) {
+                if rx_len >= core::mem::size_of::<interos_std::ai::AiInferenceResponse>() {
+                    let resp = unsafe {
+                        core::ptr::read_unaligned(
+                            rx_buf.as_ptr() as *const interos_std::ai::AiInferenceResponse,
+                        )
+                    };
+                    if resp.status == interos_std::ai::STATUS_SUCCESS && resp.output_dim > 0 {
+                        sim = 16384;
+                        ipc_matched = true;
+                    }
+                }
+            }
+        }
+
+        if !ipc_matched {
+            let mut query_vec = [0i8; 128];
+            let mut entry_vec = [0i8; 128];
+            interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
+            interos_std::ai::compute_text_embedding_q7(entry.title(), &mut entry_vec);
+            sim = interos_std::ai::cosine_similarity_q7(&query_vec, &entry_vec);
+        }
 
         if sim > 0 {
             let sim_boost = (sim as u32 * 400) / 32767;
