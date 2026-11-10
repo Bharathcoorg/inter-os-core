@@ -231,6 +231,86 @@ pub fn blend_pixel(src_pixel: u32, dst_pixel: u32, opacity: u8) -> u32 {
     }
 }
 
+/// A 64x64 tile occlusion grid for front-to-back zero-overhead culling.
+pub const TILE_SIZE: usize = 64;
+pub const MAX_TILES: usize = 2048;
+
+#[derive(Clone, Copy)]
+pub struct TileOcclusionMap {
+    pub occluded: [bool; MAX_TILES],
+    pub cols: usize,
+    pub rows: usize,
+}
+
+impl TileOcclusionMap {
+    pub fn new(scanout_w: usize, scanout_h: usize) -> Self {
+        let cols = (scanout_w + TILE_SIZE - 1) / TILE_SIZE;
+        let rows = (scanout_h + TILE_SIZE - 1) / TILE_SIZE;
+        Self {
+            occluded: [false; MAX_TILES],
+            cols: cols.min(64),
+            rows: rows.min(64),
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_occluded(&self, tx: usize, ty: usize) -> bool {
+        if tx < self.cols && ty < self.rows {
+            let idx = ty * self.cols + tx;
+            if idx < MAX_TILES {
+                return self.occluded[idx];
+            }
+        }
+        false
+    }
+
+    #[inline(always)]
+    pub fn mark_occluded(&mut self, tx: usize, ty: usize) {
+        if tx < self.cols && ty < self.rows {
+            let idx = ty * self.cols + tx;
+            if idx < MAX_TILES {
+                self.occluded[idx] = true;
+            }
+        }
+    }
+
+    /// Tests if a rectangular screen region is completely occluded by committed tiles.
+    pub fn is_region_occluded(&self, x0: usize, y0: usize, x1: usize, y1: usize) -> bool {
+        if x1 <= x0 || y1 <= y0 {
+            return true;
+        }
+        let tx0 = x0 / TILE_SIZE;
+        let ty0 = y0 / TILE_SIZE;
+        let tx1 = (x1 + TILE_SIZE - 1) / TILE_SIZE;
+        let ty1 = (y1 + TILE_SIZE - 1) / TILE_SIZE;
+
+        for ty in ty0..ty1.min(self.rows) {
+            for tx in tx0..tx1.min(self.cols) {
+                if !self.is_occluded(tx, ty) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Marks all 64x64 tiles strictly contained inside an opaque rectangle as occluded.
+    pub fn commit_opaque_rect(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        let tx0 = (x0 + TILE_SIZE - 1) / TILE_SIZE;
+        let ty0 = (y0 + TILE_SIZE - 1) / TILE_SIZE;
+        let tx1 = x1 / TILE_SIZE;
+        let ty1 = y1 / TILE_SIZE;
+
+        if tx1 > tx0 && ty1 > ty0 {
+            for ty in ty0..ty1.min(self.rows) {
+                for tx in tx0..tx1.min(self.cols) {
+                    self.mark_occluded(tx, ty);
+                }
+            }
+        }
+    }
+}
+
 pub struct DrmSurface {
     pub id: u32,
     pub x: i32,
@@ -297,6 +377,9 @@ pub struct DrmSurface {
     /// repainted, and a leading-row frontier would stall on a client that
     /// paints the bottom of the canvas first.
     pub written_row_bits: Vec<u64>,
+    /// Whether this surface was determined to be completely occluded by higher z-order opaque surfaces
+    /// during the front-to-back tile occlusion pass.
+    pub occluded: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -351,6 +434,7 @@ impl DrmSurface {
             has_frame: false,
             frame_complete: false,
             written_row_bits: vec![0u64; (height as usize + 63) / 64],
+            occluded: false,
         }
     }
 
@@ -1306,6 +1390,61 @@ impl DrmKmsController {
             .and_then(|id| self.surfaces.iter().find(|s| s.id == id))
             .map(|s| (s.owner_task, s.z_order));
 
+        // Front-to-back tile occlusion analysis:
+        // Walk surfaces from highest z-order to lowest z-order. Opaque surfaces commit
+        // their covered 64x64 tiles into the occlusion grid. Lower surfaces whose bounding
+        // box falls entirely within committed tiles are marked occluded and skipped during
+        // rasterization and blending.
+        let mut tile_map = TileOcclusionMap::new(self.scanout_width as usize, self.scanout_height as usize);
+        for s in self.surfaces.iter_mut().rev() {
+            s.occluded = false;
+            if !s.visible || s.opacity == 0 || !s.frame_ready || !s.frame_complete || !s.has_frame {
+                continue;
+            }
+            if let Some((focused_owner, focused_z)) = focused {
+                if s.owner_task != focused_owner && s.z_order < focused_z {
+                    continue;
+                }
+            }
+            if has_mobile_portrait && s.height == 96 && s.y != 0 {
+                continue;
+            }
+
+            let (x0, y0, x1, y1) = if ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160)) && s.x == 0 && s.y == 0 {
+                if !matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft)
+                    && s.width == self.scanout_width && s.height == self.scanout_height {
+                    (0, 0, self.scanout_width as usize, self.scanout_height as usize)
+                } else {
+                    let s_w = s.width as i32;
+                    let s_h = s.height as i32;
+                    let (dst_w, dst_h) = if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
+                        (((s_w as u32).saturating_mul(sh as u32) / (s_h as u32)).max(1).min(self.scanout_width), self.scanout_height)
+                    } else {
+                        (self.scanout_width, ((s_h as u32).saturating_mul(sw as u32) / (s_w as u32)).max(1).min(self.scanout_height))
+                    };
+                    let dst_x = ((sw - dst_w as i32) / 2).max(0) as usize;
+                    let dst_y = ((sh - dst_h as i32) / 2).max(0) as usize;
+                    (dst_x, dst_y, dst_x + dst_w as usize, dst_y + dst_h as usize)
+                }
+            } else {
+                let rx0 = s.x.max(0) as usize;
+                let ry0 = s.y.max(0) as usize;
+                let rx1 = (s.x.saturating_add(s.width as i32)).max(0).min(sw) as usize;
+                let ry1 = (s.y.saturating_add(s.height as i32)).max(0).min(sh) as usize;
+                (rx0, ry0, rx1, ry1)
+            };
+
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+
+            if tile_map.is_region_occluded(x0, y0, x1, y1) {
+                s.occluded = true;
+            } else if s.opacity == 255 {
+                tile_map.commit_opaque_rect(x0, y0, x1, y1);
+            }
+        }
+
         // When an opaque surface covers the entire scanout without rotation or scaling,
         // it directly copies its pixels over the entire back buffer. Skipping the
         // baseline fill in that case saves millions of redundant DRAM writes per second
@@ -1314,7 +1453,8 @@ impl DrmKmsController {
             self.orientation,
             DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
         ) && self.surfaces.iter().any(|s| {
-            s.visible
+            !s.occluded
+                && s.visible
                 && s.opacity == 255
                 && s.frame_ready
                 && s.frame_complete
@@ -1332,6 +1472,11 @@ impl DrmKmsController {
         let mut base_drawn = false;
 
         for surface in self.surfaces.iter_mut() {
+            if surface.occluded {
+                surface.dirty = false;
+                surface.dirty_rows = (0, 0);
+                continue;
+            }
             // WHY a surface that holds no frame is skipped: the pixels it still
             // holds are the allocator's fill (opaque black), not a picture the
             // owner drew. Blending one puts a black rectangle underneath the
@@ -2961,6 +3106,56 @@ mod tests {
         let flip_res = display.composite_and_flip();
         assert!(flip_res.is_ok());
         assert!(display.destroy_surface(id, 10).is_ok());
+    }
+
+    #[test]
+    fn test_tile_occlusion_map_culling() {
+        let mut map = TileOcclusionMap::new(720, 1440);
+        assert!(!map.is_region_occluded(64, 64, 128, 128));
+
+        // Commit an opaque rect [0, 0, 192, 192] -> tiles [0..3, 0..3]
+        map.commit_opaque_rect(0, 0, 192, 192);
+
+        // Region [64, 64, 128, 128] spans tile tx=1, ty=1 -> strictly occluded!
+        assert!(map.is_region_occluded(64, 64, 128, 128));
+
+        // Region [64, 64, 256, 256] extends beyond tile 3 -> not occluded
+        assert!(!map.is_region_occluded(64, 64, 256, 256));
+    }
+
+    #[test]
+    fn test_front_to_back_tile_occlusion_skips_covered_layers() {
+        let mut kms = DrmKmsController::new(720, 1440);
+
+        // Lower surface (z=100): covers 128x128 region at (64, 64)
+        let s_lower = kms.create_surface(128, 128, 100, 1);
+        assert_eq!(s_lower, 1);
+        kms.surfaces[0].x = 64;
+        kms.surfaces[0].y = 64;
+        kms.surfaces[0].has_frame = true;
+        kms.surfaces[0].frame_complete = true;
+        kms.surfaces[0].frame_ready = true;
+        kms.surfaces[0].opacity = 255;
+        kms.surfaces[0].pixels.fill(0xFFFF0000);
+
+        // Higher surface (z=200): covers 256x256 region at (0, 0), completely covering [0..256, 0..256]
+        let s_higher = kms.create_surface(256, 256, 200, 1);
+        assert_eq!(s_higher, 2);
+        kms.surfaces[1].x = 0;
+        kms.surfaces[1].y = 0;
+        kms.surfaces[1].has_frame = true;
+        kms.surfaces[1].frame_complete = true;
+        kms.surfaces[1].frame_ready = true;
+        kms.surfaces[1].opacity = 255;
+        kms.surfaces[1].pixels.fill(0xFF00FF00);
+
+        kms.composite();
+
+        let lower = kms.surfaces.iter().find(|s| s.id == s_lower).unwrap();
+        let higher = kms.surfaces.iter().find(|s| s.id == s_higher).unwrap();
+
+        assert!(!higher.occluded, "Higher surface must not be occluded");
+        assert!(lower.occluded, "Lower surface covered by opaque higher surface must be occluded");
     }
 }
 
