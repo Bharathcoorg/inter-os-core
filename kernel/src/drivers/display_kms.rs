@@ -152,7 +152,7 @@ impl FrameScheduler {
         }
         if self.last_frame_tick > 0 && now_ticks >= self.last_frame_tick {
             let elapsed_ticks = now_ticks - self.last_frame_tick;
-            let elapsed_ns = elapsed_ticks.saturating_mul(10_000_000);
+            let elapsed_ns = elapsed_ticks.saturating_mul(1_000_000);
             self.frame_times_ns[self.history_idx] = elapsed_ns;
             self.history_idx = (self.history_idx + 1) % 256;
         }
@@ -161,8 +161,11 @@ impl FrameScheduler {
 
     pub fn frame_budget_ns(&self) -> u64 {
         match self.refresh_hz {
-            120 => 8_333_333,
+            360 => 2_777_778,
+            240 => 4_166_667,
             144 => 6_944_444,
+            120 => 8_333_333,
+            90 => 11_111_111,
             _ => 16_666_666,
         }
     }
@@ -1274,12 +1277,6 @@ impl DrmKmsController {
         // background colour is the one pixel state that is true under every
         // foreground, so every composite starts from it.
         // WHY paper and not the desktop-era slate: this platform is a phone,
-        // and the phone's stock surface is paper. A client that paints
-        // translucent cards blends them against this colour, so the platform
-        // background is part of what every screen looks like: a slate
-        // background turned a light theme's translucent cards dark.
-        self.back_buffer.fill(PLATFORM_BACKGROUND);
-
         // Sort surfaces by z_order ascending (lower z painted first)
         self.surfaces.sort_by_key(|s| s.z_order);
 
@@ -1308,6 +1305,29 @@ impl DrmKmsController {
             .focused_surface
             .and_then(|id| self.surfaces.iter().find(|s| s.id == id))
             .map(|s| (s.owner_task, s.z_order));
+
+        // When an opaque surface covers the entire scanout without rotation or scaling,
+        // it directly copies its pixels over the entire back buffer. Skipping the
+        // baseline fill in that case saves millions of redundant DRAM writes per second
+        // (e.g. ~1 GB/s at 240Hz).
+        let has_full_cover = !matches!(
+            self.orientation,
+            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+        ) && self.surfaces.iter().any(|s| {
+            s.visible
+                && s.opacity == 255
+                && s.frame_ready
+                && s.frame_complete
+                && s.has_frame
+                && s.x == 0
+                && s.y == 0
+                && s.width == self.scanout_width
+                && s.height == self.scanout_height
+                && focused.map_or(true, |(owner, z)| s.owner_task == owner || s.z_order >= z)
+        });
+        if !has_full_cover {
+            self.back_buffer.fill(PLATFORM_BACKGROUND);
+        }
 
         let mut base_drawn = false;
 
@@ -1920,7 +1940,7 @@ impl DrmKmsController {
     }
 
     pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
-        if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 240 {
+        if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 360 {
             return Err("invalid display mode");
         }
         let pixels = (width as usize).checked_mul(height as usize).ok_or("display mode size overflow")?;
@@ -1982,7 +2002,7 @@ impl DrmKmsController {
         self.scanout_y_offset = 0;
         let now = crate::interrupts::get_system_ticks();
         self.scheduler.record_frame(now, self.frame_deadline_ticks);
-        let ticks_per_frame = ((100u64 + self.refresh_hz.max(1) as u64 - 1) / self.refresh_hz.max(1) as u64).max(1);
+        let ticks_per_frame = ((1000u64 + self.refresh_hz.max(1) as u64 - 1) / self.refresh_hz.max(1) as u64).max(1);
         self.frame_deadline_ticks = now.saturating_add(ticks_per_frame);
         self.page_flips_completed
     }

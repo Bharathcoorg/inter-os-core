@@ -321,8 +321,8 @@ impl VirtioGpuDriver {
         if width == 0 || height == 0 || width > 3840 || height > 2160 {
             return Err("Invalid VirtIO-GPU resource dimensions");
         }
-        if fps != 60 && fps != 90 && fps != 120 {
-            return Err("Unsupported refresh rate: only 60, 90, or 120 fps supported");
+        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 240 && fps != 360 {
+            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 240, or 360 fps supported");
         }
         self.scanout_width = width;
         self.scanout_height = height;
@@ -338,8 +338,8 @@ impl VirtioGpuDriver {
 
     /// Configures the scanout target refresh rate (e.g., 60 Hz or 90 Hz).
     pub fn set_target_fps(&mut self, fps: u16) -> Result<(), &'static str> {
-        if fps != 60 && fps != 90 && fps != 120 {
-            return Err("Unsupported refresh rate: only 60, 90, or 120 fps supported");
+        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 240 && fps != 360 {
+            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 240, or 360 fps supported");
         }
         self.target_fps = fps;
         Ok(())

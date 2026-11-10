@@ -2332,6 +2332,11 @@ pub fn read_file_for_task(
             }
             Err(e) => {
                 crate::serial_println!("[VFS RESTORE] Metadata decrypt error: {:?}", e);
+                // Fail closed on encrypted envelopes whose decryption/authentication failed.
+                if len >= 4 && &sealed[..4] == b"ENC1" {
+                    crate::serial_println!("[VFS RESTORE] Integrity violation: rejecting corrupted ENC1 metadata.");
+                    return;
+                }
                 if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; }
             }
         };
@@ -2464,6 +2469,11 @@ pub fn read_file_for_task(
             }
             Err(e) => {
                 crate::serial_println!("[VFS RESTORE] Data snapshot decrypt error: {:?}", e);
+                // Fail closed on encrypted envelopes whose decryption/authentication failed.
+                if len >= 4 && &sealed[..4] == b"ENC1" {
+                    crate::serial_println!("[VFS RESTORE] Integrity violation: rejecting corrupted ENC1 data snapshot.");
+                    return;
+                }
                 // One-time compatibility with legacy unencrypted plaintext snapshots.
                 if len <= buf.len() {
                     buf[..len].copy_from_slice(&sealed[..len]);

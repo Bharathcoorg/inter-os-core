@@ -2050,13 +2050,10 @@ pub fn present_argb8888_offset(pixels: &[u32], width: u32, height: u32, dirty_ro
                         PixelFormat::Bgr if bpp == 4 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
+                                let mut dst_u32 = ptr.add((dy + y_offset) * stride_bytes) as *mut u32;
                                 for &p in row_src {
-                                    *dst_ptr = p as u8;
-                                    *dst_ptr.add(1) = (p >> 8) as u8;
-                                    *dst_ptr.add(2) = (p >> 16) as u8;
-                                    *dst_ptr.add(3) = 0xFF;
-                                    dst_ptr = dst_ptr.add(4);
+                                    *dst_u32 = (p & 0x00FF_FFFF) | 0xFF00_0000;
+                                    dst_u32 = dst_u32.add(1);
                                 }
                             }
                             return;
@@ -2077,13 +2074,13 @@ pub fn present_argb8888_offset(pixels: &[u32], width: u32, height: u32, dirty_ro
                         PixelFormat::Rgb if bpp == 4 => {
                             for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
-                                let mut dst_ptr = ptr.add((dy + y_offset) * stride_bytes);
+                                let mut dst_u32 = ptr.add((dy + y_offset) * stride_bytes) as *mut u32;
                                 for &p in row_src {
-                                    *dst_ptr = (p >> 16) as u8;
-                                    *dst_ptr.add(1) = (p >> 8) as u8;
-                                    *dst_ptr.add(2) = p as u8;
-                                    *dst_ptr.add(3) = 0xFF;
-                                    dst_ptr = dst_ptr.add(4);
+                                    let b = (p & 0xFF) as u32;
+                                    let g = ((p >> 8) & 0xFF) as u32;
+                                    let r = ((p >> 16) & 0xFF) as u32;
+                                    *dst_u32 = (b << 16) | (g << 8) | r | 0xFF00_0000;
+                                    dst_u32 = dst_u32.add(1);
                                 }
                             }
                             return;

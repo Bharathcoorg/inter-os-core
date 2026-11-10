@@ -550,6 +550,20 @@ pub fn sys_app_background_ext(target_id: u64) -> SyscallResult {
         caller
     };
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    if task != caller {
+        let sched = SCHEDULER.lock();
+        let authorized = if let Some(current) = sched.get_task(caller) {
+            current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE)
+                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
+        } else {
+            false
+        };
+        drop(sched);
+        if !authorized {
+            return SyscallResult::PermissionDenied;
+        }
+    }
     SCHEDULER.lock().set_task_priority(task, 1);
     crate::drivers::display_kms::DRM_KMS.lock().set_surfaces_visibility_for_task(task.0, false);
     crate::capability::revocation::suspend_ephemeral_for_task(task);
@@ -2733,6 +2747,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         160 => {
             // ConsentResolve: a1 = request_id, a2 = decision (1=Granted, 2=Denied, 3=GrantedOnce)
+            let sched = SCHEDULER.lock();
+            let current = match sched.current_task() {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let authorized = current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
+                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE)
+                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE);
+            drop(sched);
+            if !authorized {
+                return SyscallResult::PermissionDenied as i64;
+            }
             match sys_consent_resolve(a1, a2 as u32) {
                 Ok(slot) => slot as i64,
                 Err(e) => e as i64,
@@ -2788,7 +2814,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // SurfaceWrite: a1=display-cap slot, a2=surface id, a3=offset pixels,
             // a4=pixel buffer pointer, a5=pixel count.
             let count = a5 as usize;
-            if count == 0 || count > 65536 { return SyscallResult::InvalidArguments as i64; }
+            if count == 0 || count > 4_194_304 { return SyscallResult::InvalidArguments as i64; }
             let byte_len = match count.checked_mul(core::mem::size_of::<u32>()) {
                 Some(b) => b,
                 None => return SyscallResult::InvalidArguments as i64,
