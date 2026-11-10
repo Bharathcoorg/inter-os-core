@@ -1225,16 +1225,22 @@ def cmd_verify(args):
         return 1
     data = pkg_path.read_bytes()
     if len(data) < 0xB4 or data[:4] != b"RAPP":
-        log_error("Invalid RAPP v2 package")
+        log_error("Invalid RAPP package header")
         return 1
-    if int.from_bytes(data[4:6], "little") != 2:
-        log_error("Rejected: package is not RAPP v2")
+    format_version = int.from_bytes(data[4:6], "little")
+    if format_version not in (2, 3, 4):
+        log_error(f"Rejected: unsupported RAPP format version {format_version} (expected 2, 3, or 4)")
+        return 1
+    header_size = 0xB4 if format_version == 2 else 0xB8
+    if len(data) < header_size:
+        log_error("Rejected: package shorter than header size")
         return 1
     pub = data[0x28:0x48]
     sig = data[0x70:0xB0]
     payload_len = int.from_bytes(data[0xB0:0xB4], "little")
+    section_len = 0 if format_version == 2 else int.from_bytes(data[0xB4:0xB8], "little")
     cap_count = int.from_bytes(data[0x4E:0x50], "little")
-    payload_offset = 0xB4 + cap_count * 2
+    payload_offset = header_size + cap_count * 2 + section_len
     if payload_offset + payload_len != len(data):
         log_error("Rejected: malformed payload bounds")
         return 1
@@ -1251,7 +1257,7 @@ def cmd_verify(args):
         return 1
     pkg_id = data[8:40].split(b"\0", 1)[0].decode("utf-8", errors="strict")
     version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
-    log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
+    log_success(f"RAPP v{format_version} '{pkg_id}' cryptographically verified")
     log(f"  • Publisher key: {pub.hex()}")
     log(f"  • Version: {version[0]}.{version[1]}.{version[2]}")
     log(f"  • Payload: {payload_len} bytes")

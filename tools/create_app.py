@@ -122,12 +122,19 @@ use interos_std as std;
 pub extern "C" fn _start() -> ! {{
     std::log(0, "[{app_name.upper()}] Sensor tracking service online in Ring 3.").ok();
 
-    // Query hardware thermal sensor (TSENS) and battery fuel gauge
-    let battery_pct = 94u8;
-    let temp_celsius = 34u8;
+    // Query platform hardware telemetry service
+    let mut status = [0u8; 16];
+    let (battery_pct, temp_celsius) = if let Ok(n) = std::ipc_recv(&mut status) {{
+        if n >= 2 {{ (status[0], status[1]) }} else {{ (0, 0) }}
+    }} else {{
+        (0, 0)
+    }};
 
-    std::log(0, "[{app_name.upper()}] Battery state: 94% (Fuel Gauge: Normal)").ok();
-    std::log(0, "[{app_name.upper()}] Thermal sensor: 34 deg C (Governor: Dynamic)").ok();
+    if battery_pct > 0 {{
+        std::log(0, "[{app_name.upper()}] Telemetry acquired from sensor service.").ok();
+    }} else {{
+        std::log(0, "[{app_name.upper()}] Hardware sensor telemetry: UNAVAILABLE / OFFLINE.").ok();
+    }}
 
     // Stream sensor telemetry frame over IPC bus
     let payload = b"SENSOR_TELEMETRY_PKT_V1";

@@ -932,14 +932,10 @@
         }
 
         if (nativeGetUserMedia) {
-          try {
-            return await nativeGetUserMedia(constraints);
-          } catch (_) {
-            // Hardware device not attached in emulator; return clean virtual stream
-          }
+          return await nativeGetUserMedia(constraints);
         }
 
-        return createSimulatedMediaStream(constraints);
+        throw new DOMException("Requested device not found (no physical camera or microphone attached)", "NotFoundError");
       };
     } catch (_) {}
   }
@@ -1105,9 +1101,10 @@
         checkManifestPermission('Sensors');
         const t = await this.getStatus();
         return {
-          level: t.battery_level || 94,
-          voltageMv: t.battery_voltage_mv || 3850,
-          charging: t.battery_charging || false
+          level: (t && typeof t.battery_level === 'number') ? t.battery_level : null,
+          voltageMv: (t && typeof t.battery_voltage_mv === 'number') ? t.battery_voltage_mv : null,
+          charging: (t && typeof t.battery_charging === 'boolean') ? t.battery_charging : false,
+          available: Boolean(t && typeof t.battery_level === 'number')
         };
       },
 
@@ -1115,8 +1112,9 @@
         checkManifestPermission('Sensors');
         const t = await this.getStatus();
         return {
-          socTempC: t.soc_temp_c || 42,
-          throttled: t.thermal_throttling || false
+          socTempC: (t && typeof t.soc_temp_c === 'number') ? t.soc_temp_c : null,
+          throttled: (t && typeof t.thermal_throttling === 'boolean') ? t.thermal_throttling : false,
+          available: Boolean(t && typeof t.soc_temp_c === 'number')
         };
       }
     },
