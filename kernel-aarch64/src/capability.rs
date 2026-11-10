@@ -47,6 +47,11 @@ pub enum CapabilityType {
     DisplayControllerDirect,
     StrongBoxSecureEnclave,
     RemoteKillSwitchDirect,
+    InputDevice,
+    DisplayServer,
+    FileSystemRead,
+    FileSystemWrite,
+    EventPoll,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

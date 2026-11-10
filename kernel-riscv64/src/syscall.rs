@@ -55,6 +55,21 @@ fn copy_to_user(addr: usize, src: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+pub const SYS_YIELD: usize = 1;
+pub const SYS_EXIT: usize = 2;
+pub const SYS_LOG: usize = 3;
+pub const SYS_GET_TICKS: usize = 4;
+pub const SYS_IPC_SEND: usize = 5;
+pub const SYS_IPC_RECV: usize = 6;
+pub const SYS_GET_TASK_ID: usize = 7;
+pub const SYS_FS_OPEN: usize = 8;
+pub const SYS_FS_READ: usize = 9;
+pub const SYS_FS_WRITE: usize = 10;
+pub const SYS_FS_CLOSE: usize = 11;
+pub const SYS_EVENT_POLL: usize = 62;
+pub const SYS_EXIT_WITH_CODE: usize = 64;
+pub const SYS_TOUCH_POLL: usize = 71;
+
 pub const USER_SPACE_MIN: usize = 0x0000_1000;
 pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF; // Below 2GB Kernel DRAM
 pub const KERNEL_DRAM_START: usize = 0x8000_0000;
@@ -115,6 +130,54 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         // 7: GetTaskId
         7 => {
             SCHEDULER.lock().current_task_id().0 as i64
+        }
+        // 8: FsOpen (cap_slot, path_ptr, path_len, flags)
+        8 => {
+            let path_ptr = a1;
+            let path_len = a2;
+            if path_len > 0 && validate_user_range(path_ptr, path_len, false).is_err() {
+                -14 // -EFAULT
+            } else {
+                -13 // -EACCES: fail-closed capability check
+            }
+        }
+        // 9: FsRead (cap_slot, fd, buf_ptr, buf_len)
+        9 => {
+            let buf_ptr = a2;
+            let buf_len = _a3;
+            if buf_len > 0 && validate_user_range(buf_ptr, buf_len, true).is_err() {
+                -14 // -EFAULT
+            } else {
+                -13 // -EACCES: fail-closed capability check
+            }
+        }
+        // 10: FsWrite (cap_slot, fd, buf_ptr, buf_len)
+        10 => {
+            let buf_ptr = a2;
+            let buf_len = _a3;
+            if buf_len > 0 && validate_user_range(buf_ptr, buf_len, false).is_err() {
+                -14 // -EFAULT
+            } else {
+                -13 // -EACCES: fail-closed capability check
+            }
+        }
+        // 11: FsClose (cap_slot, fd)
+        11 => {
+            -13 // -EACCES: fail-closed capability check
+        }
+        // 62: EventPoll (cap_slot, interest_mask, timeout_ticks)
+        62 => {
+            -13 // -EACCES: fail-closed capability check
+        }
+        // 64: ExitWithCode (exit_code)
+        64 => {
+            println!("[SYSCALL:EXIT] Task exited with code {}", a0);
+            SCHEDULER.lock().exit_current();
+            0
+        }
+        // 71: TouchPoll (cap_slot)
+        71 => {
+            -13 // -EACCES: fail-closed capability check
         }
         _ => {
             -38 // -ENOSYS

@@ -137,6 +137,7 @@ impl SimpleFbFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimpleFramebuffer {
     pub base_paddr: usize,
     pub base_vaddr: usize,
@@ -144,6 +145,16 @@ pub struct SimpleFramebuffer {
     pub height: u32,
     pub stride: u32,
     pub format: SimpleFbFormat,
+}
+
+pub static FRAMEBUFFER: spin::Mutex<Option<SimpleFramebuffer>> = spin::Mutex::new(None);
+
+pub fn register_framebuffer(fb: SimpleFramebuffer) {
+    *FRAMEBUFFER.lock() = Some(fb);
+}
+
+pub fn get_framebuffer() -> Option<SimpleFramebuffer> {
+    *FRAMEBUFFER.lock()
 }
 
 impl SimpleFramebuffer {
@@ -319,16 +330,12 @@ let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleF
                     core::ptr::write_volatile(ptr.add(2), b);
                 }
                 SimpleFbFormat::Argb8888 => {
-                    core::ptr::write_volatile(ptr, b);
-                    core::ptr::write_volatile(ptr.add(1), g);
-                    core::ptr::write_volatile(ptr.add(2), r);
-                    core::ptr::write_volatile(ptr.add(3), 0xFF);
+                    let argb32 = (0xFF00_0000u32) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    core::ptr::write_volatile(ptr as *mut u32, argb32);
                 }
                 SimpleFbFormat::Xrgb8888 => {
-                    core::ptr::write_volatile(ptr, b);
-                    core::ptr::write_volatile(ptr.add(1), g);
-                    core::ptr::write_volatile(ptr.add(2), r);
-                    core::ptr::write_volatile(ptr.add(3), 0x00);
+                    let xrgb32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    core::ptr::write_volatile(ptr as *mut u32, xrgb32);
                 }
             }
         }

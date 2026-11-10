@@ -243,7 +243,7 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
         let a3 = frame.regs[3];
         let a4 = frame.regs[4];
 
-        if syscall_nr == crate::syscall::SYS_EXIT {
+        if syscall_nr == crate::syscall::SYS_EXIT || syscall_nr == crate::syscall::SYS_EXIT_WITH_CODE {
             let code = a0 as i32;
             crate::kprintln!("[SYSCALL] Task exited with code: {}", code);
             crate::user::record_el0_exit(code);

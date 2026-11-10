@@ -217,6 +217,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         }
     };
     let fb_vaddr = fb_buf.as_ptr() as usize;
+    display::register_framebuffer(fb);
 
     // Render a neutral boot splash. Status indicators are omitted entirely:
     // signal, battery and thermal state have no sensor backend attached yet.
@@ -388,7 +389,33 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(sys_ticks >= 0);
     let sys_task_id = syscall::sys_dispatch(syscall::SYS_GET_TASK_ID, 0, 0, 0, 0, 0);
     assert_eq!(sys_task_id, 0);
-    kprintln!("[TEST] AArch64 Syscall Dispatcher: sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", sys_ticks, sys_task_id);
+
+    // Verify uncredentialed calls fail closed (-13)
+    let denied_touch = syscall::sys_dispatch(syscall::SYS_TOUCH_POLL, 0, 0, 0, 0, 0);
+    assert_eq!(denied_touch, -13, "TouchPoll without InputDevice cap must return -EACCES");
+    let denied_surf = syscall::sys_dispatch(syscall::SYS_SURFACE_CREATE, 0, 100, 100, 0, 0);
+    assert_eq!(denied_surf, -13, "SurfaceCreate without DisplayServer cap must return -EACCES");
+    let denied_event = syscall::sys_dispatch(syscall::SYS_EVENT_POLL, 0, 0, 0, 0, 0);
+    assert_eq!(denied_event, -13, "EventPoll without EventPoll cap must return -EACCES");
+
+    // Verify SYS_EXIT_WITH_CODE records exit code
+    let exit_res = syscall::sys_dispatch(syscall::SYS_EXIT_WITH_CODE, 0, 0, 0, 0, 0);
+    assert_eq!(exit_res, 0);
+
+    // Verify credentialed surface operations
+    {
+        let mut sched = task::SCHEDULER.lock();
+        let curr_idx = sched.current_task_idx;
+        sched.tasks[curr_idx].cap_table.mint(capability::CapabilityType::DisplayServer, capability::Rights::READ | capability::Rights::WRITE, None);
+    }
+    let surf_id = syscall::sys_dispatch(syscall::SYS_SURFACE_CREATE, 0, 100, 100, 0, 0);
+    assert_eq!(surf_id, 1, "SurfaceCreate with DisplayServer cap should succeed");
+    let flip_res = syscall::sys_dispatch(syscall::SYS_SURFACE_FLIP, 0, 0, 0, 0, 0);
+    assert_eq!(flip_res, 1, "SurfaceFlip with DisplayServer cap should succeed");
+    let destroy_res = syscall::sys_dispatch(syscall::SYS_SURFACE_DESTROY, 0, 1, 0, 0, 0);
+    assert_eq!(destroy_res, 0, "SurfaceDestroy with DisplayServer cap should succeed");
+
+    kprintln!("[TEST] AArch64 Syscall Dispatcher: sys_get_ticks (x0={}), sys_get_task_id (x0={}), and standard syscall parity VERIFIED.", sys_ticks, sys_task_id);
 
     // 14. AArch64 Architectural Exception Vector Table (VBAR_EL1) & Hardware SVC Dispatch
     kprintln!("--- [Testing AArch64 Architectural Exception Vector Table & Hardware SVC] ---");

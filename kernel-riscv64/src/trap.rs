@@ -182,7 +182,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 let width = unsafe { crate::mmu::instruction_len(tf.sepc) };
                 tf.sepc += width;
                 crate::syscall::dispatch_syscall(tf);
-                if syscall_num == 2 {
+                if syscall_num == 2 || syscall_num == 64 {
                     let exited = crate::task::SCHEDULER.lock().exit_current();
                     println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
                     loop {

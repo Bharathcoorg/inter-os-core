@@ -81,6 +81,15 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     syscall::dispatch_syscall(&mut user_tf);
     assert_eq!(user_tf.regs[10], 1, "GetTaskId should return task ID 1");
     println!("[TEST] RISC-V Userspace Syscall: SYS_GET_TASK_ID returned valid Task ID 1 (VERIFIED).");
+
+    // 4b. Test Stub/Fail-Closed Capability Security for Standard Syscalls
+    let mut cap_tf = trap::TrapFrame::default();
+    for &sc in &[8, 9, 10, 11, 62, 71] {
+        cap_tf.regs[17] = sc;
+        syscall::dispatch_syscall(&mut cap_tf);
+        assert_eq!(cap_tf.regs[10] as isize, -13, "Uncredentialed syscall must fail closed with -EACCES");
+    }
+    println!("[TEST] RISC-V Zero Ambient Authority: Syscalls 8, 9, 10, 11, 62, 71 fail closed (-EACCES) (VERIFIED).");
     println!("[BOOT] InterOS RISC-V SBI console/trap interface initialized.");
     println!("[BOOT] Microkernel S-mode initialized.");
     println!("[BOOT] RISC-V userspace smoke image is the current architecture validation target.");

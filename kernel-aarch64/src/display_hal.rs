@@ -60,6 +60,8 @@ pub enum RefreshRateHz {
     Hz30 = 30,   // Video playback
     Hz60 = 60,   // Standard mobile UI
     Hz120 = 120, // High-frequency touch interaction
+    Hz240 = 240, // Ultra-high refresh mobile gaming and fluid UI
+    Hz360 = 360, // Next-gen extreme esports / sub-millisecond input
 }
 
 pub struct MobileDisplayHal {
