@@ -56,12 +56,41 @@ impl ServiceId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ServiceState {
-    Declared = 0,
+    Stopped = 0,
     Starting = 1,
     Running = 2,
-    Stopped = 3,
-    Failed = 4,
+    Degraded = 3,
+    Crashed = 4,
+    Restarting = 5,
 }
+
+impl ServiceState {
+    pub const fn from_u8(val: u8) -> Self {
+        match val {
+            0 => ServiceState::Stopped,
+            1 => ServiceState::Starting,
+            2 => ServiceState::Running,
+            3 => ServiceState::Degraded,
+            4 => ServiceState::Crashed,
+            5 => ServiceState::Restarting,
+            _ => ServiceState::Crashed,
+        }
+    }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            ServiceState::Stopped => "stopped",
+            ServiceState::Starting => "starting",
+            ServiceState::Running => "running",
+            ServiceState::Degraded => "degraded",
+            ServiceState::Crashed => "crashed",
+            ServiceState::Restarting => "restarting",
+        }
+    }
+}
+
+pub const HEARTBEAT_TIMEOUT_TICKS: u64 = 2_000_000_000;
+pub const MAX_RESTART_ATTEMPTS: u32 = 5;
 
 pub struct ServiceEntry {
     pub id: ServiceId,
@@ -96,28 +125,30 @@ pub static SERVICES: [ServiceEntry; 12] = [
 pub fn start(id: u8) -> Result<u32, ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
+            let old_pid = svc.pid.load(Ordering::Acquire);
+            if old_pid != 0 {
+                let mut sched = crate::task::SCHEDULER.lock();
+                let _ = sched.reap_task(1, true, old_pid);
+                drop(sched);
+                svc.pid.store(0, Ordering::Release);
+            }
+
+            svc.state.store(ServiceState::Starting as u8, Ordering::Release);
+
             let img = match crate::images::service_image(id) {
                 Some(i) => i,
                 None => {
-                    svc.state.store(ServiceState::Failed as u8, Ordering::Release);
+                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    svc.failures.fetch_add(1, Ordering::Relaxed);
                     return Err(());
                 }
             };
-            let sched = crate::task::SCHEDULER.lock();
-            for t in &sched.tasks {
-                if t.name == img.name && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running) {
-                    svc.pid.store(t.id, Ordering::Release);
-                    svc.state.store(ServiceState::Running as u8, Ordering::Release);
-                    return Ok(t.id);
-                }
-            }
-            drop(sched);
 
             let loaded = match crate::elf::load_elf(img.elf) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::kprintln!("[SERVICE ERROR] Failed to load '{}': {}", img.name, e);
-                    svc.state.store(ServiceState::Failed as u8, Ordering::Release);
+                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
                     svc.failures.fetch_add(1, Ordering::Relaxed);
                     return Err(());
                 }
@@ -130,20 +161,41 @@ pub fn start(id: u8) -> Result<u32, ()> {
             caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
             if id == 9 || id == 10 { // compositor or launcher
                 caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights(crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0), None);
+                caps.mint(crate::capability::CapabilityType::SystemResource, crate::capability::Rights(crate::capability::Rights::READ.0 | crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0), None);
             } else {
                 caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
             }
             caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+            caps.mint(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ, None);
             if id == 10 { // launcher
                 caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
             }
             let tid = sched.spawn_user_process(1, img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
-            drop(sched);
+            if tid == 0 {
+                drop(sched);
+                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                svc.failures.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
 
-            crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
+            let verified = sched.tasks.iter().any(|t| t.id == tid && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
+            drop(sched);
+            if !verified {
+                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                svc.failures.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
+
+            let ticks: u64;
+            unsafe {
+                core::arch::asm!("mrs {0}, cntpct_el0", out(reg) ticks);
+            }
             svc.pid.store(tid, Ordering::Release);
+            svc.last_heartbeat.store(ticks, Ordering::Release);
             svc.state.store(ServiceState::Running as u8, Ordering::Release);
             svc.generation.fetch_add(1, Ordering::Relaxed);
+
+            crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
             return Ok(tid);
         }
     }
@@ -161,6 +213,7 @@ pub fn stop(id: u8) -> Result<(), ()> {
                         task.state = crate::task::TaskState::Terminated;
                     }
                 }
+                let _ = sched.reap_task(1, true, pid);
             }
             svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
             return Ok(());
@@ -170,13 +223,20 @@ pub fn stop(id: u8) -> Result<(), ()> {
 }
 
 pub fn heartbeat(caller_pid: u32) -> Result<(), ()> {
+    if caller_pid == 0 || caller_pid == crate::task::INVALID_PID {
+        return Err(());
+    }
     let ticks: u64;
     unsafe {
         core::arch::asm!("mrs {0}, cntpct_el0", out(reg) ticks);
     }
     for svc in &SERVICES {
-        if svc.pid.load(Ordering::Acquire) == caller_pid || (caller_pid == 1 && svc.state.load(Ordering::Acquire) == ServiceState::Running as u8) {
+        if svc.pid.load(Ordering::Acquire) == caller_pid {
             svc.last_heartbeat.store(ticks, Ordering::Release);
+            let prev = svc.state.load(Ordering::Acquire);
+            if prev == ServiceState::Degraded as u8 {
+                svc.state.store(ServiceState::Running as u8, Ordering::Release);
+            }
             return Ok(());
         }
     }
@@ -187,12 +247,23 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
             let st = svc.state.load(Ordering::Acquire);
-            if st != ServiceState::Failed as u8 {
+            if st != ServiceState::Crashed as u8 && st != ServiceState::Degraded as u8 {
                 return Err(());
             }
-            svc.failures.fetch_add(1, Ordering::Relaxed);
-            let _ = start(id);
-            return Ok(());
+            let fails = svc.failures.load(Ordering::Relaxed);
+            if fails >= MAX_RESTART_ATTEMPTS {
+                crate::kprintln!("[SERVICE] Service '{}' exceeded maximum retry budget ({})", svc.name, fails);
+                return Err(());
+            }
+            svc.restart_count.fetch_add(1, Ordering::Relaxed);
+            svc.state.store(ServiceState::Restarting as u8, Ordering::Release);
+            return match start(id) {
+                Ok(_) => Ok(()),
+                Err(()) => {
+                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    Err(())
+                }
+            };
         }
     }
     Err(())
@@ -225,15 +296,28 @@ pub fn snapshot(out: &mut [u8]) -> usize {
     }
 
     let mut writer = SliceWriter { buf: out, pos: 0 };
+    let sched = crate::task::SCHEDULER.lock();
+
     for svc in &SERVICES {
-        let state_val = svc.state.load(Ordering::Acquire);
-        let state_str = match state_val {
-            0 => "declared",
-            1 => "starting",
-            2 => "running",
-            3 => "stopped",
-            _ => "failed",
-        };
+        let mut state_val = svc.state.load(Ordering::Acquire);
+        let pid = svc.pid.load(Ordering::Acquire);
+
+        // Audit active process status
+        if state_val == ServiceState::Running as u8 {
+            let task_active = pid != 0 && sched.tasks.iter().any(|t| t.id == pid && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
+            if !task_active {
+                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                state_val = ServiceState::Crashed as u8;
+            } else {
+                let hb = svc.last_heartbeat.load(Ordering::Acquire);
+                if hb > 0 && ticks.saturating_sub(hb) > HEARTBEAT_TIMEOUT_TICKS {
+                    svc.state.store(ServiceState::Degraded as u8, Ordering::Release);
+                    state_val = ServiceState::Degraded as u8;
+                }
+            }
+        }
+
+        let state_str = ServiceState::from_u8(state_val).as_str();
         let gen = svc.generation.load(Ordering::Relaxed);
         let fails = svc.failures.load(Ordering::Relaxed);
         let hb = svc.last_heartbeat.load(Ordering::Acquire);
