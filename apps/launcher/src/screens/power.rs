@@ -591,6 +591,13 @@ fn line_pixel(
     pad: usize,
     level: u8,
 ) -> Option<u32> {
+    let line_h = scale::line_at(rung, level);
+    if y < y0 || y >= y0 + line_h {
+        return None;
+    }
+    if x < lane.x || x >= lane.x + lane.w {
+        return None;
+    }
     let available = lane.w.saturating_sub(2 * pad);
     let (buf, len) = scale::ellipsize_at(bytes, rung, available, level);
     let run = &buf[..len];
@@ -615,6 +622,13 @@ fn start_pixel(
     pad: usize,
     level: u8,
 ) -> Option<u32> {
+    let line_h = scale::line_at(rung, level);
+    if y < y0 || y >= y0 + line_h {
+        return None;
+    }
+    if x < lane.x || x >= lane.x + lane.w {
+        return None;
+    }
     let available = lane.w.saturating_sub(pad);
     let (buf, len) = scale::ellipsize_at(bytes, rung, available, level);
     let run = &buf[..len];

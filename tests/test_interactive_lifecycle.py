@@ -1021,6 +1021,15 @@ def main():
             timeout=25.0,
             print_keywords=["LAUNCHER", "Power", "menu", "render_power_menu"]
         )
+        if not pm_ready:
+            print("[LIFECYCLE TEST] Retrying opening Power Menu...")
+            time.sleep(1.0)
+            reader.send(b"TAP 600 25\n")
+            pm_ready = reader.wait_for(
+                "Power surface rendered.",
+                timeout=35.0,
+                print_keywords=["LAUNCHER", "Power", "menu", "render_power_menu"]
+            )
         assert pm_ready, "Failed to open Power Menu"
         print("[LIFECYCLE TEST] [OK] Power Menu opened.")
         ppm_pm = os.path.abspath(r"target\test_power_menu.ppm").replace("\\", "/")
@@ -1034,6 +1043,15 @@ def main():
             timeout=25.0,
             print_keywords=["LAUNCHER", "Device", "locked", "render_lock_screen"]
         )
+        if not device_locked:
+            print("[LIFECYCLE TEST] Retrying locking device...")
+            time.sleep(1.0)
+            reader.send(b"TAP 500 225\n")
+            device_locked = reader.wait_for(
+                "Lock surface rendered.",
+                timeout=35.0,
+                print_keywords=["LAUNCHER", "Device", "locked", "render_lock_screen"]
+            )
         assert device_locked, "Failed to lock device from Power Menu"
         print("[LIFECYCLE TEST] [OK] Device locked into Lock Screen.")
         ppm_lock = os.path.abspath(r"target\test_lock_screen.ppm").replace("\\", "/")

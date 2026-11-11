@@ -88,7 +88,7 @@ def static_gate():
     for needle, label in (
         ("x86_64 QEMU Canonical Boot Verification", "canonical QEMU verifier"),
         ("Initial presentation complete", "launcher readiness gate"),
-        ("Framebuffer PPM verified for current run", "fresh framebuffer evidence"),
+        ("Framebuffer pixels verified", "fresh framebuffer evidence"),
     ):
         must(qemu, needle, label)
 
