@@ -191,6 +191,24 @@ def verify_ppm_file(path_str, min_size=500000):
         assert len(colors) >= 20, f"Display frame appears blank or uniform ({len(colors)} distinct colors)"
     print(f"[VERIFY PPM] [OK] Genuine P6 PPM confirmed: {p.name} ({w}x{h}, {sz} bytes, {len(colors)} distinct sampled colours)")
 
+def verify_visual_pixel_change(path_before, path_after, row_start=150, row_end=350, w=720):
+    def extract_band(path):
+        with open(path, "rb") as f:
+            for _ in range(3):
+                l = f.readline()
+                while l.startswith(b"#"):
+                    l = f.readline()
+            pixels = f.read()
+            start_byte = row_start * w * 3
+            end_byte = row_end * w * 3
+            return pixels[start_byte:end_byte]
+
+    band_before = extract_band(path_before)
+    band_after = extract_band(path_after)
+    diff = sum(1 for a, b in zip(band_before, band_after) if a != b)
+    assert diff > 0, f"No pixel change detected in calculation area between {path_before} and {path_after}"
+    print(f"[VERIFY PIXELS] [OK] Display result area ({row_start}..{row_end} px) changed: {diff} differing bytes confirmed between frames.")
+
 def main():
     print("[*] InterOS Core AArch64 Interactive Lifecycle & Graphics Verification...")
     qemu_exe = find_qemu("qemu-system-aarch64.exe")
@@ -209,7 +227,7 @@ def main():
         "-m", "1024M",
         "-kernel", str(kernel_img),
         "-display", "none",
-        "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
+        "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=on",
         "-serial", "chardev:ser0",
         "-chardev", f"socket,id=mon0,host=127.0.0.1,port={mon_port},server=on,wait=off",
         "-mon", "chardev=mon0,mode=readline",
@@ -234,6 +252,15 @@ def main():
         monitor_sock.settimeout(0.5)
 
         print("[*] Connected to QEMU serial and monitor sockets.")
+
+        # Check kernel boot self-tests
+        mem_ok = reader.wait_for("50-Cycle Memory Stability: Free/used frame count returned to baseline", timeout=25.0)
+        assert mem_ok, "AArch64 50-Cycle Memory Stability self-test not observed"
+        print("[OK] AArch64 50-Cycle Memory Stability verified without leakage.")
+
+        svc_ok = reader.wait_for("Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover", timeout=25.0)
+        assert svc_ok, "AArch64 Service Supervisor Lifecycle self-test not observed"
+        print("[OK] AArch64 Service Supervisor Lifecycle & Recovery verified.")
 
         # 1. Await Launcher initial presentation
         print("[*] Operation 1: Awaiting Launcher initial scanout presentation...")
@@ -346,6 +373,7 @@ def main():
         send_monitor_cmd(monitor_sock, f"screendump {ppm_eval}")
         wait_for_screendump(ppm_eval)
         verify_ppm_file(ppm_eval)
+        verify_visual_pixel_change(ppm_calc, ppm_eval)
 
         # 6. Exit Calculator via Back button at (48, 80)
         print("[*] Operation 6: Exiting Calculator via Back button tap at (48, 80)...")

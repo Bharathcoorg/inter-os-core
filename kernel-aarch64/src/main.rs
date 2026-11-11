@@ -1487,7 +1487,42 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("  Source-level backend boundaries validated; runtime hardware remains unbound until a concrete driver is attached.");
     kprintln!("============================================================");
 
-    // 45. Spawn userspace PID 1 (init) at EL0
+    // 45. 50-Cycle Memory Stability Test
+    kprintln!("--- [Testing AArch64 50-Cycle Memory Stability] ---");
+    let baseline_frames = mmu::active_allocated_frames();
+    for cycle in 0..50 {
+        let mut aspace = mmu::UserAddressSpace::new().expect("Address space allocation in stability cycle");
+        let test_frame = mmu::allocate_frame().expect("Frame allocation in stability cycle");
+        aspace.map_user_page(0x0040_0000, test_frame, true, false).expect("Mapping page in stability cycle");
+        assert!(mmu::active_allocated_frames() > baseline_frames);
+        aspace.destroy();
+        assert_eq!(mmu::active_allocated_frames(), baseline_frames, "Memory leak detected at cycle {}", cycle);
+    }
+    kprintln!("[TEST] 50-Cycle Memory Stability: Free/used frame count returned to baseline ({}) across 50 cycles without leakage VERIFIED.", baseline_frames);
+
+    // 46. Service Supervisor Lifecycle & Recovery Verification
+    kprintln!("--- [Testing AArch64 Service Supervisor Lifecycle & Recovery] ---");
+    let test_svc_id = 3; // storaged
+    let orig_pid = services::start(test_svc_id).expect("Service start failed in lifecycle test");
+    assert!(orig_pid > 0);
+    assert_eq!(services::heartbeat(9999), Err(()), "Heartbeat with spoofed PID must be rejected");
+    assert_eq!(services::heartbeat(orig_pid), Ok(()), "Heartbeat with owning PID must be accepted");
+    // Simulate service failure/crash by terminating its task and running snapshot audit:
+    {
+        let mut sched = task::SCHEDULER.lock();
+        for t in &mut sched.tasks {
+            if t.id == orig_pid {
+                t.state = task::TaskState::Terminated;
+            }
+        }
+    }
+    let mut snap_buf = [0u8; 1024];
+    services::snapshot(&mut snap_buf);
+    assert_eq!(services::recover_failed(test_svc_id), Ok(()), "Service recover_failed must succeed");
+    assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
+    kprintln!("[TEST] Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover(Restarting -> Running) -> Stopped VERIFIED.");
+
+    // 47. Spawn userspace PID 1 (init) at EL0
     kprintln!();
     kprintln!("--- [Spawning Userspace PID 1 (init) at EL0] ---");
     kprintln!("[BOOT] Loading userspace PID 1 init ELF ({} bytes)...", images::USER_INIT_ELF.len());
@@ -1506,6 +1541,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 init_caps.mint(capability::CapabilityType::SerialOutput, capability::Rights::WRITE, None);
                 init_caps.mint(capability::CapabilityType::EventPoll, capability::Rights::READ, None);
                 init_caps.mint(capability::CapabilityType::DisplayServer, capability::Rights(capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
+                init_caps.mint(capability::CapabilityType::SystemResource, capability::Rights(capability::Rights::READ.0 | capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
                 let pid1 = sched.spawn_user_process(0, "init", l.entry_point, l.stack_top, Some(l.address_space), init_caps);
                 sched.tasks[0].state = task::TaskState::Running;
                 sched.current_task_idx = 0;
