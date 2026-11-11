@@ -21,6 +21,9 @@ pub mod elf;
 pub mod images;
 pub mod input_queue;
 pub mod services;
+pub mod allocator;
+pub mod display;
+pub mod pcie;
 
 use core::panic::PanicInfo;
 
@@ -60,6 +63,11 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         trap::init_traps();
     }
     println!("[BOOT] Traps: stvec vector table online (direct mode, per-task sscratch).");
+
+    // 2b. Initialize Dynamic Heap & Bochs Display Scanout
+    allocator::init_heap();
+    println!("[BOOT] RISC-V 32 MiB Dynamic Heap Allocator initialized.");
+    pcie::probe_and_init_display();
 
     // Supervisor user-memory access must be off: firmware leaves SUM set, and
     // leaving it on would let S-mode reach user pages regardless of the

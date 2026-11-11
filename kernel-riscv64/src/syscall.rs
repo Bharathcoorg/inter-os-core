@@ -123,15 +123,26 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
     let a2 = tf.regs[12];  // a2
     let _a3 = tf.regs[13]; // a3
 
-    let is_test = SCHEDULER.lock().task_count == 0;
+    let is_test = SCHEDULER.lock().tasks.is_empty();
 
     let res: i64 = match num {
         // 1: Yield
-        SYS_YIELD => 0,
+        SYS_YIELD => {
+            crate::task::yield_now();
+            0
+        }
 
         // 2: Exit
         SYS_EXIT | SYS_EXIT_WITH_CODE => {
             println!("[SYSCALL:EXIT] Task exited with code {}", a0);
+            let mut sched = SCHEDULER.lock();
+            let curr = sched.current_task_idx;
+            if curr < sched.tasks.len() {
+                sched.tasks[curr].state = crate::task::TaskState::Terminated;
+                sched.tasks[curr].exit_code = Some(a0 as i32);
+            }
+            drop(sched);
+            crate::task::yield_now();
             0
         }
 
@@ -179,7 +190,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
+            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
             drop(sched);
 
             match caps_opt {
@@ -209,7 +220,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
+            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
             drop(sched);
 
             match caps_opt {
@@ -237,7 +248,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let addr = a0;
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
+            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
             drop(sched);
 
             match caps_opt {
@@ -329,32 +340,168 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if is_test {
                 -13 // -EACCES: fail-closed capability check
             } else {
-                0
+                let sched = SCHEDULER.lock();
+                let curr_idx = sched.current_task_idx;
+                let has_cap = if curr_idx < sched.tasks.len() {
+                    sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok()
+                } else {
+                    false
+                };
+                drop(sched);
+                if !has_cap {
+                    -13
+                } else {
+                    crate::task::yield_now();
+                    crate::input_queue::service_serial_commands();
+                    let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(curr_idx as u32);
+                    let mut mask = 0x08; // EVENT_TIMER_TICK
+                    if has_input {
+                        mask |= 0x10; // EVENT_TOUCH_INPUT
+                    }
+                    mask
+                }
             }
         }
 
         // 69: SurfaceCreate
-        SYS_SURFACE_CREATE => 1,
+        SYS_SURFACE_CREATE => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            let has_cap = if curr_idx < sched.tasks.len() {
+                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+            } else {
+                false
+            };
+            drop(sched);
+            if !has_cap {
+                -13
+            } else {
+                let (width, height, z_order) = if a0 < 0x1000 && a2 > 0 {
+                    (a1 as u32, a2 as u32, _a3 as u32)
+                } else {
+                    (a0 as u32, a1 as u32, a2 as u32)
+                };
+                match crate::display::SURFACE_MANAGER.lock().create_surface(curr_idx as u32, width, height, z_order) {
+                    Ok(id) => id as i64,
+                    Err(e) => e,
+                }
+            }
+        }
 
         // 70: SurfaceFlip
-        SYS_SURFACE_FLIP => 1,
+        SYS_SURFACE_FLIP => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            let has_cap = if curr_idx < sched.tasks.len() {
+                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+            } else {
+                false
+            };
+            drop(sched);
+            if !has_cap {
+                -13
+            } else {
+                let count = crate::display::SURFACE_MANAGER.lock().flip();
+                count as i64
+            }
+        }
 
         // 71: TouchPoll
         SYS_TOUCH_POLL => {
             if is_test || a0 == 0 {
                 -13 // -EACCES: fail-closed capability check
-            } else if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop() {
-                (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
             } else {
-                0
+                let sched = SCHEDULER.lock();
+                let curr_idx = sched.current_task_idx;
+                let has_cap = if curr_idx < sched.tasks.len() {
+                    sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok()
+                } else {
+                    false
+                };
+                drop(sched);
+                if !has_cap {
+                    -13
+                } else {
+                    crate::input_queue::service_serial_commands();
+                    if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
+                        (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
+                    } else {
+                        0
+                    }
+                }
             }
         }
 
         // 73: SurfaceWrite
-        SYS_SURFACE_WRITE => _a3 as i64,
+        SYS_SURFACE_WRITE => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            let has_cap = if curr_idx < sched.tasks.len() {
+                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+            } else {
+                false
+            };
+            drop(sched);
+            if !has_cap {
+                -13
+            } else {
+                let a4 = tf.regs[14];
+                let (surface_id, offset, pixel_ptr, pixel_count) = if a0 < 0x1000 && a4 > 0 {
+                    (a1 as u32, a2 as usize, _a3, a4 as usize)
+                } else if a0 < 0x1000 && _a3 > 0 {
+                    (a1 as u32, 0usize, a2, _a3 as usize)
+                } else {
+                    (a0 as u32, a1 as usize, a2, _a3 as usize)
+                };
+
+                let byte_len = pixel_count * 4;
+                if validate_user_range(pixel_ptr, byte_len, false).is_err() {
+                    -14
+                } else {
+                    let mut sm = crate::display::SURFACE_MANAGER.lock();
+                    if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
+                        if offset >= s.pixels.len() {
+                            -22
+                        } else {
+                            let copy_len = pixel_count.min(s.pixels.len() - offset);
+                            unsafe {
+                                crate::mmu::with_user_memory(|| {
+                                    core::ptr::copy_nonoverlapping(
+                                        pixel_ptr as *const u32,
+                                        s.pixels.as_mut_ptr().add(offset),
+                                        copy_len,
+                                    );
+                                });
+                            }
+                            copy_len as i64
+                        }
+                    } else {
+                        -2 // -ENOENT
+                    }
+                }
+            }
+        }
 
         // 74: SurfaceDestroy
-        SYS_SURFACE_DESTROY => 0,
+        SYS_SURFACE_DESTROY => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            let has_cap = if curr_idx < sched.tasks.len() {
+                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+            } else {
+                false
+            };
+            drop(sched);
+            if !has_cap {
+                -13
+            } else {
+                let surface_id = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
+                match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id) {
+                    Ok(_) => 0,
+                    Err(e) => e,
+                }
+            }
+        }
 
         // 81: ServiceList
         SYS_SERVICE_LIST => {
@@ -405,19 +552,25 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 92: InputEventPoll
         SYS_INPUT_EVENT_POLL => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            drop(sched);
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
             if len < 24 {
                 -22
-            } else if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop() {
-                let mut buf = [0u8; 24];
-                ev.encode(&mut buf);
-                if copy_to_user(addr, &buf).is_err() {
-                    -14
-                } else {
-                    24
-                }
             } else {
-                0
+                crate::input_queue::service_serial_commands();
+                if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
+                    let mut buf = [0u8; 24];
+                    ev.encode(&mut buf);
+                    if copy_to_user(addr, &buf).is_err() {
+                        -14
+                    } else {
+                        24
+                    }
+                } else {
+                    0
+                }
             }
         }
 
@@ -456,25 +609,33 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 });
 
             if let Some(user_img) = img {
-                match crate::elf::load_elf(user_img.elf) {
-                    Ok(loaded) => {
-                        let new_tid = crate::task::TaskId(SCHEDULER.lock().task_count + 1);
-                        let satp = loaded.address_space.satp;
-                        let kstack_top = 0x8040_0000 + new_tid.0 * 0x10000;
-                        let mut caps = crate::capability::CapabilityTable::new();
-                        let _ = caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
-                        let _ = caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
-                        let _ = caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
-                        let _ = caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
-                        let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
-                        SCHEDULER.lock().add_task_with_caps(new_tid, satp, loaded.entry_point, loaded.stack_top, kstack_top, caps);
-                        crate::ipc::IPC_ROUTER.lock().register_task(new_tid.0 as u32);
-                        println!("[SPAWN] RISC-V Userspace process '{}' spawned (PID {})", user_img.name, new_tid.0);
-                        new_tid.0 as i64
-                    }
-                    Err(e) => {
-                        println!("[SPAWN ERROR] Failed to load '{}': {}", user_img.name, e);
-                        -22
+                let existing_id = {
+                    let sched = SCHEDULER.lock();
+                    sched.tasks.iter().find(|t| t.name == user_img.name && t.state == crate::task::TaskState::Ready).map(|t| t.id as i64)
+                };
+
+                if let Some(tid) = existing_id {
+                    tid
+                } else {
+                    match crate::elf::load_elf(user_img.elf) {
+                        Ok(loaded) => {
+                            let mut sched = SCHEDULER.lock();
+                            let mut caps = crate::capability::CapabilityTable::new();
+                            let _ = caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+                            let tid = sched.spawn_user_process(user_img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.satp, caps);
+                            drop(sched);
+                            println!("[SPAWN] RISC-V Userspace process '{}' spawned (PID {})", user_img.name, tid);
+                            tid as i64
+                        }
+                        Err(e) => {
+                            println!("[SPAWN ERROR] Failed to load '{}': {}", user_img.name, e);
+                            -22
+                        }
                     }
                 }
             } else {
@@ -495,8 +656,75 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
 
         SYS_SERVICE_HEARTBEAT => 0,
-        SYS_PACKAGE_LIST | SYS_PACKAGE_REGISTRY => 0,
+        SYS_PACKAGE_LIST => 14,
+        SYS_PACKAGE_REGISTRY => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
+            let s = concat!(
+                "org.interos.settings|settings|1.0.0|active|/apps/settings.elf|Settings|SET|System\n",
+                "org.interos.calculator|calculator|1.0.0|active|/apps/calculator.elf|Calculator|CALC|Utility\n",
+                "org.interos.file_manager|file_manager|1.0.0|active|/apps/files.elf|Files|FILE|Utility\n",
+                "org.interos.calendar|calendar|1.0.0|active|/apps/calendar.elf|Calendar|DATE|Personal\n",
+                "org.interos.music|music_player|1.0.0|active|/apps/music.elf|Music|PLAY|Media\n",
+                "org.interos.vault|vault|1.0.0|active|/apps/vault.elf|Vault|SECR|Security\n",
+                "org.interos.notes|notes|1.0.0|active|/apps/notes.elf|Notes|NOTE|Personal\n",
+                "org.interos.gallery|gallery|1.0.0|active|/apps/gallery.elf|Gallery|PICS|Media\n",
+                "org.interos.dialer|dialer|1.0.0|active|/apps/dialer.elf|Phone|CALL|Communication\n",
+                "org.interos.camera|camera|1.0.0|active|/apps/camera.elf|Camera|CAM|Media\n",
+                "org.interos.messages|messages|1.0.0|active|/apps/messages.elf|Messages|SMS|Communication\n",
+                "org.interos.browser|browser|1.0.0|active|/apps/browser.elf|Browser|WEB|Utility\n",
+                "org.interos.agentmanager|agentmanager|1.0.0|active|/apps/agentmanager.elf|Agents|AI|System\n",
+                "org.interos.video_player|video_player|1.0.0|active|/apps/video.elf|Video|VID|Media\n"
+            ).as_bytes();
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
         SYS_USER_GET_CURRENT => 1,
+        107 => 0, // UserLockState: 0 = Unlocked
+        108 => 0, // UserUnlock: 0 = Ok(())
+        129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
+        132 => { // CapLookup
+            let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };
+            let cap_type = match cap_type_raw {
+                1 => Some(crate::capability::CapabilityType::SerialOutput),
+                2 => Some(crate::capability::CapabilityType::FrameBufferDirect),
+                3 => Some(crate::capability::CapabilityType::TimerTickRead),
+                5 => Some(crate::capability::CapabilityType::IpcSend),
+                6 => Some(crate::capability::CapabilityType::IpcReceive),
+                9 => Some(crate::capability::CapabilityType::FileSystemRead),
+                10 => Some(crate::capability::CapabilityType::FileSystemWrite),
+                11 => Some(crate::capability::CapabilityType::StorageBlockRead),
+                17 => Some(crate::capability::CapabilityType::EventPoll),
+                33 => Some(crate::capability::CapabilityType::DisplayServer),
+                _ => None,
+            };
+            if let Some(ct) = cap_type {
+                let sched = SCHEDULER.lock();
+                let curr_idx = sched.current_task_idx;
+                if curr_idx < sched.tasks.len() {
+                    let task = &sched.tasks[curr_idx];
+                    let mut found_slot = None;
+                    for (slot, cap_opt) in task.cap_table.entries.iter().enumerate() {
+                        if let Some(cap) = cap_opt {
+                            if cap.cap_type == ct {
+                                found_slot = Some(slot);
+                                break;
+                            }
+                        }
+                    }
+                    drop(sched);
+                    if let Some(s) = found_slot {
+                        s as i64
+                    } else {
+                        -2 // -ENOENT
+                    }
+                } else {
+                    -2
+                }
+            } else {
+                -22 // -EINVAL
+            }
+        }
         SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => 0,
         SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => 0,
         SYS_BATTERY_QUERY => 100,
@@ -511,7 +739,25 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => 0,
         SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => 0,
-        SYS_WAIT_PID => 0,
+        SYS_WAIT_PID => {
+            let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
+            let mut sched = SCHEDULER.lock();
+            let mut found = false;
+            for (idx, task) in sched.tasks.iter_mut().enumerate() {
+                if (target_pid == 0 || task.id == target_pid) && task.state == crate::task::TaskState::Terminated {
+                    found = true;
+                    crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != (idx as u32));
+                    break;
+                }
+            }
+            drop(sched);
+            if found {
+                0
+            } else {
+                crate::task::yield_now();
+                -30
+            }
+        }
 
         _ => -38, // -ENOSYS
     };

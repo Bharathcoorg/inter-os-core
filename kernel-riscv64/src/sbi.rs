@@ -19,6 +19,31 @@ pub fn console_putchar(c: usize) {
 }
 
 #[inline(always)]
+pub fn console_getchar() -> Option<u8> {
+    let uart_lsr = 0x1000_0005 as *const u8;
+    let lsr = unsafe { core::ptr::read_volatile(uart_lsr) };
+    if (lsr & 0x01) != 0 {
+        let uart_rbr = 0x1000_0000 as *const u8;
+        return Some(unsafe { core::ptr::read_volatile(uart_rbr) });
+    }
+
+    let ret: isize;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") 2usize, // SBI_CONSOLE_GETCHAR
+            lateout("a0") ret,
+            lateout("a1") _,
+        );
+    }
+    if ret >= 0 {
+        Some(ret as u8)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
 pub fn shutdown() -> ! {
     unsafe {
         asm!(

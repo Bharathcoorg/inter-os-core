@@ -8,6 +8,7 @@ description = "RISC-V 64 Sovereign Smartphone Physical Microkernel Payload for I
 
 [dependencies]
 spin = "0.9.8"
+linked_list_allocator = "0.10.6"
 
 # Declare panic = "abort" for bare-metal `#![no_std]` targets excluded from the workspace.
 [profile.dev]

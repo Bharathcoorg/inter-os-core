@@ -171,6 +171,12 @@ pub unsafe fn init_sv39() {
     let user_lvl0_ppn = (user_lvl0 as *const PageTable as u64) >> 12;
     user_lvl1.entries[0] = (user_lvl0_ppn << 10) | PTE_V; // Branch pointer (no R/W/X flags)
 
+    // Identity-map remaining megapages in Gigapage 1 for supervisor PCIe MMIO (entries 1..512)
+    for i in 1..512u64 {
+        let paddr = 0x4000_0000u64 + (i * 0x20_0000u64);
+        user_lvl1.entries[i as usize] = ((paddr >> 12) << 10) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    }
+
     // Point root entry 1 to user_lvl1 page table
     let user_lvl1_ppn = (user_lvl1 as *const PageTable as u64) >> 12;
     root.entries[1] = (user_lvl1_ppn << 10) | PTE_V; // Branch pointer (no R/W/X flags)
@@ -298,9 +304,17 @@ impl UserAddressSpace {
         for &i in &[0, 16, 96, 128, 129, 130, 131, 132] {
             lvl1.entries[i] = ((i as u64) << 19) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
         }
+        // Identity-map PCIe ECAM space (0x3000_0000 .. 0x3FFF_FFFF: megapages 384..512)
+        for i in 384..512 {
+            lvl1.entries[i] = ((i as u64) << 19) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+        }
 
         // Connect Level 1 table to root entry 0
         root.entries[0] = ((lvl1_paddr >> 12) << 10) | PTE_V;
+
+        // Entry 1: 1 GiB PCIe MMIO window (0x4000_0000 .. 0x7FFF_FFFF) for supervisor access
+        let mmio_ppn = 0x40000u64;
+        root.entries[1] = (mmio_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
 
         // Entry 2: Identity-mapped Kernel DRAM (PPN = 0x80000, 1 GiB)
         let dram_ppn = 0x80000u64;
@@ -378,11 +392,11 @@ impl UserAddressSpace {
     pub fn destroy(&mut self) {
         let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
         for i in 0..512 {
-            if i == 2 {
-                continue; // Skip cloned kernel DRAM entry
+            if i == 1 || i == 2 {
+                continue; // Skip cloned kernel MMIO and DRAM gigapage entries
             }
             let pte2 = root.entries[i];
-            if pte2 & PTE_V != 0 {
+            if pte2 & PTE_V != 0 && (pte2 & (PTE_R | PTE_X)) == 0 {
                 let lvl1_paddr = (pte2 >> 10) << 12;
                 let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
                 for j in 0..512 {

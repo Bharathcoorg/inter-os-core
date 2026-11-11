@@ -49,7 +49,8 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     }
 
     let stack_top_addr = crate::mmu::ELF_USER_STACK_TOP;
-    let stack_bottom_addr = stack_top_addr - 16 * PAGE_SIZE;
+    let stack_pages = 64; // 256 KiB user stack
+    let stack_bottom_addr = stack_top_addr - stack_pages * PAGE_SIZE;
     let stack_guard_start = stack_bottom_addr;
     let stack_guard_end = stack_top_addr;
 
@@ -134,9 +135,9 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             }
         }
 
-        // Allocate user stack (16 pages = 64 KiB)
+        // Allocate user stack (64 pages = 256 KiB)
         // Guard page at stack_bottom_addr remains unmapped
-        for p in 1..16 {
+        for p in 1..stack_pages {
             let stack_page_vaddr = stack_bottom_addr + p * PAGE_SIZE;
             let frame = allocate_frame().ok_or("Out of physical memory allocating user stack")?;
             if let Err(e) = aspace.map_user_page(stack_page_vaddr, frame, true, false) {

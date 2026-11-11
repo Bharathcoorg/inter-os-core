@@ -190,6 +190,21 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                         match crate::elf::load_elf(crate::images::USER_INIT_ELF) {
                             Ok(loaded) => {
                                 println!("[BOOT] RISC-V PID 1 ELF loaded: entry 0x{:08x}, sp 0x{:08x}", loaded.entry_point, loaded.stack_top);
+                                {
+                                    let mut sched = crate::task::SCHEDULER.lock();
+                                    if !sched.tasks.is_empty() {
+                                        sched.tasks[0].name = "init";
+                                        sched.tasks[0].state = crate::task::TaskState::Running;
+                                        sched.tasks[0].page_table = Some(loaded.address_space.satp);
+                                        sched.tasks[0].user_entry = loaded.entry_point;
+                                        sched.tasks[0].user_stack_top = loaded.stack_top;
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+                                    }
+                                }
                                 loaded.address_space.activate();
                                 tf.sepc = loaded.entry_point;
                                 tf.regs[2] = loaded.stack_top; // sp
@@ -206,6 +221,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     }
                     let exited = crate::task::SCHEDULER.lock().exit_current();
                     println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
+                    crate::task::yield_now();
                     loop {
                         unsafe { core::arch::asm!("wfi"); }
                     }
