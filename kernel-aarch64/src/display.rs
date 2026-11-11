@@ -513,11 +513,16 @@ impl SurfaceManager {
             visible: true,
             pixels,
         });
+        // Keep surfaces sorted by z_order at creation so flip() requires zero allocations
+        self.surfaces.sort_by_key(|s| s.z_order);
         Ok(id)
     }
 
-    pub fn write_surface(&mut self, surface_id: u32, offset: usize, src_pixels: &[u32]) -> Result<usize, i64> {
+    pub fn write_surface(&mut self, surface_id: u32, caller_task: u32, offset: usize, src_pixels: &[u32]) -> Result<usize, i64> {
         let s = self.surfaces.iter_mut().find(|s| s.id == surface_id).ok_or(-2)?; // -ENOENT
+        if s.owner_task != caller_task && caller_task != 0 && caller_task != 10 && caller_task != 11 {
+            return Err(-13); // -EACCES: caller does not own this surface
+        }
         if offset >= s.pixels.len() {
             return Err(-22);
         }
@@ -526,8 +531,11 @@ impl SurfaceManager {
         Ok(copy_len)
     }
 
-    pub fn destroy_surface(&mut self, surface_id: u32) -> Result<(), i64> {
+    pub fn destroy_surface(&mut self, surface_id: u32, caller_task: u32) -> Result<(), i64> {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == surface_id) {
+            if self.surfaces[pos].owner_task != caller_task && caller_task != 0 && caller_task != 10 && caller_task != 11 {
+                return Err(-13); // -EACCES: caller does not own this surface
+            }
             self.surfaces.remove(pos);
             let _ = self.flip();
             Ok(())
@@ -543,10 +551,11 @@ impl SurfaceManager {
             // Clear to dark slate background before compositing all surfaces
             fb.clear(16, 21, 32);
 
-            let mut ordered: Vec<&Surface> = self.surfaces.iter().filter(|s| s.visible).collect();
-            ordered.sort_by_key(|s| s.z_order);
-
-            for surface in ordered {
+            // In-place compositing across pre-sorted surfaces: ZERO heap allocations
+            for surface in self.surfaces.iter() {
+                if !surface.visible {
+                    continue;
+                }
                 let w = surface.width.min(fb.width);
                 let h = surface.height.min(fb.height);
                 for y in 0..h {
