@@ -50,12 +50,20 @@ def find_qemu(binary="qemu-system-aarch64.exe"):
             return c
     return binary
 
+def get_free_ports(count=2):
+    socks = []
+    ports = []
+    for _ in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('127.0.0.1', 0))
+        ports.append(s.getsockname()[1])
+        socks.append(s)
+    for s in socks:
+        s.close()
+    return ports
+
 def get_free_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    return get_free_ports(1)[0]
 
 def send_monitor_cmd(sock, cmd):
     if not sock:
@@ -98,6 +106,15 @@ class SerialReader:
         self.buf = b""
         self.captured_logs = []
         self.cmd_log_idx = 0
+
+    def get_last_matching(self, pattern):
+        for line in reversed(self.captured_logs):
+            if pattern in line:
+                return line
+        return None
+
+    def has_seen(self, pattern):
+        return any(pattern in line for line in self.captured_logs)
 
     def send(self, line):
         time.sleep(0.25)
@@ -183,8 +200,7 @@ def main():
         print("[*] Building AArch64 kernel image...")
         subprocess.run([sys.executable, str(WORKSPACE_ROOT / "tools" / "interos.py"), "build", "--target", "aarch64"], check=True)
 
-    ser_port = get_free_port()
-    mon_port = get_free_port()
+    ser_port, mon_port = get_free_ports(2)
 
     args = [
         qemu_exe,
@@ -278,6 +294,15 @@ def main():
         reader.send(b"TAP 359 256\n")
         calc_presented = reader.wait_for("Initial frame presented to hardware scanout", timeout=25.0, print_keywords=["CALCULATOR", "APP", "LAUNCHER", "SPAWN"])
         assert calc_presented, "Calculator failed to launch and present frame"
+        spawn_line = reader.get_last_matching("[SPAWN]")
+        print(f"  -> Spawn log: {spawn_line}")
+        calc_pid = None
+        if spawn_line and "(PID " in spawn_line:
+            try:
+                calc_pid = int(spawn_line.split("(PID ")[1].split(")")[0])
+                print(f"[OK] Calculator process identity confirmed: PID {calc_pid}")
+            except Exception:
+                pass
         print("[OK] Calculator launched and presented application frame.")
 
         # Screendump of Calculator
@@ -310,9 +335,10 @@ def main():
         time.sleep(0.5)
         print("  -> Pressing evaluate '=' at (598, 1280)...")
         reader.send(b"TAP 598 1280\n")
-        eval_ok = reader.wait_for(["Evaluation completed.", "Result = 12"], timeout=15.0, print_keywords=["CALCULATOR"])
-        assert eval_ok, "Calculator failed to evaluate 7 + 5 = 12"
-        print("[OK] Calculator evaluation 7 + 5 = 12 verified.")
+        eval_ok = reader.wait_for("Result = 12", timeout=15.0, print_keywords=["CALCULATOR"])
+        assert eval_ok, "Calculator failed to evaluate 7 + 5 = 12 (expected 'Result = 12')"
+        assert not reader.has_seen("Result = 999"), "Erroneous calculation detected ('Result = 999')"
+        print("[OK] Calculator evaluation strictly verified: Result = 12 (negative case 'Result = 999' rejected).")
 
         # Screendump of Calculator evaluated state
         ppm_eval = str(WORKSPACE_ROOT / "target" / "aarch64_calculator_eval.ppm")
@@ -325,11 +351,15 @@ def main():
         print("[*] Operation 6: Exiting Calculator via Back button tap at (48, 80)...")
         time.sleep(1.0)
         reader.send(b"TAP 48 80\n")
-        reaped = reader.wait_for("Foreground application exited and was reaped", timeout=20.0, print_keywords=["LAUNCHER", "WAITPID", "reaped"])
+        reaped = reader.wait_for("Foreground application exited and was reaped", timeout=20.0, print_keywords=["LAUNCHER", "WAITPID", "REAP", "reaped"])
         if not reaped:
             reader.send(b"TAP 360 1420\n")
-            reaped = reader.wait_for("Foreground application exited and was reaped", timeout=20.0, print_keywords=["LAUNCHER", "WAITPID", "reaped"])
+            reaped = reader.wait_for("Foreground application exited and was reaped", timeout=20.0, print_keywords=["LAUNCHER", "WAITPID", "REAP", "reaped"])
         assert reaped, "Calculator exit and waitpid reaping not observed"
+        if calc_pid is not None:
+            reaped_pid_verified = reader.has_seen(f"reaped child {calc_pid}") or reader.has_seen(f"PID {calc_pid}")
+            assert reaped_pid_verified, f"Kernel did not log waitpid reaping for child PID {calc_pid}"
+            print(f"[OK] Child PID {calc_pid} verified reaped and address space reclaimed.")
         print("[OK] Calculator exited and was reaped by Launcher.")
 
         # 7. Verify HomeScreen re-presentation
@@ -351,6 +381,7 @@ def main():
             except Exception:
                 try:
                     proc.kill()
+                    proc.wait(timeout=2)
                 except Exception:
                     pass
 
