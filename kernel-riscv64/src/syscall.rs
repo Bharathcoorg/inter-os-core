@@ -460,7 +460,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 } else {
                     let mut sm = crate::display::SURFACE_MANAGER.lock();
                     if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
-                        if offset >= s.pixels.len() {
+                        if s.owner_task != curr_idx as u32 && curr_idx != 0 && curr_idx != 10 && curr_idx != 11 {
+                            -13 // -EACCES: caller does not own this surface
+                        } else if offset >= s.pixels.len() {
                             -22
                         } else {
                             let copy_len = pixel_count.min(s.pixels.len() - offset);
@@ -496,7 +498,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 -13
             } else {
                 let surface_id = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
-                match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id) {
+                match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id, curr_idx as u32) {
                     Ok(_) => 0,
                     Err(e) => e,
                 }
@@ -742,18 +744,12 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
             let mut sched = SCHEDULER.lock();
-            let mut found = false;
-            for (idx, task) in sched.tasks.iter_mut().enumerate() {
-                if (target_pid == 0 || task.id == target_pid) && task.state == crate::task::TaskState::Terminated {
-                    found = true;
-                    crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != (idx as u32));
-                    break;
-                }
-            }
-            drop(sched);
-            if found {
-                0
+            if let Some(code) = sched.reap_task(target_pid) {
+                drop(sched);
+                crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != target_pid);
+                code as i64
             } else {
+                drop(sched);
                 crate::task::yield_now();
                 -30
             }

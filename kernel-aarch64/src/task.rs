@@ -73,6 +73,7 @@ pub enum TaskState {
     Running,
     Blocked,
     Terminated,
+    Exited,
 }
 
 use crate::capability::CapabilityTable;
@@ -105,6 +106,7 @@ impl TaskControlBlock {
 pub struct Scheduler {
     pub tasks: Vec<TaskControlBlock>,
     pub current_task_idx: usize,
+    pub next_pid: u32,
 }
 
 impl Scheduler {
@@ -112,6 +114,7 @@ impl Scheduler {
         Self {
             tasks: Vec::new(),
             current_task_idx: 0,
+            next_pid: 0,
         }
     }
 
@@ -120,7 +123,8 @@ impl Scheduler {
     }
 
     pub fn spawn_with_caps(&mut self, name: &'static str, entry_fn: fn() -> !, cap_table: CapabilityTable) {
-        let task_id = self.tasks.len() as u32;
+        let task_id = self.next_pid;
+        self.next_pid += 1;
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let stack_top = (stack.as_ptr() as u64) + STACK_SIZE as u64;
@@ -149,7 +153,8 @@ impl Scheduler {
     }
 
     pub fn spawn_user_process(&mut self, name: &'static str, entry_point: u64, user_sp: u64, ttbr0: u64, cap_table: CapabilityTable) -> u32 {
-        let task_id = self.tasks.len() as u32;
+        let task_id = self.next_pid;
+        self.next_pid += 1;
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
@@ -175,6 +180,19 @@ impl Scheduler {
             exit_code: None,
         });
         task_id
+    }
+
+    pub fn reap_task(&mut self, target_pid: u32) -> Option<i32> {
+        let pos = self.tasks.iter().position(|t| {
+            (target_pid == 0 || t.id == target_pid)
+                && (t.state == TaskState::Terminated || t.state == TaskState::Exited)
+        })?;
+        let removed = self.tasks.remove(pos);
+        if self.current_task_idx >= self.tasks.len() && self.current_task_idx > 0 {
+            self.current_task_idx = self.tasks.len() - 1;
+        }
+        crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);
+        Some(removed.exit_code.unwrap_or(0))
     }
 
     pub fn prepare_switch(&mut self) -> (Option<*mut ArmContext>, Option<*const ArmContext>) {

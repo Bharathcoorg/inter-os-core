@@ -115,6 +115,15 @@ impl IpcRouter {
         }
     }
 
+    pub fn unregister_task(&mut self, task_id: u32) {
+        for mb in self.mailboxes.iter_mut() {
+            if mb.active && mb.task_id == task_id {
+                *mb = TaskMailbox::empty();
+                return;
+            }
+        }
+    }
+
     pub fn send(
         &mut self,
         sender_caps: &CapabilityTable,

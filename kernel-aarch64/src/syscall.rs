@@ -360,6 +360,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
 
             let mut sm = crate::display::SURFACE_MANAGER.lock();
             if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
+                if s.owner_task != curr_idx as u32 && curr_idx != 0 && curr_idx != 10 && curr_idx != 11 {
+                    return -13; // -EACCES: caller does not own this surface
+                }
                 if offset >= s.pixels.len() {
                     return -22;
                 }
@@ -387,7 +390,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             }
             drop(sched);
             let surface_id = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
-            match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id) {
+            match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id, curr_idx as u32) {
                 Ok(_) => 0,
                 Err(e) => e,
             }
@@ -640,18 +643,12 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
             let mut sched = SCHEDULER.lock();
-            let mut found = false;
-            for (idx, task) in sched.tasks.iter_mut().enumerate() {
-                if (target_pid == 0 || task.id == target_pid) && task.state == crate::task::TaskState::Terminated {
-                    found = true;
-                    crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != (idx as u32));
-                    break;
-                }
+            if let Some(code) = sched.reap_task(target_pid) {
+                drop(sched);
+                crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != target_pid);
+                return code as i64;
             }
             drop(sched);
-            if found {
-                return 0; // Ok(())
-            }
             yield_now();
             -30 // SyscallResult::NotReady (-30) indicates child is still alive
         }

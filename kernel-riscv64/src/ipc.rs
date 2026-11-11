@@ -109,12 +109,30 @@ impl IpcRouter {
 
     pub fn register_task(&mut self, task_id: u32) {
         for mb in self.mailboxes.iter_mut() {
+            if mb.active && mb.task_id == task_id {
+                return;
+            }
+        }
+        for mb in self.mailboxes.iter_mut() {
             if !mb.active {
                 mb.task_id = task_id;
                 mb.active = true;
                 mb.head = 0;
                 mb.tail = 0;
                 mb.count = 0;
+                return;
+            }
+        }
+    }
+
+    pub fn unregister_task(&mut self, task_id: u32) {
+        for mb in self.mailboxes.iter_mut() {
+            if mb.active && mb.task_id == task_id {
+                mb.active = false;
+                mb.task_id = 0;
+                mb.count = 0;
+                mb.head = 0;
+                mb.tail = 0;
                 return;
             }
         }

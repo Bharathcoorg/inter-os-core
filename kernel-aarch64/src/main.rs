@@ -1481,6 +1481,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             {
                 let mut sched = task::SCHEDULER.lock();
                 sched.tasks.clear();
+                sched.next_pid = 0;
                 let mut init_caps = capability::CapabilityTable::new();
                 init_caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
                 init_caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);

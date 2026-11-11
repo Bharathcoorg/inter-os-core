@@ -116,6 +116,7 @@ impl TaskControlBlock {
 pub struct Scheduler {
     pub tasks: Vec<TaskControlBlock>,
     pub current_task_idx: usize,
+    pub next_pid: u32,
 }
 
 impl Scheduler {
@@ -123,6 +124,7 @@ impl Scheduler {
         Self {
             tasks: Vec::new(),
             current_task_idx: 0,
+            next_pid: 0,
         }
     }
 
@@ -144,6 +146,19 @@ impl Scheduler {
         }
     }
 
+    pub fn reap_task(&mut self, target_pid: u32) -> Option<i32> {
+        let pos = self.tasks.iter().position(|t| {
+            (target_pid == 0 || t.id == target_pid)
+                && (t.state == TaskState::Terminated || t.state == TaskState::Exited)
+        })?;
+        let removed = self.tasks.remove(pos);
+        if self.current_task_idx >= self.tasks.len() && self.current_task_idx > 0 {
+            self.current_task_idx = self.tasks.len() - 1;
+        }
+        crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);
+        Some(removed.exit_code.unwrap_or(0))
+    }
+
     pub fn add_task(
         &mut self,
         _id: TaskId,
@@ -152,7 +167,8 @@ impl Scheduler {
         user_sp: usize,
         kstack_top: usize,
     ) -> bool {
-        let task_id = self.tasks.len() as u32;
+        let task_id = self.next_pid;
+        self.next_pid += 1;
         let stack = Box::new([0u8; STACK_SIZE]);
         let mut context = RiscvContext::default();
         context.sp = kstack_top as u64;
@@ -188,7 +204,8 @@ impl Scheduler {
         satp: usize,
         cap_table: CapabilityTable,
     ) -> u32 {
-        let task_id = self.tasks.len() as u32;
+        let task_id = self.next_pid;
+        self.next_pid += 1;
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let kernel_sp = ((stack.as_ptr() as usize) + STACK_SIZE) & !0x0F;
