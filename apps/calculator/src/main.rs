@@ -1798,6 +1798,19 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
         61 | input_key_code::ENTER => {
             calc.press_key('=');
             std::log("[CALCULATOR] Evaluation completed.").ok();
+            if calc.result_mode && !calc.error {
+                if let Ok(res_str) = core::str::from_utf8(&calc.display_buf[..calc.display_len]) {
+                    let mut msg = [0u8; 64];
+                    let prefix = b"[CALCULATOR] Result = ";
+                    msg[..prefix.len()].copy_from_slice(prefix);
+                    let r_bytes = res_str.as_bytes();
+                    let l = r_bytes.len().min(64 - prefix.len());
+                    msg[prefix.len()..prefix.len() + l].copy_from_slice(&r_bytes[..l]);
+                    if let Ok(full_msg) = core::str::from_utf8(&msg[..prefix.len() + l]) {
+                        std::log(full_msg).ok();
+                    }
+                }
+            }
         }
         99 | 67 | input_key_code::ESCAPE => {
             calc.press_key('C');
@@ -2005,6 +2018,19 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                 // armed key shaded until something else repainted the row.
                 let op_before = calc.active_operation;
                 calc.press_key(action);
+                if action == '=' && calc.result_mode && !calc.error {
+                    if let Ok(res_str) = core::str::from_utf8(&calc.display_buf[..calc.display_len]) {
+                        let mut msg = [0u8; 64];
+                        let prefix = b"[CALCULATOR] Result = ";
+                        msg[..prefix.len()].copy_from_slice(prefix);
+                        let r_bytes = res_str.as_bytes();
+                        let l = r_bytes.len().min(64 - prefix.len());
+                        msg[prefix.len()..prefix.len() + l].copy_from_slice(&r_bytes[..l]);
+                        if let Ok(full_msg) = core::str::from_utf8(&msg[..prefix.len() + l]) {
+                            std::log(full_msg).ok();
+                        }
+                    }
+                }
                 return Tap::Redraw(chrome::press_dirty(op_before, calc.active_operation));
             }
             return Tap::None;
