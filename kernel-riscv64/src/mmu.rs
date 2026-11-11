@@ -67,21 +67,41 @@ impl PageTable {
     }
 }
 
+#[repr(C, align(4096))]
+pub struct PageFrame(pub [u8; PAGE_SIZE]);
+
+impl PageFrame {
+    pub const fn new() -> Self {
+        Self([0; PAGE_SIZE])
+    }
+}
+
 // Static kernel root page table and secondary/tertiary tables for bare-metal boot
 static mut KERNEL_ROOT_PT: PageTable = PageTable::empty();
 static mut USER_LVL1_PT: PageTable = PageTable::empty();
 static mut USER_LVL0_PT: PageTable = PageTable::empty();
-static mut USER_PAGE_FRAME: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
-static mut USER_STACK_FRAME: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+static mut USER_PAGE_FRAME: PageFrame = PageFrame::new();
+static mut USER_STACK_FRAME: PageFrame = PageFrame::new();
+
+static mut MMIO_USER_LVL1_PT: PageTable = PageTable::empty();
+static mut USER_ELF_LVL0_CODE_PT: PageTable = PageTable::empty();
+static mut USER_ELF_LVL0_STACK_PT: PageTable = PageTable::empty();
+pub static mut USER_ELF_CODE_PAGES: [PageFrame; 64] = [const { PageFrame::new() }; 64];
+pub static mut USER_ELF_STACK_PAGES: [PageFrame; 16] = [const { PageFrame::new() }; 16];
 
 pub const USER_CODE_VADDR: usize = 0x4000_0000;
 pub const USER_STACK_TOP: usize = 0x4000_2000;
 
+pub const ELF_USER_CODE_VADDR: usize = 0x0040_0000;
+pub const ELF_USER_STACK_TOP: usize = 0x0080_0000 + 16 * PAGE_SIZE;
+
 /// Copies userspace code payload into the dedicated physical code frame.
 pub unsafe fn load_user_code(code: &[u8]) {
     assert!(code.len() <= PAGE_SIZE, "User code exceeds 4KiB page size");
-    let dest = (&raw mut USER_PAGE_FRAME) as *mut u8;
+    let dest = (&raw mut USER_PAGE_FRAME.0) as *mut u8;
     core::ptr::copy_nonoverlapping(code.as_ptr(), dest, code.len());
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!("fence.i");
 }
 
 /// Initializes Sv39 virtual memory, maps kernel RAM and MMIO, and activates SATP.
@@ -89,28 +109,61 @@ pub unsafe fn init_sv39() {
     let root = unsafe { &mut *(&raw mut KERNEL_ROOT_PT) };
     root.clear();
 
-    // 1. Identity map Gigapage 0 (0x0000_0000 - 0x3FFF_FFFF) for MMIO (UART, CLINT, PLIC)
-    // PPN = 0, Flags: Valid + Read + Write + Accessed + Dirty (Kernel only: NO PTE_U)
-    root.entries[0] = (0 << 10) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    // 1. Gigapage 0 (0x0000_0000 - 0x3FFF_FFFF): MMIO & Ring 3 ELF Userspace
+    // Map Level 1 page table for Gigapage 0 so individual 2MB megapages can be configured.
+    let mmio_user_lvl1 = unsafe { &mut *(&raw mut MMIO_USER_LVL1_PT) };
+    mmio_user_lvl1.clear();
+
+    // Identity-map all 2MB blocks as MMIO supervisor entries (UART, CLINT, PLIC, VirtIO)
+    for i in 0..512u64 {
+        if i == 2 || i == 4 {
+            continue; // Reserved for user ELF code (0x0040_0000) and stack (0x0080_0000)
+        }
+        mmio_user_lvl1.entries[i as usize] = (i << 19) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    }
+
+    // Leaf 4KiB pages for User ELF Code at 0x0040_0000 (entry 2 in mmio_user_lvl1)
+    let code_lvl0 = unsafe { &mut *(&raw mut USER_ELF_LVL0_CODE_PT) };
+    code_lvl0.clear();
+    for p in 0..64 {
+        let paddr = (&raw const USER_ELF_CODE_PAGES[p].0) as *const u8 as u64;
+        code_lvl0.entries[p] = ((paddr >> 12) << 10) | PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D;
+    }
+    let code_lvl0_ppn = (code_lvl0 as *const PageTable as u64) >> 12;
+    mmio_user_lvl1.entries[2] = (code_lvl0_ppn << 10) | PTE_V;
+
+    // Leaf 4KiB pages for User ELF Stack at 0x0080_0000 (entry 4 in mmio_user_lvl1)
+    let stack_lvl0 = unsafe { &mut *(&raw mut USER_ELF_LVL0_STACK_PT) };
+    stack_lvl0.clear();
+    for p in 0..16 {
+        let paddr = (&raw const USER_ELF_STACK_PAGES[p].0) as *const u8 as u64;
+        stack_lvl0.entries[p] = ((paddr >> 12) << 10) | PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
+    }
+    let stack_lvl0_ppn = (stack_lvl0 as *const PageTable as u64) >> 12;
+    mmio_user_lvl1.entries[4] = (stack_lvl0_ppn << 10) | PTE_V;
+
+    // Point root entry 0 to mmio_user_lvl1
+    let mmio_user_lvl1_ppn = (mmio_user_lvl1 as *const PageTable as u64) >> 12;
+    root.entries[0] = (mmio_user_lvl1_ppn << 10) | PTE_V;
 
     // 2. Identity map Gigapage 2 (0x8000_0000 - 0xBFFF_FFFF) for Kernel DRAM (1 GiB)
     // PPN = 0x80000 (0x8000_0000 >> 12), Flags: Valid + Read + Write + Exec + Accessed + Dirty (Kernel only: NO PTE_U)
     let dram_ppn = 0x80000u64;
     root.entries[2] = (dram_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
 
-    // 3. User lower-half mapping (Gigapage 1: 0x4000_0000 .. 0x7FFF_FFFF)
+    // 3. Smoke Test lower-half mapping (Gigapage 1: 0x4000_0000 .. 0x7FFF_FFFF)
     let user_lvl1 = unsafe { &mut *(&raw mut USER_LVL1_PT) };
     user_lvl1.clear();
     let user_lvl0 = unsafe { &mut *(&raw mut USER_LVL0_PT) };
     user_lvl0.clear();
 
     // Leaf 0 (0x4000_0000): User Code Region (RX only: Read + Exec + User, NO Write -> W^X enforced!)
-    let user_frame_paddr = (&raw const USER_PAGE_FRAME) as *const u8 as u64;
+    let user_frame_paddr = (&raw const USER_PAGE_FRAME.0) as *const u8 as u64;
     let user_frame_ppn = user_frame_paddr >> 12;
     user_lvl0.entries[0] = (user_frame_ppn << 10) | PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D;
 
     // Leaf 1 (0x4000_1000): User Stack Region (RW only: Read + Write + User, NO Exec -> W^X enforced!)
-    let stack_frame_paddr = (&raw const USER_STACK_FRAME) as *const u8 as u64;
+    let stack_frame_paddr = (&raw const USER_STACK_FRAME.0) as *const u8 as u64;
     let stack_frame_ppn = stack_frame_paddr >> 12;
     user_lvl0.entries[1] = (stack_frame_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
 
@@ -154,4 +207,204 @@ pub unsafe fn switch_satp(satp: usize) {
         in(reg) satp,
         options(nostack)
     );
+}
+
+pub const USER_SPACE_MIN: usize = 0x0000_1000;
+pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF;
+
+pub struct RiscvFrameAllocator {
+    pub base_paddr: u64,
+    pub total_frames: usize,
+    pub allocated_frames: usize,
+    pub recycled_frames: usize,
+    pub bitmap: [u64; 1024], // 65,536 frames = 256 MiB
+}
+
+impl RiscvFrameAllocator {
+    pub const fn empty() -> Self {
+        Self {
+            base_paddr: 0x8800_0000,
+            total_frames: 65536,
+            allocated_frames: 0,
+            recycled_frames: 0,
+            bitmap: [0; 1024],
+        }
+    }
+
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        for (word_idx, word) in self.bitmap.iter_mut().enumerate() {
+            if *word != !0u64 {
+                let bit_idx = (!*word).trailing_zeros() as usize;
+                let frame_idx = word_idx * 64 + bit_idx;
+                if frame_idx >= self.total_frames {
+                    return None;
+                }
+                *word |= 1u64 << bit_idx;
+                self.allocated_frames += 1;
+                let paddr = self.base_paddr + (frame_idx as u64) * 4096;
+                unsafe {
+                    core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
+                }
+                return Some(paddr);
+            }
+        }
+        None
+    }
+
+    pub fn recycle_frame(&mut self, paddr: u64) {
+        if paddr < self.base_paddr {
+            return;
+        }
+        let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
+        if frame_idx < self.total_frames {
+            let word_idx = frame_idx / 64;
+            let bit_idx = frame_idx % 64;
+            if (self.bitmap[word_idx] & (1u64 << bit_idx)) != 0 {
+                self.bitmap[word_idx] &= !(1u64 << bit_idx);
+                self.recycled_frames += 1;
+            }
+        }
+    }
+}
+
+pub static FRAME_ALLOCATOR: spin::Mutex<RiscvFrameAllocator> = spin::Mutex::new(RiscvFrameAllocator::empty());
+
+pub fn allocate_frame() -> Option<u64> {
+    FRAME_ALLOCATOR.lock().allocate_frame()
+}
+
+pub fn recycle_frame(paddr: u64) {
+    FRAME_ALLOCATOR.lock().recycle_frame(paddr);
+}
+
+pub struct UserAddressSpace {
+    pub satp: usize,
+    pub root_paddr: u64,
+    pub mapped_bytes: usize,
+}
+
+impl UserAddressSpace {
+    pub fn new() -> Option<Self> {
+        let root_paddr = allocate_frame()?;
+        let root = unsafe { &mut *(root_paddr as *mut PageTable) };
+        root.clear();
+
+        // Level 1 table for Gigapage 0 (MMIO & User ELF)
+        let lvl1_paddr = allocate_frame()?;
+        let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
+        lvl1.clear();
+
+        // Identity-map supervisor MMIO megapages (without PTE_U)
+        for &i in &[0, 16, 96, 128, 129, 130, 131, 132] {
+            lvl1.entries[i] = ((i as u64) << 19) | PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+        }
+
+        // Connect Level 1 table to root entry 0
+        root.entries[0] = ((lvl1_paddr >> 12) << 10) | PTE_V;
+
+        // Entry 2: Identity-mapped Kernel DRAM (PPN = 0x80000, 1 GiB)
+        let dram_ppn = 0x80000u64;
+        root.entries[2] = (dram_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+
+        let satp_val = (SATP_MODE_SV39 | ((root_paddr >> 12) & 0x0FFF_FFFF_FFFF)) as usize;
+
+        Some(Self {
+            satp: satp_val,
+            root_paddr,
+            mapped_bytes: 0,
+        })
+    }
+
+    pub fn map_user_page(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if is_write && is_exec {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        if vaddr >= USER_SPACE_MAX || vaddr < USER_SPACE_MIN {
+            return Err("Virtual address outside canonical user range");
+        }
+
+        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
+        let vpn2 = (vaddr >> 30) & 0x1FF;
+        let vpn1 = (vaddr >> 21) & 0x1FF;
+        let vpn0 = (vaddr >> 12) & 0x1FF;
+
+        // Level 2 root entry -> Level 1 table
+        let lvl1_paddr = if root.entries[vpn2] & PTE_V == 0 {
+            let frame = allocate_frame().ok_or("OOM allocating Level 1 page table")?;
+            root.entries[vpn2] = ((frame >> 12) << 10) | PTE_V;
+            frame
+        } else {
+            (root.entries[vpn2] >> 10) << 12
+        };
+
+        // Level 1 entry -> Level 0 table
+        let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
+        let lvl0_paddr = if lvl1.entries[vpn1] & PTE_V == 0 {
+            let frame = allocate_frame().ok_or("OOM allocating Level 0 page table")?;
+            lvl1.entries[vpn1] = ((frame >> 12) << 10) | PTE_V;
+            frame
+        } else {
+            if (lvl1.entries[vpn1] & (PTE_R | PTE_X)) != 0 {
+                return Err("Virtual address collides with MMIO megapage");
+            }
+            (lvl1.entries[vpn1] >> 10) << 12
+        };
+
+        // Level 0 leaf entry
+        let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
+        if lvl0.entries[vpn0] & PTE_V != 0 {
+            return Err("Page already mapped");
+        }
+
+        let mut flags = PTE_V | PTE_U | PTE_A | PTE_D | PTE_R;
+        if is_write {
+            flags |= PTE_W;
+        }
+        if is_exec {
+            flags |= PTE_X;
+        }
+
+        lvl0.entries[vpn0] = ((paddr >> 12) << 10) | flags;
+        self.mapped_bytes += PAGE_SIZE;
+        Ok(())
+    }
+
+    pub fn activate(&self) {
+        unsafe {
+            switch_satp(self.satp);
+        }
+    }
+
+    pub fn destroy(&mut self) {
+        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
+        for i in 0..512 {
+            if i == 2 {
+                continue; // Skip cloned kernel DRAM entry
+            }
+            let pte2 = root.entries[i];
+            if pte2 & PTE_V != 0 {
+                let lvl1_paddr = (pte2 >> 10) << 12;
+                let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
+                for j in 0..512 {
+                    let pte1 = lvl1.entries[j];
+                    if pte1 & PTE_V != 0 {
+                        if (pte1 & (PTE_R | PTE_X)) == 0 {
+                            let lvl0_paddr = (pte1 >> 10) << 12;
+                            let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
+                            for k in 0..512 {
+                                let pte0 = lvl0.entries[k];
+                                if pte0 & PTE_V != 0 {
+                                    recycle_frame((pte0 >> 10) << 12);
+                                }
+                            }
+                            recycle_frame(lvl0_paddr);
+                        }
+                    }
+                }
+                recycle_frame(lvl1_paddr);
+            }
+        }
+        recycle_frame(self.root_paddr);
+        self.mapped_bytes = 0;
+    }
 }

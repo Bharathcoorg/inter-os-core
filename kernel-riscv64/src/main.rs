@@ -9,12 +9,18 @@
 #![no_std]
 #![no_main]
 
+pub mod capability;
+pub mod ipc;
 pub mod entry;
 pub mod sbi;
 pub mod mmu;
 pub mod trap;
 pub mod syscall;
 pub mod task;
+pub mod elf;
+pub mod images;
+pub mod input_queue;
+pub mod services;
 
 use core::panic::PanicInfo;
 

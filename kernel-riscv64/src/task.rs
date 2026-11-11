@@ -29,6 +29,7 @@ pub struct TaskControlBlock {
     pub kernel_stack_top: usize,
     pub priority: u8,
     pub cpu_ticks: u64,
+    pub cap_table: crate::capability::CapabilityTable,
 }
 
 pub struct Scheduler {
@@ -50,6 +51,10 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, id: TaskId, satp: usize, entry_point: usize, user_sp: usize, kstack_top: usize) -> bool {
+        self.add_task_with_caps(id, satp, entry_point, user_sp, kstack_top, crate::capability::CapabilityTable::new())
+    }
+
+    pub fn add_task_with_caps(&mut self, id: TaskId, satp: usize, entry_point: usize, user_sp: usize, kstack_top: usize, cap_table: crate::capability::CapabilityTable) -> bool {
         if self.task_count >= 8 {
             return false;
         }
@@ -68,6 +73,7 @@ impl Scheduler {
             kernel_stack_top: kstack_top,
             priority: 1,
             cpu_ticks: 0,
+            cap_table,
         };
 
         for slot in self.tasks.iter_mut() {

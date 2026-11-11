@@ -183,6 +183,27 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 tf.sepc += width;
                 crate::syscall::dispatch_syscall(tf);
                 if syscall_num == 2 || syscall_num == 64 {
+                    static mut INIT_LAUNCHED: bool = false;
+                    if unsafe { !INIT_LAUNCHED } {
+                        unsafe { INIT_LAUNCHED = true; }
+                        println!("--- [Spawning Userspace PID 1 (init) in U-Mode] ---");
+                        match crate::elf::load_elf(crate::images::USER_INIT_ELF) {
+                            Ok(loaded) => {
+                                println!("[BOOT] RISC-V PID 1 ELF loaded: entry 0x{:08x}, sp 0x{:08x}", loaded.entry_point, loaded.stack_top);
+                                loaded.address_space.activate();
+                                tf.sepc = loaded.entry_point;
+                                tf.regs[2] = loaded.stack_top; // sp
+                                tf.regs[10] = 0; // a0
+                                tf.regs[11] = 0; // a1
+                                tf.regs[12] = 0; // a2
+                                tf.regs[17] = 0; // a7
+                                return;
+                            }
+                            Err(e) => {
+                                println!("[BOOT] Failed to load RISC-V init ELF: {}", e);
+                            }
+                        }
+                    }
                     let exited = crate::task::SCHEDULER.lock().exit_current();
                     println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
                     loop {
