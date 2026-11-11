@@ -142,6 +142,32 @@ impl Scheduler {
         });
     }
 
+    pub fn spawn_user_process(&mut self, name: &'static str, entry_point: u64, _user_sp: u64, ttbr0: u64, cap_table: CapabilityTable) -> u32 {
+        let task_id = self.tasks.len() as u32;
+        let stack = Box::new([0u8; STACK_SIZE]);
+
+        let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
+
+        let mut context = ArmContext::default();
+        context.sp = kernel_sp;
+        context.lr = entry_point;
+
+        crate::ipc::IPC_ROUTER.lock().register_task(task_id);
+
+        self.tasks.push(TaskControlBlock {
+            id: task_id,
+            name,
+            state: TaskState::Ready,
+            context,
+            stack,
+            cap_table,
+            cpu_ticks: 0,
+            priority: 1,
+            page_table: Some(ttbr0),
+        });
+        task_id
+    }
+
     pub fn prepare_switch(&mut self) -> (Option<*mut ArmContext>, Option<*const ArmContext>) {
         if self.tasks.len() <= 1 {
             return (None, None);

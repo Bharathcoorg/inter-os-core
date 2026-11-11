@@ -13,6 +13,10 @@
 
 extern crate alloc;
 
+pub mod elf;
+pub mod images;
+pub mod input_queue;
+pub mod services;
 pub mod allocator;
 pub mod capability;
 pub mod console_sink;
@@ -1452,7 +1456,25 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("  Source-level backend boundaries validated; runtime hardware remains unbound until a concrete driver is attached.");
     kprintln!("============================================================");
 
-    // Enter idle wait loop
+    // 45. Spawn userspace PID 1 (init) at EL0
+    kprintln!();
+    kprintln!("--- [Spawning Userspace PID 1 (init) at EL0] ---");
+    kprintln!("[BOOT] Loading userspace PID 1 init ELF ({} bytes)...", images::USER_INIT_ELF.len());
+    match elf::load_elf(images::USER_INIT_ELF) {
+        Ok(l) => {
+            kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
+            kprintln!("[BOOT] Entering PID 1 (init) at EL0 via hardware eret...");
+            l.address_space.activate();
+            unsafe {
+                user::enter_user_mode(l.entry_point, l.stack_top);
+            }
+        }
+        Err(e) => {
+            kprintln!("[BOOT] Failed to load init ELF: {}", e);
+        }
+    }
+
+    // Enter idle wait loop if init exits
     loop {
         #[cfg(target_arch = "aarch64")]
         unsafe {

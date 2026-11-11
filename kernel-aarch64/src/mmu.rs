@@ -30,11 +30,14 @@ pub const MAIR_VALUE: u64 = (MAIR_ATTR_DEVICE << 8) | MAIR_ATTR_NORMAL;
 pub const DESC_VALID: u64 = 1 << 0;
 pub const DESC_TABLE: u64 = 1 << 1;        // Next-level table (for Level 0, 1, 2)
 pub const DESC_BLOCK: u64 = 0 << 1;        // Block entry (for Level 1 or 2)
+pub const DESC_PAGE: u64 = 1 << 1;         // Leaf 4KB page entry (for Level 3)
 pub const DESC_ATTR_NORMAL: u64 = 0 << 2;  // AttrIndx = 0
 pub const DESC_ATTR_DEVICE: u64 = 1 << 2;  // AttrIndx = 1
 pub const DESC_AP_RW_EL1: u64 = 0 << 6;    // Read/Write at EL1 only
 pub const DESC_AP_RW_ALL: u64 = 1 << 6;    // Read/Write at EL1 and EL0
 pub const DESC_AP_RW_EL0: u64 = 1 << 6;    // User EL0 accessible
+pub const DESC_AP_RO_EL1: u64 = 2 << 6;    // Read-Only at EL1 only
+pub const DESC_AP_RO_ALL: u64 = 3 << 6;    // Read-Only at EL1 and EL0
 pub const DESC_SH_OUTER: u64 = 2 << 8;     // Outer Shareable
 pub const DESC_SH_INNER: u64 = 3 << 8;     // Inner Shareable
 pub const DESC_AF: u64 = 1 << 10;          // Access Flag (must be 1 to avoid fault)
@@ -245,6 +248,10 @@ impl ArmMmu {
                 core::arch::asm!("msr sctlr_el1, {}", in(reg) sctlr);
                 core::arch::asm!("isb");
             }
+
+            let alloc_base = base + 0x0800_0000;
+            let alloc_frames = ((size.saturating_sub(0x0800_0000)) / 4096).min(65536) as usize;
+            init_frame_allocator(alloc_base, alloc_frames);
         }
     }
 
@@ -760,6 +767,218 @@ impl ArmMmu {
         {
             let _ = ttbr0;
         }
+    }
+}
+
+pub struct ArmFrameAllocator {
+    pub base_paddr: u64,
+    pub total_frames: usize,
+    pub allocated_frames: usize,
+    pub recycled_frames: usize,
+    pub bitmap: [u64; 1024], // 65,536 frames = 256 MiB
+}
+
+impl ArmFrameAllocator {
+    pub const fn empty() -> Self {
+        Self {
+            base_paddr: 0,
+            total_frames: 0,
+            allocated_frames: 0,
+            recycled_frames: 0,
+            bitmap: [0; 1024],
+        }
+    }
+
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        for (word_idx, word) in self.bitmap.iter_mut().enumerate() {
+            if *word != !0u64 {
+                let bit_idx = (!*word).trailing_zeros() as usize;
+                let frame_idx = word_idx * 64 + bit_idx;
+                if frame_idx >= self.total_frames {
+                    return None;
+                }
+                *word |= 1u64 << bit_idx;
+                self.allocated_frames += 1;
+                let paddr = self.base_paddr + (frame_idx as u64) * 4096;
+                unsafe {
+                    core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
+                }
+                return Some(paddr);
+            }
+        }
+        None
+    }
+
+    pub fn recycle_frame(&mut self, paddr: u64) {
+        if paddr < self.base_paddr {
+            return;
+        }
+        let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
+        if frame_idx < self.total_frames {
+            let word_idx = frame_idx / 64;
+            let bit_idx = frame_idx % 64;
+            if (self.bitmap[word_idx] & (1u64 << bit_idx)) != 0 {
+                self.bitmap[word_idx] &= !(1u64 << bit_idx);
+                self.recycled_frames += 1;
+            }
+        }
+    }
+}
+
+pub static FRAME_ALLOCATOR: spin::Mutex<ArmFrameAllocator> = spin::Mutex::new(ArmFrameAllocator::empty());
+
+pub fn init_frame_allocator(base_paddr: u64, total_frames: usize) {
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    alloc.base_paddr = base_paddr;
+    alloc.total_frames = total_frames.min(65536);
+    alloc.allocated_frames = 0;
+    alloc.recycled_frames = 0;
+    alloc.bitmap = [0; 1024];
+}
+
+pub fn allocate_frame() -> Option<u64> {
+    FRAME_ALLOCATOR.lock().allocate_frame()
+}
+
+pub fn recycle_frame(paddr: u64) {
+    FRAME_ALLOCATOR.lock().recycle_frame(paddr);
+}
+
+pub fn total_recycled_frames() -> usize {
+    FRAME_ALLOCATOR.lock().recycled_frames
+}
+
+extern crate alloc;
+use alloc::vec::Vec;
+
+pub struct UserAddressSpace {
+    pub ttbr0: u64,
+    pub table_frames: Vec<u64>,
+    pub mapped_frames: Vec<u64>,
+    pub mapped_bytes: usize,
+}
+
+impl UserAddressSpace {
+    pub fn new() -> Option<Self> {
+        let root_l1_phys = allocate_frame()?;
+        let l2_phys = allocate_frame()?;
+
+        let user_l1 = unsafe { &mut *(root_l1_phys as *mut PageTable) };
+        let user_l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
+
+        user_l1.entries[0] = l2_phys | DESC_TABLE | DESC_VALID;
+
+        let r_base = ACTIVE_RAM_BASE.load(core::sync::atomic::Ordering::Relaxed);
+        let r_size = ACTIVE_RAM_SIZE.load(core::sync::atomic::Ordering::Relaxed);
+        const GIGABYTE: u64 = 0x4000_0000;
+        let start_gb = (r_base / GIGABYTE) as usize;
+        let num_gbs = ((r_size + GIGABYTE - 1) / GIGABYTE).max(1) as usize;
+
+        for gb_idx in start_gb..(start_gb + num_gbs).min(512) {
+            if gb_idx == 0 {
+                continue;
+            }
+            user_l1.entries[gb_idx] = ((gb_idx as u64) * GIGABYTE)
+                | DESC_AF
+                | DESC_SH_INNER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_NORMAL
+                | DESC_BLOCK
+                | DESC_VALID;
+        }
+
+        if user_l1.entries[1] == 0 {
+            user_l1.entries[1] = 0x4000_0000
+                | DESC_AF
+                | DESC_SH_INNER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_NORMAL
+                | DESC_BLOCK
+                | DESC_VALID;
+        }
+
+        user_l2.entries[8] = 0x0100_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+        user_l2.entries[14] = 0x01c0_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+        user_l2.entries[15] = 0x01e0_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+        user_l2.entries[64] = 0x0800_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+        user_l2.entries[72] = 0x0900_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+
+        let mut table_frames = Vec::new();
+        table_frames.push(root_l1_phys);
+        table_frames.push(l2_phys);
+
+        Some(Self {
+            ttbr0: root_l1_phys,
+            table_frames,
+            mapped_frames: Vec::new(),
+            mapped_bytes: 0,
+        })
+    }
+
+    pub fn map_user_page(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if is_write && is_exec {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        if vaddr >= 0x0000_8000_0000_0000 || vaddr < 0x1000 {
+            return Err("Virtual address outside canonical user range");
+        }
+
+        let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
+        let l1_entry = l1.entries[0];
+        if l1_entry & DESC_VALID == 0 {
+            return Err("L1 root table corrupt");
+        }
+        let l2_phys = l1_entry & 0x0000_FFFF_FFFF_F000;
+        let l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
+
+        let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let l3_phys = if l2.entries[l2_idx] & DESC_VALID == 0 {
+            let frame = allocate_frame().ok_or("OOM allocating L3 page table")?;
+            l2.entries[l2_idx] = frame | DESC_TABLE | DESC_VALID;
+            self.table_frames.push(frame);
+            frame
+        } else {
+            l2.entries[l2_idx] & 0x0000_FFFF_FFFF_F000
+        };
+
+        let l3 = unsafe { &mut *(l3_phys as *mut PageTable) };
+        let l3_idx = ((vaddr >> 12) & 0x1FF) as usize;
+        if l3.entries[l3_idx] & DESC_VALID != 0 {
+            return Err("physical frame already owned by address space");
+        }
+
+        let mut flags = DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTR_NORMAL | DESC_VALID | DESC_PXN;
+        if is_write {
+            flags |= DESC_AP_RW_ALL;
+        } else {
+            flags |= DESC_AP_RO_ALL;
+        }
+        if !is_exec {
+            flags |= DESC_UXN;
+        }
+
+        l3.entries[l3_idx] = (paddr & !0xFFF) | flags;
+        self.mapped_frames.push(paddr);
+        self.mapped_bytes += 4096;
+        Ok(())
+    }
+
+    pub fn user_mapped_bytes(&self) -> usize {
+        self.mapped_bytes
+    }
+
+    pub fn destroy(&mut self) {
+        for paddr in self.mapped_frames.drain(..) {
+            recycle_frame(paddr);
+        }
+        for paddr in self.table_frames.drain(..) {
+            recycle_frame(paddr);
+        }
+        self.mapped_bytes = 0;
+    }
+
+    pub fn activate(&self) {
+        ArmMmu::switch_to_task(self.ttbr0);
     }
 }
 
