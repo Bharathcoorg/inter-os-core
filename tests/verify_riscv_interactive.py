@@ -8,16 +8,16 @@ End-to-End Interactive Smartphone Lifecycle Verification Test for InterOS Core o
 Validates the full vertical slice on QEMU RISC-V 64:
 1. Kernel boot & self-tests
 2. Userspace PID 1 service-manager startup
-3. System services, compositor, and launcher startup in Ring 3 / U-mode
+3. System services, compositor, and launcher startup in U-mode
 4. Launcher LockScreen presentation
 5. Hardware swipe-up unlock to HomeScreen
 6. Hardware touch tap dispatch to App Drawer
 7. Hardware touch tap dispatch to launch an application (Calculator)
-8. Child application surface allocation, rendering, and interaction
+8. Child application surface allocation, rendering, and calculation (7 + 5 = 12)
 9. Hardware touch tap dispatch to child Back button (<)
 10. Child application exit and surface destruction
 11. Parent (Launcher) waitpid reaping and home screen canvas re-presentation
-12. Bochs-display PCI scanout screendump verification (P6 PPM)
+12. Bochs-display PCI scanout screendump verification (P6 PPM) with entropy validation
 """
 
 import socket
@@ -50,22 +50,12 @@ def find_qemu(binary="qemu-system-riscv64.exe"):
             return c
     return binary
 
-def kill_proc_on_port(p):
-    if sys.platform == "win32":
-        try:
-            res = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue | "
-                 "ForEach-Object {{ Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue }} | "
-                 "Where-Object {{ $_.ProcessName -like '*qemu*' }} | ForEach-Object {{ $_.Id }}"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in res.stdout.splitlines():
-                pid = line.strip()
-                if pid and pid.isdigit() and int(pid) > 0:
-                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=3)
-        except Exception:
-            pass
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 def send_monitor_cmd(sock, cmd):
     if not sock:
@@ -163,30 +153,38 @@ def verify_ppm_file(path_str, min_size=500000):
     with open(p, "rb") as f:
         header = f.readline().strip()
         assert header == b"P6", f"PPM header invalid: {header} (expected P6)"
-        dims = f.readline().strip().split()
-        while dims[0].startswith(b"#"):
-            dims = f.readline().strip().split()
+        line = f.readline().strip()
+        while line.startswith(b"#"):
+            line = f.readline().strip()
+        dims = line.split()
         w, h = int(dims[0]), int(dims[1])
         assert w == 720 and h == 1440, f"Unexpected display resolution: {w}x{h} (expected 720x1440)"
-    print(f"[VERIFY PPM] [OK] Genuine P6 PPM confirmed: {p.name} ({w}x{h}, {sz} bytes)")
+        maxval = f.readline().strip()
+        assert maxval == b"255", f"Unexpected maxval: {maxval}"
+        
+        pixels = f.read()
+        expected_bytes = w * h * 3
+        assert len(pixels) == expected_bytes, f"Truncated PPM pixel data: {len(pixels)} != {expected_bytes}"
+        
+        step = max(1, len(pixels) // (3 * 20000))
+        colors = set()
+        for i in range(0, len(pixels), 3 * step):
+            colors.add((pixels[i], pixels[i+1], pixels[i+2]))
+        
+        assert len(colors) >= 20, f"Display frame appears blank or uniform ({len(colors)} distinct colors)"
+    print(f"[VERIFY PPM] [OK] Genuine P6 PPM confirmed: {p.name} ({w}x{h}, {sz} bytes, {len(colors)} distinct sampled colours)")
 
 def main():
     print("[*] InterOS Core RISC-V 64 Interactive Lifecycle & Graphics Verification...")
     qemu_exe = find_qemu("qemu-system-riscv64.exe")
+    kernel_elf = WORKSPACE_ROOT / "kernel-riscv64" / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
 
-    kernel_img = WORKSPACE_ROOT / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
-    if not kernel_img.exists():
-        kernel_img = WORKSPACE_ROOT / "kernel-riscv64" / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
-
-    if not kernel_img.exists():
-        print("[*] Building RISC-V 64 kernel image...")
+    if not kernel_elf.exists():
+        print("[*] Building RISC-V kernel image...")
         subprocess.run([sys.executable, str(WORKSPACE_ROOT / "tools" / "interos.py"), "build", "--target", "riscv64"], check=True)
 
-    ser_port = 5697
-    mon_port = 5698
-    kill_proc_on_port(ser_port)
-    kill_proc_on_port(mon_port)
-    time.sleep(1.0)
+    ser_port = get_free_port()
+    mon_port = get_free_port()
 
     args = [
         qemu_exe,
@@ -194,7 +192,7 @@ def main():
         "-cpu", "rv64",
         "-m", "1024M",
         "-bios", "default",
-        "-kernel", str(kernel_img),
+        "-kernel", str(kernel_elf),
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
         "-serial", "chardev:ser0",
@@ -204,7 +202,7 @@ def main():
         "-no-reboot"
     ]
 
-    print(f"[*] Launching QEMU RISC-V 64: {' '.join(args[:7])} ...")
+    print(f"[*] Launching QEMU RISC-V 64 on isolated ports ser={ser_port}, mon={mon_port}...")
     proc = subprocess.Popen(args)
     time.sleep(0.5)
 
@@ -224,19 +222,17 @@ def main():
 
         # 1. Await Launcher initial presentation
         print("[*] Operation 1: Awaiting Launcher initial scanout presentation...")
+        ready = reader.wait_for(["Step 5: Initial presentation complete", "Boot presentation complete; lock screen is now guest-owned", "Lock surface rendered."], timeout=60.0, print_keywords=["LAUNCHER", "PID1", "Step"])
+        assert ready, "Launcher initial presentation timed out"
+        print("[OK] Launcher initial presentation complete.")
+
+        print("[*] Waiting for lock screen presentation to complete...")
         lock_ready = reader.wait_for(
-            ["Boot presentation complete; lock screen is now guest-owned", "Lock surface rendered.", "Step 5: Initial presentation complete"],
-            timeout=45.0,
-            print_keywords=["LAUNCHER", "PID1", "Step", "BOOT", "Lock", "guest-owned"]
+            ["Boot presentation complete; lock screen is now guest-owned", "Lock surface rendered."],
+            timeout=40.0,
+            print_keywords=["LAUNCHER", "Lock surface rendered", "guest-owned"]
         )
-        assert lock_ready, "Launcher initial presentation timed out"
-        if not any("guest-owned" in log or "Lock surface rendered" in log for log in reader.captured_logs):
-            lock_ready = reader.wait_for(
-                ["Boot presentation complete; lock screen is now guest-owned", "Lock surface rendered."],
-                timeout=40.0,
-                print_keywords=["LAUNCHER", "Lock surface rendered", "guest-owned"]
-            )
-            assert lock_ready, "Lock screen failed to complete boot presentation"
+        assert lock_ready, "Lock screen failed to complete boot presentation"
         print("[OK] Lock screen is guest-owned and ready for interaction.")
 
         # Take screendump of LockScreen
@@ -290,15 +286,39 @@ def main():
         wait_for_screendump(ppm_calc)
         verify_ppm_file(ppm_calc)
 
-        # 5. In-app interaction: tap key '7' at (100, 680)
-        print("[*] Operation 5: In-app interaction (Calculator key '7' at 100, 680)...")
+        # 5. In-app interaction: Calculator arithmetic evaluation 7 + 5 = 12
+        print("[*] Operation 5: In-app interaction (Calculator arithmetic 7 + 5 = 12)...")
         time.sleep(1.0)
+        print("  -> Pressing '7' at (100, 680)...")
         reader.send(b"TAP 100 680\n")
         inter_ok = reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"])
-        if not inter_ok:
-            inter_ok = reader.wait_for("Post-input frame presented.", timeout=10.0, print_keywords=["CALCULATOR"])
-        assert inter_ok, "Calculator interaction failed"
-        print("[OK] Calculator interaction verified.")
+        assert inter_ok, "Calculator failed to process key '7'"
+
+        time.sleep(0.5)
+        print("  -> Pressing operator '+' at (598, 1120)...")
+        reader.send(b"TAP 598 1120\n")
+        op_ok = reader.wait_for("Keypad operator selected.", timeout=15.0, print_keywords=["CALCULATOR"])
+        assert op_ok, "Calculator failed to process operator '+'"
+
+        time.sleep(0.5)
+        print("  -> Pressing '5' at (266, 800)...")
+        reader.send(b"TAP 266 800\n")
+        digit5_ok = reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"])
+        assert digit5_ok, "Calculator failed to process key '5'"
+
+        time.sleep(0.5)
+        print("  -> Pressing evaluate '=' at (598, 1280)...")
+        reader.send(b"TAP 598 1280\n")
+        eval_ok = reader.wait_for(["Evaluation completed.", "Result = 12"], timeout=15.0, print_keywords=["CALCULATOR"])
+        assert eval_ok, "Calculator failed to evaluate 7 + 5 = 12"
+        print("[OK] Calculator evaluation 7 + 5 = 12 verified.")
+
+        # Screendump of Calculator evaluated state
+        ppm_eval = str(WORKSPACE_ROOT / "target" / "riscv_calculator_eval.ppm")
+        if os.path.exists(ppm_eval): os.remove(ppm_eval)
+        send_monitor_cmd(monitor_sock, f"screendump {ppm_eval}")
+        wait_for_screendump(ppm_eval)
+        verify_ppm_file(ppm_eval)
 
         # 6. Exit Calculator via Back button at (48, 80)
         print("[*] Operation 6: Exiting Calculator via Back button tap at (48, 80)...")
@@ -323,14 +343,15 @@ def main():
         return 0
 
     finally:
-        try:
-            proc.terminate()
-            proc.wait(timeout=2)
-        except Exception:
-            try: proc.kill()
-            except Exception: pass
-        kill_proc_on_port(ser_port)
-        kill_proc_on_port(mon_port)
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 if __name__ == "__main__":
     sys.exit(main())

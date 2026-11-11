@@ -38,32 +38,12 @@ from emulator.server import qemu_x86_audio_args  # noqa: E402
 import emulator.server as _emulator_server  # noqa: E402
 _emulator_server.vnc_client.running = False
 
-def kill_proc_on_port(p):
-    try:
-        import psutil
-        for conn in psutil.net_connections():
-            if conn.laddr and conn.laddr.port == p and conn.pid:
-                try:
-                    proc = psutil.Process(conn.pid)
-                    # A foreign owner means another device is using this port;
-                    # leave it running and let the bind below fail loudly.
-                    if "qemu" in proc.name().lower():
-                        proc.kill()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    if sys.platform == "win32":
-        try:
-            res = subprocess.run(["powershell", "-NoProfile", "-Command", f"Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue | "
-                                  "ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | "
-                                  "Where-Object { $_.ProcessName -like '*qemu*' } | ForEach-Object { $_.Id }"], capture_output=True, text=True, timeout=5)
-            for line in res.stdout.splitlines():
-                pid = line.strip()
-                if pid and pid.isdigit() and int(pid) > 0:
-                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=3)
-        except Exception:
-            pass
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 
@@ -352,13 +332,9 @@ def main():
         with open(data_disk, "wb") as f:
             f.truncate(512 * 1024 * 1024)
 
-    # WHY not 5555/5556: those are the Android emulator's console band, and a guest
-    # serial socket there can bind over - or talk to - somebody else's device.
-    ser_port = 5595
-    mon_port = 5596
-    kill_proc_on_port(ser_port)
-    kill_proc_on_port(mon_port)
-    time.sleep(0.5)
+    ser_port = get_free_port()
+    mon_port = get_free_port()
+    time.sleep(0.1)
 
     args = [
         qemu_exe,
