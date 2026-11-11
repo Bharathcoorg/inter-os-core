@@ -966,8 +966,16 @@ def cmd_test(args):
                 return res.returncode
 
     if test_target in ["aarch64", "all"]:
+        arm_py = WORKSPACE_ROOT / "tests" / "verify_aarch64_boot.py"
         arm_script = WORKSPACE_ROOT / "tests" / "test_aarch64.ps1"
-        if arm_script.exists() and sys.platform == "win32":
+        if arm_py.exists():
+            log("Executing QEMU AArch64 boot verification...")
+            res = subprocess.run([sys.executable, str(arm_py)])
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target == "aarch64":
+                    return res.returncode
+        elif arm_script.exists() and sys.platform == "win32":
             log("Executing QEMU AArch64 boot verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(arm_script)])
             if res.returncode != 0:
@@ -976,8 +984,16 @@ def cmd_test(args):
                     return res.returncode
 
     if test_target in ["riscv64", "all"]:
+        riscv_py = WORKSPACE_ROOT / "tests" / "verify_riscv_boot.py"
         riscv_script = WORKSPACE_ROOT / "tests" / "test_riscv64.ps1"
-        if riscv_script.exists() and sys.platform == "win32":
+        if riscv_py.exists():
+            log("Executing QEMU RISC-V boot verification...")
+            res = subprocess.run([sys.executable, str(riscv_py)])
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target == "riscv64":
+                    return res.returncode
+        elif riscv_script.exists() and sys.platform == "win32":
             log("Executing QEMU RISC-V boot verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(riscv_script)])
             if res.returncode != 0:

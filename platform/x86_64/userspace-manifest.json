@@ -126,14 +126,14 @@
       "manifest": "apps/gallery/Cargo.toml"
     },
     {
-      "name": "notes",
-      "kind": "application",
-      "manifest": "apps/notes/Cargo.toml"
-    },
-    {
       "name": "agent_manager",
       "kind": "application",
       "manifest": "apps/agent_manager/Cargo.toml"
+    },
+    {
+      "name": "notes",
+      "kind": "application",
+      "manifest": "apps/notes/Cargo.toml"
     },
     {
       "name": "video_player",
@@ -149,9 +149,5 @@
   "kernel": {
     "manifest": "kernel/Cargo.toml",
     "target": "x86_64-unknown-none"
-  },
-  "boot": {
-    "manifest": "boot/Cargo.toml",
-    "image": "target/inter-os-bios.img"
   }
 }

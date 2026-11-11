@@ -1385,8 +1385,8 @@ SUPPORTED_PROFILES = {
         "arch": "aarch64",
         "machine": "virt",
         "cpu": "cortex-a53",
-        "ram": 512,
-        "boot_type": "Direct Kernel ELF",
+        "ram": 1024,
+        "boot_type": "Direct Kernel ELF / Flat Image",
         # Prefer the flat arm64 Image: the arm64 boot protocol hands the device
         # tree to the kernel in x0, whereas an ELF is entered directly with
         # x0 = 0 and no device tree at all.
@@ -1396,20 +1396,26 @@ SUPPORTED_PROFILES = {
             os.path.join("kernel-aarch64", "target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
             os.path.join("target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
         ),
-        "status": "Source-level architecture target; runtime validation pending",
+        "status": "QEMU virt verified with EL0 userspace & service registry",
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 720, "guest_height": 1440, "density_dpi": 320, "scale_factor_permille": 1000, "authoring_space": {"width": 720, "height": 1440, "density_dpi": 320}},
+        "serial": {"host": "127.0.0.1", "port": 4302},
+        "monitor": {"host": "127.0.0.1", "port": 44446},
     },
     "riscv64": {
         "name": "InterOS RISC-V Virt Mobile",
         "arch": "riscv64",
         "machine": "virt",
         "cpu": "rv64",
-        "ram": 256,
+        "ram": 1024,
         "boot_type": "OpenSBI / Direct Kernel ELF",
         "image": _resolve_artifact(
-            os.path.join("kernel-riscv64", "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
             os.path.join("target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
+            os.path.join("kernel-riscv64", "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
         ),
-        "status": "Source-level architecture target; runtime validation pending",
+        "status": "QEMU virt verified with U-mode userspace & service registry",
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 720, "guest_height": 1440, "density_dpi": 320, "scale_factor_permille": 1000, "authoring_space": {"width": 720, "height": 1440, "density_dpi": 320}},
+        "serial": {"host": "127.0.0.1", "port": 4303},
+        "monitor": {"host": "127.0.0.1", "port": 44447},
     },
 }
 active_profile_key = "x86_64"

@@ -200,22 +200,30 @@ jobs:
         run: echo 'RUSTFLAGS=--cfg curve25519_dalek_backend="serial"' >> "$GITHUB_ENV"
 
       - name: Package Canonical Demo Disk Image via CLI
-        run: python tools/interos.py build demo
+        run: |
+          python tools/interos.py build demo
+          python tools/interos.py build --target aarch64
+          python tools/interos.py build --target riscv64
 
-      - name: Verify BIOS Bootable Disk Image Output
+      - name: Verify Multi-Arch Image Outputs
         run: |
           test -s target/inter-os-bios.img
-          ls -lh target/inter-os-bios.img
+          test -s target/kernel-aarch64.img
+          test -s target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
+          ls -lh target/inter-os-bios.img target/kernel-aarch64.img target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
 
-      - name: Upload Bootable BIOS Image Artifact
+      - name: Upload Bootable Images Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: inter-os-bios-image
-          path: target/inter-os-bios.img
+          name: inter-os-multiarch-images
+          path: |
+            target/inter-os-bios.img
+            target/kernel-aarch64.img
+            target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
           retention-days: 7
 
   tier4-qemu-verification:
-    name: "Tier 4: QEMU Boot Verification"
+    name: "Tier 4: Multi-Architecture QEMU Verification"
     needs: tier3-packaging-demo
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -233,27 +241,35 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install psutil
 
-      - name: Install QEMU System Emulators
+      - name: Install QEMU Multi-Architecture Emulators
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86
+          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc
 
-      - name: Download Bootable BIOS Image Artifact
+      - name: Download Multi-Arch Images Artifact
         uses: actions/download-artifact@v4
         with:
-          name: inter-os-bios-image
+          name: inter-os-multiarch-images
           path: target
 
-      - name: Verify Downloaded Image Artifact
+      - name: Verify Downloaded Image Artifacts
         run: |
           test -s target/inter-os-bios.img
-          ls -lh target/inter-os-bios.img
+          test -s target/kernel-aarch64.img
+          test -s target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
+          ls -lh target/inter-os-bios.img target/kernel-aarch64.img target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
 
-      - name: Run QEMU Canonical Boot Verification
+      - name: Run QEMU Canonical Boot Verification (x86_64)
         env:
           INTEROS_BOOT_TIMEOUT: "180"
           INTEROS_DISABLE_AUDIO: "1"
         run: python tests/verify_x86_boot.py
+
+      - name: Run QEMU AArch64 Boot Verification
+        run: python tests/verify_aarch64_boot.py
+
+      - name: Run QEMU RISC-V 64 Boot Verification
+        run: python tests/verify_riscv_boot.py
 
       - name: Upload QEMU Boot Logs and Screendump Evidence
         uses: actions/upload-artifact@v4

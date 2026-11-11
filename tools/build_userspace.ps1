@@ -2,8 +2,13 @@
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
 # Build and strip all Ring-3 userspace and app binaries with static relocation
-# Architecture: x86_64-unknown-none
+# Architecture: x86_64, aarch64, riscv64
 # Entry base: 0x00400000
+
+param(
+    [ValidateSet("x86_64", "aarch64", "riscv64", "all")]
+    [string]$TargetArch = "all"
+)
 
 # PowerShell script errors must terminate the build. Native tools (cargo,
 # llvm-strip) write progress to stderr, which PowerShell raises as a
@@ -13,6 +18,16 @@
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WorkspaceRoot = Split-Path -Parent $ScriptDir
+
+if ($TargetArch -ne "x86_64") {
+    & python (Join-Path $ScriptDir "build_userspace.py") --arch $TargetArch
+    if ($LASTEXITCODE -ne 0) {
+        throw "[FAILED] build_userspace.py exited with $LASTEXITCODE"
+    }
+    if ($TargetArch -ne "all") {
+        return
+    }
+}
 # Assert-NoSymbolTable lives with the other ELF helpers in build_env.ps1.
 . (Join-Path $ScriptDir "build_env.ps1")
 Set-Location $WorkspaceRoot
