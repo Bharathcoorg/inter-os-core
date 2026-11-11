@@ -61,10 +61,10 @@ impl InputQueue {
         }
     }
 
-    pub fn pop_for_task(&mut self, task_idx: u32) -> Option<RawInputEvent> {
+    pub fn pop_for_task(&mut self, task_pid: u32) -> Option<RawInputEvent> {
         for i in 0..self.len {
             if let Some(qe) = &self.events[i] {
-                if qe.target_task == task_idx || qe.target_task == u32::MAX {
+                if qe.target_task == task_pid || qe.target_task == u32::MAX {
                     let ev = qe.event;
                     for j in i..(self.len - 1) {
                         self.events[j] = self.events[j + 1].take();
@@ -78,22 +78,42 @@ impl InputQueue {
         None
     }
 
-    pub fn has_events_for_task(&self, task_idx: u32) -> bool {
+    pub fn has_events_for_task(&self, task_pid: u32) -> bool {
         for i in 0..self.len {
             if let Some(qe) = &self.events[i] {
-                if qe.target_task == task_idx || qe.target_task == u32::MAX {
+                if qe.target_task == task_pid || qe.target_task == u32::MAX {
                     return true;
                 }
             }
         }
         false
     }
+
+    pub fn clear_for_task(&mut self, task_pid: u32) -> usize {
+        let mut cleared = 0;
+        let mut i = 0;
+        while i < self.len {
+            if let Some(qe) = &self.events[i] {
+                if qe.target_task == task_pid {
+                    for j in i..(self.len - 1) {
+                        self.events[j] = self.events[j + 1].take();
+                    }
+                    self.events[self.len - 1] = None;
+                    self.len -= 1;
+                    cleared += 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        cleared
+    }
 }
 
 pub static INPUT_QUEUE: Mutex<InputQueue> = Mutex::new(InputQueue::new());
 
 pub fn post_touch(x: u32, y: u32) {
-    let target = crate::display::focused_task_idx();
+    let target = crate::display::focused_task_pid();
     INPUT_QUEUE.lock().push(target, RawInputEvent {
         kind: 1,
         x,

@@ -378,6 +378,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 11. Multi-Tasking Scheduler & Register Context Switching
     task::test_context_switching();
+    task::test_task_lifecycle();
 
     // 12. Bring up Sovereign Background Daemons with Explicit Capabilities
     {
@@ -468,6 +469,22 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(flip_res, 1, "SurfaceFlip with DisplayServer cap should succeed");
     let destroy_res = syscall::sys_dispatch(syscall::SYS_SURFACE_DESTROY, 0, 1, 0, 0, 0);
     assert_eq!(destroy_res, 0, "SurfaceDestroy with DisplayServer cap should succeed");
+
+    // 13b. Test surface authorization & capability separation
+    {
+        let mut sm = display::SURFACE_MANAGER.lock();
+        let s_id = sm.create_surface(10, 100, 100, 1).expect("create surface");
+        let pixels = [0xFF00FF00u32; 10];
+        // Owner (10) can write
+        assert!(sm.write_surface(s_id, 10, 0, &pixels).is_ok());
+        // Unrelated task (11) CANNOT write
+        assert_eq!(sm.write_surface(s_id, 11, 0, &pixels), Err(-13));
+        // Unrelated task (11) without ADMIN CANNOT destroy
+        assert_eq!(sm.destroy_surface(s_id, 11, false), Err(-13));
+        // Unrelated task (11) WITH ADMIN CAN destroy
+        assert_eq!(sm.destroy_surface(s_id, 11, true), Ok(()));
+        kprintln!("[TEST] AArch64 Surface Authorization: Unrelated task rejected (-EACCES), Admin override authorized VERIFIED.");
+    }
 
     kprintln!("[TEST] AArch64 Syscall Dispatcher: sys_get_ticks (x0={}), sys_get_task_id (x0={}), and standard syscall parity VERIFIED.", sys_ticks, sys_task_id);
 
@@ -1478,20 +1495,22 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Ok(l) => {
             kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
             kprintln!("[BOOT] Entering PID 1 (init) at EL0 via hardware eret...");
+            l.address_space.activate();
             {
                 let mut sched = task::SCHEDULER.lock();
                 sched.tasks.clear();
-                sched.next_pid = 0;
+                sched.next_pid = 1;
                 let mut init_caps = capability::CapabilityTable::new();
                 init_caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
                 init_caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
                 init_caps.mint(capability::CapabilityType::SerialOutput, capability::Rights::WRITE, None);
                 init_caps.mint(capability::CapabilityType::EventPoll, capability::Rights::READ, None);
-                let pid1 = sched.spawn_user_process("init", l.entry_point, l.stack_top, l.address_space.ttbr0, init_caps);
-                sched.tasks[pid1 as usize].state = task::TaskState::Running;
-                sched.current_task_idx = pid1 as usize;
+                init_caps.mint(capability::CapabilityType::DisplayServer, capability::Rights(capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
+                let pid1 = sched.spawn_user_process(0, "init", l.entry_point, l.stack_top, Some(l.address_space), init_caps);
+                sched.tasks[0].state = task::TaskState::Running;
+                sched.current_task_idx = 0;
+                kprintln!("[BOOT] PID 1 initialized with state Running (PID {})", pid1);
             }
-            l.address_space.activate();
             unsafe {
                 user::enter_user_mode(l.entry_point, l.stack_top);
             }

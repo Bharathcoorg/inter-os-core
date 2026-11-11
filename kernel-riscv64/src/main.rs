@@ -104,6 +104,25 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         assert_eq!(cap_tf.regs[10] as isize, -13, "Uncredentialed syscall must fail closed with -EACCES");
     }
     println!("[TEST] RISC-V Zero Ambient Authority: Syscalls 8, 9, 10, 11, 62, 71 fail closed (-EACCES) (VERIFIED).");
+
+    // 4c. Test Task Scheduler Lifecycle & Removal Consistency
+    task::test_task_lifecycle();
+
+    // 4d. Test Surface Authorization & Capability Separation
+    {
+        let mut sm = display::SURFACE_MANAGER.lock();
+        let s_id = sm.create_surface(10, 100, 100, 1).expect("create surface");
+        let pixels = [0xFF00FF00u32; 10];
+        // Owner (10) can write
+        assert!(sm.write_surface(s_id, 10, 0, &pixels).is_ok());
+        // Unrelated task (11) CANNOT write
+        assert_eq!(sm.write_surface(s_id, 11, 0, &pixels), Err(-13));
+        // Unrelated task (11) without ADMIN CANNOT destroy
+        assert_eq!(sm.destroy_surface(s_id, 11, false), Err(-13));
+        // Unrelated task (11) WITH ADMIN CAN destroy
+        assert_eq!(sm.destroy_surface(s_id, 11, true), Ok(()));
+        println!("[TEST] RISC-V Surface Authorization: Unrelated task rejected (-EACCES), Admin override authorized VERIFIED.");
+    }
     println!("[BOOT] InterOS RISC-V SBI console/trap interface initialized.");
     println!("[BOOT] Microkernel S-mode initialized.");
     println!("[BOOT] RISC-V userspace smoke image is the current architecture validation target.");

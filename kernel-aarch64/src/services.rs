@@ -72,51 +72,79 @@ pub struct ServiceEntry {
     pub generation: AtomicU32,
     pub last_heartbeat: AtomicU64,
     pub failures: AtomicU32,
+    pub pid: AtomicU32,
+    pub restart_count: AtomicU32,
+    pub backoff_ticks: AtomicU64,
 }
 
 // 12 core declared services matching userspace/init discovery expectations
 pub static SERVICES: [ServiceEntry; 12] = [
-    ServiceEntry { id: ServiceId::Display, name: "displayd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Input, name: "inputd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Storage, name: "storaged", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Network, name: "netd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Power, name: "powerd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Modem, name: "modemd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Audio, name: "audiod", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Camera, name: "camerad", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Compositor, name: "compositor", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Launcher, name: "launcher", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Sensor, name: "sensord", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
-    ServiceEntry { id: ServiceId::Inference, name: "aid", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0) },
+    ServiceEntry { id: ServiceId::Display, name: "displayd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Input, name: "inputd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Storage, name: "storaged", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Network, name: "netd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Power, name: "powerd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Modem, name: "modemd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Audio, name: "audiod", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Camera, name: "camerad", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Compositor, name: "compositor", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Launcher, name: "launcher", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Sensor, name: "sensord", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry { id: ServiceId::Inference, name: "aid", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(1), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
 ];
 
-pub fn start(id: u8) -> Result<(), ()> {
+pub fn start(id: u8) -> Result<u32, ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
-            if let Some(img) = crate::images::service_image(id) {
-                let sched = crate::task::SCHEDULER.lock();
-                let already_running = sched.tasks.iter().any(|t| t.name == img.name && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
-                if !already_running {
-                    drop(sched);
-                    if let Ok(loaded) = crate::elf::load_elf(img.elf) {
-                        let mut sched = crate::task::SCHEDULER.lock();
-                        let mut caps = crate::capability::CapabilityTable::new();
-                        caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
-                        caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
-                        caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
-                        caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
-                        caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
-                        if id == 10 { // launcher
-                            caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
-                        }
-                        let tid = sched.spawn_user_process(img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.ttbr0, caps);
-                        crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
-                    }
+            let img = match crate::images::service_image(id) {
+                Some(i) => i,
+                None => {
+                    svc.state.store(ServiceState::Failed as u8, Ordering::Release);
+                    return Err(());
+                }
+            };
+            let sched = crate::task::SCHEDULER.lock();
+            for t in &sched.tasks {
+                if t.name == img.name && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running) {
+                    svc.pid.store(t.id, Ordering::Release);
+                    svc.state.store(ServiceState::Running as u8, Ordering::Release);
+                    return Ok(t.id);
                 }
             }
+            drop(sched);
+
+            let loaded = match crate::elf::load_elf(img.elf) {
+                Ok(l) => l,
+                Err(e) => {
+                    crate::kprintln!("[SERVICE ERROR] Failed to load '{}': {}", img.name, e);
+                    svc.state.store(ServiceState::Failed as u8, Ordering::Release);
+                    svc.failures.fetch_add(1, Ordering::Relaxed);
+                    return Err(());
+                }
+            };
+
+            let mut sched = crate::task::SCHEDULER.lock();
+            let mut caps = crate::capability::CapabilityTable::new();
+            caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
+            caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
+            caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+            if id == 9 || id == 10 { // compositor or launcher
+                caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights(crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0), None);
+            } else {
+                caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+            }
+            caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+            if id == 10 { // launcher
+                caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+            }
+            let tid = sched.spawn_user_process(1, img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            drop(sched);
+
+            crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
+            svc.pid.store(tid, Ordering::Release);
             svc.state.store(ServiceState::Running as u8, Ordering::Release);
             svc.generation.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
+            return Ok(tid);
         }
     }
     Err(())
@@ -125,15 +153,30 @@ pub fn start(id: u8) -> Result<(), ()> {
 pub fn stop(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
-            if let Some(img) = crate::images::service_image(id) {
+            let pid = svc.pid.swap(0, Ordering::AcqRel);
+            if pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
                 for task in &mut sched.tasks {
-                    if task.name == img.name {
+                    if task.id == pid {
                         task.state = crate::task::TaskState::Terminated;
                     }
                 }
             }
             svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
+            return Ok(());
+        }
+    }
+    Err(())
+}
+
+pub fn heartbeat(caller_pid: u32) -> Result<(), ()> {
+    let ticks: u64;
+    unsafe {
+        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) ticks);
+    }
+    for svc in &SERVICES {
+        if svc.pid.load(Ordering::Acquire) == caller_pid || (caller_pid == 1 && svc.state.load(Ordering::Acquire) == ServiceState::Running as u8) {
+            svc.last_heartbeat.store(ticks, Ordering::Release);
             return Ok(());
         }
     }
@@ -159,6 +202,11 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
 /// `{id}|1|{state_str}|{restart}|{critical}|{generation}|{age}|{failures}\n`
 pub fn snapshot(out: &mut [u8]) -> usize {
     use core::fmt::Write;
+
+    let ticks: u64;
+    unsafe {
+        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) ticks);
+    }
 
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -188,10 +236,12 @@ pub fn snapshot(out: &mut [u8]) -> usize {
         };
         let gen = svc.generation.load(Ordering::Relaxed);
         let fails = svc.failures.load(Ordering::Relaxed);
+        let hb = svc.last_heartbeat.load(Ordering::Acquire);
+        let age = if hb > 0 { ticks.saturating_sub(hb) / 1000 } else { 0 };
         let _ = writeln!(
             writer,
-            "{}|1|{}|{}|{}|{}|0|{}",
-            svc.id as u8, state_str, svc.restart, svc.critical, gen, fails
+            "{}|1|{}|{}|{}|{}|{}|{}",
+            svc.id as u8, state_str, svc.restart, svc.critical, gen, age, fails
         );
     }
     writer.pos

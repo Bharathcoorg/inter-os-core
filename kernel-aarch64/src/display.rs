@@ -520,7 +520,7 @@ impl SurfaceManager {
 
     pub fn write_surface(&mut self, surface_id: u32, caller_task: u32, offset: usize, src_pixels: &[u32]) -> Result<usize, i64> {
         let s = self.surfaces.iter_mut().find(|s| s.id == surface_id).ok_or(-2)?; // -ENOENT
-        if s.owner_task != caller_task && caller_task != 0 && caller_task != 10 && caller_task != 11 {
+        if s.owner_task != caller_task {
             return Err(-13); // -EACCES: caller does not own this surface
         }
         if offset >= s.pixels.len() {
@@ -531,10 +531,10 @@ impl SurfaceManager {
         Ok(copy_len)
     }
 
-    pub fn destroy_surface(&mut self, surface_id: u32, caller_task: u32) -> Result<(), i64> {
+    pub fn destroy_surface(&mut self, surface_id: u32, caller_task: u32, is_admin: bool) -> Result<(), i64> {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == surface_id) {
-            if self.surfaces[pos].owner_task != caller_task && caller_task != 0 && caller_task != 10 && caller_task != 11 {
-                return Err(-13); // -EACCES: caller does not own this surface
+            if self.surfaces[pos].owner_task != caller_task && !is_admin {
+                return Err(-13); // -EACCES: caller does not own this surface and lacks ADMIN
             }
             self.surfaces.remove(pos);
             let _ = self.flip();
@@ -542,6 +542,16 @@ impl SurfaceManager {
         } else {
             Err(-2)
         }
+    }
+
+    pub fn destroy_surfaces_owned_by(&mut self, owner_pid: u32) -> usize {
+        let before = self.surfaces.len();
+        self.surfaces.retain(|s| s.owner_task != owner_pid);
+        let removed = before - self.surfaces.len();
+        if removed > 0 {
+            let _ = self.flip();
+        }
+        removed
     }
 
     pub fn flip(&mut self) -> u64 {
@@ -583,18 +593,22 @@ impl SurfaceManager {
 
 pub static SURFACE_MANAGER: spin::Mutex<SurfaceManager> = spin::Mutex::new(SurfaceManager::new());
 
-pub fn focused_task_idx() -> u32 {
+pub fn focused_task_pid() -> u32 {
     if let Some(owner) = SURFACE_MANAGER.lock().top_visible_owner() {
         owner
     } else {
         let sched = crate::task::SCHEDULER.lock();
-        for (i, t) in sched.tasks.iter().enumerate() {
+        for t in &sched.tasks {
             if t.name == "launcher" {
-                return i as u32;
+                return t.id;
             }
         }
-        10
+        sched.current_pid()
     }
+}
+
+pub fn focused_task_idx() -> u32 {
+    focused_task_pid()
 }
 
 pub fn init_bochs_display(bar0_paddr: usize, bar2_paddr: usize) {

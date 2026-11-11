@@ -340,20 +340,22 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if is_test {
                 -13 // -EACCES: fail-closed capability check
             } else {
-                let sched = SCHEDULER.lock();
-                let curr_idx = sched.current_task_idx;
-                let has_cap = if curr_idx < sched.tasks.len() {
-                    sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok()
-                } else {
-                    false
+                let (caller_pid, has_cap) = {
+                    let sched = SCHEDULER.lock();
+                    let pid = sched.current_pid();
+                    let ok = if sched.current_task_idx < sched.tasks.len() {
+                        sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok()
+                    } else {
+                        false
+                    };
+                    (pid, ok)
                 };
-                drop(sched);
                 if !has_cap {
                     -13
                 } else {
                     crate::task::yield_now();
                     crate::input_queue::service_serial_commands();
-                    let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(curr_idx as u32);
+                    let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(caller_pid);
                     let mut mask = 0x08; // EVENT_TIMER_TICK
                     if has_input {
                         mask |= 0x10; // EVENT_TOUCH_INPUT
@@ -365,14 +367,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 69: SurfaceCreate
         SYS_SURFACE_CREATE => {
-            let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            let has_cap = if curr_idx < sched.tasks.len() {
-                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-            } else {
-                false
+            let (caller_pid, has_cap) = {
+                let sched = SCHEDULER.lock();
+                let pid = sched.current_pid();
+                let ok = if sched.current_task_idx < sched.tasks.len() {
+                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+                } else {
+                    false
+                };
+                (pid, ok)
             };
-            drop(sched);
             if !has_cap {
                 -13
             } else {
@@ -381,7 +385,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 } else {
                     (a0 as u32, a1 as u32, a2 as u32)
                 };
-                match crate::display::SURFACE_MANAGER.lock().create_surface(curr_idx as u32, width, height, z_order) {
+                match crate::display::SURFACE_MANAGER.lock().create_surface(caller_pid, width, height, z_order) {
                     Ok(id) => id as i64,
                     Err(e) => e,
                 }
@@ -390,14 +394,14 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 70: SurfaceFlip
         SYS_SURFACE_FLIP => {
-            let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            let has_cap = if curr_idx < sched.tasks.len() {
-                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-            } else {
-                false
+            let has_cap = {
+                let sched = SCHEDULER.lock();
+                if sched.current_task_idx < sched.tasks.len() {
+                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+                } else {
+                    false
+                }
             };
-            drop(sched);
             if !has_cap {
                 -13
             } else {
@@ -411,19 +415,21 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if is_test || a0 == 0 {
                 -13 // -EACCES: fail-closed capability check
             } else {
-                let sched = SCHEDULER.lock();
-                let curr_idx = sched.current_task_idx;
-                let has_cap = if curr_idx < sched.tasks.len() {
-                    sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok()
-                } else {
-                    false
+                let (caller_pid, has_cap) = {
+                    let sched = SCHEDULER.lock();
+                    let pid = sched.current_pid();
+                    let ok = if sched.current_task_idx < sched.tasks.len() {
+                        sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok()
+                    } else {
+                        false
+                    };
+                    (pid, ok)
                 };
-                drop(sched);
                 if !has_cap {
                     -13
                 } else {
                     crate::input_queue::service_serial_commands();
-                    if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
+                    if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
                         (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
                     } else {
                         0
@@ -434,14 +440,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 73: SurfaceWrite
         SYS_SURFACE_WRITE => {
-            let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            let has_cap = if curr_idx < sched.tasks.len() {
-                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-            } else {
-                false
+            let (caller_pid, has_cap) = {
+                let sched = SCHEDULER.lock();
+                let pid = sched.current_pid();
+                let ok = if sched.current_task_idx < sched.tasks.len() {
+                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
+                } else {
+                    false
+                };
+                (pid, ok)
             };
-            drop(sched);
             if !has_cap {
                 -13
             } else {
@@ -460,7 +468,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 } else {
                     let mut sm = crate::display::SURFACE_MANAGER.lock();
                     if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
-                        if s.owner_task != curr_idx as u32 && curr_idx != 0 && curr_idx != 10 && curr_idx != 11 {
+                        if s.owner_task != caller_pid {
                             -13 // -EACCES: caller does not own this surface
                         } else if offset >= s.pixels.len() {
                             -22
@@ -486,19 +494,25 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 74: SurfaceDestroy
         SYS_SURFACE_DESTROY => {
-            let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            let has_cap = if curr_idx < sched.tasks.len() {
-                sched.tasks[curr_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-            } else {
-                false
+            let (caller_pid, is_admin, has_cap) = {
+                let sched = SCHEDULER.lock();
+                let pid = sched.current_pid();
+                let (admin, ok) = if sched.current_task_idx < sched.tasks.len() {
+                    let t = &sched.tasks[sched.current_task_idx];
+                    (
+                        t.cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok(),
+                        t.cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok(),
+                    )
+                } else {
+                    (false, false)
+                };
+                (pid, admin, ok)
             };
-            drop(sched);
             if !has_cap {
                 -13
             } else {
                 let surface_id = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
-                match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id, curr_idx as u32) {
+                match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id, caller_pid, is_admin) {
                     Ok(_) => 0,
                     Err(e) => e,
                 }
@@ -529,7 +543,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_SERVICE_START => {
             let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
             match crate::services::start(svc_id) {
-                Ok(_) => 0,
+                Ok(pid) => pid as i64,
                 Err(_) => -22,
             }
         }
@@ -554,15 +568,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 92: InputEventPoll
         SYS_INPUT_EVENT_POLL => {
-            let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            drop(sched);
+            let caller_pid = {
+                let sched = SCHEDULER.lock();
+                sched.current_pid()
+            };
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
             if len < 24 {
                 -22
             } else {
                 crate::input_queue::service_serial_commands();
-                if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
+                if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
                     let mut buf = [0u8; 24];
                     ev.encode(&mut buf);
                     if copy_to_user(addr, &buf).is_err() {
@@ -622,6 +637,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     match crate::elf::load_elf(user_img.elf) {
                         Ok(loaded) => {
                             let mut sched = SCHEDULER.lock();
+                            let caller_pid = sched.current_pid();
                             let mut caps = crate::capability::CapabilityTable::new();
                             let _ = caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
                             let _ = caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
@@ -629,7 +645,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                             let _ = caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                             let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                             let _ = caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
-                            let tid = sched.spawn_user_process(user_img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.satp, caps);
+                            let tid = sched.spawn_user_process(caller_pid, user_img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
                             drop(sched);
                             println!("[SPAWN] RISC-V Userspace process '{}' spawned (PID {})", user_img.name, tid);
                             tid as i64
@@ -657,7 +673,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             }
         }
 
-        SYS_SERVICE_HEARTBEAT => 0,
+        SYS_SERVICE_HEARTBEAT => {
+            let caller_pid = {
+                let sched = SCHEDULER.lock();
+                sched.current_pid()
+            };
+            match crate::services::heartbeat(caller_pid) {
+                Ok(()) => 0,
+                Err(()) => -13,
+            }
+        }
         SYS_PACKAGE_LIST => 14,
         SYS_PACKAGE_REGISTRY => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
@@ -743,15 +768,23 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => 0,
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
-            let mut sched = SCHEDULER.lock();
-            if let Some(code) = sched.reap_task(target_pid) {
-                drop(sched);
-                crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != target_pid);
-                code as i64
-            } else {
-                drop(sched);
-                crate::task::yield_now();
-                -30
+            let (caller_pid, code_res) = {
+                let mut sched = SCHEDULER.lock();
+                let caller = sched.current_pid();
+                let res = sched.reap_task(caller, target_pid);
+                (caller, res)
+            };
+            match code_res {
+                Ok(code) => {
+                    println!("[WAITPID] Caller PID {} reaped child {} with exit code {}", caller_pid, target_pid, code);
+                    code as i64
+                }
+                Err(err) => {
+                    if err == -30 {
+                        crate::task::yield_now();
+                    }
+                    err
+                }
             }
         }
 

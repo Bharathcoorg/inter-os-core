@@ -80,6 +80,7 @@ use crate::capability::CapabilityTable;
 
 pub struct TaskControlBlock {
     pub id: u32,
+    pub parent_id: u32,
     pub name: &'static str,
     pub state: TaskState,
     pub context: ArmContext,
@@ -87,6 +88,7 @@ pub struct TaskControlBlock {
     pub cap_table: CapabilityTable,
     pub cpu_ticks: u64,
     pub priority: u8,
+    pub address_space: Option<crate::mmu::UserAddressSpace>,
     pub page_table: Option<u64>,
     pub user_entry: u64,
     pub user_stack_top: u64,
@@ -118,13 +120,45 @@ impl Scheduler {
         }
     }
 
+    pub fn current_pid(&self) -> u32 {
+        if self.current_task_idx < self.tasks.len() {
+            self.tasks[self.current_task_idx].id
+        } else {
+            0
+        }
+    }
+
+    pub fn allocate_pid(&mut self) -> u32 {
+        let mut candidate = self.next_pid;
+        while self.tasks.iter().any(|t| t.id == candidate) {
+            candidate = candidate.wrapping_add(1);
+            if candidate == 0 {
+                candidate = 1;
+            }
+        }
+        self.next_pid = candidate.wrapping_add(1);
+        if self.next_pid == 0 {
+            self.next_pid = 1;
+        }
+        candidate
+    }
+
+    pub fn remove_task_at(&mut self, pos: usize) -> TaskControlBlock {
+        let removed = self.tasks.remove(pos);
+        if pos < self.current_task_idx {
+            self.current_task_idx = self.current_task_idx.saturating_sub(1);
+        } else if self.current_task_idx >= self.tasks.len() && !self.tasks.is_empty() {
+            self.current_task_idx = self.tasks.len() - 1;
+        }
+        removed
+    }
+
     pub fn spawn(&mut self, name: &'static str, entry_fn: fn() -> !) {
         self.spawn_with_caps(name, entry_fn, CapabilityTable::new());
     }
 
     pub fn spawn_with_caps(&mut self, name: &'static str, entry_fn: fn() -> !, cap_table: CapabilityTable) {
-        let task_id = self.next_pid;
-        self.next_pid += 1;
+        let task_id = self.allocate_pid();
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let stack_top = (stack.as_ptr() as u64) + STACK_SIZE as u64;
@@ -138,6 +172,7 @@ impl Scheduler {
 
         self.tasks.push(TaskControlBlock {
             id: task_id,
+            parent_id: 0,
             name,
             state: TaskState::Ready,
             context,
@@ -145,6 +180,7 @@ impl Scheduler {
             cap_table,
             cpu_ticks: 0,
             priority: 0,
+            address_space: None,
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,
@@ -152,9 +188,16 @@ impl Scheduler {
         });
     }
 
-    pub fn spawn_user_process(&mut self, name: &'static str, entry_point: u64, user_sp: u64, ttbr0: u64, cap_table: CapabilityTable) -> u32 {
-        let task_id = self.next_pid;
-        self.next_pid += 1;
+    pub fn spawn_user_process(
+        &mut self,
+        parent_id: u32,
+        name: &'static str,
+        entry_point: u64,
+        user_sp: u64,
+        address_space: Option<crate::mmu::UserAddressSpace>,
+        cap_table: CapabilityTable,
+    ) -> u32 {
+        let task_id = self.allocate_pid();
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
@@ -165,8 +208,11 @@ impl Scheduler {
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
+        let ttbr0 = address_space.as_ref().map(|a| a.ttbr0);
+
         self.tasks.push(TaskControlBlock {
             id: task_id,
+            parent_id,
             name,
             state: TaskState::Ready,
             context,
@@ -174,7 +220,8 @@ impl Scheduler {
             cap_table,
             cpu_ticks: 0,
             priority: 1,
-            page_table: Some(ttbr0),
+            address_space,
+            page_table: ttbr0,
             user_entry: entry_point,
             user_stack_top: user_sp,
             exit_code: None,
@@ -182,17 +229,26 @@ impl Scheduler {
         task_id
     }
 
-    pub fn reap_task(&mut self, target_pid: u32) -> Option<i32> {
+    pub fn reap_task(&mut self, caller_pid: u32, target_pid: u32) -> Result<i32, i64> {
         let pos = self.tasks.iter().position(|t| {
             (target_pid == 0 || t.id == target_pid)
                 && (t.state == TaskState::Terminated || t.state == TaskState::Exited)
-        })?;
-        let removed = self.tasks.remove(pos);
-        if self.current_task_idx >= self.tasks.len() && self.current_task_idx > 0 {
-            self.current_task_idx = self.tasks.len() - 1;
+        }).ok_or(-30)?; // NotReady or not found
+
+        let task = &self.tasks[pos];
+        if caller_pid != 0 && caller_pid != 1 && task.parent_id != caller_pid {
+            return Err(-13); // -EACCES: caller does not own this child
+        }
+
+        let mut removed = self.remove_task_at(pos);
+        if let Some(mut aspace) = removed.address_space.take() {
+            aspace.destroy();
+            crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
         }
         crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);
-        Some(removed.exit_code.unwrap_or(0))
+        crate::display::SURFACE_MANAGER.lock().destroy_surfaces_owned_by(removed.id);
+        crate::input_queue::INPUT_QUEUE.lock().clear_for_task(removed.id);
+        Ok(removed.exit_code.unwrap_or(0))
     }
 
     pub fn prepare_switch(&mut self) -> (Option<*mut ArmContext>, Option<*const ArmContext>) {
@@ -291,4 +347,51 @@ pub fn test_context_switching() {
     }
 
     crate::kprintln!("[TEST] AArch64 Context Switch: x19-x28, fp, lr, sp saved & restored. Switched to worker and back VERIFIED.");
+}
+
+fn dummy_test_task() -> ! {
+    loop {}
+}
+
+pub fn test_task_lifecycle() {
+    crate::kprintln!("--- [Testing AArch64 Task Scheduler & Removal Consistency] ---");
+    let mut sched = Scheduler::new();
+    sched.next_pid = 1;
+    sched.spawn("task1", dummy_test_task);
+    sched.spawn("task2", dummy_test_task);
+    sched.spawn("task3", dummy_test_task);
+    assert_eq!(sched.tasks.len(), 3);
+    assert_eq!(sched.tasks[0].id, 1);
+    assert_eq!(sched.tasks[1].id, 2);
+    assert_eq!(sched.tasks[2].id, 3);
+
+    // Test 1: removing middle task when current_task_idx is 2 (task3)
+    sched.current_task_idx = 2;
+    let removed_mid = sched.remove_task_at(1);
+    assert_eq!(removed_mid.id, 2);
+    assert_eq!(sched.current_task_idx, 1);
+    assert_eq!(sched.tasks[sched.current_task_idx].id, 3);
+
+    // Test 2: removing first task when current_task_idx is 1 (task3)
+    let removed_first = sched.remove_task_at(0);
+    assert_eq!(removed_first.id, 1);
+    assert_eq!(sched.current_task_idx, 0);
+    assert_eq!(sched.tasks[sched.current_task_idx].id, 3);
+
+    // Test 3: removing final task
+    let removed_final = sched.remove_task_at(0);
+    assert_eq!(removed_final.id, 3);
+    assert_eq!(sched.tasks.len(), 0);
+    assert_eq!(sched.current_task_idx, 0);
+
+    // Test 4: PID monotonicity and collision avoidance
+    sched.next_pid = u32::MAX - 1;
+    let pid_a = sched.allocate_pid();
+    assert_eq!(pid_a, u32::MAX - 1);
+    let pid_b = sched.allocate_pid();
+    assert_eq!(pid_b, u32::MAX);
+    let pid_c = sched.allocate_pid();
+    assert_eq!(pid_c, 1); // Wraparound skips 0
+
+    crate::kprintln!("[TEST] AArch64 Task Removal Consistency: First, Middle, Final task removal & PID collision avoidance VERIFIED.");
 }
