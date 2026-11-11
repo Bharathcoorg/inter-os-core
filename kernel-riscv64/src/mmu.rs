@@ -93,7 +93,7 @@ pub const USER_CODE_VADDR: usize = 0x4000_0000;
 pub const USER_STACK_TOP: usize = 0x4000_2000;
 
 pub const ELF_USER_CODE_VADDR: usize = 0x0040_0000;
-pub const ELF_USER_STACK_TOP: usize = 0x0080_0000 + 16 * PAGE_SIZE;
+pub const ELF_USER_STACK_TOP: usize = 0x0400_0000;
 
 /// Copies userspace code payload into the dedicated physical code frame.
 pub unsafe fn load_user_code(code: &[u8]) {

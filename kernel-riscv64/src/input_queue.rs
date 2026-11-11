@@ -7,36 +7,36 @@ use spin::Mutex;
 
 #[derive(Debug, Clone, Copy)]
 pub struct InputEvent {
-    pub ev_type: u16,
-    pub code: u16,
-    pub value: i32,
+    pub kind: u8,
+    pub _pad: [u8; 3],
     pub x: u32,
     pub y: u32,
-    pub slot: u8,
-    pub timestamp_ms: u64,
+    pub dx: i32,
+    pub dy: i32,
+    pub scale_milli: u32,
 }
 
 impl InputEvent {
     pub const fn empty() -> Self {
         Self {
-            ev_type: 0,
-            code: 0,
-            value: 0,
+            kind: 0,
+            _pad: [0; 3],
             x: 0,
             y: 0,
-            slot: 0,
-            timestamp_ms: 0,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
         }
     }
 
     pub fn encode(&self, out: &mut [u8; 24]) {
-        out[0..2].copy_from_slice(&self.ev_type.to_le_bytes());
-        out[2..4].copy_from_slice(&self.code.to_le_bytes());
-        out[4..8].copy_from_slice(&self.value.to_le_bytes());
-        out[8..12].copy_from_slice(&self.x.to_le_bytes());
-        out[12..16].copy_from_slice(&self.y.to_le_bytes());
-        out[16] = self.slot;
-        out[17..24].copy_from_slice(&self.timestamp_ms.to_le_bytes()[..7]);
+        out.fill(0);
+        out[0] = self.kind;
+        out[4..8].copy_from_slice(&self.x.to_le_bytes());
+        out[8..12].copy_from_slice(&self.y.to_le_bytes());
+        out[12..16].copy_from_slice(&self.dx.to_le_bytes());
+        out[16..20].copy_from_slice(&self.dy.to_le_bytes());
+        out[20..24].copy_from_slice(&self.scale_milli.to_le_bytes());
     }
 }
 
@@ -89,26 +89,26 @@ pub fn parse_input_line(line: &str) {
     if trimmed.starts_with("INPUT_TOUCH:") {
         let payload = &trimmed["INPUT_TOUCH:".len()..];
         let mut parts = payload.split(',');
-        let slot = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        let _slot = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
         let phase = parts.next().unwrap_or("0");
         let x = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
         let y = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
-        let value = match phase {
+        let kind = match phase {
             "down" | "1" => 1,
             "move" | "2" => 2,
-            "up" | "0" => 0,
+            "up" | "0" => 3,
             _ => 1,
         };
 
         let ev = InputEvent {
-            ev_type: 3, // EV_ABS
-            code: 0x35, // ABS_MT_POSITION_X
-            value,
+            kind,
+            _pad: [0; 3],
             x,
             y,
-            slot,
-            timestamp_ms: 0,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
         };
         INPUT_QUEUE.lock().push(ev);
     } else if trimmed.starts_with("TAP:") {
@@ -118,22 +118,22 @@ pub fn parse_input_line(line: &str) {
         let y = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
         let down_ev = InputEvent {
-            ev_type: 3,
-            code: 0x35,
-            value: 1,
+            kind: 1,
+            _pad: [0; 3],
             x,
             y,
-            slot: 0,
-            timestamp_ms: 0,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
         };
         let up_ev = InputEvent {
-            ev_type: 3,
-            code: 0x35,
-            value: 0,
+            kind: 3,
+            _pad: [0; 3],
             x,
             y,
-            slot: 0,
-            timestamp_ms: 0,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
         };
         let mut q = INPUT_QUEUE.lock();
         q.push(down_ev);

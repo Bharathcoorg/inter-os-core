@@ -7,7 +7,7 @@
 //! dynamically allocates Sv39 user pages, enforces W^X permissions,
 //! configures 64 KiB stack with an unmapped guard page, and returns entry point.
 
-use crate::mmu::{PAGE_SIZE, UserAddressSpace, allocate_frame};
+use crate::mmu::{PAGE_SIZE, UserAddressSpace, allocate_frame, recycle_frame};
 
 pub struct LoadedElf {
     pub entry_point: usize,
@@ -48,8 +48,8 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         return Err("Invalid program header table");
     }
 
-    let stack_top_addr = 0x0080_0000 + 16 * PAGE_SIZE;
-    let stack_bottom_addr = 0x0080_0000;
+    let stack_top_addr = crate::mmu::ELF_USER_STACK_TOP;
+    let stack_bottom_addr = stack_top_addr - 16 * PAGE_SIZE;
     let stack_guard_start = stack_bottom_addr;
     let stack_guard_end = stack_top_addr;
 
@@ -107,7 +107,10 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let mut cur_page = page_start;
             while cur_page < page_end {
                 let frame = allocate_frame().ok_or("Out of physical memory allocating ELF page")?;
-                aspace.map_user_page(cur_page, frame, is_write, is_exec)?;
+                if let Err(e) = aspace.map_user_page(cur_page, frame, is_write, is_exec) {
+                    recycle_frame(frame);
+                    return Err(e);
+                }
 
                 let page_file_start = p_vaddr.max(cur_page);
                 let page_file_end = (p_vaddr + p_filesz).min(cur_page + PAGE_SIZE);
@@ -136,7 +139,10 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         for p in 1..16 {
             let stack_page_vaddr = stack_bottom_addr + p * PAGE_SIZE;
             let frame = allocate_frame().ok_or("Out of physical memory allocating user stack")?;
-            aspace.map_user_page(stack_page_vaddr, frame, true, false)?;
+            if let Err(e) = aspace.map_user_page(stack_page_vaddr, frame, true, false) {
+                recycle_frame(frame);
+                return Err(e);
+            }
         }
 
         if !entry_in_executable_segment {

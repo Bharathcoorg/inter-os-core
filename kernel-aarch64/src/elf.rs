@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use crate::mmu::{allocate_frame, recycle_frame, UserAddressSpace};
 
-pub const USER_STACK_TOP: u64 = 0x0080_0000;
+pub const USER_STACK_TOP: u64 = 0x2000_0000;
 pub const USER_STACK_SIZE: u64 = 65536; // 64 KiB stack (16 pages)
 pub const USER_CANONICAL_LIMIT: u64 = 0x0000_8000_0000_0000;
 

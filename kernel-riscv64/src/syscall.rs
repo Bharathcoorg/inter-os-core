@@ -179,26 +179,25 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id)
-                .map(|t| t.cap_table)
-                .unwrap_or_else(|| {
-                    let mut c = crate::capability::CapabilityTable::new();
-                    let _ = c.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
-                    c
-                });
+            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
             drop(sched);
 
-            let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
-            if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
-                -14
-            } else {
-                let mut router = crate::ipc::IPC_ROUTER.lock();
-                match router.send(&caps, curr_id, recipient, msg_type, &kbuf[..len]) {
-                    Ok(_) => len as i64,
-                    Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
-                    Err(crate::ipc::IpcError::TargetNotFound) => -3,
-                    Err(crate::ipc::IpcError::MailboxFull) => -11, // -EAGAIN
-                    Err(crate::ipc::IpcError::MailboxEmpty) => -11,
+            match caps_opt {
+                None => -13,
+                Some(caps) => {
+                    let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
+                    if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
+                        -14
+                    } else {
+                        let mut router = crate::ipc::IPC_ROUTER.lock();
+                        match router.send(&caps, curr_id, recipient, msg_type, &kbuf[..len]) {
+                            Ok(_) => len as i64,
+                            Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
+                            Err(crate::ipc::IpcError::TargetNotFound) => -3,
+                            Err(crate::ipc::IpcError::MailboxFull) => -11, // -EAGAIN
+                            Err(crate::ipc::IpcError::MailboxEmpty) => -11,
+                        }
+                    }
                 }
             }
         }
@@ -210,28 +209,27 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id)
-                .map(|t| t.cap_table)
-                .unwrap_or_else(|| {
-                    let mut c = crate::capability::CapabilityTable::new();
-                    let _ = c.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
-                    c
-                });
+            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
             drop(sched);
 
-            let mut router = crate::ipc::IPC_ROUTER.lock();
-            match router.receive(&caps, curr_id) {
-                Ok(msg) => {
-                    let to_copy = msg.len.min(max_len);
-                    if to_copy > 0 && copy_to_user(addr, &msg.payload[..to_copy]).is_err() {
-                        -14
-                    } else {
-                        to_copy as i64
+            match caps_opt {
+                None => -13,
+                Some(caps) => {
+                    let mut router = crate::ipc::IPC_ROUTER.lock();
+                    match router.receive(&caps, curr_id) {
+                        Ok(msg) => {
+                            let to_copy = msg.len.min(max_len);
+                            if to_copy > 0 && copy_to_user(addr, &msg.payload[..to_copy]).is_err() {
+                                -14
+                            } else {
+                                to_copy as i64
+                            }
+                        }
+                        Err(crate::ipc::IpcError::MailboxEmpty) => -11, // -EAGAIN
+                        Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
+                        Err(_) => -1,
                     }
                 }
-                Err(crate::ipc::IpcError::MailboxEmpty) => -11, // -EAGAIN
-                Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
-                Err(_) => -1,
             }
         }
 
@@ -239,31 +237,30 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let addr = a0;
             let sched = SCHEDULER.lock();
             let curr_id = sched.current_task_id().0 as u32;
-            let caps = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id)
-                .map(|t| t.cap_table)
-                .unwrap_or_else(|| {
-                    let mut c = crate::capability::CapabilityTable::new();
-                    let _ = c.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
-                    c
-                });
+            let caps_opt = sched.tasks.iter().flatten().find(|t| t.id.0 as u32 == curr_id).map(|t| t.cap_table);
             drop(sched);
 
-            let mut router = crate::ipc::IPC_ROUTER.lock();
-            match router.receive_meta(&caps, curr_id) {
-                Ok((sender, msg_type, len)) => {
-                    let mut meta = [0u8; 12];
-                    meta[0..4].copy_from_slice(&sender.to_le_bytes());
-                    meta[4..8].copy_from_slice(&msg_type.to_le_bytes());
-                    meta[8..12].copy_from_slice(&(len as u32).to_le_bytes());
-                    if copy_to_user(addr, &meta).is_err() {
-                        -14
-                    } else {
-                        12
+            match caps_opt {
+                None => -13,
+                Some(caps) => {
+                    let mut router = crate::ipc::IPC_ROUTER.lock();
+                    match router.receive_meta(&caps, curr_id) {
+                        Ok((sender, msg_type, len)) => {
+                            let mut meta = [0u8; 12];
+                            meta[0..4].copy_from_slice(&sender.to_le_bytes());
+                            meta[4..8].copy_from_slice(&msg_type.to_le_bytes());
+                            meta[8..12].copy_from_slice(&(len as u32).to_le_bytes());
+                            if copy_to_user(addr, &meta).is_err() {
+                                -14
+                            } else {
+                                12
+                            }
+                        }
+                        Err(crate::ipc::IpcError::MailboxEmpty) => -11,
+                        Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
+                        Err(_) => -1,
                     }
                 }
-                Err(crate::ipc::IpcError::MailboxEmpty) => -11,
-                Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
-                Err(_) => -1,
             }
         }
 
@@ -438,19 +435,25 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 ""
             };
 
-            let img = match target_name {
-                "compositor" => crate::images::service_image(9),
-                "launcher" => crate::images::service_image(10),
-                "displayd" => crate::images::service_image(1),
-                "inputd" => crate::images::service_image(2),
-                "storaged" => crate::images::service_image(3),
-                "netd" => crate::images::service_image(4),
-                "powerd" => crate::images::service_image(5),
-                _ => {
-                    let id = a0 as u8;
-                    crate::images::service_image(id)
-                }
-            };
+            let img = crate::images::app_image(target_name)
+                .or_else(|| match target_name {
+                    "compositor" => crate::images::service_image(9),
+                    "launcher" => crate::images::service_image(10),
+                    "displayd" => crate::images::service_image(1),
+                    "inputd" => crate::images::service_image(2),
+                    "storaged" => crate::images::service_image(3),
+                    "netd" => crate::images::service_image(4),
+                    "powerd" => crate::images::service_image(5),
+                    "modemd" => crate::images::service_image(6),
+                    "audiod" => crate::images::service_image(7),
+                    "camerad" => crate::images::service_image(8),
+                    "sensord" => crate::images::service_image(11),
+                    "aid" => crate::images::service_image(12),
+                    _ => {
+                        let id = a0 as u8;
+                        crate::images::service_image(id)
+                    }
+                });
 
             if let Some(user_img) = img {
                 match crate::elf::load_elf(user_img.elf) {
@@ -462,6 +465,8 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                         let _ = caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
                         let _ = caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
                         let _ = caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+                        let _ = caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                        let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                         SCHEDULER.lock().add_task_with_caps(new_tid, satp, loaded.entry_point, loaded.stack_top, kstack_top, caps);
                         crate::ipc::IPC_ROUTER.lock().register_task(new_tid.0 as u32);
                         println!("[SPAWN] RISC-V Userspace process '{}' spawned (PID {})", user_img.name, new_tid.0);
@@ -473,7 +478,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     }
                 }
             } else {
-                10 // Fallback PID 10 for unknown name
+                -2 // -ENOENT
             }
         }
 

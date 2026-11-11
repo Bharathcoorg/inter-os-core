@@ -71,7 +71,7 @@ pub const SYS_FS_READ_AT: u64 = 164;
 
 fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
     const START: u64 = 0x0000_1000;
-    const END: u64 = 0x0000_8000_0000_0000;
+    const END: u64 = 0x3FFF_FFFF; // 1 GiB user boundary, strictly below kernel DRAM (0x4000_0000)
     const CODE_START: u64 = 0x0040_0000;
     const CODE_END: u64 = CODE_START + 0x0020_0000; // 2 MiB code region
     if addr < START || len == 0 {
@@ -81,7 +81,11 @@ fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
     if end > END {
         return Err(-14);
     }
-    if write && addr >= CODE_START && addr < CODE_END {
+    // Reject any range overlapping supervisor MMIO apertures (0x0100_0000..0x0A00_0000)
+    if addr < 0x0A00_0000 && end > 0x0100_0000 {
+        return Err(-14);
+    }
+    if write && (addr < CODE_END && end > CODE_START) {
         return Err(-13); // W^X violation
     }
     Ok(())
@@ -431,21 +435,35 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 ""
             };
 
-            let img = match target_name {
-                "compositor" => crate::images::service_image(9),
-                "launcher" => crate::images::service_image(10),
-                "displayd" => crate::images::service_image(1),
-                "inputd" => crate::images::service_image(2),
-                "storaged" => crate::images::service_image(3),
-                "netd" => crate::images::service_image(4),
-                "powerd" => crate::images::service_image(5),
-                _ => {
-                    let id = a0 as u8;
-                    crate::images::service_image(id)
-                }
-            };
+            let img = crate::images::app_image(target_name)
+                .or_else(|| match target_name {
+                    "compositor" => crate::images::service_image(9),
+                    "launcher" => crate::images::service_image(10),
+                    "displayd" => crate::images::service_image(1),
+                    "inputd" => crate::images::service_image(2),
+                    "storaged" => crate::images::service_image(3),
+                    "netd" => crate::images::service_image(4),
+                    "powerd" => crate::images::service_image(5),
+                    "modemd" => crate::images::service_image(6),
+                    "audiod" => crate::images::service_image(7),
+                    "camerad" => crate::images::service_image(8),
+                    "sensord" => crate::images::service_image(11),
+                    "aid" => crate::images::service_image(12),
+                    _ => {
+                        let id = a0 as u8;
+                        crate::images::service_image(id)
+                    }
+                });
 
             if let Some(user_img) = img {
+                let sched = SCHEDULER.lock();
+                for task in &sched.tasks {
+                    if task.name == user_img.name && task.state == crate::task::TaskState::Ready {
+                        return task.id as i64;
+                    }
+                }
+                drop(sched);
+
                 match crate::elf::load_elf(user_img.elf) {
                     Ok(loaded) => {
                         let mut sched = SCHEDULER.lock();
@@ -453,6 +471,8 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                         caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
                         caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
                         caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+                        caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                        caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                         let tid = sched.spawn_user_process(user_img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.ttbr0, caps);
                         drop(sched);
                         crate::kprintln!("[SPAWN] AArch64 Userspace process '{}' spawned (PID {})", user_img.name, tid);
@@ -464,7 +484,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                     }
                 }
             } else {
-                10 // Fallback PID 10 for unknown name
+                -2 // -ENOENT
             }
         }
         SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => 0,

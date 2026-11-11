@@ -13,7 +13,7 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
-const SERVICE_BUFFER: usize = 512;
+const SERVICE_BUFFER: usize = 1024;
 const POLL_INTERVAL_TICKS: u64 = 100;
 
 #[no_mangle]

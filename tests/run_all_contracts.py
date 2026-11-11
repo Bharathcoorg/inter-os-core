@@ -95,6 +95,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_kernel_test_diagnostics.py": 16,
     "tests/test_launcher_dirty_band_contract.py": 21,
     "tests/test_launcher_power_menu_contract.py": 9,
+    "tests/test_launcher_present_truth_contract.py": 13,
     "tests/test_launcher_search_truth_contract.py": 8,
     "tests/test_launcher_volume_hud_contract.py": 6,
     "tests/test_licence_contracts.py": 3,

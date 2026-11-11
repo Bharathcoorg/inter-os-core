@@ -2981,8 +2981,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         81 => {
             let (user_ptr, user_len) = if a1 < 0x1000 && a3 > 0 { (a2, a3 as usize) } else { (a1, a2 as usize) };
             if user_len == 0 || user_len > 4096 { return SyscallResult::InvalidArguments as i64; }
-            let cap = user_len.min(512);
-            let mut out = [0u8; 512];
+            let cap = user_len.min(1024);
+            let mut out = [0u8; 1024];
             match sys_service_list(&mut out[..cap]) {
                 Ok(n) => {
                     if copy_to_user(user_ptr, &out[..n]).is_err() {

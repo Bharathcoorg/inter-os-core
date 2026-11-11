@@ -919,11 +919,15 @@ impl UserAddressSpace {
         if is_write && is_exec {
             return Err("W^X violation: writable user mapping must be non-executable");
         }
-        if vaddr >= 0x0000_8000_0000_0000 || vaddr < 0x1000 {
+        if vaddr >= 0x4000_0000 || vaddr < 0x1000 {
             return Err("Virtual address outside canonical user range");
         }
 
         let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
+        let l1_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        if l1_idx != 0 {
+            return Err("Virtual address outside L1 user slot (0..1GB)");
+        }
         let l1_entry = l1.entries[0];
         if l1_entry & DESC_VALID == 0 {
             return Err("L1 root table corrupt");
@@ -932,13 +936,17 @@ impl UserAddressSpace {
         let l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
 
         let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
-        let l3_phys = if l2.entries[l2_idx] & DESC_VALID == 0 {
+        let l2_entry = l2.entries[l2_idx];
+        if l2_entry & DESC_VALID != 0 && (l2_entry & DESC_TABLE == 0) {
+            return Err("Cannot map user page over device block entry");
+        }
+        let l3_phys = if l2_entry & DESC_VALID == 0 {
             let frame = allocate_frame().ok_or("OOM allocating L3 page table")?;
             l2.entries[l2_idx] = frame | DESC_TABLE | DESC_VALID;
             self.table_frames.push(frame);
             frame
         } else {
-            l2.entries[l2_idx] & 0x0000_FFFF_FFFF_F000
+            l2_entry & 0x0000_FFFF_FFFF_F000
         };
 
         let l3 = unsafe { &mut *(l3_phys as *mut PageTable) };

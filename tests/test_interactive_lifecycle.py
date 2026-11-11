@@ -109,6 +109,14 @@ def send_monitor_cmd(sock, cmd):
     time.sleep(0.2)
     return resp.decode('utf-8', errors='replace')
 
+def wait_for_screendump(ppm_path, timeout=5.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        if os.path.exists(ppm_path) and os.path.getsize(ppm_path) > 1000:
+            return os.path.getsize(ppm_path)
+        time.sleep(0.05)
+    return os.path.getsize(ppm_path) if os.path.exists(ppm_path) else 0
+
 class SerialReader:
     def __init__(self, sock):
         self.sock = sock
@@ -212,8 +220,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
             try: os.remove(ppm_app)
             except: pass
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
-        time.sleep(0.5)
-        sz = os.path.getsize(ppm_app) if os.path.exists(ppm_app) else 0
+        sz = wait_for_screendump(ppm_app)
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app} ({sz} bytes)")
         time.sleep(0.5)
     else:
@@ -255,8 +262,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
                         try: os.remove(ppm_inter)
                         except: pass
                     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
-                    time.sleep(0.4)
-                    sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
+                    sz_inter = wait_for_screendump(ppm_inter)
                     print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
             else:
                 time.sleep(0.8)
@@ -317,8 +323,7 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
             try: os.remove(ppm_reaped)
             except: pass
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
-        time.sleep(0.5)
-        sz_reaped = os.path.getsize(ppm_reaped) if os.path.exists(ppm_reaped) else 0
+        sz_reaped = wait_for_screendump(ppm_reaped)
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
         time.sleep(0.5)
     else:

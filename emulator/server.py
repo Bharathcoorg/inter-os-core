@@ -2373,7 +2373,10 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     # The monitor and serial ports are QEMU's own listeners: if another
     # process holds them, QEMU exits at startup. Say so before spawning
     # rather than reporting a launch that cannot have succeeded.
-    for port, what in ((MONITOR_PORT, "QEMU monitor"), (SERIAL_TCP_PORT, "guest serial (COM1)")):
+    target_serial_port = (prof.get("serial") or {}).get("port") or SERIAL_TCP_PORT
+    target_monitor_port = (prof.get("monitor") or {}).get("port") or MONITOR_PORT
+
+    for port, what in ((target_monitor_port, "QEMU monitor"), (target_serial_port, "guest serial")):
         if _port_occupied(port):
             message = (f"The {what} port {port} is already in use by another process, so QEMU cannot "
                        f"start. Stop that process (a QEMU this Studio did not launch, for instance) "
@@ -2394,8 +2397,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-m", f"{ram}M",
         "-smp", str(smp),
         "-name", "InterOS Core — Native 720×1440 (1:1)",
-        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
-        "-serial", f"tcp:127.0.0.1:{SERIAL_TCP_PORT},server,nowait",
+        "-monitor", f"tcp:127.0.0.1:{target_monitor_port},server,nowait",
+        "-serial", f"tcp:127.0.0.1:{target_serial_port},server,nowait",
         "-display", display_backend,
         "-vnc", f"127.0.0.1:{vnc_display}"
     ]
@@ -2607,10 +2610,10 @@ def start_qemu_backend():
 last_telemetry_query = 0.0
 telemetry_lock = threading.Lock()
 
-def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=False):
+def query_qemu_monitor(host='127.0.0.1', port=None, timeout=0.35, force=False):
     """
     Queries real-time microkernel registers, CPU execution status, and block
-    device telemetry from the QEMU HMP monitor at 127.0.0.1:44445.
+    device telemetry from the QEMU HMP monitor at 127.0.0.1:44445 (or profile port).
 
     Every read goes through send_qemu_monitor_cmd(): QEMU's HMP accepts a
     single client, and that helper owns the server's one persistent monitor
@@ -2627,6 +2630,10 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
     tracked QEMU process is alive AND the monitor answers; the port probe is
     kept as a secondary signal that can never override the process check.
     """
+    global last_telemetry_query, latest_telemetry
+    if port is None:
+        prof = SUPPORTED_PROFILES.get(active_profile_key) or {}
+        port = (prof.get("monitor") or {}).get("port") or MONITOR_PORT
     global last_telemetry_query, latest_telemetry
     now = time.time()
     if not force and now - last_telemetry_query < 0.8:
@@ -2682,7 +2689,7 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
                 reg_val = "0x" + match.group(2).upper()
                 reg_dict[reg_name] = reg_val
 
-            rip_val = reg_dict.get("RIP") or reg_dict.get("EIP") or "Unavailable"
+            rip_val = reg_dict.get("RIP") or reg_dict.get("EIP") or reg_dict.get("PC") or "Unavailable"
             if "HLT=1" in regs_raw:
                 is_halted = True
             elif "HLT=0" in regs_raw:
@@ -2702,6 +2709,7 @@ def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=
             latest_telemetry["cpu"]["thread_id"] = thread_id
             latest_telemetry["cpu"]["halted"] = is_halted
             latest_telemetry["cpu"]["rip"] = rip_val
+            latest_telemetry["cpu"]["pc"] = rip_val
             latest_telemetry["cpu"]["registers"] = reg_dict
             latest_telemetry["block"]["device"] = block_device
             latest_telemetry["block"]["file"] = block_file
