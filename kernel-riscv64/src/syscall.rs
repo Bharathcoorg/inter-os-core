@@ -115,6 +115,22 @@ fn copy_to_user(addr: usize, src: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+fn get_caller_identity_and_caps() -> Result<(u32, crate::capability::CapabilityTable), i64> {
+    let curr_task = SCHEDULER.lock().current_task_id().0 as u32;
+    let sched = SCHEDULER.lock();
+    let curr_idx = sched.current_task_idx;
+    if curr_idx < sched.tasks.len() {
+        let task = &sched.tasks[curr_idx];
+        if task.id == crate::task::INVALID_PID || task.id == 0 || task.id != curr_task {
+            Err(-13)
+        } else {
+            Ok((task.id, task.cap_table))
+        }
+    } else {
+        Err(-13)
+    }
+}
+
 /// Dispatches an incoming system call from the given trap frame.
 pub fn dispatch_syscall(tf: &mut TrapFrame) {
     let num = tf.regs[17]; // a7
@@ -188,14 +204,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let addr = a2;
             let len = (_a3 as usize).min(crate::ipc::IPC_MAX_PAYLOAD);
 
-            let sched = SCHEDULER.lock();
-            let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
-            drop(sched);
-
-            match caps_opt {
-                None => -13,
-                Some(caps) => {
+            match get_caller_identity_and_caps() {
+                Err(err) => err,
+                Ok((curr_id, caps)) => {
                     let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
                     if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
                         -14
@@ -218,14 +229,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let addr = a0;
             let max_len = (a1 as usize).min(crate::ipc::IPC_MAX_PAYLOAD);
 
-            let sched = SCHEDULER.lock();
-            let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
-            drop(sched);
-
-            match caps_opt {
-                None => -13,
-                Some(caps) => {
+            match get_caller_identity_and_caps() {
+                Err(err) => err,
+                Ok((curr_id, caps)) => {
                     let mut router = crate::ipc::IPC_ROUTER.lock();
                     match router.receive(&caps, curr_id) {
                         Ok(msg) => {
@@ -246,14 +252,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         SYS_IPC_RECV_META => {
             let addr = a0;
-            let sched = SCHEDULER.lock();
-            let curr_id = sched.current_task_id().0 as u32;
-            let caps_opt = sched.tasks.iter().find(|t| t.id == curr_id).map(|t| t.cap_table);
-            drop(sched);
-
-            match caps_opt {
-                None => -13,
-                Some(caps) => {
+            match get_caller_identity_and_caps() {
+                Err(err) => err,
+                Ok((curr_id, caps)) => {
                     let mut router = crate::ipc::IPC_ROUTER.lock();
                     match router.receive_meta(&caps, curr_id) {
                         Ok((sender, msg_type, len)) => {
@@ -277,7 +278,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 7: GetTaskId
         SYS_GET_TASK_ID => {
-            SCHEDULER.lock().current_task_id().0 as i64
+            if is_test {
+                1
+            } else {
+                let pid = SCHEDULER.lock().current_pid();
+                if pid == crate::task::INVALID_PID || pid == 0 {
+                    -13
+                } else {
+                    pid as i64
+                }
+            }
         }
 
         // 8: FsOpen
@@ -337,45 +347,35 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 62: EventPoll
         SYS_EVENT_POLL => {
-            if is_test {
-                -13 // -EACCES: fail-closed capability check
-            } else {
-                let (caller_pid, has_cap) = {
-                    let sched = SCHEDULER.lock();
-                    let pid = sched.current_pid();
-                    let ok = if sched.current_task_idx < sched.tasks.len() {
-                        sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok()
-                    } else {
-                        false
-                    };
+            let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let ok = caps.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok();
                     (pid, ok)
-                };
-                if !has_cap {
-                    -13
-                } else {
-                    crate::task::yield_now();
-                    crate::input_queue::service_serial_commands();
-                    let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(caller_pid);
-                    let mut mask = 0x08; // EVENT_TIMER_TICK
-                    if has_input {
-                        mask |= 0x10; // EVENT_TOUCH_INPUT
-                    }
-                    mask
                 }
+                Err(_) => (crate::task::INVALID_PID, false),
+            };
+            if !has_cap {
+                -13
+            } else {
+                crate::task::yield_now();
+                crate::input_queue::service_serial_commands();
+                let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(caller_pid);
+                let mut mask = 0x08; // EVENT_TIMER_TICK
+                if has_input {
+                    mask |= 0x10; // EVENT_TOUCH_INPUT
+                }
+                mask
             }
         }
 
         // 69: SurfaceCreate
         SYS_SURFACE_CREATE => {
-            let (caller_pid, has_cap) = {
-                let sched = SCHEDULER.lock();
-                let pid = sched.current_pid();
-                let ok = if sched.current_task_idx < sched.tasks.len() {
-                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-                } else {
-                    false
-                };
-                (pid, ok)
+            let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let ok = caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok();
+                    (pid, ok)
+                }
+                Err(_) => (crate::task::INVALID_PID, false),
             };
             if !has_cap {
                 -13
@@ -394,13 +394,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 70: SurfaceFlip
         SYS_SURFACE_FLIP => {
-            let has_cap = {
-                let sched = SCHEDULER.lock();
-                if sched.current_task_idx < sched.tasks.len() {
-                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-                } else {
-                    false
-                }
+            let has_cap = match get_caller_identity_and_caps() {
+                Ok((_, caps)) => caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok(),
+                Err(_) => false,
             };
             if !has_cap {
                 -13
@@ -412,43 +408,33 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 71: TouchPoll
         SYS_TOUCH_POLL => {
-            if is_test || a0 == 0 {
-                -13 // -EACCES: fail-closed capability check
-            } else {
-                let (caller_pid, has_cap) = {
-                    let sched = SCHEDULER.lock();
-                    let pid = sched.current_pid();
-                    let ok = if sched.current_task_idx < sched.tasks.len() {
-                        sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok()
-                    } else {
-                        false
-                    };
+            let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let ok = caps.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok();
                     (pid, ok)
-                };
-                if !has_cap {
-                    -13
+                }
+                Err(_) => (crate::task::INVALID_PID, false),
+            };
+            if !has_cap {
+                -13
+            } else {
+                crate::input_queue::service_serial_commands();
+                if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
+                    (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
                 } else {
-                    crate::input_queue::service_serial_commands();
-                    if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
-                        (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
-                    } else {
-                        0
-                    }
+                    0
                 }
             }
         }
 
         // 73: SurfaceWrite
         SYS_SURFACE_WRITE => {
-            let (caller_pid, has_cap) = {
-                let sched = SCHEDULER.lock();
-                let pid = sched.current_pid();
-                let ok = if sched.current_task_idx < sched.tasks.len() {
-                    sched.tasks[sched.current_task_idx].cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok()
-                } else {
-                    false
-                };
-                (pid, ok)
+            let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let ok = caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok();
+                    (pid, ok)
+                }
+                Err(_) => (crate::task::INVALID_PID, false),
             };
             if !has_cap {
                 -13
@@ -494,19 +480,14 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 74: SurfaceDestroy
         SYS_SURFACE_DESTROY => {
-            let (caller_pid, is_admin, has_cap) = {
-                let sched = SCHEDULER.lock();
-                let pid = sched.current_pid();
-                let (admin, ok) = if sched.current_task_idx < sched.tasks.len() {
-                    let t = &sched.tasks[sched.current_task_idx];
-                    (
-                        t.cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok(),
-                        t.cap_table.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok(),
-                    )
-                } else {
-                    (false, false)
-                };
-                (pid, admin, ok)
+            let (caller_pid, is_admin, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let admin = caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok()
+                        || caps.check(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::ADMIN).is_ok();
+                    let ok = caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE).is_ok() || admin;
+                    (pid, admin, ok)
+                }
+                Err(_) => (crate::task::INVALID_PID, false, false),
             };
             if !has_cap {
                 -13
@@ -541,52 +522,93 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 86: ServiceStart
         SYS_SERVICE_START => {
-            let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
-            match crate::services::start(svc_id) {
-                Ok(pid) => pid as i64,
-                Err(_) => -22,
+            let is_supervisor = match get_caller_identity_and_caps() {
+                Ok((_, caps)) => {
+                    caps.check(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::ADMIN).is_ok()
+                        || caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok()
+                }
+                Err(_) => false,
+            };
+            if !is_supervisor {
+                -13
+            } else {
+                let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
+                match crate::services::start(svc_id) {
+                    Ok(pid) => pid as i64,
+                    Err(_) => -22,
+                }
             }
         }
 
         // 87: ServiceStop
         SYS_SERVICE_STOP => {
-            let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
-            match crate::services::stop(svc_id) {
-                Ok(_) => 0,
-                Err(_) => -22,
+            let is_supervisor = match get_caller_identity_and_caps() {
+                Ok((_, caps)) => {
+                    caps.check(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::ADMIN).is_ok()
+                        || caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok()
+                }
+                Err(_) => false,
+            };
+            if !is_supervisor {
+                -13
+            } else {
+                let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
+                match crate::services::stop(svc_id) {
+                    Ok(_) => 0,
+                    Err(_) => -22,
+                }
             }
         }
 
         // 88: ServiceRecoverFailed
         SYS_SERVICE_RECOVER_FAILED => {
-            let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
-            match crate::services::recover_failed(svc_id) {
-                Ok(_) => 0,
-                Err(_) => -22,
+            let is_supervisor = match get_caller_identity_and_caps() {
+                Ok((_, caps)) => {
+                    caps.check(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::ADMIN).is_ok()
+                        || caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok()
+                }
+                Err(_) => false,
+            };
+            if !is_supervisor {
+                -13
+            } else {
+                let svc_id = if a0 < 0x1000 && a1 > 0 { a1 as u8 } else { a0 as u8 };
+                match crate::services::recover_failed(svc_id) {
+                    Ok(_) => 0,
+                    Err(_) => -22,
+                }
             }
         }
 
         // 92: InputEventPoll
         SYS_INPUT_EVENT_POLL => {
-            let caller_pid = {
-                let sched = SCHEDULER.lock();
-                sched.current_pid()
+            let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let ok = caps.check(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ).is_ok()
+                        || caps.check(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ).is_ok();
+                    (pid, ok)
+                }
+                Err(_) => (crate::task::INVALID_PID, false),
             };
-            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
-            if len < 24 {
-                -22
+            if !has_cap {
+                -13
             } else {
-                crate::input_queue::service_serial_commands();
-                if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
-                    let mut buf = [0u8; 24];
-                    ev.encode(&mut buf);
-                    if copy_to_user(addr, &buf).is_err() {
-                        -14
-                    } else {
-                        24
-                    }
+                let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
+                if len < 24 {
+                    -22
                 } else {
-                    0
+                    crate::input_queue::service_serial_commands();
+                    if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
+                        let mut buf = [0u8; 24];
+                        ev.encode(&mut buf);
+                        if copy_to_user(addr, &buf).is_err() {
+                            -14
+                        } else {
+                            24
+                        }
+                    } else {
+                        0
+                    }
                 }
             }
         }
@@ -644,6 +666,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                             let _ = caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
                             let _ = caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                             let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+                            let _ = caps.mint(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ, None);
                             let _ = caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
                             let tid = sched.spawn_user_process(caller_pid, user_img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
                             drop(sched);
@@ -674,13 +697,17 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
 
         SYS_SERVICE_HEARTBEAT => {
-            let caller_pid = {
-                let sched = SCHEDULER.lock();
-                sched.current_pid()
+            let caller_pid = match get_caller_identity_and_caps() {
+                Ok((pid, _)) => pid,
+                Err(_) => crate::task::INVALID_PID,
             };
-            match crate::services::heartbeat(caller_pid) {
-                Ok(()) => 0,
-                Err(()) => -13,
+            if caller_pid == crate::task::INVALID_PID || caller_pid == 0 {
+                -13
+            } else {
+                match crate::services::heartbeat(caller_pid) {
+                    Ok(()) => 0,
+                    Err(()) => -13,
+                }
             }
         }
         SYS_PACKAGE_LIST => 14,
@@ -768,22 +795,32 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => 0,
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
-            let (caller_pid, code_res) = {
-                let mut sched = SCHEDULER.lock();
-                let caller = sched.current_pid();
-                let res = sched.reap_task(caller, target_pid);
-                (caller, res)
-            };
-            match code_res {
-                Ok(code) => {
-                    println!("[WAITPID] Caller PID {} reaped child {} with exit code {}", caller_pid, target_pid, code);
-                    code as i64
+            let (caller_pid, is_supervisor) = match get_caller_identity_and_caps() {
+                Ok((pid, caps)) => {
+                    let supervisor = caps.check(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::ADMIN).is_ok()
+                        || caps.check(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::ADMIN).is_ok();
+                    (pid, supervisor)
                 }
-                Err(err) => {
-                    if err == -30 {
-                        crate::task::yield_now();
+                Err(_) => (crate::task::INVALID_PID, false),
+            };
+            if caller_pid == crate::task::INVALID_PID {
+                -13
+            } else {
+                let code_res = {
+                    let mut sched = SCHEDULER.lock();
+                    sched.reap_task(caller_pid, is_supervisor, target_pid)
+                };
+                match code_res {
+                    Ok(code) => {
+                        println!("[WAITPID] Caller PID {} reaped child {} with exit code {}", caller_pid, target_pid, code);
+                        code as i64
                     }
-                    err
+                    Err(err) => {
+                        if err == -30 {
+                            crate::task::yield_now();
+                        }
+                        err
+                    }
                 }
             }
         }

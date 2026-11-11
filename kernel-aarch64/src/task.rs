@@ -111,6 +111,9 @@ pub struct Scheduler {
     pub next_pid: u32,
 }
 
+pub const MAX_TASKS: usize = 256;
+pub const INVALID_PID: u32 = u32::MAX;
+
 impl Scheduler {
     pub const fn new() -> Self {
         Self {
@@ -124,20 +127,25 @@ impl Scheduler {
         if self.current_task_idx < self.tasks.len() {
             self.tasks[self.current_task_idx].id
         } else {
-            0
+            INVALID_PID
         }
     }
 
     pub fn allocate_pid(&mut self) -> u32 {
         let mut candidate = self.next_pid;
+        let mut attempts = 0;
         while self.tasks.iter().any(|t| t.id == candidate) {
             candidate = candidate.wrapping_add(1);
-            if candidate == 0 {
+            if candidate == 0 || candidate == INVALID_PID {
                 candidate = 1;
+            }
+            attempts += 1;
+            if attempts > 65536 {
+                break;
             }
         }
         self.next_pid = candidate.wrapping_add(1);
-        if self.next_pid == 0 {
+        if self.next_pid == 0 || self.next_pid == INVALID_PID {
             self.next_pid = 1;
         }
         candidate
@@ -197,6 +205,9 @@ impl Scheduler {
         address_space: Option<crate::mmu::UserAddressSpace>,
         cap_table: CapabilityTable,
     ) -> u32 {
+        if self.tasks.len() >= MAX_TASKS {
+            return 0;
+        }
         let task_id = self.allocate_pid();
         let stack = Box::new([0u8; STACK_SIZE]);
 
@@ -229,15 +240,23 @@ impl Scheduler {
         task_id
     }
 
-    pub fn reap_task(&mut self, caller_pid: u32, target_pid: u32) -> Result<i32, i64> {
+    pub fn reap_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
+        let curr_pid = self.current_pid();
+        if target_pid != 0 && target_pid == caller_pid {
+            return Err(-16); // -EBUSY: caller cannot reap itself
+        }
+        if target_pid != 0 && target_pid == curr_pid && self.tasks.get(self.current_task_idx).map(|t| t.state == TaskState::Running).unwrap_or(false) {
+            return Err(-16); // -EBUSY: cannot reap active running process
+        }
+
         let pos = self.tasks.iter().position(|t| {
             (target_pid == 0 || t.id == target_pid)
                 && (t.state == TaskState::Terminated || t.state == TaskState::Exited)
         }).ok_or(-30)?; // NotReady or not found
 
         let task = &self.tasks[pos];
-        if caller_pid != 0 && caller_pid != 1 && task.parent_id != caller_pid {
-            return Err(-13); // -EACCES: caller does not own this child
+        if !is_supervisor && task.parent_id != caller_pid {
+            return Err(-13); // -EACCES: caller does not own this child and lacks supervisor capability
         }
 
         let mut removed = self.remove_task_at(pos);
@@ -384,14 +403,38 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched.tasks.len(), 0);
     assert_eq!(sched.current_task_idx, 0);
 
-    // Test 4: PID monotonicity and collision avoidance
+    // Test 4: Reaping authority and active process protection
+    let mut sched2 = Scheduler::new();
+    sched2.next_pid = 1;
+    let caps = CapabilityTable::new();
+    let p1 = sched2.spawn_user_process(0, "parent", 0, 0, None, caps.clone());
+    let c1 = sched2.spawn_user_process(p1, "child", 0, 0, None, caps.clone());
+    sched2.current_task_idx = 0; // Current running is parent (p1)
+
+    // Active task cannot be reaped
+    assert_eq!(sched2.reap_task(p1, true, p1), Err(-16));
+
+    // Child is still Ready, not Terminated/Exited
+    assert_eq!(sched2.reap_task(p1, false, c1), Err(-30));
+
+    // Mark child terminated
+    sched2.tasks[1].state = TaskState::Terminated;
+
+    // Non-parent without supervisor authority is denied
+    assert_eq!(sched2.reap_task(999, false, c1), Err(-13));
+
+    // Parent can reap child
+    assert_eq!(sched2.reap_task(p1, false, c1), Ok(0));
+
+    // Idempotent rejection on second reap
+    assert_eq!(sched2.reap_task(p1, false, c1), Err(-30));
+
+    // Test 5: PID monotonicity and collision avoidance
     sched.next_pid = u32::MAX - 1;
     let pid_a = sched.allocate_pid();
     assert_eq!(pid_a, u32::MAX - 1);
     let pid_b = sched.allocate_pid();
-    assert_eq!(pid_b, u32::MAX);
-    let pid_c = sched.allocate_pid();
-    assert_eq!(pid_c, 1); // Wraparound skips 0
+    assert_eq!(pid_b, 1); // Skips u32::MAX (INVALID_PID) and 0
 
-    crate::kprintln!("[TEST] AArch64 Task Removal Consistency: First, Middle, Final task removal & PID collision avoidance VERIFIED.");
+    crate::kprintln!("[TEST] AArch64 Task Removal Consistency & Reap Security VERIFIED.");
 }

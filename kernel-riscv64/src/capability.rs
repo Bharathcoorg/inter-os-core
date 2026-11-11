@@ -50,6 +50,7 @@ pub enum CapabilityType {
     FileSystemRead,
     FileSystemWrite,
     EventPoll,
+    SystemResource,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -848,6 +848,15 @@ pub fn total_recycled_frames() -> usize {
     FRAME_ALLOCATOR.lock().recycled_frames
 }
 
+pub fn total_allocated_frames() -> usize {
+    FRAME_ALLOCATOR.lock().allocated_frames
+}
+
+pub fn active_allocated_frames() -> usize {
+    let alloc = FRAME_ALLOCATOR.lock();
+    alloc.allocated_frames.saturating_sub(alloc.recycled_frames)
+}
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -861,7 +870,13 @@ pub struct UserAddressSpace {
 impl UserAddressSpace {
     pub fn new() -> Option<Self> {
         let root_l1_phys = allocate_frame()?;
-        let l2_phys = allocate_frame()?;
+        let l2_phys = match allocate_frame() {
+            Some(f) => f,
+            None => {
+                recycle_frame(root_l1_phys);
+                return None;
+            }
+        };
 
         let user_l1 = unsafe { &mut *(root_l1_phys as *mut PageTable) };
         let user_l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
@@ -996,6 +1011,16 @@ impl UserAddressSpace {
             recycle_frame(paddr);
         }
         self.mapped_bytes = 0;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!(
+                "dsb ish",
+                "tlbi vmalle1is",
+                "dsb ish",
+                "isb",
+                options(nostack)
+            );
+        }
     }
 
     pub fn activate(&self) {

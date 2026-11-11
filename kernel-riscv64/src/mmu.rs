@@ -283,6 +283,19 @@ pub fn recycle_frame(paddr: u64) {
     FRAME_ALLOCATOR.lock().recycle_frame(paddr);
 }
 
+pub fn total_recycled_frames() -> usize {
+    FRAME_ALLOCATOR.lock().recycled_frames
+}
+
+pub fn total_allocated_frames() -> usize {
+    FRAME_ALLOCATOR.lock().allocated_frames
+}
+
+pub fn active_allocated_frames() -> usize {
+    let alloc = FRAME_ALLOCATOR.lock();
+    alloc.allocated_frames.saturating_sub(alloc.recycled_frames)
+}
+
 pub struct UserAddressSpace {
     pub satp: usize,
     pub root_paddr: u64,
@@ -292,11 +305,17 @@ pub struct UserAddressSpace {
 impl UserAddressSpace {
     pub fn new() -> Option<Self> {
         let root_paddr = allocate_frame()?;
+        let lvl1_paddr = match allocate_frame() {
+            Some(f) => f,
+            None => {
+                recycle_frame(root_paddr);
+                return None;
+            }
+        };
         let root = unsafe { &mut *(root_paddr as *mut PageTable) };
         root.clear();
 
         // Level 1 table for Gigapage 0 (MMIO & User ELF)
-        let lvl1_paddr = allocate_frame()?;
         let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
         lvl1.clear();
 
@@ -407,7 +426,7 @@ impl UserAddressSpace {
                             let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
                             for k in 0..512 {
                                 let pte0 = lvl0.entries[k];
-                                if pte0 & PTE_V != 0 {
+                                if (pte0 & (PTE_V | PTE_U)) == (PTE_V | PTE_U) {
                                     recycle_frame((pte0 >> 10) << 12);
                                 }
                             }
@@ -420,5 +439,14 @@ impl UserAddressSpace {
         }
         recycle_frame(self.root_paddr);
         self.mapped_bytes = 0;
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!(
+                "sfence.vma zero, zero",
+                "fence rw, rw",
+                "fence.i",
+                options(nostack)
+            );
+        }
     }
 }
