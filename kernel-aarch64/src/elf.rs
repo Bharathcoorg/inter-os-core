@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use crate::mmu::{allocate_frame, recycle_frame, UserAddressSpace};
 
 pub const USER_STACK_TOP: u64 = 0x2000_0000;
-pub const USER_STACK_SIZE: u64 = 65536; // 64 KiB stack (16 pages)
+pub const USER_STACK_SIZE: u64 = 256 * 1024; // 256 KiB stack
 pub const USER_CANONICAL_LIMIT: u64 = 0x0000_8000_0000_0000;
 
 pub struct LoadedElf {
@@ -195,8 +195,8 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         return Err("ELF entry point is not located within any executable PT_LOAD segment");
     }
 
-    // Allocate user stack (64 KiB)
-    for page_vaddr in (stack_bottom_addr..stack_top_addr).step_by(4096) {
+    // Allocate user stack (256 KiB + 64 KiB headroom above stack top)
+    for page_vaddr in (stack_bottom_addr..stack_top_addr + 65536).step_by(4096) {
         let frame = match allocate_frame() {
             Some(f) => f,
             None => {

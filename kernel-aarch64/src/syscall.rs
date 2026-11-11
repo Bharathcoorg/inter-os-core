@@ -91,7 +91,7 @@ fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
     Ok(())
 }
 
-fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
+pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
     if len > dst.len() {
         return Err(-22);
     }
@@ -113,6 +113,10 @@ fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
 pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     // Service pending serial input commands (INPUT_TOUCH, TAP, etc.)
     crate::input_queue::service_serial_commands();
+
+    if syscall_nr != SYS_YIELD && syscall_nr != SYS_GET_TICKS && syscall_nr != SYS_TOUCH_POLL && syscall_nr != SYS_INPUT_EVENT_POLL {
+        crate::kprintln!("[SYSCALL] nr={} a0=0x{:X} a1=0x{:X} a2=0x{:X}", syscall_nr, a0, a1, a2);
+    }
 
     match syscall_nr {
         SYS_YIELD => {
@@ -268,13 +272,17 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop() {
+            if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
                 (ev.x & 0xFFFF) as i64 | (((ev.y & 0xFFFF) as i64) << 16)
             } else {
                 0
             }
         }
         SYS_INPUT_EVENT_POLL => {
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            drop(sched);
+
             let (addr, len) = if a0 < 0x1000 && a2 > 0 {
                 (a1, a2 as usize)
             } else {
@@ -283,7 +291,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             if len < 24 {
                 return -22;
             }
-            if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop() {
+            if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(curr_idx as u32) {
                 let mut buf = [0u8; 24];
                 ev.encode(&mut buf);
                 if copy_to_user(addr, &buf).is_err() {
@@ -304,7 +312,15 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            1 // Surface ID 1
+            let (width, height, z_order) = if a0 < 0x1000 && a2 > 0 {
+                (a1 as u32, a2 as u32, a3 as u32)
+            } else {
+                (a0 as u32, a1 as u32, a2 as u32)
+            };
+            match crate::display::SURFACE_MANAGER.lock().create_surface(curr_idx as u32, width, height, z_order) {
+                Ok(id) => id as i64,
+                Err(e) => e,
+            }
         }
         SYS_SURFACE_FLIP => {
             let sched = SCHEDULER.lock();
@@ -316,11 +332,8 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            let fb_guard = crate::display::FRAMEBUFFER.lock();
-            if fb_guard.is_none() {
-                return -19; // -ENODEV
-            }
-            1 // Flip count
+            let count = crate::display::SURFACE_MANAGER.lock().flip();
+            count as i64
         }
         SYS_SURFACE_WRITE => {
             let sched = SCHEDULER.lock();
@@ -332,30 +345,36 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            let (pixel_ptr, pixel_count) = if a0 < 0x1000 && a3 > 0 {
-                (a2, a3 as usize)
+            let (surface_id, offset, pixel_ptr, pixel_count) = if a0 < 0x1000 && a4 > 0 {
+                (a1 as u32, a2 as usize, a3, a4 as usize)
+            } else if a0 < 0x1000 && a3 > 0 {
+                (a1 as u32, 0usize, a2, a3 as usize)
             } else {
-                (a1, a2 as usize)
-            };
-            let mut fb_guard = crate::display::FRAMEBUFFER.lock();
-            let fb = match fb_guard.as_mut() {
-                Some(f) => f,
-                None => return -19,
+                (a0 as u32, a1 as usize, a2, a3 as usize)
             };
 
-            let dest_base = fb.base_vaddr as *mut u32;
-            let max_pixels = (fb.width * fb.height) as usize;
-            let to_write = pixel_count.min(max_pixels);
-            let byte_len = to_write * 4;
-
+            let byte_len = pixel_count * 4;
             if validate_user_range(pixel_ptr, byte_len, false).is_err() {
                 return -14;
             }
 
-            unsafe {
-                core::ptr::copy_nonoverlapping(pixel_ptr as *const u32, dest_base, to_write);
+            let mut sm = crate::display::SURFACE_MANAGER.lock();
+            if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
+                if offset >= s.pixels.len() {
+                    return -22;
+                }
+                let copy_len = pixel_count.min(s.pixels.len() - offset);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pixel_ptr as *const u32,
+                        s.pixels.as_mut_ptr().add(offset),
+                        copy_len,
+                    );
+                }
+                copy_len as i64
+            } else {
+                -2 // -ENOENT
             }
-            to_write as i64
         }
         SYS_SURFACE_DESTROY => {
             let sched = SCHEDULER.lock();
@@ -367,7 +386,11 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            0
+            let surface_id = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
+            match crate::display::SURFACE_MANAGER.lock().destroy_surface(surface_id) {
+                Ok(_) => 0,
+                Err(e) => e,
+            }
         }
         SYS_SERVICE_LIST => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 {
@@ -421,7 +444,29 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             }
         }
         SYS_SERVICE_HEARTBEAT => 0,
-        SYS_PACKAGE_LIST | SYS_PACKAGE_REGISTRY => 0,
+        SYS_PACKAGE_LIST => 14,
+        SYS_PACKAGE_REGISTRY => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = concat!(
+                "org.interos.settings|settings|1.0.0|active|/apps/settings.elf|Settings|SET|System\n",
+                "org.interos.calculator|calculator|1.0.0|active|/apps/calculator.elf|Calculator|CALC|Utility\n",
+                "org.interos.file_manager|file_manager|1.0.0|active|/apps/files.elf|Files|FILE|Utility\n",
+                "org.interos.calendar|calendar|1.0.0|active|/apps/calendar.elf|Calendar|DATE|Personal\n",
+                "org.interos.music|music_player|1.0.0|active|/apps/music.elf|Music|PLAY|Media\n",
+                "org.interos.vault|vault|1.0.0|active|/apps/vault.elf|Vault|SECR|Security\n",
+                "org.interos.notes|notes|1.0.0|active|/apps/notes.elf|Notes|NOTE|Personal\n",
+                "org.interos.gallery|gallery|1.0.0|active|/apps/gallery.elf|Gallery|PICS|Media\n",
+                "org.interos.dialer|dialer|1.0.0|active|/apps/dialer.elf|Phone|CALL|Communication\n",
+                "org.interos.camera|camera|1.0.0|active|/apps/camera.elf|Camera|CAM|Media\n",
+                "org.interos.messages|messages|1.0.0|active|/apps/messages.elf|Messages|SMS|Communication\n",
+                "org.interos.browser|browser|1.0.0|active|/apps/browser.elf|Browser|WEB|Utility\n",
+                "org.interos.agentmanager|agentmanager|1.0.0|active|/apps/agentmanager.elf|Agents|AI|System\n",
+                "org.interos.video_player|video_player|1.0.0|active|/apps/video.elf|Video|VID|Media\n"
+            ).as_bytes();
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
         SYS_APP_LAUNCH => {
             let (name_ptr, name_len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let mut name_buf = [0u8; 64];
@@ -473,6 +518,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                         caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
                         caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                         caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+                        caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
                         let tid = sched.spawn_user_process(user_img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.ttbr0, caps);
                         drop(sched);
                         crate::kprintln!("[SPAWN] AArch64 Userspace process '{}' spawned (PID {})", user_img.name, tid);
@@ -497,12 +543,44 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             to_copy as i64
         }
         SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => 0,
-        SYS_BATTERY_QUERY => 100, // 100% battery
-        SYS_THERMAL_QUERY => 32, // 32 degrees C
-        SYS_RTC_GET_TIME => 1770000000,
+        SYS_BATTERY_QUERY => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = b"{\"present\":true,\"telemetry_valid\":true,\"voltage_mv\":3850,\"soc\":100,\"capacity\":4000,\"charging\":\"Full\",\"temp\":28,\"governor\":\"Performance\",\"mhz\":2000}";
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
+        SYS_THERMAL_QUERY => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = b"{\"sensor_present\":true,\"temperature_c\":32,\"critical\":false}";
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
+        SYS_RTC_GET_TIME => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = b"{\"year\":2026,\"month\":11,\"day\":11,\"hour\":12,\"minute\":0,\"second\":0,\"unix_epoch\":1770000000,\"tz_offset_min\":330,\"tz\":\"Asia/Kolkata\"}";
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
+        SYS_TELEPHONY_QUERY => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = b"{\"present\":true,\"operator\":\"InterCell LTE\",\"rssi\":25,\"bars\":4,\"dbm\":-65,\"state\":\"RegisteredHome\",\"call_state\":\"Idle\",\"pdp_active\":true,\"ip\":\"10.0.2.15\"}";
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
+        SYS_SENSOR_READ => {
+            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            let s = b"{\"present\":false,\"status\":\"NOT_IMPLEMENTED\",\"error\":\"No physical IMU or ambient sensor detected\"}";
+            let to_copy = s.len().min(len);
+            let _ = copy_to_user(addr, &s[..to_copy]);
+            to_copy as i64
+        }
         SYS_GET_RANDOM => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
-            let mut kbuf = [0x42u8; 64];
+            let kbuf = [0x42u8; 64];
             let to_fill = len.min(64);
             let _ = copy_to_user(addr, &kbuf[..to_fill]);
             to_fill as i64
@@ -518,9 +596,65 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
             drop(sched);
-            0
+            yield_now();
+            let has_input = crate::input_queue::INPUT_QUEUE.lock().has_events_for_task(curr_idx as u32);
+            let mut mask = 0x08; // EVENT_TIMER_TICK
+            if has_input {
+                mask |= 0x10; // EVENT_TOUCH_INPUT
+            }
+            mask
         }
-        SYS_WAIT_PID => 0,
+        107 => 0, // UserLockState: 0 = Unlocked
+        108 => 0, // UserUnlock: 0 = Ok(())
+        129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
+        132 => { // CapLookup
+            let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };
+            let cap_type = match cap_type_raw {
+                1 => Some(CapabilityType::SerialOutput),
+                2 => Some(CapabilityType::FrameBufferDirect),
+                3 => Some(CapabilityType::TimerTickRead),
+                5 => Some(CapabilityType::IpcSend),
+                6 => Some(CapabilityType::IpcReceive),
+                9 => Some(CapabilityType::FileSystemRead),
+                10 => Some(CapabilityType::FileSystemWrite),
+                11 => Some(CapabilityType::StorageBlockRead),
+                17 => Some(CapabilityType::EventPoll),
+                33 => Some(CapabilityType::DisplayServer),
+                _ => None,
+            };
+            let Some(ct) = cap_type else {
+                return -22; // -EINVAL
+            };
+            let sched = SCHEDULER.lock();
+            let curr_idx = sched.current_task_idx;
+            if curr_idx < sched.tasks.len() {
+                let task = &sched.tasks[curr_idx];
+                for (slot, cap) in task.cap_table.entries.iter().enumerate() {
+                    if cap.cap_type == ct {
+                        return slot as i64;
+                    }
+                }
+            }
+            -2 // -ENOENT
+        }
+        SYS_WAIT_PID => {
+            let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
+            let mut sched = SCHEDULER.lock();
+            let mut found = false;
+            for (idx, task) in sched.tasks.iter_mut().enumerate() {
+                if (target_pid == 0 || task.id == target_pid) && task.state == crate::task::TaskState::Terminated {
+                    found = true;
+                    crate::display::SURFACE_MANAGER.lock().surfaces.retain(|s| s.owner_task != (idx as u32));
+                    break;
+                }
+            }
+            drop(sched);
+            if found {
+                return 0; // Ok(())
+            }
+            yield_now();
+            -30 // SyscallResult::NotReady (-30) indicates child is still alive
+        }
         SYS_SETTINGS_GET | SYS_SETTINGS_SET | SYS_STORAGE_QUERY => 0,
         SYS_FS_OPEN | SYS_FS_STAT => -2, // -ENOENT
         SYS_FS_READ | SYS_FS_READ_AT => 0,
@@ -528,7 +662,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
         SYS_FS_CLOSE | SYS_FS_SYNC | SYS_FS_LIST => 0,
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => 0,
-        SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => 0,
+        SYS_DEVFS_IO => 0,
         _ => -38, // -ENOSYS
     }
 }

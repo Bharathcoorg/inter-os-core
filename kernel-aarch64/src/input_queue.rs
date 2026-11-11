@@ -32,47 +32,69 @@ impl RawInputEvent {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct QueuedInputEvent {
+    pub target_task: u32,
+    pub event: RawInputEvent,
+}
+
 pub struct InputQueue {
-    events: [Option<RawInputEvent>; 32],
-    head: usize,
-    tail: usize,
-    count: usize,
+    events: [Option<QueuedInputEvent>; 32],
+    len: usize,
 }
 
 impl InputQueue {
     pub const fn new() -> Self {
         Self {
             events: [None; 32],
-            head: 0,
-            tail: 0,
-            count: 0,
+            len: 0,
         }
     }
 
-    pub fn push(&mut self, ev: RawInputEvent) {
-        if self.count < 32 {
-            self.events[self.tail] = Some(ev);
-            self.tail = (self.tail + 1) % 32;
-            self.count += 1;
+    pub fn push(&mut self, target_task: u32, ev: RawInputEvent) {
+        if self.len < 32 {
+            self.events[self.len] = Some(QueuedInputEvent {
+                target_task,
+                event: ev,
+            });
+            self.len += 1;
         }
     }
 
-    pub fn pop(&mut self) -> Option<RawInputEvent> {
-        if self.count > 0 {
-            let ev = self.events[self.head].take();
-            self.head = (self.head + 1) % 32;
-            self.count -= 1;
-            ev
-        } else {
-            None
+    pub fn pop_for_task(&mut self, task_idx: u32) -> Option<RawInputEvent> {
+        for i in 0..self.len {
+            if let Some(qe) = &self.events[i] {
+                if qe.target_task == task_idx || qe.target_task == u32::MAX {
+                    let ev = qe.event;
+                    for j in i..(self.len - 1) {
+                        self.events[j] = self.events[j + 1].take();
+                    }
+                    self.events[self.len - 1] = None;
+                    self.len -= 1;
+                    return Some(ev);
+                }
+            }
         }
+        None
+    }
+
+    pub fn has_events_for_task(&self, task_idx: u32) -> bool {
+        for i in 0..self.len {
+            if let Some(qe) = &self.events[i] {
+                if qe.target_task == task_idx || qe.target_task == u32::MAX {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
 pub static INPUT_QUEUE: Mutex<InputQueue> = Mutex::new(InputQueue::new());
 
 pub fn post_touch(x: u32, y: u32) {
-    INPUT_QUEUE.lock().push(RawInputEvent {
+    let target = crate::display::focused_task_idx();
+    INPUT_QUEUE.lock().push(target, RawInputEvent {
         kind: 1,
         x,
         y,
@@ -88,7 +110,11 @@ pub fn service_serial_commands() {
     let mut guard = SERIAL_LINE_BUF.lock();
     let (buf, len) = &mut *guard;
 
-    while let Some(byte) = crate::uart::UART.lock().read_byte() {
+    loop {
+        let byte_opt = {
+            crate::uart::UART.lock().read_byte()
+        };
+        let Some(byte) = byte_opt else { break; };
         if byte == b'\n' || byte == b'\r' {
             if *len > 0 {
                 process_line(&buf[..*len]);
@@ -136,8 +162,59 @@ fn process_line(line: &[u8]) {
         }
     } else if verb.eq_ignore_ascii_case("SWIPE") {
         if let (Some(x1_str), Some(y1_str), Some(x2_str), Some(y2_str)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
-            if let (Some(x1), Some(y1), Some(_x2), Some(_y2)) = (parse_u32(x1_str), parse_u32(y1_str), parse_u32(x2_str), parse_u32(y2_str)) {
-                post_touch(x1, y1);
+            if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (parse_u32(x1_str), parse_u32(y1_str), parse_u32(x2_str), parse_u32(y2_str)) {
+                let dy = (y2 as i32) - (y1 as i32);
+                let dx = (x2 as i32) - (x1 as i32);
+                crate::kprintln!("[UART INPUT] Hardware swipe received from ({},{}) to ({},{}) dy={}.", x1, y1, x2, y2, dy);
+                let kind = if dy <= -40 && y1 >= 1000 {
+                    7 // Home / Unlock gesture
+                } else {
+                    4 // Pan / Drag
+                };
+                let target = crate::display::focused_task_idx();
+                INPUT_QUEUE.lock().push(target, RawInputEvent {
+                    kind,
+                    x: x2,
+                    y: y2,
+                    dx,
+                    dy,
+                    scale_milli: 1000,
+                });
+            }
+        }
+    } else if verb.eq_ignore_ascii_case("NAV") {
+        if let Some(target_nav) = parts.next() {
+            let target = crate::display::focused_task_idx();
+            if target_nav.eq_ignore_ascii_case("HOME") {
+                crate::kprintln!("[UART INPUT] Hardware NAV HOME event received.");
+                INPUT_QUEUE.lock().push(target, RawInputEvent {
+                    kind: 7,
+                    x: 360,
+                    y: 1416,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
+                });
+            } else if target_nav.eq_ignore_ascii_case("BACK") {
+                crate::kprintln!("[UART INPUT] Hardware NAV BACK event received.");
+                INPUT_QUEUE.lock().push(target, RawInputEvent {
+                    kind: 6,
+                    x: 120,
+                    y: 1416,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
+                });
+            } else if target_nav.eq_ignore_ascii_case("RECENTS") {
+                crate::kprintln!("[UART INPUT] Hardware NAV RECENTS event received.");
+                INPUT_QUEUE.lock().push(target, RawInputEvent {
+                    kind: 8,
+                    x: 600,
+                    y: 1416,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
+                });
             }
         }
     }

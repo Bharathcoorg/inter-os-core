@@ -87,6 +87,9 @@ pub struct TaskControlBlock {
     pub cpu_ticks: u64,
     pub priority: u8,
     pub page_table: Option<u64>,
+    pub user_entry: u64,
+    pub user_stack_top: u64,
+    pub exit_code: Option<i32>,
 }
 
 impl TaskControlBlock {
@@ -139,10 +142,13 @@ impl Scheduler {
             cpu_ticks: 0,
             priority: 0,
             page_table: None,
+            user_entry: 0,
+            user_stack_top: 0,
+            exit_code: None,
         });
     }
 
-    pub fn spawn_user_process(&mut self, name: &'static str, entry_point: u64, _user_sp: u64, ttbr0: u64, cap_table: CapabilityTable) -> u32 {
+    pub fn spawn_user_process(&mut self, name: &'static str, entry_point: u64, user_sp: u64, ttbr0: u64, cap_table: CapabilityTable) -> u32 {
         let task_id = self.tasks.len() as u32;
         let stack = Box::new([0u8; STACK_SIZE]);
 
@@ -150,7 +156,7 @@ impl Scheduler {
 
         let mut context = ArmContext::default();
         context.sp = kernel_sp;
-        context.lr = entry_point;
+        context.lr = user_process_entry as *const () as usize as u64;
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
@@ -164,6 +170,9 @@ impl Scheduler {
             cpu_ticks: 0,
             priority: 1,
             page_table: Some(ttbr0),
+            user_entry: entry_point,
+            user_stack_top: user_sp,
+            exit_code: None,
         });
         task_id
     }
@@ -174,13 +183,20 @@ impl Scheduler {
         }
 
         let curr_idx = self.current_task_idx;
-        let next_idx = (curr_idx + 1) % self.tasks.len();
+        let mut next_idx = (curr_idx + 1) % self.tasks.len();
+        let mut count = 0;
+        while self.tasks[next_idx].state != TaskState::Ready && count < self.tasks.len() {
+            next_idx = (next_idx + 1) % self.tasks.len();
+            count += 1;
+        }
 
-        if curr_idx == next_idx {
+        if curr_idx == next_idx || self.tasks[next_idx].state != TaskState::Ready {
             return (None, None);
         }
 
-        self.tasks[curr_idx].state = TaskState::Ready;
+        if self.tasks[curr_idx].state == TaskState::Running {
+            self.tasks[curr_idx].state = TaskState::Ready;
+        }
         self.tasks[next_idx].state = TaskState::Running;
         self.tasks[next_idx].cpu_ticks += 1;
         self.current_task_idx = next_idx;
@@ -195,6 +211,18 @@ impl Scheduler {
 
         (Some(old_ctx), Some(new_ctx))
     }
+}
+
+pub extern "C" fn user_process_entry() -> ! {
+    let (entry, sp) = {
+        let sched = SCHEDULER.lock();
+        let curr = sched.current_task_idx;
+        (sched.tasks[curr].user_entry, sched.tasks[curr].user_stack_top)
+    };
+    unsafe {
+        crate::user::enter_user_mode(entry, sp);
+    }
+    loop {}
 }
 
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());

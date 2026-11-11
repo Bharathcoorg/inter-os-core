@@ -242,10 +242,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             (framebuffer, true)
         }
         None => {
-            let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize];
+            let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize].into_boxed_slice();
+            let leaked_ptr = alloc::boxed::Box::leak(buf).as_mut_ptr() as usize;
             let fb = SimpleFramebuffer::new(
                 0,
-                buf.as_ptr() as usize,
+                leaked_ptr,
                 FB_WIDTH,
                 FB_HEIGHT,
                 FB_STRIDE,
@@ -537,6 +538,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     dev.device,
                     dev.function
                 );
+                if dev.vendor_id == 0x1234 && dev.device_id == 0x1111 {
+                    if let Some(ecam) = pcie.ecam() {
+                        unsafe {
+                            ecam.enable_memory_and_bus_master(0, dev.device, dev.function);
+                            let bar0 = ecam.read_bar_addr(0, dev.device, dev.function, 0);
+                            let bar2 = ecam.read_bar_addr(0, dev.device, dev.function, 2);
+                            if let (Some(b0), Some(b2)) = (bar0, bar2) {
+                                display::init_bochs_display(b0 as usize, b2 as usize);
+                            }
+                        }
+                    }
+                }
                 found += 1;
             }
         }
@@ -570,6 +583,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(unsafe { user::EL0_MMU_TRAP_VERIFIED }, "EL0 MMU kernel memory trap not observed");
     assert_eq!(unsafe { user::EL0_EXIT_CODE }, 42, "EL0 exit code mismatch");
     assert!(unsafe { user::EL0_TEST_COMPLETED }, "EL0 test loop incomplete");
+    unsafe { user::IN_SECTION17_SMOKE = false; }
 
     kprintln!(
         "[TEST] AArch64 EL0 Userspace Syscall Loop: sys_get_ticks (x0={}), sys_get_task_id (x0={}), sys_exit (code=42) VERIFIED.",
@@ -1464,6 +1478,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Ok(l) => {
             kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
             kprintln!("[BOOT] Entering PID 1 (init) at EL0 via hardware eret...");
+            {
+                let mut sched = task::SCHEDULER.lock();
+                sched.tasks.clear();
+                let mut init_caps = capability::CapabilityTable::new();
+                init_caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
+                init_caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+                init_caps.mint(capability::CapabilityType::SerialOutput, capability::Rights::WRITE, None);
+                init_caps.mint(capability::CapabilityType::EventPoll, capability::Rights::READ, None);
+                let pid1 = sched.spawn_user_process("init", l.entry_point, l.stack_top, l.address_space.ttbr0, init_caps);
+                sched.tasks[pid1 as usize].state = task::TaskState::Running;
+                sched.current_task_idx = pid1 as usize;
+            }
             l.address_space.activate();
             unsafe {
                 user::enter_user_mode(l.entry_point, l.stack_top);

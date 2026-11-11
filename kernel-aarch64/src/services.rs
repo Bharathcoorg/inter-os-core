@@ -93,6 +93,27 @@ pub static SERVICES: [ServiceEntry; 12] = [
 pub fn start(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
+            if let Some(img) = crate::images::service_image(id) {
+                let sched = crate::task::SCHEDULER.lock();
+                let already_running = sched.tasks.iter().any(|t| t.name == img.name && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
+                if !already_running {
+                    drop(sched);
+                    if let Ok(loaded) = crate::elf::load_elf(img.elf) {
+                        let mut sched = crate::task::SCHEDULER.lock();
+                        let mut caps = crate::capability::CapabilityTable::new();
+                        caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
+                        caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
+                        caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+                        caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                        caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
+                        if id == 10 { // launcher
+                            caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+                        }
+                        let tid = sched.spawn_user_process(img.name, loaded.entry_point, loaded.stack_top, loaded.address_space.ttbr0, caps);
+                        crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
+                    }
+                }
+            }
             svc.state.store(ServiceState::Running as u8, Ordering::Release);
             svc.generation.fetch_add(1, Ordering::Relaxed);
             return Ok(());
@@ -104,6 +125,14 @@ pub fn start(id: u8) -> Result<(), ()> {
 pub fn stop(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
+            if let Some(img) = crate::images::service_image(id) {
+                let mut sched = crate::task::SCHEDULER.lock();
+                for task in &mut sched.tasks {
+                    if task.name == img.name {
+                        task.state = crate::task::TaskState::Terminated;
+                    }
+                }
+            }
             svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
             return Ok(());
         }
@@ -114,9 +143,12 @@ pub fn stop(id: u8) -> Result<(), ()> {
 pub fn recover_failed(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
+            let st = svc.state.load(Ordering::Acquire);
+            if st != ServiceState::Failed as u8 {
+                return Err(());
+            }
             svc.failures.fetch_add(1, Ordering::Relaxed);
-            svc.state.store(ServiceState::Running as u8, Ordering::Release);
-            svc.generation.fetch_add(1, Ordering::Relaxed);
+            let _ = start(id);
             return Ok(());
         }
     }

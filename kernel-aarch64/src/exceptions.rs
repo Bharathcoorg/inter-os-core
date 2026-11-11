@@ -17,6 +17,7 @@ pub struct ExceptionFrame {
     pub elr: u64,
     pub spsr: u64,
     pub esr: u64,
+    pub sp_el0: u64,
 }
 
 global_asm!(
@@ -43,14 +44,17 @@ global_asm!(
         mrs x21, elr_el1
         mrs x22, spsr_el1
         mrs x23, esr_el1
+        mrs x24, sp_el0
         stp x21, x22, [sp, #248]
-        str x23, [sp, #264]
+        stp x23, x24, [sp, #264]
     .endm
 
     .macro restore_all_regs
         ldp x21, x22, [sp, #248]
+        ldp x23, x24, [sp, #264]
         msr elr_el1, x21
         msr spsr_el1, x22
+        msr sp_el0, x24
 
         ldp x0, x1, [sp, #0]
         ldp x2, x3, [sp, #16]
@@ -247,9 +251,21 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
             let code = a0 as i32;
             crate::kprintln!("[SYSCALL] Task exited with code: {}", code);
             crate::user::record_el0_exit(code);
-            // Return from EL0 test session back to kernel caller
-            unsafe {
-                crate::user::return_to_kernel_mode();
+            if unsafe { crate::user::IN_SECTION17_SMOKE } {
+                unsafe {
+                    crate::user::return_to_kernel_mode();
+                }
+            } else {
+                let mut sched = crate::task::SCHEDULER.lock();
+                let curr = sched.current_task_idx;
+                if curr < sched.tasks.len() {
+                    sched.tasks[curr].state = crate::task::TaskState::Terminated;
+                    sched.tasks[curr].exit_code = Some(code);
+                }
+                drop(sched);
+                loop {
+                    crate::task::yield_now();
+                }
             }
         }
 

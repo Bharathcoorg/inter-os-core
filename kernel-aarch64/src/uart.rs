@@ -63,13 +63,13 @@ impl Pl011Uart {
     }
 
     #[inline(always)]
-    unsafe fn read_reg(&self, offset: usize) -> u32 {
+    pub unsafe fn read_reg(&self, offset: usize) -> u32 {
         let ptr = (self.base_address + offset) as *const u32;
         core::ptr::read_volatile(ptr)
     }
 
     #[inline(always)]
-    unsafe fn write_reg(&self, offset: usize, val: u32) {
+    pub unsafe fn write_reg(&self, offset: usize, val: u32) {
         let ptr = (self.base_address + offset) as *mut u32;
         core::ptr::write_volatile(ptr, val);
     }
@@ -193,13 +193,13 @@ impl Ns16550Uart {
     }
 
     #[inline(always)]
-    unsafe fn read_reg(&self, offset: usize) -> u32 {
+    pub unsafe fn read_reg(&self, offset: usize) -> u32 {
         let ptr = (self.base_address + offset) as *const u32;
         core::ptr::read_volatile(ptr)
     }
 
     #[inline(always)]
-    unsafe fn write_reg(&self, offset: usize, val: u32) {
+    pub unsafe fn write_reg(&self, offset: usize, val: u32) {
         let ptr = (self.base_address + offset) as *mut u32;
         core::ptr::write_volatile(ptr, val);
     }
@@ -341,6 +341,17 @@ impl KernelUart {
         match self.driver {
             UartDriver::Pl011(ref uart) => uart.read_byte(),
             UartDriver::Ns16550(ref uart) => uart.read_byte(),
+        }
+    }
+
+    pub fn debug_status(&self) -> (u32, u32) {
+        match self.driver {
+            UartDriver::Pl011(ref uart) => unsafe {
+                (uart.read_reg(PL011_FR), uart.read_reg(PL011_CR))
+            },
+            UartDriver::Ns16550(ref uart) => unsafe {
+                (uart.read_reg(NS16550_LSR), 0)
+            },
         }
     }
 

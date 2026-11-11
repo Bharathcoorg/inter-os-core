@@ -186,6 +186,25 @@ impl PcieEcam {
         found
     }
 
+    pub unsafe fn read_bar_addr(
+        &self,
+        bus: u16,
+        device: u8,
+        function: u8,
+        bar_idx: usize,
+    ) -> Option<u64> {
+        let low = self.read32(bus, device, function, PCI_BAR0 + bar_idx * 4);
+        if low == 0 || low == 0xFFFF_FFFF {
+            return None;
+        }
+        if (low & 1) == 0 && (low & 0x6) == 0x4 {
+            let high = self.read32(bus, device, function, PCI_BAR0 + bar_idx * 4 + 4);
+            Some(((high as u64) << 32) | (low as u64 & 0xFFFF_FFF0))
+        } else {
+            Some(low as u64 & 0xFFFF_FFF0)
+        }
+    }
+
     /// Reads a 64-bit Base Address Register from a device.
     ///
     /// # Safety

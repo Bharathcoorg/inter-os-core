@@ -903,6 +903,19 @@ impl UserAddressSpace {
         user_l2.entries[64] = 0x0800_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
         user_l2.entries[72] = 0x0900_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
 
+        // Map PCI MMIO aperture (0x1000_0000 .. 0x1200_0000: 32 MiB covering BAR 0 & BAR 2) for kernel EL1 display
+        for i in 128..144 {
+            user_l2.entries[i] = ((i as u64) << 21)
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+        }
+
         let mut table_frames = Vec::new();
         table_frames.push(root_l1_phys);
         table_frames.push(l2_phys);
