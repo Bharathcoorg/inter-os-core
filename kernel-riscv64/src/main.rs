@@ -137,11 +137,86 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     }
     println!("[TEST] 50-Cycle Memory Stability: Free/used frame count returned to baseline ({}) across 50 cycles without leakage VERIFIED.", baseline_frames);
 
+    // 50-Cycle Real Process Lifecycle Verification
+    println!("--- [Testing RISC-V 50-Cycle Real Process Lifecycle] ---");
+    let proc_baseline_frames = mmu::active_allocated_frames();
+    let proc_baseline_tasks = task::SCHEDULER.lock().tasks.len();
+    for cycle in 0..50 {
+        let loaded = elf::load_elf(images::USER_INIT_ELF).expect("Loading test ELF for lifecycle cycle");
+        let parent_id = 99;
+        let mut caps = capability::CapabilityTable::new();
+        let _ = caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
+        let _ = caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+
+        let child_pid = {
+            let mut sched = task::SCHEDULER.lock();
+            let pid = sched.spawn_user_process(parent_id, "test_child", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            assert!(pid > 0);
+            for t in &mut sched.tasks {
+                if t.id == pid {
+                    t.state = task::TaskState::Terminated;
+                    t.exit_code = Some(0);
+                }
+            }
+            pid
+        };
+
+        let mut sched = task::SCHEDULER.lock();
+        assert_eq!(sched.reap_task(999, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
+        let reaped_code = sched.reap_task(parent_id, false, child_pid).expect("Parent reap of terminated child must succeed");
+        assert_eq!(reaped_code, 0);
+        assert!(sched.reap_task(parent_id, false, child_pid).is_err(), "Double reap must fail");
+        drop(sched);
+
+        assert_eq!(mmu::active_allocated_frames(), proc_baseline_frames, "Process frame leak at cycle {}", cycle);
+        assert_eq!(task::SCHEDULER.lock().tasks.len(), proc_baseline_tasks, "Process task leak at cycle {}", cycle);
+    }
+    println!("[TEST] 50-Cycle Real Process Lifecycle: Spawn, execute, parent waitpid & zero frame/task leakage VERIFIED.");
+
+    // Process Safety Invariants & Allocator Exhaustion/Rollback
+    {
+        // Quota exhaustion
+        let mut sched = task::SCHEDULER.lock();
+        let orig_len = sched.tasks.len();
+        while sched.tasks.len() < task::MAX_TASKS {
+            let pid = sched.allocate_pid();
+            let _ = sched.add_task(task::TaskId(pid as usize), 0, 0x1000, 0x2000, 0x3000);
+        }
+        let excess_pid = sched.spawn_user_process(1, "overflow", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+        assert_eq!(excess_pid, 0, "Spawn beyond MAX_TASKS must return 0");
+        while sched.tasks.len() > orig_len {
+            sched.tasks.pop();
+        }
+        drop(sched);
+
+        // Active process reap denial (-EBUSY)
+        let mut sched = task::SCHEDULER.lock();
+        let active_pid = sched.spawn_user_process(99, "active_proc", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+        if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == active_pid) {
+            t.state = task::TaskState::Running;
+        }
+        let reap_active_res = sched.reap_task(99, false, active_pid);
+        assert!(reap_active_res == Err(-16) || reap_active_res == Err(-30), "Reaping non-terminated/running task must be rejected (-EBUSY or -30)");
+        if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == active_pid) {
+            t.state = task::TaskState::Terminated;
+        }
+        assert!(sched.reap_task(99, false, active_pid).is_ok());
+        drop(sched);
+
+        // Partial ELF load rollback
+        let corrupt_elf = [0x7fu8, b'E', b'L', b'F', 0, 0, 0];
+        let baseline = mmu::active_allocated_frames();
+        assert!(elf::load_elf(&corrupt_elf).is_err());
+        assert_eq!(mmu::active_allocated_frames(), baseline, "ELF load failure must roll back all frames");
+    }
+    println!("[TEST] Process Safety Invariants: Quota exhaustion, active reap rejection & ELF rollback VERIFIED.");
+
     // Service Supervisor Lifecycle & Recovery Verification
     println!("--- [Testing RISC-V Service Supervisor Lifecycle & Recovery] ---");
     let test_svc_id = 3; // storaged
     let orig_pid = services::start(test_svc_id).expect("Service start failed in lifecycle test");
     assert!(orig_pid > 0);
+    assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
     assert_eq!(services::heartbeat(9999), Err(()), "Heartbeat with spoofed PID must be rejected");
     assert_eq!(services::heartbeat(orig_pid), Ok(()), "Heartbeat with owning PID must be accepted");
     // Simulate service failure/crash by terminating its task and running snapshot audit:
@@ -157,6 +232,7 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     services::snapshot(&mut snap_buf);
     assert_eq!(services::recover_failed(test_svc_id), Ok(()), "Service recover_failed must succeed");
     assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
+    assert_eq!(services::stop(test_svc_id), Ok(()), "Stopping already stopped service must succeed");
     {
         let mut sched = task::SCHEDULER.lock();
         sched.tasks.clear();

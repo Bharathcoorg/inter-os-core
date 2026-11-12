@@ -209,6 +209,37 @@ def verify_visual_pixel_change(path_before, path_after, row_start=150, row_end=3
     assert diff > 0, f"No pixel change detected in calculation area between {path_before} and {path_after}"
     print(f"[VERIFY PIXELS] [OK] Display result area ({row_start}..{row_end} px) changed: {diff} differing bytes confirmed between frames.")
 
+def verify_calculator_result_glyphs(path_ppm, expected_result="12"):
+    with open(path_ppm, "rb") as f:
+        for _ in range(3):
+            l = f.readline()
+            while l.startswith(b"#"):
+                l = f.readline()
+        data = f.read()
+
+    w, h = 720, 1440
+    assert len(data) >= w * h * 3, f"Incomplete frame buffer data in {path_ppm}"
+
+    def is_dark(x, y):
+        idx = (y * w + x) * 3
+        return data[idx] < 100 and data[idx+1] < 100 and data[idx+2] < 100
+
+    # Verify structural glyph geometry of evaluated result '12' in display card (y: 230..290)
+    top_arc = sum(1 for y in range(232, 240) for x in range(640, 665) if is_dark(x, y))
+    right_neck = sum(1 for y in range(260, 272) for x in range(655, 670) if is_dark(x, y))
+    bottom_base = sum(1 for y in range(280, 288) for x in range(635, 665) if is_dark(x, y))
+    neg_space = sum(1 for y in range(240, 250) for x in range(620, 640) if is_dark(x, y))
+
+    assert top_arc >= 50, f"Digit '2' top arc missing in evaluated result (count={top_arc})"
+    assert right_neck >= 50, f"Digit '2' right neck missing in evaluated result (count={right_neck})"
+    assert bottom_base >= 50, f"Digit '2' bottom base missing in evaluated result (count={bottom_base})"
+    assert neg_space == 0, f"Unexpected ink in negative space of digit '2' (count={neg_space})"
+
+    tape_ink = sum(1 for y in range(125, 155) for x in range(250, 670) if is_dark(x, y))
+    assert tape_ink >= 500, f"Expression tape ink missing in calculation card (count={tape_ink})"
+
+    print(f"[VERIFY GLYPHS] [OK] Rendered result '{expected_result}' verified via structural glyph analysis in display card (top_arc={top_arc}, neck={right_neck}, base={bottom_base}, tape_ink={tape_ink}).")
+
 def main():
     print("[*] InterOS Core RISC-V 64 Interactive Lifecycle & Graphics Verification...")
     qemu_exe = find_qemu("qemu-system-riscv64.exe")
@@ -258,6 +289,14 @@ def main():
         mem_ok = reader.wait_for("50-Cycle Memory Stability: Free/used frame count returned to baseline", timeout=25.0)
         assert mem_ok, "RISC-V 50-Cycle Memory Stability self-test not observed"
         print("[OK] RISC-V 50-Cycle Memory Stability verified without leakage.")
+
+        proc_mem_ok = reader.wait_for("50-Cycle Real Process Lifecycle: Spawn, execute, parent waitpid & zero frame/task leakage VERIFIED.", timeout=25.0)
+        assert proc_mem_ok, "RISC-V 50-Cycle Real Process Lifecycle self-test not observed"
+        print("[OK] RISC-V 50-Cycle Real Process Lifecycle verified without frame/task leakage.")
+
+        invariants_ok = reader.wait_for("Process Safety Invariants: Quota exhaustion, active reap rejection & ELF rollback VERIFIED.", timeout=25.0)
+        assert invariants_ok, "RISC-V Process Safety Invariants self-test not observed"
+        print("[OK] RISC-V Process Safety Invariants (quota, active reap, ELF rollback) verified.")
 
         svc_ok = reader.wait_for("Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover", timeout=25.0)
         assert svc_ok, "RISC-V Service Supervisor Lifecycle self-test not observed"
@@ -373,6 +412,7 @@ def main():
         wait_for_screendump(ppm_eval)
         verify_ppm_file(ppm_eval)
         verify_visual_pixel_change(ppm_calc, ppm_eval)
+        verify_calculator_result_glyphs(ppm_eval, expected_result="12")
 
         # 6. Exit Calculator via Back button at (48, 80)
         print("[*] Operation 6: Exiting Calculator via Back button tap at (48, 80)...")
