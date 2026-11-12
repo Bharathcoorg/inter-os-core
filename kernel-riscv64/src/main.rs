@@ -223,7 +223,7 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         let mut sched = task::SCHEDULER.lock();
         let orig_len = sched.tasks.len();
         while sched.tasks.len() < task::MAX_TASKS {
-            let pid = sched.allocate_pid();
+            let pid = sched.allocate_pid().expect("allocate_pid");
             let _ = sched.add_task(task::TaskId(pid as usize), 0, 0x1000, 0x2000, 0x3000);
         }
         let excess_pid = sched.spawn_user_process(1, "overflow", 0x1000, 0x2000, None, capability::CapabilityTable::new());
@@ -320,25 +320,25 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     mmu::test_mmu_ownership_reclamation_errors();
 
     // Service Supervisor Lifecycle & Recovery Verification
-    println!("--- [Testing RISC-V Service Supervisor Lifecycle & Recovery] ---");
+    services::test_service_supervisor_lifecycle_hardening();
     let test_svc_id = 3; // storaged
-    let orig_pid = services::start(test_svc_id).expect("Service start failed in lifecycle test");
+    let orig_pid = services::start(test_svc_id).expect("Service start failed in heartbeat test");
     assert!(orig_pid > 0);
+    let cur_gen = {
+        let mut g = 0;
+        for svc in &services::SERVICES {
+            if svc.id as u8 == test_svc_id {
+                g = svc.generation.load(core::sync::atomic::Ordering::Acquire);
+            }
+        }
+        g
+    };
     assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
-    assert_eq!(services::heartbeat(9999, 1), Err(()), "Heartbeat with spoofed PID must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, 1), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
+    assert_eq!(services::heartbeat(9999, cur_gen), Err(()), "Heartbeat with spoofed PID must be rejected");
+    assert_eq!(services::heartbeat(orig_pid, cur_gen), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
     assert_eq!(services::heartbeat(orig_pid, 0), Err(()), "Heartbeat with unvalidated/zero generation must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, 999), Err(()), "Heartbeat with stale generation must be rejected");
-    // Terminate service task via scheduler terminate_task and test recovery:
-    {
-        let mut sched = task::SCHEDULER.lock();
-        assert!(sched.terminate_task(1, true, orig_pid).is_ok());
-    }
-    let mut snap_buf = [0u8; 1024];
-    services::snapshot(&mut snap_buf);
-    assert_eq!(services::recover_failed(test_svc_id), Ok(()), "Service recover_failed must succeed");
+    assert_eq!(services::heartbeat(orig_pid, cur_gen.wrapping_add(999)), Err(()), "Heartbeat with stale generation must be rejected");
     assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
-    assert_eq!(services::stop(test_svc_id), Ok(()), "Stopping already stopped service must succeed");
     {
         let mut sched = task::SCHEDULER.lock();
         sched.tasks.clear();

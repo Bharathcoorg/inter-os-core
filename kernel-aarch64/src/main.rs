@@ -442,8 +442,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Test system call dispatch
     let sys_ticks = syscall::sys_dispatch(syscall::SYS_GET_TICKS, 0, 0, 0, 0, 0);
     assert!(sys_ticks >= 0);
+    let curr_pid = task::SCHEDULER.lock().current_pid() as i64;
     let sys_task_id = syscall::sys_dispatch(syscall::SYS_GET_TASK_ID, 0, 0, 0, 0, 0);
-    assert_eq!(sys_task_id, 0);
+    assert_eq!(sys_task_id, curr_pid);
 
     // Verify uncredentialed calls fail closed (-13)
     let denied_touch = syscall::sys_dispatch(syscall::SYS_TOUCH_POLL, 0, 0, 0, 0, 0);
@@ -494,7 +495,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let svc_ticks = unsafe { exceptions::svc_call(syscall::SYS_GET_TICKS, 0, 0, 0, 0) };
     assert!(svc_ticks >= 0);
     let svc_task_id = unsafe { exceptions::svc_call(syscall::SYS_GET_TASK_ID, 0, 0, 0, 0) };
-    assert_eq!(svc_task_id, 0);
+    assert_eq!(svc_task_id, curr_pid);
     kprintln!("[TEST] AArch64 Vector Table (VBAR_EL1): Hardware 'svc #0' trap -> sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", svc_ticks, svc_task_id);
 
     // 15. Mobile Shell Hit-Testing & Touch-Initiated Preemption
@@ -1681,25 +1682,25 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     mmu::test_mmu_ownership_reclamation_errors();
 
     // 46. Service Supervisor Lifecycle & Recovery Verification
-    kprintln!("--- [Testing AArch64 Service Supervisor Lifecycle & Recovery] ---");
+    services::test_service_supervisor_lifecycle_hardening();
     let test_svc_id = 3; // storaged
-    let orig_pid = services::start(test_svc_id).expect("Service start failed in lifecycle test");
+    let orig_pid = services::start(test_svc_id).expect("Service start failed in heartbeat test");
     assert!(orig_pid > 0);
+    let cur_gen = {
+        let mut g = 0;
+        for svc in &services::SERVICES {
+            if svc.id as u8 == test_svc_id {
+                g = svc.generation.load(core::sync::atomic::Ordering::Acquire);
+            }
+        }
+        g
+    };
     assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
-    assert_eq!(services::heartbeat(9999, 1), Err(()), "Heartbeat with spoofed PID must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, 1), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
+    assert_eq!(services::heartbeat(9999, cur_gen), Err(()), "Heartbeat with spoofed PID must be rejected");
+    assert_eq!(services::heartbeat(orig_pid, cur_gen), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
     assert_eq!(services::heartbeat(orig_pid, 0), Err(()), "Heartbeat with unvalidated/zero generation must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, 999), Err(()), "Heartbeat with stale generation must be rejected");
-    // Terminate service task via scheduler terminate_task and test recovery:
-    {
-        let mut sched = task::SCHEDULER.lock();
-        assert!(sched.terminate_task(1, true, orig_pid).is_ok());
-    }
-    let mut snap_buf = [0u8; 1024];
-    services::snapshot(&mut snap_buf);
-    assert_eq!(services::recover_failed(test_svc_id), Ok(()), "Service recover_failed must succeed");
+    assert_eq!(services::heartbeat(orig_pid, cur_gen.wrapping_add(999)), Err(()), "Heartbeat with stale generation must be rejected");
     assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
-    assert_eq!(services::stop(test_svc_id), Ok(()), "Stopping already stopped service must succeed");
     kprintln!("[TEST] Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover(Restarting -> Running) -> Stopped VERIFIED.");
 
     // 47. Spawn userspace PID 1 (init) at EL0

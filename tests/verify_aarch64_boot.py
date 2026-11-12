@@ -14,6 +14,8 @@ import sys
 import time
 import subprocess
 import shutil
+import threading
+import queue
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
@@ -87,21 +89,31 @@ def main():
     print(f"[*] Launching QEMU: {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
 
+    reader_queue = queue.Queue()
+    def enqueue_output(out, q):
+        for line in iter(out.readline, ''):
+            q.put(line)
+        out.close()
+
+    t = threading.Thread(target=enqueue_output, args=(proc.stdout, reader_queue))
+    t.daemon = True
+    t.start()
+
     captured_lines = []
     start_time = time.time()
     timeout_sec = 25
 
     try:
         while time.time() - start_time < timeout_sec:
-            line = proc.stdout.readline()
-            if not line and proc.poll() is not None:
-                break
-            if line:
+            try:
+                line = reader_queue.get(timeout=0.2)
                 captured_lines.append(line.rstrip())
-                # Check if all required signals have been observed
                 combined = "\n".join(captured_lines)
                 if all(sig in combined for sig in REQUIRED_SIGNALS):
                     print("[*] All required boot and lifecycle signals observed!")
+                    break
+            except queue.Empty:
+                if proc.poll() is not None:
                     break
     finally:
         try:
