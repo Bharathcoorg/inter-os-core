@@ -92,22 +92,22 @@ impl ServiceState {
 pub const HEARTBEAT_TIMEOUT_TICKS: u64 = 300_000_000;
 pub const MAX_RESTART_ATTEMPTS: u32 = 5;
 
-pub struct ServiceEntry {
-    pub id: ServiceId,
-    pub name: &'static str,
-    pub state: AtomicU8,
-    pub restart: u8,
-    pub critical: u8,
-    pub generation: AtomicU32,
-    pub last_heartbeat: AtomicU64,
-    pub failures: AtomicU32,
-    pub pid: AtomicU32,
-    pub restart_count: AtomicU32,
-    pub backoff_ticks: AtomicU64,
+struct ServiceEntry {
+    id: ServiceId,
+    name: &'static str,
+    state: AtomicU8,
+    restart: u8,
+    critical: u8,
+    generation: AtomicU32,
+    last_heartbeat: AtomicU64,
+    failures: AtomicU32,
+    pid: AtomicU32,
+    restart_count: AtomicU32,
+    backoff_ticks: AtomicU64,
 }
 
 // 12 core declared services matching userspace/init discovery expectations
-pub static SERVICES: [ServiceEntry; 12] = [
+static SERVICES: [ServiceEntry; 12] = [
     ServiceEntry { id: ServiceId::Display, name: "displayd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
     ServiceEntry { id: ServiceId::Input, name: "inputd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
     ServiceEntry { id: ServiceId::Storage, name: "storaged", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
@@ -145,7 +145,7 @@ impl ServiceLifecycleToken {
         })
     }
 
-    #[doc(hidden)]
+    #[cfg(test)]
     pub(crate) fn forge_for_test(service_id: u8, pid: u32, generation: u32) -> Self {
         Self {
             service_id,
@@ -180,6 +180,16 @@ impl ServiceLifecycleToken {
         }
         false
     }
+}
+
+/// Validate whether an ID corresponds to a registered service without leaking the array
+pub fn is_valid_service_id(id: u8) -> bool {
+    for svc in &SERVICES {
+        if svc.id as u8 == id {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn service_pid(id: u8) -> Option<u32> {
@@ -540,6 +550,13 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     crate::println!("--- [Testing RISC-V Service Supervisor Lifecycle & Authorization Hardening] ---");
     let test_svc_id = 3; // ServiceId::Storage ("storaged")
 
+    // In-module private test token helper for negative authorization testing
+    let make_test_token = |service_id: u8, pid: u32, generation: u32| ServiceLifecycleToken {
+        service_id,
+        pid,
+        generation,
+    };
+
     // Clean initial state: stop if already running
     let _ = stop(test_svc_id);
 
@@ -553,22 +570,14 @@ pub fn test_service_supervisor_lifecycle_hardening() {
         assert_eq!(t.service_id, Some(test_svc_id), "Test 1: Service task must have service_id matching declared ID");
         assert_eq!(t.parent_id, crate::task::SUPERVISOR_PID, "Test 1: Service task must have parent_id == SUPERVISOR_PID");
     }
-    for svc in &SERVICES {
-        if svc.id as u8 == test_svc_id {
-            assert_eq!(svc.state.load(Ordering::Acquire), ServiceState::Running as u8);
-            assert_eq!(svc.pid.load(Ordering::Acquire), pid1);
-        }
-    }
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
+    assert_eq!(service_pid(test_svc_id), Some(pid1));
     crate::println!("[TEST] Test 1 (Start Service & Identity Verification): PASSED");
 
     // Test 2: Stop service (task removed, registry PID cleared, state Stopped)
     assert_eq!(stop(test_svc_id), Ok(()), "Test 2: Service stop must succeed");
-    for svc in &SERVICES {
-        if svc.id as u8 == test_svc_id {
-            assert_eq!(svc.state.load(Ordering::Acquire), ServiceState::Stopped as u8);
-            assert_eq!(svc.pid.load(Ordering::Acquire), 0);
-        }
-    }
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
+    assert_eq!(service_pid(test_svc_id), None);
     {
         let sched = crate::task::SCHEDULER.lock();
         assert!(!sched.tasks.iter().any(|t| t.id == pid1), "Test 2: Stopped service task must be reaped from scheduler");
@@ -576,26 +585,10 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     crate::println!("[TEST] Test 2 (Stop Service & Clean Reaping): PASSED");
 
     // Test 3: Restart service (old task reaped, new PID assigned, generation advances)
-    let initial_gen = {
-        let mut g = 0;
-        for svc in &SERVICES {
-            if svc.id as u8 == test_svc_id {
-                g = svc.generation.load(Ordering::Acquire);
-            }
-        }
-        g
-    };
+    let initial_gen = service_generation(test_svc_id).unwrap_or(0);
     let pid2 = start(test_svc_id).expect("Test 3: Service restart must succeed");
     assert!(pid2 > 0 && pid2 != pid1, "Test 3: Restarted service must receive a new distinct PID");
-    let restarted_gen = {
-        let mut g = 0;
-        for svc in &SERVICES {
-            if svc.id as u8 == test_svc_id {
-                g = svc.generation.load(Ordering::Acquire);
-            }
-        }
-        g
-    };
+    let restarted_gen = service_generation(test_svc_id).unwrap_or(0);
     assert!(restarted_gen > initial_gen, "Test 3: Generation must advance on service restart");
     {
         let sched = crate::task::SCHEDULER.lock();
@@ -618,16 +611,8 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     let mut snap_buf = [0u8; 1024];
     let _ = snapshot(&mut snap_buf);
     assert_eq!(recover_failed(test_svc_id), Ok(()), "Test 4: recover_failed must succeed");
-    let pid3 = {
-        let mut p = 0;
-        for svc in &SERVICES {
-            if svc.id as u8 == test_svc_id {
-                p = svc.pid.load(Ordering::Acquire);
-                assert_eq!(svc.state.load(Ordering::Acquire), ServiceState::Running as u8);
-            }
-        }
-        p
-    };
+    let pid3 = service_pid(test_svc_id).expect("Test 4: Recovered service must have active PID");
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
     assert!(pid3 > 0 && pid3 != pid2, "Test 4: Recovered service must have new PID");
     {
         let sched = crate::task::SCHEDULER.lock();
@@ -643,7 +628,7 @@ pub fn test_service_supervisor_lifecycle_hardening() {
         sched.spawn_user_process(1, "unauth_user", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new())
     };
     assert!(user_pid > 0);
-    let forged_token = ServiceLifecycleToken::forge_for_test(test_svc_id, user_pid, 1);
+    let forged_token = make_test_token(test_svc_id, user_pid, 1);
     assert_eq!(crate::task::reap_service_task(&forged_token), Err(-1), "Test 5: reap_service_task on ordinary user process must fail with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
@@ -655,18 +640,18 @@ pub fn test_service_supervisor_lifecycle_hardening() {
 
     // Test 6: Stale PID / generation token rejection with -EPERM
     let cur_gen = service_generation(test_svc_id).expect("service generation");
-    let stale_gen_token = ServiceLifecycleToken::forge_for_test(test_svc_id, pid3, cur_gen.wrapping_add(999));
+    let stale_gen_token = make_test_token(test_svc_id, pid3, cur_gen.wrapping_add(999));
     assert_eq!(crate::task::reap_service_task(&stale_gen_token), Err(-1), "Test 6: Token with stale generation must be rejected with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
         assert_eq!(crate::task::terminate_service_task(&mut sched, &stale_gen_token), Err(-1), "Test 6: terminate with stale generation must fail with -EPERM (-1)");
     }
-    let stale_pid_token = ServiceLifecycleToken::forge_for_test(test_svc_id, 0x9999, cur_gen);
+    let stale_pid_token = make_test_token(test_svc_id, 0x9999, cur_gen);
     assert_eq!(crate::task::reap_service_task(&stale_pid_token), Err(-1), "Test 6: Token with stale PID must be rejected with -EPERM (-1)");
     crate::println!("[TEST] Test 6 (Stale PID & Generation Token Rejection -EPERM): PASSED");
 
     // Test 7: Service registration mismatch rejection with -EPERM (-1)
-    let mismatch_token = ServiceLifecycleToken::forge_for_test(test_svc_id + 1, pid3, cur_gen);
+    let mismatch_token = make_test_token(test_svc_id + 1, pid3, cur_gen);
     assert_eq!(crate::task::reap_service_task(&mismatch_token), Err(-1), "Test 7: Token with mismatched service ID must fail with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
@@ -674,7 +659,7 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     }
     crate::println!("[TEST] Test 7 (Service Registration Mismatch Rejection -EPERM): PASSED");
 
-    // Test 8: Reserved PID registration rejection
+    // Test 8: Reserved PID registration & spawn_service_process validation
     {
         let mut sched = crate::task::SCHEDULER.lock();
         assert!(!sched.add_task(crate::task::TaskId(0), 0, 0, 0, 0), "Test 8: Explicit registration of PID 0 must be rejected");
@@ -687,15 +672,21 @@ pub fn test_service_supervisor_lifecycle_hardening() {
         if let Some(pos) = sched.tasks.iter().position(|t| t.id == 23456) {
             sched.remove_task_at(pos);
         }
+
+        // Validate spawn_service_process generation and ID validation
+        assert_eq!(sched.spawn_service_process(test_svc_id, 0, "gen0_svc", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new()), 0, "Test 8: spawn_service_process with generation 0 must be rejected");
+        assert_eq!(sched.spawn_service_process(255, 1, "inv_svc", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new()), 0, "Test 8: spawn_service_process with invalid service ID must be rejected");
+        assert!(is_valid_service_id(test_svc_id), "Test 8: test_svc_id must be valid");
+        assert!(!is_valid_service_id(255), "Test 8: service_id 255 must be invalid");
     }
-    crate::println!("[TEST] Test 8 (Reserved PID Registration Rejection): PASSED");
+    crate::println!("[TEST] Test 8 (Reserved PID Registration Rejection & Spawn Validation): PASSED");
 
     // Test 9: Failure paths without silently clearing service PID
     {
         let recorded_pid = service_pid(test_svc_id).expect("Service PID must be active");
         assert_eq!(recorded_pid, pid3);
         // An unauthenticated / invalid token reap does NOT clear the registry PID
-        let invalid_token = ServiceLifecycleToken::forge_for_test(test_svc_id, pid3, cur_gen.wrapping_add(555));
+        let invalid_token = make_test_token(test_svc_id, pid3, cur_gen.wrapping_add(555));
         let reap_fail = crate::task::reap_service_task(&invalid_token);
         assert_eq!(reap_fail, Err(-1));
         assert_eq!(service_pid(test_svc_id), Some(pid3), "Test 9: Failed reap must NOT clear service PID from registry");
