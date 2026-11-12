@@ -1,11 +1,11 @@
-# InterOS Core — Phase 8.5 / 8.5.4 Cross-Architecture Acceptance Matrix
+# InterOS Core — Phase 8.5 / 8.5.4 / 8.5.4.1 Cross-Architecture Acceptance Matrix
 
-**Date:** 2026-11-12  
-**Phase:** 8.5.4 Quarantine Integrity, Shared-Frame Hardening & Service Identity Safety  
-**Starting HEAD:** `16b35107db6b991a4a4ba015bd6d7566da5823b7`  
-**Previous Phase Baseline:** Phase 8.5.3.2 Completion  
+**Date:** 2026-11-13  
+**Phase:** 8.5.4.1 Supervisor Identity Reservation, Service-Target Authorization & Lifecycle Regression Hardening  
+**Starting HEAD:** `b86b9f5f9aa6881b1e69988adea3f5153acf6886`  
+**Previous Phase Baseline:** Phase 8.5.4 Completion (`4dfdc24c9357a8394e49e625ec34cedb3c9d6289`)  
 **Target Architectures:** `x86_64`, `aarch64`, `riscv64`  
-**Scope Note:** Phase 8.5.4 hardened `kernel-aarch64/src/mmu.rs`, `kernel-riscv64/src/mmu.rs`, `kernel-aarch64/src/task.rs`, `kernel-riscv64/src/task.rs`, `kernel-aarch64/src/services.rs`, and `kernel-riscv64/src/services.rs`. `kernel/` (`x86_64`) was **not** modified in Phase 8.5.4.
+**Scope Note:** Phase 8.5.4.1 hardened `kernel-aarch64/src/task.rs`, `kernel-riscv64/src/task.rs`, `kernel-aarch64/src/services.rs`, `kernel-riscv64/src/services.rs`, and the QEMU boot test harnesses `tests/verify_aarch64_boot.py` and `tests/verify_riscv_boot.py`. `kernel/` (`x86_64`) was **not** modified in Phase 8.5.4.1.
 
 **Evidence Labels Used in This Document:**
 `VERIFIED BY LOCAL TEST` | `VERIFIED BY SINGLE-CPU QEMU` | `VERIFIED BY SINGLE-HART QEMU` | `SOURCE-REVIEWED` | `NOT VERIFIED` | `NOT IMPLEMENTED` | `NOT APPLICABLE`
@@ -26,6 +26,10 @@
 | **Diagnostic Quarantine** | Rich Quarantine Metadata & Recycle Rejection (`is_quarantined`) | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4; no `QUARANTINED_FRAMES` or `is_quarantined()` in `kernel/src`) | **VERIFIED BY SINGLE-CPU QEMU** (`QuarantinedFrame { paddr, ownership, reason }`; `recycle_frame`/`release_shared_frame` reject quarantined frames; `Kernel` ownership for table frames) | **VERIFIED BY SINGLE-HART QEMU** (`QuarantinedFrame { paddr, ownership, reason }`; `recycle_frame`/`release_shared_frame` reject quarantined frames; `Kernel` ownership for table frames) | `test_mmu_ownership_reclamation_errors()` in Single-Core QEMU Boot |
 | **Quarantined Shared-Frame Integrity** | Reject `retain_shared_frame` and `map_shared_frame` for Quarantined Frames | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4) | **VERIFIED BY SINGLE-CPU QEMU** (`retain_shared_frame`, `map_shared_frame`, `map_private_frame` reject quarantined frames; `test_mmu_ownership_reclamation_errors` Part 7) | **VERIFIED BY SINGLE-HART QEMU** (`retain_shared_frame`, `map_shared_frame`, `map_private_frame` reject quarantined frames; `test_mmu_ownership_reclamation_errors` Part 7) | `test_mmu_ownership_reclamation_errors()` Part 7 in Single-Core QEMU Boot |
 | **Allocator Quarantine Immunity** | `allocate_frame_with_ownership` Skips Quarantined Frames | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4) | **VERIFIED BY SINGLE-CPU QEMU** (Allocator tests `is_quarantined(paddr)` and skips quarantined frames; `test_mmu_ownership_reclamation_errors` Part 6) | **VERIFIED BY SINGLE-HART QEMU** (Allocator tests `is_quarantined(paddr)` and skips quarantined frames; `test_mmu_ownership_reclamation_errors` Part 6) | `test_mmu_ownership_reclamation_errors()` Part 6 in Single-Core QEMU Boot |
+| **Supervisor Identity Reservation** | PID Allocators Reserve `0`, `SUPERVISOR_PID`, `INVALID_PID` with Loop Termination | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4.1) | **VERIFIED BY SINGLE-CPU QEMU** (`is_reserved_pid()`, wraparound to 1, `None` on exhaustion; `test_task_lifecycle` Test 5) | **VERIFIED BY SINGLE-HART QEMU** (`is_reserved_pid()`, wraparound to 1, `None` on exhaustion; `test_task_lifecycle` Test 5) | PID Allocator Unit Tests & Boot Verification |
+| **Service Target Authorization** | Lifecycle Operations Enforced via Authenticated `ServiceLifecycleToken` | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4.1) | **VERIFIED BY SINGLE-CPU QEMU** (`reap_service_task` & `terminate_service_task` require token, reject ordinary user tasks with `-EPERM`) | **VERIFIED BY SINGLE-HART QEMU** (`reap_service_task` & `terminate_service_task` require token, reject ordinary user tasks with `-EPERM`) | `test_service_supervisor_lifecycle_hardening()` in QEMU Boot |
+| **Supervisor Lifecycle Hardening** | 7-Contract Service Lifecycle & Recovery Validation (Section 46) | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4.1) | **VERIFIED BY SINGLE-CPU QEMU** (Start, Stop, Restart, Crash Recovery, User Task Denial, Stale Token Denial, PID 1 Immunity) | **VERIFIED BY SINGLE-HART QEMU** (Start, Stop, Restart, Crash Recovery, User Task Denial, Stale Token Denial, PID 1 Immunity) | Section 46 Boot Self-Test in Single-Core QEMU |
+| **Test Harness Pipe Deadlock Safety** | Asynchronous Queue Reader Threads (Zero Windows Pipe Deadlocks) | **VERIFIED BY LOCAL TEST** | **VERIFIED BY LOCAL TEST** (`tests/verify_aarch64_boot.py` non-blocking pipe queue reader) | **VERIFIED BY LOCAL TEST** (`tests/verify_riscv_boot.py` non-blocking pipe queue reader) | QEMU Boot Verification Harnesses |
 | **Service Supervisor Identity** | Dedicated `reap_service_task` with `SUPERVISOR_PID` (No Hardcoded PID 1) | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4) | **VERIFIED BY SINGLE-CPU QEMU** (`SUPERVISOR_PID = 0xFFFF_FFFE`, `reap_service_task`, `terminate_service_task` in `services.rs`; `test_task_lifecycle` Test 8) | **VERIFIED BY SINGLE-HART QEMU** (`SUPERVISOR_PID = 0xFFFF_FFFE`, `reap_service_task`, `terminate_service_task` in `services.rs`; `test_task_lifecycle` Test 10) | Single-Core QEMU Boot Tests & `services.rs` Lifecycle Loop |
 | **Reaping Wildcard Safety** | `target_pid == 0` Filters by Caller Identity (No Foreign Interception) | **NOT IMPLEMENTED** (`kernel/` untouched in 8.5.4) | **VERIFIED BY SINGLE-CPU QEMU** (`begin_reap` checks `(target_pid != 0 || is_supervisor || t.parent_id == caller_pid)` inside `.position()`; `test_task_lifecycle` Test 7) | **VERIFIED BY SINGLE-HART QEMU** (`begin_reap` checks `(target_pid != 0 || is_supervisor || t.parent_id == caller_pid)` inside `.position()`; `test_task_lifecycle` Test 9) | `test_task_lifecycle` Multi-Process Interleaved Reaping Tests |
 | **TLB Failure Handling** | Fallible Teardown & Quarantining | **NOT IMPLEMENTED** (Single-core teardown in `kernel/src`; no `destroy_fallible()`) | **VERIFIED BY SINGLE-CPU QEMU** (`destroy_fallible()`, `Drop` preserves quarantine reasons and skips `Borrowed`) | **VERIFIED BY SINGLE-HART QEMU** (`destroy_fallible()`, `Drop` preserves quarantine reasons and skips `Borrowed`) | `test_mmu_ownership_reclamation_errors()` in Single-Core QEMU Boot |
@@ -51,19 +55,20 @@
 
 | Target Architecture | Test Script / Suite | Exit Code | Result | Key Indicators |
 |---|---|---|---|---|
-| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors (excludes `kernel`, `kernel-aarch64`, `kernel-riscv64`; 8.5.4 run) |
-| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts (8.5.4 run) |
-| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 67 passed in 0.28s (8.5.4 run) |
-| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 593 passed, 0 failed, 1 ignored (`x86_64` host tests; `kernel/` untouched in 8.5.4) |
-| **x86_64** | `python tools/interos.py build demo` & `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** (Phase 8.5.3 baseline) / **NOT VERIFIED** (8.5.4) | Phase 8.5.3 baseline built `target/inter-os-bios.img` and checked 3680 distinct colours; not re-run in 8.5.4 (`kernel/` unchanged) |
-| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors/warnings (8.5.4 run) |
-| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,472,176 bytes; 8.5.4 run) |
-| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran with 1 vCPU (`-M virt`, no `-smp`); enforces Transactional Switch, 5-Stage Reap Evacuation & MMU Error signals (8.5.4 run) |
-| **AArch64** | `python tests/verify_aarch64_interactive.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran with 1 vCPU (`-M virt`, no `-smp`); Calculator PID 61, `7 + 5 = 12` glyph + negative tests, reap PID 61, HomeScreen re-presented (8.5.4 run) |
-| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors/warnings (8.5.4 run) |
-| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly (8.5.4 run) |
-| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran with 1 hart (`-M virt`, no `-smp`); enforces 5-Stage Reap + Transactional Switch & MMU Error signals (8.5.4 run) |
-| **RISC-V 64** | `python tests/verify_riscv_interactive.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran with 1 hart (`-M virt`, no `-smp`); Calculator PID 149, `7 + 5 = 12` glyph + negative tests, reap PID 149, HomeScreen re-presented (8.5.4 run) |
+| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors (excludes `kernel`, `kernel-aarch64`, `kernel-riscv64`; 8.5.4.1 run) |
+| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts (8.5.4.1 run) |
+| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 67 passed in 0.20s (8.5.4.1 run) |
+| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 593 passed, 0 failed, 1 ignored (`x86_64` host tests; `kernel/` untouched in 8.5.4.1) |
+| **x86_64** | `python tools/interos.py build demo` & `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** (Phase 8.5.3 baseline) / **NOT VERIFIED** (8.5.4.1) | Phase 8.5.3 baseline built `target/inter-os-bios.img` and checked 3680 distinct colours; not re-run in 8.5.4.1 (`kernel/` unchanged) |
+| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors/warnings (8.5.4.1 run) |
+| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,484,464 bytes; 8.5.4.1 run) |
+| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 2.0s with 1 vCPU; non-blocking pipe queue reader; Section 46 7-stage lifecycle verified (8.5.4.1 run) |
+| **AArch64** | `python tests/verify_aarch64_interactive.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 31.8s with 1 vCPU; Calculator PID 77, `7 + 5 = 12` glyph + negative tests, reap PID 77, HomeScreen re-presented (8.5.4.1 run) |
+| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors/warnings (8.5.4.1 run) |
+| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly (8.5.4.1 run) |
+| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 1.8s with 1 hart; non-blocking pipe queue reader; Section 46 7-stage lifecycle verified (8.5.4.1 run) |
+| **RISC-V 64** | `python tests/verify_riscv_interactive.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 24.2s with 1 hart; Calculator PID 189, `7 + 5 = 12` glyph + negative tests, reap PID 189, HomeScreen re-presented (8.5.4.1 run) |
+| **Workspace** | `python tests/run_all_contracts.py` | 0 | **VERIFIED BY LOCAL TEST** | 1241 cases passed across 109 active suites, 0 failed (8.5.4.1 run) |
 | **AArch64 / RISC-V 64** | Concurrent Multi-Core Evacuation (`-smp > 1` QEMU) | — | **NOT VERIFIED** | No genuine concurrent multi-core evacuation test executed; remote CPU/hart behavior has **SOURCE-REVIEWED** + sequential single-core test coverage only |
 
 ---
