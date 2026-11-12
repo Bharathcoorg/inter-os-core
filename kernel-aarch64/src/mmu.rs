@@ -812,22 +812,29 @@ impl ArmFrameAllocator {
     }
 
     pub fn allocate_frame_with_ownership(&mut self, ownership: FrameOwnership) -> Option<u64> {
-        for (word_idx, word) in self.bitmap.iter_mut().enumerate() {
-            if *word != !0u64 {
-                let bit_idx = (!*word).trailing_zeros() as usize;
-                let frame_idx = word_idx * 64 + bit_idx;
-                if frame_idx >= self.total_frames {
-                    return None;
+        for word_idx in 0..self.bitmap.len() {
+            if self.bitmap[word_idx] == !0u64 {
+                continue;
+            }
+            for bit_idx in 0..64 {
+                if (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0 {
+                    let frame_idx = word_idx * 64 + bit_idx;
+                    if frame_idx >= self.total_frames {
+                        return None;
+                    }
+                    let paddr = self.base_paddr + (frame_idx as u64) * 4096;
+                    if is_quarantined(paddr) {
+                        continue;
+                    }
+                    self.bitmap[word_idx] |= 1u64 << bit_idx;
+                    self.allocated_frames += 1;
+                    self.ownership[frame_idx] = ownership as u8;
+                    self.ref_counts[frame_idx] = 0;
+                    unsafe {
+                        core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
+                    }
+                    return Some(paddr);
                 }
-                *word |= 1u64 << bit_idx;
-                self.allocated_frames += 1;
-                self.ownership[frame_idx] = ownership as u8;
-                self.ref_counts[frame_idx] = 0;
-                let paddr = self.base_paddr + (frame_idx as u64) * 4096;
-                unsafe {
-                    core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
-                }
-                return Some(paddr);
             }
         }
         None
@@ -848,6 +855,9 @@ impl ArmFrameAllocator {
         }
         if self.ownership[frame_idx] != FrameOwnership::PrivateOwned as u8 {
             return Err("Cannot map non-private frame as private");
+        }
+        if is_quarantined(paddr) {
+            return Err("Cannot map quarantined private frame");
         }
         if self.ref_counts[frame_idx] != 0 {
             return Err("Private frame already mapped to another virtual address");
@@ -898,6 +908,9 @@ impl ArmFrameAllocator {
         }
         if self.ownership[frame_idx] != FrameOwnership::Shared as u8 {
             return Err("Cannot retain non-shared frame");
+        }
+        if is_quarantined(paddr) {
+            return Err("Cannot retain quarantined shared frame");
         }
         if self.ref_counts[frame_idx] >= 1024 {
             return Err("Reference count overflow on shared frame");
@@ -1351,6 +1364,9 @@ impl UserAddressSpace {
         if vaddr >= 0x4000_0000 || vaddr < 0x1000 {
             return Err("Virtual address outside canonical user range");
         }
+        if is_quarantined(paddr) {
+            return Err("Cannot map quarantined frame");
+        }
         if frame_ownership(paddr) != Some(FrameOwnership::PrivateOwned) {
             return Err("Frame is not PrivatelyOwned");
         }
@@ -1391,6 +1407,9 @@ impl UserAddressSpace {
         }
         if vaddr >= 0x4000_0000 || vaddr < 0x1000 {
             return Err("Virtual address outside canonical user range");
+        }
+        if is_quarantined(paddr) {
+            return Err("Cannot map quarantined frame");
         }
         if frame_ownership(paddr) != Some(FrameOwnership::Shared) {
             return Err("Frame is not Shared");
@@ -1433,6 +1452,9 @@ impl UserAddressSpace {
         }
         if vaddr >= 0x4000_0000 || vaddr < 0x1000 {
             return Err("Virtual address outside canonical user range");
+        }
+        if is_quarantined(paddr) {
+            return Err("Cannot map quarantined frame");
         }
         let own = frame_ownership(paddr);
         let base = ACTIVE_RAM_BASE.load(core::sync::atomic::Ordering::Relaxed);
@@ -1890,6 +1912,45 @@ pub fn test_mmu_ownership_reclamation_errors() {
     assert!(!is_quarantined(f_shared));
     assert_eq!(total_recycled_frames(), recycled_s2 + 1, "Shared frame must be freed when refcount reaches 0");
     assert_eq!(aspace_s2.destroy_fallible(), Ok(()));
+
+    // 6. Quarantined frame cannot be allocated by allocate_frame_with_ownership
+    let f_to_quarantine = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc test frame for alloc reject");
+    quarantine_frame_with_meta(f_to_quarantine, FrameOwnership::PrivateOwned, "test alloc skip");
+    // Free the frame in bitmap so allocator would otherwise pick it
+    {
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        let idx = ((f_to_quarantine - alloc.base_paddr) / 4096) as usize;
+        alloc.bitmap[idx / 64] &= !(1u64 << (idx % 64));
+    }
+    // Now allocate another frame: it must NOT pick f_to_quarantine!
+    let f_allocated_after = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc next frame");
+    assert_ne!(f_allocated_after, f_to_quarantine, "Allocator must never allocate a quarantined frame");
+    // Also re-verify quarantine metadata intact
+    {
+        let q = QUARANTINED_FRAMES.lock();
+        let entry = q.iter().find(|e| e.paddr == f_to_quarantine).expect("quarantine entry preserved");
+        assert_eq!(entry.reason, "test alloc skip");
+    }
+
+    // 7. Quarantined shared frame (refcount > 1) rejects retain_shared_frame and map_shared_frame
+    let f_multi_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc multi shared frame");
+    let mut aspace_ms1 = UserAddressSpace::new().expect("aspace ms1");
+    aspace_ms1.map_shared_frame(0x0040_0000, f_multi_shared, false, false).expect("map ms1");
+    assert_eq!(frame_refcount(f_multi_shared), 1);
+    retain_shared_frame(f_multi_shared).expect("retain refcount 2");
+    assert_eq!(frame_refcount(f_multi_shared), 2);
+    quarantine_frame_with_meta(f_multi_shared, FrameOwnership::Shared, "quarantine multi-shared");
+    assert!(is_quarantined(f_multi_shared));
+    // Must reject further retain
+    assert_eq!(retain_shared_frame(f_multi_shared), Err("Cannot retain quarantined shared frame"));
+    // Must reject mapping in a new address space
+    let mut aspace_ms2 = UserAddressSpace::new().expect("aspace ms2");
+    assert_eq!(aspace_ms2.map_shared_frame(0x0040_0000, f_multi_shared, false, false), Err("Cannot map quarantined frame"));
+    // Must reject mapping as private frame
+    assert_eq!(aspace_ms2.map_private_frame(0x0040_0000, f_multi_shared, false, false), Err("Cannot map quarantined frame"));
+    // Cleanup ms1
+    drop(aspace_ms1);
+    drop(aspace_ms2);
 
     crate::kprintln!("[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.");
 }

@@ -123,6 +123,7 @@ pub struct Scheduler {
 
 pub const MAX_TASKS: usize = 256;
 pub const INVALID_PID: u32 = u32::MAX;
+pub const SUPERVISOR_PID: u32 = 0xFFFF_FFFE;
 
 impl Scheduler {
     pub const fn new() -> Self {
@@ -301,6 +302,8 @@ impl Scheduler {
         let pos = self.tasks.iter().position(|t| {
             (target_pid == 0 || t.id == target_pid)
                 && (target_pid != 0 || t.id != caller_pid)
+                && (target_pid != 0 || t.id != 0)
+                && (target_pid != 0 || is_supervisor || t.parent_id == caller_pid)
                 && (t.state == TaskState::Terminated || t.state == TaskState::Exited || t.state == TaskState::ReapFailed)
         }).ok_or(-30i64)?; // NotReady or not found
 
@@ -507,6 +510,24 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
     }
 }
 
+/// Reaps a supervisor-managed service task.
+/// Uses authentic internal kernel supervisor identity (`SUPERVISOR_PID`, `is_supervisor: true`).
+/// Cannot be impersonated by userspace because userspace PIDs are allocated sequentially (0..255).
+pub fn reap_service_task(target_pid: u32) -> Result<i32, i64> {
+    if target_pid == 0 || target_pid == INVALID_PID || target_pid == SUPERVISOR_PID {
+        return Err(-22); // -EINVAL
+    }
+    reap_task_locksafe(SUPERVISOR_PID, true, target_pid)
+}
+
+/// Terminates a supervisor-managed service task.
+pub fn terminate_service_task(sched: &mut Scheduler, target_pid: u32) -> Result<(), i64> {
+    if target_pid == 0 || target_pid == INVALID_PID || target_pid == SUPERVISOR_PID {
+        return Err(-22); // -EINVAL
+    }
+    sched.terminate_task(SUPERVISOR_PID, true, target_pid)
+}
+
 pub extern "C" fn user_process_entry() -> ! {
     let (entry, sp) = {
         let sched = SCHEDULER.lock();
@@ -667,6 +688,44 @@ pub fn test_task_lifecycle() {
     let retry_aspace = sched2.detach_reaping_aspace(retry_handle).expect("detach on ReapFailed retry");
     assert!(retry_aspace.is_none());
     assert_eq!(sched2.finish_reap(retry_handle), Ok(0));
+
+    // Test 7: Wildcard Reaping Target Selection Safety (target_pid == 0)
+    let p_a = sched2.spawn_user_process(0, "parent_a", 0, 0, None, caps.clone());
+    let p_b = sched2.spawn_user_process(0, "parent_b", 0, 0, None, caps.clone());
+    let c_a = sched2.spawn_user_process(p_a, "child_a", 0, 0, None, caps.clone());
+    let c_b = sched2.spawn_user_process(p_b, "child_b", 0, 0, None, caps.clone());
+    // Terminate child_a first so it is earlier in the task array than child_b
+    let c_a_pos = sched2.tasks.iter().position(|t| t.id == c_a).unwrap();
+    sched2.tasks[c_a_pos].state = TaskState::Terminated;
+    let c_b_pos = sched2.tasks.iter().position(|t| t.id == c_b).unwrap();
+    sched2.tasks[c_b_pos].state = TaskState::Terminated;
+
+    // Caller p_b calls wildcard begin_reap(p_b, false, 0).
+    // It MUST skip foreign child_a and select p_b's child c_b!
+    let h_b = sched2.begin_reap(p_b, false, 0).expect("Wildcard reap for parent_b must select child_b");
+    assert_eq!(h_b.pid, c_b, "Wildcard reap must find caller's own child, not foreign child");
+    assert_eq!(sched2.finish_reap(h_b), Ok(0));
+
+    // Now caller p_a calls wildcard begin_reap(p_a, false, 0) -> selects child_a
+    let h_a = sched2.begin_reap(p_a, false, 0).expect("Wildcard reap for parent_a must select child_a");
+    assert_eq!(h_a.pid, c_a, "Wildcard reap must select child_a");
+    assert_eq!(sched2.finish_reap(h_a), Ok(0));
+
+    // Second wildcard reap with no terminated children must return -30
+    assert_eq!(sched2.begin_reap(p_a, false, 0), Err(-30));
+
+    // Test 8: Service Supervisor Identity Reaping API
+    let svc_child = sched2.spawn_user_process(0, "svc_child", 0, 0, None, caps.clone());
+    let svc_pos = sched2.tasks.iter().position(|t| t.id == svc_child).unwrap();
+    sched2.tasks[svc_pos].state = TaskState::Terminated;
+    // Invalid PIDs rejected
+    assert_eq!(reap_service_task(0), Err(-22));
+    assert_eq!(reap_service_task(INVALID_PID), Err(-22));
+    assert_eq!(reap_service_task(SUPERVISOR_PID), Err(-22));
+    // Supervisor reap of svc_child succeeds using internal SUPERVISOR_PID
+    let h_svc = sched2.begin_reap(SUPERVISOR_PID, true, svc_child).expect("Supervisor begin_reap on service task");
+    assert_eq!(h_svc.pid, svc_child);
+    assert_eq!(sched2.finish_reap(h_svc), Ok(0));
 
     crate::kprintln!("[TEST] AArch64 Task Removal Consistency & Multi-Stage Reap VERIFIED.");
 }

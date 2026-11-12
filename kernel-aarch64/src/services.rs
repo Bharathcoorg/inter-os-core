@@ -154,13 +154,13 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             if old_pid != 0 {
                 {
                     let mut sched = crate::task::SCHEDULER.lock();
-                    if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                    if let Err(e) = crate::task::terminate_service_task(&mut sched, old_pid) {
                         crate::kprintln!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
                         svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
                         return Err(());
                     }
                 }
-                match crate::task::reap_task_locksafe(1, true, old_pid) {
+                match crate::task::reap_service_task(old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }
@@ -248,12 +248,12 @@ pub fn stop(id: u8) -> Result<(), ()> {
             if pid != 0 {
                 {
                     let mut sched = crate::task::SCHEDULER.lock();
-                    if let Err(e) = sched.terminate_task(1, true, pid) {
+                    if let Err(e) = crate::task::terminate_service_task(&mut sched, pid) {
                         crate::kprintln!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
                         return Err(());
                     }
                 }
-                match crate::task::reap_task_locksafe(1, true, pid) {
+                match crate::task::reap_service_task(pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }
@@ -331,12 +331,12 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             if old_pid != 0 {
                 {
                     let mut sched = crate::task::SCHEDULER.lock();
-                    if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                    if let Err(e) = crate::task::terminate_service_task(&mut sched, old_pid) {
                         crate::kprintln!("[SERVICE] Recovery termination failed for PID {}: {}", old_pid, e);
                         return Err(());
                     }
                 }
-                match crate::task::reap_task_locksafe(1, true, old_pid) {
+                match crate::task::reap_service_task(old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }
