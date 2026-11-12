@@ -206,12 +206,10 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
             mmu::switch_satp(kernel_satp);
         }
 
-        let mut sched = task::SCHEDULER.lock();
-        assert_eq!(sched.reap_task(888, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
-        let reaped_code = sched.reap_task(parent_id, false, child_pid).expect("Parent reap of terminated child must succeed");
+        assert_eq!(task::reap_task_locksafe(888, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
+        let reaped_code = task::reap_task_locksafe(parent_id, false, child_pid).expect("Parent reap of terminated child must succeed");
         assert_eq!(reaped_code, 0);
-        assert!(sched.reap_task(parent_id, false, child_pid).is_err(), "Double reap must fail");
-        drop(sched);
+        assert!(task::reap_task_locksafe(parent_id, false, child_pid).is_err(), "Double reap must fail");
 
         assert_eq!(mmu::active_allocated_frames(), proc_baseline_frames, "Process frame leak at cycle {}", cycle);
         assert_eq!(task::SCHEDULER.lock().tasks.len(), proc_baseline_tasks, "Process task leak at cycle {}", cycle);
@@ -317,6 +315,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
 
         println!("[TEST] Frame Ownership & Shared Mappings: Private/Shared/Borrowed lifecycle & Quarantine Metadata VERIFIED.");
     }
+
+    // MMU Ownership Reclamation Errors & Quarantine Verification
+    mmu::test_mmu_ownership_reclamation_errors();
 
     // Service Supervisor Lifecycle & Recovery Verification
     println!("--- [Testing RISC-V Service Supervisor Lifecycle & Recovery] ---");

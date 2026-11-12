@@ -133,6 +133,15 @@ pub struct Scheduler {
 
 pub const MAX_TASKS: usize = 256;
 pub const INVALID_PID: u32 = u32::MAX;
+pub const REAP_EVACUATION_MAX_SPINS: usize = 1000;
+
+fn aspace_is_evacuated(aspace: &crate::mmu::UserAddressSpace) -> bool {
+    let active = aspace.active_harts();
+    let executed = aspace.executed_harts.load(core::sync::atomic::Ordering::Acquire);
+    let acknowledged = aspace.acknowledged_harts.load(core::sync::atomic::Ordering::Acquire);
+    let unacknowledged = executed & !acknowledged;
+    active == 0 && unacknowledged == 0
+}
 
 impl Scheduler {
     pub const fn new() -> Self {
@@ -213,7 +222,7 @@ impl Scheduler {
         Ok(())
     }
 
-    pub fn begin_reap(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<(ReapHandle, Option<crate::mmu::UserAddressSpace>), i64> {
+    pub fn begin_reap(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<ReapHandle, i64> {
         let curr_pid = self.current_pid();
         if target_pid != 0 && target_pid == caller_pid {
             return Err(-16); // -EBUSY: caller cannot reap itself
@@ -224,6 +233,7 @@ impl Scheduler {
 
         let pos = self.tasks.iter().position(|t| {
             (target_pid == 0 || t.id == target_pid)
+                && (target_pid != 0 || t.id != caller_pid)
                 && (t.state == TaskState::Terminated || t.state == TaskState::Exited || t.state == TaskState::ReapFailed)
         }).ok_or(-30i64)?;
 
@@ -234,13 +244,34 @@ impl Scheduler {
 
         task.state = TaskState::Reaping;
         task.generation = task.generation.wrapping_add(1);
+        if let Some(ref aspace) = task.address_space {
+            aspace
+                .lifecycle
+                .fetch_or(crate::mmu::LIFECYCLE_CLOSING_BIT, core::sync::atomic::Ordering::Release);
+        }
         let handle = ReapHandle {
             pid: task.id,
             generation: task.generation,
             exit_code: task.exit_code.unwrap_or(0),
         };
-        let aspace = task.address_space.take();
-        Ok((handle, aspace))
+        // Keep task.address_space attached so remote prepare_switch() can observe and deactivate it.
+        Ok(handle)
+    }
+
+    pub fn detach_reaping_aspace(&mut self, handle: ReapHandle) -> Result<Option<crate::mmu::UserAddressSpace>, i64> {
+        let pos = self.tasks.iter().position(|t| {
+            t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
+        }).ok_or(-3i64)?;
+
+        if let Some(ref aspace) = self.tasks[pos].address_space {
+            if !aspace_is_evacuated(aspace) {
+                self.tasks[pos].state = TaskState::ReapFailed;
+                self.tasks[pos].generation = self.tasks[pos].generation.wrapping_add(1);
+                return Err(-16); // -EBUSY: hart still active or unacknowledged
+            }
+        }
+
+        Ok(self.tasks[pos].address_space.take())
     }
 
     pub fn finish_reap(&mut self, handle: ReapHandle) -> Result<i32, i64> {
@@ -260,19 +291,18 @@ impl Scheduler {
         if let Some(pos) = self.tasks.iter().position(|t| {
             t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
         }) {
-            self.tasks[pos].address_space = aspace;
+            if let Some(a) = aspace {
+                self.tasks[pos].address_space = Some(a);
+            }
             self.tasks[pos].state = TaskState::ReapFailed;
             self.tasks[pos].generation = self.tasks[pos].generation.wrapping_add(1);
         }
     }
 
     pub fn reap_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
-        let (handle, mut aspace_opt) = self.begin_reap(caller_pid, is_supervisor, target_pid)?;
+        let handle = self.begin_reap(caller_pid, is_supervisor, target_pid)?;
+        let mut aspace_opt = self.detach_reaping_aspace(handle)?;
         if let Some(ref mut aspace) = aspace_opt {
-            if aspace.is_active_on_any_hart() {
-                self.abort_reap(handle, aspace_opt);
-                return Err(-16); // -EBUSY: process still executing on hart
-            }
             if let Err(e) = aspace.destroy_fallible() {
                 crate::println!("[REAP ERROR] Failed to destroy user address space for PID {}: {:?}", handle.pid, e);
                 self.abort_reap(handle, aspace_opt);
@@ -440,21 +470,57 @@ impl Scheduler {
 }
 
 pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
-    let (handle, mut aspace_opt) = {
+    // Stage 1: Mark target Reaping under lock while keeping address_space attached.
+    let handle = {
         let mut sched = SCHEDULER.lock();
         sched.begin_reap(caller_pid, is_supervisor, target_pid)?
     };
 
-    let teardown_res = if let Some(ref mut aspace) = aspace_opt {
-        if aspace.is_active_on_any_hart() {
-            Err(crate::mmu::TeardownError::ActiveOnRemoteHart(aspace.active_harts()))
-        } else {
-            aspace.destroy_fallible()
+    // Stage 2: Bounded lock-free evacuation polling so remote harts can run prepare_switch() + deactivate().
+    let mut evacuated = false;
+    for _ in 0..REAP_EVACUATION_MAX_SPINS {
+        let check = {
+            let sched = SCHEDULER.lock();
+            match sched.tasks.iter().find(|t| {
+                t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
+            }) {
+                Some(task) => match task.address_space {
+                    Some(ref aspace) => Ok(aspace_is_evacuated(aspace)),
+                    None => Ok(true),
+                },
+                None => Err(-3i64),
+            }
+        };
+        match check {
+            Ok(true) => {
+                evacuated = true;
+                break;
+            }
+            Ok(false) => core::hint::spin_loop(),
+            Err(e) => return Err(e),
         }
+    }
+
+    if !evacuated {
+        let mut sched = SCHEDULER.lock();
+        sched.abort_reap(handle, None);
+        return Err(-16); // -EBUSY: remote hart failed to evacuate/acknowledge in time
+    }
+
+    // Stage 3: Reacquire lock, revalidate handle and evacuation, and detach address_space.
+    let mut aspace_opt = {
+        let mut sched = SCHEDULER.lock();
+        sched.detach_reaping_aspace(handle)?
+    };
+
+    // Stage 4: Destroy detached address space outside SCHEDULER.lock().
+    let teardown_res = if let Some(ref mut aspace) = aspace_opt {
+        aspace.destroy_fallible()
     } else {
         Ok(())
     };
 
+    // Stage 5: Finalize under lock.
     match teardown_res {
         Ok(()) => {
             let mut sched = SCHEDULER.lock();
@@ -563,25 +629,28 @@ pub fn test_task_lifecycle() {
     let pid_b = sched.allocate_pid();
     assert_eq!(pid_b, 1); // Skips u32::MAX (INVALID_PID) and 0
 
-    // Test 6: Two-Phase Lock-Safe Reaping & Generation Tracking
+    // Test 6: 5-Stage Lock-Safe Reaping & Generation Tracking
     let c2 = sched2.spawn_user_process(p1, "child2", 0, 0, None, caps.clone());
     sched2.tasks[1].state = TaskState::Terminated;
-    let (handle, aspace_opt) = sched2.begin_reap(p1, false, c2).expect("begin_reap on terminated child");
+    let handle = sched2.begin_reap(p1, false, c2).expect("begin_reap on terminated child");
     assert_eq!(sched2.tasks[1].state, TaskState::Reaping);
     // Concurrent second reap while Reaping must be rejected
     match sched2.begin_reap(p1, false, c2) {
         Err(e) => assert_eq!(e, -30),
         Ok(_) => panic!("Concurrent begin_reap must fail with -30"),
     }
-    // Stale generation handle finish_reap must be rejected
+    // Stale generation handle detach/finish_reap must be rejected
     let mut stale_handle = handle;
     stale_handle.generation = stale_handle.generation.wrapping_add(99);
+    assert!(matches!(sched2.detach_reaping_aspace(stale_handle), Err(-3)));
     assert_eq!(sched2.finish_reap(stale_handle), Err(-3));
     // Abort reap preserves task in ReapFailed state with incremented generation
-    sched2.abort_reap(handle, aspace_opt);
+    let detached = sched2.detach_reaping_aspace(handle).expect("detach on evacuated child");
+    sched2.abort_reap(handle, detached);
     assert_eq!(sched2.tasks[1].state, TaskState::ReapFailed);
     // Retry reap on ReapFailed task must succeed
-    let (retry_handle, _retry_aspace) = sched2.begin_reap(p1, false, c2).expect("begin_reap on ReapFailed child");
+    let retry_handle = sched2.begin_reap(p1, false, c2).expect("begin_reap on ReapFailed child");
+    assert!(sched2.detach_reaping_aspace(retry_handle).is_ok());
     assert_eq!(sched2.finish_reap(retry_handle), Ok(0));
 
     // Test 7: Transactional Switch Rollback on Activation Failure
@@ -599,5 +668,129 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched2.tasks[c3_pos].state, TaskState::Ready, "Candidate task must remain Ready, not falsely Terminated");
     assert_eq!(sched2.tasks[c3_pos].cpu_ticks, 0, "Candidate task cpu_ticks must not be incremented on abort");
 
-    crate::println!("[TEST] RISC-V Task Removal Consistency, Two-Phase Reap & Transactional Switch VERIFIED.");
+    // Test 8: Remote Address-Space Evacuation Race & 5-Stage Reaping Invariants
+    let saved_satp: usize;
+    let saved_sscratch: usize;
+    unsafe {
+        core::arch::asm!("csrr {0}, satp", out(reg) saved_satp);
+        core::arch::asm!("csrr {0}, sscratch", out(reg) saved_sscratch);
+    }
+
+    let mut sched3 = Scheduler::new();
+    sched3.next_pid = 1;
+    let p_idle = sched3.spawn_user_process(0, "idle_parent", 0, 0, None, caps.clone());
+    let aspace_evac = crate::mmu::UserAddressSpace::new().expect("Address space alloc for evacuation test");
+    let c_evac = sched3.spawn_user_process(p_idle, "evac_child", 0, 0, Some(aspace_evac), caps.clone());
+
+    // Simulate active execution of c_evac before it exits and a peer/parent initiates reap
+    sched3.tasks[1].address_space.as_ref().unwrap().try_activate().expect("activate evac_child");
+    sched3.tasks[1].state = TaskState::Exited;
+    sched3.current_task_idx = 1;
+
+    // 8a/8b: begin_reap marks task Reaping and keeps address_space attached
+    let h1 = sched3.begin_reap(p_idle, false, c_evac).expect("begin_reap on exited child");
+    assert_eq!(sched3.tasks[1].state, TaskState::Reaping);
+    assert!(sched3.tasks[1].address_space.is_some(), "address_space must remain attached in Reaping");
+
+    // 8a: Reaping task is unschedulable (prepare_switch will not select it)
+    sched3.tasks[0].state = TaskState::Running;
+    sched3.current_task_idx = 0;
+    let (unsel_old, unsel_new) = sched3.prepare_switch();
+    assert!(unsel_old.is_none() && unsel_new.is_none(), "Reaping task must not be scheduled");
+    sched3.tasks[0].state = TaskState::Ready;
+    sched3.current_task_idx = 1;
+
+    // 8d: detach_reaping_aspace rejects detachment while active_harts != 0 and preserves aspace & hart bits
+    assert!(sched3.tasks[1].address_space.as_ref().unwrap().active_harts() != 0);
+    assert!(matches!(sched3.detach_reaping_aspace(h1), Err(-16)));
+    assert_eq!(sched3.tasks[1].state, TaskState::ReapFailed);
+    assert_eq!(sched3.tasks[1].generation, h1.generation.wrapping_add(1));
+    assert!(sched3.tasks[1].address_space.is_some(), "address_space must not be detached on EBUSY");
+    assert!(sched3.tasks[1].address_space.as_ref().unwrap().active_harts() != 0, "hart bits must not be cleared on EBUSY");
+    assert!(matches!(sched3.detach_reaping_aspace(h1), Err(-3)));
+    assert_eq!(sched3.finish_reap(h1), Err(-3));
+
+    // 8c: Outgoing prepare_switch from a Reaping task accesses curr.address_space and deactivates it
+    let h2 = sched3.begin_reap(p_idle, false, c_evac).expect("retry begin_reap on ReapFailed");
+    assert_eq!(h2.generation, h1.generation.wrapping_add(2));
+    let (evac_old, evac_new) = sched3.prepare_switch();
+    unsafe {
+        core::arch::asm!("csrw satp, {0}", "sfence.vma zero, zero", in(reg) saved_satp, options(nostack));
+        core::arch::asm!("csrw sscratch, {0}", in(reg) saved_sscratch);
+    }
+    assert!(evac_old.is_some() && evac_new.is_some(), "outgoing switch from Reaping task must succeed");
+    assert_eq!(sched3.current_task_idx, 0);
+    assert_eq!(sched3.tasks[1].state, TaskState::Reaping, "Reaping state must be preserved across outgoing switch");
+    {
+        let aspace_ref = sched3.tasks[1].address_space.as_ref().unwrap();
+        assert_eq!(aspace_ref.active_harts(), 0, "prepare_switch must deactivate outgoing Reaping address space");
+        assert!(aspace_is_evacuated(aspace_ref), "outgoing address space must be fully evacuated");
+    }
+
+    // 8e: detach_reaping_aspace succeeds after evacuation
+    let detached_aspace = sched3.detach_reaping_aspace(h2).expect("detach after evacuation");
+    assert!(detached_aspace.is_some());
+    assert!(sched3.tasks[1].address_space.is_none());
+
+    // 8f: Failed teardown restores address_space into ReapFailed and stale ReapHandle cannot reap newer generation
+    sched3.abort_reap(h2, detached_aspace);
+    assert_eq!(sched3.tasks[1].state, TaskState::ReapFailed);
+    assert_eq!(sched3.tasks[1].generation, h2.generation.wrapping_add(1));
+    assert!(sched3.tasks[1].address_space.is_some(), "abort_reap must restore address_space");
+    assert!(matches!(sched3.detach_reaping_aspace(h2), Err(-3)));
+    assert_eq!(sched3.finish_reap(h2), Err(-3));
+
+    // Complete final reap on c_evac cleanly
+    let h3 = sched3.begin_reap(p_idle, false, c_evac).expect("final begin_reap after abort");
+    let mut final_aspace = sched3.detach_reaping_aspace(h3).expect("final detach").expect("restored aspace");
+    final_aspace.destroy_fallible().expect("destroy_fallible after evacuation");
+    assert_eq!(sched3.finish_reap(h3), Ok(0));
+
+    // 8e (direct deactivate path): verify detach_reaping_aspace succeeds after direct deactivate()
+    let aspace_deact = crate::mmu::UserAddressSpace::new().expect("Address space alloc for deactivate test");
+    let c_deact = sched3.spawn_user_process(p_idle, "deact_child", 0, 0, Some(aspace_deact), caps.clone());
+    let c_deact_pos = sched3.tasks.iter().position(|t| t.id == c_deact).unwrap();
+    sched3.tasks[c_deact_pos].address_space.as_ref().unwrap().try_activate().expect("activate deact_child");
+    sched3.tasks[c_deact_pos].state = TaskState::Terminated;
+    let hd1 = sched3.begin_reap(p_idle, false, c_deact).expect("begin_reap on deact_child");
+    assert!(matches!(sched3.detach_reaping_aspace(hd1), Err(-16)));
+    sched3.tasks[c_deact_pos].address_space.as_ref().unwrap().deactivate();
+    unsafe {
+        core::arch::asm!("csrw satp, {0}", "sfence.vma zero, zero", in(reg) saved_satp, options(nostack));
+    }
+    assert_eq!(sched3.reap_task(p_idle, false, c_deact), Ok(0));
+
+    // End-to-end reap_task_locksafe() on global SCHEDULER: rejects while active -> preserves address_space -> succeeds after deactivate()
+    let (orig_len, orig_next_pid, ls_pid) = {
+        let mut g_sched = SCHEDULER.lock();
+        let len = g_sched.tasks.len();
+        let next_p = g_sched.next_pid;
+        let aspace_ls = crate::mmu::UserAddressSpace::new().expect("Address space alloc for locksafe e2e");
+        aspace_ls.try_activate().expect("activate locksafe test aspace");
+        let pid = g_sched.spawn_user_process(1, "locksafe_e2e", 0, 0, Some(aspace_ls), CapabilityTable::new());
+        if let Some(t) = g_sched.tasks.iter_mut().find(|t| t.id == pid) {
+            t.state = TaskState::Terminated;
+        }
+        (len, next_p, pid)
+    };
+    assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Err(-16));
+    {
+        let g_sched = SCHEDULER.lock();
+        let t = g_sched.tasks.iter().find(|t| t.id == ls_pid).expect("task must remain after EBUSY");
+        assert_eq!(t.state, TaskState::ReapFailed);
+        let aspace_ref = t.address_space.as_ref().expect("aspace must remain attached on EBUSY");
+        assert_ne!(aspace_ref.active_harts(), 0);
+        aspace_ref.deactivate();
+    }
+    unsafe {
+        core::arch::asm!("csrw satp, {0}", "sfence.vma zero, zero", in(reg) saved_satp, options(nostack));
+    }
+    assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Ok(0));
+    {
+        let mut g_sched = SCHEDULER.lock();
+        assert_eq!(g_sched.tasks.len(), orig_len);
+        g_sched.next_pid = orig_next_pid;
+    }
+
+    crate::println!("[TEST] RISC-V Task Removal Consistency, 5-Stage Reap & Transactional Switch VERIFIED.");
 }

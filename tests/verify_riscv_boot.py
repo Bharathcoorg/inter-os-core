@@ -31,6 +31,8 @@ REQUIRED_SIGNALS = [
     "Dropping CPU execution privilege from S-mode to U-mode via sret",
     "Hello from InterOS RISC-V Userspace!",
     "Task exited with code 0",
+    "[TEST] RISC-V Task Removal Consistency, 5-Stage Reap & Transactional Switch VERIFIED.",
+    "[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.",
     "Spawning Userspace PID 1 (init) in U-Mode",
     "[PID1] Inter OS userspace init started in Ring 3.",
     "[PID1] Service stop lifecycle contract exercised.",

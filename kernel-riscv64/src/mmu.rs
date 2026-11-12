@@ -365,6 +365,9 @@ impl RiscvFrameAllocator {
         if self.ref_counts[frame_idx] == 0 {
             return Err("Reference count underflow on shared frame");
         }
+        if self.ref_counts[frame_idx] == 1 && is_quarantined(paddr) {
+            return Err("Cannot recycle quarantined shared frame");
+        }
         self.ref_counts[frame_idx] -= 1;
         if self.ref_counts[frame_idx] == 0 {
             self.bitmap[word_idx] &= !(1u64 << bit_idx);
@@ -377,6 +380,9 @@ impl RiscvFrameAllocator {
     }
 
     pub fn recycle_frame(&mut self, paddr: u64) -> Result<(), &'static str> {
+        if is_quarantined(paddr) {
+            return Err("Cannot recycle quarantined frame");
+        }
         if (paddr & 0xFFF) != 0 {
             return Err("Physical frame unaligned");
         }
@@ -502,6 +508,10 @@ pub fn quarantine_frame(paddr: u64) {
 
 pub fn quarantined_frame_count() -> usize {
     QUARANTINED_FRAMES.lock().len()
+}
+
+pub fn is_quarantined(paddr: u64) -> bool {
+    QUARANTINED_FRAMES.lock().iter().any(|entry| entry.paddr == paddr)
 }
 
 pub static ONLINE_HARTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -632,6 +642,25 @@ impl UserAddressSpace {
 
     pub fn is_active_on_any_hart(&self) -> bool {
         self.active_harts() != 0
+    }
+
+    pub fn has_unacknowledged_or_active_harts(&self) -> bool {
+        let active = self.active_harts();
+        let executed = self.executed_harts.load(core::sync::atomic::Ordering::Acquire);
+        let acknowledged = self.acknowledged_harts.load(core::sync::atomic::Ordering::Acquire);
+        active != 0 || (executed & !acknowledged) != 0
+    }
+
+    pub fn is_evacuated_for_current(&self) -> bool {
+        let hid = current_hart_id();
+        if hid >= 62 {
+            return true;
+        }
+        let hart_bit = 1u64 << hid;
+        let active = self.active_harts();
+        let executed = self.executed_harts.load(core::sync::atomic::Ordering::Acquire);
+        let acknowledged = self.acknowledged_harts.load(core::sync::atomic::Ordering::Acquire);
+        (active & hart_bit) == 0 && (executed & !acknowledged & hart_bit) == 0
     }
 
     pub fn new() -> Option<Self> {
@@ -931,19 +960,36 @@ impl UserAddressSpace {
             core::arch::asm!("sfence.vma {0}, zero", in(reg) vaddr, options(nostack));
         }
 
+        let hid = current_hart_id();
+        let current_mask = if hid < 62 { 1u64 << hid } else { 0 };
+        let executed = self.executed_harts.load(core::sync::atomic::Ordering::SeqCst);
+        let online = ONLINE_HARTS.load(core::sync::atomic::Ordering::SeqCst);
+        let remote_mask = (executed | online) & !current_mask;
+        if remote_mask != 0 {
+            if let Err(_) = crate::sbi::remote_sfence_vma(remote_mask as usize, 0, vaddr, PAGE_SIZE) {
+                if mapping.kind != MappingKind::Borrowed {
+                    quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), "unmap_user_page sbi_remote_sfence_vma failed");
+                }
+                return Err("SBI remote_sfence_vma failed during unmap");
+            }
+        }
+
         if release {
             match mapping.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = mark_private_frame_unmapped(mapping.paddr);
-                    if let Err(_) = recycle_frame(mapping.paddr) {
-                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), "unmap_user_page recycle_frame failed");
-                        return Err("Failed to recycle private frame");
+                    if let Err(reason) = mark_private_frame_unmapped(mapping.paddr) {
+                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), reason);
+                        return Err(reason);
+                    }
+                    if let Err(reason) = recycle_frame(mapping.paddr) {
+                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), reason);
+                        return Err(reason);
                     }
                 }
                 MappingKind::Shared => {
-                    if let Err(_) = release_shared_frame(mapping.paddr) {
-                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), "unmap_user_page release_shared_frame failed");
-                        return Err("Failed to release shared frame");
+                    if let Err(reason) = release_shared_frame(mapping.paddr) {
+                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), reason);
+                        return Err(reason);
                     }
                 }
                 MappingKind::Borrowed => {}
@@ -1077,80 +1123,103 @@ impl UserAddressSpace {
             core::hint::spin_loop();
         }
 
-        // Step 1: Remove user mappings from root table
-        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
-        root.entries[0] = 0; // Detach Level 1 table for user/MMIO space
+        if self.table_frames.contains(&self.root_paddr) {
+            // Step 1: Remove user mappings from root table
+            let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
+            root.entries[0] = 0; // Detach Level 1 table for user/MMIO space
 
-        // Step 2: Perform local TLB invalidation
-        #[cfg(target_arch = "riscv64")]
-        unsafe {
-            core::arch::asm!("sfence.vma zero, zero", options(nostack));
-        }
+            // Step 2: Perform local TLB invalidation
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                core::arch::asm!("sfence.vma zero, zero", options(nostack));
+            }
 
-        // Step 3: Broadcast across remote harts that ever executed this address space via SBI RFNC
-        let executed = self.executed_harts.load(core::sync::atomic::Ordering::SeqCst);
-        let online = ONLINE_HARTS.load(core::sync::atomic::Ordering::SeqCst);
-        let remote_mask = (executed | online) & !current_mask;
-        if remote_mask != 0 {
-            match crate::sbi::remote_sfence_vma(remote_mask as usize, 0, 0, 0) {
-                Ok(()) => {}
-                Err(err) => {
-                    // On remote TLB invalidation failure, quarantine frames to avoid reuse while stale translations exist
-                    for m in self.mappings.drain(..) {
-                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy sbi_remote_sfence_vma failed");
+            // Step 3: Broadcast across remote harts that ever executed this address space via SBI RFNC
+            let executed = self.executed_harts.load(core::sync::atomic::Ordering::SeqCst);
+            let online = ONLINE_HARTS.load(core::sync::atomic::Ordering::SeqCst);
+            let remote_mask = (executed | online) & !current_mask;
+            if remote_mask != 0 {
+                match crate::sbi::remote_sfence_vma(remote_mask as usize, 0, 0, 0) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // On remote TLB invalidation failure, quarantine frames to avoid reuse while stale translations exist
+                        for m in self.mappings.drain(..) {
+                            if m.kind == MappingKind::PrivateOwned || m.kind == MappingKind::Shared {
+                                quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy sbi_remote_sfence_vma failed");
+                            }
+                        }
+                        for t in self.table_frames.drain(..) {
+                            quarantine_frame_with_meta(
+                                t,
+                                frame_ownership(t).unwrap_or(FrameOwnership::Kernel),
+                                "destroy sbi_remote_sfence_vma failed table frame",
+                            );
+                        }
+                        self.mapped_bytes = 0;
+                        self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
+                        self.destroyed = true;
+                        return Err(TeardownError::SbiRemoteFenceFailed(err));
                     }
-                    for t in self.table_frames.drain(..) {
-                        quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "destroy sbi_remote_sfence_vma failed table frame");
-                    }
-                    self.destroyed = true;
-                    return Err(TeardownError::SbiRemoteFenceFailed(err));
                 }
             }
-        }
 
-        #[cfg(target_arch = "riscv64")]
-        unsafe {
-            core::arch::asm!(
-                "fence rw, rw",
-                "fence.i",
-                options(nostack)
-            );
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                core::arch::asm!(
+                    "fence rw, rw",
+                    "fence.i",
+                    options(nostack)
+                );
+            }
         }
 
         // Step 4: Recycle private frames, release shared, preserve borrowed
         let mut cleanup_failed = false;
+        let mut retained_mappings = Vec::new();
         for m in self.mappings.drain(..) {
             match m.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = mark_private_frame_unmapped(m.paddr);
-                    if let Err(_) = recycle_frame(m.paddr) {
+                    if let Err(reason) = mark_private_frame_unmapped(m.paddr) {
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), reason);
+                        retained_mappings.push(m);
+                        cleanup_failed = true;
+                    } else if let Err(_) = recycle_frame(m.paddr) {
                         quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy recycle private frame failed");
+                        retained_mappings.push(m);
                         cleanup_failed = true;
                     }
                 }
                 MappingKind::Shared => {
                     if let Err(_) = release_shared_frame(m.paddr) {
                         quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy release shared frame failed");
+                        retained_mappings.push(m);
                         cleanup_failed = true;
                     }
                 }
                 MappingKind::Borrowed => {}
             }
         }
+        self.mappings = retained_mappings;
+        let mut retained_tables = Vec::new();
         for t in self.table_frames.drain(..) {
             if let Err(_) = recycle_frame(t) {
-                quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "destroy recycle table frame failed");
+                quarantine_frame_with_meta(
+                    t,
+                    frame_ownership(t).unwrap_or(FrameOwnership::Kernel),
+                    "destroy recycle table frame failed",
+                );
+                retained_tables.push(t);
                 cleanup_failed = true;
             }
         }
-
-        self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
-        self.destroyed = true;
-        self.mapped_bytes = 0;
+        self.table_frames = retained_tables;
+        self.mapped_bytes = self.mappings.len() * PAGE_SIZE;
 
         if cleanup_failed {
             Err(TeardownError::FrameRecycleFailed)
         } else {
+            self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
+            self.destroyed = true;
             Ok(())
         }
     }
@@ -1165,16 +1234,156 @@ impl Drop for UserAddressSpace {
         if !self.destroyed {
             if let Err(e) = self.destroy_fallible() {
                 crate::println!("[MMU WARNING] UserAddressSpace drop failed: {:?}. Quarantining unreclaimed frames.", e);
+                let reason = match e {
+                    TeardownError::ActiveOnRemoteHart(_) => "drop failed: address space active on remote hart",
+                    TeardownError::SbiRemoteFenceFailed(_) => "drop failed: sbi remote sfence failed",
+                    TeardownError::QuiescenceTimeout => "drop failed: quiescence timeout",
+                    TeardownError::FrameRecycleFailed => "drop failed: frame recycle failed",
+                    TeardownError::AlreadyDestroyed => "drop failed: already destroyed",
+                };
                 for m in self.mappings.drain(..) {
                     if m.kind == MappingKind::PrivateOwned || m.kind == MappingKind::Shared {
-                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "drop unhandled failure");
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), reason);
                     }
                 }
                 for t in self.table_frames.drain(..) {
-                    quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "drop unhandled table frame failure");
+                    quarantine_frame_with_meta(
+                        t,
+                        frame_ownership(t).unwrap_or(FrameOwnership::Kernel),
+                        reason,
+                    );
                 }
+                self.mapped_bytes = 0;
+                self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
                 self.destroyed = true;
             }
         }
     }
+}
+
+pub fn test_mmu_ownership_reclamation_errors() {
+    // 1. Private ownership validation failure in unmap_user_page:
+    //    - returns Err with original reason
+    //    - does NOT call recycle_frame / increment recycled_frames
+    //    - preserves self.mappings entry and self.mapped_bytes
+    //    - quarantines frame with original validation failure reason
+    let mut aspace = UserAddressSpace::new().expect("test aspace");
+    let f_err = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc private err frame");
+    aspace.map_private_frame(0x0040_0000, f_err, true, false).expect("map private err frame");
+    assert_eq!(frame_refcount(f_err), 1);
+
+    // Corrupt lifecycle state by marking frame unmapped early (refcount 1 -> 0)
+    mark_private_frame_unmapped(f_err).expect("early unmap");
+    assert_eq!(frame_refcount(f_err), 0);
+
+    let recycled_before = total_recycled_frames();
+    let mapped_before = aspace.mapped_bytes;
+    let mappings_len_before = aspace.mappings.len();
+    let res = aspace.unmap_user_page(0x0040_0000, true);
+    assert!(res.is_err(), "unmap_user_page must fail when private frame validation fails");
+    let err_reason = res.unwrap_err();
+    assert_eq!(total_recycled_frames(), recycled_before, "Failed unmap must not recycle frame");
+    assert_eq!(aspace.mappings.len(), mappings_len_before, "Failed unmap must preserve mapping metadata");
+    assert_eq!(aspace.mappings[0].paddr, f_err);
+    assert_eq!(aspace.mapped_bytes, mapped_before, "Failed unmap must preserve mapped_bytes");
+    assert!(is_quarantined(f_err), "Failed unmap must quarantine frame");
+    {
+        let q = QUARANTINED_FRAMES.lock();
+        let entry = q.iter().find(|e| e.paddr == f_err).expect("quarantine entry for f_err");
+        assert_eq!(entry.ownership, FrameOwnership::PrivateOwned);
+        assert_eq!(entry.reason, err_reason);
+    }
+
+    // 2. Quarantined frame cannot be accidentally recycled via recycle_frame() or release_shared_frame()
+    let recycled_before_q = total_recycled_frames();
+    assert!(recycle_frame(f_err).is_err(), "Quarantined private frame must not be recycled");
+    assert_eq!(total_recycled_frames(), recycled_before_q);
+
+    let f_q_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc quarantined shared frame");
+    retain_shared_frame(f_q_shared).expect("retain shared");
+    quarantine_frame_with_meta(f_q_shared, FrameOwnership::Shared, "test quarantine shared");
+    assert!(is_quarantined(f_q_shared));
+    let recycled_before_qs = total_recycled_frames();
+    assert!(release_shared_frame(f_q_shared).is_err(), "Quarantined shared frame must not be freed at refcount 1");
+    assert_eq!(total_recycled_frames(), recycled_before_qs);
+    assert_eq!(frame_refcount(f_q_shared), 1);
+
+    // 3. Normal unmap_user_page transitions refcount 1 -> 0 and recycles frame once
+    let mut aspace_ok = UserAddressSpace::new().expect("ok aspace");
+    let f_ok = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc ok frame");
+    aspace_ok.map_private_frame(0x0040_0000, f_ok, true, false).expect("map ok frame");
+    assert_eq!(frame_refcount(f_ok), 1);
+    let recycled_before_ok = total_recycled_frames();
+    assert_eq!(aspace_ok.unmap_user_page(0x0040_0000, true), Ok(()));
+    assert_eq!(frame_refcount(f_ok), 0);
+    assert!(!is_quarantined(f_ok));
+    assert_eq!(total_recycled_frames(), recycled_before_ok + 1);
+    assert!(aspace_ok.mappings.is_empty());
+    assert_eq!(aspace_ok.mapped_bytes, 0);
+    assert!(recycle_frame(f_ok).is_err(), "Already-recycled frame must reject double-free");
+    assert_eq!(aspace_ok.destroy_fallible(), Ok(()));
+
+    // 4. destroy_fallible with corrupted ownership retains metadata, avoids recycle_frame, and quarantines with validation reason
+    let mut aspace_bad = UserAddressSpace::new().expect("bad aspace");
+    let f_bad = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc bad frame");
+    aspace_bad.map_private_frame(0x0040_0000, f_bad, true, false).expect("map bad frame");
+    {
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        let idx = ((f_bad - alloc.base_paddr) / 4096) as usize;
+        // Corrupt ownership to Kernel so recycle_frame would succeed if validation error were ignored
+        alloc.ownership[idx] = FrameOwnership::Kernel as u8;
+    }
+    let expected_tables = aspace_bad.table_frames.len();
+    let recycled_before_bad = total_recycled_frames();
+    assert_eq!(aspace_bad.destroy_fallible(), Err(TeardownError::FrameRecycleFailed));
+    assert_eq!(
+        total_recycled_frames(),
+        recycled_before_bad + expected_tables,
+        "Only valid table frames may be recycled; corrupted private frame must not be recycled"
+    );
+    assert_eq!(aspace_bad.mappings.len(), 1);
+    assert_eq!(aspace_bad.mappings[0].paddr, f_bad);
+    assert_eq!(aspace_bad.mapped_bytes, PAGE_SIZE);
+    assert!(is_quarantined(f_bad));
+    {
+        let q = QUARANTINED_FRAMES.lock();
+        let entry = q.iter().find(|e| e.paddr == f_bad).expect("quarantine entry for f_bad");
+        assert_eq!(entry.ownership, FrameOwnership::PrivateOwned);
+        assert_eq!(entry.reason, "Not a private frame");
+    }
+
+    // Verify Drop handles already-attempted teardown cleanly without panic and preserves original quarantine reason
+    drop(aspace_bad);
+    drop(aspace);
+    {
+        let q = QUARANTINED_FRAMES.lock();
+        let entry = q.iter().find(|e| e.paddr == f_bad).expect("f_bad preserved after drop");
+        assert_eq!(entry.reason, "Not a private frame");
+        let entry_err = q.iter().find(|e| e.paddr == f_err).expect("f_err preserved after drop");
+        assert_eq!(entry_err.reason, err_reason);
+    }
+
+    // 5. Shared-frame retain/release continues decrementing properly and frees only at 0
+    let f_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc shared frame");
+    let mut aspace_s1 = UserAddressSpace::new().expect("aspace s1");
+    let mut aspace_s2 = UserAddressSpace::new().expect("aspace s2");
+    aspace_s1.map_shared_frame(0x0040_0000, f_shared, false, false).expect("map shared s1");
+    aspace_s2.map_shared_frame(0x0040_0000, f_shared, false, false).expect("map shared s2");
+    assert_eq!(frame_refcount(f_shared), 2);
+
+    let recycled_s1 = total_recycled_frames();
+    assert_eq!(aspace_s1.unmap_user_page(0x0040_0000, true), Ok(()));
+    assert_eq!(frame_refcount(f_shared), 1);
+    assert!(!is_quarantined(f_shared));
+    assert_eq!(total_recycled_frames(), recycled_s1, "Shared frame must not be freed while refcount > 0");
+    assert_eq!(aspace_s1.destroy_fallible(), Ok(()));
+
+    let recycled_s2 = total_recycled_frames();
+    assert_eq!(aspace_s2.unmap_user_page(0x0040_0000, true), Ok(()));
+    assert_eq!(frame_refcount(f_shared), 0);
+    assert!(!is_quarantined(f_shared));
+    assert_eq!(total_recycled_frames(), recycled_s2 + 1, "Shared frame must be freed when refcount reaches 0");
+    assert_eq!(aspace_s2.destroy_fallible(), Ok(()));
+
+    crate::println!("[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.");
 }
