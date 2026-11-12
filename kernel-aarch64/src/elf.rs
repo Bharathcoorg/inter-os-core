@@ -74,13 +74,13 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     for i in 0..e_phnum {
         let ph_start = e_phoff + i * e_phentsize;
         if ph_start + e_phentsize > elf_data.len() {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Program header exceeds ELF file bounds");
         }
 
         let p_type = u32::from_le_bytes(elf_data[ph_start..ph_start + 4].try_into().unwrap());
         if p_type == 3 {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("PT_INTERP dynamic linkers rejected in static microkernel architecture");
         }
         if p_type != 1 { // PT_LOAD
@@ -99,40 +99,40 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         }
 
         if p_offset.checked_add(p_filesz).ok_or("Segment file size overflow")? > elf_data.len() {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Segment file size exceeds ELF binary length");
         }
         if p_filesz > p_memsz {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Segment file size exceeds memory size");
         }
         if p_vaddr < 0x1000 {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("ELF segment overlaps the reserved null page");
         }
         if p_align != 0 && (p_align & (p_align - 1)) != 0 {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("ELF segment alignment is not a power of two");
         }
         if p_align > 1 && p_vaddr % p_align != (p_offset as u64) % p_align {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("ELF segment virtual/file alignment mismatch");
         }
 
         let seg_end_vaddr = match p_vaddr.checked_add(p_memsz as u64) {
             Some(end) => end,
             None => {
-                aspace.destroy();
+                let _ = aspace.destroy();
                 return Err("Segment memory range overflow");
             }
         };
 
         if p_vaddr >= seg_end_vaddr || seg_end_vaddr > USER_CANONICAL_LIMIT {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Invalid or non-canonical user segment range");
         }
         if p_vaddr < stack_guard_end && seg_end_vaddr > stack_guard_start {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("ELF segment overlaps user stack or stack guard region");
         }
 
@@ -140,16 +140,16 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         let is_write = (p_flags & 0x2) != 0;
 
         if is_exec && is_write {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("W^X security violation: ELF segment requests both write and execute permissions");
         }
 
         if load_ranges.iter().any(|(s, e, oe, ow)| p_vaddr < *e && seg_end_vaddr > *s && (*oe != is_exec || *ow != is_write)) {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Overlapping ELF load segments request conflicting permissions");
         }
         if load_ranges.iter().any(|(s, e, _, _)| p_vaddr < *e && seg_end_vaddr > *s) {
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err("Overlapping ELF load segments are not supported");
         }
         load_ranges.push((p_vaddr, seg_end_vaddr, is_exec, is_write));
@@ -165,7 +165,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let frame = match allocate_frame() {
                 Some(f) => f,
                 None => {
-                    aspace.destroy();
+                    let _ = aspace.destroy();
                     return Err("Out of physical memory frames for user segment");
                 }
             };
@@ -184,14 +184,14 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
             if let Err(e) = aspace.map_user_page(page_vaddr, frame, is_write, is_exec) {
                 let _ = recycle_frame(frame);
-                aspace.destroy();
+                let _ = aspace.destroy();
                 return Err(e);
             }
         }
     }
 
     if !entry_in_executable_segment {
-        aspace.destroy();
+        let _ = aspace.destroy();
         return Err("ELF entry point is not located within any executable PT_LOAD segment");
     }
 
@@ -200,13 +200,13 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
         let frame = match allocate_frame() {
             Some(f) => f,
             None => {
-                aspace.destroy();
+                let _ = aspace.destroy();
                 return Err("Out of physical memory frames for user stack");
             }
         };
         if let Err(e) = aspace.map_user_page(page_vaddr, frame, true, false) {
             let _ = recycle_frame(frame);
-            aspace.destroy();
+            let _ = aspace.destroy();
             return Err(e);
         }
     }

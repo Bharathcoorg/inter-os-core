@@ -257,11 +257,45 @@ def verify_calculator_result_glyphs(path_ppm, expected_result="12"):
     print(f"[VERIFY GLYPHS] [OK] Rendered result '{expected_result}' verified via independent structural glyph analysis (1_stem={stem_1}, 2_top={top_arc_2}, 2_neck={neck_2}, 2_base={base_2}, tape_ink={tape_ink}).")
 
 def run_glyph_negative_tests():
-    """Validates that verify_calculator_result_glyphs rejects erroneous frames (13, 17, 0, 2, blank, noise)."""
+    """Validates that verify_calculator_result_glyphs rejects erroneous frames (13, 17, 0, 2, blank, noise, bad spacing) and accepts valid 12."""
     print("[*] Running Calculator Glyph Negative Rejection Tests...")
     w, h = 720, 1440
     tmp_ppm = str(WORKSPACE_ROOT / "target" / "test_glyph_negative_riscv.ppm")
     header = f"P6\n{w} {h}\n255\n".encode("ascii")
+
+    def make_base_frame():
+        frame = bytearray(b"\xFF" * (w * h * 3))
+        # Add tape ink (y: 130..150, x: 250..400 -> 20 * 150 = 3000 pixels)
+        for y in range(130, 150):
+            for x in range(250, 400):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        return frame
+
+    def draw_digit_1(frame):
+        for y in range(236, 287):
+            for x in range(614, 623):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+
+    def draw_digit_2_top(frame):
+        for y in range(234, 248):
+            for x in range(640, 668):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+
+    def draw_digit_2_neck(frame):
+        for y in range(252, 276):
+            diag_x = int(662 - (y - 252))
+            for x in range(diag_x - 2, diag_x + 3):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+
+    def draw_digit_2_base(frame):
+        for y in range(281, 287):
+            for x in range(633, 666):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
 
     # Negative 1: Blank frame (all white 255)
     with open(tmp_ppm, "wb") as f:
@@ -288,57 +322,15 @@ def run_glyph_negative_tests():
     except AssertionError:
         pass # Expected rejection
 
-    # Negative 3: Incorrect expected_result strings ("13", "17", "0", "2")
-    for bad_res in ["13", "17", "0", "2"]:
-        try:
-            verify_calculator_result_glyphs(tmp_ppm, bad_res)
-            raise RuntimeError(f"Negative test failed: Incorrect result '{bad_res}' was accepted!")
-        except AssertionError:
-            pass # Expected rejection
-
-    # Negative 4: Synthetic frame with missing digit '1' (only '2' present)
+    # Negative 3: Synthetic frame for "13" with ink in negative space of digit '2'
     with open(tmp_ppm, "wb") as f:
         f.write(header)
-        frame = bytearray(b"\xFF" * (w * h * 3))
-        # Add tape
-        for y in range(130, 150):
-            for x in range(250, 400):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        for y in range(234, 248): # top arc
-            for x in range(640, 668):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        for y in range(252, 276): # neck
-            for x in range(635, 665):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        for y in range(281, 287): # base
-            for x in range(633, 666):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        f.write(frame)
-    try:
-        verify_calculator_result_glyphs(tmp_ppm, "12")
-        raise RuntimeError("Negative test failed: Frame missing digit '1' was accepted!")
-    except AssertionError:
-        pass # Expected rejection (stem_1 < 30)
-
-    # Negative 5: Synthetic frame for "13" with ink in negative space of digit '2'
-    with open(tmp_ppm, "wb") as f:
-        f.write(header)
-        frame = bytearray(b"\xFF" * (w * h * 3))
-        # Add tape
-        for y in range(130, 150):
-            for x in range(250, 400):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        # Add digit 1
-        for y in range(236, 287):
-            for x in range(614, 623):
-                idx = (y * w + x) * 3
-                frame[idx:idx+3] = b"\x00\x00\x00"
-        # Add digit 3 (ink in negative space x: 636..646, y: 250..264)
+        frame = make_base_frame()
+        draw_digit_1(frame)
+        draw_digit_2_top(frame)
+        draw_digit_2_neck(frame)
+        draw_digit_2_base(frame)
+        # Erroneous digit 3 ink in negative space x: 636..646, y: 250..264
         for y in range(250, 264):
             for x in range(636, 646):
                 idx = (y * w + x) * 3
@@ -346,13 +338,90 @@ def run_glyph_negative_tests():
         f.write(frame)
     try:
         verify_calculator_result_glyphs(tmp_ppm, "12")
-        raise RuntimeError("Negative test failed: Frame with erroneous glyph '13' was accepted!")
+        raise RuntimeError("Negative test failed: Erroneous glyph '13' was accepted as result 12!")
     except AssertionError:
         pass # Expected rejection (neg_space_2 != 0)
 
+    # Negative 4: Synthetic frame for "17" (missing bottom base of digit '2')
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = make_base_frame()
+        draw_digit_1(frame)
+        draw_digit_2_top(frame)
+        draw_digit_2_neck(frame)
+        # Base omitted!
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Erroneous glyph '17' was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection (base_2 < 20)
+
+    # Negative 5: Synthetic frame for lone "0" (missing digit '1')
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = make_base_frame()
+        draw_digit_2_top(frame)
+        draw_digit_2_base(frame)
+        for y in range(240, 280):
+            for x in (635, 636, 664, 665):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Erroneous glyph '0' was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection (stem_1 < 30)
+
+    # Negative 6: Synthetic frame for lone "2" (missing digit '1')
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = make_base_frame()
+        draw_digit_2_top(frame)
+        draw_digit_2_neck(frame)
+        draw_digit_2_base(frame)
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Lone digit '2' (missing '1') was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection (stem_1 < 30)
+
+    # Negative 7: Synthetic frame for "12" with bad spacing / bridging ink
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = make_base_frame()
+        draw_digit_1(frame)
+        draw_digit_2_top(frame)
+        draw_digit_2_neck(frame)
+        draw_digit_2_base(frame)
+        # Bridge between 1 and 2 (spacing_1_2 > 15)
+        for y in range(250, 270):
+            for x in range(624, 633):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Merged glyphs with bad spacing was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection (spacing_1_2 > 15)
+
+    # Positive control: Synthetic valid "12" frame must pass verification
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = make_base_frame()
+        draw_digit_1(frame)
+        draw_digit_2_top(frame)
+        draw_digit_2_neck(frame)
+        draw_digit_2_base(frame)
+        f.write(frame)
+    verify_calculator_result_glyphs(tmp_ppm, "12")
+
     if os.path.exists(tmp_ppm):
         os.remove(tmp_ppm)
-    print("[OK] Calculator visual negative tests PASSED: Blank, noise, and incorrect results ('13', '17', '0', '2') strictly rejected.")
+    print("[OK] Calculator visual negative & positive synthetic tests PASSED: Blank, noise, and incorrect results ('13', '17', '0', '2', bridged) strictly rejected, valid '12' confirmed.")
 
 def main():
     print("[*] InterOS Core RISC-V 64 Interactive Lifecycle & Graphics Verification...")

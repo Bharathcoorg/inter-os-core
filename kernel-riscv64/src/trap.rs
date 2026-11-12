@@ -208,7 +208,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
-                                        loaded.address_space.activate();
+                                        loaded.address_space.try_activate().expect("Failed to activate init address space");
                                         sched.tasks[0].address_space = Some(loaded.address_space);
                                     }
                                 }

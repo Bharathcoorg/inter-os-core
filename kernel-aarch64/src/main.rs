@@ -1495,7 +1495,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let test_frame = mmu::allocate_frame().expect("Frame allocation in stability cycle");
         aspace.map_user_page(0x0040_0000, test_frame, true, false).expect("Mapping page in stability cycle");
         assert!(mmu::active_allocated_frames() > baseline_frames);
-        aspace.destroy();
+        assert!(aspace.destroy().is_ok());
         assert_eq!(mmu::active_allocated_frames(), baseline_frames, "Memory leak detected at cycle {}", cycle);
     }
     kprintln!("[TEST] 50-Cycle Memory Stability: Free/used frame count returned to baseline ({}) across 50 cycles without leakage VERIFIED.", baseline_frames);
@@ -1633,6 +1633,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         // Private mapping
         assert_eq!(aspace_a.map_private_frame(0x0040_0000, frame1, true, false), Ok(()));
         assert_eq!(mmu::frame_ownership(frame1), Some(mmu::FrameOwnership::PrivateOwned));
+        // Private frame already mapped must be rejected from being mapped in another address space
+        assert!(aspace_b.map_private_frame(0x0040_0000, frame1, true, false).is_err(), "Private frame already mapped must be rejected");
 
         // Shared mapping: frame2 mapped into A (refcount 1), then into B (refcount 2)
         let frame2 = mmu::allocate_frame_with_ownership(mmu::FrameOwnership::Shared).expect("Frame alloc");
@@ -1691,7 +1693,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Ok(l) => {
             kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
             kprintln!("[BOOT] Entering PID 1 (init) at EL0 via hardware eret...");
-            l.address_space.activate();
+            l.address_space.try_activate().expect("Failed to activate init address space");
             {
                 let mut sched = task::SCHEDULER.lock();
                 sched.tasks.clear();

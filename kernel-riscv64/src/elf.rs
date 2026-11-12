@@ -154,7 +154,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     })();
 
     if let Err(e) = load_res {
-        aspace.destroy();
+        let _ = aspace.destroy();
         return Err(e);
     }
 

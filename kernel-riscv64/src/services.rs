@@ -122,7 +122,14 @@ pub static SERVICES: [ServiceEntry; 12] = [
     ServiceEntry { id: ServiceId::Inference, name: "aid", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
 ];
 
+pub static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub fn start(id: u8) -> Result<u32, ()> {
+    let _lock = SERVICE_LIFECYCLE_LOCK.lock();
+    start_internal(id)
+}
+
+fn start_internal(id: u8) -> Result<u32, ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
             // Atomic state transition: only Stopped, Crashed, or Restarting can transition to Starting
@@ -146,7 +153,11 @@ pub fn start(id: u8) -> Result<u32, ()> {
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                let _ = sched.terminate_task(1, true, old_pid);
+                if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                    crate::println!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
+                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    return Err(());
+                }
                 match sched.reap_task(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
@@ -228,12 +239,16 @@ pub fn start(id: u8) -> Result<u32, ()> {
 }
 
 pub fn stop(id: u8) -> Result<(), ()> {
+    let _lock = SERVICE_LIFECYCLE_LOCK.lock();
     for svc in &SERVICES {
         if svc.id as u8 == id {
             let pid = svc.pid.load(Ordering::Acquire);
             if pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                let _ = sched.terminate_task(1, true, pid);
+                if let Err(e) = sched.terminate_task(1, true, pid) {
+                    crate::println!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
+                    return Err(());
+                }
                 match sched.reap_task(1, true, pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
@@ -283,6 +298,7 @@ pub fn heartbeat(caller_pid: u32, generation: u32) -> Result<(), ()> {
 }
 
 pub fn recover_failed(id: u8) -> Result<(), ()> {
+    let _lock = SERVICE_LIFECYCLE_LOCK.lock();
     for svc in &SERVICES {
         if svc.id as u8 == id {
             let st = svc.state.load(Ordering::Acquire);
@@ -310,7 +326,10 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                let _ = sched.terminate_task(1, true, old_pid);
+                if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                    crate::println!("[SERVICE] Recovery termination failed for PID {}: {}", old_pid, e);
+                    return Err(());
+                }
                 match sched.reap_task(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
@@ -323,7 +342,7 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             }
 
             svc.state.store(ServiceState::Restarting as u8, Ordering::Release);
-            return match start(id) {
+            return match start_internal(id) {
                 Ok(_) => {
                     svc.restart_count.fetch_add(1, Ordering::Relaxed);
                     Ok(())

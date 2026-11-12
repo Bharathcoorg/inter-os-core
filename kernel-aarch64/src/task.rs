@@ -276,17 +276,18 @@ impl Scheduler {
             return Err(-13); // -EACCES: caller does not own this child and lacks supervisor capability
         }
 
-        if let Some(ref aspace) = task.address_space {
+        if let Some(ref mut aspace) = self.tasks[pos].address_space {
             if aspace.is_active_on_any_cpu() {
                 return Err(-16); // -EBUSY: process still executing on CPU
             }
+            if let Err(e) = aspace.destroy_fallible() {
+                crate::kprintln!("[REAP ERROR] Failed to destroy user address space for PID {}: {:?}", self.tasks[pos].id, e);
+                return Err(-16); // -EBUSY: teardown failed; preserve task and do not emit success log
+            }
         }
 
-        let mut removed = self.remove_task_at(pos);
-        if let Some(mut aspace) = removed.address_space.take() {
-            let _ = aspace.destroy_fallible();
-            crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
-        }
+        let removed = self.remove_task_at(pos);
+        crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
         crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);
         crate::display::SURFACE_MANAGER.lock().destroy_surfaces_owned_by(removed.id);
         crate::input_queue::INPUT_QUEUE.lock().clear_for_task(removed.id);
@@ -317,9 +318,23 @@ impl Scheduler {
         self.tasks[next_idx].cpu_ticks += 1;
         self.current_task_idx = next_idx;
 
-        // Switch to the incoming task's hardware TTBR0_EL1 translation table if present
-        if let Some(ttbr0) = self.tasks[next_idx].page_table {
-            crate::mmu::ArmMmu::switch_to_task(ttbr0);
+        if curr_idx != next_idx {
+            // Deactivate outgoing task address space on current CPU if present
+            if let Some(ref aspace) = self.tasks[curr_idx].address_space {
+                aspace.deactivate();
+            }
+            // Activate incoming task address space on current CPU if present
+            if let Some(ref aspace) = self.tasks[next_idx].address_space {
+                if let Err(e) = aspace.try_activate() {
+                    crate::kprintln!("[SCHED] Activation failed for PID {}: {:?}. Aborting switch.", self.tasks[next_idx].id, e);
+                    self.tasks[next_idx].state = TaskState::Terminated;
+                    self.tasks[next_idx].exit_code = Some(-1);
+                    crate::mmu::ArmMmu::switch_to_kernel();
+                    return (None, None);
+                }
+            } else {
+                crate::mmu::ArmMmu::switch_to_kernel();
+            }
         }
 
         let old_ctx = &mut self.tasks[curr_idx].context as *mut ArmContext;

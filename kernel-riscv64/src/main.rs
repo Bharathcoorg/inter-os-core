@@ -133,7 +133,7 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         let test_frame = mmu::allocate_frame().expect("Frame allocation in stability cycle");
         aspace.map_user_page(0x0040_0000, test_frame, true, false).expect("Mapping page in stability cycle");
         assert!(mmu::active_allocated_frames() > baseline_frames);
-        aspace.destroy();
+        assert!(aspace.destroy().is_ok());
         assert_eq!(mmu::active_allocated_frames(), baseline_frames, "Memory leak detected at cycle {}", cycle);
     }
     println!("[TEST] 50-Cycle Memory Stability: Free/used frame count returned to baseline ({}) across 50 cycles without leakage VERIFIED.", baseline_frames);
@@ -275,6 +275,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         // Private mapping
         assert_eq!(aspace_a.map_private_frame(0x0040_0000, frame1, true, false), Ok(()));
         assert_eq!(mmu::frame_ownership(frame1), Some(mmu::FrameOwnership::PrivateOwned));
+        // Private frame already mapped must be rejected if remapped
+        assert!(aspace_b.map_private_frame(0x0040_0000, frame1, true, false).is_err(), "Private frame already mapped must be rejected");
 
         // Shared mapping: frame2 mapped into A (refcount 1), then into B (refcount 2)
         let frame2 = mmu::allocate_frame_with_ownership(mmu::FrameOwnership::Shared).expect("Frame alloc");
@@ -290,14 +292,14 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         assert!(aspace_a.map_borrowed_frame(0x0070_0000, 0x0005_0000, true, false).is_err(), "Unregistered MMIO address must be rejected");
 
         // Destroy Aspace A: private frame1 freed, shared frame2 retained (refcount 1), borrowed not freed
-        aspace_a.destroy();
+        assert!(aspace_a.destroy().is_ok());
         assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
         assert_eq!(mmu::frame_refcount(frame2), 1);
         // Activation after close/destroy must be rejected
         assert_eq!(aspace_a.try_activate(), Err(mmu::ActivationError::ClosingOrDestroyed));
 
         // Destroy Aspace B: shared frame2 drops to 0 and is freed
-        aspace_b.destroy();
+        assert!(aspace_b.destroy().is_ok());
 
         assert_eq!(mmu::active_allocated_frames(), baseline, "All owned frames must return to baseline");
         println!("[TEST] Frame Ownership & Shared Mappings: Private/Shared/Borrowed lifecycle VERIFIED.");
