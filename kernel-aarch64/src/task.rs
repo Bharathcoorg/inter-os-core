@@ -96,6 +96,8 @@ pub struct TaskControlBlock {
     pub user_stack_top: u64,
     pub exit_code: Option<i32>,
     pub generation: u32,
+    pub is_service: bool,
+    pub service_id: Option<u8>,
 }
 
 impl TaskControlBlock {
@@ -125,6 +127,10 @@ pub const MAX_TASKS: usize = 256;
 pub const INVALID_PID: u32 = u32::MAX;
 pub const SUPERVISOR_PID: u32 = 0xFFFF_FFFE;
 
+pub fn is_reserved_pid(pid: u32) -> bool {
+    pid == 0 || pid == SUPERVISOR_PID || pid == INVALID_PID
+}
+
 impl Scheduler {
     pub const fn new() -> Self {
         Self {
@@ -142,24 +148,26 @@ impl Scheduler {
         }
     }
 
-    pub fn allocate_pid(&mut self) -> u32 {
-        let mut candidate = self.next_pid;
-        let mut attempts = 0;
-        while self.tasks.iter().any(|t| t.id == candidate) {
+    pub fn allocate_pid(&mut self) -> Option<u32> {
+        let start = if is_reserved_pid(self.next_pid) { 1 } else { self.next_pid };
+        let mut candidate = start;
+        loop {
+            if !is_reserved_pid(candidate) && !self.tasks.iter().any(|t| t.id == candidate) {
+                let mut next = candidate.wrapping_add(1);
+                if is_reserved_pid(next) {
+                    next = 1;
+                }
+                self.next_pid = next;
+                return Some(candidate);
+            }
             candidate = candidate.wrapping_add(1);
-            if candidate == 0 || candidate == INVALID_PID {
+            if is_reserved_pid(candidate) {
                 candidate = 1;
             }
-            attempts += 1;
-            if attempts > 65536 {
-                break;
+            if candidate == start {
+                return None;
             }
         }
-        self.next_pid = candidate.wrapping_add(1);
-        if self.next_pid == 0 || self.next_pid == INVALID_PID {
-            self.next_pid = 1;
-        }
-        candidate
     }
 
     pub fn remove_task_at(&mut self, pos: usize) -> TaskControlBlock {
@@ -177,7 +185,7 @@ impl Scheduler {
     }
 
     pub fn spawn_with_caps(&mut self, name: &'static str, entry_fn: fn() -> !, cap_table: CapabilityTable) {
-        let task_id = self.allocate_pid();
+        let task_id = self.allocate_pid().expect("PID allocation failure during kernel daemon spawn");
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let stack_top = (stack.as_ptr() as u64) + STACK_SIZE as u64;
@@ -205,6 +213,8 @@ impl Scheduler {
             user_stack_top: 0,
             exit_code: None,
             generation: 1,
+            is_service: false,
+            service_id: None,
         });
     }
 
@@ -220,7 +230,10 @@ impl Scheduler {
         if self.tasks.len() >= MAX_TASKS {
             return 0;
         }
-        let task_id = self.allocate_pid();
+        let task_id = match self.allocate_pid() {
+            Some(id) => id,
+            None => return 0,
+        };
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
@@ -249,6 +262,58 @@ impl Scheduler {
             user_stack_top: user_sp,
             exit_code: None,
             generation: 1,
+            is_service: false,
+            service_id: None,
+        });
+        task_id
+    }
+
+    pub fn spawn_service_process(
+        &mut self,
+        service_id: u8,
+        name: &'static str,
+        entry_point: u64,
+        user_sp: u64,
+        address_space: Option<crate::mmu::UserAddressSpace>,
+        cap_table: CapabilityTable,
+    ) -> u32 {
+        if self.tasks.len() >= MAX_TASKS {
+            return 0;
+        }
+        let task_id = match self.allocate_pid() {
+            Some(id) => id,
+            None => return 0,
+        };
+        let stack = Box::new([0u8; STACK_SIZE]);
+
+        let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
+
+        let mut context = ArmContext::default();
+        context.sp = kernel_sp;
+        context.lr = user_process_entry as *const () as usize as u64;
+
+        crate::ipc::IPC_ROUTER.lock().register_task(task_id);
+
+        let ttbr0 = address_space.as_ref().map(|a| a.ttbr0);
+
+        self.tasks.push(TaskControlBlock {
+            id: task_id,
+            parent_id: SUPERVISOR_PID,
+            name,
+            state: TaskState::Ready,
+            context,
+            stack,
+            cap_table,
+            cpu_ticks: 0,
+            priority: 1,
+            address_space,
+            page_table: ttbr0,
+            user_entry: entry_point,
+            user_stack_top: user_sp,
+            exit_code: None,
+            generation: 1,
+            is_service: true,
+            service_id: Some(service_id),
         });
         task_id
     }
@@ -511,19 +576,49 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
 }
 
 /// Reaps a supervisor-managed service task.
-/// Uses authentic internal kernel supervisor identity (`SUPERVISOR_PID`, `is_supervisor: true`).
-/// Cannot be impersonated by userspace because userspace PIDs are allocated sequentially (0..255).
-pub fn reap_service_task(target_pid: u32) -> Result<i32, i64> {
-    if target_pid == 0 || target_pid == INVALID_PID || target_pid == SUPERVISOR_PID {
+/// Validates caller's `ServiceLifecycleToken` against the live service registry and scheduler TCB.
+/// Rejects non-service tasks, stale tokens, and wrong service IDs with -EPERM (-1).
+pub fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Result<i32, i64> {
+    if !token.verify_live() {
+        return Err(-1); // -EPERM
+    }
+    let target_pid = token.pid();
+    if is_reserved_pid(target_pid) {
         return Err(-22); // -EINVAL
+    }
+    {
+        let sched = SCHEDULER.lock();
+        let (is_svc, svc_id) = match sched.tasks.iter().find(|t| t.id == target_pid) {
+            Some(t) => (t.is_service, t.service_id),
+            None => return Err(-30), // -ESRCH
+        };
+        if !is_svc || svc_id != Some(token.service_id()) {
+            return Err(-1); // -EPERM
+        }
     }
     reap_task_locksafe(SUPERVISOR_PID, true, target_pid)
 }
 
 /// Terminates a supervisor-managed service task.
-pub fn terminate_service_task(sched: &mut Scheduler, target_pid: u32) -> Result<(), i64> {
-    if target_pid == 0 || target_pid == INVALID_PID || target_pid == SUPERVISOR_PID {
+/// Validates caller's `ServiceLifecycleToken` against the live service registry and scheduler TCB.
+/// Rejects non-service tasks, stale tokens, and wrong service IDs with -EPERM (-1).
+pub fn terminate_service_task(
+    sched: &mut Scheduler,
+    token: &crate::services::ServiceLifecycleToken,
+) -> Result<(), i64> {
+    if !token.verify_live() {
+        return Err(-1); // -EPERM
+    }
+    let target_pid = token.pid();
+    if is_reserved_pid(target_pid) {
         return Err(-22); // -EINVAL
+    }
+    let (is_svc, svc_id) = match sched.tasks.iter().find(|t| t.id == target_pid) {
+        Some(t) => (t.is_service, t.service_id),
+        None => return Err(-3), // -ESRCH
+    };
+    if !is_svc || svc_id != Some(token.service_id()) {
+        return Err(-1); // -EPERM
     }
     sched.terminate_task(SUPERVISOR_PID, true, target_pid)
 }
@@ -651,12 +746,17 @@ pub fn test_task_lifecycle() {
     // Idempotent rejection on second reap
     assert_eq!(sched2.reap_task(p1, false, c1), Err(-30));
 
-    // Test 5: PID monotonicity and collision avoidance
-    sched.next_pid = u32::MAX - 1;
-    let pid_a = sched.allocate_pid();
-    assert_eq!(pid_a, u32::MAX - 1);
-    let pid_b = sched.allocate_pid();
-    assert_eq!(pid_b, 1); // Skips u32::MAX (INVALID_PID) and 0
+    // Test 5: PID monotonicity, collision avoidance, and reserved PID skip
+    sched.next_pid = SUPERVISOR_PID - 1;
+    let pid_a = sched.allocate_pid().expect("allocate before supervisor pid");
+    assert_eq!(pid_a, SUPERVISOR_PID - 1);
+    let pid_b = sched.allocate_pid().expect("allocate wraps to 1");
+    assert_eq!(pid_b, 1); // Skips SUPERVISOR_PID (u32::MAX - 1), INVALID_PID (u32::MAX), and 0
+    assert!(is_reserved_pid(0));
+    assert!(is_reserved_pid(SUPERVISOR_PID));
+    assert!(is_reserved_pid(INVALID_PID));
+    assert!(!is_reserved_pid(1));
+    assert!(!is_reserved_pid(SUPERVISOR_PID - 1));
 
     // Test 6: Multi-Stage Lock-Safe Reaping & Generation Tracking
     let c2 = sched2.spawn_user_process(p1, "child2", 0, 0, None, caps.clone());
@@ -715,13 +815,9 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched2.begin_reap(p_a, false, 0), Err(-30));
 
     // Test 8: Service Supervisor Identity Reaping API
-    let svc_child = sched2.spawn_user_process(0, "svc_child", 0, 0, None, caps.clone());
+    let svc_child = sched2.spawn_service_process(3, "svc_child", 0, 0, None, caps.clone());
     let svc_pos = sched2.tasks.iter().position(|t| t.id == svc_child).unwrap();
     sched2.tasks[svc_pos].state = TaskState::Terminated;
-    // Invalid PIDs rejected
-    assert_eq!(reap_service_task(0), Err(-22));
-    assert_eq!(reap_service_task(INVALID_PID), Err(-22));
-    assert_eq!(reap_service_task(SUPERVISOR_PID), Err(-22));
     // Supervisor reap of svc_child succeeds using internal SUPERVISOR_PID
     let h_svc = sched2.begin_reap(SUPERVISOR_PID, true, svc_child).expect("Supervisor begin_reap on service task");
     assert_eq!(h_svc.pid, svc_child);
