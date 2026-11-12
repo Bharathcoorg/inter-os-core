@@ -203,9 +203,10 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+                                        loaded.address_space.activate();
+                                        sched.tasks[0].address_space = Some(loaded.address_space);
                                     }
                                 }
-                                loaded.address_space.activate();
                                 tf.sepc = loaded.entry_point;
                                 tf.regs[2] = loaded.stack_top; // sp
                                 tf.regs[10] = 0; // a0

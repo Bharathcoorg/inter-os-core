@@ -56,6 +56,24 @@ pub fn shutdown() -> ! {
     loop {}
 }
 
+/// Broadcasts an sfence.vma instruction to remote harts via SBI RFNC extension (EID 0x52464E43, FID 0x1).
+#[inline(always)]
+pub fn remote_sfence_vma(hart_mask: usize, hart_mask_base: usize, start_addr: usize, size: usize) {
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") 0x52464E43usize, // SBI_EXT_RFNC
+            in("a6") 1usize,          // SBI_EXT_RFNC_REMOTE_SFENCE_VMA
+            in("a0") hart_mask,
+            in("a1") hart_mask_base,
+            in("a2") start_addr,
+            in("a3") size,
+            lateout("a0") _,
+            lateout("a1") _,
+        );
+    }
+}
+
 pub struct SbiConsole;
 
 impl core::fmt::Write for SbiConsole {

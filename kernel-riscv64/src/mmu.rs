@@ -218,12 +218,24 @@ pub unsafe fn switch_satp(satp: usize) {
 pub const USER_SPACE_MIN: usize = 0x0000_1000;
 pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameOwnership {
+    Kernel = 0,
+    Mmio = 1,
+    Borrowed = 2,
+    Shared = 3,
+    PrivateOwned = 4,
+}
+
 pub struct RiscvFrameAllocator {
     pub base_paddr: u64,
     pub total_frames: usize,
     pub allocated_frames: usize,
     pub recycled_frames: usize,
     pub bitmap: [u64; 1024], // 65,536 frames = 256 MiB
+    pub ownership: [u8; 65536],
+    pub ref_counts: [u16; 65536],
 }
 
 impl RiscvFrameAllocator {
@@ -234,10 +246,12 @@ impl RiscvFrameAllocator {
             allocated_frames: 0,
             recycled_frames: 0,
             bitmap: [0; 1024],
+            ownership: [0; 65536],
+            ref_counts: [0; 65536],
         }
     }
 
-    pub fn allocate_frame(&mut self) -> Option<u64> {
+    pub fn allocate_frame_with_ownership(&mut self, ownership: FrameOwnership) -> Option<u64> {
         for (word_idx, word) in self.bitmap.iter_mut().enumerate() {
             if *word != !0u64 {
                 let bit_idx = (!*word).trailing_zeros() as usize;
@@ -247,6 +261,8 @@ impl RiscvFrameAllocator {
                 }
                 *word |= 1u64 << bit_idx;
                 self.allocated_frames += 1;
+                self.ownership[frame_idx] = ownership as u8;
+                self.ref_counts[frame_idx] = 1;
                 let paddr = self.base_paddr + (frame_idx as u64) * 4096;
                 unsafe {
                     core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
@@ -257,19 +273,41 @@ impl RiscvFrameAllocator {
         None
     }
 
-    pub fn recycle_frame(&mut self, paddr: u64) {
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        self.allocate_frame_with_ownership(FrameOwnership::PrivateOwned)
+    }
+
+    pub fn recycle_frame(&mut self, paddr: u64) -> Result<(), &'static str> {
+        if (paddr & 0xFFF) != 0 {
+            return Err("Physical frame unaligned");
+        }
         if paddr < self.base_paddr {
-            return;
+            return Err("Physical frame below allocator base");
         }
         let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
-        if frame_idx < self.total_frames {
-            let word_idx = frame_idx / 64;
-            let bit_idx = frame_idx % 64;
-            if (self.bitmap[word_idx] & (1u64 << bit_idx)) != 0 {
-                self.bitmap[word_idx] &= !(1u64 << bit_idx);
-                self.recycled_frames += 1;
+        if frame_idx >= self.total_frames {
+            return Err("Physical frame exceeds allocator range");
+        }
+        let word_idx = frame_idx / 64;
+        let bit_idx = frame_idx % 64;
+        if (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0 {
+            return Err("Double-free rejected: frame is not allocated");
+        }
+        let own = self.ownership[frame_idx];
+        if own == FrameOwnership::Mmio as u8 || own == FrameOwnership::Borrowed as u8 {
+            return Err("Non-owned MMIO or borrowed frame cannot be recycled");
+        }
+        if own == FrameOwnership::Shared as u8 {
+            if self.ref_counts[frame_idx] > 1 {
+                self.ref_counts[frame_idx] -= 1;
+                return Ok(()); // Dropped one reference, frame still retained
             }
         }
+        self.bitmap[word_idx] &= !(1u64 << bit_idx);
+        self.ownership[frame_idx] = 0;
+        self.ref_counts[frame_idx] = 0;
+        self.recycled_frames += 1;
+        Ok(())
     }
 }
 
@@ -279,8 +317,12 @@ pub fn allocate_frame() -> Option<u64> {
     FRAME_ALLOCATOR.lock().allocate_frame()
 }
 
-pub fn recycle_frame(paddr: u64) {
-    FRAME_ALLOCATOR.lock().recycle_frame(paddr);
+pub fn allocate_frame_with_ownership(ownership: FrameOwnership) -> Option<u64> {
+    FRAME_ALLOCATOR.lock().allocate_frame_with_ownership(ownership)
+}
+
+pub fn recycle_frame(paddr: u64) -> Result<(), &'static str> {
+    FRAME_ALLOCATOR.lock().recycle_frame(paddr)
 }
 
 pub fn total_recycled_frames() -> usize {
@@ -296,19 +338,48 @@ pub fn active_allocated_frames() -> usize {
     alloc.allocated_frames.saturating_sub(alloc.recycled_frames)
 }
 
+pub fn frame_ownership(paddr: u64) -> Option<FrameOwnership> {
+    let alloc = FRAME_ALLOCATOR.lock();
+    if paddr < alloc.base_paddr { return None; }
+    let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
+    if frame_idx >= alloc.total_frames { return None; }
+    match alloc.ownership[frame_idx] {
+        0 => Some(FrameOwnership::Kernel),
+        1 => Some(FrameOwnership::Mmio),
+        2 => Some(FrameOwnership::Borrowed),
+        3 => Some(FrameOwnership::Shared),
+        4 => Some(FrameOwnership::PrivateOwned),
+        _ => None,
+    }
+}
+
+extern crate alloc;
+use alloc::vec::Vec;
+
 pub struct UserAddressSpace {
     pub satp: usize,
     pub root_paddr: u64,
+    pub table_frames: Vec<u64>,
+    pub mapped_frames: Vec<u64>,
     pub mapped_bytes: usize,
+    pub destroyed: bool,
+}
+
+impl Drop for UserAddressSpace {
+    fn drop(&mut self) {
+        if !self.destroyed {
+            self.destroy();
+        }
+    }
 }
 
 impl UserAddressSpace {
     pub fn new() -> Option<Self> {
-        let root_paddr = allocate_frame()?;
-        let lvl1_paddr = match allocate_frame() {
+        let root_paddr = allocate_frame_with_ownership(FrameOwnership::Kernel)?;
+        let lvl1_paddr = match allocate_frame_with_ownership(FrameOwnership::Kernel) {
             Some(f) => f,
             None => {
-                recycle_frame(root_paddr);
+                let _ = recycle_frame(root_paddr);
                 return None;
             }
         };
@@ -341,14 +412,24 @@ impl UserAddressSpace {
 
         let satp_val = (SATP_MODE_SV39 | ((root_paddr >> 12) & 0x0FFF_FFFF_FFFF)) as usize;
 
+        let mut table_frames = Vec::new();
+        table_frames.push(root_paddr);
+        table_frames.push(lvl1_paddr);
+
         Some(Self {
             satp: satp_val,
             root_paddr,
+            table_frames,
+            mapped_frames: Vec::new(),
             mapped_bytes: 0,
+            destroyed: false,
         })
     }
 
     pub fn map_user_page(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if self.destroyed {
+            return Err("Cannot map into destroyed address space");
+        }
         if is_write && is_exec {
             return Err("W^X violation: writable user mapping must be non-executable");
         }
@@ -362,9 +443,10 @@ impl UserAddressSpace {
         let vpn0 = (vaddr >> 12) & 0x1FF;
 
         // Level 2 root entry -> Level 1 table
+        let mut newly_allocated_lvl1 = None;
         let lvl1_paddr = if root.entries[vpn2] & PTE_V == 0 {
-            let frame = allocate_frame().ok_or("OOM allocating Level 1 page table")?;
-            root.entries[vpn2] = ((frame >> 12) << 10) | PTE_V;
+            let frame = allocate_frame_with_ownership(FrameOwnership::Kernel).ok_or("OOM allocating Level 1 page table")?;
+            newly_allocated_lvl1 = Some(frame);
             frame
         } else {
             (root.entries[vpn2] >> 10) << 12
@@ -372,12 +454,24 @@ impl UserAddressSpace {
 
         // Level 1 entry -> Level 0 table
         let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
+        let mut newly_allocated_lvl0 = None;
         let lvl0_paddr = if lvl1.entries[vpn1] & PTE_V == 0 {
-            let frame = allocate_frame().ok_or("OOM allocating Level 0 page table")?;
-            lvl1.entries[vpn1] = ((frame >> 12) << 10) | PTE_V;
+            let frame = match allocate_frame_with_ownership(FrameOwnership::Kernel) {
+                Some(f) => f,
+                None => {
+                    if let Some(f) = newly_allocated_lvl1 {
+                        let _ = recycle_frame(f);
+                    }
+                    return Err("OOM allocating Level 0 page table");
+                }
+            };
+            newly_allocated_lvl0 = Some(frame);
             frame
         } else {
             if (lvl1.entries[vpn1] & (PTE_R | PTE_X)) != 0 {
+                if let Some(f) = newly_allocated_lvl1 {
+                    let _ = recycle_frame(f);
+                }
                 return Err("Virtual address collides with MMIO megapage");
             }
             (lvl1.entries[vpn1] >> 10) << 12
@@ -386,7 +480,23 @@ impl UserAddressSpace {
         // Level 0 leaf entry
         let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
         if lvl0.entries[vpn0] & PTE_V != 0 {
+            if let Some(f) = newly_allocated_lvl0 {
+                let _ = recycle_frame(f);
+            }
+            if let Some(f) = newly_allocated_lvl1 {
+                let _ = recycle_frame(f);
+            }
             return Err("Page already mapped");
+        }
+
+        // Commit newly allocated tables to hierarchy and table_frames
+        if let Some(f) = newly_allocated_lvl1 {
+            root.entries[vpn2] = ((f >> 12) << 10) | PTE_V;
+            self.table_frames.push(f);
+        }
+        if let Some(f) = newly_allocated_lvl0 {
+            lvl1.entries[vpn1] = ((f >> 12) << 10) | PTE_V;
+            self.table_frames.push(f);
         }
 
         let mut flags = PTE_V | PTE_U | PTE_A | PTE_D | PTE_R;
@@ -398,6 +508,7 @@ impl UserAddressSpace {
         }
 
         lvl0.entries[vpn0] = ((paddr >> 12) << 10) | flags;
+        self.mapped_frames.push(paddr);
         self.mapped_bytes += PAGE_SIZE;
         Ok(())
     }
@@ -409,44 +520,49 @@ impl UserAddressSpace {
     }
 
     pub fn destroy(&mut self) {
-        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
-        for i in 0..512 {
-            if i == 1 || i == 2 {
-                continue; // Skip cloned kernel MMIO and DRAM gigapage entries
-            }
-            let pte2 = root.entries[i];
-            if pte2 & PTE_V != 0 && (pte2 & (PTE_R | PTE_X)) == 0 {
-                let lvl1_paddr = (pte2 >> 10) << 12;
-                let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
-                for j in 0..512 {
-                    let pte1 = lvl1.entries[j];
-                    if pte1 & PTE_V != 0 {
-                        if (pte1 & (PTE_R | PTE_X)) == 0 {
-                            let lvl0_paddr = (pte1 >> 10) << 12;
-                            let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
-                            for k in 0..512 {
-                                let pte0 = lvl0.entries[k];
-                                if (pte0 & (PTE_V | PTE_U)) == (PTE_V | PTE_U) {
-                                    recycle_frame((pte0 >> 10) << 12);
-                                }
-                            }
-                            recycle_frame(lvl0_paddr);
-                        }
-                    }
-                }
-                recycle_frame(lvl1_paddr);
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
+        // Step 1 & 2: Detach active CPU translation register if currently pointing to this table
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            let current_satp: usize;
+            core::arch::asm!("csrr {0}, satp", out(reg) current_satp);
+            if (current_satp & 0x0FFF_FFFF_FFFF) == ((self.root_paddr >> 12) & 0x0FFF_FFFF_FFFF) as usize {
+                let kernel_root_phys = core::ptr::addr_of!(KERNEL_ROOT_PT) as u64;
+                let kernel_satp = (SATP_MODE_SV39 | ((kernel_root_phys >> 12) & 0x0FFF_FFFF_FFFF)) as usize;
+                switch_satp(kernel_satp);
             }
         }
-        recycle_frame(self.root_paddr);
-        self.mapped_bytes = 0;
+
+        // Step 3: Remove user mappings from tables
+        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
+        root.entries[0] = 0; // Detach Level 1 table for user/MMIO space
+
+        // Step 4: Perform TLB invalidation locally and broadcast across all remote harts via SBI RFNC
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!("sfence.vma zero, zero", options(nostack));
+        }
+        crate::sbi::remote_sfence_vma(0, usize::MAX, 0, 0);
         #[cfg(target_arch = "riscv64")]
         unsafe {
             core::arch::asm!(
-                "sfence.vma zero, zero",
                 "fence rw, rw",
                 "fence.i",
                 options(nostack)
             );
         }
+
+        // Step 5: Only after TLB shootdown completes, return exclusively owned frames to allocator
+        for paddr in self.mapped_frames.drain(..) {
+            let _ = recycle_frame(paddr);
+        }
+        for paddr in self.table_frames.drain(..) {
+            let _ = recycle_frame(paddr);
+        }
+        self.mapped_bytes = 0;
     }
 }

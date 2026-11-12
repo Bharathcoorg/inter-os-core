@@ -125,12 +125,29 @@ pub static SERVICES: [ServiceEntry; 12] = [
 pub fn start(id: u8) -> Result<u32, ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
+            let cur_state = svc.state.load(Ordering::Acquire);
+            if cur_state == ServiceState::Starting as u8 || cur_state == ServiceState::Running as u8 {
+                crate::println!("[SERVICE] Rejecting duplicate start for active service '{}'", svc.name);
+                return Err(());
+            }
+
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                let _ = sched.reap_task(1, true, old_pid);
-                drop(sched);
-                svc.pid.store(0, Ordering::Release);
+                for task in &mut sched.tasks {
+                    if task.id == old_pid {
+                        task.state = crate::task::TaskState::Terminated;
+                    }
+                }
+                match sched.reap_task(1, true, old_pid) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
+                    }
+                    Err(e) => {
+                        crate::println!("[SERVICE] Failed to reap old process PID {} for '{}': {}", old_pid, svc.name, e);
+                        return Err(());
+                    }
+                }
             }
 
             svc.state.store(ServiceState::Starting as u8, Ordering::Release);
@@ -194,6 +211,7 @@ pub fn start(id: u8) -> Result<u32, ()> {
             svc.last_heartbeat.store(ticks, Ordering::Release);
             svc.state.store(ServiceState::Running as u8, Ordering::Release);
             svc.generation.fetch_add(1, Ordering::Relaxed);
+            svc.failures.store(0, Ordering::Relaxed);
 
             crate::println!("[SERVICE] RISC-V userspace service '{}' spawned (PID {})", img.name, tid);
             return Ok(tid);
@@ -205,7 +223,7 @@ pub fn start(id: u8) -> Result<u32, ()> {
 pub fn stop(id: u8) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.id as u8 == id {
-            let pid = svc.pid.swap(0, Ordering::AcqRel);
+            let pid = svc.pid.load(Ordering::Acquire);
             if pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
                 for task in &mut sched.tasks {
@@ -213,7 +231,15 @@ pub fn stop(id: u8) -> Result<(), ()> {
                         task.state = crate::task::TaskState::Terminated;
                     }
                 }
-                let _ = sched.reap_task(1, true, pid);
+                match sched.reap_task(1, true, pid) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
+                    }
+                    Err(e) => {
+                        crate::println!("[SERVICE] Failed to reap PID {} during stop of '{}': {}", pid, svc.name, e);
+                        return Err(());
+                    }
+                }
             }
             svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
             return Ok(());
@@ -232,9 +258,12 @@ pub fn heartbeat(caller_pid: u32) -> Result<(), ()> {
     }
     for svc in &SERVICES {
         if svc.pid.load(Ordering::Acquire) == caller_pid {
+            let cur_state = svc.state.load(Ordering::Acquire);
+            if cur_state == ServiceState::Stopped as u8 || cur_state == ServiceState::Crashed as u8 {
+                return Err(());
+            }
             svc.last_heartbeat.store(ticks, Ordering::Release);
-            let prev = svc.state.load(Ordering::Acquire);
-            if prev == ServiceState::Degraded as u8 {
+            if cur_state == ServiceState::Degraded as u8 {
                 svc.state.store(ServiceState::Running as u8, Ordering::Release);
             }
             return Ok(());
@@ -250,17 +279,54 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             if st != ServiceState::Crashed as u8 && st != ServiceState::Degraded as u8 {
                 return Err(());
             }
+
+            let ticks: u64;
+            unsafe {
+                core::arch::asm!("rdtime {0}", out(reg) ticks);
+            }
+            let bo = svc.backoff_ticks.load(Ordering::Acquire);
+            if ticks < bo {
+                crate::println!("[SERVICE] Service '{}' in backoff window", svc.name);
+                return Err(());
+            }
+
             let fails = svc.failures.load(Ordering::Relaxed);
             if fails >= MAX_RESTART_ATTEMPTS {
                 crate::println!("[SERVICE] Service '{}' exceeded maximum retry budget ({})", svc.name, fails);
                 return Err(());
             }
-            svc.restart_count.fetch_add(1, Ordering::Relaxed);
+
+            // Clean up any remaining process from previous instance
+            let old_pid = svc.pid.load(Ordering::Acquire);
+            if old_pid != 0 {
+                let mut sched = crate::task::SCHEDULER.lock();
+                for task in &mut sched.tasks {
+                    if task.id == old_pid {
+                        task.state = crate::task::TaskState::Terminated;
+                    }
+                }
+                match sched.reap_task(1, true, old_pid) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
+                    }
+                    Err(e) => {
+                        crate::println!("[SERVICE] Recovery reap failed for PID {}: {}", old_pid, e);
+                        return Err(());
+                    }
+                }
+            }
+
             svc.state.store(ServiceState::Restarting as u8, Ordering::Release);
             return match start(id) {
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    svc.restart_count.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
                 Err(()) => {
                     svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    svc.failures.fetch_add(1, Ordering::Relaxed);
+                    let backoff_interval = (1u64 << fails.min(6)) * (HEARTBEAT_TIMEOUT_TICKS / 10);
+                    svc.backoff_ticks.store(ticks.saturating_add(backoff_interval), Ordering::Release);
                     Err(())
                 }
             };

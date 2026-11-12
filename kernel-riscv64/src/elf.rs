@@ -109,7 +109,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             while cur_page < page_end {
                 let frame = allocate_frame().ok_or("Out of physical memory allocating ELF page")?;
                 if let Err(e) = aspace.map_user_page(cur_page, frame, is_write, is_exec) {
-                    recycle_frame(frame);
+                    let _ = recycle_frame(frame);
                     return Err(e);
                 }
 
@@ -141,7 +141,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let stack_page_vaddr = stack_bottom_addr + p * PAGE_SIZE;
             let frame = allocate_frame().ok_or("Out of physical memory allocating user stack")?;
             if let Err(e) = aspace.map_user_page(stack_page_vaddr, frame, true, false) {
-                recycle_frame(frame);
+                let _ = recycle_frame(frame);
                 return Err(e);
             }
         }

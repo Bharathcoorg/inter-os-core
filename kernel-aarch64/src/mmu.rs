@@ -770,12 +770,24 @@ impl ArmMmu {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameOwnership {
+    Kernel = 0,
+    Mmio = 1,
+    Borrowed = 2,
+    Shared = 3,
+    PrivateOwned = 4,
+}
+
 pub struct ArmFrameAllocator {
     pub base_paddr: u64,
     pub total_frames: usize,
     pub allocated_frames: usize,
     pub recycled_frames: usize,
     pub bitmap: [u64; 1024], // 65,536 frames = 256 MiB
+    pub ownership: [u8; 65536],
+    pub ref_counts: [u16; 65536],
 }
 
 impl ArmFrameAllocator {
@@ -786,10 +798,12 @@ impl ArmFrameAllocator {
             allocated_frames: 0,
             recycled_frames: 0,
             bitmap: [0; 1024],
+            ownership: [0; 65536],
+            ref_counts: [0; 65536],
         }
     }
 
-    pub fn allocate_frame(&mut self) -> Option<u64> {
+    pub fn allocate_frame_with_ownership(&mut self, ownership: FrameOwnership) -> Option<u64> {
         for (word_idx, word) in self.bitmap.iter_mut().enumerate() {
             if *word != !0u64 {
                 let bit_idx = (!*word).trailing_zeros() as usize;
@@ -799,6 +813,8 @@ impl ArmFrameAllocator {
                 }
                 *word |= 1u64 << bit_idx;
                 self.allocated_frames += 1;
+                self.ownership[frame_idx] = ownership as u8;
+                self.ref_counts[frame_idx] = 1;
                 let paddr = self.base_paddr + (frame_idx as u64) * 4096;
                 unsafe {
                     core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
@@ -809,19 +825,41 @@ impl ArmFrameAllocator {
         None
     }
 
-    pub fn recycle_frame(&mut self, paddr: u64) {
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        self.allocate_frame_with_ownership(FrameOwnership::PrivateOwned)
+    }
+
+    pub fn recycle_frame(&mut self, paddr: u64) -> Result<(), &'static str> {
+        if (paddr & 0xFFF) != 0 {
+            return Err("Physical frame unaligned");
+        }
         if paddr < self.base_paddr {
-            return;
+            return Err("Physical frame below allocator base");
         }
         let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
-        if frame_idx < self.total_frames {
-            let word_idx = frame_idx / 64;
-            let bit_idx = frame_idx % 64;
-            if (self.bitmap[word_idx] & (1u64 << bit_idx)) != 0 {
-                self.bitmap[word_idx] &= !(1u64 << bit_idx);
-                self.recycled_frames += 1;
+        if frame_idx >= self.total_frames {
+            return Err("Physical frame exceeds allocator range");
+        }
+        let word_idx = frame_idx / 64;
+        let bit_idx = frame_idx % 64;
+        if (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0 {
+            return Err("Double-free rejected: frame is not allocated");
+        }
+        let own = self.ownership[frame_idx];
+        if own == FrameOwnership::Mmio as u8 || own == FrameOwnership::Borrowed as u8 {
+            return Err("Non-owned MMIO or borrowed frame cannot be recycled");
+        }
+        if own == FrameOwnership::Shared as u8 {
+            if self.ref_counts[frame_idx] > 1 {
+                self.ref_counts[frame_idx] -= 1;
+                return Ok(()); // Dropped one reference, frame still retained
             }
         }
+        self.bitmap[word_idx] &= !(1u64 << bit_idx);
+        self.ownership[frame_idx] = 0;
+        self.ref_counts[frame_idx] = 0;
+        self.recycled_frames += 1;
+        Ok(())
     }
 }
 
@@ -834,14 +872,20 @@ pub fn init_frame_allocator(base_paddr: u64, total_frames: usize) {
     alloc.allocated_frames = 0;
     alloc.recycled_frames = 0;
     alloc.bitmap = [0; 1024];
+    alloc.ownership = [0; 65536];
+    alloc.ref_counts = [0; 65536];
 }
 
 pub fn allocate_frame() -> Option<u64> {
     FRAME_ALLOCATOR.lock().allocate_frame()
 }
 
-pub fn recycle_frame(paddr: u64) {
-    FRAME_ALLOCATOR.lock().recycle_frame(paddr);
+pub fn allocate_frame_with_ownership(ownership: FrameOwnership) -> Option<u64> {
+    FRAME_ALLOCATOR.lock().allocate_frame_with_ownership(ownership)
+}
+
+pub fn recycle_frame(paddr: u64) -> Result<(), &'static str> {
+    FRAME_ALLOCATOR.lock().recycle_frame(paddr)
 }
 
 pub fn total_recycled_frames() -> usize {
@@ -865,15 +909,24 @@ pub struct UserAddressSpace {
     pub table_frames: Vec<u64>,
     pub mapped_frames: Vec<u64>,
     pub mapped_bytes: usize,
+    pub destroyed: bool,
+}
+
+impl Drop for UserAddressSpace {
+    fn drop(&mut self) {
+        if !self.destroyed {
+            self.destroy();
+        }
+    }
 }
 
 impl UserAddressSpace {
     pub fn new() -> Option<Self> {
-        let root_l1_phys = allocate_frame()?;
-        let l2_phys = match allocate_frame() {
+        let root_l1_phys = allocate_frame_with_ownership(FrameOwnership::Kernel)?;
+        let l2_phys = match allocate_frame_with_ownership(FrameOwnership::Kernel) {
             Some(f) => f,
             None => {
-                recycle_frame(root_l1_phys);
+                let _ = recycle_frame(root_l1_phys);
                 return None;
             }
         };
@@ -940,10 +993,14 @@ impl UserAddressSpace {
             table_frames,
             mapped_frames: Vec::new(),
             mapped_bytes: 0,
+            destroyed: false,
         })
     }
 
     pub fn map_user_page(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if self.destroyed {
+            return Err("Cannot map into destroyed address space");
+        }
         if is_write && is_exec {
             return Err("W^X violation: writable user mapping must be non-executable");
         }
@@ -968,10 +1025,10 @@ impl UserAddressSpace {
         if l2_entry & DESC_VALID != 0 && (l2_entry & DESC_TABLE == 0) {
             return Err("Cannot map user page over device block entry");
         }
+        let mut newly_allocated_l3 = None;
         let l3_phys = if l2_entry & DESC_VALID == 0 {
-            let frame = allocate_frame().ok_or("OOM allocating L3 page table")?;
-            l2.entries[l2_idx] = frame | DESC_TABLE | DESC_VALID;
-            self.table_frames.push(frame);
+            let frame = allocate_frame_with_ownership(FrameOwnership::Kernel).ok_or("OOM allocating L3 page table")?;
+            newly_allocated_l3 = Some(frame);
             frame
         } else {
             l2_entry & 0x0000_FFFF_FFFF_F000
@@ -980,7 +1037,15 @@ impl UserAddressSpace {
         let l3 = unsafe { &mut *(l3_phys as *mut PageTable) };
         let l3_idx = ((vaddr >> 12) & 0x1FF) as usize;
         if l3.entries[l3_idx] & DESC_VALID != 0 {
+            if let Some(new_frame) = newly_allocated_l3 {
+                let _ = recycle_frame(new_frame);
+            }
             return Err("physical frame already owned by address space");
+        }
+
+        if let Some(new_frame) = newly_allocated_l3 {
+            l2.entries[l2_idx] = new_frame | DESC_TABLE | DESC_VALID;
+            self.table_frames.push(new_frame);
         }
 
         let mut flags = DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTR_NORMAL | DESC_VALID | DESC_PXN;
@@ -1004,23 +1069,45 @@ impl UserAddressSpace {
     }
 
     pub fn destroy(&mut self) {
-        for paddr in self.mapped_frames.drain(..) {
-            recycle_frame(paddr);
+        if self.destroyed {
+            return;
         }
-        for paddr in self.table_frames.drain(..) {
-            recycle_frame(paddr);
+        self.destroyed = true;
+
+        // Step 1 & 2: Detach active CPU translation register if currently pointing to this table
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let current_ttbr0: u64;
+            core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) current_ttbr0);
+            if (current_ttbr0 & 0x0000_FFFF_FFFF_F000) == (self.ttbr0 & 0x0000_FFFF_FFFF_F000) {
+                ArmMmu::switch_to_task(core::ptr::addr_of!(L1_TABLE) as u64);
+            }
         }
-        self.mapped_bytes = 0;
+
+        // Step 3: Remove user mappings from tables
+        let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
+        l1.entries[0] = 0; // Detach L2 table for user 0..1GB
+
+        // Step 4: Perform architecture TLB invalidation and memory barriers across all CPUs
         #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!(
-                "dsb ish",
+                "dsb ishst",
                 "tlbi vmalle1is",
                 "dsb ish",
                 "isb",
                 options(nostack)
             );
         }
+
+        // Step 5: Only after TLB shootdown completes, return exclusively owned frames to allocator
+        for paddr in self.mapped_frames.drain(..) {
+            let _ = recycle_frame(paddr);
+        }
+        for paddr in self.table_frames.drain(..) {
+            let _ = recycle_frame(paddr);
+        }
+        self.mapped_bytes = 0;
     }
 
     pub fn activate(&self) {

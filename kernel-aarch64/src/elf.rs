@@ -183,7 +183,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             }
 
             if let Err(e) = aspace.map_user_page(page_vaddr, frame, is_write, is_exec) {
-                recycle_frame(frame);
+                let _ = recycle_frame(frame);
                 aspace.destroy();
                 return Err(e);
             }
@@ -205,7 +205,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             }
         };
         if let Err(e) = aspace.map_user_page(page_vaddr, frame, true, false) {
-            recycle_frame(frame);
+            let _ = recycle_frame(frame);
             aspace.destroy();
             return Err(e);
         }
