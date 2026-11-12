@@ -435,7 +435,7 @@ impl Scheduler {
         task_id
     }
 
-    pub fn spawn_service_process(
+    pub(crate) fn spawn_service_process(
         &mut self,
         service_id: u8,
         generation: u32,
@@ -445,6 +445,9 @@ impl Scheduler {
         address_space: Option<crate::mmu::UserAddressSpace>,
         cap_table: CapabilityTable,
     ) -> u32 {
+        if generation == 0 || !crate::services::is_valid_service_id(service_id) {
+            return 0;
+        }
         if self.tasks.len() >= MAX_TASKS {
             return 0;
         }
