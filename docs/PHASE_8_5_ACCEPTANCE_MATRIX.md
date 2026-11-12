@@ -1,11 +1,11 @@
-# InterOS Core — Phase 8.5 / 8.5.4 / 8.5.4.1 / 8.5.4.2 / 8.5.4.3 Cross-Architecture Acceptance Matrix
+# InterOS Core — Phase 8.5 / 8.5.4 / 8.5.4.1 / 8.5.4.2 / 8.5.4.3 / 8.5.4.4 Cross-Architecture Acceptance Matrix
 
 **Date:** 2026-11-13  
-**Phase:** 8.5.4.3 Final Internal API Boundary Cleanup  
-**Starting HEAD:** `55e19034f9baa7e0ebef853c28cca495f29587f2`  
-**Previous Phase Baseline:** Phase 8.5.4.2 Completion (`55e19034f9baa7e0ebef853c28cca495f29587f2`)  
+**Phase:** 8.5.4.4 Remove Production Token Forgery and Close Lifecycle Test Boundary  
+**Starting HEAD:** `11192329179588152e670ddd4c55d6791e6b086e`  
+**Previous Phase Baseline:** Phase 8.5.4.3 Completion (`11192329179588152e670ddd4c55d6791e6b086e`)  
 **Target Architectures:** `x86_64`, `aarch64`, `riscv64`  
-**Scope Note:** Phase 8.5.4.3 completed final internal API boundary cleanup across `kernel-aarch64` and `kernel-riscv64`: removed `forge_for_test()` from production builds (gated behind `#[cfg(test)]`), fully encapsulated `ServiceEntry` and `SERVICES` as private to `services.rs`, introduced `is_valid_service_id()`, and restricted `Scheduler::spawn_service_process()` to `pub(crate)` with strict validation of nonzero generation and registered service IDs. `kernel/` (`x86_64`) was verified via `python tests/verify_x86_boot.py` without code modification.
+**Scope Note:** Phase 8.5.4.4 completely eliminated production token forgery: removed `forge_for_test()` and `make_test_token` from both production kernels, made `ServiceLifecycleToken` fields private with `issue()` as the sole production issuance path, redesigned in-kernel boot tests (Section 46) to use real production APIs, moved negative token tests into isolated `#[cfg(test)] mod tests`, and added platform reality regression protection. `kernel/` (`x86_64`) was verified via `python tests/verify_x86_boot.py` without code modification.
 
 **Evidence Labels Used in This Document:**
 `VERIFIED BY LOCAL TEST` | `VERIFIED BY SINGLE-CPU QEMU` | `VERIFIED BY SINGLE-HART QEMU` | `SOURCE-REVIEWED` | `NOT VERIFIED` | `NOT IMPLEMENTED` | `NOT APPLICABLE`
@@ -27,7 +27,7 @@
 | **Quarantined Shared-Frame Integrity** | Reject `retain_shared_frame` and `map_shared_frame` for Quarantined Frames | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY SINGLE-CPU QEMU** (`retain_shared_frame`, `map_shared_frame`, `map_private_frame` reject quarantined frames; `test_mmu_ownership_reclamation_errors` Part 7) | **VERIFIED BY SINGLE-HART QEMU** (`retain_shared_frame`, `map_shared_frame`, `map_private_frame` reject quarantined frames; `test_mmu_ownership_reclamation_errors` Part 7) | `test_mmu_ownership_reclamation_errors()` Part 7 in Single-Core QEMU Boot |
 | **Allocator Quarantine Immunity** | `allocate_frame_with_ownership` Skips Quarantined Frames | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY SINGLE-CPU QEMU** (Allocator tests `is_quarantined(paddr)` and skips quarantined frames; `test_mmu_ownership_reclamation_errors` Part 6) | **VERIFIED BY SINGLE-HART QEMU** (Allocator tests `is_quarantined(paddr)` and skips quarantined frames; `test_mmu_ownership_reclamation_errors` Part 6) | `test_mmu_ownership_reclamation_errors()` Part 6 in Single-Core QEMU Boot |
 | **Supervisor Identity Reservation** | PID Allocators Reserve `0`, `SUPERVISOR_PID`, `INVALID_PID` with Loop Termination | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY SINGLE-CPU QEMU** (`is_reserved_pid()`, wraparound to 1, `None` on exhaustion; `test_task_lifecycle` Test 5) | **VERIFIED BY SINGLE-HART QEMU** (`is_reserved_pid()`, wraparound to 1, `None` on exhaustion; `test_task_lifecycle` Test 5) | PID Allocator Unit Tests & Boot Verification |
-| **Production Token Safety** | `forge_for_test` Removed from Production Builds (`#[cfg(test)]` Only) | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-CPU QEMU** (`forge_for_test` gated behind `cfg(test)`, absent in production builds; test tokens isolated to in-module closure) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-HART QEMU** (`forge_for_test` gated behind `cfg(test)`, absent in production builds; test tokens isolated to in-module closure) | Compiler Visibility Audit & QEMU Boot |
+| **Production Token Safety** | `forge_for_test` & `make_test_token` Eliminated; Sole Production Issuance via Registry | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-CPU QEMU** (`forge_for_test` & `make_test_token` completely removed from production builds; test tokens isolated to `#[cfg(test)] mod tests`; private `issue()` only; `test_service_lifecycle_token_forgery_eliminated` passes) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-HART QEMU** (`forge_for_test` & `make_test_token` completely removed from production builds; test tokens isolated to `#[cfg(test)] mod tests`; private `issue()` only; `test_service_lifecycle_token_forgery_eliminated` passes) | Compiler Visibility Audit, Platform Reality & QEMU Boot |
 | **Registry Encapsulation** | `ServiceEntry` & `SERVICES` Fully Private; Safe Query APIs | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-CPU QEMU** (`ServiceEntry` & `SERVICES` private; `is_valid_service_id()`, `service_pid()`, `service_generation()`, `service_state()`) | **VERIFIED BY LOCAL TEST** & **VERIFIED BY SINGLE-HART QEMU** (`ServiceEntry` & `SERVICES` private; `is_valid_service_id()`, `service_pid()`, `service_generation()`, `service_state()`) | Module Visibility Audit & Section 46 Boot Test |
 | **Restricted Process Creation** | `spawn_service_process` `pub(crate)` with Nonzero Gen & Valid ID Validation | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY SINGLE-CPU QEMU** (`spawn_service_process` rejects `generation == 0` and invalid service IDs; Section 46 Test 8) | **VERIFIED BY SINGLE-HART QEMU** (`spawn_service_process` rejects `generation == 0` and invalid service IDs; Section 46 Test 8) | Section 46 Boot Self-Test in Single-Core QEMU |
 | **Service Target Authorization** | Lifecycle Operations Enforced via Authenticated `ServiceLifecycleToken` | **NOT IMPLEMENTED** (`kernel/` untouched) | **VERIFIED BY SINGLE-CPU QEMU** (`reap_service_task` & `terminate_service_task` `pub(crate)`, require token, reject ordinary user tasks with `-EPERM`) | **VERIFIED BY SINGLE-HART QEMU** (`reap_service_task` & `terminate_service_task` `pub(crate)`, require token, reject ordinary user tasks with `-EPERM`) | `test_service_supervisor_lifecycle_hardening()` in QEMU Boot |
@@ -61,18 +61,18 @@
 
 | Target Architecture | Test Script / Suite | Exit Code | Result | Key Indicators |
 |---|---|---|---|---|
-| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors (Phase 8.5.4.3 run in 0.19s) |
-| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts (Phase 8.5.4.3 run in 1.88s) |
-| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 67 passed in 0.20s (Phase 8.5.4.3 run) |
-| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 593 passed, 0 failed, 1 ignored (`x86_64` host tests; Phase 8.5.4.3 run in 2.27s) |
-| **x86_64** | `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | 3631 distinct colours, PID 1 + launcher online (Phase 8.5.4.3 run) |
-| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.3 run in 0.15s) |
-| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,488,560 bytes; Phase 8.5.4.3 run in 9.24s) |
-| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 2.0s with 1 vCPU; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified (Phase 8.5.4.3 run) |
-| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.3 run in 0.76s) |
-| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly (Phase 8.5.4.3 run in 2.30s) |
-| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 1.8s with 1 hart; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified (Phase 8.5.4.3 run) |
-| **Workspace** | `python tests/run_all_contracts.py` | 0 | **VERIFIED BY LOCAL TEST** | 1241 cases passed across 109 active suites, 0 failed, 1 skipped (Phase 8.5.4.3 run) |
+| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors (Phase 8.5.4.4 run in 0.13s) |
+| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts (Phase 8.5.4.4 run) |
+| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 68 passed in 0.19s (Phase 8.5.4.4 run) |
+| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 593 passed, 0 failed, 1 ignored (`x86_64` host tests; Phase 8.5.4.4 run in 2.13s) |
+| **x86_64** | `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | 3626 distinct colours, PID 1 + launcher online (Phase 8.5.4.4 run) |
+| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.4 run in 0.13s) |
+| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,492,656 bytes; Phase 8.5.4.4 run in 4.21s) |
+| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 2.0s with 1 vCPU; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified without token forgery (Phase 8.5.4.4 run) |
+| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.4 run in 0.04s) |
+| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly (Phase 8.5.4.4 run in 1.45s) |
+| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 1.8s with 1 hart; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified without token forgery (Phase 8.5.4.4 run) |
+| **Workspace** | `python tests/run_all_contracts.py` | 0 | **VERIFIED BY LOCAL TEST** | 1242 cases passed across 109 active suites, 0 failed, 1 skipped (Phase 8.5.4.4 run) |
 | **AArch64 / RISC-V 64** | Concurrent Multi-Core Evacuation (`-smp > 1` QEMU) | — | **NOT VERIFIED** | No genuine concurrent multi-core evacuation test executed; remote CPU/hart behavior has **SOURCE-REVIEWED** + sequential single-core test coverage only |
 
 ---
