@@ -677,10 +677,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
                 Err(err) => return err,
             };
-            let code_res = {
-                let mut sched = SCHEDULER.lock();
-                sched.reap_task(caller_pid, is_supervisor, target_pid)
-            };
+            let code_res = crate::task::reap_task_locksafe(caller_pid, is_supervisor, target_pid);
             match code_res {
                 Ok(code) => {
                     crate::kprintln!("[WAITPID] Caller PID {} reaped child {} with exit code {}", caller_pid, target_pid, code);

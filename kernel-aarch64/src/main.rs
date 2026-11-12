@@ -1660,8 +1660,24 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         assert!(aspace_b.destroy().is_ok());
 
         assert_eq!(mmu::active_allocated_frames(), baseline, "All owned frames must return to baseline");
-        kprintln!("[TEST] Frame Ownership & Shared Mappings: Private/Shared/Borrowed lifecycle VERIFIED.");
+
+        // Quarantine metadata & diagnostic tracking verification
+        let q_before = mmu::quarantined_frame_count();
+        mmu::quarantine_frame_with_meta(0x1234_0000, mmu::FrameOwnership::PrivateOwned, "test quarantine metadata");
+        assert_eq!(mmu::quarantined_frame_count(), q_before + 1);
+        {
+            let q_lock = mmu::QUARANTINED_FRAMES.lock();
+            let entry = q_lock.last().unwrap();
+            assert_eq!(entry.paddr, 0x1234_0000);
+            assert_eq!(entry.ownership, mmu::FrameOwnership::PrivateOwned);
+            assert_eq!(entry.reason, "test quarantine metadata");
+        }
+
+        kprintln!("[TEST] Frame Ownership & Shared Mappings: Private/Shared/Borrowed lifecycle & Quarantine Metadata VERIFIED.");
     }
+
+    // 45e. Transactional Context Switch & Lock-Safe Rollback Verification
+    task::test_transactional_switch();
 
     // 46. Service Supervisor Lifecycle & Recovery Verification
     kprintln!("--- [Testing AArch64 Service Supervisor Lifecycle & Recovery] ---");

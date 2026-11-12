@@ -809,10 +809,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if caller_pid == crate::task::INVALID_PID {
                 -13
             } else {
-                let code_res = {
-                    let mut sched = SCHEDULER.lock();
-                    sched.reap_task(caller_pid, is_supervisor, target_pid)
-                };
+                let code_res = crate::task::reap_task_locksafe(caller_pid, is_supervisor, target_pid);
                 match code_res {
                     Ok(code) => {
                         println!("[WAITPID] Caller PID {} reaped child {} with exit code {}", caller_pid, target_pid, code);

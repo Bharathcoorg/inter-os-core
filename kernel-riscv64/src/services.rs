@@ -152,13 +152,15 @@ fn start_internal(id: u8) -> Result<u32, ()> {
 
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
-                let mut sched = crate::task::SCHEDULER.lock();
-                if let Err(e) = sched.terminate_task(1, true, old_pid) {
-                    crate::println!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
-                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
-                    return Err(());
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                        crate::println!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
+                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        return Err(());
+                    }
                 }
-                match sched.reap_task(1, true, old_pid) {
+                match crate::task::reap_task_locksafe(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }
@@ -244,12 +246,14 @@ pub fn stop(id: u8) -> Result<(), ()> {
         if svc.id as u8 == id {
             let pid = svc.pid.load(Ordering::Acquire);
             if pid != 0 {
-                let mut sched = crate::task::SCHEDULER.lock();
-                if let Err(e) = sched.terminate_task(1, true, pid) {
-                    crate::println!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
-                    return Err(());
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    if let Err(e) = sched.terminate_task(1, true, pid) {
+                        crate::println!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
+                        return Err(());
+                    }
                 }
-                match sched.reap_task(1, true, pid) {
+                match crate::task::reap_task_locksafe(1, true, pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }
@@ -325,12 +329,14 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             // Clean up any remaining process from previous instance
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
-                let mut sched = crate::task::SCHEDULER.lock();
-                if let Err(e) = sched.terminate_task(1, true, old_pid) {
-                    crate::println!("[SERVICE] Recovery termination failed for PID {}: {}", old_pid, e);
-                    return Err(());
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    if let Err(e) = sched.terminate_task(1, true, old_pid) {
+                        crate::println!("[SERVICE] Recovery termination failed for PID {}: {}", old_pid, e);
+                        return Err(());
+                    }
                 }
-                match sched.reap_task(1, true, old_pid) {
+                match crate::task::reap_task_locksafe(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
                     }

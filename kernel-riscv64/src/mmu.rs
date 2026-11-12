@@ -304,8 +304,16 @@ impl RiscvFrameAllocator {
         if frame_idx >= self.total_frames {
             return Err("Frame exceeds allocator range");
         }
+        let word = frame_idx / 64;
+        let bit = frame_idx % 64;
+        if (self.bitmap[word] & (1 << bit)) == 0 {
+            return Err("Frame is not allocated");
+        }
         if self.ownership[frame_idx] != FrameOwnership::PrivateOwned as u8 {
             return Err("Not a private frame");
+        }
+        if self.ref_counts[frame_idx] != 1 {
+            return Err("Private frame was not mapped or ref_count invalid");
         }
         self.ref_counts[frame_idx] = 0;
         Ok(())
@@ -471,13 +479,25 @@ pub fn release_shared_frame(paddr: u64) -> Result<bool, &'static str> {
     FRAME_ALLOCATOR.lock().release_shared_frame(paddr)
 }
 
-pub static QUARANTINED_FRAMES: spin::Mutex<Vec<u64>> = spin::Mutex::new(Vec::new());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuarantinedFrame {
+    pub paddr: u64,
+    pub ownership: FrameOwnership,
+    pub reason: &'static str,
+}
+
+pub static QUARANTINED_FRAMES: spin::Mutex<Vec<QuarantinedFrame>> = spin::Mutex::new(Vec::new());
+
+pub fn quarantine_frame_with_meta(paddr: u64, ownership: FrameOwnership, reason: &'static str) {
+    let mut q = QUARANTINED_FRAMES.lock();
+    if !q.iter().any(|entry| entry.paddr == paddr) {
+        q.push(QuarantinedFrame { paddr, ownership, reason });
+    }
+}
 
 pub fn quarantine_frame(paddr: u64) {
-    let mut q = QUARANTINED_FRAMES.lock();
-    if !q.contains(&paddr) {
-        q.push(paddr);
-    }
+    let own = frame_ownership(paddr).unwrap_or(FrameOwnership::Kernel);
+    quarantine_frame_with_meta(paddr, own, "unspecified");
 }
 
 pub fn quarantined_frame_count() -> usize {
@@ -520,6 +540,16 @@ pub enum MappingKind {
     PrivateOwned,
     Shared,
     Borrowed,
+}
+
+impl From<MappingKind> for FrameOwnership {
+    fn from(kind: MappingKind) -> Self {
+        match kind {
+            MappingKind::PrivateOwned => FrameOwnership::PrivateOwned,
+            MappingKind::Shared => FrameOwnership::Shared,
+            MappingKind::Borrowed => FrameOwnership::Borrowed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -760,7 +790,10 @@ impl UserAddressSpace {
 
         mark_private_frame_mapped(paddr)?;
         if let Err(e) = self.map_leaf_entry(vaddr, paddr, is_write, is_exec) {
-            let _ = mark_private_frame_unmapped(paddr);
+            if let Err(unmap_err) = mark_private_frame_unmapped(paddr) {
+                crate::println!("[MMU ERROR] Failed to unmark private frame 0x{:x} on map rollback: {}", paddr, unmap_err);
+                quarantine_frame_with_meta(paddr, FrameOwnership::PrivateOwned, "map_private_frame rollback failed");
+            }
             return Err(e);
         }
         self.mappings.push(UserMapping {
@@ -798,7 +831,10 @@ impl UserAddressSpace {
 
         retain_shared_frame(paddr)?;
         if let Err(e) = self.map_leaf_entry(vaddr, paddr, is_write, is_exec) {
-            let _ = release_shared_frame(paddr);
+            if let Err(rel_err) = release_shared_frame(paddr) {
+                crate::println!("[MMU ERROR] Failed to release shared frame 0x{:x} on map rollback: {}", paddr, rel_err);
+                quarantine_frame_with_meta(paddr, FrameOwnership::Shared, "map_shared_frame rollback failed");
+            }
             return Err(e);
         }
 
@@ -873,7 +909,7 @@ impl UserAddressSpace {
 
     pub fn unmap_user_page(&mut self, vaddr: usize, release: bool) -> Result<(), &'static str> {
         let pos = self.mappings.iter().position(|m| m.vaddr == vaddr).ok_or("Address not mapped")?;
-        let mapping = self.mappings.remove(pos);
+        let mapping = self.mappings[pos];
 
         let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
         let vpn2 = (vaddr >> 30) & 0x1FF;
@@ -889,7 +925,6 @@ impl UserAddressSpace {
                 lvl0.entries[vpn0] = 0;
             }
         }
-        self.mapped_bytes = self.mapped_bytes.saturating_sub(PAGE_SIZE);
 
         #[cfg(target_arch = "riscv64")]
         unsafe {
@@ -899,14 +934,24 @@ impl UserAddressSpace {
         if release {
             match mapping.kind {
                 MappingKind::PrivateOwned => {
-                    recycle_frame(mapping.paddr)?;
+                    let _ = mark_private_frame_unmapped(mapping.paddr);
+                    if let Err(_) = recycle_frame(mapping.paddr) {
+                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), "unmap_user_page recycle_frame failed");
+                        return Err("Failed to recycle private frame");
+                    }
                 }
                 MappingKind::Shared => {
-                    let _ = release_shared_frame(mapping.paddr);
+                    if let Err(_) = release_shared_frame(mapping.paddr) {
+                        quarantine_frame_with_meta(mapping.paddr, mapping.kind.into(), "unmap_user_page release_shared_frame failed");
+                        return Err("Failed to release shared frame");
+                    }
                 }
                 MappingKind::Borrowed => {}
             }
         }
+
+        self.mappings.remove(pos);
+        self.mapped_bytes = self.mapped_bytes.saturating_sub(PAGE_SIZE);
         Ok(())
     }
 
@@ -945,19 +990,14 @@ impl UserAddressSpace {
         self.try_activate()
     }
 
-    pub fn deactivate(&self) {
+    pub fn deactivate_after_switch(&self) {
         let hid = current_hart_id();
         if hid >= 62 {
             return;
         }
         let hart_bit = 1u64 << hid;
-        // 1. Switch hardware SATP away to kernel root page table and flush local TLB
-        unsafe {
-            switch_to_kernel_satp();
-        }
-        // 2. Mark this hart as acknowledged
+        // Hardware SATP has already switched away from this address space.
         self.acknowledged_harts.fetch_or(hart_bit, core::sync::atomic::Ordering::Release);
-        // 3. Clear this hart from active mask
         loop {
             let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
             let next = cur & !hart_bit;
@@ -971,6 +1011,19 @@ impl UserAddressSpace {
                 Err(_) => core::hint::spin_loop(),
             }
         }
+    }
+
+    pub fn deactivate(&self) {
+        let hid = current_hart_id();
+        if hid >= 62 {
+            return;
+        }
+        // 1. Switch hardware SATP away to kernel root page table and flush local TLB
+        unsafe {
+            switch_to_kernel_satp();
+        }
+        // 2 & 3. Acknowledge and clear this hart from active mask
+        self.deactivate_after_switch();
     }
 
     pub fn destroy_fallible(&mut self) -> Result<(), TeardownError> {
@@ -1044,10 +1097,10 @@ impl UserAddressSpace {
                 Err(err) => {
                     // On remote TLB invalidation failure, quarantine frames to avoid reuse while stale translations exist
                     for m in self.mappings.drain(..) {
-                        quarantine_frame(m.paddr);
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy sbi_remote_sfence_vma failed");
                     }
                     for t in self.table_frames.drain(..) {
-                        quarantine_frame(t);
+                        quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "destroy sbi_remote_sfence_vma failed table frame");
                     }
                     self.destroyed = true;
                     return Err(TeardownError::SbiRemoteFenceFailed(err));
@@ -1071,13 +1124,13 @@ impl UserAddressSpace {
                 MappingKind::PrivateOwned => {
                     let _ = mark_private_frame_unmapped(m.paddr);
                     if let Err(_) = recycle_frame(m.paddr) {
-                        quarantine_frame(m.paddr);
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy recycle private frame failed");
                         cleanup_failed = true;
                     }
                 }
                 MappingKind::Shared => {
                     if let Err(_) = release_shared_frame(m.paddr) {
-                        quarantine_frame(m.paddr);
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy release shared frame failed");
                         cleanup_failed = true;
                     }
                 }
@@ -1086,7 +1139,7 @@ impl UserAddressSpace {
         }
         for t in self.table_frames.drain(..) {
             if let Err(_) = recycle_frame(t) {
-                quarantine_frame(t);
+                quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "destroy recycle table frame failed");
                 cleanup_failed = true;
             }
         }
@@ -1114,11 +1167,11 @@ impl Drop for UserAddressSpace {
                 crate::println!("[MMU WARNING] UserAddressSpace drop failed: {:?}. Quarantining unreclaimed frames.", e);
                 for m in self.mappings.drain(..) {
                     if m.kind == MappingKind::PrivateOwned || m.kind == MappingKind::Shared {
-                        quarantine_frame(m.paddr);
+                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "drop unhandled failure");
                     }
                 }
                 for t in self.table_frames.drain(..) {
-                    quarantine_frame(t);
+                    quarantine_frame_with_meta(t, FrameOwnership::PrivateOwned, "drop unhandled table frame failure");
                 }
                 self.destroyed = true;
             }
