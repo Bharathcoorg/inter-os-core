@@ -1686,15 +1686,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let test_svc_id = 3; // storaged
     let orig_pid = services::start(test_svc_id).expect("Service start failed in heartbeat test");
     assert!(orig_pid > 0);
-    let cur_gen = {
-        let mut g = 0;
-        for svc in &services::SERVICES {
-            if svc.id as u8 == test_svc_id {
-                g = svc.generation.load(core::sync::atomic::Ordering::Acquire);
-            }
-        }
-        g
-    };
+    let cur_gen = services::service_generation(test_svc_id).expect("valid service generation");
     assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
     assert_eq!(services::heartbeat(9999, cur_gen), Err(()), "Heartbeat with spoofed PID must be rejected");
     assert_eq!(services::heartbeat(orig_pid, cur_gen), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");

@@ -130,8 +130,9 @@ pub struct ServiceLifecycleToken {
 }
 
 impl ServiceLifecycleToken {
-    /// Attempts to construct a token for a registered service entry if it has a live valid PID.
-    pub fn for_service(entry: &ServiceEntry) -> Option<Self> {
+    /// Internal issuance constructor, only callable from within `services.rs`
+    /// while holding `SERVICE_LIFECYCLE_LOCK`.
+    fn issue(entry: &ServiceEntry) -> Option<Self> {
         let pid = entry.pid.load(Ordering::Acquire);
         let generation = entry.generation.load(Ordering::Acquire);
         if pid == 0 || crate::task::is_reserved_pid(pid) {
@@ -144,8 +145,8 @@ impl ServiceLifecycleToken {
         })
     }
 
-    /// Explicit constructor for testing or when fields are verified.
-    pub const fn new(service_id: u8, pid: u32, generation: u32) -> Self {
+    #[doc(hidden)]
+    pub(crate) fn forge_for_test(service_id: u8, pid: u32, generation: u32) -> Self {
         Self {
             service_id,
             pid,
@@ -153,20 +154,20 @@ impl ServiceLifecycleToken {
         }
     }
 
-    pub fn service_id(&self) -> u8 {
+    pub(crate) fn service_id(&self) -> u8 {
         self.service_id
     }
 
-    pub fn pid(&self) -> u32 {
+    pub(crate) fn pid(&self) -> u32 {
         self.pid
     }
 
-    pub fn generation(&self) -> u32 {
+    pub(crate) fn generation(&self) -> u32 {
         self.generation
     }
 
     /// Verifies that this token matches the live registered service entry under `SERVICES`.
-    pub fn verify_live(&self) -> bool {
+    pub(crate) fn verify_live(&self) -> bool {
         if crate::task::is_reserved_pid(self.pid) {
             return false;
         }
@@ -179,6 +180,34 @@ impl ServiceLifecycleToken {
         }
         false
     }
+}
+
+pub fn service_pid(id: u8) -> Option<u32> {
+    for svc in &SERVICES {
+        if svc.id as u8 == id {
+            let p = svc.pid.load(Ordering::Acquire);
+            return if p != 0 { Some(p) } else { None };
+        }
+    }
+    None
+}
+
+pub fn service_generation(id: u8) -> Option<u32> {
+    for svc in &SERVICES {
+        if svc.id as u8 == id {
+            return Some(svc.generation.load(Ordering::Acquire));
+        }
+    }
+    None
+}
+
+pub fn service_state(id: u8) -> Option<ServiceState> {
+    for svc in &SERVICES {
+        if svc.id as u8 == id {
+            return Some(ServiceState::from_u8(svc.state.load(Ordering::Acquire)));
+        }
+    }
+    None
 }
 
 pub static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
@@ -211,27 +240,31 @@ fn start_internal(id: u8) -> Result<u32, ()> {
 
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
-                if let Some(token) = ServiceLifecycleToken::for_service(svc) {
-                    {
-                        let mut sched = crate::task::SCHEDULER.lock();
-                        if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
-                            crate::kprintln!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
-                            svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
-                            return Err(());
-                        }
+                let token = match ServiceLifecycleToken::issue(svc) {
+                    Some(t) => t,
+                    None => {
+                        crate::kprintln!("[SERVICE] Failed to issue token for old PID {} for '{}'", old_pid, svc.name);
+                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        return Err(());
                     }
-                    match crate::task::reap_service_task(&token) {
-                        Ok(_) => {
-                            svc.pid.store(0, Ordering::Release);
-                        }
-                        Err(e) => {
-                            crate::kprintln!("[SERVICE] Failed to reap old process PID {} for '{}': {}", old_pid, svc.name, e);
-                            svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
-                            return Err(());
-                        }
+                };
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
+                        crate::kprintln!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
+                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        return Err(());
                     }
-                } else {
-                    svc.pid.store(0, Ordering::Release);
+                }
+                match crate::task::reap_service_task(&token) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
+                    }
+                    Err(e) => {
+                        crate::kprintln!("[SERVICE] Failed to reap old process PID {} for '{}': {}", old_pid, svc.name, e);
+                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        return Err(());
+                    }
                 }
             }
 
@@ -270,7 +303,8 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             if id == 10 { // launcher
                 caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
             }
-            let tid = sched.spawn_service_process(svc.id as u8, img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            let next_gen = svc.generation.load(Ordering::Acquire).wrapping_add(1).max(1);
+            let tid = sched.spawn_service_process(svc.id as u8, next_gen, img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
             if tid == 0 {
                 drop(sched);
                 svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
@@ -291,9 +325,9 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                 core::arch::asm!("mrs {0}, cntpct_el0", out(reg) ticks);
             }
             svc.pid.store(tid, Ordering::Release);
+            svc.generation.store(next_gen, Ordering::Release);
             svc.last_heartbeat.store(ticks, Ordering::Release);
             svc.state.store(ServiceState::Running as u8, Ordering::Release);
-            svc.generation.fetch_add(1, Ordering::Relaxed);
             svc.failures.store(0, Ordering::Relaxed);
 
             crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
@@ -309,25 +343,28 @@ pub fn stop(id: u8) -> Result<(), ()> {
         if svc.id as u8 == id {
             let pid = svc.pid.load(Ordering::Acquire);
             if pid != 0 {
-                if let Some(token) = ServiceLifecycleToken::for_service(svc) {
-                    {
-                        let mut sched = crate::task::SCHEDULER.lock();
-                        if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
-                            crate::kprintln!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
-                            return Err(());
-                        }
+                let token = match ServiceLifecycleToken::issue(svc) {
+                    Some(t) => t,
+                    None => {
+                        crate::kprintln!("[SERVICE] Failed to issue token for PID {} during stop of '{}'", pid, svc.name);
+                        return Err(());
                     }
-                    match crate::task::reap_service_task(&token) {
-                        Ok(_) => {
-                            svc.pid.store(0, Ordering::Release);
-                        }
-                        Err(e) => {
-                            crate::kprintln!("[SERVICE] Failed to reap PID {} during stop of '{}': {}", pid, svc.name, e);
-                            return Err(());
-                        }
+                };
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
+                        crate::kprintln!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
+                        return Err(());
                     }
-                } else {
-                    svc.pid.store(0, Ordering::Release);
+                }
+                match crate::task::reap_service_task(&token) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
+                    }
+                    Err(e) => {
+                        crate::kprintln!("[SERVICE] Failed to reap PID {} during stop of '{}': {}", pid, svc.name, e);
+                        return Err(());
+                    }
                 }
             }
             svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
@@ -396,22 +433,25 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             // Clean up any remaining process from previous instance
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
-                if let Some(token) = ServiceLifecycleToken::for_service(svc) {
-                    {
-                        let mut sched = crate::task::SCHEDULER.lock();
-                        let _ = crate::task::terminate_service_task(&mut sched, &token);
+                let token = match ServiceLifecycleToken::issue(svc) {
+                    Some(t) => t,
+                    None => {
+                        crate::kprintln!("[SERVICE] Failed to issue token for recovery of PID {} for '{}'", old_pid, svc.name);
+                        return Err(());
                     }
-                    match crate::task::reap_service_task(&token) {
-                        Ok(_) => {
-                            svc.pid.store(0, Ordering::Release);
-                        }
-                        Err(e) => {
-                            crate::kprintln!("[SERVICE] Recovery reap failed for PID {}: {}", old_pid, e);
-                            return Err(());
-                        }
+                };
+                {
+                    let mut sched = crate::task::SCHEDULER.lock();
+                    let _ = crate::task::terminate_service_task(&mut sched, &token);
+                }
+                match crate::task::reap_service_task(&token) {
+                    Ok(_) => {
+                        svc.pid.store(0, Ordering::Release);
                     }
-                } else {
-                    svc.pid.store(0, Ordering::Release);
+                    Err(e) => {
+                        crate::kprintln!("[SERVICE] Recovery reap failed for PID {}: {}", old_pid, e);
+                        return Err(());
+                    }
                 }
             }
 
@@ -603,7 +643,7 @@ pub fn test_service_supervisor_lifecycle_hardening() {
         sched.spawn_user_process(1, "unauth_user", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new())
     };
     assert!(user_pid > 0);
-    let forged_token = ServiceLifecycleToken::new(test_svc_id, user_pid, 1);
+    let forged_token = ServiceLifecycleToken::forge_for_test(test_svc_id, user_pid, 1);
     assert_eq!(crate::task::reap_service_task(&forged_token), Err(-1), "Test 5: reap_service_task on ordinary user process must fail with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
@@ -614,56 +654,63 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     crate::kprintln!("[TEST] Test 5 (Unauthorized Ordinary Process Rejection -EPERM): PASSED");
 
     // Test 6: Stale PID / generation token rejection with -EPERM
-    let cur_gen = {
-        let mut g = 0;
-        for svc in &SERVICES {
-            if svc.id as u8 == test_svc_id {
-                g = svc.generation.load(Ordering::Acquire);
-            }
-        }
-        g
-    };
-    let stale_gen_token = ServiceLifecycleToken::new(test_svc_id, pid3, cur_gen.wrapping_add(999));
+    let cur_gen = service_generation(test_svc_id).expect("service generation");
+    let stale_gen_token = ServiceLifecycleToken::forge_for_test(test_svc_id, pid3, cur_gen.wrapping_add(999));
     assert_eq!(crate::task::reap_service_task(&stale_gen_token), Err(-1), "Test 6: Token with stale generation must be rejected with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
         assert_eq!(crate::task::terminate_service_task(&mut sched, &stale_gen_token), Err(-1), "Test 6: terminate with stale generation must fail with -EPERM (-1)");
     }
-    let stale_pid_token = ServiceLifecycleToken::new(test_svc_id, 0x9999, cur_gen);
+    let stale_pid_token = ServiceLifecycleToken::forge_for_test(test_svc_id, 0x9999, cur_gen);
     assert_eq!(crate::task::reap_service_task(&stale_pid_token), Err(-1), "Test 6: Token with stale PID must be rejected with -EPERM (-1)");
     crate::kprintln!("[TEST] Test 6 (Stale PID & Generation Token Rejection -EPERM): PASSED");
 
-    // Test 7: PID 1 collision immunity (stopping/restarting PID 1 service without self-reap confusion)
-    let init_dummy_pid = 1;
-    let dummy_exists = {
-        let sched = crate::task::SCHEDULER.lock();
-        sched.tasks.iter().any(|t| t.id == init_dummy_pid)
-    };
-    if !dummy_exists {
-        let mut sched = crate::task::SCHEDULER.lock();
-        let orig_next = sched.next_pid;
-        sched.next_pid = 1;
-        let p = sched.spawn_user_process(0, "simulated_init", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new());
-        assert_eq!(p, init_dummy_pid);
-        sched.next_pid = orig_next;
-    }
-    let init_token = ServiceLifecycleToken::new(test_svc_id, init_dummy_pid, 1);
-    assert_eq!(crate::task::reap_service_task(&init_token), Err(-1), "Test 7: Forged reap targeting PID 1 must be rejected with -EPERM (-1)");
+    // Test 7: Service registration mismatch rejection with -EPERM (-1)
+    let mismatch_token = ServiceLifecycleToken::forge_for_test(test_svc_id + 1, pid3, cur_gen);
+    assert_eq!(crate::task::reap_service_task(&mismatch_token), Err(-1), "Test 7: Token with mismatched service ID must fail with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
-        assert_eq!(crate::task::terminate_service_task(&mut sched, &init_token), Err(-1), "Test 7: Forged terminate targeting PID 1 must be rejected with -EPERM (-1)");
+        assert_eq!(crate::task::terminate_service_task(&mut sched, &mismatch_token), Err(-1), "Test 7: terminate with mismatched service ID must fail with -EPERM (-1)");
     }
-    assert_eq!(stop(test_svc_id), Ok(()));
+    crate::kprintln!("[TEST] Test 7 (Service Registration Mismatch Rejection -EPERM): PASSED");
+
+    // Test 8: Reserved PID registration rejection
     {
-        let sched = crate::task::SCHEDULER.lock();
-        assert!(sched.tasks.iter().any(|t| t.id == init_dummy_pid), "Test 7: PID 1 must remain untouched after service stop");
-    }
-    if !dummy_exists {
         let mut sched = crate::task::SCHEDULER.lock();
-        if let Some(pos) = sched.tasks.iter().position(|t| t.id == init_dummy_pid) {
+        assert!(!sched.add_task(0, 0x1000, 0x2000), "Test 8: Explicit registration of PID 0 must be rejected");
+        assert!(!sched.add_task(crate::task::SUPERVISOR_PID, 0x1000, 0x2000), "Test 8: Explicit registration of SUPERVISOR_PID must be rejected");
+        assert!(!sched.add_task(crate::task::INVALID_PID, 0x1000, 0x2000), "Test 8: Explicit registration of INVALID_PID must be rejected");
+        let reg_ok = sched.add_task(23456, 0x1000, 0x2000);
+        assert!(reg_ok, "Test 8: Explicit registration of valid PID must succeed");
+        let reg_dup = sched.add_task(23456, 0x1000, 0x2000);
+        assert!(!reg_dup, "Test 8: Duplicate PID registration must be rejected");
+        if let Some(pos) = sched.tasks.iter().position(|t| t.id == 23456) {
             sched.remove_task_at(pos);
         }
     }
-    crate::kprintln!("[TEST] Test 7 (PID 1 Collision Immunity): PASSED");
-    crate::kprintln!("[TEST] AArch64 Service Supervisor Lifecycle Hardening 7/7 Tests VERIFIED.");
+    crate::kprintln!("[TEST] Test 8 (Reserved PID Registration Rejection): PASSED");
+
+    // Test 9: Failure paths without silently clearing service PID
+    {
+        let recorded_pid = service_pid(test_svc_id).expect("Service PID must be active");
+        assert_eq!(recorded_pid, pid3);
+        // An unauthenticated / invalid token reap does NOT clear the registry PID
+        let invalid_token = ServiceLifecycleToken::forge_for_test(test_svc_id, pid3, cur_gen.wrapping_add(555));
+        let reap_fail = crate::task::reap_service_task(&invalid_token);
+        assert_eq!(reap_fail, Err(-1));
+        assert_eq!(service_pid(test_svc_id), Some(pid3), "Test 9: Failed reap must NOT clear service PID from registry");
+    }
+    crate::kprintln!("[TEST] Test 9 (Failure Paths Preserve Service PID): PASSED");
+
+    // Test 10: Verify process absence and replacement integrity
+    assert_eq!(stop(test_svc_id), Ok(()));
+    {
+        let sched = crate::task::SCHEDULER.lock();
+        assert!(!sched.tasks.iter().any(|t| t.id == pid1), "Test 10: pid1 must be absent");
+        assert!(!sched.tasks.iter().any(|t| t.id == pid2), "Test 10: pid2 must be absent");
+        assert!(!sched.tasks.iter().any(|t| t.id == pid3), "Test 10: pid3 must be reaped after stop");
+    }
+    assert_eq!(service_pid(test_svc_id), None, "Test 10: Stopped service PID must be None");
+    crate::kprintln!("[TEST] Test 10 (Process Absence & Replacement Integrity): PASSED");
+    crate::kprintln!("[TEST] AArch64 Service Supervisor Lifecycle Hardening 10/10 Tests VERIFIED.");
 }
