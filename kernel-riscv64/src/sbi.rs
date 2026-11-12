@@ -125,6 +125,9 @@ pub fn probe_extension(extension_id: usize) -> bool {
 /// Broadcasts an sfence.vma instruction to remote harts via SBI RFNC extension (EID 0x52464E43, FID 0x1).
 /// Returns Ok(()) on SBI_SUCCESS, or Err(SbiError) if firmware rejected or failed the request.
 pub fn remote_sfence_vma(hart_mask: usize, hart_mask_base: usize, start_addr: usize, size: usize) -> Result<(), SbiError> {
+    if !probe_extension(SBI_EXT_RFNC) {
+        return Err(SbiError::NotSupported);
+    }
     let (err, _) = sbi_call(SBI_EXT_RFNC, SBI_EXT_RFNC_REMOTE_SFENCE_VMA, hart_mask, hart_mask_base, start_addr, size);
     if let Some(e) = SbiError::from_isize(err) {
         Err(e)

@@ -240,6 +240,23 @@ impl Scheduler {
         task_id
     }
 
+    pub fn terminate_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<(), i64> {
+        if target_pid == 0 {
+            return Err(-22); // -EINVAL
+        }
+        let pos = self.tasks.iter().position(|t| t.id == target_pid).ok_or(-3)?; // -ESRCH
+        let task = &mut self.tasks[pos];
+        if !is_supervisor && task.parent_id != caller_pid && task.id != caller_pid {
+            return Err(-13); // -EACCES
+        }
+        if task.state == TaskState::Terminated || task.state == TaskState::Exited {
+            return Ok(());
+        }
+        task.state = TaskState::Terminated;
+        task.exit_code = Some(-15); // SIGTERM
+        Ok(())
+    }
+
     pub fn reap_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
         let curr_pid = self.current_pid();
         if target_pid != 0 && target_pid == caller_pid {
@@ -259,9 +276,15 @@ impl Scheduler {
             return Err(-13); // -EACCES: caller does not own this child and lacks supervisor capability
         }
 
+        if let Some(ref aspace) = task.address_space {
+            if aspace.is_active_on_any_cpu() {
+                return Err(-16); // -EBUSY: process still executing on CPU
+            }
+        }
+
         let mut removed = self.remove_task_at(pos);
         if let Some(mut aspace) = removed.address_space.take() {
-            aspace.destroy();
+            let _ = aspace.destroy_fallible();
             crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
         }
         crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);

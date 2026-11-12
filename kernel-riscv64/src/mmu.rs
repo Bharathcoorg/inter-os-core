@@ -436,6 +436,17 @@ pub fn quarantined_frame_count() -> usize {
 }
 
 pub static ONLINE_HARTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+pub static BOOT_HART_ID: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn init_hart(hart_id: usize) {
+    BOOT_HART_ID.store(hart_id, core::sync::atomic::Ordering::SeqCst);
+    if hart_id < 64 {
+        ONLINE_HARTS.fetch_or(1u64 << hart_id, core::sync::atomic::Ordering::SeqCst);
+    }
+    unsafe {
+        core::arch::asm!("mv tp, {0}", in(reg) hart_id);
+    }
+}
 
 pub fn register_online_hart(hart_id: usize) {
     if hart_id < 64 {
@@ -448,7 +459,11 @@ pub fn current_hart_id() -> usize {
     unsafe {
         core::arch::asm!("mv {0}, tp", out(reg) hartid);
     }
-    hartid
+    if hartid < 62 {
+        hartid
+    } else {
+        BOOT_HART_ID.load(core::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,6 +488,29 @@ pub enum TeardownError {
     ActiveOnRemoteHart(u64),
     SbiRemoteFenceFailed(crate::sbi::SbiError),
     QuiescenceTimeout,
+    FrameRecycleFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationError {
+    ClosingOrDestroyed,
+    HartIdOutOfRange(usize),
+}
+
+pub const LIFECYCLE_ACTIVE_HARTS_MASK: u64 = 0x3FFF_FFFF_FFFF_FFFF; // bits 0..61: bitmask of active harts
+pub const LIFECYCLE_CLOSING_BIT: u64 = 1u64 << 63;
+pub const LIFECYCLE_DESTROYED_BIT: u64 = 1u64 << 62;
+
+/// Validates that a physical address belongs to a documented QEMU virt RISC-V MMIO aperture.
+pub fn is_valid_mmio_peripheral(paddr: u64, len: usize) -> bool {
+    let end = match paddr.checked_add(len as u64) {
+        Some(e) => e,
+        None => return false,
+    };
+    (paddr >= 0x0200_0000 && end <= 0x0201_0000)
+        || (paddr >= 0x0c00_0000 && end <= 0x1000_0000)
+        || (paddr >= 0x1000_0000 && end <= 0x1000_9000)
+        || (paddr >= 0x3000_0000 && end <= 0x8000_0000)
 }
 
 extern crate alloc;
@@ -485,20 +523,37 @@ pub struct UserAddressSpace {
     pub mappings: Vec<UserMapping>,
     pub mapped_bytes: usize,
     pub destroyed: bool,
-    pub closing: core::sync::atomic::AtomicBool,
-    pub active_harts: core::sync::atomic::AtomicU64,
+    pub lifecycle: core::sync::atomic::AtomicU64,
     pub executed_harts: core::sync::atomic::AtomicU64,
 }
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
-        if !self.destroyed {
-            let _ = self.destroy_fallible();
+        if !self.is_destroyed() {
+            if let Err(e) = self.destroy_fallible() {
+                crate::println!("[MMU WARNING] UserAddressSpace drop encountered teardown error: {:?}", e);
+            }
         }
     }
 }
 
 impl UserAddressSpace {
+    pub fn is_closing(&self) -> bool {
+        (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_CLOSING_BIT) != 0
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed || (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_DESTROYED_BIT) != 0
+    }
+
+    pub fn active_harts(&self) -> u64 {
+        self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_ACTIVE_HARTS_MASK
+    }
+
+    pub fn is_active_on_any_hart(&self) -> bool {
+        self.active_harts() != 0
+    }
+
     pub fn new() -> Option<Self> {
         let root_paddr = allocate_frame_with_ownership(FrameOwnership::Kernel)?;
         let lvl1_paddr = match allocate_frame_with_ownership(FrameOwnership::Kernel) {
@@ -548,8 +603,7 @@ impl UserAddressSpace {
             mappings: Vec::new(),
             mapped_bytes: 0,
             destroyed: false,
-            closing: core::sync::atomic::AtomicBool::new(false),
-            active_harts: core::sync::atomic::AtomicU64::new(0),
+            lifecycle: core::sync::atomic::AtomicU64::new(0),
             executed_harts: core::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -631,7 +685,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_private_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -659,7 +716,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_shared_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -692,7 +752,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_borrowed_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -702,8 +765,14 @@ impl UserAddressSpace {
             return Err("Virtual address outside canonical user range");
         }
         let own = frame_ownership(paddr);
-        if own != Some(FrameOwnership::Borrowed) && own != Some(FrameOwnership::Mmio) && paddr >= 0x8800_0000 {
-            return Err("Frame is not Borrowed or Mmio");
+        if paddr >= 0x8000_0000 {
+            if own != Some(FrameOwnership::Borrowed) {
+                return Err("RAM frame is not Borrowed");
+            }
+        } else {
+            if !is_valid_mmio_peripheral(paddr, 4096) && own != Some(FrameOwnership::Mmio) {
+                return Err("Physical address is neither valid RAM nor a registered MMIO peripheral");
+            }
         }
         if self.mappings.iter().any(|m| m.vaddr == vaddr) {
             return Err("Virtual address already mapped in address space");
@@ -721,15 +790,18 @@ impl UserAddressSpace {
     }
 
     pub fn map_user_page(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
         match frame_ownership(paddr) {
             Some(FrameOwnership::PrivateOwned) => self.map_private_frame(vaddr, paddr, is_write, is_exec),
             Some(FrameOwnership::Shared) => self.map_shared_frame(vaddr, paddr, is_write, is_exec),
             Some(FrameOwnership::Borrowed) | Some(FrameOwnership::Mmio) => self.map_borrowed_frame(vaddr, paddr, is_write, is_exec),
             _ => {
-                if paddr < 0x8800_0000 {
+                if is_valid_mmio_peripheral(paddr, 4096) {
                     self.map_borrowed_frame(vaddr, paddr, is_write, is_exec)
                 } else {
-                    Err("Frame must have valid ownership before mapping into address space")
+                    Err("Frame must have valid ownership or be a registered MMIO peripheral before mapping")
                 }
             }
         }
@@ -763,7 +835,7 @@ impl UserAddressSpace {
         if release {
             match mapping.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = recycle_frame(mapping.paddr);
+                    recycle_frame(mapping.paddr)?;
                 }
                 MappingKind::Shared => {
                     let _ = release_shared_frame(mapping.paddr);
@@ -774,40 +846,88 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    pub fn activate(&self) {
-        if self.closing.load(core::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
+    pub fn try_activate(&self) -> Result<(), ActivationError> {
         let hid = current_hart_id();
-        if hid < 64 {
-            let mask = 1u64 << hid;
-            self.active_harts.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
-            self.executed_harts.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
+        if hid >= 62 {
+            return Err(ActivationError::HartIdOutOfRange(hid));
         }
-        unsafe {
-            switch_satp(self.satp);
+        let hart_bit = 1u64 << hid;
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            if (cur & (LIFECYCLE_CLOSING_BIT | LIFECYCLE_DESTROYED_BIT)) != 0 {
+                return Err(ActivationError::ClosingOrDestroyed);
+            }
+            let next = cur | hart_bit;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.executed_harts.fetch_or(hart_bit, core::sync::atomic::Ordering::Release);
+                    unsafe {
+                        switch_satp(self.satp);
+                    }
+                    return Ok(());
+                }
+                Err(_) => core::hint::spin_loop(),
+            }
         }
+    }
+
+    pub fn activate(&self) {
+        let _ = self.try_activate();
     }
 
     pub fn deactivate(&self) {
         let hid = current_hart_id();
-        if hid < 64 {
-            let mask = !(1u64 << hid);
-            self.active_harts.fetch_and(mask, core::sync::atomic::Ordering::SeqCst);
+        if hid >= 62 {
+            return;
+        }
+        let hart_bit = 1u64 << hid;
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            let next = cur & !hart_bit;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => core::hint::spin_loop(),
+            }
         }
     }
 
     pub fn destroy_fallible(&mut self) -> Result<(), TeardownError> {
-        if self.destroyed {
-            return Ok(());
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            if (cur & LIFECYCLE_DESTROYED_BIT) != 0 {
+                return Ok(()); // Idempotent
+            }
+            if (cur & LIFECYCLE_CLOSING_BIT) != 0 {
+                break; // Already closing
+            }
+            let next = cur | LIFECYCLE_CLOSING_BIT;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => core::hint::spin_loop(),
+            }
         }
-        self.closing.store(true, core::sync::atomic::Ordering::SeqCst);
 
         let hid = current_hart_id();
-        let current_mask = if hid < 64 { 1u64 << hid } else { 0 };
-        let active = self.active_harts.load(core::sync::atomic::Ordering::SeqCst);
-        if (active & !current_mask) != 0 {
-            return Err(TeardownError::ActiveOnRemoteHart(active & !current_mask));
+        let current_mask = if hid < 62 { 1u64 << hid } else { 0 };
+        let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+        let active_remote = cur & LIFECYCLE_ACTIVE_HARTS_MASK & !current_mask;
+        if active_remote != 0 {
+            return Err(TeardownError::ActiveOnRemoteHart(active_remote));
         }
 
         // Step 1: Detach active CPU translation register if currently pointing to this table
@@ -821,7 +941,7 @@ impl UserAddressSpace {
                 switch_satp(kernel_satp);
             }
         }
-        self.active_harts.store(0, core::sync::atomic::Ordering::SeqCst);
+        self.lifecycle.fetch_and(!current_mask, core::sync::atomic::Ordering::AcqRel);
 
         // Step 2: Remove user mappings from root table
         let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
@@ -863,14 +983,21 @@ impl UserAddressSpace {
             );
         }
 
-        // Step 5: Only after TLB shootdown completes, safely recycle according to explicit ownership
+        // Step 5: Safely recycle according to explicit ownership
+        let mut cleanup_failed = false;
         for m in self.mappings.drain(..) {
             match m.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = recycle_frame(m.paddr);
+                    if let Err(_) = recycle_frame(m.paddr) {
+                        quarantine_frame(m.paddr);
+                        cleanup_failed = true;
+                    }
                 }
                 MappingKind::Shared => {
-                    let _ = release_shared_frame(m.paddr);
+                    if let Err(_) = release_shared_frame(m.paddr) {
+                        quarantine_frame(m.paddr);
+                        cleanup_failed = true;
+                    }
                 }
                 MappingKind::Borrowed => {
                     // Borrowed mapping: never returned to allocator pools
@@ -878,11 +1005,20 @@ impl UserAddressSpace {
             }
         }
         for paddr in self.table_frames.drain(..) {
-            let _ = recycle_frame(paddr);
+            if let Err(_) = recycle_frame(paddr) {
+                quarantine_frame(paddr);
+                cleanup_failed = true;
+            }
         }
+        self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
         self.destroyed = true;
         self.mapped_bytes = 0;
-        Ok(())
+
+        if cleanup_failed {
+            Err(TeardownError::FrameRecycleFailed)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn destroy(&mut self) {

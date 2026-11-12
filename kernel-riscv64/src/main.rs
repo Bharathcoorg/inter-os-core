@@ -43,6 +43,7 @@ macro_rules! println {
 
 #[no_mangle]
 pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
+    mmu::init_hart(hart_id);
     println!("");
     println!("============================================================");
     println!("  Inter OS — RISC-V 64 Sovereign Microkernel 0.1.0");
@@ -264,6 +265,13 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         let mut aspace_a = mmu::UserAddressSpace::new().expect("Aspace A");
         let mut aspace_b = mmu::UserAddressSpace::new().expect("Aspace B");
 
+        // Atomic lifecycle & race tests:
+        assert_eq!(aspace_a.is_closing(), false);
+        assert_eq!(aspace_a.try_activate(), Ok(()));
+        assert!(aspace_a.is_active_on_any_hart());
+        aspace_a.deactivate();
+        assert_eq!(aspace_a.is_active_on_any_hart(), false);
+
         // Private mapping
         assert_eq!(aspace_a.map_private_frame(0x0040_0000, frame1, true, false), Ok(()));
         assert_eq!(mmu::frame_ownership(frame1), Some(mmu::FrameOwnership::PrivateOwned));
@@ -275,13 +283,18 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
         assert_eq!(mmu::frame_refcount(frame2), 2);
 
-        // Borrowed mapping: physical buffer
+        // Borrowed mapping: registered physical buffer in PCIe aperture
         assert_eq!(aspace_a.map_borrowed_frame(0x0060_0000, 0x6000_0000, true, false), Ok(()));
+
+        // Rejection of invalid unregistered MMIO address
+        assert!(aspace_a.map_borrowed_frame(0x0070_0000, 0x0005_0000, true, false).is_err(), "Unregistered MMIO address must be rejected");
 
         // Destroy Aspace A: private frame1 freed, shared frame2 retained (refcount 1), borrowed not freed
         aspace_a.destroy();
         assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
         assert_eq!(mmu::frame_refcount(frame2), 1);
+        // Activation after close/destroy must be rejected
+        assert_eq!(aspace_a.try_activate(), Err(mmu::ActivationError::ClosingOrDestroyed));
 
         // Destroy Aspace B: shared frame2 drops to 0 and is freed
         aspace_b.destroy();
@@ -296,19 +309,14 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     let orig_pid = services::start(test_svc_id).expect("Service start failed in lifecycle test");
     assert!(orig_pid > 0);
     assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
-    assert_eq!(services::heartbeat(9999), Err(()), "Heartbeat with spoofed PID must be rejected");
-    assert_eq!(services::heartbeat(orig_pid), Ok(()), "Heartbeat with owning PID must be accepted");
-    // Verify generation check
-    assert_eq!(services::heartbeat_with_generation(orig_pid, Some(1)), Ok(()), "Heartbeat with correct generation must succeed");
-    assert_eq!(services::heartbeat_with_generation(orig_pid, Some(999)), Err(()), "Heartbeat with stale generation must be rejected");
-    // Simulate service failure/crash by terminating its task and running snapshot audit:
+    assert_eq!(services::heartbeat(9999, 1), Err(()), "Heartbeat with spoofed PID must be rejected");
+    assert_eq!(services::heartbeat(orig_pid, 1), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
+    assert_eq!(services::heartbeat(orig_pid, 0), Err(()), "Heartbeat with unvalidated/zero generation must be rejected");
+    assert_eq!(services::heartbeat(orig_pid, 999), Err(()), "Heartbeat with stale generation must be rejected");
+    // Terminate service task via scheduler terminate_task and test recovery:
     {
         let mut sched = task::SCHEDULER.lock();
-        for t in &mut sched.tasks {
-            if t.id == orig_pid {
-                t.state = task::TaskState::Terminated;
-            }
-        }
+        assert!(sched.terminate_task(1, true, orig_pid).is_ok());
     }
     let mut snap_buf = [0u8; 1024];
     services::snapshot(&mut snap_buf);

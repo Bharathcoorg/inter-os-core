@@ -706,8 +706,8 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if caller_pid == crate::task::INVALID_PID || caller_pid == 0 {
                 -13
             } else {
-                let gen_opt = if a1 != 0 { Some(a1 as u32) } else { None };
-                match crate::services::heartbeat_with_generation(caller_pid, gen_opt) {
+                let gen = if a1 != 0 { a1 as u32 } else { 1 };
+                match crate::services::heartbeat(caller_pid, gen) {
                     Ok(()) => 0,
                     Err(()) => -13,
                 }

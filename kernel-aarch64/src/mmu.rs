@@ -1035,6 +1035,29 @@ pub enum TeardownError {
     AlreadyDestroyed,
     ActiveOnRemoteCpu(u32),
     QuiescenceTimeout,
+    FrameRecycleFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationError {
+    ClosingOrDestroyed,
+    CpuIdOutOfRange(u32),
+}
+
+pub const LIFECYCLE_ACTIVE_CPUS_MASK: u32 = 0x3FFF_FFFF; // bits 0..29: bitmask of active CPUs
+pub const LIFECYCLE_CLOSING_BIT: u32 = 1 << 31;
+pub const LIFECYCLE_DESTROYED_BIT: u32 = 1 << 30;
+
+/// Validates that a physical address belongs to a documented QEMU virt peripheral MMIO aperture.
+pub fn is_valid_mmio_peripheral(paddr: u64, len: usize) -> bool {
+    let end = match paddr.checked_add(len as u64) {
+        Some(e) => e,
+        None => return false,
+    };
+    (paddr >= 0x0800_0000 && end <= 0x0810_0000)
+        || (paddr >= 0x0900_0000 && end <= 0x0901_0000)
+        || (paddr >= 0x0a00_0000 && end <= 0x0a01_0000)
+        || (paddr >= 0x1000_0000 && end <= 0x3f00_0000)
 }
 
 extern crate alloc;
@@ -1046,20 +1069,37 @@ pub struct UserAddressSpace {
     pub mappings: Vec<UserMapping>,
     pub mapped_bytes: usize,
     pub destroyed: bool,
-    pub closing: core::sync::atomic::AtomicBool,
-    pub active_cpus: core::sync::atomic::AtomicU32,
+    pub lifecycle: core::sync::atomic::AtomicU32,
     pub executed_cpus: core::sync::atomic::AtomicU32,
 }
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
-        if !self.destroyed {
-            let _ = self.destroy_fallible();
+        if !self.is_destroyed() {
+            if let Err(e) = self.destroy_fallible() {
+                crate::kprintln!("[MMU WARNING] UserAddressSpace drop encountered teardown error: {:?}", e);
+            }
         }
     }
 }
 
 impl UserAddressSpace {
+    pub fn is_closing(&self) -> bool {
+        (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_CLOSING_BIT) != 0
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed || (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_DESTROYED_BIT) != 0
+    }
+
+    pub fn active_cpus(&self) -> u32 {
+        self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_ACTIVE_CPUS_MASK
+    }
+
+    pub fn is_active_on_any_cpu(&self) -> bool {
+        self.active_cpus() != 0
+    }
+
     pub fn new() -> Option<Self> {
         let root_l1_phys = allocate_frame_with_ownership(FrameOwnership::Kernel)?;
         let l2_phys = match allocate_frame_with_ownership(FrameOwnership::Kernel) {
@@ -1133,8 +1173,7 @@ impl UserAddressSpace {
             mappings: Vec::new(),
             mapped_bytes: 0,
             destroyed: false,
-            closing: core::sync::atomic::AtomicBool::new(false),
-            active_cpus: core::sync::atomic::AtomicU32::new(0),
+            lifecycle: core::sync::atomic::AtomicU32::new(0),
             executed_cpus: core::sync::atomic::AtomicU32::new(0),
         })
     }
@@ -1196,7 +1235,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_private_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -1224,7 +1266,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_shared_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -1257,7 +1302,10 @@ impl UserAddressSpace {
     }
 
     pub fn map_borrowed_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
+        if self.destroyed || self.is_closing() {
             return Err("Cannot map into destroyed or closing address space");
         }
         if is_write && is_exec {
@@ -1270,8 +1318,14 @@ impl UserAddressSpace {
         let base = ACTIVE_RAM_BASE.load(core::sync::atomic::Ordering::Relaxed);
         let size = ACTIVE_RAM_SIZE.load(core::sync::atomic::Ordering::Relaxed);
         let in_ram = paddr >= base && (size == 0 || paddr < base.saturating_add(size));
-        if in_ram && own != Some(FrameOwnership::Borrowed) {
-            return Err("Frame is not Borrowed or Mmio");
+        if in_ram {
+            if own != Some(FrameOwnership::Borrowed) {
+                return Err("RAM frame is not Borrowed");
+            }
+        } else {
+            if !is_valid_mmio_peripheral(paddr, 4096) && own != Some(FrameOwnership::Mmio) {
+                return Err("Physical address is neither valid RAM nor a registered MMIO peripheral");
+            }
         }
         if self.mappings.iter().any(|m| m.vaddr == vaddr) {
             return Err("Virtual address already mapped in address space");
@@ -1289,16 +1343,18 @@ impl UserAddressSpace {
     }
 
     pub fn map_user_page(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
+            return Err("Address must be page-aligned (4KB)");
+        }
         match frame_ownership(paddr) {
             Some(FrameOwnership::PrivateOwned) => self.map_private_frame(vaddr, paddr, is_write, is_exec),
             Some(FrameOwnership::Shared) => self.map_shared_frame(vaddr, paddr, is_write, is_exec),
             Some(FrameOwnership::Borrowed) | Some(FrameOwnership::Mmio) => self.map_borrowed_frame(vaddr, paddr, is_write, is_exec),
             _ => {
-                let base = ACTIVE_RAM_BASE.load(core::sync::atomic::Ordering::Relaxed);
-                if paddr < base {
+                if is_valid_mmio_peripheral(paddr, 4096) {
                     self.map_borrowed_frame(vaddr, paddr, is_write, is_exec)
                 } else {
-                    Err("Frame must have valid ownership before mapping into address space")
+                    Err("Frame must have valid ownership or be a registered MMIO peripheral before mapping")
                 }
             }
         }
@@ -1333,7 +1389,7 @@ impl UserAddressSpace {
         if release {
             match mapping.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = recycle_frame(mapping.paddr);
+                    recycle_frame(mapping.paddr)?;
                 }
                 MappingKind::Shared => {
                     let _ = release_shared_frame(mapping.paddr);
@@ -1348,38 +1404,86 @@ impl UserAddressSpace {
         self.mapped_bytes
     }
 
+    pub fn try_activate(&self) -> Result<(), ActivationError> {
+        let cid = current_cpu_id() as u32;
+        if cid >= 30 {
+            return Err(ActivationError::CpuIdOutOfRange(cid));
+        }
+        let cpu_bit = 1u32 << cid;
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            if (cur & (LIFECYCLE_CLOSING_BIT | LIFECYCLE_DESTROYED_BIT)) != 0 {
+                return Err(ActivationError::ClosingOrDestroyed);
+            }
+            let next = cur | cpu_bit;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.executed_cpus.fetch_or(cpu_bit, core::sync::atomic::Ordering::Release);
+                    ArmMmu::switch_to_task(self.ttbr0);
+                    return Ok(());
+                }
+                Err(_) => core::hint::spin_loop(),
+            }
+        }
+    }
+
     pub fn activate(&self) {
-        if self.closing.load(core::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        let cid = current_cpu_id();
-        if cid < 32 {
-            let mask = 1u32 << cid;
-            self.active_cpus.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
-            self.executed_cpus.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
-        }
-        ArmMmu::switch_to_task(self.ttbr0);
+        let _ = self.try_activate();
     }
 
     pub fn deactivate(&self) {
         let cid = current_cpu_id();
-        if cid < 32 {
-            let mask = !(1u32 << cid);
-            self.active_cpus.fetch_and(mask, core::sync::atomic::Ordering::SeqCst);
+        if cid >= 30 {
+            return;
+        }
+        let cpu_bit = 1u32 << cid;
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            let next = cur & !cpu_bit;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => core::hint::spin_loop(),
+            }
         }
     }
 
     pub fn destroy_fallible(&mut self) -> Result<(), TeardownError> {
-        if self.destroyed {
-            return Ok(());
+        loop {
+            let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+            if (cur & LIFECYCLE_DESTROYED_BIT) != 0 {
+                return Ok(()); // Idempotent
+            }
+            if (cur & LIFECYCLE_CLOSING_BIT) != 0 {
+                break; // Already marked closing
+            }
+            let next = cur | LIFECYCLE_CLOSING_BIT;
+            match self.lifecycle.compare_exchange_weak(
+                cur,
+                next,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => core::hint::spin_loop(),
+            }
         }
-        self.closing.store(true, core::sync::atomic::Ordering::SeqCst);
 
         let cid = current_cpu_id();
-        let current_mask = if cid < 32 { 1u32 << cid } else { 0 };
-        let active = self.active_cpus.load(core::sync::atomic::Ordering::SeqCst);
-        if (active & !current_mask) != 0 {
-            return Err(TeardownError::ActiveOnRemoteCpu(active & !current_mask));
+        let current_mask = if cid < 30 { 1u32 << cid } else { 0 };
+        let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+        let active_remote = cur & LIFECYCLE_ACTIVE_CPUS_MASK & !current_mask;
+        if active_remote != 0 {
+            return Err(TeardownError::ActiveOnRemoteCpu(active_remote));
         }
 
         // Step 1: Detach active CPU translation register if currently pointing to this table
@@ -1391,7 +1495,7 @@ impl UserAddressSpace {
                 ArmMmu::switch_to_task(core::ptr::addr_of!(L1_TABLE) as u64);
             }
         }
-        self.active_cpus.store(0, core::sync::atomic::Ordering::SeqCst);
+        self.lifecycle.fetch_and(!current_mask, core::sync::atomic::Ordering::AcqRel);
 
         // Step 2: Remove user mappings from tables
         let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
@@ -1410,13 +1514,20 @@ impl UserAddressSpace {
         }
 
         // Step 4: Safely recycle exclusively owned frames, release shared, and keep borrowed
+        let mut cleanup_failed = false;
         for m in self.mappings.drain(..) {
             match m.kind {
                 MappingKind::PrivateOwned => {
-                    let _ = recycle_frame(m.paddr);
+                    if let Err(_) = recycle_frame(m.paddr) {
+                        quarantine_frame(m.paddr);
+                        cleanup_failed = true;
+                    }
                 }
                 MappingKind::Shared => {
-                    let _ = release_shared_frame(m.paddr);
+                    if let Err(_) = release_shared_frame(m.paddr) {
+                        quarantine_frame(m.paddr);
+                        cleanup_failed = true;
+                    }
                 }
                 MappingKind::Borrowed => {
                     // Borrowed: never returned to allocator pools
@@ -1424,11 +1535,20 @@ impl UserAddressSpace {
             }
         }
         for paddr in self.table_frames.drain(..) {
-            let _ = recycle_frame(paddr);
+            if let Err(_) = recycle_frame(paddr) {
+                quarantine_frame(paddr);
+                cleanup_failed = true;
+            }
         }
+        self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
         self.destroyed = true;
         self.mapped_bytes = 0;
-        Ok(())
+
+        if cleanup_failed {
+            Err(TeardownError::FrameRecycleFailed)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn destroy(&mut self) {

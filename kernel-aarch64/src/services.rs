@@ -146,11 +146,7 @@ pub fn start(id: u8) -> Result<u32, ()> {
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                for task in &mut sched.tasks {
-                    if task.id == old_pid {
-                        task.state = crate::task::TaskState::Terminated;
-                    }
-                }
+                let _ = sched.terminate_task(1, true, old_pid);
                 match sched.reap_task(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
@@ -237,11 +233,7 @@ pub fn stop(id: u8) -> Result<(), ()> {
             let pid = svc.pid.load(Ordering::Acquire);
             if pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                for task in &mut sched.tasks {
-                    if task.id == pid {
-                        task.state = crate::task::TaskState::Terminated;
-                    }
-                }
+                let _ = sched.terminate_task(1, true, pid);
                 match sched.reap_task(1, true, pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);
@@ -259,8 +251,10 @@ pub fn stop(id: u8) -> Result<(), ()> {
     Err(())
 }
 
-pub fn heartbeat_with_generation(caller_pid: u32, generation: Option<u32>) -> Result<(), ()> {
-    if caller_pid == 0 || caller_pid == crate::task::INVALID_PID {
+/// Publishes a heartbeat for a registered service, validating both caller PID and incarnation generation.
+/// Rejects unvalidated calls (generation == 0) or incarnation mismatches to prevent zombie heartbeats.
+pub fn heartbeat(caller_pid: u32, generation: u32) -> Result<(), ()> {
+    if caller_pid == 0 || caller_pid == crate::task::INVALID_PID || generation == 0 {
         return Err(());
     }
     let ticks: u64;
@@ -273,12 +267,10 @@ pub fn heartbeat_with_generation(caller_pid: u32, generation: Option<u32>) -> Re
             if cur_state == ServiceState::Stopped as u8 || cur_state == ServiceState::Crashed as u8 {
                 return Err(());
             }
-            if let Some(expected_gen) = generation {
-                let actual_gen = svc.generation.load(Ordering::Acquire);
-                if actual_gen != expected_gen {
-                    crate::kprintln!("[SERVICE] Heartbeat rejected: generation mismatch for PID {} (expected {}, service has {})", caller_pid, expected_gen, actual_gen);
-                    return Err(());
-                }
+            let actual_gen = svc.generation.load(Ordering::Acquire);
+            if actual_gen != generation {
+                crate::kprintln!("[SERVICE] Heartbeat rejected: generation mismatch for PID {} (expected {}, service has {})", caller_pid, generation, actual_gen);
+                return Err(());
             }
             svc.last_heartbeat.store(ticks, Ordering::Release);
             if cur_state == ServiceState::Degraded as u8 {
@@ -288,10 +280,6 @@ pub fn heartbeat_with_generation(caller_pid: u32, generation: Option<u32>) -> Re
         }
     }
     Err(())
-}
-
-pub fn heartbeat(caller_pid: u32) -> Result<(), ()> {
-    heartbeat_with_generation(caller_pid, None)
 }
 
 pub fn recover_failed(id: u8) -> Result<(), ()> {
@@ -322,11 +310,7 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
             let old_pid = svc.pid.load(Ordering::Acquire);
             if old_pid != 0 {
                 let mut sched = crate::task::SCHEDULER.lock();
-                for task in &mut sched.tasks {
-                    if task.id == old_pid {
-                        task.state = crate::task::TaskState::Terminated;
-                    }
-                }
+                let _ = sched.terminate_task(1, true, old_pid);
                 match sched.reap_task(1, true, old_pid) {
                     Ok(_) => {
                         svc.pid.store(0, Ordering::Release);

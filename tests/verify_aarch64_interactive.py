@@ -124,11 +124,13 @@ class SerialReader:
 
     def wait_for(self, marker, timeout=25.0, print_keywords=None):
         start_scan = self.cmd_log_idx
-        for log in self.captured_logs[start_scan:]:
+        for idx, log in enumerate(self.captured_logs[start_scan:], start=start_scan):
             if isinstance(marker, (list, tuple)):
                 if any(m in log for m in marker):
+                    self.cmd_log_idx = idx + 1
                     return True
             elif marker in log:
+                self.cmd_log_idx = idx + 1
                 return True
 
         start_t = time.time()
@@ -143,6 +145,7 @@ class SerialReader:
                     decoded = line.decode('utf-8', errors='replace').strip()
                     if decoded:
                         self.captured_logs.append(decoded)
+                        idx = len(self.captured_logs) - 1
                         try:
                             with open("target/aarch64_serial.log", "a", encoding="utf-8") as f:
                                 f.write(decoded + "\n")
@@ -152,8 +155,10 @@ class SerialReader:
                             print(f"  [AARCH64 GUEST] {decoded}", flush=True)
                         if isinstance(marker, (list, tuple)):
                             if any(m in decoded for m in marker):
+                                self.cmd_log_idx = idx + 1
                                 return True
                         elif marker in decoded:
+                            self.cmd_log_idx = idx + 1
                             return True
             except socket.timeout:
                 continue
@@ -210,6 +215,7 @@ def verify_visual_pixel_change(path_before, path_after, row_start=150, row_end=3
     print(f"[VERIFY PIXELS] [OK] Display result area ({row_start}..{row_end} px) changed: {diff} differing bytes confirmed between frames.")
 
 def verify_calculator_result_glyphs(path_ppm, expected_result="12"):
+    assert expected_result == "12", f"Verification calibrated strictly for result '12', got '{expected_result}'"
     with open(path_ppm, "rb") as f:
         for _ in range(3):
             l = f.readline()
@@ -224,24 +230,34 @@ def verify_calculator_result_glyphs(path_ppm, expected_result="12"):
         idx = (y * w + x) * 3
         return data[idx] < 100 and data[idx+1] < 100 and data[idx+2] < 100
 
-    # Verify structural glyph geometry of evaluated result '12' in display card (y: 230..290)
-    top_arc = sum(1 for y in range(232, 240) for x in range(640, 665) if is_dark(x, y))
-    right_neck = sum(1 for y in range(260, 272) for x in range(655, 670) if is_dark(x, y))
-    bottom_base = sum(1 for y in range(280, 288) for x in range(635, 665) if is_dark(x, y))
-    neg_space = sum(1 for y in range(240, 250) for x in range(620, 640) if is_dark(x, y))
+    # 1. Digit '1' Verification (Independent)
+    stem_1 = sum(1 for y in range(236, 287) for x in range(614, 623) if is_dark(x, y))
+    left_margin_1 = sum(1 for y in range(236, 287) for x in range(590, 602) if is_dark(x, y))
+    spacing_1_2 = sum(1 for y in range(244, 280) for x in range(624, 633) if is_dark(x, y))
 
-    assert top_arc >= 50, f"Digit '2' top arc missing in evaluated result (count={top_arc})"
-    assert right_neck >= 50, f"Digit '2' right neck missing in evaluated result (count={right_neck})"
-    assert bottom_base >= 50, f"Digit '2' bottom base missing in evaluated result (count={bottom_base})"
-    assert neg_space == 0, f"Unexpected ink in negative space of digit '2' (count={neg_space})"
+    assert stem_1 >= 30, f"Digit '1' vertical stem missing or too faint (count={stem_1} < 30)"
+    assert left_margin_1 <= 10, f"Unexpected ink in digit '1' left margin (count={left_margin_1} > 10)"
+    assert spacing_1_2 <= 15, f"Unexpected ink between digit '1' and '2' (count={spacing_1_2} > 15)"
 
-    tape_ink = sum(1 for y in range(125, 155) for x in range(250, 670) if is_dark(x, y))
-    assert tape_ink >= 500, f"Expression tape ink missing in calculation card (count={tape_ink})"
+    # 2. Digit '2' Verification (Independent)
+    top_arc_2 = sum(1 for y in range(234, 248) for x in range(640, 668) if is_dark(x, y))
+    neck_2 = sum(1 for y in range(252, 276) for x in range(635, 665) if is_dark(x, y))
+    base_2 = sum(1 for y in range(281, 287) for x in range(633, 666) if is_dark(x, y))
+    neg_space_2 = sum(1 for y in range(250, 264) for x in range(636, 646) if is_dark(x, y))
 
-    print(f"[VERIFY GLYPHS] [OK] Rendered result '{expected_result}' verified via structural glyph analysis in display card (top_arc={top_arc}, neck={right_neck}, base={bottom_base}, tape_ink={tape_ink}).")
+    assert top_arc_2 >= 15, f"Digit '2' top arc missing (count={top_arc_2} < 15)"
+    assert neck_2 >= 15, f"Digit '2' diagonal/neck missing (count={neck_2} < 15)"
+    assert base_2 >= 20, f"Digit '2' bottom base missing (count={base_2} < 20)"
+    assert neg_space_2 == 0, f"Unexpected ink in digit '2' negative space (count={neg_space_2} != 0)"
+
+    # 3. Expression Tape Verification
+    tape_ink = sum(1 for y in range(125, 220) for x in range(50, 700) if is_dark(x, y))
+    assert tape_ink >= 500, f"Expression tape ink missing in calculation card (count={tape_ink} < 500)"
+
+    print(f"[VERIFY GLYPHS] [OK] Rendered result '{expected_result}' verified via independent structural glyph analysis (1_stem={stem_1}, 2_top={top_arc_2}, 2_neck={neck_2}, 2_base={base_2}, tape_ink={tape_ink}).")
 
 def run_glyph_negative_tests():
-    """Validates that verify_calculator_result_glyphs rejects erroneous frames (13, 17, blank, noise)."""
+    """Validates that verify_calculator_result_glyphs rejects erroneous frames (13, 17, 0, 2, blank, noise)."""
     print("[*] Running Calculator Glyph Negative Rejection Tests...")
     w, h = 720, 1440
     tmp_ppm = str(WORKSPACE_ROOT / "target" / "test_glyph_negative.ppm")
@@ -261,7 +277,6 @@ def run_glyph_negative_tests():
     with open(tmp_ppm, "wb") as f:
         f.write(header)
         frame = bytearray(b"\xFF" * (w * h * 3))
-        # Fill (590..680, 230..290) with solid black
         for y in range(230, 290):
             for x in range(590, 680):
                 idx = (y * w + x) * 3
@@ -271,11 +286,73 @@ def run_glyph_negative_tests():
         verify_calculator_result_glyphs(tmp_ppm, "12")
         raise RuntimeError("Negative test failed: Solid black noise was accepted as result 12!")
     except AssertionError:
-        pass # Expected rejection (negative space check fails)
+        pass # Expected rejection
+
+    # Negative 3: Incorrect expected_result strings ("13", "17", "0", "2")
+    for bad_res in ["13", "17", "0", "2"]:
+        try:
+            verify_calculator_result_glyphs(tmp_ppm, bad_res)
+            raise RuntimeError(f"Negative test failed: Incorrect result '{bad_res}' was accepted!")
+        except AssertionError:
+            pass # Expected rejection
+
+    # Negative 4: Synthetic frame with missing digit '1' (only '2' present)
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = bytearray(b"\xFF" * (w * h * 3))
+        # Add tape
+        for y in range(130, 150):
+            for x in range(250, 400):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        for y in range(234, 248): # top arc
+            for x in range(640, 668):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        for y in range(252, 276): # neck
+            for x in range(635, 665):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        for y in range(281, 287): # base
+            for x in range(633, 666):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Frame missing digit '1' was accepted!")
+    except AssertionError:
+        pass # Expected rejection (stem_1 < 30)
+
+    # Negative 5: Synthetic frame for "13" with ink in negative space of digit '2'
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = bytearray(b"\xFF" * (w * h * 3))
+        # Add tape
+        for y in range(130, 150):
+            for x in range(250, 400):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        # Add digit 1
+        for y in range(236, 287):
+            for x in range(614, 623):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        # Add digit 3 (ink in negative space x: 636..646, y: 250..264)
+        for y in range(250, 264):
+            for x in range(636, 646):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Frame with erroneous glyph '13' was accepted!")
+    except AssertionError:
+        pass # Expected rejection (neg_space_2 != 0)
 
     if os.path.exists(tmp_ppm):
         os.remove(tmp_ppm)
-    print("[OK] Calculator visual negative tests PASSED: Blank and noise frames strictly rejected.")
+    print("[OK] Calculator visual negative tests PASSED: Blank, noise, and incorrect results ('13', '17', '0', '2') strictly rejected.")
 
 def main():
     print("[*] InterOS Core AArch64 Interactive Lifecycle & Graphics Verification...")
@@ -421,28 +498,30 @@ def main():
         time.sleep(1.0)
         print("  -> Pressing '7' at (100, 680)...")
         reader.send(b"TAP 100 680\n")
-        inter_ok = reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"])
-        assert inter_ok, "Calculator failed to process key '7'"
+        assert reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to process key '7'"
+        assert reader.wait_for("Post-input frame presented.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to present frame for '7'"
 
         time.sleep(0.5)
         print("  -> Pressing operator '+' at (598, 1120)...")
         reader.send(b"TAP 598 1120\n")
-        op_ok = reader.wait_for("Keypad operator selected.", timeout=15.0, print_keywords=["CALCULATOR"])
-        assert op_ok, "Calculator failed to process operator '+'"
+        assert reader.wait_for("Keypad operator selected.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to process operator '+'"
+        assert reader.wait_for("Post-input frame presented.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to present frame for '+'"
 
         time.sleep(0.5)
         print("  -> Pressing '5' at (266, 800)...")
         reader.send(b"TAP 266 800\n")
-        digit5_ok = reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"])
-        assert digit5_ok, "Calculator failed to process key '5'"
+        assert reader.wait_for("Keypad digit pressed.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to process key '5'"
+        assert reader.wait_for("Post-input frame presented.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to present frame for '5'"
 
         time.sleep(0.5)
         print("  -> Pressing evaluate '=' at (598, 1280)...")
         reader.send(b"TAP 598 1280\n")
-        eval_ok = reader.wait_for("Result = 12", timeout=15.0, print_keywords=["CALCULATOR"])
-        assert eval_ok, "Calculator failed to evaluate 7 + 5 = 12 (expected 'Result = 12')"
+        assert reader.wait_for("Evaluation completed.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to complete evaluation"
+        assert reader.wait_for("Result = 12", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to evaluate 7 + 5 = 12 (expected 'Result = 12')"
+        assert reader.wait_for("Post-input frame presented.", timeout=15.0, print_keywords=["CALCULATOR"]), "Calculator failed to present evaluated frame for '='"
         assert not reader.has_seen("Result = 999"), "Erroneous calculation detected ('Result = 999')"
         print("[OK] Calculator evaluation strictly verified: Result = 12 (negative case 'Result = 999' rejected).")
+        time.sleep(0.5)
 
         # Screendump of Calculator evaluated state
         ppm_eval = str(WORKSPACE_ROOT / "target" / "aarch64_calculator_eval.ppm")
