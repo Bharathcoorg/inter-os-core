@@ -158,7 +158,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 sched.tasks[curr].exit_code = Some(a0 as i32);
             }
             drop(sched);
-            crate::task::yield_now();
+            if unsafe { !crate::trap::IN_LIFECYCLE_TEST } {
+                crate::task::yield_now();
+            }
             0
         }
 
@@ -704,7 +706,8 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             if caller_pid == crate::task::INVALID_PID || caller_pid == 0 {
                 -13
             } else {
-                match crate::services::heartbeat(caller_pid) {
+                let gen_opt = if a1 != 0 { Some(a1 as u32) } else { None };
+                match crate::services::heartbeat_with_generation(caller_pid, gen_opt) {
                     Ok(()) => 0,
                     Err(()) => -13,
                 }

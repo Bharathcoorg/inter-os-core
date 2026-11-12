@@ -262,7 +262,7 @@ impl RiscvFrameAllocator {
                 *word |= 1u64 << bit_idx;
                 self.allocated_frames += 1;
                 self.ownership[frame_idx] = ownership as u8;
-                self.ref_counts[frame_idx] = 1;
+                self.ref_counts[frame_idx] = if ownership == FrameOwnership::Shared { 0 } else { 1 };
                 let paddr = self.base_paddr + (frame_idx as u64) * 4096;
                 unsafe {
                     core::ptr::write_bytes(paddr as *mut u8, 0, 4096);
@@ -275,6 +275,59 @@ impl RiscvFrameAllocator {
 
     pub fn allocate_frame(&mut self) -> Option<u64> {
         self.allocate_frame_with_ownership(FrameOwnership::PrivateOwned)
+    }
+
+    pub fn retain_shared_frame(&mut self, paddr: u64) -> Result<(), &'static str> {
+        if (paddr & 0xFFF) != 0 || paddr < self.base_paddr {
+            return Err("Invalid frame address for retain");
+        }
+        let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
+        if frame_idx >= self.total_frames {
+            return Err("Frame exceeds allocator range");
+        }
+        let word_idx = frame_idx / 64;
+        let bit_idx = frame_idx % 64;
+        if (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0 {
+            return Err("Cannot retain unallocated frame");
+        }
+        if self.ownership[frame_idx] != FrameOwnership::Shared as u8 {
+            return Err("Cannot retain non-shared frame");
+        }
+        if self.ref_counts[frame_idx] == u16::MAX {
+            return Err("Reference count overflow on shared frame");
+        }
+        self.ref_counts[frame_idx] += 1;
+        Ok(())
+    }
+
+    pub fn release_shared_frame(&mut self, paddr: u64) -> Result<bool, &'static str> {
+        if (paddr & 0xFFF) != 0 || paddr < self.base_paddr {
+            return Err("Invalid frame address for release");
+        }
+        let frame_idx = ((paddr - self.base_paddr) / 4096) as usize;
+        if frame_idx >= self.total_frames {
+            return Err("Frame exceeds allocator range");
+        }
+        let word_idx = frame_idx / 64;
+        let bit_idx = frame_idx % 64;
+        if (self.bitmap[word_idx] & (1u64 << bit_idx)) == 0 {
+            return Err("Double-free rejected: frame is not allocated");
+        }
+        if self.ownership[frame_idx] != FrameOwnership::Shared as u8 {
+            return Err("Cannot release non-shared frame via release_shared_frame");
+        }
+        if self.ref_counts[frame_idx] == 0 {
+            return Err("Reference count underflow on shared frame");
+        }
+        self.ref_counts[frame_idx] -= 1;
+        if self.ref_counts[frame_idx] == 0 {
+            self.bitmap[word_idx] &= !(1u64 << bit_idx);
+            self.ownership[frame_idx] = 0;
+            self.recycled_frames += 1;
+            Ok(true) // Frame was freed
+        } else {
+            Ok(false) // Frame still held by other references
+        }
     }
 
     pub fn recycle_frame(&mut self, paddr: u64) -> Result<(), &'static str> {
@@ -353,6 +406,75 @@ pub fn frame_ownership(paddr: u64) -> Option<FrameOwnership> {
     }
 }
 
+pub fn frame_refcount(paddr: u64) -> u16 {
+    let alloc = FRAME_ALLOCATOR.lock();
+    if paddr < alloc.base_paddr { return 0; }
+    let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
+    if frame_idx >= alloc.total_frames { return 0; }
+    alloc.ref_counts[frame_idx]
+}
+
+pub fn retain_shared_frame(paddr: u64) -> Result<(), &'static str> {
+    FRAME_ALLOCATOR.lock().retain_shared_frame(paddr)
+}
+
+pub fn release_shared_frame(paddr: u64) -> Result<bool, &'static str> {
+    FRAME_ALLOCATOR.lock().release_shared_frame(paddr)
+}
+
+pub static QUARANTINED_FRAMES: spin::Mutex<Vec<u64>> = spin::Mutex::new(Vec::new());
+
+pub fn quarantine_frame(paddr: u64) {
+    let mut q = QUARANTINED_FRAMES.lock();
+    if !q.contains(&paddr) {
+        q.push(paddr);
+    }
+}
+
+pub fn quarantined_frame_count() -> usize {
+    QUARANTINED_FRAMES.lock().len()
+}
+
+pub static ONLINE_HARTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+pub fn register_online_hart(hart_id: usize) {
+    if hart_id < 64 {
+        ONLINE_HARTS.fetch_or(1u64 << hart_id, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn current_hart_id() -> usize {
+    let hartid: usize;
+    unsafe {
+        core::arch::asm!("mv {0}, tp", out(reg) hartid);
+    }
+    hartid
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingKind {
+    PrivateOwned,
+    Shared,
+    Borrowed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserMapping {
+    pub vaddr: usize,
+    pub paddr: u64,
+    pub kind: MappingKind,
+    pub is_write: bool,
+    pub is_exec: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeardownError {
+    AlreadyDestroyed,
+    ActiveOnRemoteHart(u64),
+    SbiRemoteFenceFailed(crate::sbi::SbiError),
+    QuiescenceTimeout,
+}
+
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -360,15 +482,18 @@ pub struct UserAddressSpace {
     pub satp: usize,
     pub root_paddr: u64,
     pub table_frames: Vec<u64>,
-    pub mapped_frames: Vec<u64>,
+    pub mappings: Vec<UserMapping>,
     pub mapped_bytes: usize,
     pub destroyed: bool,
+    pub closing: core::sync::atomic::AtomicBool,
+    pub active_harts: core::sync::atomic::AtomicU64,
+    pub executed_harts: core::sync::atomic::AtomicU64,
 }
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
         if !self.destroyed {
-            self.destroy();
+            let _ = self.destroy_fallible();
         }
     }
 }
@@ -420,23 +545,16 @@ impl UserAddressSpace {
             satp: satp_val,
             root_paddr,
             table_frames,
-            mapped_frames: Vec::new(),
+            mappings: Vec::new(),
             mapped_bytes: 0,
             destroyed: false,
+            closing: core::sync::atomic::AtomicBool::new(false),
+            active_harts: core::sync::atomic::AtomicU64::new(0),
+            executed_harts: core::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    pub fn map_user_page(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
-        if self.destroyed {
-            return Err("Cannot map into destroyed address space");
-        }
-        if is_write && is_exec {
-            return Err("W^X violation: writable user mapping must be non-executable");
-        }
-        if vaddr >= USER_SPACE_MAX || vaddr < USER_SPACE_MIN {
-            return Err("Virtual address outside canonical user range");
-        }
-
+    fn map_leaf_entry(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
         let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
         let vpn2 = (vaddr >> 30) & 0x1FF;
         let vpn1 = (vaddr >> 21) & 0x1FF;
@@ -508,24 +626,191 @@ impl UserAddressSpace {
         }
 
         lvl0.entries[vpn0] = ((paddr >> 12) << 10) | flags;
-        self.mapped_frames.push(paddr);
         self.mapped_bytes += PAGE_SIZE;
         Ok(())
     }
 
+    pub fn map_private_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+            return Err("Cannot map into destroyed or closing address space");
+        }
+        if is_write && is_exec {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        if vaddr >= USER_SPACE_MAX || vaddr < USER_SPACE_MIN {
+            return Err("Virtual address outside canonical user range");
+        }
+        if frame_ownership(paddr) != Some(FrameOwnership::PrivateOwned) {
+            return Err("Frame is not PrivatelyOwned");
+        }
+        if self.mappings.iter().any(|m| m.vaddr == vaddr) {
+            return Err("Virtual address already mapped in address space");
+        }
+
+        self.map_leaf_entry(vaddr, paddr, is_write, is_exec)?;
+        self.mappings.push(UserMapping {
+            vaddr,
+            paddr,
+            kind: MappingKind::PrivateOwned,
+            is_write,
+            is_exec,
+        });
+        Ok(())
+    }
+
+    pub fn map_shared_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+            return Err("Cannot map into destroyed or closing address space");
+        }
+        if is_write && is_exec {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        if vaddr >= USER_SPACE_MAX || vaddr < USER_SPACE_MIN {
+            return Err("Virtual address outside canonical user range");
+        }
+        if frame_ownership(paddr) != Some(FrameOwnership::Shared) {
+            return Err("Frame is not Shared");
+        }
+        if self.mappings.iter().any(|m| m.vaddr == vaddr) {
+            return Err("Virtual address already mapped in address space");
+        }
+
+        retain_shared_frame(paddr)?;
+        if let Err(e) = self.map_leaf_entry(vaddr, paddr, is_write, is_exec) {
+            let _ = release_shared_frame(paddr);
+            return Err(e);
+        }
+
+        self.mappings.push(UserMapping {
+            vaddr,
+            paddr,
+            kind: MappingKind::Shared,
+            is_write,
+            is_exec,
+        });
+        Ok(())
+    }
+
+    pub fn map_borrowed_frame(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        if self.destroyed || self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+            return Err("Cannot map into destroyed or closing address space");
+        }
+        if is_write && is_exec {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        if vaddr >= USER_SPACE_MAX || vaddr < USER_SPACE_MIN {
+            return Err("Virtual address outside canonical user range");
+        }
+        let own = frame_ownership(paddr);
+        if own != Some(FrameOwnership::Borrowed) && own != Some(FrameOwnership::Mmio) && paddr >= 0x8800_0000 {
+            return Err("Frame is not Borrowed or Mmio");
+        }
+        if self.mappings.iter().any(|m| m.vaddr == vaddr) {
+            return Err("Virtual address already mapped in address space");
+        }
+
+        self.map_leaf_entry(vaddr, paddr, is_write, is_exec)?;
+        self.mappings.push(UserMapping {
+            vaddr,
+            paddr,
+            kind: MappingKind::Borrowed,
+            is_write,
+            is_exec,
+        });
+        Ok(())
+    }
+
+    pub fn map_user_page(&mut self, vaddr: usize, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        match frame_ownership(paddr) {
+            Some(FrameOwnership::PrivateOwned) => self.map_private_frame(vaddr, paddr, is_write, is_exec),
+            Some(FrameOwnership::Shared) => self.map_shared_frame(vaddr, paddr, is_write, is_exec),
+            Some(FrameOwnership::Borrowed) | Some(FrameOwnership::Mmio) => self.map_borrowed_frame(vaddr, paddr, is_write, is_exec),
+            _ => {
+                if paddr < 0x8800_0000 {
+                    self.map_borrowed_frame(vaddr, paddr, is_write, is_exec)
+                } else {
+                    Err("Frame must have valid ownership before mapping into address space")
+                }
+            }
+        }
+    }
+
+    pub fn unmap_user_page(&mut self, vaddr: usize, release: bool) -> Result<(), &'static str> {
+        let pos = self.mappings.iter().position(|m| m.vaddr == vaddr).ok_or("Address not mapped")?;
+        let mapping = self.mappings.remove(pos);
+
+        let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
+        let vpn2 = (vaddr >> 30) & 0x1FF;
+        let vpn1 = (vaddr >> 21) & 0x1FF;
+        let vpn0 = (vaddr >> 12) & 0x1FF;
+
+        if root.entries[vpn2] & PTE_V != 0 {
+            let lvl1_paddr = (root.entries[vpn2] >> 10) << 12;
+            let lvl1 = unsafe { &mut *(lvl1_paddr as *mut PageTable) };
+            if lvl1.entries[vpn1] & PTE_V != 0 {
+                let lvl0_paddr = (lvl1.entries[vpn1] >> 10) << 12;
+                let lvl0 = unsafe { &mut *(lvl0_paddr as *mut PageTable) };
+                lvl0.entries[vpn0] = 0;
+            }
+        }
+        self.mapped_bytes = self.mapped_bytes.saturating_sub(PAGE_SIZE);
+
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!("sfence.vma {0}, zero", in(reg) vaddr, options(nostack));
+        }
+
+        if release {
+            match mapping.kind {
+                MappingKind::PrivateOwned => {
+                    let _ = recycle_frame(mapping.paddr);
+                }
+                MappingKind::Shared => {
+                    let _ = release_shared_frame(mapping.paddr);
+                }
+                MappingKind::Borrowed => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn activate(&self) {
+        if self.closing.load(core::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let hid = current_hart_id();
+        if hid < 64 {
+            let mask = 1u64 << hid;
+            self.active_harts.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
+            self.executed_harts.fetch_or(mask, core::sync::atomic::Ordering::SeqCst);
+        }
         unsafe {
             switch_satp(self.satp);
         }
     }
 
-    pub fn destroy(&mut self) {
-        if self.destroyed {
-            return;
+    pub fn deactivate(&self) {
+        let hid = current_hart_id();
+        if hid < 64 {
+            let mask = !(1u64 << hid);
+            self.active_harts.fetch_and(mask, core::sync::atomic::Ordering::SeqCst);
         }
-        self.destroyed = true;
+    }
 
-        // Step 1 & 2: Detach active CPU translation register if currently pointing to this table
+    pub fn destroy_fallible(&mut self) -> Result<(), TeardownError> {
+        if self.destroyed {
+            return Ok(());
+        }
+        self.closing.store(true, core::sync::atomic::Ordering::SeqCst);
+
+        let hid = current_hart_id();
+        let current_mask = if hid < 64 { 1u64 << hid } else { 0 };
+        let active = self.active_harts.load(core::sync::atomic::Ordering::SeqCst);
+        if (active & !current_mask) != 0 {
+            return Err(TeardownError::ActiveOnRemoteHart(active & !current_mask));
+        }
+
+        // Step 1: Detach active CPU translation register if currently pointing to this table
         #[cfg(target_arch = "riscv64")]
         unsafe {
             let current_satp: usize;
@@ -536,17 +821,39 @@ impl UserAddressSpace {
                 switch_satp(kernel_satp);
             }
         }
+        self.active_harts.store(0, core::sync::atomic::Ordering::SeqCst);
 
-        // Step 3: Remove user mappings from tables
+        // Step 2: Remove user mappings from root table
         let root = unsafe { &mut *(self.root_paddr as *mut PageTable) };
         root.entries[0] = 0; // Detach Level 1 table for user/MMIO space
 
-        // Step 4: Perform TLB invalidation locally and broadcast across all remote harts via SBI RFNC
+        // Step 3: Perform local TLB invalidation
         #[cfg(target_arch = "riscv64")]
         unsafe {
             core::arch::asm!("sfence.vma zero, zero", options(nostack));
         }
-        crate::sbi::remote_sfence_vma(0, usize::MAX, 0, 0);
+
+        // Step 4: Broadcast across remote harts that ever executed this address space via SBI RFNC
+        let executed = self.executed_harts.load(core::sync::atomic::Ordering::SeqCst);
+        let online = ONLINE_HARTS.load(core::sync::atomic::Ordering::SeqCst);
+        let remote_mask = (executed | online) & !current_mask;
+        if remote_mask != 0 {
+            match crate::sbi::remote_sfence_vma(remote_mask as usize, 0, 0, 0) {
+                Ok(()) => {}
+                Err(err) => {
+                    // On remote TLB invalidation failure, quarantine frames to avoid reuse while stale translations exist
+                    for m in self.mappings.drain(..) {
+                        quarantine_frame(m.paddr);
+                    }
+                    for t in self.table_frames.drain(..) {
+                        quarantine_frame(t);
+                    }
+                    self.destroyed = true;
+                    return Err(TeardownError::SbiRemoteFenceFailed(err));
+                }
+            }
+        }
+
         #[cfg(target_arch = "riscv64")]
         unsafe {
             core::arch::asm!(
@@ -556,13 +863,29 @@ impl UserAddressSpace {
             );
         }
 
-        // Step 5: Only after TLB shootdown completes, return exclusively owned frames to allocator
-        for paddr in self.mapped_frames.drain(..) {
-            let _ = recycle_frame(paddr);
+        // Step 5: Only after TLB shootdown completes, safely recycle according to explicit ownership
+        for m in self.mappings.drain(..) {
+            match m.kind {
+                MappingKind::PrivateOwned => {
+                    let _ = recycle_frame(m.paddr);
+                }
+                MappingKind::Shared => {
+                    let _ = release_shared_frame(m.paddr);
+                }
+                MappingKind::Borrowed => {
+                    // Borrowed mapping: never returned to allocator pools
+                }
+            }
         }
         for paddr in self.table_frames.drain(..) {
             let _ = recycle_frame(paddr);
         }
+        self.destroyed = true;
         self.mapped_bytes = 0;
+        Ok(())
+    }
+
+    pub fn destroy(&mut self) {
+        let _ = self.destroy_fallible();
     }
 }

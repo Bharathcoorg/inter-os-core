@@ -1502,27 +1502,68 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 45b. 50-Cycle Real Process Lifecycle Verification
     kprintln!("--- [Testing AArch64 50-Cycle Real Process Lifecycle] ---");
+    static TEST_PROC_AARCH64_ELF: [u8; 4096] = {
+        let mut b = [0u8; 4096];
+        b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
+        b[4] = 0x02; b[5] = 0x01; b[6] = 0x01;
+        b[16] = 0x02; b[18] = 0xb7; b[20] = 0x01;
+        b[24] = 0x78; b[26] = 0x40; b[32] = 0x40;
+        b[52] = 0x40; b[54] = 0x38; b[56] = 0x01; b[58] = 0x40;
+        b[64] = 0x01; b[68] = 0x05; b[82] = 0x40; b[90] = 0x40;
+        b[97] = 0x10; b[105] = 0x10; b[113] = 0x10;
+        // Code at offset 120 (0x78)
+        b[120] = 0xe8; b[122] = 0x80; b[123] = 0xd2; // mov x8, #7 (SYS_GET_TASK_ID)
+        b[124] = 0x01; b[127] = 0xd4;               // svc #0
+        b[128] = 0x48; b[130] = 0x80; b[131] = 0xd2; // mov x8, #2 (SYS_EXIT)
+        b[134] = 0x80; b[135] = 0xd2;               // mov x0, #0 (exit code 0)
+        b[136] = 0x01; b[139] = 0xd4;               // svc #0
+        b[143] = 0x14;                               // b .
+        b
+    };
+
     let proc_baseline_frames = mmu::active_allocated_frames();
     let proc_baseline_tasks = task::SCHEDULER.lock().tasks.len();
+    unsafe { user::IN_LIFECYCLE_TEST = true; }
     for cycle in 0..50 {
-        let loaded = elf::load_elf(images::USER_INIT_ELF).expect("Loading test ELF for lifecycle cycle");
+        let loaded = elf::load_elf(&TEST_PROC_AARCH64_ELF).expect("Loading test ELF for lifecycle cycle");
         let parent_id = 1;
         let mut caps = capability::CapabilityTable::new();
         caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
         caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
 
-        let child_pid = {
+        let (child_pid, child_ttbr0) = {
             let mut sched = task::SCHEDULER.lock();
+            let ttbr0 = loaded.address_space.ttbr0;
             let pid = sched.spawn_user_process(parent_id, "test_child", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
             assert!(pid > 0);
-            for t in &mut sched.tasks {
-                if t.id == pid {
-                    t.state = task::TaskState::Terminated;
-                    t.exit_code = Some(0);
-                }
-            }
-            pid
+            (pid, ttbr0)
         };
+
+        // Activate child address space
+        mmu::ArmMmu::switch_to_task(child_ttbr0);
+        {
+            let mut sched = task::SCHEDULER.lock();
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == child_pid) {
+                sched.current_task_idx = pos;
+                sched.tasks[pos].state = task::TaskState::Running;
+            }
+        }
+
+        // Enter user mode (drops from EL1 to EL0 via hardware eret)
+        // In EL0: executes SYS_GET_TASK_ID, then SYS_EXIT(0)
+        // SYS_EXIT traps to EL1, records exit code 0, marks child Terminated, and returns via return_to_kernel_mode()
+        unsafe {
+            user::enter_user_mode(loaded.entry_point, loaded.stack_top);
+        }
+
+        // Switch back to kernel page table
+        mmu::ArmMmu::switch_to_kernel();
+        {
+            let mut sched = task::SCHEDULER.lock();
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == parent_id) {
+                sched.current_task_idx = pos;
+            }
+        }
 
         let mut sched = task::SCHEDULER.lock();
         assert_eq!(sched.reap_task(999, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
@@ -1534,6 +1575,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         assert_eq!(mmu::active_allocated_frames(), proc_baseline_frames, "Process frame leak at cycle {}", cycle);
         assert_eq!(task::SCHEDULER.lock().tasks.len(), proc_baseline_tasks, "Process task leak at cycle {}", cycle);
     }
+    unsafe { user::IN_LIFECYCLE_TEST = false; }
     kprintln!("[TEST] 50-Cycle Real Process Lifecycle: Spawn, execute, parent waitpid & zero frame/task leakage VERIFIED.");
 
     // 45c. Process Safety Invariants & Allocator Exhaustion/Rollback
@@ -1573,6 +1615,40 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     }
     kprintln!("[TEST] Process Safety Invariants: Quota exhaustion, active reap rejection & ELF rollback VERIFIED.");
 
+    // 45d. Physical Frame Ownership & Reference Counting
+    {
+        kprintln!("--- [Testing AArch64 Physical Frame Ownership & Shared Mappings] ---");
+        let baseline = mmu::active_allocated_frames();
+        let frame1 = mmu::allocate_frame().expect("Frame alloc");
+        let mut aspace_a = mmu::UserAddressSpace::new().expect("Aspace A");
+        let mut aspace_b = mmu::UserAddressSpace::new().expect("Aspace B");
+
+        // Private mapping
+        assert_eq!(aspace_a.map_private_frame(0x0040_0000, frame1, true, false), Ok(()));
+        assert_eq!(mmu::frame_ownership(frame1), Some(mmu::FrameOwnership::PrivateOwned));
+
+        // Shared mapping: frame2 mapped into A (refcount 1), then into B (refcount 2)
+        let frame2 = mmu::allocate_frame_with_ownership(mmu::FrameOwnership::Shared).expect("Frame alloc");
+        assert_eq!(aspace_a.map_shared_frame(0x0050_0000, frame2, false, false), Ok(()));
+        assert_eq!(aspace_b.map_shared_frame(0x0050_0000, frame2, false, false), Ok(()));
+        assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
+        assert_eq!(mmu::frame_refcount(frame2), 2);
+
+        // Borrowed mapping: physical MMIO/buffer frame
+        assert_eq!(aspace_a.map_borrowed_frame(0x0060_0000, 0x0a00_0000, true, false), Ok(()));
+
+        // Destroy Aspace A: private frame1 freed, shared frame2 retained (refcount 1), borrowed not freed
+        aspace_a.destroy();
+        assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
+        assert_eq!(mmu::frame_refcount(frame2), 1);
+
+        // Destroy Aspace B: shared frame2 drops to 0 and is freed
+        aspace_b.destroy();
+
+        assert_eq!(mmu::active_allocated_frames(), baseline, "All owned frames must return to baseline");
+        kprintln!("[TEST] Frame Ownership & Shared Mappings: Private/Shared/Borrowed lifecycle VERIFIED.");
+    }
+
     // 46. Service Supervisor Lifecycle & Recovery Verification
     kprintln!("--- [Testing AArch64 Service Supervisor Lifecycle & Recovery] ---");
     let test_svc_id = 3; // storaged
@@ -1581,6 +1657,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
     assert_eq!(services::heartbeat(9999), Err(()), "Heartbeat with spoofed PID must be rejected");
     assert_eq!(services::heartbeat(orig_pid), Ok(()), "Heartbeat with owning PID must be accepted");
+    // Verify generation check
+    assert_eq!(services::heartbeat_with_generation(orig_pid, Some(1)), Ok(()), "Heartbeat with correct generation must succeed");
+    assert_eq!(services::heartbeat_with_generation(orig_pid, Some(999)), Err(()), "Heartbeat with stale generation must be rejected");
     // Simulate service failure/crash by terminating its task and running snapshot audit:
     {
         let mut sched = task::SCHEDULER.lock();

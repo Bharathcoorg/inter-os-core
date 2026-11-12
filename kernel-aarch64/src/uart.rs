@@ -391,8 +391,12 @@ pub static UART: Mutex<KernelUart> = Mutex::new(KernelUart::new_pl011(DEFAULT_PL
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    let mut uart = UART.lock();
-    let _ = uart.write_fmt(args);
+    if let Some(mut uart) = UART.try_lock() {
+        let _ = uart.write_fmt(args);
+    } else {
+        let mut pl = Pl011Uart::new(DEFAULT_PL011_BASE);
+        let _ = pl.write_fmt(args);
+    }
 }
 
 #[macro_export]

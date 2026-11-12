@@ -251,18 +251,19 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
             let code = a0 as i32;
             crate::kprintln!("[SYSCALL] Task exited with code: {}", code);
             crate::user::record_el0_exit(code);
-            if unsafe { crate::user::IN_SECTION17_SMOKE } {
-                unsafe {
-                    crate::user::return_to_kernel_mode();
-                }
-            } else {
+            {
                 let mut sched = crate::task::SCHEDULER.lock();
                 let curr = sched.current_task_idx;
                 if curr < sched.tasks.len() {
                     sched.tasks[curr].state = crate::task::TaskState::Terminated;
                     sched.tasks[curr].exit_code = Some(code);
                 }
-                drop(sched);
+            }
+            if unsafe { crate::user::IN_SECTION17_SMOKE || crate::user::IN_LIFECYCLE_TEST } {
+                unsafe {
+                    crate::user::return_to_kernel_mode();
+                }
+            } else {
                 loop {
                     crate::task::yield_now();
                 }

@@ -56,21 +56,80 @@ pub fn shutdown() -> ! {
     loop {}
 }
 
-/// Broadcasts an sfence.vma instruction to remote harts via SBI RFNC extension (EID 0x52464E43, FID 0x1).
+pub const SBI_EXT_BASE: usize = 0x10;
+pub const SBI_EXT_BASE_PROBE_EXT: usize = 3;
+
+pub const SBI_EXT_RFNC: usize = 0x52464E43;
+pub const SBI_EXT_RFNC_REMOTE_FENCE_I: usize = 0;
+pub const SBI_EXT_RFNC_REMOTE_SFENCE_VMA: usize = 1;
+pub const SBI_EXT_RFNC_REMOTE_SFENCE_VMA_ASID: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SbiError {
+    Failed,
+    NotSupported,
+    InvalidParam,
+    Denied,
+    InvalidAddress,
+    AlreadyAvailable,
+    AlreadyStarted,
+    AlreadyStopped,
+    NoShmem,
+    Unknown(isize),
+}
+
+impl SbiError {
+    pub fn from_isize(val: isize) -> Option<Self> {
+        match val {
+            0 => None, // SBI_SUCCESS
+            -1 => Some(SbiError::Failed),
+            -2 => Some(SbiError::NotSupported),
+            -3 => Some(SbiError::InvalidParam),
+            -4 => Some(SbiError::Denied),
+            -5 => Some(SbiError::InvalidAddress),
+            -6 => Some(SbiError::AlreadyAvailable),
+            -7 => Some(SbiError::AlreadyStarted),
+            -8 => Some(SbiError::AlreadyStopped),
+            -9 => Some(SbiError::NoShmem),
+            other => Some(SbiError::Unknown(other)),
+        }
+    }
+}
+
 #[inline(always)]
-pub fn remote_sfence_vma(hart_mask: usize, hart_mask_base: usize, start_addr: usize, size: usize) {
+pub fn sbi_call(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> (isize, usize) {
+    let err: isize;
+    let val: usize;
     unsafe {
         asm!(
             "ecall",
-            in("a7") 0x52464E43usize, // SBI_EXT_RFNC
-            in("a6") 1usize,          // SBI_EXT_RFNC_REMOTE_SFENCE_VMA
-            in("a0") hart_mask,
-            in("a1") hart_mask_base,
-            in("a2") start_addr,
-            in("a3") size,
-            lateout("a0") _,
-            lateout("a1") _,
+            in("a7") eid,
+            in("a6") fid,
+            in("a0") arg0,
+            in("a1") arg1,
+            in("a2") arg2,
+            in("a3") arg3,
+            lateout("a0") err,
+            lateout("a1") val,
         );
+    }
+    (err, val)
+}
+
+/// Probes whether a given SBI extension ID is supported by firmware.
+pub fn probe_extension(extension_id: usize) -> bool {
+    let (err, val) = sbi_call(SBI_EXT_BASE, SBI_EXT_BASE_PROBE_EXT, extension_id, 0, 0, 0);
+    err == 0 && val != 0
+}
+
+/// Broadcasts an sfence.vma instruction to remote harts via SBI RFNC extension (EID 0x52464E43, FID 0x1).
+/// Returns Ok(()) on SBI_SUCCESS, or Err(SbiError) if firmware rejected or failed the request.
+pub fn remote_sfence_vma(hart_mask: usize, hart_mask_base: usize, start_addr: usize, size: usize) -> Result<(), SbiError> {
+    let (err, _) = sbi_call(SBI_EXT_RFNC, SBI_EXT_RFNC_REMOTE_SFENCE_VMA, hart_mask, hart_mask_base, start_addr, size);
+    if let Some(e) = SbiError::from_isize(err) {
+        Err(e)
+    } else {
+        Ok(())
     }
 }
 

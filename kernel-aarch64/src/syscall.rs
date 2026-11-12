@@ -465,7 +465,8 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Ok(pair) => pair,
                 Err(err) => return err,
             };
-            match crate::services::heartbeat(caller_pid) {
+            let gen_opt = if a1 != 0 { Some(a1 as u32) } else { None };
+            match crate::services::heartbeat_with_generation(caller_pid, gen_opt) {
                 Ok(()) => 0,
                 Err(()) => -13,
             }

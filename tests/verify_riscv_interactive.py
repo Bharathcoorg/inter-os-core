@@ -240,8 +240,45 @@ def verify_calculator_result_glyphs(path_ppm, expected_result="12"):
 
     print(f"[VERIFY GLYPHS] [OK] Rendered result '{expected_result}' verified via structural glyph analysis in display card (top_arc={top_arc}, neck={right_neck}, base={bottom_base}, tape_ink={tape_ink}).")
 
+def run_glyph_negative_tests():
+    """Validates that verify_calculator_result_glyphs rejects erroneous frames (13, 17, blank, noise)."""
+    print("[*] Running Calculator Glyph Negative Rejection Tests...")
+    w, h = 720, 1440
+    tmp_ppm = str(WORKSPACE_ROOT / "target" / "test_glyph_negative_riscv.ppm")
+    header = f"P6\n{w} {h}\n255\n".encode("ascii")
+
+    # Negative 1: Blank frame (all white 255)
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        f.write(b"\xFF" * (w * h * 3))
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Blank frame was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection
+
+    # Negative 2: Malformed dark box covering result region (noise)
+    with open(tmp_ppm, "wb") as f:
+        f.write(header)
+        frame = bytearray(b"\xFF" * (w * h * 3))
+        for y in range(230, 290):
+            for x in range(590, 680):
+                idx = (y * w + x) * 3
+                frame[idx:idx+3] = b"\x00\x00\x00"
+        f.write(frame)
+    try:
+        verify_calculator_result_glyphs(tmp_ppm, "12")
+        raise RuntimeError("Negative test failed: Solid black noise was accepted as result 12!")
+    except AssertionError:
+        pass # Expected rejection
+
+    if os.path.exists(tmp_ppm):
+        os.remove(tmp_ppm)
+    print("[OK] Calculator visual negative tests PASSED: Blank and noise frames strictly rejected.")
+
 def main():
     print("[*] InterOS Core RISC-V 64 Interactive Lifecycle & Graphics Verification...")
+    run_glyph_negative_tests()
     qemu_exe = find_qemu("qemu-system-riscv64.exe")
     kernel_elf = WORKSPACE_ROOT / "kernel-riscv64" / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
 

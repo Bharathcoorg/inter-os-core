@@ -183,6 +183,11 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 tf.sepc += width;
                 crate::syscall::dispatch_syscall(tf);
                 if syscall_num == 2 || syscall_num == 64 {
+                    if unsafe { IN_LIFECYCLE_TEST } {
+                        unsafe {
+                            return_to_kernel_mode();
+                        }
+                    }
                     static mut INIT_LAUNCHED: bool = false;
                     if unsafe { !INIT_LAUNCHED } {
                         unsafe { INIT_LAUNCHED = true; }
@@ -301,6 +306,106 @@ pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kst
         "mv a7, zero",
         // 6. Hardware privilege drop into U-mode at sepc
         "sret",
+    );
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KernelSavedContext {
+    pub ra: usize,
+    pub sp: usize,
+    pub s0: usize,
+    pub s1: usize,
+    pub s2: usize,
+    pub s3: usize,
+    pub s4: usize,
+    pub s5: usize,
+    pub s6: usize,
+    pub s7: usize,
+    pub s8: usize,
+    pub s9: usize,
+    pub s10: usize,
+    pub s11: usize,
+}
+
+pub static mut KERNEL_SAVED_CTX: KernelSavedContext = KernelSavedContext {
+    ra: 0,
+    sp: 0,
+    s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0, s8: 0, s9: 0, s10: 0, s11: 0,
+};
+
+pub static mut IN_LIFECYCLE_TEST: bool = false;
+
+/// Drops CPU execution privilege from S-mode to U-mode via `sret`, saving kernel context
+/// so `return_to_kernel_mode` can return back to kernel execution.
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp: usize, kstack_top: usize) {
+    naked_asm!(
+        // Save callee-saved registers to KERNEL_SAVED_CTX
+        "la t0, {ctx}",
+        "sd ra, 0(t0)",
+        "sd sp, 8(t0)",
+        "sd s0, 16(t0)",
+        "sd s1, 24(t0)",
+        "sd s2, 32(t0)",
+        "sd s3, 40(t0)",
+        "sd s4, 48(t0)",
+        "sd s5, 56(t0)",
+        "sd s6, 64(t0)",
+        "sd s7, 72(t0)",
+        "sd s8, 80(t0)",
+        "sd s9, 88(t0)",
+        "sd s10, 96(t0)",
+        "sd s11, 104(t0)",
+
+        // 1. Initialize sscratch with kernel stack for handling traps from U-mode
+        "csrw sscratch, a2",
+        // 2. Clear SPP (bit 8) so return lands in U-mode, set SPIE (bit 5), clear SUM (bit 18)
+        "csrr t0, sstatus",
+        "li t1, ~((1 << 8) | (1 << 18))",
+        "and t0, t0, t1",
+        "ori t0, t0, (1 << 5)",
+        "csrw sstatus, t0",
+        // 3. Set sepc = entry_point (a0)
+        "csrw sepc, a0",
+        // 4. Set user SP = a1
+        "mv sp, a1",
+        // 5. Zero registers for process boundary isolation
+        "mv a0, zero",
+        "mv a1, zero",
+        "mv a2, zero",
+        "mv a3, zero",
+        "mv a4, zero",
+        "mv a5, zero",
+        "mv a6, zero",
+        "mv a7, zero",
+        // 6. Hardware privilege drop into U-mode at sepc
+        "sret",
+        ctx = sym KERNEL_SAVED_CTX,
+    );
+}
+
+/// Restores kernel callee-saved registers and returns to caller of `enter_user_mode_with_return`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn return_to_kernel_mode() -> ! {
+    naked_asm!(
+        "la t0, {ctx}",
+        "ld ra, 0(t0)",
+        "ld sp, 8(t0)",
+        "ld s0, 16(t0)",
+        "ld s1, 24(t0)",
+        "ld s2, 32(t0)",
+        "ld s3, 40(t0)",
+        "ld s4, 48(t0)",
+        "ld s5, 56(t0)",
+        "ld s6, 64(t0)",
+        "ld s7, 72(t0)",
+        "ld s8, 80(t0)",
+        "ld s9, 88(t0)",
+        "ld s10, 96(t0)",
+        "ld s11, 104(t0)",
+        "ret",
+        ctx = sym KERNEL_SAVED_CTX,
     );
 }
 

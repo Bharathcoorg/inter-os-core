@@ -28,6 +28,7 @@ pub static mut EL0_MMU_TRAP_VERIFIED: bool = false;
 pub static mut EL0_EXIT_CODE: i32 = 0;
 pub static mut EL0_TEST_COMPLETED: bool = false;
 pub static mut IN_SECTION17_SMOKE: bool = true;
+pub static mut IN_LIFECYCLE_TEST: bool = false;
 
 extern "C" {
     pub fn enter_user_mode(entry_point: u64, user_sp: u64);
