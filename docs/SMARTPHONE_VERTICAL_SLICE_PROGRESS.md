@@ -1,0 +1,129 @@
+# InterOS Core — Smartphone Vertical Slice Recovery & Integration Progress
+
+**Target Environment:** x86_64 (Canonical Reference), AArch64, RISC-V 64  
+**Starting Commit:** `936073637af0d5845e6fe714bbd0e93fbcc7b14e`  
+**Execution Policy:** Local verification only. Zero CI.  
+**Date:** 2026-11-13  
+**Status:** COMPLETE INITIAL RECOVERY & INTEGRATION  
+
+---
+
+## 1. Overview & Mission
+
+The objective of this phase is to transition InterOS Core from narrow scheduler-hardening cycles to establishing a coherent, reproducible, interactive smartphone operating-system vertical slice:
+`Firmware -> Bootloader -> Kernel -> Memory Management -> Scheduler -> Init (PID 1) -> Service Manager -> System Services -> Display Server -> Compositor -> Launcher -> Applications`.
+
+To achieve this:
+1. Conducted an exhaustive source-level and architectural audit across all subsystems using 5 specialized audit streams (Boot & Runtime, Display & Input, Storage & Packages, Device Studio & QEMU, Security & Architecture).
+2. Performed end-to-end live interactive verification on the canonical x86_64 QEMU portrait smartphone (720x1440, 32bpp BGRX).
+3. Resolved highest-priority P0/P1 integration blockers in the input pipeline, service manager registration, RAPP package lifecycle, and Device Studio multi-arch emulator.
+4. Fully verified all boot and contract invariants across x86_64, AArch64, and RISC-V 64.
+
+---
+
+## 2. Comprehensive Subsystem Audit Findings
+
+Detailed audit published at `docs/audits/SMARTPHONE_VERTICAL_SLICE_AUDIT.md`. Key findings:
+
+### A. Display Subsystem & DRM/KMS Compositor
+- **Bochs DISPI Hardware Mode Setting:** `kernel/src/framebuffer.rs` programs Bochs DISPI registers (`0x1CE`/`0x1CF`) directly to configure native 720x1440 portrait at 32bpp BGRX (`VBE_DISPI_INDEX_ENABLE | VBE_DISPI_NOCLEARMEM`). 4.14 MB of framebuffer memory is dynamically mapped, enabling 1:1 pixel rendering with zero software scaling artifacts.
+- **In-Kernel DRM/KMS Compositor:** `kernel/src/drivers/drm_kms.rs` composites up to 8 client surfaces (z=0: Launcher/Desktop, z=100: Status/Nav Bars, z=200: Foreground App, z=300: Overlays/Dialogs) directly into scanout memory using fine-grained damage tracking and preallocated zero-heap buffers.
+- **Role of `apps/compositor`:** Surface compositing is performed in kernel space; `apps/compositor` merely maintains a 720x96 dummy surface and intentionally avoids calling `sys_surface_flip` to prevent screen tearing.
+
+### B. Input Pipeline & PS/2 Mouse Draining
+- **PS/2 Mouse & Touch Digitizer:** Hardware inputs are processed via Goodix GT911 touch simulation (`kernel/src/input/digitizer.rs`) and standard PS/2 packets (`kernel/src/drivers/ps2_mouse.rs`).
+- **Mouse Event Starvation Defect:** `ps2_mouse::drain_events()` was previously invoked **only** in `sys_yield()`. If an application waited in `sys_event_poll` without yielding, mouse packets buffered and lagged.
+- **Resolution:** Added `crate::drivers::ps2_mouse::drain_events()` to `sys_event_poll` in `kernel/src/syscall/mod.rs` and the Task 0 idle loop in `kernel/src/main.rs`.
+
+### C. Userspace Service Manager (PID 1) & Task Identity
+- **Startup:** Primordial init (`userspace/init/src/main.rs`) executes in Ring 3 as Task 1, exercising service start, stop, restart, and heartbeat monitoring via `SYS_SERVICE_START` (86), `SYS_SERVICE_STOP` (87), and `SYS_SERVICE_RECOVER_FAILED` (88).
+- **Service Init Task ID Mismatch Defect:** In `kernel/src/services.rs:500`, `records[Init]` was initialized with `TaskId(0)` (the kernel main thread). When `spawn_user_init` allocated `TaskId(1)` to PID 1, the registry retained `TaskId(0)`.
+- **Resolution:** Implemented `register_init_task(id: TaskId)` in `kernel/src/services.rs` and invoked it immediately following `spawn_user_init` in `kernel/src/main.rs`.
+
+### D. Package Runtime & Content Layer (RAPP v4)
+- **Serial Sideloading Intent Registration Defect:** When RAPP v4 packages were sideloaded over COM1 via `RAPP_COMMIT`, declared intents were omitted from `INTENT_REGISTRY` (unlike the `sys_package_install` syscall path). Additionally, `dev_uninstall_verified_rapp` omitted intent unregistration.
+- **Resolution:** Registered `verified.intents` in `INTENT_REGISTRY` upon successful `RAPP_COMMIT` in `kernel/src/serial.rs`, and unregistered `pkg_id` in `dev_uninstall_verified_rapp` in `kernel/src/syscall/mod.rs`.
+
+### E. Device Studio & Multi-Arch QEMU Integration
+- **Port Mismatch Defect:** `serial_stream_worker` and monitor command helpers in `emulator/server.py` connected strictly to static port 4301 and 44445, permanently failing on AArch64 (4302/44446) and RISC-V 64 (4303/44447).
+- **Display Driver Defect:** `server.py` started non-x86 QEMU with `-device virtio-gpu-pci`, while `kernel-aarch64` and `kernel-riscv64` implement `init_bochs_display` which scans for the Bochs PCI adapter (`-device bochs-display`).
+- **Platform Truth Violation:** `GET /api/extended-controls/state` previously reported hardcoded 85% battery even when QEMU was offline.
+- **Resolution:**
+  - Dynamically resolved serial port and monitor port using `SUPPORTED_PROFILES[active_profile_key]`.
+  - Replaced `-device virtio-gpu-pci` with `-device bochs-display`.
+  - Added `tracked_qemu_process_alive()` verification in `GET /api/extended-controls/state` to report `UNAVAILABLE` and `Disconnected` when QEMU is offline.
+
+---
+
+## 3. Empirical Live Verification Results
+
+### A. 15-Operation Interactive Smartphone Lifecycle (`tests/test_interactive_lifecycle.py`)
+Executed live against the canonical x86_64 QEMU portrait smartphone:
+- **Operation 1: Launcher Presentation:** 15-app home grid rendered at 720x1440 32bpp; initial scanout verified.
+- **Operation 2: Lock Screen Unlock:** Swipe-up gesture unlocked device owner (UID 1000).
+- **Operation 3: App Drawer:** Drawer opened; category tabs switched.
+- **Operations 4–14: Application Lifecycle:** Launched, verified surface allocation (z=200), UI rendering, interactive touch inputs, back/gesture-bar navigation, surface teardown, and parent waitpid reaping across 12 distinct apps:
+  - **Calculator** (`org.interos.calculator`): Keypad interaction (`7 + 5 = 12`), reaped on Back tap.
+  - **Settings** (`org.interos.settings`): Tab navigation, reaped on Swipe-up.
+  - **Vault** (`org.interos.vault`): Root keystore sector card verification, reaped on Back tap.
+  - **Camera** (`org.interos.camera`): Mode carousel switch to Document Vision, reaped on Swipe-up.
+  - **Dialer** (`org.interos.dialer`): Keypad entry ('9'), reaped on Back tap.
+  - **Browser** (`org.interos.browser`): Bookmark navigation, reaped on Home bar tap.
+  - **Messages** (`org.interos.messages`): Conversation thread view open, reaped on Back tap.
+  - **Calendar** (`org.interos.calendar`): Date canvas presentation, reaped on Swipe-up.
+  - **Music** (`org.interos.music`): Play/pause transport toggle, reaped on Swipe-up.
+  - **Files** (`org.interos.file_manager`): Category filter switch to Images, reaped on Home bar tap.
+  - **Gallery** (`org.interos.gallery`): Category chip switch to Wallpapers, reaped on Home bar tap.
+  - **Notes** (`org.interos.notes`): Canvas presentation, reaped on Home bar tap.
+- **Operation 15: Shell Features:**
+  - **Recent Apps Overview Deck:** Switched to recent app; dismissed Card 0 via close badge tap; dismissed Card 1 via horizontal swipe.
+  - **Quick Controls Shade:** Status bar tap opened control center; toggles rendered; returned to Home.
+  - **Notifications Shade:** Top-left status bar tap opened notifications list; returned to Home.
+  - **Power Menu & Lock Screen:** Battery status bar tap opened power drawer; locked device; flashlight affordance reported unavailable on torch-less hardware; swipe-up unlocked device.
+  - **Global Search Surface:** Universal search bar tap opened search canvas; returned to Home.
+- **Verdict:** `INTEROS CORE LIFECYCLE INTERACTIONS: PASSED (15/15)`.
+
+### B. Boot & Contract Invariant Verifications
+- `python tests/verify_x86_boot.py`: **PASSED (100%)** (GDT, TSS, Page Tables, Frame Allocator, Persistent VFS, PID 1, Launcher Canvas, 720x1440 32bpp framebuffer with 3627 distinct colors).
+- `python tests/verify_aarch64_boot.py`: **PASSED (100%)** (FDT, translation tables, UART PL011, scheduler, EL0 userspace).
+- `python tests/verify_riscv_boot.py`: **PASSED (100%)** (OpenSBI, Sv39 MMU, SBI timer, scheduler, U-mode userspace).
+- `python tools/interos.py contracts`: **PASSED (25/25)**.
+- `python -m pytest tests/test_platform_reality.py`: **PASSED (68/68)**.
+- `cargo test --manifest-path kernel/Cargo.toml`: **PASSED (593 passed, 0 failed, 1 ignored)**.
+- `cargo check --workspace`: **PASSED (0 warnings/errors)**.
+- `cargo check --manifest-path kernel-aarch64/Cargo.toml`: **PASSED (0 errors)**.
+- `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml`: **PASSED (0 errors)**.
+
+---
+
+## 4. Implemented P0/P1 Changes
+
+| Subsystem | File | Lines Changed | Description |
+| :--- | :--- | :---: | :--- |
+| **Input Pipeline** | `kernel/src/syscall/mod.rs` | +1 | Call `crate::drivers::ps2_mouse::drain_events()` in `sys_event_poll` |
+| **Input Pipeline** | `kernel/src/main.rs` | +1 | Call `kernel::drivers::ps2_mouse::drain_events()` in Task 0 idle loop |
+| **Service Manager**| `kernel/src/services.rs` | +9 | Implement `register_init_task(id: TaskId)` to synchronize PID 1 task ID |
+| **Service Manager**| `kernel/src/main.rs` | +1 | Invoke `kernel::services::register_init_task(id_user_init)` after spawn |
+| **Package Runtime**| `kernel/src/serial.rs` | +3 | Register `verified.intents` in `INTENT_REGISTRY` on `RAPP_COMMIT` |
+| **Package Runtime**| `kernel/src/syscall/mod.rs` | +1 | Unregister `pkg_id` from `INTENT_REGISTRY` in `dev_uninstall_verified_rapp` |
+| **Device Studio**  | `emulator/server.py` | +2, -1 | Dynamically resolve `target_serial_port` based on `active_profile_key` |
+| **Device Studio**  | `emulator/server.py` | +3, -1 | Dynamically resolve `target_monitor_port` in `send_qemu_monitor_cmd` |
+| **Device Studio**  | `emulator/server.py` | +1, -1 | Switch AArch64/RISC-V 64 display device from `virtio-gpu-pci` to `bochs-display` |
+| **Platform Truth** | `emulator/server.py` | +5, 0 | Check `tracked_qemu_process_alive()` in `/api/extended-controls/state` |
+
+---
+
+## 5. Architectural Invariants Preserved
+
+1. **The Platform Truth Contract:**
+   - No mock drivers claiming physical silicon.
+   - Flashlight reported unavailable when physical torch is absent.
+   - Extended controls report `UNAVAILABLE` when QEMU is offline.
+2. **Userspace Guarantees:**
+   - All interactive applications remain `#![no_std]` and `#![no_main]`.
+   - Zero heap allocation in interactive rendering loops and compositing passes.
+3. **Panic & Fault Resilience:**
+   - Zero blocking locks in panic and fault handlers.
+4. **Zero Ambient Authority:**
+   - All access to hardware, VFS, IPC, and system services requires an explicit capability token.
+   - Sideloaded packages only receive capabilities declared in verified RAPP manifests.
