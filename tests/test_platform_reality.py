@@ -935,5 +935,43 @@ class PlatformRealityTests(unittest.TestCase):
         # "intc" match "intcmux" and bind MMIO to the wrong node.
         self.assertIn("fn node_name_matches(name: &str, target: &str) -> bool", fdt)
         self.assertIn("rest.starts_with('@')", fdt)
+
+    def test_service_lifecycle_token_forgery_eliminated(self):
+        """Verifies that arbitrary ServiceLifecycleToken construction is eliminated from production code."""
+        for arch in ("kernel-aarch64", "kernel-riscv64"):
+            services_src = self.read(f"{arch}/src/services.rs")
+            task_src = self.read(f"{arch}/src/task.rs")
+
+            # 1. No forge_for_test symbol exists in the file
+            self.assertNotIn("forge_for_test", services_src, f"{arch} must not contain forge_for_test")
+
+            # 2. No make_test_token closure or helper exists in the file
+            self.assertNotIn("make_test_token", services_src, f"{arch} must not contain make_test_token")
+
+            # 3. ServiceLifecycleToken has private fields
+            self.assertIn("pub struct ServiceLifecycleToken {", services_src)
+            self.assertNotIn("pub service_id:", services_src)
+            self.assertNotIn("pub pid:", services_src)
+            self.assertNotIn("pub generation:", services_src)
+
+            # 4. Only issue() constructor, and it is module-private
+            self.assertIn("fn issue(entry: &ServiceEntry) -> Option<Self>", services_src)
+            self.assertNotIn("pub fn issue(", services_src)
+            self.assertNotIn("pub(crate) fn issue(", services_src)
+            self.assertNotIn("pub fn new(", services_src)
+            self.assertNotIn("pub const fn new(", services_src)
+            self.assertNotIn("pub fn for_service(", services_src)
+
+            # 5. spawn_service_process is pub(crate) and validates generation and service_id
+            self.assertIn("pub(crate) fn spawn_service_process(", task_src)
+            self.assertIn("generation == 0 || !crate::services::is_valid_service_id(service_id)", task_src)
+
+            # 6. test_service_supervisor_lifecycle_hardening does NOT construct tokens
+            start_test = services_src.index("pub fn test_service_supervisor_lifecycle_hardening()")
+            end_test = services_src.index("\n}\n", start_test)
+            test_body = services_src[start_test:end_test]
+            self.assertNotIn("ServiceLifecycleToken {", test_body, f"{arch} boot test must not manufacture tokens")
+            self.assertNotIn("ServiceLifecycleToken::", test_body, f"{arch} boot test must not call token constructors")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

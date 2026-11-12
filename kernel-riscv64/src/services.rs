@@ -145,15 +145,6 @@ impl ServiceLifecycleToken {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn forge_for_test(service_id: u8, pid: u32, generation: u32) -> Self {
-        Self {
-            service_id,
-            pid,
-            generation,
-        }
-    }
-
     pub(crate) fn service_id(&self) -> u8 {
         self.service_id
     }
@@ -550,13 +541,6 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     crate::println!("--- [Testing RISC-V Service Supervisor Lifecycle & Authorization Hardening] ---");
     let test_svc_id = 3; // ServiceId::Storage ("storaged")
 
-    // In-module private test token helper for negative authorization testing
-    let make_test_token = |service_id: u8, pid: u32, generation: u32| ServiceLifecycleToken {
-        service_id,
-        pid,
-        generation,
-    };
-
     // Clean initial state: stop if already running
     let _ = stop(test_svc_id);
 
@@ -622,42 +606,47 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     }
     crate::println!("[TEST] Test 4 (Failed Service Recovery & Reaping): PASSED");
 
-    // Test 5: Unauthorized ordinary user process rejection with -EPERM
+    // Test 5: Unauthorized undeclared service lifecycle rejection
+    let invalid_svc_id = 255u8;
+    assert_eq!(stop(invalid_svc_id), Err(()), "Test 5: stop on undeclared service must fail");
+    assert_eq!(recover_failed(invalid_svc_id), Err(()), "Test 5: recover_failed on undeclared service must fail");
+    assert_eq!(service_pid(invalid_svc_id), None, "Test 5: Undeclared service PID must be None");
+    assert_eq!(service_state(invalid_svc_id), None, "Test 5: Undeclared service state must be None");
+    assert_eq!(service_generation(invalid_svc_id), None, "Test 5: Undeclared service generation must be None");
+    assert_eq!(service_pid(test_svc_id), Some(pid3));
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
+    crate::println!("[TEST] Test 5 (Unauthorized Undeclared Service Rejection): PASSED");
+
+    // Test 6: Ordinary task isolation & unprivileged access denial (-EACCES)
     let user_pid = {
         let mut sched = crate::task::SCHEDULER.lock();
         sched.spawn_user_process(1, "unauth_user", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new())
     };
     assert!(user_pid > 0);
-    let forged_token = make_test_token(test_svc_id, user_pid, 1);
-    assert_eq!(crate::task::reap_service_task(&forged_token), Err(-1), "Test 5: reap_service_task on ordinary user process must fail with -EPERM (-1)");
     {
         let mut sched = crate::task::SCHEDULER.lock();
-        assert_eq!(crate::task::terminate_service_task(&mut sched, &forged_token), Err(-1), "Test 5: terminate_service_task on ordinary user process must fail with -EPERM (-1)");
+        // 1. Unprivileged caller cannot terminate an active process (-EACCES -13)
+        assert_eq!(sched.terminate_task(9999, false, user_pid), Err(-13), "Test 6: Unprivileged terminate_task must fail with -EACCES (-13)");
+        // 2. Supervisor termination transitions task to Terminated
+        assert_eq!(sched.terminate_task(crate::task::SUPERVISOR_PID, true, user_pid), Ok(()), "Test 6: Supervisor termination must succeed");
+        // 3. Unprivileged caller cannot reap a terminated process (-EACCES -13)
+        assert_eq!(sched.begin_reap(9999, false, user_pid), Err(-13), "Test 6: Unprivileged begin_reap must fail with -EACCES (-13)");
         let pos = sched.tasks.iter().position(|t| t.id == user_pid).unwrap();
         sched.remove_task_at(pos);
     }
-    crate::println!("[TEST] Test 5 (Unauthorized Ordinary Process Rejection -EPERM): PASSED");
+    crate::println!("[TEST] Test 6 (Ordinary Task Isolation & Non-Supervisor Access Denial): PASSED");
 
-    // Test 6: Stale PID / generation token rejection with -EPERM
-    let cur_gen = service_generation(test_svc_id).expect("service generation");
-    let stale_gen_token = make_test_token(test_svc_id, pid3, cur_gen.wrapping_add(999));
-    assert_eq!(crate::task::reap_service_task(&stale_gen_token), Err(-1), "Test 6: Token with stale generation must be rejected with -EPERM (-1)");
-    {
-        let mut sched = crate::task::SCHEDULER.lock();
-        assert_eq!(crate::task::terminate_service_task(&mut sched, &stale_gen_token), Err(-1), "Test 6: terminate with stale generation must fail with -EPERM (-1)");
-    }
-    let stale_pid_token = make_test_token(test_svc_id, 0x9999, cur_gen);
-    assert_eq!(crate::task::reap_service_task(&stale_pid_token), Err(-1), "Test 6: Token with stale PID must be rejected with -EPERM (-1)");
-    crate::println!("[TEST] Test 6 (Stale PID & Generation Token Rejection -EPERM): PASSED");
-
-    // Test 7: Service registration mismatch rejection with -EPERM (-1)
-    let mismatch_token = make_test_token(test_svc_id + 1, pid3, cur_gen);
-    assert_eq!(crate::task::reap_service_task(&mismatch_token), Err(-1), "Test 7: Token with mismatched service ID must fail with -EPERM (-1)");
-    {
-        let mut sched = crate::task::SCHEDULER.lock();
-        assert_eq!(crate::task::terminate_service_task(&mut sched, &mismatch_token), Err(-1), "Test 7: terminate with mismatched service ID must fail with -EPERM (-1)");
-    }
-    crate::println!("[TEST] Test 7 (Service Registration Mismatch Rejection -EPERM): PASSED");
+    // Test 7: Redundant / spurious service stop safety
+    // Stopping an already stopped service must be safe and idempotent
+    assert_eq!(stop(test_svc_id), Ok(()), "Initial stop must succeed");
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
+    assert_eq!(service_pid(test_svc_id), None);
+    assert_eq!(stop(test_svc_id), Ok(()), "Redundant stop on stopped service must return Ok(()) cleanly");
+    assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
+    assert_eq!(service_pid(test_svc_id), None);
+    let pid4 = start(test_svc_id).expect("start service for test 9");
+    assert!(pid4 > 0);
+    crate::println!("[TEST] Test 7 (Spurious & Redundant Service Stop Safety): PASSED");
 
     // Test 8: Reserved PID registration & spawn_service_process validation
     {
@@ -681,15 +670,18 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     }
     crate::println!("[TEST] Test 8 (Reserved PID Registration Rejection & Spawn Validation): PASSED");
 
-    // Test 9: Failure paths without silently clearing service PID
+    // Test 9: Failure paths preserve service registry PID & state
     {
-        let recorded_pid = service_pid(test_svc_id).expect("Service PID must be active");
-        assert_eq!(recorded_pid, pid3);
-        // An unauthenticated / invalid token reap does NOT clear the registry PID
-        let invalid_token = make_test_token(test_svc_id, pid3, cur_gen.wrapping_add(555));
-        let reap_fail = crate::task::reap_service_task(&invalid_token);
-        assert_eq!(reap_fail, Err(-1));
-        assert_eq!(service_pid(test_svc_id), Some(pid3), "Test 9: Failed reap must NOT clear service PID from registry");
+        assert_eq!(service_pid(test_svc_id), Some(pid4));
+        assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
+
+        // recover_failed on a healthy Running service must fail
+        let invalid_recovery = recover_failed(test_svc_id);
+        assert_eq!(invalid_recovery, Err(()), "Test 9: recover_failed on healthy Running service must fail");
+
+        // The running PID and state must NOT be cleared or corrupted by failed recovery
+        assert_eq!(service_pid(test_svc_id), Some(pid4), "Test 9: Failed recover_failed must NOT clear service PID from registry");
+        assert_eq!(service_state(test_svc_id), Some(ServiceState::Running), "Test 9: Failed recover_failed must preserve Running state");
     }
     crate::println!("[TEST] Test 9 (Failure Paths Preserve Service PID): PASSED");
 
@@ -699,9 +691,40 @@ pub fn test_service_supervisor_lifecycle_hardening() {
         let sched = crate::task::SCHEDULER.lock();
         assert!(!sched.tasks.iter().any(|t| t.id == pid1), "Test 10: pid1 must be absent");
         assert!(!sched.tasks.iter().any(|t| t.id == pid2), "Test 10: pid2 must be absent");
-        assert!(!sched.tasks.iter().any(|t| t.id == pid3), "Test 10: pid3 must be reaped after stop");
+        assert!(!sched.tasks.iter().any(|t| t.id == pid3), "Test 10: pid3 must be absent");
+        assert!(!sched.tasks.iter().any(|t| t.id == pid4), "Test 10: pid4 must be reaped after stop");
     }
     assert_eq!(service_pid(test_svc_id), None, "Test 10: Stopped service PID must be None");
     crate::println!("[TEST] Test 10 (Process Absence & Replacement Integrity): PASSED");
     crate::println!("[TEST] RISC-V Service Supervisor Lifecycle Hardening 10/10 Tests VERIFIED.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lifecycle_token_private_invariants() {
+        // Genuinely test-only verification of token validation behavior
+        let fake_token = ServiceLifecycleToken {
+            service_id: 3,
+            pid: 99999,
+            generation: 1,
+        };
+        assert!(!fake_token.verify_live());
+
+        let reserved_token = ServiceLifecycleToken {
+            service_id: 3,
+            pid: crate::task::SUPERVISOR_PID,
+            generation: 1,
+        };
+        assert!(!reserved_token.verify_live());
+
+        let zero_token = ServiceLifecycleToken {
+            service_id: 3,
+            pid: 0,
+            generation: 1,
+        };
+        assert!(!zero_token.verify_live());
+    }
 }
