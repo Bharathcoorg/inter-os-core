@@ -1,132 +1,205 @@
-# InterOS Core — Phase 8.5.3.1 Completion Report
-## Remote Evacuation Race & Frame Reclamation Error Closure
+# InterOS Core — Phase 8.5.3.1 & 8.5.3.2 Completion Report
+## Remote Evacuation Race, Frame Reclamation Error Closure & Acceptance Closure
 
 **Date:** 2026-11-12  
 **Branch:** `master`  
-**Starting Commit SHA:** `96db7c7f6d6a48505960ba2e60c61d086c372d25`  
-**Implementation Commit SHA:** `7597e84cd6fd3060d509bd29da2e971d18abe02b`  
-**Execution Mode:** Parallel subagents + local QEMU/contract verification (no CI)  
 
 ---
 
-## 1. Subagents Used & Assigned Work
+## 1. Phase Objective
 
-Four subagents ran concurrently with strict file-ownership isolation:
-
-1. **Agent 1 — AArch64 Scheduler Specialist (`phase8531_worker`, conversation `3f48c37b-cbd3-4f29-9bb8-9e5bbaa170e7`)**:
-   - Owned `kernel-aarch64/src/task.rs`. Implemented the 5-stage lock-safe reaping protocol (`begin_reap`, lock-free bounded evacuation poll, `detach_reaping_aspace`, `abort_reap`, `finish_reap`, updated `reap_task` & `reap_task_locksafe`) and added `test_reap_evacuation_protocol`.
-2. **Agent 2 — RISC-V Scheduler Specialist (`phase8531_worker`, conversation `e7e11e24-e7bc-4206-b43a-1e30c2f96719`)**:
-   - Owned `kernel-riscv64/src/task.rs`. Implemented the equivalent 5-stage lock-safe reaping protocol for RISC-V (`REAP_EVACUATION_MAX_SPINS`, `aspace_is_evacuated`, `begin_reap`, `detach_reaping_aspace`, `abort_reap`, `reap_task_locksafe`) and added Test 8 evacuation regression tests.
-3. **Agent 3 — MMU Ownership & Reclamation Specialist (`phase8531_worker`, conversation `f65beeaa-fa6e-4f23-a358-c71c8632005e`)**:
-   - Owned `kernel-aarch64/src/mmu.rs` and `kernel-riscv64/src/mmu.rs`. Eliminated all ignored `mark_private_frame_unmapped()` errors in `unmap_user_page` and `destroy_fallible`, preserved failed mapping metadata and `mapped_bytes`, added `is_quarantined()` protection to `recycle_frame()` and refcount-1 `release_shared_frame()`, fixed table-frame quarantine ownership and `Drop` metadata preservation, added read-only evacuation helpers (`has_unacknowledged_or_active_cpus` / `has_unacknowledged_or_active_harts`, `is_evacuated_for_current`), and added `test_mmu_ownership_reclamation_errors()`.
-4. **Agent 4 — Independent Verification Auditor (`research`, read-only, conversation `f5074f95-7599-43b2-8f2d-812803558d0a`)**:
-   - Audited `b5694654`, `96db7c7f`, kernel/MMU/scheduler sources, boot/interactive test scripts, and doc accuracy; identified edge cases (pre-`destroy_fallible` bypass when active, missing `dsb ishst`/remote `sfence.vma` in `unmap_user_page`, Section 45b still using locked `reap_task`, boot verifiers omitting regression signal checks, and `kernel/` vs multi-core test script coverage limits).
-5. **Lead Agent Integration**:
-   - Synchronized `LIFECYCLE_CLOSING_BIT` enforcement on `begin_reap()`, unified `MAX_EVACUATION_POLLS = 1000`, added `dsb ishst` before `tlbi vae1is` (AArch64 `unmap_user_page`) and remote `sbi::remote_sfence_vma` (RISC-V `unmap_user_page`), added end-to-end `reap_task_locksafe` active->`ReapFailed`->`deactivate()`->reap tests, updated `main.rs` Section 45b to call `reap_task_locksafe()` (50 live EL0/U-Mode cycles) and invoke `mmu::test_mmu_ownership_reclamation_errors()`, and added assertions in `tests/verify_aarch64_boot.py` and `tests/verify_riscv_boot.py`.
+Close the two remaining safety blockers after Phase 8.5.3 and finalize cross-architecture acceptance documentation:
+1. **Blocker A — Remote Address-Space Evacuation Race:** Prevent `TaskControlBlock::address_space` from being detached before remote CPUs/harts finish switching away and deactivating it cleanly.
+2. **Blocker B — Ignored Private-Frame Ownership Validation Errors:** Never ignore `mark_private_frame_unmapped()` errors, never recycle frames on failed ownership transitions, retain mapping metadata and byte counts on failure, and guard against recycling quarantined frames.
+3. **Phase 8.5.3.2 Acceptance Closure:** Audit all production and internal task-reaping callers, correct misleading `x86_64` / SMP / polling labels in `docs/PHASE_8_5_ACCEPTANCE_MATRIX.md`, isolate `cargo fmt` baseline vs newly introduced diffs, investigate the intermittent `test_runner_integrity.py` failure, and commit verified documentation without reopening working kernel code.
 
 ---
 
-## 2. Files Changed
+## 2. Starting Baseline SHA
 
-| File | Scope |
-|---|---|
-| [kernel-aarch64/src/task.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/task.rs) | 5-stage lock-safe reaping + evacuation & `reap_task_locksafe` E2E tests (`+255 / -42` net lines) |
-| [kernel-aarch64/src/mmu.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/mmu.rs) | Quarantine protection, non-ignored `mark_private_frame_unmapped`, metadata preservation, `dsb ishst` barrier, `test_mmu_ownership_reclamation_errors()` |
-| [kernel-aarch64/src/main.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/main.rs) | Section 45b calls `reap_task_locksafe`; Section 45f invokes `mmu::test_mmu_ownership_reclamation_errors()` |
-| [kernel-riscv64/src/task.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/task.rs) | 5-stage lock-safe reaping + Test 8 & `reap_task_locksafe` E2E regression tests |
-| [kernel-riscv64/src/mmu.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/mmu.rs) | Quarantine protection, non-ignored `mark_private_frame_unmapped`, metadata preservation, remote `sfence.vma` in `unmap_user_page`, `SbiRemoteFenceFailed` cleanup alignment, `test_mmu_ownership_reclamation_errors()` |
-| [kernel-riscv64/src/main.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/main.rs) | Section 45b calls `reap_task_locksafe`; invokes `mmu::test_mmu_ownership_reclamation_errors()` |
-| [tests/verify_aarch64_boot.py](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/tests/verify_aarch64_boot.py) | Enforces `Transactional Switch Rollback`, `5-Stage Reap Evacuation Protocol`, and `MMU Ownership Reclamation Errors` signals |
-| [tests/verify_riscv_boot.py](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/tests/verify_riscv_boot.py) | Enforces `5-Stage Reap & Transactional Switch` and `MMU Ownership Reclamation Errors` signals |
-| [docs/PHASE_8_5_ACCEPTANCE_MATRIX.md](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/docs/PHASE_8_5_ACCEPTANCE_MATRIX.md) | Reconciled matrix, honest SMP single-vCPU notes, exact test outputs |
-| [docs/PHASE_8_5_3_1_COMPLETION_REPORT.md](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/docs/PHASE_8_5_3_1_COMPLETION_REPORT.md) | This completion report |
+- **Phase 8.5.3.1 Starting Baseline SHA:** `96db7c7f6d6a48505960ba2e60c61d086c372d25` (`master`)
+- **Phase 8.5.3.2 Entry SHA:** `e3509c96138ebd0f7e68a32d626b0fec703381e8` (initial Phase 8.5.3.1 completion report commit on top of `7597e84cd6fd3060d509bd29da2e971d18abe02b`)
 
 ---
 
-## 3. Root Causes of Blockers
+## 3. Implementation SHA
 
-### Blocker A — Remote Address-Space Evacuation Race
-- `Scheduler::begin_reap()` previously executed `let aspace = task.address_space.take();` during Stage 1 before dropping `SCHEDULER.lock()`.
-- Once detached from `TaskControlBlock`, any remote CPU/hart switching out of that task via `prepare_switch()` observed `self.tasks[curr_idx].address_space == None` and skipped calling `deactivate()` / `deactivate_after_switch()`, stranding the remote CPU bit in `lifecycle` and omitting `acknowledged_cpus`/`acknowledged_harts`.
-- Additionally, `reap_task_locksafe()` pre-checked `is_active_on_any_cpu()` before calling `destroy_fallible()`, bypassing both `LIFECYCLE_CLOSING_BIT` activation blocking and bounded evacuation waiting.
-
-### Blocker B — Frame Ownership Validation Errors Ignored
-- Both `UserAddressSpace::unmap_user_page()` and `UserAddressSpace::destroy_fallible()` executed `let _ = mark_private_frame_unmapped(...);` before calling `recycle_frame(...)`.
-- If private-frame validation failed (e.g., corrupted ownership or `ref_counts != 1`), `recycle_frame()` could still free the frame (if `ref_counts` was 0) instead of refusing recycling, retaining mapping metadata, and quarantining the frame with the original validation reason.
-- Neither `recycle_frame()` nor refcount-1 `release_shared_frame()` consulted `is_quarantined(paddr)`, leaving quarantined frames vulnerable to accidental free-list re-insertion through another path.
+- **Implementation Commit SHA:** `7597e84cd6fd3060d509bd29da2e971d18abe02b` — `fix(sched, mmu): close remote reaping race and preserve frame ownership`
 
 ---
 
-## 4. Exact Implementation Changes
+## 4. Final Documentation SHA
 
-1. **5-Stage Lock-Safe Reaping (`task.rs` AArch64 & RISC-V 64):**
-   - **Stage 1 (`begin_reap`)**: Under `SCHEDULER.lock()`, validates caller/target/state (`Terminated | Exited | ReapFailed`), transitions to `TaskState::Reaping`, increments `generation`, sets `LIFECYCLE_CLOSING_BIT` on `task.address_space` if present, **keeps `task.address_space` attached**, and returns `ReapHandle`.
-   - **Stage 2 (`reap_task_locksafe` evacuation loop)**: `prepare_switch()` selects only `TaskState::Ready` so `Reaping` tasks cannot be scheduled. Outside `SCHEDULER.lock()`, loops up to `1000` polls taking/dropping `SCHEDULER.lock()` briefly to inspect `is_aspace_evacuated()` / `aspace_is_evacuated()`. On timeout while active/unacknowledged, calls `abort_reap(handle, None)` (`TaskState::ReapFailed`, bumps `generation`) without detaching or clearing active CPU bits, returning `Err(-16)`.
-   - **Stage 3 (`detach_reaping_aspace`)**: Reacquires `SCHEDULER.lock()`, validates PID, exact `handle.generation`, and `TaskState::Reaping`, rechecks full evacuation under lock, transitions to `TaskState::ReapFailed` (`Err(-16)`) without detaching if busy, or `.take()`s `address_space` while keeping `handle.generation` intact.
-   - **Stage 4**: Executes `aspace.destroy_fallible()` outside `SCHEDULER.lock()`.
-   - **Stage 5**: Validates original `ReapHandle` under `SCHEDULER.lock()`: removes task + cleans IPC/surfaces/input via `finish_reap(handle)`, or restores `aspace_opt` into `TaskState::ReapFailed` via `abort_reap(handle, aspace_opt)` with incremented `generation`.
-2. **Ownership & Quarantine Protection (`mmu.rs` AArch64 & RISC-V 64):**
-   - Added `is_quarantined(paddr: u64) -> bool` and rejected quarantined frames at the entry of `recycle_frame()` and `release_shared_frame()` (when `ref_counts == 1`).
-   - Replaced all `let _ = mark_private_frame_unmapped(...)` in `unmap_user_page()` and `destroy_fallible()`: on `Err(reason)`, skips `recycle_frame()`, retains the `UserMapping` entry and `mapped_bytes`, quarantines via `quarantine_frame_with_meta(paddr, kind.into(), reason)`, and returns error (`Err(reason)` / `Err(TeardownError::FrameRecycleFailed)`).
-   - Guarded `destroy_fallible()` root table detachment with `self.table_frames.contains(...)`, omitted `LIFECYCLE_DESTROYED_BIT` / `self.destroyed = true` when `cleanup_failed` is true so `Drop` and retries remain consistent, quarantined table frames using `frame_ownership(paddr).unwrap_or(FrameOwnership::Kernel)`, and ensured `Drop` preserves earlier quarantine reasons without touching `Borrowed` mappings.
-   - Added `dsb ishst` prior to `tlbi vae1is` in AArch64 `unmap_user_page()` and `sbi::remote_sfence_vma` on non-zero remote hart masks in RISC-V `unmap_user_page()`.
+- **Initial Completion Report Commit SHA:** `e3509c96138ebd0f7e68a32d626b0fec703381e8` — `docs(sched, mmu): add evacuation and reclamation completion report`
+- **Phase 8.5.3.2 Final Acceptance Documentation Commit:** Committed directly on top of `e3509c96138ebd0f7e68a32d626b0fec703381e8` as `docs(sched, mmu): finalize phase 8.5.3.1 acceptance evidence` (final commit SHA recorded in the push verification summary, since a commit cannot contain its own hash).
 
 ---
 
-## 5. Regression Tests Added
+## 5. Original Blockers
 
-- **Scheduler (`kernel-aarch64/src/task.rs`, `kernel-riscv64/src/task.rs`):**
-  - `TaskState::Reaping` skipped by `prepare_switch()`.
-  - `task.address_space` stays `Some` during `TaskState::Reaping`.
-  - Outgoing `prepare_switch()` from a `Reaping` task still invokes `deactivate()`/`deactivate_after_switch()` cleanly while preserving `TaskState::Reaping`.
-  - `detach_reaping_aspace()` rejects with `Err(-16)` while active CPU/hart bit != 0 (preserving `address_space` & active bit), and succeeds after confirmed evacuation.
-  - `abort_reap()` restores `address_space` and transitions to `ReapFailed`; stale `ReapHandle` is rejected with `Err(-3)`.
-  - Global `reap_task_locksafe()` end-to-end test: active AS returns `Err(-16)` (`ReapFailed`, AS intact) -> `deactivate()` -> retry succeeds `Ok(0)`.
-  - Section 45b 50-cycle live EL0/U-Mode ELF tests updated to call `task::reap_task_locksafe()` outside `SCHEDULER.lock()`.
-- **MMU (`kernel-aarch64/src/mmu.rs`, `kernel-riscv64/src/mmu.rs` -> `test_mmu_ownership_reclamation_errors()`):**
-  - Ownership validation error in `unmap_user_page` skips `recycle_frame`, preserves `self.mappings` & `mapped_bytes`, and quarantines with original failure reason.
-  - Quarantined private & refcount-1 shared frames cannot be recycled via `recycle_frame()` / `release_shared_frame()`.
-  - Valid `unmap_user_page` transitions `refcount` `1 -> 0` and recycles exactly once (double-free rejected).
-  - `destroy_fallible` with corrupted ownership retains failed mapping & `mapped_bytes`, skips `recycle_frame`, returns `Err(TeardownError::FrameRecycleFailed)`, and `Drop` preserves original quarantine reasons.
-  - Shared-frame retain/release frees only at `refcount == 0`.
+1. **Blocker A (`task.rs` AArch64 & RISC-V 64):** `Scheduler::begin_reap()` moved `task.address_space.take()` out of the `TaskControlBlock` prior to releasing `SCHEDULER.lock()`, and `reap_task_locksafe()` pre-checked `is_active_on_any_cpu()` before `destroy_fallible()`.
+2. **Blocker B (`mmu.rs` AArch64 & RISC-V 64):** Both `unmap_user_page()` and `destroy_fallible()` executed `let _ = mark_private_frame_unmapped(...)`, silently discarding validation failures before calling `recycle_frame(...)`. `recycle_frame()` and `release_shared_frame()` did not check `QUARANTINED_FRAMES`.
 
 ---
 
-## 6. Executed Commands & Observed Results
+## 6. Root Causes
 
-| Check / Command | Exit | Outcome & Exact Classification |
-|---|---|---|
-| `cargo fmt --all -- --check` | 1 | **EXECUTED** — exited 1 on pre-existing formatting differences in untouched workspace/kernel files |
-| `cargo check --workspace` | 0 | **EXECUTED / PASSED** — 0 errors (excludes `kernel`, `kernel-aarch64`, `kernel-riscv64`) |
-| `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **EXECUTED / PASSED** — 0 errors, 0 warnings |
-| `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **EXECUTED / PASSED** — 0 errors, 0 warnings |
-| `cargo test --manifest-path kernel/Cargo.toml` | 0 | **EXECUTED / PASSED** — 593 passed, 0 failed, 1 ignored (`x86_64` host tests only) |
-| `python tools/interos.py build --target aarch64` | 0 | **EXECUTED / PASSED** — `target\kernel-aarch64.img` (150,459,888 bytes) |
-| `python tools/interos.py build --target riscv64` | 0 | **EXECUTED / PASSED** — RISC-V ELF built |
-| `python tests/verify_aarch64_boot.py` | 0 | **EXECUTED / PASSED** — single-vCPU QEMU (`cortex-a53`); verified transactional switch, 5-stage evacuation, and MMU error signals |
-| `python tests/verify_riscv_boot.py` | 0 | **EXECUTED / PASSED** — single-hart QEMU (`rv64`); verified 5-stage reap + transactional switch & MMU error signals |
-| `python tests/verify_aarch64_interactive.py` | 0 | **EXECUTED / PASSED** — Launcher -> Calculator PID 71 (`7 + 5 = 12` glyph verified) -> Reap PID 71 -> HomeScreen |
-| `python tests/verify_riscv_interactive.py` | 0 | **EXECUTED / PASSED** — Launcher -> Calculator PID 177 (`7 + 5 = 12` glyph verified) -> Reap PID 177 -> HomeScreen |
-| `python tools/interos.py contracts` | 0 | **EXECUTED / PASSED** — 25/25 system contracts, 3/3 license contracts |
-| `python -m pytest tests/test_platform_reality.py` | 0 | **EXECUTED / PASSED** — 67 passed in 0.17s |
-| `python tests/run_all_contracts.py` | 1 | **EXECUTED** — 1213 passed + 27 script contracts passed, 1 skipped, **1 pre-existing intermittent fail** (`tests/test_runner_integrity.py::test_kernel_net_cases_are_independent_of_execution_order` on `kernel/` parallel sweep attempt 3; standalone `cargo test --manifest-path kernel/Cargo.toml -- --test-threads=8 --skip task::` passed `573 passed; 0 failed`); 13 runtime/QEMU suites intentionally skipped by runner |
-| `verify_x86_boot.py` | — | **NOT RE-RUN IN 8.5.3.1** (no `kernel/` x86_64 files were modified; passed in Phase 8.5.3) |
-| Multi-core `-smp > 1` QEMU stress | — | **UNAVAILABLE / SOURCE-INFERRED ONLY** (kernels use global `SCHEDULER` lock / single `current_task_idx`; QEMU harness boots 1 vCPU/1 hart) |
+- **Blocker A:** Detaching `address_space` in `begin_reap()` left `tasks[curr_idx].address_space == None` while a remote CPU/hart could still be executing in that address space. When that CPU ran `prepare_switch()`, it skipped calling `out_aspace.deactivate()` / `deactivate_after_switch()`, stranding active CPU/hart bits and acknowledgements.
+- **Blocker B:** Ignoring `mark_private_frame_unmapped()` allowed corrupted private frames (e.g., `ref_counts == 0` or altered ownership) to fall through into `recycle_frame()`. Calling `recycle_frame()` without checking `is_quarantined()` risked returning quarantined pages to the allocator bitmap.
 
 ---
 
-## 7. QEMU / SMP Evidence & Remaining Known Issues
+## 7. AArch64 Implementation
 
-1. **QEMU Verification Scope**: AArch64 and RISC-V 64 boot and interactive QEMU runs execute on **single-CPU / single-hart virtual machines (`-M virt` without `-smp`)**. All 5-stage reaping, evacuation rejection/retry, `prepare_switch` outgoing deactivation, and MMU ownership/quarantine tests were genuinely compiled and executed inside QEMU, while *simultaneous remote multi-core preemption* across separate CPUs/harts is verified by source inspection and single-core simulation rather than concurrent SMP hardware/QEMU execution.
-2. **Global Scheduler & Trap Architecture**: `kernel-aarch64` and `kernel-riscv64` still use a single global `SCHEDULER` lock, single global `current_task_idx`, and global trap save slots rather than per-CPU/per-hart runqueues and no GIC SGI / SBI IPI preemption kicks exist for passive evacuation.
-3. **Pre-Existing Upstream Workspace Findings**:
-   - `cargo fmt --all -- --check` exits 1 due to pre-existing unformatted files outside Phase 8.5.3.1 edits.
-   - `tests/test_runner_integrity.py::test_kernel_net_cases_are_independent_of_execution_order` failed intermittently (attempt 3 of 3) on `kernel/` x86_64 parallel `--test-threads=8` sweeps (`kernel/` was untouched in Phase 8.5.3.1).
+Files modified in commit `7597e84cd6fd3060d509bd29da2e971d18abe02b`:
+- [kernel-aarch64/src/task.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/task.rs):
+  - **Stage 1 (`Scheduler::begin_reap`)**: Under `SCHEDULER.lock()`, validates caller/target/state (`Terminated | Exited | ReapFailed`), transitions to `TaskState::Reaping`, increments `generation`, sets `LIFECYCLE_CLOSING_BIT` on `task.address_space` if present, **keeps `task.address_space` attached**, and returns `ReapHandle`.
+  - **Stage 2 (`reap_task_locksafe` evacuation loop)**: Performs **bounded polling with the scheduler mutex released between polling attempts** (`MAX_EVACUATION_POLLS = 1000`), inspecting `Scheduler::is_aspace_evacuated()` (`!is_active_on_any_cpu()` and `(executed_cpus & !acknowledged_cpus) == 0`). `prepare_switch()` selects only `TaskState::Ready` while preserving outgoing `Reaping` address-space deactivation (`deactivate()` / `deactivate_after_switch()`). Timeout aborts via `abort_reap(handle, None)` into `TaskState::ReapFailed` (`Err(-16)`).
+  - **Stage 3 (`Scheduler::detach_reaping_aspace`)**: Reacquires `SCHEDULER.lock()`, validates PID, `handle.generation`, and `TaskState::Reaping`, rechecks evacuation under lock, and `.take()`s `address_space` only if evacuated.
+  - **Stage 4 & 5 (`reap_task_locksafe`)**: Runs `aspace.destroy_fallible()` outside `SCHEDULER.lock()`, then reacquires lock with the original `ReapHandle` to call `finish_reap(handle)` or restore `aspace_opt` via `abort_reap(handle, aspace_opt)`.
+- [kernel-aarch64/src/main.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/main.rs): Updated Section 45b 50-cycle ELF lifecycle loop to invoke `task::reap_task_locksafe()` outside `SCHEDULER.lock()`, and added Section 45f invoking `mmu::test_mmu_ownership_reclamation_errors()`.
 
 ---
 
-## 8. Explicit Acceptance Verdict
+## 8. RISC-V Implementation
 
-**PASS (with documented SMP single-core harness scope and pre-existing `kernel/`/`rustfmt` exclusions):**
-- Blocker A (remote address-space evacuation race across `begin_reap`, Stage 2 bounded evacuation polling, `detach_reaping_aspace`, `abort_reap`, `finish_reap`, and `prepare_switch`) is resolved in both AArch64 and RISC-V 64 with focused regression tests enforced in `verify_aarch64_boot.py` and `verify_riscv_boot.py`.
-- Blocker B (ignored `mark_private_frame_unmapped()` errors, metadata loss on failed unmap/destroy, and quarantine bypass in `recycle_frame`/`release_shared_frame`) is resolved across both architectures with focused lifecycle regression tests executing in QEMU boot.
+Files modified in commit `7597e84cd6fd3060d509bd29da2e971d18abe02b`:
+- [kernel-riscv64/src/task.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/task.rs): Implemented identical 5-stage `begin_reap` / bounded polling with the scheduler mutex released between polling attempts (`REAP_EVACUATION_MAX_SPINS = 1000`) / `detach_reaping_aspace` / Stage 4 unlocked `destroy_fallible()` / Stage 5 `finish_reap` or `abort_reap` using `aspace_is_evacuated()` (`active_harts() == 0 && (executed_harts & !acknowledged_harts) == 0`).
+- [kernel-riscv64/src/main.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/main.rs): Updated Section 45b 50-cycle U-mode lifecycle loop to invoke `task::reap_task_locksafe()` outside `SCHEDULER.lock()`, and added `mmu::test_mmu_ownership_reclamation_errors()`.
+
+---
+
+## 9. MMU Ownership Changes
+
+Files modified identically across [kernel-aarch64/src/mmu.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/mmu.rs) and [kernel-riscv64/src/mmu.rs](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/mmu.rs):
+- Added `pub fn is_quarantined(paddr: u64) -> bool` and rejected quarantined frames at the entry of `recycle_frame()` and `release_shared_frame()` (when `ref_counts[frame_idx] == 1`).
+- Replaced ignored `let _ = mark_private_frame_unmapped(...)` in `unmap_user_page()` and `destroy_fallible()` with explicit error handling: on failure, `recycle_frame()` is never called, the failed mapping entry and `mapped_bytes` are retained, the frame is quarantined via `quarantine_frame_with_meta()` preserving the original error reason, and an explicit error is returned (`Err(reason)` / `Err(TeardownError::FrameRecycleFailed)`).
+- Guarded `destroy_fallible()` root table detachment with `self.table_frames.contains(...)`, kept `self.destroyed == false` and `LIFECYCLE_DESTROYED_BIT` clear when `cleanup_failed` is true, recorded table-frame quarantine ownership using `frame_ownership(paddr).unwrap_or(FrameOwnership::Kernel)`, and ensured `Drop` avoids double-frees, skips `Borrowed` frames, and does not overwrite prior quarantine reasons.
+- Added `dsb ishst` before `tlbi vae1is` in AArch64 `unmap_user_page()` and remote `sbi::remote_sfence_vma` on non-zero remote hart masks in RISC-V `unmap_user_page()`, plus aligned RISC-V `SbiRemoteFenceFailed` handling.
+- Added read-only helpers `has_unacknowledged_or_active_cpus()` / `has_unacknowledged_or_active_harts()` and `is_evacuated_for_current()`.
+
+---
+
+## 10. Scheduler Caller Audit
+
+Audited every call site across the entire repository for `reap_task(`, `reap_task_locksafe(`, `begin_reap(`, `detach_reaping_aspace(`, `finish_reap(`, and `abort_reap(` (Agent 1, `401168ce`). **`x86_64` (`kernel/`)** does not use these APIs (it uses uniprocessor `reap_task_now_or_defer`), and neither architecture implements a `stop_all()` service function.
+
+| Caller | Architecture | Context | API Used | Locks Held at Call Site | Remote Active AS Possible? | Safe? |
+|---|---|---|---|---|---|---|
+| `sys_dispatch` (`SYS_WAIT_PID`, [kernel-aarch64/src/syscall.rs:680](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/syscall.rs#L680)) | AArch64 | Production syscall: process wait/reap | `task::reap_task_locksafe` | None (`SCHEDULER.lock()` dropped before call) | Yes | **Yes** — all 7 invariants (I1–I7) satisfied |
+| `dispatch_syscall` (`SYS_WAIT_PID`, [kernel-riscv64/src/syscall.rs:812](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/syscall.rs#L812)) | RISC-V 64 | Production syscall: process wait/reap | `task::reap_task_locksafe` | None (`SCHEDULER.lock()` dropped before call) | Yes | **Yes** — all 7 invariants satisfied |
+| `start_internal` / `stop` / `recover_failed` ([kernel-aarch64/src/services.rs:163,256,339](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/services.rs#L163)) | AArch64 | Production supervisor: service lifecycle | `task::reap_task_locksafe` | `SERVICE_LIFECYCLE_LOCK` only (`SCHEDULER.lock()` dropped prior to call; no path acquires `SERVICE_LIFECYCLE_LOCK` under `SCHEDULER`) | Yes | **Yes** — all 7 invariants satisfied |
+| `start_internal` / `stop` / `recover_failed` ([kernel-riscv64/src/services.rs:163,256,339](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/services.rs#L163)) | RISC-V 64 | Production supervisor: service lifecycle | `task::reap_task_locksafe` | `SERVICE_LIFECYCLE_LOCK` only (`SCHEDULER.lock()` dropped prior to call) | Yes | **Yes** — all 7 invariants satisfied |
+| Boot Section 45b ([kernel-aarch64/src/main.rs:1568](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/main.rs#L1568), [kernel-riscv64/src/main.rs:209](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/main.rs#L209)) | Both | Kernel boot self-test (50 ELF cycles) | `task::reap_task_locksafe` | None (`SCHEDULER.lock()` dropped) | No (1 core at boot, kernel page table active) | **Yes** — all 7 invariants satisfied |
+| Boot Section 45c ([kernel-aarch64/src/main.rs:1600,1605](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-aarch64/src/main.rs#L1600), [kernel-riscv64/src/main.rs:242,247](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/kernel-riscv64/src/main.rs#L242)) | Both | Kernel boot test (active process reap denial on `active_proc` with `address_space: None`) | `sched.reap_task` | `SCHEDULER.lock()` held | No (single-core boot, `address_space: None`) | **Safe for single-core no-AS test** (not used in production; `Scheduler::reap_task` does not poll Stage 2 and holds `&mut self` across destroy) |
+| Unit tests in `task.rs` (`test_task_lifecycle`, `test_reap_evacuation_protocol`, Test 8) | Both | Isolated `Scheduler::new()` & E2E `SCHEDULER` tests | `begin_reap`, `detach_reaping_aspace`, `abort_reap`, `finish_reap`, `reap_task_locksafe`, local `sched.reap_task` | None held across `reap_task_locksafe`; local `Scheduler::new()` for unit stages | Simulated on 1 core | **Yes** — directly unit-tests each protocol stage and E2E `reap_task_locksafe` |
+
+**Audit Conclusion:** Zero production callers bypass `reap_task_locksafe()`, no recursive `SCHEDULER.lock()` acquisition exists, and no production caller edits were required.
+
+---
+
+## 11. Regression Tests
+
+- **Scheduler (`kernel-aarch64/src/task.rs` `test_reap_evacuation_protocol` & `kernel-riscv64/src/task.rs` Test 8):**
+  - Verifies `TaskState::Reaping` is unschedulable in `prepare_switch()`.
+  - Verifies `task.address_space` remains `Some(...)` during `TaskState::Reaping`.
+  - Verifies outgoing `prepare_switch()` from a `Reaping` task accesses `curr.address_space` and deactivates it while preserving `TaskState::Reaping`.
+  - Verifies `detach_reaping_aspace()` rejects with `Err(-16)` while active CPU/hart bits remain, preserving `address_space` and active bits without clearing them, and succeeds after evacuation (`prepare_switch` or `deactivate()`).
+  - Verifies `abort_reap()` restores detached `address_space` into `TaskState::ReapFailed`, bumps `generation`, and rejects stale `ReapHandle` with `Err(-3)`.
+  - Verifies end-to-end `reap_task_locksafe()` on global `SCHEDULER`: active AS returns `Err(-16)` (`ReapFailed`, AS attached) -> `deactivate()` -> retry succeeds `Ok(0)`.
+- **MMU (`test_mmu_ownership_reclamation_errors()` in both `mmu.rs` files):**
+  - Verifies ownership validation failure in `unmap_user_page` skips `recycle_frame()`, retains `self.mappings` and `mapped_bytes`, quarantines with the original failure reason, and returns error.
+  - Verifies `recycle_frame()` and refcount-1 `release_shared_frame()` reject quarantined frames.
+  - Verifies normal `unmap_user_page` transitions `refcount` `1 -> 0` and recycles once (rejecting double-free).
+  - Verifies `destroy_fallible()` with corrupted ownership retains failed mapping and `mapped_bytes`, skips `recycle_frame()`, quarantines with `"Not a private frame"`, returns `Err(TeardownError::FrameRecycleFailed)`, and `Drop` preserves original quarantine reasons.
+  - Verifies shared-frame retain/release decrements properly and frees only at `refcount == 0`.
+
+---
+
+## 12. Exact Local Test Commands & 13. Actual Exit Codes
+
+| Check / Command | Exit Code | Executed Phase | Actual Outcome |
+|---|---|---|---|
+| `cargo fmt --all -- --check` | 1 | 8.5.3.1 / 8.5.3.2 | Fails on pre-existing unformatted lines across workspace crates (`apps/*`, `sdk/*`, `userspace/*`) |
+| `cargo fmt --manifest-path kernel/Cargo.toml -- --check` | 1 | 8.5.3.2 | Fails on pre-existing unformatted lines in `kernel/build.rs` and `kernel/src/*` |
+| `cargo fmt --manifest-path kernel-aarch64/Cargo.toml -- --check` | 1 | 8.5.3.2 | Fails across 48 files in `kernel-aarch64/src/` (pre-existing + newly added diffs detailed below) |
+| `cargo fmt --manifest-path kernel-riscv64/Cargo.toml -- --check` | 1 | 8.5.3.2 | Fails across 14 files in `kernel-riscv64/src/` |
+| `cargo check --workspace` | 0 | 8.5.3.1 / 8.5.3.2 | Passed (excludes `kernel`, `kernel-aarch64`, `kernel-riscv64`) |
+| `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | 8.5.3.1 / 8.5.3.2 | Passed (0 errors, 0 warnings) |
+| `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | 8.5.3.1 / 8.5.3.2 | Passed (0 errors, 0 warnings) |
+| `cargo test --manifest-path kernel/Cargo.toml` | 0 | 8.5.3.1 / 8.5.3.2 | Passed: `593 passed; 0 failed; 1 ignored` (`x86_64` host tests) |
+| `cargo test --manifest-path kernel/Cargo.toml -- --test-threads=1` | 0 | 8.5.3.2 | Passed: `593 passed; 0 failed; 1 ignored` (sequential execution) |
+| `python tools/interos.py contracts` | 0 | 8.5.3.1 / 8.5.3.2 | Passed: 25/25 system contracts, 3/3 license contracts |
+| `python -m pytest tests/test_platform_reality.py` | 0 | 8.5.3.1 / 8.5.3.2 | Passed: 67 passed |
+| `python -m pytest tests/test_runner_integrity.py -k test_kernel_net_cases_are_independent_of_execution_order -v` | 0 | 8.5.3.2 | Passed standalone (`1 passed, 14 deselected in 51.87s`) |
+| `cargo test --manifest-path kernel/Cargo.toml --no-fail-fast -- --format terse --test-threads=8 --skip task::` (30 sweeps) | 101 (2/30) | 8.5.3.2 | 28/30 passed; 2/30 failed (Run 11 & Run 26) on `serial::tests::proc_list_answers_with_the_process_table_on_demand` |
+| `python tests/run_all_contracts.py` | 1 | 8.5.3.1 | 1213 passed + 27 script contracts passed, 1 skipped, 1 intermittent fail (`test_runner_integrity.py::test_kernel_net_cases_are_independent_of_execution_order`), 13 QEMU/runtime suites excluded |
+| `python tools/interos.py build --target aarch64` | 0 | 8.5.3.1 | Built `target\kernel-aarch64.img` (150,459,888 bytes) |
+| `python tools/interos.py build --target riscv64` | 0 | 8.5.3.1 | Built RISC-V 64 kernel ELF |
+| `python tests/verify_aarch64_boot.py` | 0 | 8.5.3.1 | Passed (1-vCPU QEMU); enforced Transactional Switch, 5-Stage Reap Evacuation, and MMU Error signals |
+| `python tests/verify_riscv_boot.py` | 0 | 8.5.3.1 | Passed (1-hart QEMU); enforced 5-Stage Reap + Transactional Switch and MMU Error signals |
+| `python tests/verify_aarch64_interactive.py` | 0 | 8.5.3.1 | Passed (1-vCPU QEMU); Calculator PID 71 (`7 + 5 = 12`), reap PID 71, HomeScreen |
+| `python tests/verify_riscv_interactive.py` | 0 | 8.5.3.1 | Passed (1-hart QEMU); Calculator PID 177 (`7 + 5 = 12`), reap PID 177, HomeScreen |
+| `verify_x86_boot.py` | — | 8.5.3 baseline | Not re-run in 8.5.3.1/8.5.3.2 (`kernel/` untouched; ran and passed in Phase 8.5.3) |
+
+---
+
+## 14. Formatting Status
+
+Investigated by Agent 3 (`a7d0b251`) using `rustfmt --edition 2021 --check` vs `git diff -U0 619d4b54..7597e84c` (and `b5694654..7597e84c`):
+- Pre-existing repository files in both crates and workspace are unformatted baseline-wide (`cargo fmt --all -- --check` fails across `apps/`, `sdk/`, `userspace/`; `kernel-aarch64` fails on 48 files; `kernel-riscv64` fails on 14 files).
+- Breakdown across the 6 Rust files changed in `7597e84c` (total diffs vs newly touched `619d4b54..7597e84c` diffs):
+  - `kernel-aarch64/src/main.rs`: 720 total diff lines (4 pre-existing/new touched in 2 hunks; 716 pre-existing).
+  - `kernel-aarch64/src/mmu.rs`: 106 total diff lines (40 touched; 66 pre-existing).
+  - `kernel-aarch64/src/task.rs`: 78 total diff lines (59 touched; 19 pre-existing).
+  - `kernel-riscv64/src/main.rs`: 400 total diff lines (5 touched; 395 pre-existing).
+  - `kernel-riscv64/src/mmu.rs`: 78 total diff lines (51 touched; 27 pre-existing).
+  - `kernel-riscv64/src/task.rs`: 79 total diff lines (64 touched; 15 pre-existing).
+- Per project discipline ("Do not create unrelated repository-wide formatting churn" and "finish the documentation promptly instead of reopening working kernel code"), untouched formatting diffs were not rewritten.
+
+---
+
+## 15. Contract-Suite Status
+
+Investigated by Agent 3 (`a7d0b251`):
+- `tests/test_runner_integrity.py::test_kernel_net_cases_are_independent_of_execution_order` failed on Half 3 (`--test-threads=8 --skip task::` across 3 parallel sweeps) during the Phase 8.5.3.1 `run_all_contracts.py` run.
+- Standalone reproduction: `pytest tests/test_runner_integrity.py -k test_kernel_net_cases_are_independent_of_execution_order -v` PASSED (`1/1`), `cargo test --manifest-path kernel/Cargo.toml -- --test-threads=1` PASSED (`593/593`), and in 30 repeated `--test-threads=8 --skip task::` sweeps, **2/30 failed** (Run 11 and Run 26) identically in **`serial::tests::proc_list_answers_with_the_process_table_on_demand`** (`kernel/src/serial.rs:2469`).
+- Root cause: `handle_serial_command(b"PROC_LIST")` calls `crate::interrupts::process_table_dump_now()` (`kernel/src/interrupts.rs:869`), which calls `SCHEDULER.try_lock()?`. Concurrent non-`task::` tests (e.g., `serial::tests`, `syscall::tests`, `fs::vfs`, `net::caller_task_id`) lock `SCHEDULER.lock()`, causing `PROC_LIST` to print `[PROC_LIST] UNAVAILABLE scheduler_busy` (additionally `CAPTURED` in `serial.rs:149` lacks a test synchronization mutex).
+- `git diff --stat 619d4b54..HEAD -- kernel/ tests/test_runner_integrity.py` is **0 bytes**, confirming this is a pre-existing `kernel/` test-harness parallel race unrelated to Phase 8.5.3 / 8.5.3.1.
+
+---
+
+## 16. QEMU Evidence
+
+- AArch64 boot (`verify_aarch64_boot.py`) and interactive UI (`verify_aarch64_interactive.py`) ran on QEMU `virt` (`cortex-a53`) with **one vCPU** (no `-smp`).
+- RISC-V 64 boot (`verify_riscv_boot.py`) and interactive UI (`verify_riscv_interactive.py`) ran on QEMU `virt` (`rv64`, OpenSBI default) with **one hart** (no `-smp`).
+- Both boots executed real `UserAddressSpace`, `SCHEDULER`, `FRAME_ALLOCATOR`, and `QUARANTINED_FRAMES` invariants and passed interactive Launcher -> Calculator (`7 + 5 = 12`) -> Exit/Reap (`PID 71` on AArch64, `PID 177` on RISC-V 64) -> HomeScreen checks.
+
+---
+
+## 17. SMP Limitations
+
+- **No genuine concurrent multi-core evacuation test was executed.** Remote CPU/hart behavior has **`SOURCE-REVIEWED`** + sequential single-core test coverage only.
+- **Global Scheduler & Trap State:** Both architectures still use a single global `SCHEDULER` mutex, a single global `current_task_idx`, and global trap save areas rather than per-CPU/per-hart runqueues; multi-core simultaneous task execution is not supported.
+- **Passive Bounded Protocol:** `reap_task_locksafe()` uses **bounded polling with the scheduler mutex released between polling attempts** (1000 iterations) and `destroy_fallible()` spins up to 100k iterations waiting for `deactivate()`. Active GIC SGI or SBI IPI preemption rendezvous is **`NOT IMPLEMENTED`**.
+- **Untested Multi-Core Paths in Single-Core QEMU:** On 1 hart in RISC-V 64, `remote_mask == 0`, so `sbi::remote_sfence_vma` and `SbiRemoteFenceFailed` are not triggered at runtime; AArch64 `tlbi vae1is` / `tlbi vmalle1is` cross-core broadcast is similarly only single-CPU executed.
+- **x86_64:** Remains uniprocessor; none of the Phase 8.5.3.1 AArch64/RISC-V ownership, quarantine, or lock-safe reaping features exist in `kernel/`.
+
+---
+
+## 18. Remaining Known Issues
+
+1. **Quarantined Frame Re-Allocation / Re-Mapping Hardening (Minor):** `allocate_frame_with_ownership()` checks the allocation bitmap rather than `is_quarantined()`, and `retain_shared_frame()` does not reject a frame quarantined while `refcount >= 1` (frames quarantined with bitmap bit still 1 cannot be freed via `recycle_frame()` or refcount-1 `release_shared_frame()`, preventing re-allocation in normal teardown failures).
+2. **`SYS_SERVICE_*` Error Collapsing & `caller_pid == 1` Assumption (`services.rs`/`syscall.rs`):** `services.rs` passes `caller_pid = 1` when calling `reap_task_locksafe(1, true, pid)`, assuming no managed daemon holds PID `1`; `SYS_SERVICE_STOP/START/RECOVER_FAILED` map supervisor `Err(())` to generic `-1` / `-22`.
+3. **Wildcard `begin_reap(..., 0)` / 50-Cycle Synthetic MMU Activation:** Calling `begin_reap(sup, true, 0)` from a non-self ID could select a terminated `curr_idx` still on CPU and wait out the 1000-poll bound (`-EBUSY`); the 50-cycle ELF boot self-tests in `main.rs` switch registers via `switch_to_task` / `switch_satp` rather than `try_activate()`.
+4. **Pre-existing Upstream Issues:** `cargo fmt` baseline diffs across untouched files and the pre-existing `serial::tests::proc_list_answers_with_the_process_table_on_demand` parallel `--test-threads=8` race in `kernel/`.
+
+---
+
+## 19. Final Acceptance Verdict
+
+**ACCEPTANCE PASS — CLOSURE VERIFIED (within Single-CPU / Single-Hart QEMU Scope):**
+- Both Phase 8.5.3.1 technical blockers (Blocker A 5-stage lock-safe evacuation and Blocker B private-frame ownership validation + quarantine protection) are verified present in published commit `7597e84cd6fd3060d509bd29da2e971d18abe02b` and preserved unmodified on `master`.
+- All production reaping callers (`syscall.rs` `SYS_WAIT_PID` and `services.rs` `start_internal`, `stop`, `recover_failed`) use `reap_task_locksafe()` without holding `SCHEDULER.lock()` and enforce all 7 reaping invariants.
+- [PHASE_8_5_ACCEPTANCE_MATRIX.md](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/docs/PHASE_8_5_ACCEPTANCE_MATRIX.md) and [PHASE_8_5_3_1_COMPLETION_REPORT.md](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/docs/PHASE_8_5_3_1_COMPLETION_REPORT.md) now accurately document `x86_64` baseline vs AArch64/RISC-V 64 implementation scope, exact evidence labels, bounded polling with released scheduler mutex terminology, and SMP single-core QEMU limitations.
+- Full local checks (`cargo check`, `kernel` tests, `interos.py contracts`, `test_platform_reality.py`), single-core AArch64/RISC-V 64 QEMU boot & interactive runs passed; the single `run_all_contracts.py` failure is independently reproduced and confirmed to be a pre-existing `kernel/src/serial.rs` parallel-scheduling race unrelated to Phase 8.5.3 / 8.5.3.1.
