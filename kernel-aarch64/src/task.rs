@@ -98,6 +98,7 @@ pub struct TaskControlBlock {
     pub generation: u32,
     pub is_service: bool,
     pub service_id: Option<u8>,
+    pub service_generation: Option<u32>,
 }
 
 impl TaskControlBlock {
@@ -215,6 +216,7 @@ impl Scheduler {
             generation: 1,
             is_service: false,
             service_id: None,
+            service_generation: None,
         });
     }
 
@@ -264,13 +266,61 @@ impl Scheduler {
             generation: 1,
             is_service: false,
             service_id: None,
+            service_generation: None,
         });
         task_id
+    }
+
+    pub fn add_task(&mut self, id: u32, entry_point: u64, user_sp: u64) -> bool {
+        if is_reserved_pid(id) {
+            return false;
+        }
+        if self.tasks.iter().any(|t| t.id == id) {
+            return false; // Prevent duplicate task registration
+        }
+        if self.tasks.len() >= MAX_TASKS {
+            return false;
+        }
+        if self.next_pid <= id {
+            self.next_pid = id.wrapping_add(1);
+            if is_reserved_pid(self.next_pid) {
+                self.next_pid = 1;
+            }
+        }
+        let stack = Box::new([0u8; STACK_SIZE]);
+        let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
+        let mut context = ArmContext::default();
+        context.sp = kernel_sp;
+        context.lr = user_process_entry as *const () as usize as u64;
+
+        let cap_table = CapabilityTable::new();
+        self.tasks.push(TaskControlBlock {
+            id,
+            parent_id: 0,
+            name: "primordial_task",
+            state: TaskState::Ready,
+            context,
+            stack,
+            cap_table,
+            cpu_ticks: 0,
+            priority: 1,
+            address_space: None,
+            page_table: None,
+            user_entry: entry_point,
+            user_stack_top: user_sp,
+            exit_code: None,
+            generation: 1,
+            is_service: false,
+            service_id: None,
+            service_generation: None,
+        });
+        true
     }
 
     pub fn spawn_service_process(
         &mut self,
         service_id: u8,
+        generation: u32,
         name: &'static str,
         entry_point: u64,
         user_sp: u64,
@@ -314,6 +364,7 @@ impl Scheduler {
             generation: 1,
             is_service: true,
             service_id: Some(service_id),
+            service_generation: Some(generation),
         });
         task_id
     }
@@ -578,7 +629,7 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
 /// Reaps a supervisor-managed service task.
 /// Validates caller's `ServiceLifecycleToken` against the live service registry and scheduler TCB.
 /// Rejects non-service tasks, stale tokens, and wrong service IDs with -EPERM (-1).
-pub fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Result<i32, i64> {
+pub(crate) fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Result<i32, i64> {
     if !token.verify_live() {
         return Err(-1); // -EPERM
     }
@@ -588,11 +639,11 @@ pub fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Resu
     }
     {
         let sched = SCHEDULER.lock();
-        let (is_svc, svc_id) = match sched.tasks.iter().find(|t| t.id == target_pid) {
-            Some(t) => (t.is_service, t.service_id),
+        let t = match sched.tasks.iter().find(|t| t.id == target_pid) {
+            Some(t) => t,
             None => return Err(-30), // -ESRCH
         };
-        if !is_svc || svc_id != Some(token.service_id()) {
+        if !t.is_service || t.service_id != Some(token.service_id()) || t.service_generation != Some(token.generation()) || t.parent_id != SUPERVISOR_PID {
             return Err(-1); // -EPERM
         }
     }
@@ -602,7 +653,7 @@ pub fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Resu
 /// Terminates a supervisor-managed service task.
 /// Validates caller's `ServiceLifecycleToken` against the live service registry and scheduler TCB.
 /// Rejects non-service tasks, stale tokens, and wrong service IDs with -EPERM (-1).
-pub fn terminate_service_task(
+pub(crate) fn terminate_service_task(
     sched: &mut Scheduler,
     token: &crate::services::ServiceLifecycleToken,
 ) -> Result<(), i64> {
@@ -613,11 +664,11 @@ pub fn terminate_service_task(
     if is_reserved_pid(target_pid) {
         return Err(-22); // -EINVAL
     }
-    let (is_svc, svc_id) = match sched.tasks.iter().find(|t| t.id == target_pid) {
-        Some(t) => (t.is_service, t.service_id),
+    let t = match sched.tasks.iter().find(|t| t.id == target_pid) {
+        Some(t) => t,
         None => return Err(-3), // -ESRCH
     };
-    if !is_svc || svc_id != Some(token.service_id()) {
+    if !t.is_service || t.service_id != Some(token.service_id()) || t.service_generation != Some(token.generation()) || t.parent_id != SUPERVISOR_PID {
         return Err(-1); // -EPERM
     }
     sched.terminate_task(SUPERVISOR_PID, true, target_pid)
@@ -815,7 +866,7 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched2.begin_reap(p_a, false, 0), Err(-30));
 
     // Test 8: Service Supervisor Identity Reaping API
-    let svc_child = sched2.spawn_service_process(3, "svc_child", 0, 0, None, caps.clone());
+    let svc_child = sched2.spawn_service_process(3, 1, "svc_child", 0, 0, None, caps.clone());
     let svc_pos = sched2.tasks.iter().position(|t| t.id == svc_child).unwrap();
     sched2.tasks[svc_pos].state = TaskState::Terminated;
     // Supervisor reap of svc_child succeeds using internal SUPERVISOR_PID
