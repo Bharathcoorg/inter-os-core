@@ -441,6 +441,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // through the object-scoped ServiceStart/Stop/Recover ABI.
     let id_user_init = kernel::task::spawn_user_init(TaskId(0));
     IPC_ROUTER.lock().register_task(id_user_init);
+    kernel::services::register_init_task(id_user_init);
 
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
@@ -460,6 +461,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         // the 16-byte UART FIFO from interrupt context. The handler only fills the
         // line buffer; the work happens here, in a normal context.
         kernel::serial::service_serial_commands();
+        kernel::drivers::ps2_mouse::drain_events();
         kernel::services::supervise();
         // The process table is printed here, in a context where its bytes do not
         // hold the timer or a touch interrupt off -- and only when the task table

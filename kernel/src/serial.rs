@@ -852,6 +852,9 @@ fn handle_rapp_command(s: &str) -> bool {
             registry.stage_verified(&verified).is_ok() && registry.activate(&verified.package_id).is_ok()
         };
         if registry_ok {
+            if !verified.intents.is_empty() {
+                crate::content::INTENT_REGISTRY.lock().register(&verified.package_id, &verified.intents);
+            }
             serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{}",
                 verified.package_id, verified.version.0, verified.version.1, verified.version.2);
         } else {

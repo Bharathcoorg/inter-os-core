@@ -4487,6 +4487,7 @@ pub fn dev_uninstall_verified_rapp(pkg_id: &str) -> Result<(), SyscallResult> {
         let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
         return Err(SyscallResult::DeviceError);
     }
+    crate::content::INTENT_REGISTRY.lock().unregister(pkg_id);
     crate::notification::NOTIFICATION_MANAGER
         .lock()
         .cancel_all_for_package_all_users(pkg_id);
@@ -6418,6 +6419,7 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     // Promptly service any pending serial console commands so host commands
     // and input events are handled immediately without waiting for Task 0.
     crate::serial::service_serial_commands();
+    crate::drivers::ps2_mouse::drain_events();
 
     let current_ticks = crate::interrupts::get_system_ticks();
 

@@ -1205,7 +1205,8 @@ def serial_stream_worker():
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 conn = s
                 s.settimeout(1.5)
-                s.connect(('127.0.0.1', SERIAL_TCP_PORT))
+                target_serial_port = (SUPPORTED_PROFILES.get(active_profile_key, {}).get("serial") or {}).get("port") or SERIAL_TCP_PORT
+                s.connect(('127.0.0.1', target_serial_port))
                 try:
                     # Windows: detect a peer killed without FIN/RST within ~3s
                     # instead of spinning on recv timeouts forever.
@@ -1519,9 +1520,11 @@ def find_qemu_executable(arch):
 _persistent_monitor_sock = None
 _persistent_monitor_lock = threading.Lock()
 
-def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=MONITOR_PORT, timeout=0.8):
+def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=None, timeout=0.8):
     """Sends a raw command to QEMU HMP monitor and returns the response using persistent connection."""
     global _persistent_monitor_sock
+    if port is None:
+        port = (SUPPORTED_PROFILES.get(active_profile_key, {}).get("monitor") or {}).get("port") or MONITOR_PORT
     with _persistent_monitor_lock:
         for attempt in range(2):
             if _persistent_monitor_sock is None:
@@ -2490,7 +2493,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     # framebuffer by default, so Device Studio's phone viewport had nothing to
     # show and no VNC pixels to stream.
     if arch in ("aarch64", "riscv64"):
-        cmd.extend(["-device", "virtio-gpu-pci", "-device", "usb-ehci,id=usb0"])
+        cmd.extend(["-device", "bochs-display", "-device", "usb-ehci,id=usb0"])
         # This guest does not implement an EHCI/USB HID driver yet; browser-to-guest input remains explicit serial injection on these non-canonical profiles.
 
     # The x86_64 profile tries the host's hardware accelerator first and always
@@ -4186,8 +4189,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed_path.path == '/api/extended-controls/state':
+            is_running = tracked_qemu_process_alive()
             with extended_controls_lock:
                 state_copy = json.loads(json.dumps(extended_controls_state))
+            state_copy['device_online'] = is_running
+            if not is_running:
+                state_copy['battery']['charging_status'] = 'Disconnected'
+                state_copy['telemetry_status'] = 'UNAVAILABLE'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()

@@ -515,6 +515,15 @@ pub fn init() {
     );
 }
 
+/// Updates the registered task ID for the primordial Init service (PID 1).
+pub fn register_init_task(id: TaskId) {
+    if let Some(mut records) = SERVICE_RECORDS.try_lock() {
+        if let Some(ref mut rec) = records[ServiceId::Init as usize] {
+            rec.task = id;
+        }
+    }
+}
+
 /// Resource budget assigned to each first-party system service. These limits are
 /// process-scoped and intentionally conservative so a faulty service cannot consume
 /// the same address-space, IPC, descriptor, or thread budget as an unrestricted app.
