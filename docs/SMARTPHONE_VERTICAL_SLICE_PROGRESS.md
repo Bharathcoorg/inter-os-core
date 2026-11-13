@@ -136,3 +136,31 @@ Executed live against the canonical x86_64 QEMU portrait smartphone:
 4. **Zero Ambient Authority:**
    - All access to hardware, VFS, IPC, and system services requires an explicit capability token.
    - Sideloaded packages only receive capabilities declared in verified RAPP manifests.
+
+---
+
+## 6. Native Graphics, High-Refresh Rendering, Performance & Interaction Architecture
+
+**Status:** AUDITED, ARCHITECTED & BASELINED (Nov 2026)  
+**Architecture Decision Record:** `docs/GRAPHICS_AND_INTERACTION_ARCHITECTURE.md` (ADR-0024)  
+**Acceptance Matrix:** `docs/GRAPHICS_AND_INTERACTION_ACCEPTANCE_MATRIX.md` (MATRIX-0024)  
+**Benchmark Baselines:** `docs/GRAPHICS_AND_INTERACTION_BENCHMARKS.md` (BENCH-0024)  
+
+### Specialist Audit Deliverables:
+1. `docs/audits/DISPLAY_DRIVER_ARCHITECTURE_AUDIT.md`: Display driver & HAL analysis across Bochs DISPI, SimpleFB, VirtIO-GPU, and scanout geometry bounds.
+2. `docs/audits/COMPOSITOR_AND_SURFACE_ARCHITECTURE_AUDIT.md`: Surface capacity limits (48 MiB), dynamic OOM eviction, z-ordering, damage tracking, tile occlusion engine, and userspace compositor migration specification.
+3. `docs/audits/TYPOGRAPHY_DPI_AND_RENDERING_AUDIT.md`: Vector typography, 4-bit grayscale coverage area AA (strictly separating from subpixel RGB stripe claims), and glyph tile caching architecture.
+4. `docs/audits/RENDERING_PERFORMANCE_BASELINE.md`: 11 representative workloads, refresh budgets (60/90/120+ Hz), `PresentGate` write permission gating, and frame pacing telemetry.
+5. `docs/audits/INPUT_AND_TOUCH_LATENCY_AUDIT.md`: Three-tier input reality (UART serial injection vs PS/2 IRQ 12 vs I2C GT911), non-starvation queues, gesture latching, and latency breakdown.
+6. `docs/audits/DEVICE_STUDIO_GRAPHICS_INTEGRATION_AUDIT.md`: Real guest execution vs emulation, VNC/RFB persistent streaming, telemetry truthfulness, and offline state degradation.
+7. `docs/audits/MULTIARCH_GRAPHICS_PORTABILITY_AUDIT.md`: Cross-architecture comparison matrix across x86_64, AArch64, and RISC-V 64.
+8. `docs/audits/GRAPHICS_SECURITY_AND_CORRECTNESS_REVIEW.md`: Adversarial review defining mandatory hard safety requirements (z-order partitioning, checked arithmetic, capability de-escalation).
+
+### Core Architecture Invariants:
+- **Canonical Reference Resolution:** 720×1440 portrait (9:18, 320 DPI) across all native applications.
+- **Display Controller HAL:** Architecture-independent `DisplayController` trait decoupling composition from platform I/O.
+- **Phased Hybrid Compositor:** Zero-heap row-damage in-kernel DRM/KMS engine with planned migration to shared-memory `ICMP` userspace swapchains.
+- **High-Refresh Pacing:** 16.67ms (60Hz), 11.11ms (90Hz), 8.33ms (120Hz) deadlines with `PresentGate` write authorization preventing phantom spinloop FPS claims.
+- **Glyph Tile Caching:** Individual 64×64 glyph alpha tile cache replacing 2.88 MB static text-run cache (>90% BSS reduction).
+- **Three-Tier Input Reality:** Strict separation of synthetic UART injection from emulated PS/2 hardware and physical I2C silicon.
+- **Security Hardening:** Z-order partitioning (`100..499` application band, `500+` system overlays) preventing touch hijacking / clickjacking.
