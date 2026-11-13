@@ -3909,7 +3909,7 @@ pub fn test_drm_kms() {
     let s2 = kms.create_surface(320, 40, 10, 1);
     assert_eq!(s1, 1);
     assert_eq!(s2, 2);
-    assert_eq!(kms.create_surface(1281, 720, 20, 1), 0);
+    assert_eq!(kms.create_surface(2401, 720, 20, 1), 0);
     assert_eq!(kms.create_surface(1280, 720, 20, 1), 3);
 
     // Fill surface 2 with a test color (semi-transparent white)
