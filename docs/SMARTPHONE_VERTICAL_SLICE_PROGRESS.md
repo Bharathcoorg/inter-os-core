@@ -27,7 +27,7 @@ Detailed audit published at `docs/audits/SMARTPHONE_VERTICAL_SLICE_AUDIT.md`. Ke
 
 ### A. Display Subsystem & DRM/KMS Compositor
 - **Bochs DISPI Hardware Mode Setting:** `kernel/src/framebuffer.rs` programs Bochs DISPI registers (`0x1CE`/`0x1CF`) directly to configure native 720x1440 portrait at 32bpp BGRX (`VBE_DISPI_INDEX_ENABLE | VBE_DISPI_NOCLEARMEM`). 4.14 MB of framebuffer memory is dynamically mapped, enabling 1:1 pixel rendering with zero software scaling artifacts.
-- **In-Kernel DRM/KMS Compositor:** `kernel/src/drivers/drm_kms.rs` composites up to 8 client surfaces (z=0: Launcher/Desktop, z=100: Status/Nav Bars, z=200: Foreground App, z=300: Overlays/Dialogs) directly into scanout memory using fine-grained damage tracking and preallocated zero-heap buffers.
+- **In-Kernel DRM/KMS Compositor:** `kernel/src/drivers/drm_kms.rs` composites up to 8 client surfaces (z=0: Launcher/Desktop, z=100: Status/Nav Bars, z=200: Foreground App, z=300: Overlays/Dialogs) directly into scanout memory using fine-grained damage tracking and zero heap allocations during the composite and presentation passes (surfaces managed within the bounded 48 MiB kernel surface ceiling).
 - **Role of `apps/compositor`:** Surface compositing is performed in kernel space; `apps/compositor` merely maintains a 720x96 dummy surface and intentionally avoids calling `sys_surface_flip` to prevent screen tearing.
 
 ### B. Input Pipeline & PS/2 Mouse Draining

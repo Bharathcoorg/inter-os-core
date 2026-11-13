@@ -47,6 +47,104 @@ pub const TASK_STACK_SIZE: usize = 128 * 1024;
 /// Stack guard canary word placed at the bottom of the stack to detect overflows.
 pub const STACK_CANARY: u64 = 0xDEAD_BEEF_C0DE_CAFE;
 
+/// Maximum number of detached kernel stacks to hold in the recycling pool.
+/// Bounded to avoid unbounded cache expansion while eliminating stack-driven
+/// allocator fragmentation across repeated process spawn and exit cycles.
+const STACK_POOL_CAPACITY: usize = 4;
+
+static STACK_POOL: Mutex<alloc::vec::Vec<Box<[u8]>>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Dedicated kernel stack memory for a task.
+/// Automatically recycled into `STACK_POOL` on drop when capacity permits,
+/// avoiding repeated 128 KiB heap allocations and allocator churn during lifecycle stress.
+pub struct KernelStack {
+    inner: Option<Box<[u8]>>,
+}
+
+impl core::fmt::Debug for KernelStack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "KernelStack({:p}, len={})", self.as_ptr(), self.len())
+    }
+}
+
+impl KernelStack {
+    /// Creates an empty kernel stack descriptor (used for primordial bootstrap thread).
+    pub const fn empty() -> Self {
+        Self { inner: None }
+    }
+
+    /// Allocates a dedicated kernel stack, popping from `STACK_POOL` if available.
+    pub fn allocate() -> Self {
+        let recycled = {
+            if let Some(mut pool) = STACK_POOL.try_lock() {
+                pool.pop()
+            } else {
+                None
+            }
+        };
+
+        let stack = if let Some(mut s) = recycled {
+            if s.len() == TASK_STACK_SIZE {
+                for b in s.iter_mut() {
+                    *b = 0;
+                }
+                s
+            } else {
+                Self::create_fresh_stack()
+            }
+        } else {
+            Self::create_fresh_stack()
+        };
+
+        Self { inner: Some(stack) }
+    }
+
+    fn create_fresh_stack() -> Box<[u8]> {
+        let mut stack = Box::new_uninit_slice(TASK_STACK_SIZE);
+        unsafe {
+            for byte in stack.iter_mut() {
+                byte.write(0);
+            }
+            stack.assume_init()
+        }
+    }
+}
+
+impl core::ops::Deref for KernelStack {
+    type Target = [u8];
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        match &self.inner {
+            Some(s) => s.as_ref(),
+            None => &[],
+        }
+    }
+}
+
+impl core::ops::DerefMut for KernelStack {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.inner {
+            Some(s) => s.as_mut(),
+            None => &mut [],
+        }
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        if let Some(s) = self.inner.take() {
+            if s.len() == TASK_STACK_SIZE {
+                if let Some(mut pool) = STACK_POOL.try_lock() {
+                    if pool.len() < STACK_POOL_CAPACITY {
+                        pool.push(s);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Strongly typed task identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub u64);
@@ -172,7 +270,7 @@ pub struct TaskControlBlock {
     /// Preserved hardware register context (stack pointer).
     pub context: TaskContext,
     /// Dedicated kernel stack memory.
-    pub stack: Box<[u8]>,
+    pub stack: KernelStack,
     /// Capability table holding guarded access tokens.
     pub cap_table: CapabilityTable,
     /// Total CPU timer ticks consumed by this task.
@@ -217,14 +315,7 @@ impl TaskControlBlock {
         cap_table: CapabilityTable,
         priority: u8,
     ) -> Self {
-        let mut stack = Box::new_uninit_slice(TASK_STACK_SIZE);
-        // Zero-fill stack memory
-        let mut stack = unsafe {
-            for byte in stack.iter_mut() {
-                byte.write(0);
-            }
-            stack.assume_init()
-        };
+        let mut stack = KernelStack::allocate();
 
         // Write canary at the bottom of the stack
         unsafe {
@@ -282,7 +373,7 @@ impl TaskControlBlock {
             name,
             state: TaskState::Running,
             context: TaskContext::empty(),
-            stack: Box::new([]),
+            stack: KernelStack::empty(),
             cap_table,
             cpu_ticks: 0,
             base_priority: 0,
