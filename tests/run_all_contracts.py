@@ -21,6 +21,7 @@ RUNTIME_DEPENDENT_SKIPPED_FILES = frozenset({
     "tests/test_interactive_lifecycle.py",
     "tests/test_lifecycle_stress.py",
     "tests/test_persistence.py",
+    "tests/test_qemu_hmp_pointer_acceptance.py",
     "tests/test_reboot_recovery.py",
     "tests/test_serial_tcp.py",
     "tests/test_storage_recovery.py",

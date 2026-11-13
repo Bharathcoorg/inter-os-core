@@ -451,8 +451,13 @@ def qemu_device_state(probe_monitor=True):
     vnc_port_busy = _port_occupied(active_vnc_port)
     record = tracked_qemu_process()
     if process_alive and monitor_answers:
-        state = "running"
-        reason = "The QEMU process this Studio launched is alive and its monitor answers."
+        vm_status = query_qemu_monitor().get("status", "running")
+        if vm_status == "paused":
+            state = "paused"
+            reason = "The QEMU process this Studio launched is alive, but execution is paused."
+        else:
+            state = "running"
+            reason = "The QEMU process this Studio launched is alive and its monitor answers."
     elif process_alive:
         state = "unknown"
         reason = "The QEMU process this Studio launched is alive, but its monitor did not answer."
@@ -1639,6 +1644,13 @@ class VncScanoutClient:
             'frames_in_second': 0,
         }
         self._force_reconnect = False
+
+    def get_transport_fps(self):
+        now = time.time()
+        with self.lock:
+            if not self.connected or (now - self.latest_raw_time > 1.5):
+                return 0.0
+            return self.metrics['fps']
 
     def start(self):
         t = threading.Thread(target=self._worker_loop, daemon=True)
@@ -3710,6 +3722,7 @@ POST_ONLY_ROUTES = frozenset({
     '/api/orientation',
     '/api/hardware/sensor_inject',
     '/api/touch/event',
+    '/api/pointer/hmp_event',
     '/api/input/key',
     '/api/power/state',
     '/api/themes/apply',
@@ -4193,7 +4206,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed_path.path == '/api/extended-controls/state':
-            is_running = tracked_qemu_process_alive()
+            dev_state = qemu_device_state()
+            is_running = dev_state.get("running", False)
             with extended_controls_lock:
                 state_copy = json.loads(json.dumps(extended_controls_state))
             state_copy['device_online'] = is_running
@@ -4307,8 +4321,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == '/api/qemu/telemetry':
             t = query_qemu_monitor().copy()
-            t["launcher_ready"] = bool(check_launcher_ready() and t.get("qemu_alive"))
-            t["transport_fps"] = round(vnc_client.metrics["fps"], 1) if vnc_client.connected else round(_transport_metrics["fps"], 1)
+            dev_state = qemu_device_state()
+            t["launcher_ready"] = bool(check_launcher_ready() and t.get("qemu_alive") and dev_state.get("running"))
+            if dev_state.get("state") == "paused":
+                t["transport_fps"] = 0.0
+            else:
+                t["transport_fps"] = round(vnc_client.get_transport_fps(), 1) if vnc_client.connected else round(_transport_metrics["fps"], 1)
             t["transport_frame_us"] = int(vnc_client.metrics["frame_us"]) if vnc_client.connected else int(_transport_metrics["frame_us"])
             t["vnc_connected"] = vnc_client.connected
             # Guest FPS from real KMS flips or reported as Unknown
@@ -4316,7 +4334,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             with telemetry_lock:
                 for line in reversed(serial_lines[-200:]):
                     if "[KMS]" in line and "vsync=" in line:
-                        t["guest_fps"] = 60  # nominal target when KMS active
+                        t["guest_fps"] = None  # platform truth: do not fabricate guest fps unless guest reports actual measurement
                         break
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -4344,6 +4362,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed_path.path == '/api/screen/binary_stream':
+            if not vnc_client.connected:
+                self.send_response(503)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'VNC scanout client not connected')
+                return
             self.send_response(200)
             self.send_header('Content-Type', 'application/octet-stream')
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -5611,11 +5635,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
         if self.path == '/api/touch/event':
-            if not tracked_qemu_process_alive():
+            dev_state = qemu_device_state()
+            if not dev_state.get("running", False):
                 self.send_response(503)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': 'QEMU guest is offline; touch input rejected'}).encode())
+                self.wfile.write(json.dumps({'success': False, 'error': f"QEMU guest is not running (state={dev_state.get('state', 'offline')}); touch input rejected"}).encode())
                 return
             content_length = self._bounded_content_length()
             if content_length is None:
@@ -5707,6 +5732,57 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'delivery_method': 'serial_injection', 'hardware_touch': False, 'action': action, 'coordinate_space': space, 'guest': {'x': gx, 'y': gy}}).encode())
             except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
                 self.send_response(400 if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)) else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(exc)}).encode())
+            return
+
+        if self.path == '/api/pointer/hmp_event':
+            dev_state = qemu_device_state()
+            if not dev_state.get("running", False):
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': f"QEMU guest is not running (state={dev_state.get('state', 'offline')}); pointer input rejected"}).encode())
+                return
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                action = str(data.get('action', 'move')).strip().lower()
+                if action == 'move':
+                    dx = int(data.get('dx', 0))
+                    dy = int(data.get('dy', 0))
+                    cmd = f"mouse_move {dx} {dy}"
+                    ok, resp = send_qemu_monitor_cmd(cmd)
+                elif action == 'button':
+                    button = int(data.get('button', 0))
+                    cmd = f"mouse_button {button}"
+                    ok, resp = send_qemu_monitor_cmd(cmd)
+                elif action == 'click':
+                    button = int(data.get('button', 1))
+                    ok1, resp1 = send_qemu_monitor_cmd(f"mouse_button {button}")
+                    time.sleep(0.02)
+                    ok2, resp2 = send_qemu_monitor_cmd("mouse_button 0")
+                    ok = ok1 and ok2
+                    resp = f"{resp1}; {resp2}"
+                else:
+                    raise ValueError(f"unsupported pointer action '{action}'")
+                self.send_response(200 if ok else 500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': ok,
+                    'status': 'DISPATCHED' if ok else 'FAILED',
+                    'action': action,
+                    'hardware_pointer': True,
+                    'delivery_method': 'qemu_hmp_monitor',
+                    'response': resp
+                }).encode())
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(exc)}).encode())
