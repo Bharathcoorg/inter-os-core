@@ -50,3 +50,4 @@
 
 - `4b99e111`: `fix(display): actor-based z-order privilege and geometry bounds hardening`
 - `297616e0`: `fix(emulator): truthfully degrade paused guest telemetry and add hmp pointer endpoint`
+- `7d680926`: `fix(display): align self-test surface bounds with expanded max surface limit`
