@@ -139,12 +139,36 @@ Executed live against the canonical x86_64 QEMU portrait smartphone:
 
 ---
 
-## 6. Native Graphics, High-Refresh Rendering, Performance & Interaction Architecture
+## 6. Native Graphics, High-Refresh Rendering, Performance & Interaction Implementation
 
-**Status:** AUDITED, ARCHITECTED & BASELINED (Nov 2026)  
+**Status:** IMPLEMENTED, AUDITED & VERIFIED (Nov 2026)  
 **Architecture Decision Record:** `docs/GRAPHICS_AND_INTERACTION_ARCHITECTURE.md` (ADR-0024)  
 **Acceptance Matrix:** `docs/GRAPHICS_AND_INTERACTION_ACCEPTANCE_MATRIX.md` (MATRIX-0024)  
 **Benchmark Baselines:** `docs/GRAPHICS_AND_INTERACTION_BENCHMARKS.md` (BENCH-0024)  
+
+### Key Implementation Deliverables & Commits:
+1. `4b99e111`: `fix(display): actor-based z-order privilege and geometry bounds hardening`
+   - Enforced caller privilege z-order authorization in `set_surface_geometry_owned` via `is_trusted_system_owner(owner)`, strictly confining unprivileged apps to `200..=899`.
+   - Expanded `MAX_SURFACE_PIXELS` to `1080 * 2400` with symmetric geometry bounds (`width <= 2400 && height <= 2400`).
+   - Wired `ps2_mouse::drain_events()` into `sys_input_event_poll` to eliminate mouse packet starvation.
+   - Guarded touch gesture dispatch with surface bounding box intersection to prevent transparent overlay clickjacking.
+   - Fixed signed row calculation underflow in dirty-band blit union, eliminating panic on negative surface coordinates.
+   - Hardened `FrameScheduler` to filter idle pauses (>100 ms) and added 165 Hz target budget.
+   - Enforced 48 MiB aggregate surface limits and eliminated full-cover clear flicker on AArch64 and RISC-V.
+2. `297616e0`: `fix(emulator): truthfully degrade paused guest telemetry and add hmp pointer endpoint`
+   - Detected paused guest state in `qemu_device_state` and gracefully degraded telemetry (`state: "paused"`, `transport_fps: 0.0`).
+   - Added `/api/pointer/hmp_event` endpoint for real Tier B QEMU HMP pointer injection (`mouse_move`, `mouse_button`, `click`).
+   - Returned 503 on touch and stream endpoints when guest is paused or offline.
+   - Reset transport FPS when frame delivery stalls for >1.5s.
+   - Removed fabricated `guest_fps = 60` telemetry in `/api/qemu/telemetry`.
+   - Implemented automated HMP pointer acceptance contract in `tests/test_qemu_hmp_pointer_acceptance.py`.
+
+### Verification Evidence:
+- `cargo check --workspace`: Passed (0 errors, 0.12s)
+- `cargo test --manifest-path kernel/Cargo.toml`: Passed (601/601 unit tests)
+- `python tools/interos.py contracts`: Passed (25/25 platform contracts)
+- `python tests/run_all_contracts.py`: Passed (1253/1253 test cases across 111 active suites, 14 skipped)
+- `python tests/test_qemu_hmp_pointer_acceptance.py`: Passed (4/4 pointer acceptance cases)  
 
 ### Specialist Audit Deliverables:
 1. `docs/audits/DISPLAY_DRIVER_ARCHITECTURE_AUDIT.md`: Display driver & HAL analysis across Bochs DISPI, SimpleFB, VirtIO-GPU, and scanout geometry bounds.

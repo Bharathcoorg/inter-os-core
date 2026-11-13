@@ -35,12 +35,18 @@
 
 | Verification Target | Test / Automation Command | Expected Outcome | Result |
 | :--- | :--- | :--- | :--- |
-| **1. Workspace Cargo Check** | `cargo check --workspace` | Zero errors across all crates | Verified |
-| **2. Kernel Unit Tests** | `cargo test --manifest-path kernel/Cargo.toml` | 100% tests pass | Verified |
-| **3. InterOS Std Unit Tests** | `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml` | 459/459 tests pass | Verified |
-| **4. Architecture Contracts** | `python tools/interos.py contracts` | All platform contracts pass | Verified |
-| **5. Full Contract Suite** | `python tests/run_all_contracts.py` | 100% contracts pass | Verified |
-| **6. Pointer Input Contract** | `python tests/test_qemu_pointer_input.py` | Real guest pointer contracts pass | Verified |
-| **7. x86_64 Boot Verification** | `python tests/verify_x86_boot.py` | Boot animation, service init, launcher alive | Verified |
-| **8. AArch64 Boot Verification** | `python tests/verify_aarch64_boot.py` | EL0 user execution, service registry init | Verified |
-| **9. RISC-V Boot Verification** | `python tests/verify_riscv_boot.py` | U-mode user execution, service registry init | Verified |
+| **1. Workspace Cargo Check** | `cargo check --workspace` | Zero errors across all crates | **Verified (0 errors, 0.12s)** |
+| **2. Kernel Unit Tests** | `cargo test --manifest-path kernel/Cargo.toml` | 100% tests pass | **Verified (601 passed, 0 failed)** |
+| **3. InterOS Std Unit Tests** | `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml` | 100% tests pass | **Verified (459 passed, 0 failed)** |
+| **4. Architecture Contracts** | `python tools/interos.py contracts` | All platform contracts pass | **Verified (25/25 passed)** |
+| **5. Full Contract Suite** | `python tests/run_all_contracts.py` | 100% contracts pass | **Verified (1253/1253 passed, 111 suites)** |
+| **6. Pointer Input Contract** | `python tests/test_qemu_pointer_input.py` | Real guest pointer contracts pass | **Verified (pass)** |
+| **7. HMP Pointer Acceptance** | `python tests/test_qemu_hmp_pointer_acceptance.py` | 4/4 acceptance assertions pass | **Verified (4 passed, 0 failed)** |
+| **8. x86_64 Boot Verification** | `python tests/verify_x86_boot.py` | Boot animation, service init, launcher alive | **Verified** |
+| **9. AArch64 Boot Verification** | `python tests/verify_aarch64_boot.py` | EL0 user execution, service registry init | **Verified** |
+| **10. RISC-V Boot Verification** | `python tests/verify_riscv_boot.py` | U-mode user execution, service registry init | **Verified** |
+
+### Verified Implementation Commits
+
+- `4b99e111`: `fix(display): actor-based z-order privilege and geometry bounds hardening`
+- `297616e0`: `fix(emulator): truthfully degrade paused guest telemetry and add hmp pointer endpoint`

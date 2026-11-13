@@ -237,3 +237,22 @@ To prevent untrusted applications from stealing touch input or spoofing system d
 | **Verification Gate** | Behavioural QEMU Integration | Behavioural QEMU Boot/EL0 | Behavioural QEMU Boot/U-Mode |
 
 All performance benchmarks, contracts, and acceptance tests must execute against real virtual hardware in QEMU. String-scraping tests are deprecated in favor of verified behavioral integration suites.
+
+---
+
+## 9. Contradictions Resolution & Platform Truth Implementation
+
+During the Native Graphics Implementation phase, four core architectural contradictions were systematically addressed and resolved:
+
+1. **Surface Geometry Bounds (`MAX_SURFACE_PIXELS`):**  
+   - *Previous state:* `MAX_SURFACE_PIXELS = 1280 * 720` (921,600 px), which was smaller than a full-screen 720×1440 portrait surface (1,036,800 px).  
+   - *Resolution:* Expanded `MAX_SURFACE_PIXELS` to `1080 * 2400` (2,592,000 px) with symmetric aspect bounds (`width <= 2400 && height <= 2400`). Safely supports 720×1440, 1080×2160, and 1080×2400 mobile displays without integer truncation or allocation failures.
+2. **Memory Ceiling & Jetsam Coexistence:**  
+   - *Previous state:* 48 MiB aggregate surface allocation limit (`MAX_SURFACE_BYTES`) lacked explicit multi-arch parity.  
+   - *Resolution:* Enforced the 48 MiB aggregate ceiling across all three architecture trees (x86_64, AArch64, RISC-V 64). Under memory pressure, the kernel activates jetsam eviction based on background dwell time, preventing kernel heap exhaustion.
+3. **Userspace vs. Kernel Heap Truth Invariants:**  
+   - *Previous state:* Ambiguity between zero-heap userspace guarantees and kernel surface buffer allocations.  
+   - *Resolution:* Platform invariants explicitly codified: userspace interactive rendering and event loops in all 17 `#![no_std]` applications remain strictly zero-heap; the kernel KMS compositor manages bounded kernel heap surfaces protected by the 48 MiB ceiling and proactive memory reclamation.
+4. **Caller Privilege Z-Order Authorization:**  
+   - *Previous state:* In `set_surface_geometry_owned`, privilege clamping checked the surface's *current* `z_order` rather than the caller's authenticated identity (`owner`).  
+   - *Resolution:* Implemented actor-based privilege verification (`DrmKmsController::is_trusted_system_owner(owner)`). Unprivileged applications are strictly constrained to the application band (`200..=899`), preventing clickjacking overlays and privilege escalation. System overlays (`>= 1000`) and desktop surfaces (`0..=199`) require authenticated system services.

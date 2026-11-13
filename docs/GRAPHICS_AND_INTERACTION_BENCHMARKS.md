@@ -20,7 +20,13 @@ $$T_{\text{budget}} = \frac{1000}{f_{\text{target}}} \text{ ms}$$
 | **60 Hz** | **16.667 ms** | **< 12.0 ms** | **< 16.0 ms** | **Sustained & Verified** |
 | **90 Hz** | **11.111 ms** | **< 8.0 ms** | **< 11.0 ms** | **Achievable with partial damage** |
 | **120 Hz** | **8.333 ms** | **< 5.5 ms** | **< 8.0 ms** | **Achievable with VirtIO-GPU / DMA** |
-| **144 Hz** | **6.944 ms** | **< 4.5 ms** | **< 6.5 ms** | **Target for dedicated hardware** |
+| **144 Hz** | **6.944 ms** | **< 4.5 ms** | **< 6.5 ms** | **Target for high-refresh panels** |
+| **165 Hz** | **6.061 ms** | **< 4.0 ms** | **< 5.5 ms** | **Supported in FrameScheduler** |
+| **240 Hz** | **4.167 ms** | **< 2.5 ms** | **< 3.5 ms** | **Supported in FrameScheduler** |
+| **360 Hz** | **2.778 ms** | **< 1.8 ms** | **< 2.5 ms** | **Future hardware ceiling** |
+
+> [!NOTE]
+> `FrameScheduler::record_frame` filters idle intervals (>100 ms). Resuming from static screens (0 FPS idle) does not falsely increment `missed_frames` or poison latency percentiles.
 
 ---
 
