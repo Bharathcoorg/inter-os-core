@@ -500,6 +500,12 @@ impl SurfaceManager {
         if pixels_count == 0 || pixels_count > 1440 * 2160 {
             return Err(-22); // -EINVAL
         }
+        let current_bytes: usize = self.surfaces.iter().map(|s| s.pixels.len() * 4).sum();
+        let new_bytes = pixels_count.saturating_mul(4);
+        const MAX_SURFACE_BYTES: usize = 48 * 1024 * 1024;
+        if current_bytes.saturating_add(new_bytes) > MAX_SURFACE_BYTES {
+            return Err(-12); // -ENOMEM
+        }
         let id = self.next_id;
         self.next_id += 1;
         let mut pixels = Vec::with_capacity(pixels_count);
@@ -558,8 +564,13 @@ impl SurfaceManager {
         self.flip_count += 1;
         let mut fb_guard = FRAMEBUFFER.lock();
         if let Some(fb) = fb_guard.as_mut() {
-            // Clear to dark slate background before compositing all surfaces
-            fb.clear(16, 21, 32);
+            let has_full_cover = self.surfaces.iter().any(|s| {
+                s.visible && s.width >= fb.width && s.height >= fb.height && s.pixels.first().map_or(false, |&p| (p >> 24) == 255)
+            });
+            if !has_full_cover {
+                // Clear to dark slate background only when no full-cover opaque surface is present
+                fb.clear(16, 21, 32);
+            }
 
             // In-place compositing across pre-sorted surfaces: ZERO heap allocations
             for surface in self.surfaces.iter() {

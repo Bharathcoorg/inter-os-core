@@ -45,7 +45,7 @@ def main():
     must(scheduler, "task.parent_id = TaskId(0);", "orphan reparenting")
 
     must(kms, "MAX_CLIENT_SURFACES: usize = 32", "surface count bound")
-    must(kms, "MAX_SURFACE_PIXELS: usize = 1280 * 720", "surface pixel bound")
+    must(kms, "MAX_SURFACE_PIXELS: usize = 1080 * 2400", "surface pixel bound")
     must(kms, "value <= MAX_SURFACE_PIXELS", "per-surface allocation guard")
     must(kms, "checked_add(1)", "surface id overflow guard")
     must(display, 'return Err("display surface capacity exhausted")', "surface allocation failure propagation")

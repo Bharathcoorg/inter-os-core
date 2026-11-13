@@ -5106,6 +5106,7 @@ pub fn sys_cap_handle_lookup(cap_type_raw: u64, object_id: u64) -> Result<CapHan
 /// Polls the normalized userspace input event pipeline.
 pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     crate::serial::service_serial_commands();
+    crate::drivers::ps2_mouse::drain_events();
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {

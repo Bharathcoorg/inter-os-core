@@ -297,6 +297,19 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
                                 })
                                 .map(|s| s.owner_task)
                         });
+                    } else if matches!(event.kind, InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress) {
+                        let ex = event.x as i32;
+                        let ey = event.y as i32;
+                        target_owner = kms.surfaces.iter()
+                            .filter(|s| {
+                                s.visible && s.input_enabled
+                                    && ex >= s.x
+                                    && ex < s.x.saturating_add(s.width as i32)
+                                    && ey >= s.y
+                                    && ey < s.y.saturating_add(s.height as i32)
+                            })
+                            .max_by_key(|s| s.z_order)
+                            .map(|s| s.owner_task);
                     } else {
                         target_owner = kms.surfaces.iter()
                             .filter(|s| s.visible && s.input_enabled)

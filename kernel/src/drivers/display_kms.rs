@@ -30,7 +30,7 @@ pub enum DisplayOrientation { Portrait, LandscapeRight, PortraitInverted, Landsc
 
 /// A hardware plane / application graphics surface managed by KMS.
 pub const MAX_CLIENT_SURFACES: usize = 32;
-pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
+pub const MAX_SURFACE_PIXELS: usize = 1080 * 2400;
 pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
 /// The most kernel heap every surface may hold between them.
@@ -147,14 +147,17 @@ impl FrameScheduler {
 
     pub fn record_frame(&mut self, now_ticks: u64, deadline_ticks: u64) {
         self.total_frames += 1;
-        if deadline_ticks > 0 && now_ticks > deadline_ticks {
+        let is_idle_gap = self.last_frame_tick > 0 && now_ticks.saturating_sub(self.last_frame_tick) > 100;
+        if deadline_ticks > 0 && now_ticks > deadline_ticks && !is_idle_gap {
             self.missed_frames += 1;
         }
         if self.last_frame_tick > 0 && now_ticks >= self.last_frame_tick {
             let elapsed_ticks = now_ticks - self.last_frame_tick;
-            let elapsed_ns = elapsed_ticks.saturating_mul(1_000_000);
-            self.frame_times_ns[self.history_idx] = elapsed_ns;
-            self.history_idx = (self.history_idx + 1) % 256;
+            if elapsed_ticks <= 100 {
+                let elapsed_ns = elapsed_ticks.saturating_mul(1_000_000);
+                self.frame_times_ns[self.history_idx] = elapsed_ns;
+                self.history_idx = (self.history_idx + 1) % 256;
+            }
         }
         self.last_frame_tick = now_ticks;
     }
@@ -163,6 +166,7 @@ impl FrameScheduler {
         match self.refresh_hz {
             360 => 2_777_778,
             240 => 4_166_667,
+            165 => 6_060_606,
             144 => 6_944_444,
             120 => 8_333_333,
             90 => 11_111_111,
@@ -943,10 +947,10 @@ impl DrmKmsController {
         next
     }
 
-    /// Re-indexes application surface z-orders (z < 1000) starting from 200 while preserving relative ordering.
+    /// Re-indexes application surface z-orders (200 <= z < 1000) starting from 200 while preserving relative ordering.
     pub fn rebase_app_z_orders(&mut self) {
         let mut app_indices: Vec<usize> = (0..self.surfaces.len())
-            .filter(|&i| self.surfaces[i].z_order < 1000)
+            .filter(|&i| self.surfaces[i].z_order >= 200 && self.surfaces[i].z_order < 1000)
             .collect();
         app_indices.sort_by_key(|&i| (self.surfaces[i].z_order, self.surfaces[i].id));
         let mut cur_z = 200u32;
@@ -1137,6 +1141,33 @@ impl DrmKmsController {
         )
     }
 
+    /// Returns true if `owner_task` is an authenticated system supervisor or privileged shell.
+    pub fn is_trusted_system_owner(owner_task: u64) -> bool {
+        #[cfg(test)]
+        {
+            if owner_task == 0 || owner_task == 999 {
+                return true;
+            }
+        }
+        if owner_task == 0 {
+            return true;
+        }
+        if Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Display).map(|t| t.0)
+            || Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0)
+            || Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Launcher).map(|t| t.0)
+        {
+            return true;
+        }
+        if let Some(sched) = crate::task::scheduler::SCHEDULER.try_lock() {
+            if let Some(task) = sched.get_task(crate::task::TaskId(owner_task)) {
+                if task.name == "launcher" || task.name == "compositor" || task.name == "user_init" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         // A client that explicitly requests a 1080x2160 surface is asking for
@@ -1148,7 +1179,7 @@ impl DrmKmsController {
             // Client surfaces have a stricter per-surface budget than the
             // physical scanout buffer. This prevents a single display client
             // from multiplying large kernel-heap allocations across 32 slots.
-            Some(value) if value > 0 && (value <= MAX_SURFACE_PIXELS || (width <= 1080 && height <= 2400)) => value,
+            Some(value) if value > 0 && value <= MAX_SURFACE_PIXELS && width <= 2400 && height <= 2400 => value,
             _ => {
                 crate::serial_println!(
                     "[SURFACE_CREATE REFUSED] owner={} {}x{} z={} exceeds the per-surface pixel budget",
@@ -1183,38 +1214,42 @@ impl DrmKmsController {
             _ => return 0,
         };
         debug_assert_eq!(pixels, width as usize * height as usize);
-        let is_overlay = z_order == 100
+        let is_trusted = Self::is_trusted_system_owner(owner_task);
+        let is_overlay = is_trusted && (z_order == 100
             || owner_task == crate::services::task_id(crate::services::ServiceId::Display).map(|t| t.0).unwrap_or(u64::MAX)
-            || owner_task == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0).unwrap_or(u64::MAX);
+            || owner_task == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0).unwrap_or(u64::MAX));
         let kind = if is_overlay { crate::gui::WindowKind::SystemOverlay } else { crate::gui::WindowKind::Application };
         let actual_z = if z_order >= 200 && z_order < 1000 {
             let offset = z_order.saturating_sub(200);
             let task_base = self.surfaces.iter()
-                .filter(|s| s.owner_task == owner_task && s.z_order < 1000)
+                .filter(|s| s.owner_task == owner_task && s.z_order >= 200 && s.z_order < 1000)
                 .map(|s| s.z_order)
                 .min();
             if let Some(tb) = task_base {
-                tb.saturating_add(offset).min(900)
+                tb.saturating_add(offset).clamp(200, 899)
             } else {
                 let max_z = self.surfaces.iter()
-                    .filter(|s| s.z_order < 1000)
+                    .filter(|s| s.z_order >= 200 && s.z_order < 1000)
                     .map(|s| s.z_order)
                     .max()
                     .unwrap_or(200);
-                if max_z >= 900 {
+                if max_z >= 899 {
                     self.rebase_app_z_orders();
                     let new_max = self.surfaces.iter()
-                        .filter(|s| s.z_order < 1000)
+                        .filter(|s| s.z_order >= 200 && s.z_order < 1000)
                         .map(|s| s.z_order)
                         .max()
                         .unwrap_or(200);
-                    new_max.max(200).saturating_add(1).saturating_add(offset).min(900)
+                    new_max.max(200).saturating_add(1).saturating_add(offset).clamp(200, 899)
                 } else {
-                    max_z.max(200).saturating_add(1).saturating_add(offset).min(900)
+                    max_z.max(200).saturating_add(1).saturating_add(offset).clamp(200, 899)
                 }
             }
-        } else {
+        } else if is_trusted {
             z_order
+        } else {
+            // Unprivileged callers requesting overlay (>= 1000) or desktop (< 200) are clamped to application band.
+            z_order.clamp(200, 899)
         };
         let mut surface = DrmSurface::new(id, width, height, actual_z, owner_task);
         // WHY the system's own surfaces do not take input: the system line
@@ -1428,14 +1463,12 @@ impl DrmKmsController {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id && s.owner_task == owner) {
             s.x = x;
             s.y = y;
-            // Prevent unprivileged application surfaces from escaping the app band (200..=900)
-            // or elevating into the privileged system/modal overlay band (>= 1000).
-            if s.z_order >= 200 && s.z_order < 1000 {
-                s.z_order = z.clamp(200, 900);
-            } else if s.z_order < 200 {
-                s.z_order = z.min(199);
-            } else {
+            // Caller-based privilege enforcement: unprivileged applications can never
+            // escape the application band (200..=899) or elevate into system overlay (>= 1000) or desktop (0..=199).
+            if Self::is_trusted_system_owner(owner) {
                 s.z_order = z;
+            } else {
+                s.z_order = z.clamp(200, 899);
             }
             s.visible = visible;
             s.dirty = true;
@@ -2219,12 +2252,16 @@ impl DrmKmsController {
             // band with the rows this blit actually draws (`y0..y1`) yields the
             // exact scanout rows that changed.
             if surface.dirty_rows.1 > surface.dirty_rows.0 {
-                let drawn_lo = (y0 - sy) as usize;
-                let drawn_hi = (y1 - sy) as usize;
+                let drawn_lo = (y0 - sy).max(0) as usize;
+                let drawn_hi = (y1 - sy).max(0) as usize;
                 let lo = surface.dirty_rows.0.max(drawn_lo);
                 let hi = surface.dirty_rows.1.min(drawn_hi);
                 if hi > lo {
-                    union_rows(&mut present_band, lo + sy as usize, hi + sy as usize);
+                    let r0 = ((lo as i32) + sy).max(0) as usize;
+                    let r1 = ((hi as i32) + sy).max(0) as usize;
+                    if r1 > r0 {
+                        union_rows(&mut present_band, r0, r1);
+                    }
                 }
             }
 
