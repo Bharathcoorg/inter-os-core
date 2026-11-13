@@ -1428,7 +1428,15 @@ impl DrmKmsController {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id && s.owner_task == owner) {
             s.x = x;
             s.y = y;
-            s.z_order = z;
+            // Prevent unprivileged application surfaces from escaping the app band (200..=900)
+            // or elevating into the privileged system/modal overlay band (>= 1000).
+            if s.z_order >= 200 && s.z_order < 1000 {
+                s.z_order = z.clamp(200, 900);
+            } else if s.z_order < 200 {
+                s.z_order = z.min(199);
+            } else {
+                s.z_order = z;
+            }
             s.visible = visible;
             s.dirty = true;
             let _ = crate::gui::WINDOW_MANAGER.lock().set_geometry_owned(
@@ -2232,6 +2240,10 @@ impl DrmKmsController {
                         let src_x = (x - sx) as usize;
                         let src_idx = src_y_offset + src_x;
 
+                        if src_idx >= surface.pixels.len() || dst_idx >= self.back_buffer.len() {
+                            continue;
+                        }
+
                         let src_pixel = surface.pixels[src_idx];
                         let sa = (src_pixel >> 24) & 0xFF;
                         if sa == 255 {
@@ -2263,6 +2275,10 @@ impl DrmKmsController {
                         let dst_idx = dst_y_offset + (x as usize);
                         let src_x = (x - sx) as usize;
                         let src_idx = src_y_offset + src_x;
+
+                        if src_idx >= surface.pixels.len() || dst_idx >= self.back_buffer.len() {
+                            continue;
+                        }
 
                         let src_pixel = surface.pixels[src_idx];
                         let sa = (((src_pixel >> 24) & 0xFF) * op) / 255;
