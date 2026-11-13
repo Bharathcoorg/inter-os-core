@@ -53,7 +53,11 @@
 | **Display Subsystem** | 720x1440 Portrait Framebuffer Presentation | **VERIFIED BY SINGLE-CPU QEMU** (`verify_x86_boot.py`, 3631 distinct colors) | **VERIFIED BY SINGLE-CPU QEMU** (`verify_aarch64_boot.py` & `verify_aarch64_interactive.py`) | **VERIFIED BY SINGLE-HART QEMU** (`verify_riscv_boot.py` & `verify_riscv_interactive.py`) | Single-Core QEMU Framebuffer Sample Analysis |
 | **Visual App Parity** | Calculator Visual Evaluation (`7 + 5 = 12`) | **VERIFIED BY SINGLE-CPU QEMU** (`test_interactive_lifecycle.py`: Operation 4 verified Calculator `7 + 5 = 12` keypad input, display scanout, back button teardown, and parent waitpid reaping; Operations 5–14 verified Settings, Vault, Camera, Dialer, Browser, Messages, Calendar, Music, Files, Gallery, Notes) | **VERIFIED BY SINGLE-CPU QEMU** (Independent '1' stem and '2' arc/neck/base glyph geometry) | **VERIFIED BY SINGLE-HART QEMU** (Independent '1' stem and '2' arc/neck/base glyph geometry) | Interactive Single-Core QEMU UI Test Scripts |
 | **Visual Robustness** | Blank, Noise, Synthetic Erroneous ("13", "17", "0", "2", Bridged) & Positive "12" | **NOT IMPLEMENTED** (`run_glyph_negative_tests` exists in AArch64 & RISC-V interactive scripts only) | **VERIFIED BY LOCAL TEST** (`run_glyph_negative_tests` synthetic PPM evaluation in `verify_aarch64_interactive.py`) | **VERIFIED BY LOCAL TEST** (`run_glyph_negative_tests` synthetic PPM evaluation in `verify_riscv_interactive.py`) | Synthetic PPM Evaluation in Interactive Test Scripts |
-| **Platform Truth** | Zero Mock Hardware Telemetry / Zero Ambient Authority | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 67 passed) | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 67 passed) | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 67 passed) | `tests/test_platform_reality.py` (67 passed in 0.20s) |
+| **Service ABI Consistency** | Unified Service ID Bound `1..=15` across Kernel, SDK and Contracts | **VERIFIED BY LOCAL TEST** (`SERVICE_ID_MAX = 15`, `Inference` ID 12 supported, ID 0 and >15 rejected; `service_abi::tests`) | **SOURCE-REVIEWED** (Kernel service ID definitions align) | **SOURCE-REVIEWED** (Kernel service ID definitions align) | Kernel wire unit tests, userspace SDK tests, contract tests |
+| **Persistent Intent Registry** | Third-Party RAPP Intent Re-Registration Across Reboot | **VERIFIED BY LOCAL TEST** (`restore_persisted_rapp_intents` re-validates via `parse_rapp` and re-registers; `tests/test_persistent_intents.py`) | **NOT APPLICABLE** (AArch64 RAPP sideloading storage journal not enabled) | **NOT APPLICABLE** (RISC-V RAPP sideloading storage journal not enabled) | In-kernel unit test & `test_persistent_intents.py` |
+| **PID 1 Service Registration** | Synchronize `SERVICE_RECORDS[Init]` with PID 1 TaskId | **VERIFIED BY SINGLE-CPU QEMU** & **VERIFIED BY LOCAL TEST** (`register_init_task(id)` rejects TaskId(0), locks registry; `verify_x86_boot.py`) | **NOT APPLICABLE** (Separate init spawn path) | **NOT APPLICABLE** (Separate init spawn path) | `kernel/src/services.rs` unit tests & `verify_x86_boot.py` |
+| **Input Pipeline & Tiers** | PS/2 Mouse Draining & 3-Tier Input Separation | **VERIFIED BY LOCAL TEST** (`drain_events` in `sys_event_poll` & idle loop; `test_qemu_pointer_input.py` packet decoding, 720x1440 clamping) | **NOT APPLICABLE** (PL011 UART console only; no PS/2 controller) | **NOT APPLICABLE** (16550 UART console only; no PS/2 controller) | `test_qemu_pointer_input.py` & interactive lifecycle tests |
+| **Platform Truth** | Zero Mock Hardware Telemetry / Zero Ambient Authority | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 68 passed; studio truth 25 passed) | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 68 passed) | **VERIFIED BY LOCAL TEST** (`tests/test_platform_reality.py`, 68 passed) | `tests/test_platform_reality.py` (68 passed) & `tests/test_studio_truth_contract.py` (25 passed) |
 
 ---
 
@@ -61,18 +65,22 @@
 
 | Target Architecture | Test Script / Suite | Exit Code | Result | Key Indicators |
 |---|---|---|---|---|
-| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors (Phase 8.5.4.4 run in 0.13s) |
-| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts (Phase 8.5.4.4 run) |
-| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 68 passed in 0.19s (Phase 8.5.4.4 run) |
-| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 593 passed, 0 failed, 1 ignored (`x86_64` host tests; Phase 8.5.4.4 run in 2.13s) |
-| **x86_64** | `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | 3626 distinct colours, PID 1 + launcher online (Phase 8.5.4.4 run) |
-| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.4 run in 0.13s) |
-| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,492,656 bytes; Phase 8.5.4.4 run in 4.21s) |
-| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 2.0s with 1 vCPU; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified without token forgery (Phase 8.5.4.4 run) |
-| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings (Phase 8.5.4.4 run in 0.04s) |
-| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly (Phase 8.5.4.4 run in 1.45s) |
-| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 1.8s with 1 hart; non-blocking pipe queue reader; Section 46 10-stage supervisor lifecycle verified without token forgery (Phase 8.5.4.4 run) |
-| **Workspace** | `python tests/run_all_contracts.py` | 0 | **VERIFIED BY LOCAL TEST** | 1242 cases passed across 109 active suites, 0 failed, 1 skipped (Phase 8.5.4.4 run) |
+| **Workspace** | `cargo check --workspace` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors |
+| **Workspace** | `python tools/interos.py contracts` | 0 | **VERIFIED BY LOCAL TEST** | 25/25 system contracts, 3/3 license contracts |
+| **Workspace** | `python -m pytest tests/test_platform_reality.py` | 0 | **VERIFIED BY LOCAL TEST** | 68 passed in 0.19s |
+| **Workspace** | `python -m pytest tests/test_studio_truth_contract.py` | 0 | **VERIFIED BY LOCAL TEST** | 25 passed in 0.40s |
+| **Workspace** | `python tests/test_persistent_intents.py` | 0 | **VERIFIED BY LOCAL TEST** | 100% passed (first-party intents, reboot restoration, uninstall cleanup) |
+| **Workspace** | `python tests/test_qemu_pointer_input.py` | 0 | **VERIFIED BY LOCAL TEST** | 100% passed (PS/2 packet decoding, 720x1440 portrait clamping, non-starvation) |
+| **x86_64** | `cargo test --manifest-path kernel/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 598 passed, 0 failed, 1 ignored (`x86_64` host tests) |
+| **x86_64** | `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 459 passed, 0 failed (userspace SDK tests) |
+| **x86_64** | `python tests/verify_x86_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | 3626 distinct colours, PID 1 + launcher online |
+| **AArch64** | `cargo check --manifest-path kernel-aarch64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings |
+| **AArch64** | `python tools/interos.py build --target aarch64` | 0 | **VERIFIED BY LOCAL TEST** | `target/kernel-aarch64.img` (150,492,656 bytes) |
+| **AArch64** | `python tests/verify_aarch64_boot.py` | 0 | **VERIFIED BY SINGLE-CPU QEMU** | Ran in 2.0s with 1 vCPU; non-blocking pipe queue reader |
+| **RISC-V 64** | `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml` | 0 | **VERIFIED BY LOCAL TEST** | 0 errors, 0 warnings |
+| **RISC-V 64** | `python tools/interos.py build --target riscv64` | 0 | **VERIFIED BY LOCAL TEST** | Kernel ELF built cleanly |
+| **RISC-V 64** | `python tests/verify_riscv_boot.py` | 0 | **VERIFIED BY SINGLE-HART QEMU** | Ran in 1.8s with 1 hart; non-blocking pipe queue reader |
+| **Workspace** | `python tests/run_all_contracts.py` | 0 | **VERIFIED BY LOCAL TEST** | 1253 cases passed across 111 active suites, 0 failed, 1 skipped |
 | **AArch64 / RISC-V 64** | Concurrent Multi-Core Evacuation (`-smp > 1` QEMU) | — | **NOT VERIFIED** | No genuine concurrent multi-core evacuation test executed; remote CPU/hart behavior has **SOURCE-REVIEWED** + sequential single-core test coverage only |
 
 ---

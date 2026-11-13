@@ -89,27 +89,36 @@ Executed live against the canonical x86_64 QEMU portrait smartphone:
 - `python tests/verify_riscv_boot.py`: **PASSED (100%)** (OpenSBI, Sv39 MMU, SBI timer, scheduler, U-mode userspace).
 - `python tools/interos.py contracts`: **PASSED (25/25)**.
 - `python -m pytest tests/test_platform_reality.py`: **PASSED (68/68)**.
-- `cargo test --manifest-path kernel/Cargo.toml`: **PASSED (593 passed, 0 failed, 1 ignored)**.
+- `python -m pytest tests/test_studio_truth_contract.py`: **PASSED (25/25)**.
+- `python tests/test_persistent_intents.py`: **PASSED (100%)** (Reboot restoration and resolution of persisted RAPP intents).
+- `python tests/test_qemu_pointer_input.py`: **PASSED (100%)** (PS/2 packet decoding, 720x1440 clamping, non-starvation).
+- `python tests/run_all_contracts.py`: **PASSED (111 active suites, 1253 passed, 0 failed, 1 skipped)**.
+- `cargo test --manifest-path kernel/Cargo.toml`: **PASSED (598 passed, 0 failed, 1 ignored)**.
+- `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml`: **PASSED (459 passed, 0 failed)**.
 - `cargo check --workspace`: **PASSED (0 warnings/errors)**.
 - `cargo check --manifest-path kernel-aarch64/Cargo.toml`: **PASSED (0 errors)**.
 - `cargo check --target riscv64gc-unknown-none-elf --manifest-path kernel-riscv64/Cargo.toml`: **PASSED (0 errors)**.
 
 ---
 
-## 4. Implemented P0/P1 Changes
+## 4. Implemented P0/P1 Changes & Integration Closure
 
 | Subsystem | File | Lines Changed | Description |
 | :--- | :--- | :---: | :--- |
+| **Service ABI** | `kernel/src/service_abi.rs` | +120, -5 | Expand `SERVICE_ID_MAX` to 15, support `aid` (12), add comprehensive wire tests |
+| **Service ABI** | `sdk/rust/interos-std/src/service.rs` | +115, -1 | Unify `SERVICE_ID_MAX = 15`, add `enum ServiceId`, userspace wire parity tests |
+| **Service ABI** | `tests/test_system_service_contracts.py` | +1, -1 | Align contract specification with `SERVICE_ID_MAX = 15` |
+| **Service Manager**| `kernel/src/services.rs` | +38, -5 | Implement `register_init_task(id: TaskId) -> Result<(), &'static str>`, validate non-zero TaskId, unit tests |
+| **Service Manager**| `kernel/src/main.rs` | +2, -1 | Invoke `register_init_task(id_user_init)` with `.expect()` and assert registry |
+| **Package Runtime**| `kernel/src/package/mod.rs` | +68, -2 | Implement `restore_persisted_rapp_intents` to restore verified package intents across reboot |
+| **Package Runtime**| `kernel/src/package/store.rs` | +12, 0 | Add `insert_for_test` helper for memory-based test setup |
+| **Package Runtime**| `kernel/src/package/registry.rs` | +12, 0 | Add `insert_active_for_test` helper for memory-based test setup |
+| **Package Runtime**| `kernel/src/serial.rs` | +18, 0 | Add `INTENT_RESOLVE <kind> <value>` serial command for guest intent resolution query |
 | **Input Pipeline** | `kernel/src/syscall/mod.rs` | +1 | Call `crate::drivers::ps2_mouse::drain_events()` in `sys_event_poll` |
 | **Input Pipeline** | `kernel/src/main.rs` | +1 | Call `kernel::drivers::ps2_mouse::drain_events()` in Task 0 idle loop |
-| **Service Manager**| `kernel/src/services.rs` | +9 | Implement `register_init_task(id: TaskId)` to synchronize PID 1 task ID |
-| **Service Manager**| `kernel/src/main.rs` | +1 | Invoke `kernel::services::register_init_task(id_user_init)` after spawn |
-| **Package Runtime**| `kernel/src/serial.rs` | +3 | Register `verified.intents` in `INTENT_REGISTRY` on `RAPP_COMMIT` |
-| **Package Runtime**| `kernel/src/syscall/mod.rs` | +1 | Unregister `pkg_id` from `INTENT_REGISTRY` in `dev_uninstall_verified_rapp` |
-| **Device Studio**  | `emulator/server.py` | +2, -1 | Dynamically resolve `target_serial_port` based on `active_profile_key` |
-| **Device Studio**  | `emulator/server.py` | +3, -1 | Dynamically resolve `target_monitor_port` in `send_qemu_monitor_cmd` |
-| **Device Studio**  | `emulator/server.py` | +1, -1 | Switch AArch64/RISC-V 64 display device from `virtio-gpu-pci` to `bochs-display` |
-| **Platform Truth** | `emulator/server.py` | +5, 0 | Check `tracked_qemu_process_alive()` in `/api/extended-controls/state` |
+| **Input Testing**  | `tests/test_qemu_pointer_input.py` | +115, 0 | Test PS/2 packet decoding, portrait clamping, non-starvation, tier separation |
+| **Intent Testing** | `tests/test_persistent_intents.py` | +92, 0 | End-to-end verification of first-party intents, reboot restoration, uninstallation |
+| **Device Studio**  | `emulator/server.py` | +18, -3 | Dynamic monitor/serial port resolution, connection & epoch reset on switch/stop, offline touch rejection |
 
 ---
 
