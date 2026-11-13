@@ -441,7 +441,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // through the object-scoped ServiceStart/Stop/Recover ABI.
     let id_user_init = kernel::task::spawn_user_init(TaskId(0));
     IPC_ROUTER.lock().register_task(id_user_init);
-    kernel::services::register_init_task(id_user_init);
+    kernel::services::register_init_task(id_user_init)
+        .expect("PID 1 service registration must succeed");
+    assert_eq!(kernel::services::task_id(kernel::services::ServiceId::Init), Some(id_user_init));
 
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");

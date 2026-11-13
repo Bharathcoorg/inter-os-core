@@ -516,12 +516,18 @@ pub fn init() {
 }
 
 /// Updates the registered task ID for the primordial Init service (PID 1).
-pub fn register_init_task(id: TaskId) {
-    if let Some(mut records) = SERVICE_RECORDS.try_lock() {
-        if let Some(ref mut rec) = records[ServiceId::Init as usize] {
-            rec.task = id;
-        }
+///
+/// Rejects TaskId(0) as it is reserved for the kernel supervisor.
+pub fn register_init_task(id: TaskId) -> Result<(), &'static str> {
+    if id == TaskId(0) {
+        return Err("TaskId(0) is reserved for kernel supervisor");
     }
+    let mut records = SERVICE_RECORDS.lock();
+    let rec = records[ServiceId::Init as usize]
+        .as_mut()
+        .ok_or("Init service record not found")?;
+    rec.task = id;
+    Ok(())
 }
 
 /// Resource budget assigned to each first-party system service. These limits are
@@ -1261,4 +1267,32 @@ mod tests {
         assert_eq!(BootProfile::parse(b""), None);
         assert_eq!(BootProfile::parse(b"agents extra"), None);
     }
+    #[test]
+    fn register_init_task_validates_identity_and_updates_registry() {
+        // TaskId(0) is reserved for kernel supervisor and must be rejected
+        assert!(register_init_task(TaskId(0)).is_err());
+
+        // Ensure Init record is declared
+        {
+            let mut records = SERVICE_RECORDS.lock();
+            records[ServiceId::Init as usize] = Some(ServiceRecord {
+                id: ServiceId::Init,
+                task: TaskId(0),
+                state: ServiceState::Running,
+                generation: 1,
+            });
+        }
+
+        // Registering a valid PID 1 TaskId must succeed
+        assert!(register_init_task(TaskId(1)).is_ok());
+        assert_eq!(task_id(ServiceId::Init), Some(TaskId(1)));
+
+        // Uninitialized record must return an error
+        {
+            let mut records = SERVICE_RECORDS.lock();
+            records[ServiceId::Init as usize] = None;
+        }
+        assert!(register_init_task(TaskId(1)).is_err());
+    }
 }
+

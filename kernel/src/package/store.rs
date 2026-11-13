@@ -42,6 +42,22 @@ impl PackageBlobStore {
    out[p..p+4].copy_from_slice(&(b.bytes.len()as u32).to_le_bytes());p+=4;out[p..p+b.bytes.len()].copy_from_slice(&b.bytes);p+=b.bytes.len();
   }crate::storage::persistent::commit_kind(&out[..p],5).map(|_|()).map_err(|_|())
  }
+
+ #[cfg(test)]
+ pub fn insert_for_test(&mut self, package_id: &str, version: (u16, u16, u16), bytes: &[u8]) {
+     self.blobs.retain(|b| b.package_id != package_id);
+     self.blobs.push(PackageBlob {
+         package_id: package_id.to_string(),
+         version,
+         bytes: bytes.to_vec(),
+     });
+ }
+
+ #[cfg(test)]
+ pub fn remove_for_test(&mut self, package_id: &str) {
+     self.blobs.retain(|b| b.package_id != package_id);
+ }
+
  pub fn restore(&mut self){
   let mut b=Vec::with_capacity(65472);
   b.resize(65472,0);

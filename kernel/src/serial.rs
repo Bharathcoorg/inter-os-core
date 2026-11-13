@@ -900,6 +900,32 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("INTENT_RESOLVE") {
+        let Some(kind_str) = parts.next() else {
+            serial_println!("[INTENT] REJECT missing kind");
+            return true;
+        };
+        let Some(value) = parts.next() else {
+            serial_println!("[INTENT] REJECT missing value");
+            return true;
+        };
+        let kind = match kind_str.to_ascii_lowercase().as_str() {
+            "mime" => crate::content::intent::IntentKind::Mime,
+            "scheme" => crate::content::intent::IntentKind::Scheme,
+            "action" => crate::content::intent::IntentKind::Action,
+            _ => {
+                serial_println!("[INTENT] REJECT unknown kind '{}'", kind_str);
+                return true;
+            }
+        };
+        let registry = crate::content::INTENT_REGISTRY.lock();
+        match registry.resolve(kind, value) {
+            Some(pkg) => serial_println!("[INTENT] RESOLVE {} '{}' -> '{}'", kind_str, value, pkg),
+            None => serial_println!("[INTENT] REFUSE {} '{}' -> NONE", kind_str, value),
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("INPUT_TOUCH") {
         let phase = match parts.next().map(|v| v.to_ascii_uppercase()).as_deref() {
             Some("DOWN") => crate::input::TouchPhase::Down,

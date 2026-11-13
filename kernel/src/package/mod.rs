@@ -152,4 +152,186 @@ pub fn seed_intent_registry() {
         seeded,
         packages
     );
+    drop(registry);
+
+    // Restore intents declared by verified third-party RAPP packages installed across reboots
+    restore_persisted_rapp_intents();
+}
+
+/// Scans active packages in [`PACKAGE_REGISTRY`], reads their payloads from [`PACKAGE_BLOB_STORE`],
+/// verifies integrity and signatures, and registers declared intents into [`INTENT_REGISTRY`].
+pub fn restore_persisted_rapp_intents() {
+    let active_entries = PACKAGE_REGISTRY.lock().active_entries();
+    if active_entries.is_empty() {
+        return;
+    }
+
+    let mut restored_handlers = 0usize;
+    let mut restored_packages = 0usize;
+
+    for entry in active_entries {
+        if first_party_package(&entry.package_id).is_some() {
+            continue;
+        }
+
+        let blob = {
+            let store = PACKAGE_BLOB_STORE.lock();
+            store.get(&entry.package_id).cloned()
+        };
+
+        let Some(blob) = blob else {
+            crate::serial_println!(
+                "[CONTENT] Missing blob for persisted package '{}'; skipping intent restoration.",
+                entry.package_id
+            );
+            continue;
+        };
+
+        if blob.version != entry.version {
+            crate::serial_println!(
+                "[CONTENT] Version mismatch for persisted package '{}' (registry={:?}, store={:?}); skipping intent restoration.",
+                entry.package_id,
+                entry.version,
+                blob.version
+            );
+            continue;
+        }
+
+        match parse_rapp(&blob.bytes) {
+            Ok(manifest) => {
+                if manifest.package_id == entry.package_id && manifest.version == entry.version {
+                    if !manifest.intents.is_empty() {
+                        let count = manifest.intents.len();
+                        crate::content::INTENT_REGISTRY
+                            .lock()
+                            .register(&manifest.package_id, &manifest.intents);
+                        restored_handlers += count;
+                        restored_packages += 1;
+                        crate::serial_println!(
+                            "[CONTENT] Restored {} intent handler(s) from verified persisted package '{}'.",
+                            count,
+                            entry.package_id
+                        );
+                    }
+                } else {
+                    crate::serial_println!(
+                        "[CONTENT] Persisted package '{}' manifest ID/version mismatch; skipping intent restoration.",
+                        entry.package_id
+                    );
+                }
+            }
+            Err(err) => {
+                crate::serial_println!(
+                    "[CONTENT] Persisted package '{}' failed verification during intent restoration ({:?}); skipping.",
+                    entry.package_id,
+                    err
+                );
+            }
+        }
+    }
+
+    if restored_packages > 0 {
+        crate::serial_println!(
+            "[CONTENT] Persisted RAPP intent restoration complete: {} handler(s) from {} package(s).",
+            restored_handlers,
+            restored_packages
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::intent::{IntentDeclaration, IntentKind, INTENT_REGISTRY};
+    use crate::package::rapp::{
+        build_rapp_v4, signed_message, RappArch, RAPP_FORMAT_VERSION_V4, RAPP_SIGNATURE_OFFSET,
+        RAPP_SIGNATURE_SIZE, RAPP_V3_HEADER_SIZE,
+    };
+    use ed25519_dalek::Signer;
+
+    #[test]
+    fn seed_intent_registry_populates_first_party_intents() {
+        seed_intent_registry();
+        let registry = INTENT_REGISTRY.lock();
+        let handler = registry.resolve(IntentKind::Mime, "image/png");
+        assert_eq!(handler, Some("org.interos.gallery"));
+        let browser = registry.resolve(IntentKind::Scheme, "https");
+        assert_eq!(browser, Some("org.interos.browser"));
+    }
+
+    #[test]
+    fn persisted_rapp_intents_restored_across_reboot() {
+        let pkg_id = "org.interos.custom_app";
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[55; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes();
+
+        let payload = &[0x7F, b'E', b'L', b'F', 0, 0, 0, 0];
+        let declarations = [IntentDeclaration::new(
+            IntentKind::Mime,
+            "application/x-custom-doc",
+        )];
+
+        let mut pkg = build_rapp_v4(
+            pkg_id,
+            &pub_key,
+            (1, 0, 0),
+            RappArch::X86_64,
+            &[1],
+            &[],
+            &declarations,
+            payload,
+            &[0u8; 64],
+        );
+
+        REVOCATION_REGISTRY
+            .lock()
+            .grant_trust_root(pub_key, "custom_app_key")
+            .unwrap();
+
+        let section_len = u32::from_le_bytes([pkg[0xB4], pkg[0xB5], pkg[0xB6], pkg[0xB7]]) as usize;
+        let section_start = RAPP_V3_HEADER_SIZE + 1 * 2;
+        let payload_offset = section_start + section_len;
+        let msg = signed_message(&pkg, payload_offset, payload.len());
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+
+        // Stage in blob store and active package registry
+        let verified = parse_rapp(&pkg).expect("test package must parse and verify");
+        assert_eq!(verified.format_version, RAPP_FORMAT_VERSION_V4);
+
+        {
+            let mut store = PACKAGE_BLOB_STORE.lock();
+            store.insert_for_test(pkg_id, (1, 0, 0), &pkg);
+        }
+        {
+            let mut reg = PACKAGE_REGISTRY.lock();
+            reg.insert_active_for_test(pkg_id, (1, 0, 0));
+        }
+
+        // Before intent restoration: unregister to simulate reboot wipe
+        INTENT_REGISTRY.lock().unregister(pkg_id);
+        assert_eq!(
+            INTENT_REGISTRY
+                .lock()
+                .resolve(IntentKind::Mime, "application/x-custom-doc"),
+            None
+        );
+
+        // Run restoration (as happens during boot seed_intent_registry)
+        seed_intent_registry();
+
+        // Intent must now be resolved to the restored custom app
+        assert_eq!(
+            INTENT_REGISTRY
+                .lock()
+                .resolve(IntentKind::Mime, "application/x-custom-doc"),
+            Some(pkg_id)
+        );
+
+        // Cleanup: remove and unregister
+        INTENT_REGISTRY.lock().unregister(pkg_id);
+        PACKAGE_BLOB_STORE.lock().remove_for_test(pkg_id);
+        PACKAGE_REGISTRY.lock().remove_for_test(pkg_id);
+    }
 }

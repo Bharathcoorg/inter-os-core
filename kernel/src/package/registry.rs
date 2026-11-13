@@ -398,6 +398,20 @@ impl PackageRegistry {
             .cloned()
             .collect()
     }
-}
+    #[cfg(test)]
+    pub fn insert_active_for_test(&mut self, package_id: &str, version: (u16, u16, u16)) {
+        self.entries.retain(|e| e.package_id != package_id);
+        self.entries.push(PackageEntry {
+            package_id: package_id.to_string(),
+            generation: 1,
+            state: PackageState::Active,
+            version,
+        });
+    }
 
+    #[cfg(test)]
+    pub fn remove_for_test(&mut self, package_id: &str) {
+        self.entries.retain(|e| e.package_id != package_id);
+    }
+}
 pub static PACKAGE_REGISTRY: Mutex<PackageRegistry> = Mutex::new(PackageRegistry::new());

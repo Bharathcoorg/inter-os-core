@@ -39,7 +39,7 @@ def main():
     must(user,"11 => crate::services::ServiceId::Sensor","sensor userspace mapping")
     for cap in ("19 => (CapabilityType::SystemControl","20 => (CapabilityType::SystemControl","21 => (CapabilityType::SystemControl","22 => (CapabilityType::SystemControl","23 => (CapabilityType::SystemControl"):
         must(user,cap,f"RAPP scoped capability {cap}")
-    must(abi,"SERVICE_ID_MAX: u8 = 11","ABI service range")
+    must(abi,"SERVICE_ID_MAX: u8 = 15","ABI service range")
     must(abi,'"org.interos.service.sensord" => Some(11)',"sensor package identity")
     must(images,"debug/sensord","sensor image embedding")
     must(manifest,'"name": "sensord"',"QEMU sensor service manifest")

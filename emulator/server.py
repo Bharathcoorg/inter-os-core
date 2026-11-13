@@ -2185,6 +2185,7 @@ def stop_qemu_backend():
     # recycled PID for the guest this Studio launched.
     clear_qemu_process()
     reset_monitor_connection()
+    reset_serial_epoch()
 
     # Never discover and kill arbitrary QEMU processes by executable name,
     # shared disk path, or monitor port. Only qemu_subproc, created and owned by
@@ -2568,6 +2569,9 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
             # impersonate.
             track_qemu_process(proc, vnc_display=vnc_display, vnc_port=vnc_port)
             launch_info["pid"] = proc.pid
+            if active_profile_key != profile_key:
+                reset_monitor_connection()
+                reset_serial_epoch()
             active_profile_key = profile_key
             # The guest may be on a different display than the configured one;
             # the Studio's own RFB client follows it.
@@ -4195,6 +4199,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             state_copy['device_online'] = is_running
             if not is_running:
                 state_copy['battery']['charging_status'] = 'Disconnected'
+                state_copy['battery']['level'] = None
+                state_copy['battery']['health'] = 'UNAVAILABLE'
                 state_copy['telemetry_status'] = 'UNAVAILABLE'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -5605,6 +5611,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
         if self.path == '/api/touch/event':
+            if not tracked_qemu_process_alive():
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'QEMU guest is offline; touch input rejected'}).encode())
+                return
             content_length = self._bounded_content_length()
             if content_length is None:
                 return
@@ -5692,7 +5704,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'action': action, 'coordinate_space': space, 'guest': {'x': gx, 'y': gy}}).encode())
+                self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'delivery_method': 'serial_injection', 'hardware_touch': False, 'action': action, 'coordinate_space': space, 'guest': {'x': gx, 'y': gy}}).encode())
             except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
                 self.send_response(400 if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)) else 503)
                 self.send_header('Content-Type', 'application/json')
