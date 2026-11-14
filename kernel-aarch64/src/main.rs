@@ -149,6 +149,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 if let Ok(bootargs) = parser.get_bootargs() {
                     kprintln!("[AArch64] Kernel bootargs: '{}'", bootargs);
                 }
+                if let Ok(seed) = parser.get_random_seed() {
+                    kprintln!("[AArch64] Firmware entropy seed discovered in DTB (/chosen/rng-seed, {} bytes).", seed.len());
+                }
                 dtb = Some(parser);
             }
         }
@@ -179,13 +182,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
-            gic::IntcDescription::Gicv3 { distributor, redistributors } => {
-                let gicv3 = gic::Gicv3::new(distributor, redistributors);
-                unsafe { gicv3.init(); }
-                gicv3.enable_irq(27);
-                gic::register_active_gicv3(gicv3);
-                kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X}, full generic GICv3 initialized, IRQ 27 enabled.",
-                    distributor, redistributors);
+            gic::IntcDescription::Gicv3 { distributor, redistributors, redistributors_size } => {
+                let mut gicv3 = gic::Gicv3::with_size(distributor, redistributors, redistributors_size);
+                if let Err(e) = unsafe { gicv3.init() } {
+                    kprintln!("[WARN] GICv3 initialization failed: {:?}", e);
+                } else {
+                    gicv3.enable_irq(27);
+                    gic::register_active_gicv3(gicv3);
+                    kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
+                        distributor, redistributors, redistributors_size / 1024);
+                }
             }
             gic::IntcDescription::Unsupported(model) => {
                 kprintln!("[OK] Interrupt controller {} declared by the platform uses a register model this driver does not implement.", model);

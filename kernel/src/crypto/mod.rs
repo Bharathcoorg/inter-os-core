@@ -14,10 +14,14 @@ pub mod rng;
 pub mod sha256;
 pub mod tls_trust;
 
-pub use chacha20poly1305::{AeadError, ChaCha20Poly1305};
+pub use chacha20poly1305::{chacha20_block, chacha20_xor, poly1305_mac, AeadError, ChaCha20Poly1305};
 pub use hmac::HmacSha256;
 pub use keystore::{KeySlot, KeystoreError, SecureKeystore, SECURE_KEYSTORE};
-pub use rng::{get_random_bytes, try_get_random_bytes, entropy_state, inject_verified_seed, mix_auxiliary_jitter, EntropyError, EntropyState, HardwareRng, TRNG};
+pub use rng::{
+    entropy_state, get_random_bytes, inject_bootloader_seed, inject_test_seed,
+    inject_verified_seed, mix_auxiliary_jitter, try_get_random_bytes, EntropyError, EntropyState,
+    HardwareRng, PlatformEntropyProvider, register_platform_entropy_provider, TRNG,
+};
 pub use sha256::{Sha256, SHA256_BLOCK_SIZE, SHA256_DIGEST_LENGTH};
 
 /// Constant-time 32-byte array equality comparison preventing timing attacks.

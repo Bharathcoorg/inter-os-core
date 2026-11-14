@@ -588,6 +588,22 @@ impl<'a> ArmFdtParser<'a> {
         core::str::from_utf8(&prop_bytes[..len]).map_err(|_| FdtError::CorruptedStructure)
     }
 
+    /// Extracts the bootloader-provided random seed from `/chosen/rng-seed` or `/chosen/kaslr-seed`.
+    pub fn get_random_seed(&self) -> Result<&'a [u8], FdtError> {
+        let chosen_node = self.find_node_by_name("chosen")?;
+        if let Ok(seed) = self.get_node_property(&chosen_node, "rng-seed") {
+            if seed.len() >= 32 {
+                return Ok(seed);
+            }
+        }
+        if let Ok(seed) = self.get_node_property(&chosen_node, "kaslr-seed") {
+            if seed.len() >= 8 {
+                return Ok(seed);
+            }
+        }
+        Err(FdtError::PropertyNotFound)
+    }
+
     pub fn get_node_property(
         &self,
         node: &ArmFdtNode<'a>,

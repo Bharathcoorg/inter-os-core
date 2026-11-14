@@ -66,7 +66,8 @@ global_asm!(
 
         mrs x21, fpcr
         mrs x22, fpsr
-        stp w21, w22, [sp, #280]
+        orr x21, x21, x22, lsl #32
+        str x21, [sp, #280]
 
         stp q0, q1, [sp, #288]
         stp q2, q3, [sp, #320]
@@ -106,8 +107,9 @@ global_asm!(
 
         ldp x21, x22, [sp, #248]
         ldp x23, x24, [sp, #264]
-        ldp w25, w26, [sp, #280]
+        ldr x25, [sp, #280]
         msr fpcr, x25
+        lsr x26, x25, #32
         msr fpsr, x26
         msr elr_el1, x21
         msr spsr_el1, x22

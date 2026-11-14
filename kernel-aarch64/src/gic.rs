@@ -47,17 +47,14 @@ pub enum IntcDescription {
     Gicv3 {
         distributor: usize,
         redistributors: usize,
+        redistributors_size: usize,
     },
     Unsupported(&'static str),
     Absent,
 }
 
-/// Reads the `reg` property of a node as a list of base addresses.
-///
-/// `reg` is a sequence of `(address, size)` pairs, so the stride depends on both
-/// cell counts; skipping only the address cells would misread every size as the
-/// next base address.
-fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<usize>> {
+/// Reads the `reg` property of a node as a list of `(address, size)` pairs.
+fn reg_windows_with_sizes(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<(usize, usize)>> {
     let reg = parser.get_node_property(node, "reg").ok()?;
     if reg.is_empty() {
         return None;
@@ -79,11 +76,11 @@ fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<V
             size_cells = 1;
         } else {
             address_cells = 1;
-            size_cells = 0;
+            size_cells = 1;
         }
     }
 
-    if address_cells == 0 || address_cells > 2 || size_cells > 2 {
+    if address_cells == 0 || address_cells > 2 || size_cells == 0 || size_cells > 2 {
         return None;
     }
     let stride = (address_cells + size_cells) * 4;
@@ -91,34 +88,43 @@ fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<V
         return None;
     }
 
-    let mut bases = Vec::new();
+    let mut windows = Vec::new();
     let mut cursor = 0usize;
-    while cursor + address_cells * 4 <= reg.len() {
-        let value = match address_cells {
-            1 => u32::from_be_bytes(reg[cursor..cursor + 4].try_into().ok()?) as u64,
-            _ => u64::from_be_bytes(reg[cursor..cursor + 8].try_into().ok()?),
+    while cursor + stride <= reg.len() {
+        let base = match address_cells {
+            1 => u32::from_be_bytes(reg[cursor..cursor + 4].try_into().ok()?) as usize,
+            _ => u64::from_be_bytes(reg[cursor..cursor + 8].try_into().ok()?) as usize,
         };
-        bases.push(value as usize);
+        let size_offset = cursor + address_cells * 4;
+        let size = match size_cells {
+            1 => u32::from_be_bytes(reg[size_offset..size_offset + 4].try_into().ok()?) as usize,
+            _ => u64::from_be_bytes(reg[size_offset..size_offset + 8].try_into().ok()?) as usize,
+        };
+        windows.push((base, size));
         cursor += stride;
     }
 
-    // Safety check: if bases[1] looks like a region size (< 64 KiB) instead of a
-    // peripheral base address, and we have additional entries, the parser stride
-    // may have skipped sizes incorrectly. Fall back to direct (addr, size) parsing.
-    if bases.len() >= 2 && bases[1] < 0x10000 && reg.len() >= 16 {
-        // Direct parse for 32-bit (addr, size) pairs
+    // Direct fallback for 32-bit (addr, size) pairs
+    if windows.len() >= 2 && windows[1].0 < 0x10000 && reg.len() >= 16 {
         let gicd = u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]) as usize;
         let gicc = u32::from_be_bytes([reg[8], reg[9], reg[10], reg[11]]) as usize;
         if gicd >= 0x0010_0000 && gicc >= 0x0010_0000 {
-            return Some(alloc::vec![gicd, gicc]);
+            let gicd_sz = u32::from_be_bytes([reg[4], reg[5], reg[6], reg[7]]) as usize;
+            let gicc_sz = u32::from_be_bytes([reg[12], reg[13], reg[14], reg[15]]) as usize;
+            return Some(alloc::vec![(gicd, gicd_sz), (gicc, gicc_sz)]);
         }
     }
 
-    if bases.is_empty() {
+    if windows.is_empty() {
         None
     } else {
-        Some(bases)
+        Some(windows)
     }
+}
+
+/// Reads the `reg` property of a node as a list of base addresses.
+fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<usize>> {
+    reg_windows_with_sizes(parser, node).map(|windows| windows.into_iter().map(|(base, _)| base).collect())
 }
 
 /// Decodes a cell-count property, accepting the 1- and 2-cell encodings.
@@ -152,11 +158,12 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
     }
     for frame in ["arm,gic-v3", "arm,gic-v3-frame"] {
         if let Ok(v3_node) = parser.find_node_by_compatible(frame) {
-            match reg_windows(parser, &v3_node) {
-                Some(bases) if bases.len() >= 2 => {
+            match reg_windows_with_sizes(parser, &v3_node) {
+                Some(windows) if windows.len() >= 2 => {
                     return IntcDescription::Gicv3 {
-                        distributor: bases[0],
-                        redistributors: bases[1],
+                        distributor: windows[0].0,
+                        redistributors: windows[1].0,
+                        redistributors_size: windows[1].1,
                     };
                 }
                 _ => return IntcDescription::Unsupported("arm,gic-v3"),
@@ -193,10 +200,11 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
             _ => IntcDescription::Unsupported("arm,gic-400 without a CPU interface window"),
         }
     } else if model == "arm,gic-v3" {
-        match reg_windows(parser, &node) {
-            Some(bases) if bases.len() >= 2 => IntcDescription::Gicv3 {
-                distributor: bases[0],
-                redistributors: bases[1],
+        match reg_windows_with_sizes(parser, &node) {
+            Some(windows) if windows.len() >= 2 => IntcDescription::Gicv3 {
+                distributor: windows[0].0,
+                redistributors: windows[1].0,
+                redistributors_size: windows[1].1,
             },
             _ => IntcDescription::Unsupported("arm,gic-v3 without redistributor windows"),
         }
@@ -347,11 +355,22 @@ impl Gicv2 {
     }
 }
 
+/// GIC hardware and configuration errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GicError {
+    DistributorRwpTimeout,
+    RedistributorNotFound,
+    RedistributorSleepTimeout,
+    InvalidMmioRange,
+}
+
 /// GICv3 system-register and memory-mapped driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
 #[derive(Debug, Clone, Copy)]
 pub struct Gicv3 {
     pub distributor_base: usize,
     pub redistributors_base: usize,
+    pub redistributors_size: usize,
+    pub current_rd_base: usize,
 }
 
 impl Gicv3 {
@@ -359,6 +378,17 @@ impl Gicv3 {
         Self {
             distributor_base,
             redistributors_base,
+            redistributors_size: 0,
+            current_rd_base: 0,
+        }
+    }
+
+    pub const fn with_size(distributor_base: usize, redistributors_base: usize, redistributors_size: usize) -> Self {
+        Self {
+            distributor_base,
+            redistributors_base,
+            redistributors_size,
+            current_rd_base: 0,
         }
     }
 
@@ -386,29 +416,93 @@ impl Gicv3 {
         core::ptr::write_volatile(ptr, val);
     }
 
-    /// Full generic GICv3 initialization: Distributor, Redistributor, and CPU Interface.
-    pub unsafe fn init(&self) {
-        if self.distributor_base == 0 || self.redistributors_base == 0 {
-            return;
+    #[inline(always)]
+    unsafe fn gicr_read_64(&self, offset: usize) -> u64 {
+        let ptr = (self.redistributors_base + offset) as *const u64;
+        core::ptr::read_volatile(ptr)
+    }
+
+    /// Reads the current processing element's affinity from `MPIDR_EL1`.
+    pub fn current_pe_affinity() -> u32 {
+        let mut mpidr: u64 = 0;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack));
+        }
+        let aff3 = ((mpidr >> 32) & 0xFF) as u32;
+        let aff2 = ((mpidr >> 16) & 0xFF) as u32;
+        let aff1 = ((mpidr >> 8) & 0xFF) as u32;
+        let aff0 = (mpidr & 0xFF) as u32;
+        (aff3 << 24) | (aff2 << 16) | (aff1 << 8) | aff0
+    }
+
+    /// Walks the Redistributor frames in MMIO space to find the Redistributor
+    /// belonging to the PE with the target affinity.
+    pub fn discover_redistributor_for_affinity(&self, target_aff: u32) -> Result<usize, GicError> {
+        if self.redistributors_base == 0 {
+            return Err(GicError::InvalidMmioRange);
         }
 
-        // 1. Initialize Distributor:
+        let mut cursor = self.redistributors_base;
+        loop {
+            let offset_from_base = cursor - self.redistributors_base;
+            // Read 64-bit GICR_TYPER at offset 0x0008 of current RD_base
+            let typer = unsafe { self.gicr_read_64(offset_from_base + 0x0008) };
+            let rdist_aff = (typer >> 32) as u32;
+
+            if rdist_aff == target_aff {
+                return Ok(cursor);
+            }
+
+            let has_vlpis = (typer & (1 << 1)) != 0; // Bit 1: VLPIS
+            let stride = if has_vlpis { 0x40000 } else { 0x20000 }; // 256 KiB vs 128 KiB
+            let is_last = (typer & (1 << 4)) != 0; // Bit 4: Last
+
+            if self.redistributors_size > 0 {
+                if offset_from_base.checked_add(stride).map_or(true, |next| next > self.redistributors_size) {
+                    break;
+                }
+            }
+
+            if is_last {
+                break;
+            }
+
+            cursor += stride;
+        }
+
+        if target_aff == 0 {
+            Ok(self.redistributors_base)
+        } else {
+            Err(GicError::RedistributorNotFound)
+        }
+    }
+
+    /// Initializes the Distributor.
+    pub unsafe fn init_distributor(&self) -> Result<(), GicError> {
+        if self.distributor_base == 0 {
+            return Err(GicError::InvalidMmioRange);
+        }
+
         // Set ARE_NS (bit 5) and EnableGrp1NS (bit 1) in GICD_CTLR
         let mut ctlr = self.gicd_read(0x0000);
-        ctlr |= (1 << 5) | (1 << 1); // ARE_NS | EnableGrp1NS
+        ctlr |= (1 << 5) | (1 << 1);
         self.gicd_write(0x0000, ctlr);
 
         // Wait for Register Write Pending (RWP, bit 31) to clear
         let mut spins = 0;
-        while (self.gicd_read(0x0000) & (1 << 31)) != 0 && spins < 100_000 {
+        while (self.gicd_read(0x0000) & (1 << 31)) != 0 {
             core::hint::spin_loop();
             spins += 1;
+            if spins >= 100_000 {
+                return Err(GicError::DistributorRwpTimeout);
+            }
         }
 
         // Discover number of interrupt lines
         let typer = self.gicd_read(0x0004);
         let it_lines = typer & 0x1F;
-        let num_irqs = 32 * (it_lines + 1);
+        let num_irqs = (32 * (it_lines + 1)).min(1020);
 
         // Set SPIs (32..num_irqs) to Group 1 Non-Secure and default priority
         for irq_block in 1..(num_irqs / 32) {
@@ -418,30 +512,54 @@ impl Gicv3 {
             self.gicd_write(0x0400 + (prio_reg as usize) * 4, 0xA0A0_A0A0);
         }
 
-        // 2. Initialize Redistributor for current PE:
+        Ok(())
+    }
+
+    /// Initializes the Redistributor for the current PE.
+    pub unsafe fn init_redistributor(&mut self) -> Result<(), GicError> {
+        if self.current_rd_base == 0 {
+            self.current_rd_base = self.discover_redistributor_for_affinity(Self::current_pe_affinity())?;
+        }
+
+        let rd_offset = self.current_rd_base - self.redistributors_base;
+
         // Clear ProcessorSleep (bit 1) in GICR_WAKER to wake up Redistributor
-        let mut waker = self.gicr_read(0x0014);
+        let mut waker = self.gicr_read(rd_offset + 0x0014);
         waker &= !(1 << 1);
-        self.gicr_write(0x0014, waker);
+        self.gicr_write(rd_offset + 0x0014, waker);
 
         // Poll until ChildrenAsleep (bit 2) is cleared
-        spins = 0;
-        while (self.gicr_read(0x0014) & (1 << 2)) != 0 && spins < 100_000 {
+        let mut spins = 0;
+        while (self.gicr_read(rd_offset + 0x0014) & (1 << 2)) != 0 {
             core::hint::spin_loop();
             spins += 1;
+            if spins >= 100_000 {
+                return Err(GicError::RedistributorSleepTimeout);
+            }
         }
 
-        // SGI_base is at redistributors_base + 0x10000 (64 KiB frame)
-        let sgi_base = 0x10000;
+        // SGI_base is at rd_base + 0x10000 (64 KiB frame)
+        let sgi_offset = rd_offset + 0x10000;
         // Configure SGIs/PPIs (0..31) to Group 1 Non-Secure
-        self.gicr_write(sgi_base + 0x0080, 0xFFFF_FFFF);
+        self.gicr_write(sgi_offset + 0x0080, 0xFFFF_FFFF);
         // Set default priority for SGIs and PPIs
         for prio in 0..8 {
-            self.gicr_write(sgi_base + 0x0400 + prio * 4, 0xA0A0_A0A0);
+            self.gicr_write(sgi_offset + 0x0400 + prio * 4, 0xA0A0_A0A0);
         }
 
-        // 3. Initialize CPU Interface system registers
+        Ok(())
+    }
+
+    /// Full generic GICv3 initialization: Distributor, Redistributor, and CPU Interface.
+    pub unsafe fn init(&mut self) -> Result<(), GicError> {
+        if self.distributor_base == 0 || self.redistributors_base == 0 {
+            return Err(GicError::InvalidMmioRange);
+        }
+
+        self.init_distributor()?;
+        self.init_redistributor()?;
         self.init_cpu_interface();
+        Ok(())
     }
 
     /// Enables an interrupt line.
@@ -449,9 +567,14 @@ impl Gicv3 {
         if irq < 32 {
             // SGI/PPI: programmed in Redistributor SGI frame (offset 0x10000)
             unsafe {
-                let sgi_base = 0x10000;
+                let rd_offset = if self.current_rd_base >= self.redistributors_base {
+                    self.current_rd_base - self.redistributors_base
+                } else {
+                    0
+                };
+                let sgi_offset = rd_offset + 0x10000;
                 let bit = 1 << irq;
-                self.gicr_write(sgi_base + 0x0100, bit);
+                self.gicr_write(sgi_offset + 0x0100, bit);
             }
         } else if self.distributor_base != 0 {
             // SPI: programmed in Distributor
@@ -467,9 +590,14 @@ impl Gicv3 {
     pub fn disable_irq(&self, irq: u32) {
         if irq < 32 {
             unsafe {
-                let sgi_base = 0x10000;
+                let rd_offset = if self.current_rd_base >= self.redistributors_base {
+                    self.current_rd_base - self.redistributors_base
+                } else {
+                    0
+                };
+                let sgi_offset = rd_offset + 0x10000;
                 let bit = 1 << irq;
-                self.gicr_write(sgi_base + 0x0180, bit);
+                self.gicr_write(sgi_offset + 0x0180, bit);
             }
         } else if self.distributor_base != 0 {
             unsafe {
@@ -512,6 +640,9 @@ impl Gicv3 {
 
     /// Signals End of Interrupt via ICC_EOIR1_EL1.
     pub fn end_of_interrupt(&self, irq: u32) {
+        if irq >= 1020 {
+            return;
+        }
         #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!("msr s3_0_c12_c12_1, {val}", val = in(reg) irq as u64, options(nomem, nostack));
@@ -521,6 +652,13 @@ impl Gicv3 {
         let _ = irq;
     }
 }
+
+pub const ACTIVE_GIC_KIND_NONE: u8 = 0;
+pub const ACTIVE_GIC_KIND_GICV2: u8 = 1;
+pub const ACTIVE_GIC_KIND_GICV3: u8 = 2;
+
+static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
+static ACTIVE_GICC_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Global active interrupt controller on the platform.
 #[derive(Debug, Clone, Copy)]
@@ -533,27 +671,68 @@ pub enum ActiveGic {
 pub static ACTIVE_GIC: spin::Mutex<ActiveGic> = spin::Mutex::new(ActiveGic::None);
 
 pub fn register_active_gicv2(gic: Gicv2) {
+    ACTIVE_GICC_BASE.store(gic.gicc_base, core::sync::atomic::Ordering::Release);
+    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV2, core::sync::atomic::Ordering::Release);
     *ACTIVE_GIC.lock() = ActiveGic::Gicv2(gic);
 }
 
 pub fn register_active_gicv3(gic: Gicv3) {
+    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV3, core::sync::atomic::Ordering::Release);
     *ACTIVE_GIC.lock() = ActiveGic::Gicv3(gic);
 }
 
+/// Acknowledges pending interrupt. This function is lock-free and wait-free,
+/// ensuring zero possibility of interrupt-context deadlock.
+#[inline(always)]
 pub fn acknowledge_irq() -> u32 {
-    let guard = ACTIVE_GIC.lock();
-    match *guard {
-        ActiveGic::Gicv2(ref g) => g.acknowledge_irq(),
-        ActiveGic::Gicv3(ref g) => g.acknowledge_irq(),
-        ActiveGic::None => GIC_SPURIOUS_IRQ,
+    match ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) {
+        ACTIVE_GIC_KIND_GICV3 => {
+            let mut irq: u64 = GIC_SPURIOUS_IRQ as u64;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                core::arch::asm!("mrs {val}, s3_0_c12_c12_0", val = out(reg) irq, options(nomem, nostack));
+            }
+            irq as u32
+        }
+        ACTIVE_GIC_KIND_GICV2 => {
+            let gicc = ACTIVE_GICC_BASE.load(core::sync::atomic::Ordering::Relaxed);
+            if gicc != 0 {
+                unsafe {
+                    core::ptr::read_volatile((gicc + GICC_IAR) as *const u32) & 0x3FF
+                }
+            } else {
+                GIC_SPURIOUS_IRQ
+            }
+        }
+        _ => GIC_SPURIOUS_IRQ,
     }
 }
 
+/// Signals End of Interrupt. This function is lock-free and wait-free.
+/// Spurious interrupts (irq >= 1020) are automatically dropped without writing to EOIR.
+#[inline(always)]
 pub fn end_of_interrupt(irq: u32) {
-    let guard = ACTIVE_GIC.lock();
-    match *guard {
-        ActiveGic::Gicv2(ref g) => g.end_of_interrupt(irq),
-        ActiveGic::Gicv3(ref g) => g.end_of_interrupt(irq),
-        ActiveGic::None => {}
+    if irq >= 1020 {
+        return; // Spurious interrupt: architectural requirement to omit EOI write
+    }
+    match ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) {
+        ACTIVE_GIC_KIND_GICV3 => {
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                core::arch::asm!("msr s3_0_c12_c12_1, {val}", val = in(reg) irq as u64, options(nomem, nostack));
+                core::arch::asm!("isb");
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            let _ = irq;
+        }
+        ACTIVE_GIC_KIND_GICV2 => {
+            let gicc = ACTIVE_GICC_BASE.load(core::sync::atomic::Ordering::Relaxed);
+            if gicc != 0 {
+                unsafe {
+                    core::ptr::write_volatile((gicc + GICC_EOIR) as *mut u32, irq & 0x3FF);
+                }
+            }
+        }
+        _ => {}
     }
 }

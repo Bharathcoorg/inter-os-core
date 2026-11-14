@@ -45,7 +45,7 @@ fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) 
 
 /// Computes a single 64-byte ChaCha20 block.
 pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12], block: &mut [u8; 64]) {
-    let initial = [
+    let mut initial = [
         0x61707865u32, 0x3320646e, 0x79622d32, 0x6b206574,
         u32::from_le_bytes([key[0], key[1], key[2], key[3]]),
         u32::from_le_bytes([key[4], key[5], key[6], key[7]]),
@@ -78,6 +78,14 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12], block: &mu
     for i in 0..16 {
         let val = state[i].wrapping_add(initial[i]);
         block[i * 4..(i + 1) * 4].copy_from_slice(&val.to_le_bytes());
+    }
+
+    // Volatile zeroization of secret state to prevent stack leakage
+    for w in initial.iter_mut() {
+        unsafe { core::ptr::write_volatile(w, 0); }
+    }
+    for w in state.iter_mut() {
+        unsafe { core::ptr::write_volatile(w, 0); }
     }
 }
 
@@ -290,6 +298,13 @@ impl Drop for Poly1305 {
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Standalone Poly1305 one-time message authentication code (RFC 8439 Section 2.5).
+pub fn poly1305_mac(key: &[u8; 32], message: &[u8], tag: &mut [u8; 16]) {
+    let mut poly = Poly1305::new(key);
+    poly.blocks(message, true);
+    poly.finish(tag);
 }
 
 /// Maximum AEAD payload length (64 MiB) supported under microkernel buffer constraints.
@@ -548,5 +563,53 @@ mod tests {
             ChaCha20Poly1305::open(&wrong_key, &nonce, aad, &mut buffer, &tag),
             Err(AeadError::IntegrityViolation)
         );
+    }
+
+    #[test]
+    fn test_rfc8439_section_2_3_2_chacha20_block() {
+        // Official RFC 8439 Section 2.3.2 ChaCha20 Block Function Test Vector
+        let key: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        let nonce: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x4a,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let counter = 1u32;
+        let expected_block: [u8; 64] = [
+            0x10, 0xf1, 0xe7, 0xe4, 0xd1, 0x3b, 0x59, 0x15,
+            0x50, 0x0f, 0xdd, 0x1f, 0xa3, 0x20, 0x71, 0xc4,
+            0xc7, 0xd1, 0xf4, 0xc7, 0x33, 0xc0, 0x68, 0x03,
+            0x04, 0x22, 0xaa, 0x9a, 0xc3, 0xd4, 0x6c, 0x4e,
+            0xd2, 0x82, 0x64, 0x46, 0x07, 0x9f, 0xaa, 0x09,
+            0x14, 0xc2, 0xd7, 0x05, 0xd9, 0x8b, 0x02, 0xa2,
+            0xb5, 0x12, 0x9c, 0xd1, 0xde, 0x16, 0x4e, 0xb9,
+            0xcb, 0xd0, 0x83, 0xe8, 0xa2, 0x50, 0x3c, 0x4e,
+        ];
+        let mut block = [0u8; 64];
+        chacha20_block(&key, counter, &nonce, &mut block);
+        assert_eq!(block, expected_block, "ChaCha20 block output must match RFC 8439 Section 2.3.2 test vector");
+    }
+
+    #[test]
+    fn test_rfc8439_section_2_5_2_poly1305() {
+        // Official RFC 8439 Section 2.5.2 Standalone Poly1305 Test Vector
+        let key: [u8; 32] = [
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33,
+            0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
+            0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd,
+            0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b,
+        ];
+        let msg = b"Cryptographic Forum Research Group";
+        let expected_tag: [u8; 16] = [
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6,
+            0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9,
+        ];
+        let mut tag = [0u8; 16];
+        poly1305_mac(&key, msg, &mut tag);
+        assert_eq!(tag, expected_tag, "Poly1305 MAC must match RFC 8439 Section 2.5.2 test vector");
     }
 }

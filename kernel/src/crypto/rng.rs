@@ -28,10 +28,12 @@ pub enum EntropyError {
 pub enum EntropyState {
     /// Uninitialized.
     Uninitialized,
-    /// Verified true hardware entropy source active.
+    /// Verified true physical hardware entropy source active (e.g. CPU instructions RDRAND / RNDR / Zkr).
     HardwareSeeded { source: &'static str },
-    /// Verified explicit seed injected (bootloader handoff or test fixture).
-    ExplicitSeeded,
+    /// Verified bootloader firmware entropy injected (e.g. Device Tree `/chosen/rng-seed`, UEFI RNG).
+    BootloaderSeeded { source: &'static str },
+    /// Verified deterministic test fixture seed injected (isolated unit / integration tests only).
+    TestSeeded,
     /// Degraded pseudo-jitter only (timestamps/ticks). INSUFFICIENT for cryptographic keys/nonces.
     DegradedPseudoOnly,
 }
@@ -47,19 +49,21 @@ pub trait PlatformEntropyProvider: Send + Sync {
 static PLATFORM_ENTROPY_PROVIDER: Mutex<Option<&'static dyn PlatformEntropyProvider>> = Mutex::new(None);
 
 /// Registers an external platform entropy provider (e.g. from early board bootloader or SoC bring-up).
+/// Harvests entropy outside the global TRNG lock to prevent lock-order inversion.
 pub fn register_platform_entropy_provider(provider: &'static dyn PlatformEntropyProvider) {
     *PLATFORM_ENTROPY_PROVIDER.lock() = Some(provider);
+    let mut seed = [0u8; 32];
+    let harvest_result = provider.get_entropy(&mut seed);
     let mut trng = TRNG.lock();
     if trng.state == EntropyState::DegradedPseudoOnly || trng.state == EntropyState::Uninitialized {
-        let mut seed = [0u8; 32];
-        if let Ok(n) = provider.get_entropy(&mut seed) {
+        if let Ok(n) = harvest_result {
             if n >= 32 {
-                trng.inject_verified_seed(&seed);
+                trng.inject_bootloader_seed(&seed, provider.name());
                 trng.state = EntropyState::HardwareSeeded { source: provider.name() };
             }
         }
-        crate::crypto::zeroize_slice(&mut seed);
     }
+    crate::crypto::zeroize_slice(&mut seed);
 }
 
 /// Hardware-backed Entropy Generator.
@@ -177,11 +181,12 @@ impl HardwareRng {
         }
 
         if self.state == EntropyState::DegradedPseudoOnly {
-            if let Some(provider) = *PLATFORM_ENTROPY_PROVIDER.lock() {
+            let provider_opt = *PLATFORM_ENTROPY_PROVIDER.lock();
+            if let Some(provider) = provider_opt {
                 let mut seed = [0u8; 32];
                 if let Ok(n) = provider.get_entropy(&mut seed) {
                     if n >= 32 {
-                        self.inject_verified_seed(&seed);
+                        self.inject_bootloader_seed(&seed, provider.name());
                         self.state = EntropyState::HardwareSeeded { source: provider.name() };
                     }
                 }
@@ -191,20 +196,37 @@ impl HardwareRng {
 
         #[cfg(test)]
         if self.state == EntropyState::DegradedPseudoOnly {
-            self.state = EntropyState::ExplicitSeeded;
+            self.state = EntropyState::TestSeeded;
             self.entropy_pool = [0x5A; 32];
         }
     }
 
-    /// Injects an externally verified true entropy seed (e.g. from bootloader UEFI RNG / DTB or unit test).
-    pub fn inject_verified_seed(&mut self, seed: &[u8; 32]) {
+    /// Injects a bootloader-provided firmware entropy seed (e.g. DTB `/chosen/rng-seed` or UEFI RNG).
+    pub fn inject_bootloader_seed(&mut self, seed: &[u8], source: &'static str) {
+        self.counter = self.counter.wrapping_add(1);
+        let mut mix_buf = [0u8; 64];
+        mix_buf[0..32].copy_from_slice(&self.entropy_pool);
+        let copy_len = seed.len().min(32);
+        mix_buf[32..32 + copy_len].copy_from_slice(&seed[..copy_len]);
+        self.entropy_pool = Sha256::digest(&mix_buf);
+        crate::crypto::zeroize_slice(&mut mix_buf);
+        self.state = EntropyState::BootloaderSeeded { source };
+    }
+
+    /// Injects a deterministic test seed for isolated unit testing.
+    pub fn inject_test_seed(&mut self, seed: &[u8; 32]) {
         self.counter = self.counter.wrapping_add(1);
         let mut mix_buf = [0u8; 64];
         mix_buf[0..32].copy_from_slice(&self.entropy_pool);
         mix_buf[32..64].copy_from_slice(seed);
         self.entropy_pool = Sha256::digest(&mix_buf);
         crate::crypto::zeroize_slice(&mut mix_buf);
-        self.state = EntropyState::ExplicitSeeded;
+        self.state = EntropyState::TestSeeded;
+    }
+
+    /// Injects an externally verified true entropy seed (e.g. from bootloader UEFI RNG / DTB or unit test).
+    pub fn inject_verified_seed(&mut self, seed: &[u8; 32]) {
+        self.inject_bootloader_seed(seed, "verified external seed");
     }
 
     /// Injects auxiliary physical entropy (touch noise, timer jitter).
@@ -276,7 +298,7 @@ impl HardwareRng {
 
                 self.expand_pool()
             }
-            EntropyState::ExplicitSeeded => {
+            EntropyState::BootloaderSeeded { .. } | EntropyState::TestSeeded => {
                 self.expand_pool()
             }
         }
@@ -321,6 +343,16 @@ pub fn init() {
 /// Safe helper to query the current entropy readiness state.
 pub fn entropy_state() -> EntropyState {
     TRNG.lock().state
+}
+
+/// Injects a bootloader-provided firmware seed into the global pool.
+pub fn inject_bootloader_seed(seed: &[u8], source: &'static str) {
+    TRNG.lock().inject_bootloader_seed(seed, source);
+}
+
+/// Injects a deterministic test seed into the global pool.
+pub fn inject_test_seed(seed: &[u8; 32]) {
+    TRNG.lock().inject_test_seed(seed);
 }
 
 /// Injects a verified true entropy seed into the global pool.
@@ -375,7 +407,7 @@ mod tests {
         let mut rng = HardwareRng::new();
         let seed = [0x42u8; 32];
         rng.inject_verified_seed(&seed);
-        assert_eq!(rng.state, EntropyState::ExplicitSeeded);
+        assert_eq!(rng.state, EntropyState::BootloaderSeeded { source: "verified external seed" });
 
         let mut buf1 = [0u8; 32];
         let mut buf2 = [0u8; 32];
@@ -383,6 +415,23 @@ mod tests {
         assert_eq!(rng.try_fill_bytes(&mut buf2), Ok(()));
         assert_ne!(buf1, [0u8; 32], "Output must not be all-zeros");
         assert_ne!(buf1, buf2, "Subsequent outputs must be distinct");
+    }
+
+    #[test]
+    fn test_bootloader_and_test_seed_injection() {
+        let mut rng = HardwareRng::new();
+        let dtb_seed = [0x77u8; 64];
+        rng.inject_bootloader_seed(&dtb_seed, "DTB /chosen/rng-seed");
+        assert_eq!(rng.state, EntropyState::BootloaderSeeded { source: "DTB /chosen/rng-seed" });
+
+        let mut buf = [0u8; 32];
+        assert_eq!(rng.try_fill_bytes(&mut buf), Ok(()));
+        assert_ne!(buf, [0u8; 32]);
+
+        let test_seed = [0x99u8; 32];
+        rng.inject_test_seed(&test_seed);
+        assert_eq!(rng.state, EntropyState::TestSeeded);
+        assert_eq!(rng.try_fill_bytes(&mut buf), Ok(()));
     }
 
     struct MockPlatformEntropy;
