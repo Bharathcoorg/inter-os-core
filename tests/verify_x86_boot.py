@@ -218,7 +218,7 @@ def main():
     args = [
         qemu_exe,
         "-machine", "q35",
-        "-cpu", "qemu64",
+        "-cpu", "qemu64,+rdrand",
         "-device", "piix3-ide,id=ide",
         "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
         "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",

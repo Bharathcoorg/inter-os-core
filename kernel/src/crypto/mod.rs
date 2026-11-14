@@ -15,7 +15,7 @@ pub mod tls_trust;
 
 pub use hmac::HmacSha256;
 pub use keystore::{KeySlot, KeystoreError, SecureKeystore, SECURE_KEYSTORE};
-pub use rng::{get_random_bytes, HardwareRng, TRNG};
+pub use rng::{get_random_bytes, try_get_random_bytes, entropy_state, inject_verified_seed, mix_auxiliary_jitter, EntropyError, EntropyState, HardwareRng, TRNG};
 pub use sha256::{Sha256, SHA256_BLOCK_SIZE, SHA256_DIGEST_LENGTH};
 
 /// Constant-time 32-byte array equality comparison preventing timing attacks.

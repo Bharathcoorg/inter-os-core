@@ -6,15 +6,28 @@
 //! Keeps filesystem structure usable by the kernel while encrypting mutable
 //! file payloads at rest. The root key comes from the persistent secure keystore;
 //! each blob receives a fresh nonce and HMAC-SHA256 authentication tag.
+//!
+//! Version 2 envelope format establishes strict cryptographic domain separation:
+//! - Encryption Subkey: K_enc = HMAC(K, "ENC1-ENCRYPT-KEY-V2")
+//! - Authentication Subkey: K_mac = HMAC(K, "ENC1-AUTHENTICATE-KEY-V2")
+//!
+//! Backward compatibility with Version 1 is preserved for read/migration.
+//! Authentication tag is strictly verified before any plaintext bytes are decrypted.
+//! All sensitive key buffers and keystreams are scrubbed with zeroize_slice.
 
 use alloc::vec::Vec;
-use crate::crypto::{get_random_bytes, HmacSha256, KeySlot, SECURE_KEYSTORE, constant_time_eq_32};
+use crate::crypto::{try_get_random_bytes, HmacSha256, KeySlot, SECURE_KEYSTORE, constant_time_eq_32, zeroize_slice};
 
 pub const ENCRYPTED_MAGIC: [u8; 4] = *b"ENC1";
-pub const ENCRYPTED_VERSION: u8 = 1;
+pub const ENCRYPTED_VERSION_V1: u8 = 1;
+pub const ENCRYPTED_VERSION_V2: u8 = 2;
+pub const ENCRYPTED_VERSION: u8 = ENCRYPTED_VERSION_V2;
 pub const ENCRYPTED_HEADER_SIZE: usize = 26;
 pub const ENCRYPTED_TAG_SIZE: usize = 32;
 pub const ENCRYPTED_OVERHEAD: usize = ENCRYPTED_HEADER_SIZE + ENCRYPTED_TAG_SIZE;
+
+const DOMAIN_ENC_V2: &[u8] = b"ENC1-ENCRYPT-KEY-V2";
+const DOMAIN_MAC_V2: &[u8] = b"ENC1-AUTHENTICATE-KEY-V2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionError {
@@ -24,6 +37,8 @@ pub enum EncryptionError {
     TooLarge,
     /// No persistent storage root is established, so no key can be derived.
     NoStorageRoot,
+    /// Hardware entropy unavailable to generate secure nonce.
+    InsufficientEntropy,
 }
 
 /// The storage-at-rest root key.
@@ -47,11 +62,14 @@ fn storage_key() -> Result<[u8; 32], EncryptionError> {
     Ok(ks.derive_key(KeySlot::SovereignMasterKey, b"storage-at-rest-v1"))
 }
 
-/// Encrypts a bounded payload into an authenticated ENC1 envelope using an explicit key.
+/// Encrypts a bounded payload into an authenticated ENC1 Version 2 envelope using an explicit key.
 pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
     if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
     let mut nonce = [0u8; 16];
-    get_random_bytes(&mut nonce);
+    try_get_random_bytes(&mut nonce).map_err(|_| EncryptionError::InsufficientEntropy)?;
+
+    let mut k_enc = HmacSha256::compute(key, DOMAIN_ENC_V2);
+    let mut k_mac = HmacSha256::compute(key, DOMAIN_MAC_V2);
 
     let mut ciphertext = Vec::with_capacity(plaintext.len());
     let mut stream = [0u8; 32];
@@ -61,24 +79,27 @@ pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Res
             let mut input = [0u8; 20];
             input[..16].copy_from_slice(&nonce);
             input[16..20].copy_from_slice(&block.to_be_bytes());
-            stream = HmacSha256::compute(key, &input);
-            crate::crypto::zeroize_slice(&mut input);
+            stream = HmacSha256::compute(&k_enc, &input);
+            zeroize_slice(&mut input);
         }
         ciphertext.push(byte ^ stream[i % 32]);
     }
+    zeroize_slice(&mut k_enc);
+    zeroize_slice(&mut stream);
 
     out.clear();
     out.reserve(ENCRYPTED_OVERHEAD + ciphertext.len());
     out.extend_from_slice(&ENCRYPTED_MAGIC);
-    out.push(ENCRYPTED_VERSION);
+    out.push(ENCRYPTED_VERSION_V2);
     out.push(0);
     out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
 
-    let tag = HmacSha256::compute(key, out);
-    crate::crypto::zeroize_slice(&mut stream);
+    let mut tag = HmacSha256::compute(&k_mac, out);
+    zeroize_slice(&mut k_mac);
     out.extend_from_slice(&tag);
+    zeroize_slice(&mut tag);
     Ok(())
 }
 
@@ -88,17 +109,21 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
     // would be a payload readable by anyone holding the zero seed.
     let mut key = storage_key()?;
     let res = seal_with_key(plaintext, &key, out);
-    crate::crypto::zeroize_slice(&mut key);
+    zeroize_slice(&mut key);
     res
 }
 
-/// Authenticates and decrypts an ENC1 envelope using an explicit key.
+/// Authenticates and decrypts an ENC1 envelope (supports Version 2 and legacy Version 1) using an explicit key.
 pub fn open_with_key(envelope: &[u8], key: &[u8; 32], out: &mut [u8]) -> Result<usize, EncryptionError> {
     if envelope.len() < ENCRYPTED_OVERHEAD { return Err(EncryptionError::InvalidFormat); }
-    if envelope[..4] != ENCRYPTED_MAGIC || envelope[4] != ENCRYPTED_VERSION {
+    if envelope[..4] != ENCRYPTED_MAGIC {
         return Err(EncryptionError::InvalidFormat);
     }
-    let plain_len = u32::from_le_bytes([envelope[6],envelope[7],envelope[8],envelope[9]]) as usize;
+    let version = envelope[4];
+    if version != ENCRYPTED_VERSION_V1 && version != ENCRYPTED_VERSION_V2 {
+        return Err(EncryptionError::InvalidFormat);
+    }
+    let plain_len = u32::from_le_bytes([envelope[6], envelope[7], envelope[8], envelope[9]]) as usize;
     let expected_len = ENCRYPTED_OVERHEAD.checked_add(plain_len).ok_or(EncryptionError::InvalidFormat)?;
     if expected_len != envelope.len() { return Err(EncryptionError::InvalidFormat); }
     if out.len() < plain_len { return Err(EncryptionError::BufferTooSmall); }
@@ -107,26 +132,56 @@ pub fn open_with_key(envelope: &[u8], key: &[u8; 32], out: &mut [u8]) -> Result<
     let mut expected_tag = [0u8; 32];
     expected_tag.copy_from_slice(&envelope[tag_offset..]);
 
-    let actual_tag = HmacSha256::compute(key, &envelope[..tag_offset]);
-    if !constant_time_eq_32(&actual_tag, &expected_tag) {
+    let actual_tag = if version == ENCRYPTED_VERSION_V2 {
+        let mut k_mac = HmacSha256::compute(key, DOMAIN_MAC_V2);
+        let tag = HmacSha256::compute(&k_mac, &envelope[..tag_offset]);
+        zeroize_slice(&mut k_mac);
+        tag
+    } else {
+        HmacSha256::compute(key, &envelope[..tag_offset])
+    };
+
+    let auth_ok = constant_time_eq_32(&actual_tag, &expected_tag);
+    zeroize_slice(&mut expected_tag);
+    if !auth_ok {
         return Err(EncryptionError::IntegrityViolation);
     }
 
     let nonce = &envelope[10..26];
     let ciphertext = &envelope[26..tag_offset];
-    let mut stream = [0u8; 32];
-    for i in 0..plain_len {
-        if i % 32 == 0 {
-            let block = (i / 32) as u32;
-            let mut input = [0u8; 20];
-            input[..16].copy_from_slice(nonce);
-            input[16..20].copy_from_slice(&block.to_be_bytes());
-            stream = HmacSha256::compute(key, &input);
-            crate::crypto::zeroize_slice(&mut input);
+
+    if version == ENCRYPTED_VERSION_V2 {
+        let mut k_enc = HmacSha256::compute(key, DOMAIN_ENC_V2);
+        let mut stream = [0u8; 32];
+        for i in 0..plain_len {
+            if i % 32 == 0 {
+                let block = (i / 32) as u32;
+                let mut input = [0u8; 20];
+                input[..16].copy_from_slice(nonce);
+                input[16..20].copy_from_slice(&block.to_be_bytes());
+                stream = HmacSha256::compute(&k_enc, &input);
+                zeroize_slice(&mut input);
+            }
+            out[i] = ciphertext[i] ^ stream[i % 32];
         }
-        out[i] = ciphertext[i] ^ stream[i % 32];
+        zeroize_slice(&mut k_enc);
+        zeroize_slice(&mut stream);
+    } else {
+        let mut stream = [0u8; 32];
+        for i in 0..plain_len {
+            if i % 32 == 0 {
+                let block = (i / 32) as u32;
+                let mut input = [0u8; 20];
+                input[..16].copy_from_slice(nonce);
+                input[16..20].copy_from_slice(&block.to_be_bytes());
+                stream = HmacSha256::compute(key, &input);
+                zeroize_slice(&mut input);
+            }
+            out[i] = ciphertext[i] ^ stream[i % 32];
+        }
+        zeroize_slice(&mut stream);
     }
-    crate::crypto::zeroize_slice(&mut stream);
+
     Ok(plain_len)
 }
 
@@ -137,26 +192,47 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
     // compute, so the "authenticated" verdict would mean nothing.
     let mut key = storage_key()?;
     let res = open_with_key(envelope, &key, out);
-    crate::crypto::zeroize_slice(&mut key);
+    zeroize_slice(&mut key);
     res
+}
+
+#[cfg(test)]
+pub fn seal_v1_for_test(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) {
+    let mut nonce = [0u8; 16];
+    try_get_random_bytes(&mut nonce).unwrap();
+
+    let mut ciphertext = Vec::with_capacity(plaintext.len());
+    let mut stream = [0u8; 32];
+    for (i, &byte) in plaintext.iter().enumerate() {
+        if i % 32 == 0 {
+            let block = (i / 32) as u32;
+            let mut input = [0u8; 20];
+            input[..16].copy_from_slice(&nonce);
+            input[16..20].copy_from_slice(&block.to_be_bytes());
+            stream = HmacSha256::compute(key, &input);
+            zeroize_slice(&mut input);
+        }
+        ciphertext.push(byte ^ stream[i % 32]);
+    }
+
+    out.clear();
+    out.reserve(ENCRYPTED_OVERHEAD + ciphertext.len());
+    out.extend_from_slice(&ENCRYPTED_MAGIC);
+    out.push(ENCRYPTED_VERSION_V1);
+    out.push(0);
+    out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+
+    let tag = HmacSha256::compute(key, out);
+    zeroize_slice(&mut stream);
+    out.extend_from_slice(&tag);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// With no storage root established, `derive_key` still returns a key — it
-    /// is `HMAC(0, ...)`, which anyone can compute. So an unguarded caller
-    /// encrypts under published constants and "verifies" against a tag the
-    /// reader can also produce, and neither operation reports anything wrong.
-    ///
-    /// Both entry points must refuse instead. This is the assertion that proves
-    /// the guard is in the shared key function rather than in one caller.
-    ///
-    /// WHY the precondition is asserted rather than assumed: the result differs
-    /// depending on whether a root is established, and no test establishes one, so
-    /// this must fail loudly rather than silently check the other branch if that
-    /// ever changes.
     #[test]
     fn both_directions_refuse_when_no_storage_root_is_established() {
         assert!(
@@ -175,11 +251,9 @@ mod tests {
             "a refused seal must not leave a ciphertext behind that something could adopt",
         );
 
-        // A well-formed envelope: the refusal is about the missing key, not about
-        // the input, so the key gate has to be the thing that fires.
         let mut envelope = Vec::new();
         envelope.extend_from_slice(&ENCRYPTED_MAGIC);
-        envelope.push(ENCRYPTED_VERSION);
+        envelope.push(ENCRYPTED_VERSION_V2);
         envelope.push(0);
         envelope.extend_from_slice(&4u32.to_le_bytes());
         envelope.extend_from_slice(&[0u8; 16]);
@@ -200,17 +274,51 @@ mod tests {
         0x0f, 0xf0, 0x0f, 0xf0, 0x7a, 0x8b, 0x9c, 0xad,
     ];
 
+    const WRONG_KEY: [u8; 32] = [
+        0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
+        0x11, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa,
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
+    ];
+
     #[test]
-    fn test_valid_seal_and_open_roundtrip() {
-        let plaintext = b"InterOS Sovereign Encrypted Payload at rest";
+    fn test_v2_seal_and_open_roundtrip() {
+        let plaintext = b"InterOS Sovereign Encrypted Payload at rest V2 Envelope";
         let mut envelope = Vec::new();
         assert_eq!(seal_with_key(plaintext, &TEST_KEY, &mut envelope), Ok(()));
         assert_eq!(envelope.len(), ENCRYPTED_OVERHEAD + plaintext.len());
+        assert_eq!(envelope[4], ENCRYPTED_VERSION_V2);
 
         let mut decrypted = alloc::vec![0u8; plaintext.len()];
         let n = open_with_key(&envelope, &TEST_KEY, &mut decrypted).expect("open failed");
         assert_eq!(n, plaintext.len());
         assert_eq!(&decrypted[..n], plaintext);
+    }
+
+    #[test]
+    fn test_v1_backward_compatibility_migration() {
+        let plaintext = b"Legacy Version 1 Envelope Created By Old Kernel Version";
+        let mut envelope = Vec::new();
+        seal_v1_for_test(plaintext, &TEST_KEY, &mut envelope);
+        assert_eq!(envelope[4], ENCRYPTED_VERSION_V1);
+
+        let mut decrypted = alloc::vec![0u8; plaintext.len()];
+        let n = open_with_key(&envelope, &TEST_KEY, &mut decrypted).expect("V1 migration open failed");
+        assert_eq!(n, plaintext.len());
+        assert_eq!(&decrypted[..n], plaintext);
+    }
+
+    #[test]
+    fn test_wrong_key_fails_closed() {
+        let plaintext = b"Payload that must not decrypt with an incorrect key";
+        let mut envelope = Vec::new();
+        seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
+
+        let mut decrypted = alloc::vec![0u8; plaintext.len()];
+        assert_eq!(
+            open_with_key(&envelope, &WRONG_KEY, &mut decrypted),
+            Err(EncryptionError::IntegrityViolation)
+        );
     }
 
     #[test]
@@ -225,9 +333,9 @@ mod tests {
         let mut out = alloc::vec![0u8; plaintext.len()];
         assert_eq!(open_with_key(&tampered, &TEST_KEY, &mut out), Err(EncryptionError::InvalidFormat));
 
-        // 2. Corrupt version byte
+        // 2. Corrupt version byte to unsupported version 3
         let mut tampered = envelope.clone();
-        tampered[4] ^= 0x02;
+        tampered[4] = 3;
         assert_eq!(open_with_key(&tampered, &TEST_KEY, &mut out), Err(EncryptionError::InvalidFormat));
 
         // 3. Corrupt encoded plaintext length
@@ -302,12 +410,10 @@ mod tests {
         seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
 
         let mut out = alloc::vec![0u8; plaintext.len()];
-        // Truncate to less than overhead
         assert_eq!(
             open_with_key(&envelope[..ENCRYPTED_OVERHEAD - 1], &TEST_KEY, &mut out),
             Err(EncryptionError::InvalidFormat)
         );
-        // Truncate one byte off the end
         assert_eq!(
             open_with_key(&envelope[..envelope.len() - 1], &TEST_KEY, &mut out),
             Err(EncryptionError::InvalidFormat)
@@ -320,7 +426,7 @@ mod tests {
         let mut envelope = Vec::new();
         seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
 
-        let mut out = alloc::vec![0u8; plaintext.len() - 1]; // 1 byte too short
+        let mut out = alloc::vec![0u8; plaintext.len() - 1];
         assert_eq!(
             open_with_key(&envelope, &TEST_KEY, &mut out),
             Err(EncryptionError::BufferTooSmall)

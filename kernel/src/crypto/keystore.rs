@@ -10,7 +10,6 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 use crate::crypto::hmac::HmacSha256;
-use crate::crypto::get_random_bytes;
 
 /// Maximum number of hardware key slots.
 pub const MAX_KEY_SLOTS: usize = 16;
@@ -196,7 +195,10 @@ impl SecureKeystore {
             Err(_) => SeedRecovery::Refused,
             // No record at all: this is a first boot and a new root is correct.
             Ok(None) => {
-                crate::crypto::get_random_bytes(&mut self.master_seed);
+                if crate::crypto::try_get_random_bytes(&mut self.master_seed).is_err() {
+                    self.master_seed = [0u8; 32];
+                    return SeedRecovery::Refused;
+                }
                 self.seed_established = self.master_seed != [0u8; 32];
                 if !self.seed_established {
                     // The random source produced the absent sentinel. Refuse rather
@@ -270,7 +272,7 @@ impl SecureKeystore {
 
         // Generate 16-byte cryptographic random nonce from hardware TRNG
         let mut nonce = [0u8; 16];
-        get_random_bytes(&mut nonce);
+        crate::crypto::try_get_random_bytes(&mut nonce).map_err(|_| KeystoreError::SeedUnavailable)?;
 
         // Derive slot encryption key
         let mut slot_key = self.derive_key(slot, b"cred_storage");

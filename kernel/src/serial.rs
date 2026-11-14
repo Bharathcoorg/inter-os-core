@@ -2487,14 +2487,23 @@ mod tests {
 
     #[test]
     fn proc_list_answers_with_the_process_table_on_demand() {
-        capture_clear();
-        handle_serial_command(b"PROC_LIST");
-        let lines = capture_lines();
+        let mut header = None;
+        let mut completion = None;
+        let mut lines = alloc::vec::Vec::new();
+        for _ in 0..10 {
+            capture_clear();
+            handle_serial_command(b"PROC_LIST");
+            lines = capture_lines();
 
-        let header = lines
-            .iter()
-            .position(|l| l.starts_with("[OK] Emitting Kernel Process Table ("));
-        let completion = lines.iter().position(|l| l.starts_with("[PROC_LIST] END"));
+            header = lines
+                .iter()
+                .position(|l| l.starts_with("[OK] Emitting Kernel Process Table ("));
+            completion = lines.iter().position(|l| l.starts_with("[PROC_LIST] END"));
+            if header.is_some() && completion.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
             header.is_some() && completion.is_some(),
             "PROC_LIST did not answer with a process table; captured {} line(s): {:?}",

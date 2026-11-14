@@ -485,6 +485,10 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
         assert diag["shm_pipes"] == baseline["shm_pipes"], f"SHM leak at cycle {cycle}: {diag['shm_pipes']} != {baseline['shm_pipes']}"
         assert diag["mailboxes"] == baseline["mailboxes"], f"Mailbox leak at cycle {cycle}: {diag['mailboxes']} != {baseline['mailboxes']}"
         assert diag["endpoints"] == baseline["endpoints"], f"Endpoint leak at cycle {cycle}: {diag['endpoints']} != {baseline['endpoints']}"
+        assert diag["heap_used"] == baseline["heap_used"], (
+            f"Single-cycle heap increase after stabilization at cycle {cycle}: "
+            f"{diag['heap_used']} B != {baseline['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)"
+        )
 
         # Periodically log progress
         if cycle % 20 == 0 or cycle == num_cycles:
@@ -494,19 +498,52 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
                   f"surfaces={diag['surfaces']} shm={diag['shm_pipes']} mailboxes={diag['mailboxes']} "
                   f"endpoints={diag['endpoints']} heap={diag['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)")
 
-    # Verify no monotonic growth across all measurements
-    cycle_heaps = [cp["heap_used"] for cp in per_cycle_telemetry]
-    is_strictly_monotonic = len(cycle_heaps) >= 3 and all(
-        cycle_heaps[k] > cycle_heaps[k - 1] for k in range(1, len(cycle_heaps))
-    )
-    assert not is_strictly_monotonic, (
-        f"FORBIDDEN: Monotonic heap growth detected across extended cycles: {cycle_heaps}"
-    )
+    # Execute comprehensive post-stabilization invariant verification
+    assert_post_stabilization_invariants(baseline, per_cycle_telemetry, num_cycles)
 
     total_time = time.time() - t_start
     print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle) with every-cycle telemetry.")
     final_diag = per_cycle_telemetry[-1]
     return final_diag, checkpoints, per_cycle_telemetry
+
+
+def assert_post_stabilization_invariants(baseline, telemetry_list, expected_cycles):
+    """
+    Enforces strict zero-leak invariants across every single post-stabilization cycle.
+    Rejects:
+    - Missing telemetry samples.
+    - Duplicate or out-of-order cycle numbers.
+    - Single-cycle heap increase after stabilization.
+    - Growth followed by a plateau.
+    - A plateau followed by resumed growth.
+    - Intermittent growth that later returns to baseline.
+    - Any drift whatsoever (strictly 0 B delta).
+    """
+    assert len(telemetry_list) == expected_cycles, (
+        f"Missing telemetry samples: expected {expected_cycles}, received {len(telemetry_list)}"
+    )
+
+    cycles = [item["cycle"] for item in telemetry_list]
+    expected_order = list(range(1, expected_cycles + 1))
+    assert cycles == expected_order, (
+        f"Invalid cycle sequence: got {cycles[:10]}... expected {expected_order[:10]}... (duplicates or out-of-order)"
+    )
+
+    base_heap = baseline["heap_used"]
+    for item in telemetry_list:
+        c = item["cycle"]
+        h = item["heap_used"]
+        assert item["surfaces"] == baseline["surfaces"], f"Surface leak detected at cycle {c}: {item['surfaces']} != {baseline['surfaces']}"
+        assert item["tasks_active"] == baseline["tasks_active"], f"Active task leak detected at cycle {c}: {item['tasks_active']} != {baseline['tasks_active']}"
+        assert item["shm_pipes"] == baseline["shm_pipes"], f"SHM pipe leak detected at cycle {c}: {item['shm_pipes']} != {baseline['shm_pipes']}"
+        assert item["mailboxes"] == baseline["mailboxes"], f"Mailbox leak detected at cycle {c}: {item['mailboxes']} != {baseline['mailboxes']}"
+        if "endpoints" in item and "endpoints" in baseline:
+            assert item["endpoints"] == baseline["endpoints"], f"Endpoint leak detected at cycle {c}: {item['endpoints']} != {baseline['endpoints']}"
+
+        if h > base_heap:
+            raise AssertionError(f"Single-cycle heap increase after stabilization at cycle {c}: {h} B > {base_heap} B (+{h - base_heap} B)")
+        if h < base_heap:
+            raise AssertionError(f"Unexpected heap drop below baseline at cycle {c}: {h} B < {base_heap} B ({h - base_heap} B)")
 
 
 def analyze_and_assert_lifecycle_metrics(
@@ -593,10 +630,10 @@ def analyze_and_assert_lifecycle_metrics(
 
     if extended_cycles > 0:
         assert extended_tail_drift == 0, (
-            f"FORBIDDEN: Heap drifted across post-stabilization tail cycles: {extended_tail_drift} B"
+            f"FORBIDDEN: Heap drifted across post-stabilization tail cycles: {extended_tail_drift} B != 0 B"
         )
-        assert extended_drift <= max_budget_bytes, (
-            f"FORBIDDEN: Heap drifted across post-stabilization cycles beyond capacity budget: {extended_drift} B > {max_budget_bytes} B"
+        assert extended_drift == 0, (
+            f"FORBIDDEN: Heap drifted across post-stabilization cycles: {extended_drift} B != 0 B"
         )
 
     iter1_drift = (heap_counts[0] - baseline["heap_used"]) if heap_counts else 0
@@ -737,7 +774,104 @@ def run_detector_self_tests():
         assert "Heap expansion exceeded documented budget" in str(e)
     print("[PASS] Budget expansion limit correctly detected and rejected.")
 
-    print("\n[SUCCESS] All 8 regression detector self-tests passed with strict non-zero rejection enforcement.")
+    # 9. Clean post-stabilization cycles -> MUST PASS
+    clean_extended = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 3, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    assert_post_stabilization_invariants(base, clean_extended, expected_cycles=3)
+    print("[PASS] Clean post-stabilization telemetry accepted.")
+
+    # 10. Single-cycle heap increase after stabilization -> MUST FAIL
+    single_cycle_spike = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400032},
+        {"cycle": 3, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400032},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, single_cycle_spike, expected_cycles=3)
+        raise AssertionError("Failed to detect single-cycle heap increase")
+    except AssertionError as e:
+        assert "Single-cycle heap increase after stabilization" in str(e)
+    print("[PASS] Single-cycle heap increase correctly detected and rejected.")
+
+    # 11. Intermittent heap spike returning to baseline -> MUST FAIL
+    intermittent_spike = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400064},
+        {"cycle": 3, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, intermittent_spike, expected_cycles=3)
+        raise AssertionError("Failed to detect intermittent heap spike")
+    except AssertionError as e:
+        assert "Single-cycle heap increase after stabilization" in str(e)
+    print("[PASS] Intermittent heap spike returning to baseline correctly detected and rejected.")
+
+    # 12. Missing telemetry samples -> MUST FAIL
+    missing_sample = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, missing_sample, expected_cycles=3)
+        raise AssertionError("Failed to detect missing telemetry samples")
+    except AssertionError as e:
+        assert "Missing telemetry samples" in str(e)
+    print("[PASS] Missing telemetry sample correctly detected and rejected.")
+
+    # 13. Duplicate cycle numbers -> MUST FAIL
+    duplicate_cycle = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, duplicate_cycle, expected_cycles=3)
+        raise AssertionError("Failed to detect duplicate cycle sequence")
+    except AssertionError as e:
+        assert "Invalid cycle sequence" in str(e)
+    print("[PASS] Duplicate cycle number correctly detected and rejected.")
+
+    # 14. Out-of-order cycle numbers -> MUST FAIL
+    out_of_order = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 3, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, out_of_order, expected_cycles=3)
+        raise AssertionError("Failed to detect out-of-order cycle sequence")
+    except AssertionError as e:
+        assert "Invalid cycle sequence" in str(e)
+    print("[PASS] Out-of-order cycle numbers correctly detected and rejected.")
+
+    # 15. Extended SHM pipe leak -> MUST FAIL
+    shm_leak = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 6, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, shm_leak, expected_cycles=2)
+        raise AssertionError("Failed to detect extended SHM leak")
+    except AssertionError as e:
+        assert "SHM pipe leak detected" in str(e)
+    print("[PASS] Extended SHM pipe leak correctly detected and rejected.")
+
+    # 16. Extended mailbox leak -> MUST FAIL
+    mb_leak = [
+        {"cycle": 1, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "endpoints": 13, "heap_used": 10400000},
+        {"cycle": 2, "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 14, "endpoints": 13, "heap_used": 10400000},
+    ]
+    try:
+        assert_post_stabilization_invariants(base, mb_leak, expected_cycles=2)
+        raise AssertionError("Failed to detect extended mailbox leak")
+    except AssertionError as e:
+        assert "Mailbox leak detected" in str(e)
+    print("[PASS] Extended mailbox leak correctly detected and rejected.")
+
+    print("\n[SUCCESS] All 16 regression detector self-tests passed with strict non-zero rejection enforcement.")
     return 0
 
 
@@ -780,7 +914,7 @@ def main():
     qemu_cmd = [
         qemu_exe,
         "-machine", "q35",
-        "-cpu", "qemu64",
+        "-cpu", "qemu64,+rdrand",
         "-device", "piix3-ide,id=ide",
         "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
         "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",

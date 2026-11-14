@@ -545,7 +545,7 @@ class Guest:
         args = [
             qemu,
             "-machine", "q35",
-            "-cpu", "qemu64",
+            "-cpu", "qemu64,+rdrand",
             "-device", "piix3-ide,id=ide",
             # WHY snapshot=on on both drives: this suite must not move the boot
             # image another agent is relying on, and must not leave marks on the
