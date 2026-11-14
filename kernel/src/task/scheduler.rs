@@ -319,7 +319,12 @@ impl Scheduler {
         tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
         self.configure_task_ui_pipeline(id);
-        crate::ipc::IPC_ROUTER.lock().register_task(id);
+        let ipc_registered = crate::ipc::IPC_ROUTER.lock().register_task(id);
+        if !ipc_registered {
+            self.tasks.pop();
+            crate::task::process::try_reap(id).ok();
+            return TaskId(0);
+        }
         id
     }
 

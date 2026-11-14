@@ -206,6 +206,28 @@ impl ArmMmu {
                 | DESC_BLOCK
                 | DESC_VALID;
 
+            // Block 5 (0x00a0_0000): Qualcomm GENI QUP UART (0x00a9_0000) (2MB) - Device MMIO (PXN + UXN)
+            L2_TABLE.entries[5] = 0x00a0_0000
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+
+            // Block 189 (0x17a0_0000): Qualcomm SM8250 GICv3 Distributor (0x17a0_0000) & Redistributors (0x17a6_0000) (2MB) - Device MMIO (PXN + UXN)
+            L2_TABLE.entries[189] = 0x17a0_0000
+                | DESC_AF
+                | DESC_SH_OUTER
+                | DESC_AP_RW_EL1
+                | DESC_ATTR_DEVICE
+                | DESC_PXN
+                | DESC_UXN
+                | DESC_BLOCK
+                | DESC_VALID;
+
             // 5. Configure MAIR_EL1
             #[cfg(target_arch = "aarch64")]
             {

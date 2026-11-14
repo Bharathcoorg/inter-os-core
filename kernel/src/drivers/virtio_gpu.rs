@@ -1078,7 +1078,7 @@ impl VirtioGpuDriver {
         if !self.present {
             return Err("VirtIO-GPU hardware unattached");
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
+        if width == 0 || height == 0 || width > 3840 || height > 3840 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU resource dimensions");
         }
         if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 165 && fps != 240 && fps != 360 {
@@ -1144,7 +1144,7 @@ impl VirtioGpuDriver {
         if resource_id == 0 {
             return Err("Invalid VirtIO-GPU resource ID 0");
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
+        if width == 0 || height == 0 || width > 3840 || height > 3840 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU resource dimensions");
         }
         self.active_resource_id = resource_id;
@@ -1214,7 +1214,7 @@ impl VirtioGpuDriver {
                 resource_id: 0,
             });
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
+        if width == 0 || height == 0 || width > 3840 || height > 3840 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU scanout dimensions");
         }
         self.active_resource_id = resource_id;

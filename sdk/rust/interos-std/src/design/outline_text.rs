@@ -33,7 +33,7 @@ use crate::design::typeface;
 /// Expanding to 680 ensures that full-width headlines, card subtitles, and
 /// long metadata strings are rendered as vector outlines without falling back to
 /// blocky bitmap faces.
-const RUN_W_MAX: usize = 640;
+const RUN_W_MAX: usize = 680;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
 ///

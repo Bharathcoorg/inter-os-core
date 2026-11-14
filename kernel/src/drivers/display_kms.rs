@@ -2118,7 +2118,7 @@ impl DrmKmsController {
                         let s_h_usize = s_h as usize;
                         let num_groups = s_w_usize / 2;
 
-                        let mut row_scratch = [0u32; 720];
+                        let mut row_scratch = [0u32; 2400];
 
                         for dy in 0..dst_h {
                             let ry = dy % 3;

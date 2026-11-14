@@ -44,6 +44,10 @@ pub enum IntcDescription {
         distributor: usize,
         cpu_interface: usize,
     },
+    Gicv3 {
+        distributor: usize,
+        redistributors: usize,
+    },
     Unsupported(&'static str),
     Absent,
 }
@@ -147,8 +151,16 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
         }
     }
     for frame in ["arm,gic-v3", "arm,gic-v3-frame"] {
-        if parser.find_node_by_compatible(frame).is_ok() {
-            return IntcDescription::Unsupported("arm,gic-v3");
+        if let Ok(v3_node) = parser.find_node_by_compatible(frame) {
+            match reg_windows(parser, &v3_node) {
+                Some(bases) if bases.len() >= 2 => {
+                    return IntcDescription::Gicv3 {
+                        distributor: bases[0],
+                        redistributors: bases[1],
+                    };
+                }
+                _ => return IntcDescription::Unsupported("arm,gic-v3"),
+            }
         }
     }
 
@@ -179,6 +191,14 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
                 cpu_interface: bases[1],
             },
             _ => IntcDescription::Unsupported("arm,gic-400 without a CPU interface window"),
+        }
+    } else if model == "arm,gic-v3" {
+        match reg_windows(parser, &node) {
+            Some(bases) if bases.len() >= 2 => IntcDescription::Gicv3 {
+                distributor: bases[0],
+                redistributors: bases[1],
+            },
+            _ => IntcDescription::Unsupported("arm,gic-v3 without redistributor windows"),
         }
     } else if is_other_gic_compatible(model) {
         IntcDescription::Unsupported(model)
@@ -324,5 +344,62 @@ impl Gicv2 {
                 self.gicc_write(GICC_EOIR, irq & 0x3FF);
             }
         }
+    }
+}
+
+/// GICv3 system-register driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
+#[derive(Debug, Clone, Copy)]
+pub struct Gicv3 {
+    pub distributor_base: usize,
+    pub redistributors_base: usize,
+}
+
+impl Gicv3 {
+    pub const fn new(distributor_base: usize, redistributors_base: usize) -> Self {
+        Self {
+            distributor_base,
+            redistributors_base,
+        }
+    }
+
+    /// Initializes the CPU interface via system registers.
+    pub fn init_cpu_interface(&self) {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            // 1. Enable System Register access in ICC_SRE_EL1 (bit 0 = SRE)
+            core::arch::asm!("msr s3_0_c12_c12_5, {val}", val = in(reg) 1u64, options(nomem, nostack));
+            core::arch::asm!("isb");
+
+            // 2. Set Priority Mask Register ICC_PMR_EL1 to 0xFF (allow all priority levels)
+            core::arch::asm!("msr s3_0_c4_c6_0, {val}", val = in(reg) 0xFFu64, options(nomem, nostack));
+
+            // 3. Set Binary Point Register ICC_BPR1_EL1 to 0
+            core::arch::asm!("msr s3_0_c12_c12_3, {val}", val = in(reg) 0u64, options(nomem, nostack));
+
+            // 4. Enable Group 1 interrupts in ICC_IGRPEN1_EL1 (bit 0 = Enable)
+            core::arch::asm!("msr s3_0_c12_c12_7, {val}", val = in(reg) 1u64, options(nomem, nostack));
+            core::arch::asm!("isb");
+        }
+    }
+
+    /// Acknowledges pending interrupt via ICC_IAR1_EL1.
+    pub fn acknowledge_irq(&self) -> u32 {
+        let mut irq: u64 = 1023;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {val}, s3_0_c12_c12_0", val = out(reg) irq, options(nomem, nostack));
+        }
+        irq as u32
+    }
+
+    /// Signals End of Interrupt via ICC_EOIR1_EL1.
+    pub fn end_of_interrupt(&self, irq: u32) {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr s3_0_c12_c12_1, {val}", val = in(reg) irq as u64, options(nomem, nostack));
+            core::arch::asm!("isb");
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        let _ = irq;
     }
 }

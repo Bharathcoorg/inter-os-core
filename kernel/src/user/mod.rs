@@ -134,6 +134,13 @@ pub struct Credential {
     pub iterations: u32,
 }
 
+impl Drop for Credential {
+    fn drop(&mut self) {
+        crate::crypto::zeroize_slice(&mut self.salt);
+        crate::crypto::zeroize_slice(&mut self.hash);
+    }
+}
+
 /// RAII zeroizing buffer wrapper for sensitive credential records.
 /// Ensures the underlying buffer is unconditionally scrubbed with volatile writes
 /// on every exit path (early return, error, panic, or normal completion).
@@ -562,6 +569,8 @@ impl UserManager {
         }
         if let Some(ref mut cred) = profile.credential {
             cred.failed_attempts = 0;
+            let cred_snapshot = cred.clone();
+            Self::save_credential_to_vfs(uid, &cred_snapshot);
         }
         profile.lock_state = UserLockState::Unlocked;
         crate::serial_println!("[USER] User UID={} unlocked via biometric authentication.", uid.0);

@@ -276,39 +276,57 @@ pub fn kernel_stack_top() -> usize {
     (&raw const TRAP_KERNEL_STACK) as usize + 16384
 }
 
-/// Drops CPU execution privilege from S-mode to U-mode via `sret`.
+/// Drops CPU privilege from S-mode to U-mode with user arguments in a0 and a1.
 #[unsafe(naked)]
-pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kstack_top: usize) -> ! {
+pub unsafe extern "C" fn enter_user_mode_with_args(
+    entry_point: usize,
+    user_sp: usize,
+    kstack_top: usize,
+    arg0: usize,
+    arg1: usize,
+) -> ! {
     naked_asm!(
-        // a0 = entry_point, a1 = user_sp, a2 = kstack_top
+        // a0 = entry_point, a1 = user_sp, a2 = kstack_top, a3 = arg0, a4 = arg1
         // 1. Initialize sscratch with kernel stack for handling traps from U-mode
         "csrw sscratch, a2",
-        // 2. Clear SPP (bit 8) so the return lands in U-mode, set SPIE (bit 5), and
-        // clear SUM (bit 18) so the privilege drop carries no supervisor
-        // user-memory bypass across the boundary.
+        // 2. Clear SPP (bit 8) so return lands in U-mode, set SPIE (bit 5), clear SUM (bit 18)
         "csrr t0, sstatus",
-        "li t1, ~((1 << 8) | (1 << 18))",
+        "li t1, ~((1 << 8) | (1 << 18) | (3 << 9))",
         "and t0, t0, t1",
         "ori t0, t0, (1 << 5)",
         // Clear VS (bits [10:9]) to strictly trap and isolate vector state
-        "li t1, ~(3 << 9)",
-        "and t0, t0, t1",
         "csrw sstatus, t0",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
         // 4. Set user SP = a1
         "mv sp, a1",
-        // 5. Zero registers for process boundary isolation
-        "mv a0, zero",
-        "mv a1, zero",
+        // 5. Transfer user arguments and sanitize remaining registers for process boundary isolation
+        "mv a0, a3",
+        "mv a1, a4",
         "mv a2, zero",
         "mv a3, zero",
         "mv a4, zero",
         "mv a5, zero",
         "mv a6, zero",
         "mv a7, zero",
+        "mv t0, zero",
+        "mv t1, zero",
+        "mv t2, zero",
+        "mv gp, zero",
+        "mv tp, zero",
         // 6. Hardware privilege drop into U-mode at sepc
         "sret",
+    );
+}
+
+/// Drops CPU execution privilege from S-mode to U-mode via `sret`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kstack_top: usize) -> ! {
+    naked_asm!(
+        "li a3, 0",
+        "li a4, 0",
+        "j {with_args}",
+        with_args = sym enter_user_mode_with_args,
     );
 }
 
@@ -385,6 +403,11 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "mv a5, zero",
         "mv a6, zero",
         "mv a7, zero",
+        "mv t0, zero",
+        "mv t1, zero",
+        "mv t2, zero",
+        "mv gp, zero",
+        "mv tp, zero",
         // 6. Hardware privilege drop into U-mode at sepc
         "sret",
         ctx = sym KERNEL_SAVED_CTX,

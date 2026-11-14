@@ -267,6 +267,29 @@ impl Poly1305 {
     }
 }
 
+impl Drop for Poly1305 {
+    fn drop(&mut self) {
+        self.r0 = 0;
+        self.r1 = 0;
+        self.r2 = 0;
+        self.r3 = 0;
+        self.r4 = 0;
+        self.s1 = 0;
+        self.s2 = 0;
+        self.s3 = 0;
+        self.s4 = 0;
+        self.h0 = 0;
+        self.h1 = 0;
+        self.h2 = 0;
+        self.h3 = 0;
+        self.h4 = 0;
+        self.pad.fill(0);
+    }
+}
+
+/// Maximum AEAD payload length (64 MiB) supported under microkernel buffer constraints.
+pub const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
 /// ChaCha20-Poly1305 AEAD (RFC 8439).
 pub struct ChaCha20Poly1305;
 
@@ -286,6 +309,10 @@ impl ChaCha20Poly1305 {
         buffer: &mut [u8],
         tag: &mut [u8; 16],
     ) -> Result<(), AeadError> {
+        if buffer.len() > MAX_PAYLOAD_SIZE || aad.len() > MAX_PAYLOAD_SIZE {
+            return Err(AeadError::PayloadTooLarge);
+        }
+
         // 1. Generate one-time Poly1305 subkey (counter = 0)
         let mut otk_block = [0u8; 64];
         chacha20_block(key, 0, nonce, &mut otk_block);
@@ -354,6 +381,10 @@ impl ChaCha20Poly1305 {
         buffer: &mut [u8],
         tag: &[u8; 16],
     ) -> Result<(), AeadError> {
+        if buffer.len() > MAX_PAYLOAD_SIZE || aad.len() > MAX_PAYLOAD_SIZE {
+            return Err(AeadError::PayloadTooLarge);
+        }
+
         // 1. Generate one-time Poly1305 subkey (counter = 0)
         let mut otk_block = [0u8; 64];
         chacha20_block(key, 0, nonce, &mut otk_block);

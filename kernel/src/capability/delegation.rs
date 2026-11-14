@@ -351,6 +351,20 @@ pub fn revoke_for_grantee(grantee: TaskId) -> Vec<u64> {
     revoked
 }
 
+/// Revokes every lease granted by `grantor`, returning the revoked lease ids.
+/// Used on task exit so delegated authority does not outlive its accountable grantor.
+pub fn revoke_for_grantor(grantor: TaskId) -> Vec<u64> {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    let mut revoked = Vec::new();
+    for lease in registry.iter_mut() {
+        if lease.grantor_task == grantor && !lease.revoked {
+            lease.revoke();
+            revoked.push(lease.lease_id);
+        }
+    }
+    revoked
+}
+
 /// Returns whether a registered delegated lease is still active: present, not
 /// revoked, and unexpired.
 pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {

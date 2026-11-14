@@ -36,10 +36,26 @@ pub enum EntropyState {
     DegradedPseudoOnly,
 }
 
+/// Trait for platform-specific hardware entropy providers (e.g. Device Tree rng-seed, SoC PRNG MMIO).
+pub trait PlatformEntropyProvider: Send + Sync {
+    /// Unique name of the platform entropy source.
+    fn name(&self) -> &'static str;
+    /// Harvests physical hardware entropy into `out`. Returns the number of bytes written.
+    fn get_entropy(&self, out: &mut [u8]) -> Result<usize, EntropyError>;
+}
+
+static PLATFORM_ENTROPY_PROVIDER: Mutex<Option<&'static dyn PlatformEntropyProvider>> = Mutex::new(None);
+
+/// Registers an external platform entropy provider (e.g. from early board bootloader or SoC bring-up).
+pub fn register_platform_entropy_provider(provider: &'static dyn PlatformEntropyProvider) {
+    *PLATFORM_ENTROPY_PROVIDER.lock() = Some(provider);
+}
+
 /// Hardware-backed Entropy Generator.
 pub struct HardwareRng {
     pub state: EntropyState,
     pub has_rdrand: bool,
+    pub has_feat_rng: bool,
     entropy_pool: [u8; 32],
     counter: u64,
 }
@@ -49,6 +65,7 @@ impl HardwareRng {
         Self {
             state: EntropyState::Uninitialized,
             has_rdrand: false,
+            has_feat_rng: false,
             entropy_pool: [0u8; 32],
             counter: 0,
         }
@@ -107,7 +124,8 @@ impl HardwareRng {
                 core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack));
             }
             let rng_field = (isar0 >> 60) & 0x0F;
-            if rng_field >= 1 {
+            self.has_feat_rng = rng_field >= 1;
+            if self.has_feat_rng {
                 let mut test_val: u64 = 0;
                 let mut success: u8 = 0;
                 for _ in 0..10 {
@@ -145,6 +163,18 @@ impl HardwareRng {
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
         {
             self.state = EntropyState::DegradedPseudoOnly;
+        }
+
+        if self.state == EntropyState::DegradedPseudoOnly {
+            if let Some(provider) = *PLATFORM_ENTROPY_PROVIDER.lock() {
+                let mut seed = [0u8; 32];
+                if let Ok(n) = provider.get_entropy(&mut seed) {
+                    if n >= 32 {
+                        self.inject_verified_seed(&seed);
+                        self.state = EntropyState::HardwareSeeded { source: provider.name() };
+                    }
+                }
+            }
         }
 
         #[cfg(test)]
@@ -211,7 +241,7 @@ impl HardwareRng {
                 }
 
                 #[cfg(target_arch = "aarch64")]
-                if matches!(self.state, EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" }) {
+                if self.has_feat_rng && matches!(self.state, EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" }) {
                     for _ in 0..10 {
                         let val: u64;
                         let success: u8;

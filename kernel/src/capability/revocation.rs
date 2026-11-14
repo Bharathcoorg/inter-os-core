@@ -318,6 +318,15 @@ pub fn revoke_grantee_delegations(grantee: TaskId) -> usize {
     leases.len()
 }
 
+/// Revokes every delegated lease a task has granted. Used on task exit path.
+pub fn revoke_grantor_delegations(grantor: TaskId) -> usize {
+    let leases = delegation::revoke_for_grantor(grantor);
+    for lease_id in &leases {
+        publish(delegation::lease_capability_id(*lease_id));
+    }
+    leases.len()
+}
+
 /// Number of published revocations. Diagnostics only.
 pub fn revoked_count() -> usize {
     REVOKED.lock().iter().fold(0usize, |total, &(start, end)| {

@@ -18,7 +18,8 @@ pub struct ExceptionFrame {
     pub spsr: u64,
     pub esr: u64,
     pub sp_el0: u64,
-    pub _pad: u64,
+    pub fpcr: u32,
+    pub fpsr: u32,
     pub simd: [u128; 32],
 }
 
@@ -30,7 +31,8 @@ const _: () = {
     assert!(core::mem::offset_of!(ExceptionFrame, spsr) == 256);
     assert!(core::mem::offset_of!(ExceptionFrame, esr) == 264);
     assert!(core::mem::offset_of!(ExceptionFrame, sp_el0) == 272);
-    assert!(core::mem::offset_of!(ExceptionFrame, _pad) == 280);
+    assert!(core::mem::offset_of!(ExceptionFrame, fpcr) == 280);
+    assert!(core::mem::offset_of!(ExceptionFrame, fpsr) == 284);
     assert!(core::mem::offset_of!(ExceptionFrame, simd) == 288);
 };
 
@@ -61,6 +63,10 @@ global_asm!(
         mrs x24, sp_el0
         stp x21, x22, [sp, #248]
         stp x23, x24, [sp, #264]
+
+        mrs x21, fpcr
+        mrs x22, fpsr
+        stp w21, w22, [sp, #280]
 
         stp q0, q1, [sp, #288]
         stp q2, q3, [sp, #320]
@@ -100,6 +106,9 @@ global_asm!(
 
         ldp x21, x22, [sp, #248]
         ldp x23, x24, [sp, #264]
+        ldp w25, w26, [sp, #280]
+        msr fpcr, x25
+        msr fpsr, x26
         msr elr_el1, x21
         msr spsr_el1, x22
         msr sp_el0, x24
@@ -429,9 +438,10 @@ fn dispatch_irq() {
         unsafe {
             TIMER_INTERRUPT_COUNT += 1;
         }
-        let timer = crate::timer::ArmGenericTimer::new();
-        // Re-arm timer countdown for 10ms (100 Hz @ 62.5 MHz = 625,000 cycles)
-        timer.program_countdown(625_000);
+        let mut timer = crate::timer::ArmGenericTimer::new();
+        let freq = timer.read_frequency();
+        let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
+        timer.program_countdown(countdown);
         gic.end_of_interrupt(irq);
     } else if irq < 1020 {
         gic.end_of_interrupt(irq);

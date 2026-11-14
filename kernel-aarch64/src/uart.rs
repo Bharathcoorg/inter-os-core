@@ -284,6 +284,95 @@ impl fmt::Write for Ns16550Uart {
 }
 
 // ============================================================================
+// Qualcomm GENI QUP Serial UART (Snapdragon SM8250 / SDM845)
+// ============================================================================
+
+pub const QUALCOMM_SM8250_UART0_BASE: usize = 0x00A9_0000;
+pub const QUALCOMM_SM8250_UART1_BASE: usize = 0x0088_4000;
+
+pub const GENI_STATUS: usize = 0x0040;
+pub const GENI_FORCE_DEFAULT_REG: usize = 0x0020;
+pub const GENI_OUTPUT_CTRL: usize = 0x0024;
+pub const GENI_TX_FIFON: usize = 0x0700;
+pub const GENI_RX_FIFON: usize = 0x0780;
+pub const GENI_TX_FIFO_STATUS: usize = 0x0800;
+pub const GENI_RX_FIFO_STATUS: usize = 0x0804;
+pub const GENI_M_CMD0: usize = 0x0600;
+
+#[derive(Debug, Clone, Copy)]
+pub struct QcomGeniUart {
+    pub base_address: usize,
+}
+
+impl QcomGeniUart {
+    pub const fn new(base_address: usize) -> Self {
+        Self { base_address }
+    }
+
+    #[inline(always)]
+    pub unsafe fn read_reg(&self, offset: usize) -> u32 {
+        let ptr = (self.base_address + offset) as *const u32;
+        core::ptr::read_volatile(ptr)
+    }
+
+    #[inline(always)]
+    pub unsafe fn write_reg(&self, offset: usize, val: u32) {
+        let ptr = (self.base_address + offset) as *mut u32;
+        core::ptr::write_volatile(ptr, val);
+    }
+
+    pub unsafe fn init(&self) {
+        if self.base_address == 0 {
+            return;
+        }
+    }
+
+    pub fn write_byte(&self, byte: u8) {
+        if self.base_address != 0 {
+            unsafe {
+                let mut spins = 0;
+                while (self.read_reg(GENI_TX_FIFO_STATUS) & 0x0F) >= 16 && spins < 100_000 {
+                    core::hint::spin_loop();
+                    spins += 1;
+                }
+                self.write_reg(GENI_TX_FIFON, byte as u32);
+            }
+        }
+    }
+
+    pub fn write_string(&self, s: &str) {
+        for b in s.bytes() {
+            if b == b'\n' {
+                self.write_byte(b'\r');
+            }
+            self.write_byte(b);
+        }
+    }
+
+    pub fn read_byte(&self) -> Option<u8> {
+        if self.base_address != 0 {
+            unsafe {
+                let rx_status = self.read_reg(GENI_RX_FIFO_STATUS);
+                if (rx_status & 0x0F) > 0 {
+                    Some((self.read_reg(GENI_RX_FIFON) & 0xFF) as u8)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Write for QcomGeniUart {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_string(s);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Unified Microkernel Serial Console
 // ============================================================================
 
@@ -291,6 +380,7 @@ impl fmt::Write for Ns16550Uart {
 pub enum UartDriver {
     Pl011(Pl011Uart),
     Ns16550(Ns16550Uart),
+    QcomGeni(QcomGeniUart),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -311,6 +401,12 @@ impl KernelUart {
         }
     }
 
+    pub const fn new_qcom_geni(base_address: usize) -> Self {
+        Self {
+            driver: UartDriver::QcomGeni(QcomGeniUart::new(base_address)),
+        }
+    }
+
     pub unsafe fn init_pl011(&mut self, base_address: usize, clock_hz: u32, baud: u32) {
         let uart = Pl011Uart::new(base_address);
         uart.init(clock_hz, baud);
@@ -323,10 +419,17 @@ impl KernelUart {
         self.driver = UartDriver::Ns16550(uart);
     }
 
+    pub unsafe fn init_qcom_geni(&mut self, base_address: usize) {
+        let uart = QcomGeniUart::new(base_address);
+        uart.init();
+        self.driver = UartDriver::QcomGeni(uart);
+    }
+
     pub fn write_byte(&self, byte: u8) {
         match self.driver {
             UartDriver::Pl011(ref uart) => uart.write_byte(byte),
             UartDriver::Ns16550(ref uart) => uart.write_byte(byte),
+            UartDriver::QcomGeni(ref uart) => uart.write_byte(byte),
         }
     }
 
@@ -334,6 +437,7 @@ impl KernelUart {
         match self.driver {
             UartDriver::Pl011(ref uart) => uart.write_string(s),
             UartDriver::Ns16550(ref uart) => uart.write_string(s),
+            UartDriver::QcomGeni(ref uart) => uart.write_string(s),
         }
     }
 
@@ -341,6 +445,7 @@ impl KernelUart {
         match self.driver {
             UartDriver::Pl011(ref uart) => uart.read_byte(),
             UartDriver::Ns16550(ref uart) => uart.read_byte(),
+            UartDriver::QcomGeni(ref uart) => uart.read_byte(),
         }
     }
 
@@ -352,6 +457,9 @@ impl KernelUart {
             UartDriver::Ns16550(ref uart) => unsafe {
                 (uart.read_reg(NS16550_LSR), 0)
             },
+            UartDriver::QcomGeni(ref uart) => unsafe {
+                (uart.read_reg(GENI_STATUS), uart.read_reg(GENI_TX_FIFO_STATUS))
+            },
         }
     }
 
@@ -359,6 +467,7 @@ impl KernelUart {
         match self.driver {
             UartDriver::Pl011(ref uart) => uart.base_address,
             UartDriver::Ns16550(ref uart) => uart.base_address,
+            UartDriver::QcomGeni(ref uart) => uart.base_address,
         }
     }
 }
@@ -382,6 +491,14 @@ impl From<Ns16550Uart> for KernelUart {
     fn from(uart: Ns16550Uart) -> Self {
         Self {
             driver: UartDriver::Ns16550(uart),
+        }
+    }
+}
+
+impl From<QcomGeniUart> for KernelUart {
+    fn from(uart: QcomGeniUart) -> Self {
+        Self {
+            driver: UartDriver::QcomGeni(uart),
         }
     }
 }

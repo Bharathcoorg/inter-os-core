@@ -1329,14 +1329,16 @@ pub use revocation::{is_revoked as capability_revoked, revoke as revoke_capabili
 /// registered and stays exercisable after the task is gone.
 pub fn cleanup_task(task: crate::task::TaskId) {
     let leases = revocation::revoke_grantee_delegations(task);
+    let granted = revocation::revoke_grantor_delegations(task);
     delegation::prune(crate::interrupts::get_system_ticks());
     let consents = permission::cleanup_task(task);
     revocation::cleanup_task(task);
-    if leases > 0 || consents > 0 {
+    if leases > 0 || granted > 0 || consents > 0 {
         crate::serial_println!(
-            "[CAPABILITY] Task {} released {} delegated lease(s) and {} permission grant(s) on exit.",
+            "[CAPABILITY] Task {} released {} held lease(s), {} granted lease(s), and {} permission grant(s) on exit.",
             task.0,
             leases,
+            granted,
             consents,
         );
     }

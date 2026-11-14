@@ -178,6 +178,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
+            gic::IntcDescription::Gicv3 { distributor, redistributors } => {
+                let gicv3 = gic::Gicv3::new(distributor, redistributors);
+                gicv3.init_cpu_interface();
+                kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X}, CPU interface system registers enabled.",
+                    distributor, redistributors);
+            }
             gic::IntcDescription::Unsupported(model) => {
                 kprintln!("[OK] Interrupt controller {} declared by the platform uses a register model this driver does not implement.", model);
                 kprintln!("[OK] Interrupt routing left unconfigured rather than written through as GICv2.");

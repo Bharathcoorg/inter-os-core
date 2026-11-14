@@ -1220,6 +1220,7 @@ pub struct BootInfoFrameAllocator {
     memory_regions: &'static MemoryRegions,
     region_idx: usize,
     next_addr: u64,
+    total_carved_bytes: u64,
     recycled_frames: Vec<PhysFrame<Size4KiB>>,
     /// Direct-map offset used to reach every frame this allocator returns.
     ///
@@ -1236,7 +1237,7 @@ pub struct BootInfoFrameAllocator {
 impl BootInfoFrameAllocator {
     /// Returns the approximate allocated bytes from the boot memory regions.
     pub fn allocated_bytes(&self) -> u64 {
-        self.next_addr.saturating_sub(self.recycled_frames.len() as u64 * 4096)
+        self.total_carved_bytes.saturating_sub(self.recycled_frames.len() as u64 * 4096)
     }
 
     /// Returns a task-owned physical frame to the allocator for reuse.
@@ -1266,6 +1267,7 @@ impl BootInfoFrameAllocator {
             memory_regions,
             region_idx: 0,
             next_addr: 0,
+            total_carved_bytes: 0,
             recycled_frames: Vec::new(),
             physical_memory_offset,
         };
@@ -1306,6 +1308,7 @@ impl BootInfoFrameAllocator {
                 }
             };
             self.next_addr = end;
+            self.total_carved_bytes = self.total_carved_bytes.saturating_add(span);
 
             self.recycled_frames
                 .retain(|frame| {
@@ -1360,6 +1363,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             if self.next_addr + 4096 <= region.end {
                 let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
                 self.next_addr += 4096;
+                self.total_carved_bytes = self.total_carved_bytes.saturating_add(4096);
                 frame
             } else {
                 self.region_idx += 1;

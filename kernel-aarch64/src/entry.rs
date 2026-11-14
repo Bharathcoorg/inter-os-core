@@ -28,6 +28,15 @@ global_asm!(
         // Enable Floating-Point and Advanced SIMD in EL2 (disable traps)
         msr cptr_el2, xzr
 
+        // If GIC system registers are present (ID_AA64PFR0_EL1[27:24] != 0), enable ICC_SRE_EL2
+        mrs x2, id_aa64pfr0_el1
+        ubfx x2, x2, #24, #4
+        cbz x2, 1f
+        mov x2, #0x09
+        msr s3_4_c12_c9_5, x2
+        isb
+1:
+
         // Configure HCR_EL2 (Hypervisor Configuration Register):
         // Bit 31 (RW) = 1 (AArch64 execution state for EL1)
         mov x2, #(1 << 31)
@@ -45,6 +54,17 @@ global_asm!(
         eret
 
     .Lel1_entry:
+        // Invalidate I-cache and local TLB
+        ic iallu
+        tlbi vmalle1
+        dsb ish
+        isb
+
+        // Set SCTLR_EL1 to known safe architectural state (caches/MMU off, alignment checks set)
+        ldr x2, =0x30C50838
+        msr sctlr_el1, x2
+        isb
+
         // Enable Floating-Point and Advanced SIMD (NEON) execution in EL1 (CPACR_EL1[21:20] = 0b11)
         mov x2, #(3 << 20)
         msr cpacr_el1, x2
