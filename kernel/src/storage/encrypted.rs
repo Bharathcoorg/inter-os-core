@@ -22,7 +22,7 @@ pub const ENCRYPTED_MAGIC: [u8; 4] = *b"ENC1";
 pub const ENCRYPTED_VERSION_V1: u8 = 1;
 pub const ENCRYPTED_VERSION_V2: u8 = 2;
 pub const ENCRYPTED_VERSION_V3: u8 = 3;
-pub const ENCRYPTED_VERSION: u8 = ENCRYPTED_VERSION_V2;
+pub const ENCRYPTED_VERSION: u8 = ENCRYPTED_VERSION_V3;
 pub const ENCRYPTED_HEADER_SIZE: usize = 26;
 pub const ENCRYPTED_TAG_SIZE: usize = 32;
 pub const ENCRYPTED_OVERHEAD: usize = ENCRYPTED_HEADER_SIZE + ENCRYPTED_TAG_SIZE;
@@ -68,7 +68,7 @@ fn storage_key() -> Result<[u8; 32], EncryptionError> {
 }
 
 /// Encrypts a bounded payload into an authenticated ENC1 Version 2 envelope using an explicit key.
-pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+pub fn seal_v2_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
     if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
     let mut nonce = [0u8; 16];
     try_get_random_bytes(&mut nonce).map_err(|_| EncryptionError::InsufficientEntropy)?;
@@ -108,16 +108,6 @@ pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Res
     Ok(())
 }
 
-/// Encrypts a bounded payload into an authenticated ENC1 envelope.
-pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
-    // Fail closed before any key material exists: producing a ciphertext here
-    // would be a payload readable by anyone holding the zero seed.
-    let mut key = storage_key()?;
-    let res = seal_with_key(plaintext, &key, out);
-    zeroize_slice(&mut key);
-    res
-}
-
 /// Encrypts a bounded payload into an authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using an explicit key.
 pub fn seal_v3_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
     if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
@@ -145,12 +135,22 @@ pub fn seal_v3_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> 
     Ok(())
 }
 
-/// Encrypts a bounded payload into an authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using storage key.
-pub fn seal_v3(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+/// Encrypts a bounded payload into the default authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using an explicit key.
+pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+    seal_v3_with_key(plaintext, key, out)
+}
+
+/// Encrypts a bounded payload into the default authenticated ENC1 Version 3 envelope using storage key.
+pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
     let mut key = storage_key()?;
-    let res = seal_v3_with_key(plaintext, &key, out);
+    let res = seal_with_key(plaintext, &key, out);
     zeroize_slice(&mut key);
     res
+}
+
+/// Encrypts a bounded payload into an authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using storage key.
+pub fn seal_v3(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+    seal(plaintext, out)
 }
 
 /// Authenticates and decrypts an ENC1 envelope (supports Version 3 AEAD, Version 2 and legacy Version 1) using an explicit key.
@@ -348,10 +348,24 @@ mod tests {
     ];
 
     #[test]
+    fn test_v3_default_seal_and_open_roundtrip() {
+        let plaintext = b"InterOS Sovereign Encrypted Payload at rest V3 ChaCha20-Poly1305";
+        let mut envelope = Vec::new();
+        assert_eq!(seal_with_key(plaintext, &TEST_KEY, &mut envelope), Ok(()));
+        assert_eq!(envelope.len(), ENCRYPTED_OVERHEAD_V3 + plaintext.len());
+        assert_eq!(envelope[4], ENCRYPTED_VERSION_V3);
+
+        let mut decrypted = alloc::vec![0u8; plaintext.len()];
+        let n = open_with_key(&envelope, &TEST_KEY, &mut decrypted).expect("V3 open failed");
+        assert_eq!(n, plaintext.len());
+        assert_eq!(&decrypted[..n], plaintext);
+    }
+
+    #[test]
     fn test_v2_seal_and_open_roundtrip() {
         let plaintext = b"InterOS Sovereign Encrypted Payload at rest V2 Envelope";
         let mut envelope = Vec::new();
-        assert_eq!(seal_with_key(plaintext, &TEST_KEY, &mut envelope), Ok(()));
+        assert_eq!(seal_v2_with_key(plaintext, &TEST_KEY, &mut envelope), Ok(()));
         assert_eq!(envelope.len(), ENCRYPTED_OVERHEAD + plaintext.len());
         assert_eq!(envelope[4], ENCRYPTED_VERSION_V2);
 
@@ -399,9 +413,9 @@ mod tests {
         let mut out = alloc::vec![0u8; plaintext.len()];
         assert_eq!(open_with_key(&tampered, &TEST_KEY, &mut out), Err(EncryptionError::InvalidFormat));
 
-        // 2. Corrupt version byte to unsupported version 3
+        // 2. Corrupt version byte to unsupported version 99
         let mut tampered = envelope.clone();
-        tampered[4] = 3;
+        tampered[4] = 99;
         assert_eq!(open_with_key(&tampered, &TEST_KEY, &mut out), Err(EncryptionError::InvalidFormat));
 
         // 3. Corrupt encoded plaintext length
@@ -417,7 +431,7 @@ mod tests {
         seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
 
         let mut out = alloc::vec![0u8; plaintext.len()];
-        for nonce_offset in 10..26 {
+        for nonce_offset in 10..22 {
             let mut tampered = envelope.clone();
             tampered[nonce_offset] ^= 0x80;
             assert_eq!(
@@ -435,9 +449,9 @@ mod tests {
         let mut envelope = Vec::new();
         seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
 
-        let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE;
+        let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE_V3;
         let mut out = alloc::vec![0u8; plaintext.len()];
-        for ct_offset in 26..tag_offset {
+        for ct_offset in ENCRYPTED_HEADER_SIZE_V3..tag_offset {
             let mut tampered = envelope.clone();
             tampered[ct_offset] ^= 0x01;
             assert_eq!(
@@ -455,7 +469,7 @@ mod tests {
         let mut envelope = Vec::new();
         seal_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
 
-        let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE;
+        let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE_V3;
         let mut out = alloc::vec![0u8; plaintext.len()];
         for tag_byte in tag_offset..envelope.len() {
             let mut tampered = envelope.clone();
@@ -463,7 +477,7 @@ mod tests {
             assert_eq!(
                 open_with_key(&tampered, &TEST_KEY, &mut out),
                 Err(EncryptionError::IntegrityViolation),
-                "Tampering HMAC tag byte at offset {} must fail closed with IntegrityViolation",
+                "Tampering Poly1305 tag byte at offset {} must fail closed with IntegrityViolation",
                 tag_byte
             );
         }
@@ -477,7 +491,7 @@ mod tests {
 
         let mut out = alloc::vec![0u8; plaintext.len()];
         assert_eq!(
-            open_with_key(&envelope[..ENCRYPTED_OVERHEAD - 1], &TEST_KEY, &mut out),
+            open_with_key(&envelope[..ENCRYPTED_OVERHEAD_V3 - 1], &TEST_KEY, &mut out),
             Err(EncryptionError::InvalidFormat)
         );
         assert_eq!(
@@ -529,5 +543,53 @@ mod tests {
             open_with_key(&tampered_tag, &TEST_KEY, &mut out),
             Err(EncryptionError::IntegrityViolation)
         );
+    }
+
+    #[test]
+    fn test_v2_tamper_rejection() {
+        let plaintext = b"V2 payload tamper testing";
+        let mut envelope = Vec::new();
+        seal_v2_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
+
+        // Tamper ciphertext
+        let mut tampered = envelope.clone();
+        tampered[28] ^= 0x01;
+        let mut out = alloc::vec![0u8; plaintext.len()];
+        assert_eq!(open_with_key(&tampered, &TEST_KEY, &mut out), Err(EncryptionError::IntegrityViolation));
+
+        // Tamper HMAC tag
+        let mut tampered_tag = envelope.clone();
+        let last = tampered_tag.len() - 1;
+        tampered_tag[last] ^= 0x01;
+        assert_eq!(open_with_key(&tampered_tag, &TEST_KEY, &mut out), Err(EncryptionError::IntegrityViolation));
+    }
+
+    #[test]
+    fn test_v1_and_v2_migration_to_v3() {
+        let plaintext = b"Payload written in legacy format must upgrade to V3 on rewrite";
+
+        // 1. Simulate reading V1
+        let mut v1_envelope = Vec::new();
+        seal_v1_for_test(plaintext, &TEST_KEY, &mut v1_envelope);
+        let mut restored = alloc::vec![0u8; plaintext.len()];
+        let len1 = open_with_key(&v1_envelope, &TEST_KEY, &mut restored).unwrap();
+        assert_eq!(&restored[..len1], plaintext);
+
+        // Rewrite using default seal (which produces V3)
+        let mut v3_rewritten = Vec::new();
+        seal_with_key(&restored[..len1], &TEST_KEY, &mut v3_rewritten).unwrap();
+        assert_eq!(v3_rewritten[4], ENCRYPTED_VERSION_V3);
+
+        // 2. Simulate reading V2
+        let mut v2_envelope = Vec::new();
+        seal_v2_with_key(plaintext, &TEST_KEY, &mut v2_envelope).unwrap();
+        let mut restored2 = alloc::vec![0u8; plaintext.len()];
+        let len2 = open_with_key(&v2_envelope, &TEST_KEY, &mut restored2).unwrap();
+        assert_eq!(&restored2[..len2], plaintext);
+
+        // Rewrite using default seal (which produces V3)
+        let mut v3_rewritten2 = Vec::new();
+        seal_with_key(&restored2[..len2], &TEST_KEY, &mut v3_rewritten2).unwrap();
+        assert_eq!(v3_rewritten2[4], ENCRYPTED_VERSION_V3);
     }
 }

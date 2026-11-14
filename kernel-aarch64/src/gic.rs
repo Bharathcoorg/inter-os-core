@@ -239,7 +239,7 @@ fn is_other_gic_compatible(text: &str) -> bool {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Gicv2 {
     gicd_base: usize,
     gicc_base: usize,
@@ -347,7 +347,7 @@ impl Gicv2 {
     }
 }
 
-/// GICv3 system-register driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
+/// GICv3 system-register and memory-mapped driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
 #[derive(Debug, Clone, Copy)]
 pub struct Gicv3 {
     pub distributor_base: usize,
@@ -359,6 +359,124 @@ impl Gicv3 {
         Self {
             distributor_base,
             redistributors_base,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn gicd_read(&self, offset: usize) -> u32 {
+        let ptr = (self.distributor_base + offset) as *const u32;
+        core::ptr::read_volatile(ptr)
+    }
+
+    #[inline(always)]
+    unsafe fn gicd_write(&self, offset: usize, val: u32) {
+        let ptr = (self.distributor_base + offset) as *mut u32;
+        core::ptr::write_volatile(ptr, val);
+    }
+
+    #[inline(always)]
+    unsafe fn gicr_read(&self, offset: usize) -> u32 {
+        let ptr = (self.redistributors_base + offset) as *const u32;
+        core::ptr::read_volatile(ptr)
+    }
+
+    #[inline(always)]
+    unsafe fn gicr_write(&self, offset: usize, val: u32) {
+        let ptr = (self.redistributors_base + offset) as *mut u32;
+        core::ptr::write_volatile(ptr, val);
+    }
+
+    /// Full generic GICv3 initialization: Distributor, Redistributor, and CPU Interface.
+    pub unsafe fn init(&self) {
+        if self.distributor_base == 0 || self.redistributors_base == 0 {
+            return;
+        }
+
+        // 1. Initialize Distributor:
+        // Set ARE_NS (bit 5) and EnableGrp1NS (bit 1) in GICD_CTLR
+        let mut ctlr = self.gicd_read(0x0000);
+        ctlr |= (1 << 5) | (1 << 1); // ARE_NS | EnableGrp1NS
+        self.gicd_write(0x0000, ctlr);
+
+        // Wait for Register Write Pending (RWP, bit 31) to clear
+        let mut spins = 0;
+        while (self.gicd_read(0x0000) & (1 << 31)) != 0 && spins < 100_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+
+        // Discover number of interrupt lines
+        let typer = self.gicd_read(0x0004);
+        let it_lines = typer & 0x1F;
+        let num_irqs = 32 * (it_lines + 1);
+
+        // Set SPIs (32..num_irqs) to Group 1 Non-Secure and default priority
+        for irq_block in 1..(num_irqs / 32) {
+            self.gicd_write(0x0080 + (irq_block as usize) * 4, 0xFFFF_FFFF);
+        }
+        for prio_reg in 8..(num_irqs / 4) {
+            self.gicd_write(0x0400 + (prio_reg as usize) * 4, 0xA0A0_A0A0);
+        }
+
+        // 2. Initialize Redistributor for current PE:
+        // Clear ProcessorSleep (bit 1) in GICR_WAKER to wake up Redistributor
+        let mut waker = self.gicr_read(0x0014);
+        waker &= !(1 << 1);
+        self.gicr_write(0x0014, waker);
+
+        // Poll until ChildrenAsleep (bit 2) is cleared
+        spins = 0;
+        while (self.gicr_read(0x0014) & (1 << 2)) != 0 && spins < 100_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+
+        // SGI_base is at redistributors_base + 0x10000 (64 KiB frame)
+        let sgi_base = 0x10000;
+        // Configure SGIs/PPIs (0..31) to Group 1 Non-Secure
+        self.gicr_write(sgi_base + 0x0080, 0xFFFF_FFFF);
+        // Set default priority for SGIs and PPIs
+        for prio in 0..8 {
+            self.gicr_write(sgi_base + 0x0400 + prio * 4, 0xA0A0_A0A0);
+        }
+
+        // 3. Initialize CPU Interface system registers
+        self.init_cpu_interface();
+    }
+
+    /// Enables an interrupt line.
+    pub fn enable_irq(&self, irq: u32) {
+        if irq < 32 {
+            // SGI/PPI: programmed in Redistributor SGI frame (offset 0x10000)
+            unsafe {
+                let sgi_base = 0x10000;
+                let bit = 1 << irq;
+                self.gicr_write(sgi_base + 0x0100, bit);
+            }
+        } else if self.distributor_base != 0 {
+            // SPI: programmed in Distributor
+            unsafe {
+                let reg_offset = 0x0100 + ((irq / 32) as usize) * 4;
+                let bit = 1 << (irq % 32);
+                self.gicd_write(reg_offset, bit);
+            }
+        }
+    }
+
+    /// Disables an interrupt line.
+    pub fn disable_irq(&self, irq: u32) {
+        if irq < 32 {
+            unsafe {
+                let sgi_base = 0x10000;
+                let bit = 1 << irq;
+                self.gicr_write(sgi_base + 0x0180, bit);
+            }
+        } else if self.distributor_base != 0 {
+            unsafe {
+                let reg_offset = 0x0180 + ((irq / 32) as usize) * 4;
+                let bit = 1 << (irq % 32);
+                self.gicd_write(reg_offset, bit);
+            }
         }
     }
 
@@ -401,5 +519,41 @@ impl Gicv3 {
         }
         #[cfg(not(target_arch = "aarch64"))]
         let _ = irq;
+    }
+}
+
+/// Global active interrupt controller on the platform.
+#[derive(Debug, Clone, Copy)]
+pub enum ActiveGic {
+    None,
+    Gicv2(Gicv2),
+    Gicv3(Gicv3),
+}
+
+pub static ACTIVE_GIC: spin::Mutex<ActiveGic> = spin::Mutex::new(ActiveGic::None);
+
+pub fn register_active_gicv2(gic: Gicv2) {
+    *ACTIVE_GIC.lock() = ActiveGic::Gicv2(gic);
+}
+
+pub fn register_active_gicv3(gic: Gicv3) {
+    *ACTIVE_GIC.lock() = ActiveGic::Gicv3(gic);
+}
+
+pub fn acknowledge_irq() -> u32 {
+    let guard = ACTIVE_GIC.lock();
+    match *guard {
+        ActiveGic::Gicv2(ref g) => g.acknowledge_irq(),
+        ActiveGic::Gicv3(ref g) => g.acknowledge_irq(),
+        ActiveGic::None => GIC_SPURIOUS_IRQ,
+    }
+}
+
+pub fn end_of_interrupt(irq: u32) {
+    let guard = ACTIVE_GIC.lock();
+    match *guard {
+        ActiveGic::Gicv2(ref g) => g.end_of_interrupt(irq),
+        ActiveGic::Gicv3(ref g) => g.end_of_interrupt(irq),
+        ActiveGic::None => {}
     }
 }

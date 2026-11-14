@@ -305,6 +305,13 @@ pub struct QcomGeniUart {
 }
 
 impl QcomGeniUart {
+    /// Creates a Qualcomm GENI QUP UART instance.
+    ///
+    /// NOTE on Platform Truth: On Qualcomm mobile platforms, clock tree distribution,
+    /// power domains (RPMh), and baud divisors for the GENI serial engine are configured
+    /// by early bootloader firmware (ABL/XBL). The microkernel driver attaches to the
+    /// active FIFO registers in early-handoff mode. Full bare-metal clock synthesizer
+    /// programming is platform-specific and deferred to the out-of-tree board port.
     pub const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
@@ -319,12 +326,6 @@ impl QcomGeniUart {
     pub unsafe fn write_reg(&self, offset: usize, val: u32) {
         let ptr = (self.base_address + offset) as *mut u32;
         core::ptr::write_volatile(ptr, val);
-    }
-
-    pub unsafe fn init(&self) {
-        if self.base_address == 0 {
-            return;
-        }
     }
 
     pub fn write_byte(&self, byte: u8) {
@@ -419,9 +420,8 @@ impl KernelUart {
         self.driver = UartDriver::Ns16550(uart);
     }
 
-    pub unsafe fn init_qcom_geni(&mut self, base_address: usize) {
+    pub fn init_qcom_geni(&mut self, base_address: usize) {
         let uart = QcomGeniUart::new(base_address);
-        uart.init();
         self.driver = UartDriver::QcomGeni(uart);
     }
 

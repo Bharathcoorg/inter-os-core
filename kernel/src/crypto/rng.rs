@@ -49,6 +49,17 @@ static PLATFORM_ENTROPY_PROVIDER: Mutex<Option<&'static dyn PlatformEntropyProvi
 /// Registers an external platform entropy provider (e.g. from early board bootloader or SoC bring-up).
 pub fn register_platform_entropy_provider(provider: &'static dyn PlatformEntropyProvider) {
     *PLATFORM_ENTROPY_PROVIDER.lock() = Some(provider);
+    let mut trng = TRNG.lock();
+    if trng.state == EntropyState::DegradedPseudoOnly || trng.state == EntropyState::Uninitialized {
+        let mut seed = [0u8; 32];
+        if let Ok(n) = provider.get_entropy(&mut seed) {
+            if n >= 32 {
+                trng.inject_verified_seed(&seed);
+                trng.state = EntropyState::HardwareSeeded { source: provider.name() };
+            }
+        }
+        crate::crypto::zeroize_slice(&mut seed);
+    }
 }
 
 /// Hardware-backed Entropy Generator.
@@ -174,6 +185,7 @@ impl HardwareRng {
                         self.state = EntropyState::HardwareSeeded { source: provider.name() };
                     }
                 }
+                crate::crypto::zeroize_slice(&mut seed);
             }
         }
 
@@ -371,5 +383,24 @@ mod tests {
         assert_eq!(rng.try_fill_bytes(&mut buf2), Ok(()));
         assert_ne!(buf1, [0u8; 32], "Output must not be all-zeros");
         assert_ne!(buf1, buf2, "Subsequent outputs must be distinct");
+    }
+
+    struct MockPlatformEntropy;
+    impl PlatformEntropyProvider for MockPlatformEntropy {
+        fn name(&self) -> &'static str { "Mock DTB rng-seed" }
+        fn get_entropy(&self, out: &mut [u8]) -> Result<usize, EntropyError> {
+            out[..32].fill(0xA5);
+            Ok(32)
+        }
+    }
+
+    #[test]
+    fn test_platform_entropy_provider_registration() {
+        static MOCK: MockPlatformEntropy = MockPlatformEntropy;
+        register_platform_entropy_provider(&MOCK);
+
+        let mut buf = [0u8; 16];
+        assert_eq!(try_get_random_bytes(&mut buf), Ok(()));
+        assert_ne!(buf, [0u8; 16]);
     }
 }

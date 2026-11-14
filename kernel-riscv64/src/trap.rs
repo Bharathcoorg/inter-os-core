@@ -291,14 +291,17 @@ pub unsafe extern "C" fn enter_user_mode_with_args(
         "csrw sscratch, a2",
         // 2. Clear SPP (bit 8) so return lands in U-mode, set SPIE (bit 5), clear SUM (bit 18)
         "csrr t0, sstatus",
-        "li t1, ~((1 << 8) | (1 << 18) | (3 << 9))",
+        "li t1, ~((1 << 8) | (1 << 18))",
+        "and t0, t0, t1",
+        "li t1, ~((3 << 9) | (3 << 13))",
         "and t0, t0, t1",
         "ori t0, t0, (1 << 5)",
-        // Clear VS (bits [10:9]) to strictly trap and isolate vector state
+        // Clear VS (bits [10:9]) and FS (bits [14:13]) to strictly trap and isolate vector and floating-point state
         "csrw sstatus, t0",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
-        // 4. Set user SP = a1
+        // 4. Set user SP = a1 (enforcing standard 16-byte ABI alignment)
+        "andi a1, a1, -16",
         "mv sp, a1",
         // 5. Transfer user arguments and sanitize remaining registers for process boundary isolation
         "mv a0, a3",
@@ -312,6 +315,10 @@ pub unsafe extern "C" fn enter_user_mode_with_args(
         "mv t0, zero",
         "mv t1, zero",
         "mv t2, zero",
+        "mv t3, zero",
+        "mv t4, zero",
+        "mv t5, zero",
+        "mv t6, zero",
         "mv gp, zero",
         "mv tp, zero",
         // 6. Hardware privilege drop into U-mode at sepc
@@ -385,14 +392,15 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "csrr t0, sstatus",
         "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
-        "ori t0, t0, (1 << 5)",
-        // Clear VS (bits [10:9]) to strictly trap and isolate vector state
-        "li t1, ~(3 << 9)",
+        "li t1, ~((3 << 9) | (3 << 13))",
         "and t0, t0, t1",
+        "ori t0, t0, (1 << 5)",
+        // Clear VS (bits [10:9]) and FS (bits [14:13]) to strictly trap and isolate vector and floating-point state
         "csrw sstatus, t0",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
-        // 4. Set user SP = a1
+        // 4. Set user SP = a1 (enforcing standard 16-byte ABI alignment)
+        "andi a1, a1, -16",
         "mv sp, a1",
         // 5. Zero registers for process boundary isolation
         "mv a0, zero",
@@ -406,6 +414,10 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "mv t0, zero",
         "mv t1, zero",
         "mv t2, zero",
+        "mv t3, zero",
+        "mv t4, zero",
+        "mv t5, zero",
+        "mv t6, zero",
         "mv gp, zero",
         "mv tp, zero",
         // 6. Hardware privilege drop into U-mode at sepc

@@ -430,8 +430,7 @@ pub extern "C" fn handle_irq_lower32(_frame: &mut ExceptionFrame) {
 }
 
 fn dispatch_irq() {
-    let gic = crate::gic::Gicv2::new(crate::gic::DEFAULT_GICD_BASE, crate::gic::DEFAULT_GICC_BASE);
-    let irq = gic.acknowledge_irq();
+    let irq = crate::gic::acknowledge_irq();
 
     if irq == 27 {
         // PPI 27: ARM Generic Timer Virtual Timer
@@ -442,9 +441,9 @@ fn dispatch_irq() {
         let freq = timer.read_frequency();
         let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
         timer.program_countdown(countdown);
-        gic.end_of_interrupt(irq);
+        crate::gic::end_of_interrupt(irq);
     } else if irq < 1020 {
-        gic.end_of_interrupt(irq);
+        crate::gic::end_of_interrupt(irq);
     }
 }
 

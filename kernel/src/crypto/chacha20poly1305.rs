@@ -269,21 +269,26 @@ impl Poly1305 {
 
 impl Drop for Poly1305 {
     fn drop(&mut self) {
-        self.r0 = 0;
-        self.r1 = 0;
-        self.r2 = 0;
-        self.r3 = 0;
-        self.r4 = 0;
-        self.s1 = 0;
-        self.s2 = 0;
-        self.s3 = 0;
-        self.s4 = 0;
-        self.h0 = 0;
-        self.h1 = 0;
-        self.h2 = 0;
-        self.h3 = 0;
-        self.h4 = 0;
-        self.pad.fill(0);
+        unsafe {
+            core::ptr::write_volatile(&mut self.r0, 0);
+            core::ptr::write_volatile(&mut self.r1, 0);
+            core::ptr::write_volatile(&mut self.r2, 0);
+            core::ptr::write_volatile(&mut self.r3, 0);
+            core::ptr::write_volatile(&mut self.r4, 0);
+            core::ptr::write_volatile(&mut self.s1, 0);
+            core::ptr::write_volatile(&mut self.s2, 0);
+            core::ptr::write_volatile(&mut self.s3, 0);
+            core::ptr::write_volatile(&mut self.s4, 0);
+            core::ptr::write_volatile(&mut self.h0, 0);
+            core::ptr::write_volatile(&mut self.h1, 0);
+            core::ptr::write_volatile(&mut self.h2, 0);
+            core::ptr::write_volatile(&mut self.h3, 0);
+            core::ptr::write_volatile(&mut self.h4, 0);
+            for word in self.pad.iter_mut() {
+                core::ptr::write_volatile(word, 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -498,6 +503,49 @@ mod tests {
         buffer[0] ^= 0x01;
         assert_eq!(
             ChaCha20Poly1305::open(&key, &nonce, &aad, &mut buffer, &tag),
+            Err(AeadError::IntegrityViolation)
+        );
+    }
+
+    #[test]
+    fn test_rfc8439_empty_payload() {
+        let key = [0x42u8; 32];
+        let nonce = [0x24u8; 12];
+        let aad = b"Additional Authenticated Header Data";
+        let mut payload = [0u8; 0];
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, aad, &mut payload, &mut tag).expect("seal empty payload failed");
+        assert_ne!(tag, [0u8; 16]);
+
+        ChaCha20Poly1305::open(&key, &nonce, aad, &mut payload, &tag).expect("open empty payload failed");
+
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 0xFF;
+        assert_eq!(
+            ChaCha20Poly1305::open(&key, &nonce, aad, &mut payload, &bad_tag),
+            Err(AeadError::IntegrityViolation)
+        );
+    }
+
+    #[test]
+    fn test_rfc8439_no_aad() {
+        let key = [0x33u8; 32];
+        let nonce = [0x77u8; 12];
+        let aad = b"";
+        let plaintext = b"Sensitive microkernel payload without extra AAD";
+        let mut buffer = *plaintext;
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, aad, &mut buffer, &mut tag).expect("seal failed");
+        assert_ne!(&buffer, plaintext);
+
+        ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &tag).expect("open failed");
+        assert_eq!(&buffer, plaintext);
+
+        let wrong_key = [0x55u8; 32];
+        assert_eq!(
+            ChaCha20Poly1305::open(&wrong_key, &nonce, aad, &mut buffer, &tag),
             Err(AeadError::IntegrityViolation)
         );
     }

@@ -54,14 +54,24 @@ global_asm!(
         eret
 
     .Lel1_entry:
-        // Invalidate I-cache and local TLB
+        // Ensure memory visibility before cache/TLB maintenance
+        dsb ish
         ic iallu
+        dsb ish
+        isb
+
         tlbi vmalle1
         dsb ish
         isb
 
-        // Set SCTLR_EL1 to known safe architectural state (caches/MMU off, alignment checks set)
-        ldr x2, =0x30C50838
+        // Sanitize SCTLR_EL1: clear MMU (M=0, bit 0), Data Cache (C=0, bit 2), Instruction Cache (I=0, bit 12),
+        // and ensure stack alignment checks (SA=1, bit 3; SA0=1, bit 4) are active, while preserving
+        // implementation-defined and architecture-reserved flags configured by firmware.
+        mrs x2, sctlr_el1
+        mov x3, #0x1005
+        bic x2, x2, x3
+        mov x3, #(3 << 3)
+        orr x2, x2, x3
         msr sctlr_el1, x2
         isb
 

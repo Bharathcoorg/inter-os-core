@@ -175,13 +175,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 unsafe { gic.init(); }
                 // Enable Virtual Timer PPI (IRQ 27)
                 gic.enable_irq(27);
+                gic::register_active_gicv2(gic);
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
             gic::IntcDescription::Gicv3 { distributor, redistributors } => {
                 let gicv3 = gic::Gicv3::new(distributor, redistributors);
-                gicv3.init_cpu_interface();
-                kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X}, CPU interface system registers enabled.",
+                unsafe { gicv3.init(); }
+                gicv3.enable_irq(27);
+                gic::register_active_gicv3(gicv3);
+                kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X}, full generic GICv3 initialized, IRQ 27 enabled.",
                     distributor, redistributors);
             }
             gic::IntcDescription::Unsupported(model) => {
@@ -193,6 +196,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
                     unsafe { gic.init(); }
                     gic.enable_irq(27);
+                    gic::register_active_gicv2(gic);
                     kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                         gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
                 } else {
@@ -205,10 +209,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
             unsafe { gic.init(); }
             gic.enable_irq(27);
+            gic::register_active_gicv2(gic);
             kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                 gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
         } else {
-            kprintln!("[OK] No device tree available; interrupt routing left unconfigured.");
+            gic = Gicv2::new(gic::DEFAULT_GICD_BASE, gic::DEFAULT_GICC_BASE);
+            unsafe { gic.init(); }
+            gic.enable_irq(27);
+            gic::register_active_gicv2(gic);
+            kprintln!("[OK] Default QEMU virt GICv2 fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
+                gic::DEFAULT_GICD_BASE, gic::DEFAULT_GICC_BASE);
         }
     }
 
