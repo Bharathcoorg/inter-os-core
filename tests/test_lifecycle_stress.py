@@ -424,7 +424,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
 
 def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=100):
     print("\n" + "=" * 68)
-    print(f"  EXTENDED POST-STABILIZATION WORKLOAD: {num_cycles} CYCLES")
+    print(f"  EXTENDED POST-STABILIZATION WORKLOAD: {num_cycles} CYCLES (EVERY-CYCLE TELEMETRY)")
     print("=" * 68)
 
     app_configs = [
@@ -452,6 +452,7 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
     ]
 
     checkpoints = []
+    per_cycle_telemetry = []
     t_start = time.time()
     for cycle in range(1, num_cycles + 1):
         cfg = app_configs[(cycle - 1) % len(app_configs)]
@@ -474,32 +475,38 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
         assert reader.wait_for("Foreground application exited and was reaped", timeout=15.0), f"Cycle {cycle}: reaping failed"
         assert reader.wait_for("Home surface rendered.", timeout=15.0), f"Cycle {cycle}: home render failed"
 
-        # Periodically check telemetry and log progress
+        # 5. Sample telemetry at every single cycle (1..100)
+        diag = query_diag_state(serial_sock, reader)
+        per_cycle_telemetry.append({"cycle": cycle, **diag})
+
+        # Invariant checks at EVERY single cycle
+        assert diag["surfaces"] == baseline["surfaces"], f"Surface leak at cycle {cycle}: {diag['surfaces']} != {baseline['surfaces']}"
+        assert diag["tasks_active"] == baseline["tasks_active"], f"Task leak at cycle {cycle}: {diag['tasks_active']} != {baseline['tasks_active']}"
+        assert diag["shm_pipes"] == baseline["shm_pipes"], f"SHM leak at cycle {cycle}: {diag['shm_pipes']} != {baseline['shm_pipes']}"
+        assert diag["mailboxes"] == baseline["mailboxes"], f"Mailbox leak at cycle {cycle}: {diag['mailboxes']} != {baseline['mailboxes']}"
+        assert diag["endpoints"] == baseline["endpoints"], f"Endpoint leak at cycle {cycle}: {diag['endpoints']} != {baseline['endpoints']}"
+
+        # Periodically log progress
         if cycle % 20 == 0 or cycle == num_cycles:
             elapsed = time.time() - t_start
-            diag = query_diag_state(serial_sock, reader)
             checkpoints.append(diag)
             print(f"[EXTENDED CYCLE {cycle:3d}/{num_cycles}] ({elapsed:.1f}s) tasks={diag['tasks_active']} "
                   f"surfaces={diag['surfaces']} shm={diag['shm_pipes']} mailboxes={diag['mailboxes']} "
-                  f"heap={diag['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)")
-            assert diag["surfaces"] == baseline["surfaces"], f"Surface leak at cycle {cycle}"
-            assert diag["tasks_active"] == baseline["tasks_active"], f"Task leak at cycle {cycle}"
-            assert diag["shm_pipes"] == baseline["shm_pipes"], f"SHM leak at cycle {cycle}"
-            assert diag["mailboxes"] == baseline["mailboxes"], f"Mailbox leak at cycle {cycle}"
+                  f"endpoints={diag['endpoints']} heap={diag['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)")
 
-    # Verify no monotonic growth across checkpoints
-    checkpoint_heaps = [cp["heap_used"] for cp in checkpoints]
-    is_strictly_monotonic = len(checkpoint_heaps) >= 3 and all(
-        checkpoint_heaps[k] > checkpoint_heaps[k - 1] for k in range(1, len(checkpoint_heaps))
+    # Verify no monotonic growth across all measurements
+    cycle_heaps = [cp["heap_used"] for cp in per_cycle_telemetry]
+    is_strictly_monotonic = len(cycle_heaps) >= 3 and all(
+        cycle_heaps[k] > cycle_heaps[k - 1] for k in range(1, len(cycle_heaps))
     )
     assert not is_strictly_monotonic, (
-        f"FORBIDDEN: Monotonic heap growth detected across extended cycles: {checkpoint_heaps}"
+        f"FORBIDDEN: Monotonic heap growth detected across extended cycles: {cycle_heaps}"
     )
 
     total_time = time.time() - t_start
-    print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle).")
-    final_diag = query_diag_state(serial_sock, reader)
-    return final_diag, checkpoints
+    print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle) with every-cycle telemetry.")
+    final_diag = per_cycle_telemetry[-1]
+    return final_diag, checkpoints, per_cycle_telemetry
 
 
 def analyze_and_assert_lifecycle_metrics(
@@ -919,9 +926,10 @@ def main():
 
         extended_drift = 0
         extended_tail_drift = 0
+        per_cycle_telemetry = []
         stabilized_baseline = {**baseline, "heap_used": heap_counts[-1]}
         if args.extended_cycles > 0:
-            final_diag, checkpoints = execute_post_stabilization_cycles(reader, serial_sock, stabilized_baseline, args.extended_cycles)
+            final_diag, checkpoints, per_cycle_telemetry = execute_post_stabilization_cycles(reader, serial_sock, stabilized_baseline, args.extended_cycles)
             extended_drift = final_diag["heap_used"] - heap_counts[-1]
             tail_checkpoints = [cp["heap_used"] for cp in checkpoints[-2:]] if len(checkpoints) >= 2 else [final_diag["heap_used"]]
             extended_tail_drift = max(tail_checkpoints) - min(tail_checkpoints)
@@ -967,6 +975,7 @@ def main():
                 "post_stabilization_drift_bytes": extended_drift,
                 "baseline": baseline,
                 "metrics_history": metrics_history,
+                "extended_cycles_telemetry": per_cycle_telemetry,
                 "max_heap_drift_bytes": total_heap_growth,
                 "iter1_drift_bytes": iter1_drift,
                 "subsequent_drift_bytes": subsequent_drift,

@@ -850,7 +850,10 @@ static mut TEST_SWITCH_FLAG: u32 = 0;
 static mut MAIN_CTX: RiscvContext = RiscvContext::empty();
 #[no_mangle]
 static mut WORKER_CTX: RiscvContext = RiscvContext::empty();
-static mut WORKER_STACK: [u8; 8192] = [0u8; 8192];
+#[repr(align(16))]
+#[allow(dead_code)]
+struct WorkerStack([u8; 8192]);
+static mut WORKER_STACK: WorkerStack = WorkerStack([0u8; 8192]);
 
 core::arch::global_asm!(
     r#"
@@ -869,16 +872,17 @@ asm_riscv_context_test_runner:
     // a1: worker_ctx (*const RiscvContext)
     // a2: patterns_f (*const u64)
     // a3: patterns_s (*const u64)
-    // a4: captured_f (*mut u64)
-    // a5: captured_s (*mut u64)
-    // a6: captured_fcsr (*mut u64)
+    // a4: test_fcsr (u64)
+    // a5: captured_f (*mut u64)
+    // a6: captured_s (*mut u64)
+    // a7: captured_fcsr (*mut u64)
 
     // 1. Allocate 128-byte stack frame (16-byte aligned)
     addi sp, sp, -128
     sd ra, 0(sp)
-    sd a4, 8(sp)
-    sd a5, 16(sp)
-    sd a6, 24(sp)
+    sd a5, 8(sp)
+    sd a6, 16(sp)
+    sd a7, 24(sp)
 
     // Save caller's callee-saved s0-s11
     sd s0, 32(sp)
@@ -893,6 +897,9 @@ asm_riscv_context_test_runner:
     sd s9, 104(sp)
     sd s10, 112(sp)
     sd s11, 120(sp)
+
+    // Set initial test FCSR from a4
+    fscsr a4
 
     // 2. Load distinguishable test patterns into s0-s11 from a3
     ld s0, 0(a3)
@@ -945,6 +952,9 @@ asm_riscv_context_test_runner:
     // 4. Trigger cooperative context switch: a0=main_ctx, a1=worker_ctx
     call switch_context
 
+    .global asm_riscv_test_return_site
+    .type asm_riscv_test_return_site, @function
+asm_riscv_test_return_site:
     // =====================================================================
     // RESUMED IN TASK A (Original Task)
     // Immediately capture all 32 floating-point registers f0-f31 into captured_f.
@@ -1077,6 +1087,10 @@ asm_riscv_test_worker_entry:
     mv s10, t2
     mv s11, t2
 
+    // Deliberately poison FCSR with 0x2A (RTZ mode + DZ, UF flags)
+    li t0, 0x2A
+    fscsr t0
+
     // Set TEST_SWITCH_FLAG = 0xCAFEBABE
     la t4, TEST_SWITCH_FLAG
     li t5, 0xCAFEBABE
@@ -1096,10 +1110,12 @@ extern "C" {
         worker_ctx: *const RiscvContext,
         patterns_f: *const u64,
         patterns_s: *const u64,
+        test_fcsr: u64,
         captured_f: *mut u64,
         captured_s: *mut u64,
         captured_fcsr: *mut u64,
     );
+    fn asm_riscv_test_return_site();
     fn asm_riscv_test_worker_entry();
 }
 
@@ -1107,12 +1123,14 @@ pub fn test_context_switching() {
     crate::println!("--- [Testing RISC-V Callee-Saved Register Context Switcher] ---");
 
     unsafe {
-        TEST_SWITCH_FLAG = 0;
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TEST_SWITCH_FLAG), 0);
         let stack_top = (core::ptr::addr_of!(WORKER_STACK) as u64) + 8192;
-        let mut wctx = WORKER_CTX;
-        wctx.sp = stack_top & !0x0F;
+        assert_eq!(stack_top & 0x0F, 0, "Worker stack must be 16-byte aligned");
+
+        let mut wctx = core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX));
+        wctx.sp = stack_top;
         wctx.set_ra(asm_riscv_test_worker_entry as *const () as usize as u64);
-        WORKER_CTX = wctx;
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(WORKER_CTX), wctx);
 
         let mut patterns_f = [0u64; 32];
         for i in 0..32 {
@@ -1128,14 +1146,17 @@ pub fn test_context_switching() {
         let mut captured_s = [0u64; 12];
         let mut captured_fcsr = [0u64; 1];
 
-        let mut orig_fcsr: u64;
-        core::arch::asm!("frcsr {}", out(reg) orig_fcsr);
+        // test_fcsr: bits 7:5 dynamic rounding mode RDN (0b010 = 2, so (2<<5)=0x40),
+        // bits 4:0 accrued exception flags: NV (bit 4 = 0x10), OF (bit 2 = 0x04), NX (bit 0 = 0x01)
+        // 0x40 | 0x10 | 0x04 | 0x01 = 0x55
+        let test_fcsr: u64 = 0x55;
 
         asm_riscv_context_test_runner(
             core::ptr::addr_of_mut!(MAIN_CTX),
             core::ptr::addr_of!(WORKER_CTX),
             patterns_f.as_ptr(),
             patterns_s.as_ptr(),
+            test_fcsr,
             captured_f.as_mut_ptr(),
             captured_s.as_mut_ptr(),
             captured_fcsr.as_mut_ptr(),
@@ -1144,26 +1165,60 @@ pub fn test_context_switching() {
         let flag_val = core::ptr::read_volatile(core::ptr::addr_of!(TEST_SWITCH_FLAG));
         assert_eq!(flag_val, 0xCAFE_BABE, "RISC-V Context switch failed to execute worker task");
 
+        // A. Verify that all 32 floating-point registers (f0-f31) were restored bit-exact
         for i in 0..32 {
             assert_eq!(
                 captured_f[i],
                 patterns_f[i],
-                "RISC-V floating-point context switch restoration mismatch on f register"
+                "RISC-V floating-point context switch restoration mismatch on f{} register",
+                i
             );
         }
 
+        // B. Verify that all 12 callee-saved GPRs (s0-s11) were restored bit-exact
         for i in 0..12 {
             assert_eq!(
                 captured_s[i],
                 patterns_s[i],
-                "RISC-V callee-saved GPR context switch restoration mismatch on s register"
+                "RISC-V callee-saved GPR context switch restoration mismatch on s{} register",
+                i
             );
         }
 
-        assert_eq!(captured_fcsr[0], orig_fcsr, "RISC-V FCSR register mismatch across context switch");
+        // C. Verify FCSR architectural preservation
+        assert_eq!(
+            captured_fcsr[0] & 0xFF,
+            test_fcsr & 0xFF,
+            "RISC-V FCSR register mismatch across context switch: expected 0x{:x}, got 0x{:x}",
+            test_fcsr & 0xFF,
+            captured_fcsr[0] & 0xFF
+        );
+
+        // D. Verify return address (ra) and stack pointer (sp) invariants
+        let main_ra = core::ptr::read_volatile(core::ptr::addr_of!(MAIN_CTX.ra));
+        let main_sp = core::ptr::read_volatile(core::ptr::addr_of!(MAIN_CTX.sp));
+        let worker_sp = core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.sp));
+        let expected_ra = asm_riscv_test_return_site as *const () as usize as u64;
+
+        assert_eq!(
+            main_ra, expected_ra,
+            "MAIN_CTX.ra must match the exact return instruction site address"
+        );
+        assert_eq!(main_sp & 0x0F, 0, "Main task stack pointer must remain 16-byte aligned");
+        assert_eq!(worker_sp & 0x0F, 0, "Worker task stack pointer must remain 16-byte aligned");
+        assert_ne!(main_sp, 0, "Saved main SP must be non-zero");
+        assert_ne!(worker_sp, 0, "Saved worker SP must be non-zero");
+
+        // E. Verify sstatus.FS and VS architectural state separation
+        let sstatus: u64;
+        core::arch::asm!("csrr {}, sstatus", out(reg) sstatus, options(nomem, nostack));
+        let fs = (sstatus >> 13) & 0x3;
+        let vs = (sstatus >> 9) & 0x3;
+        assert!(fs != 0, "sstatus.FS must be enabled for floating point context switching");
+        assert_eq!(vs, 0, "sstatus.VS must be Off (0b00) to isolate SIMD/vector state");
     }
 
-    crate::println!("[TEST] RISC-V Context Switch: ra, sp, s0-s11, all 32 floating-point registers (f0-f31), and FCSR saved & restored VERIFIED.");
+    crate::println!("[TEST] RISC-V Context Switch: ra, sp, s0-s11 (GPRs), f0-f31 (FPU), FCSR, and sstatus.FS/VS verified bit-exact.");
 }
 
 pub fn test_task_lifecycle() {

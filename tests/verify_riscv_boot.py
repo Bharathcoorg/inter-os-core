@@ -34,6 +34,7 @@ REQUIRED_SIGNALS = [
     "Hello from InterOS RISC-V Userspace!",
     "Task exited with code 0",
     "[TEST] RISC-V Task Removal Consistency, 5-Stage Reap & Transactional Switch VERIFIED.",
+    "[TEST] RISC-V Context Switch: ra, sp, s0-s11 (GPRs), f0-f31 (FPU), FCSR, and sstatus.FS/VS verified bit-exact.",
     "[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.",
     "Spawning Userspace PID 1 (init) in U-Mode",
     "[PID1] Inter OS userspace init started in Ring 3.",
