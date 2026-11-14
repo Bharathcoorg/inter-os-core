@@ -163,14 +163,19 @@ impl FrameScheduler {
     }
 
     pub fn frame_budget_ns(&self) -> u64 {
-        match self.refresh_hz {
-            360 => 2_777_778,
-            240 => 4_166_667,
-            165 => 6_060_606,
-            144 => 6_944_444,
-            120 => 8_333_333,
-            90 => 11_111_111,
-            _ => 16_666_666,
+        if self.refresh_hz == 0 {
+            16_666_666
+        } else {
+            match self.refresh_hz {
+                360 => 2_777_778,
+                240 => 4_166_667,
+                165 => 6_060_606,
+                144 => 6_944_444,
+                120 => 8_333_333,
+                90 => 11_111_111,
+                60 => 16_666_666,
+                hz => 1_000_000_000u64 / (hz as u64),
+            }
         }
     }
 }
@@ -2419,7 +2424,7 @@ impl DrmKmsController {
     }
 
     pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
-        if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 360 {
+        if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 1000 {
             return Err("invalid display mode");
         }
         let pixels = (width as usize).checked_mul(height as usize).ok_or("display mode size overflow")?;

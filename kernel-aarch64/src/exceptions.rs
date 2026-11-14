@@ -11,19 +11,33 @@
 
 use core::arch::global_asm;
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct ExceptionFrame {
     pub regs: [u64; 31],
     pub elr: u64,
     pub spsr: u64,
     pub esr: u64,
     pub sp_el0: u64,
+    pub _pad: u64,
+    pub simd: [u128; 32],
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<ExceptionFrame>() == 800);
+    assert!(core::mem::align_of::<ExceptionFrame>() == 16);
+    assert!(core::mem::offset_of!(ExceptionFrame, regs) == 0);
+    assert!(core::mem::offset_of!(ExceptionFrame, elr) == 248);
+    assert!(core::mem::offset_of!(ExceptionFrame, spsr) == 256);
+    assert!(core::mem::offset_of!(ExceptionFrame, esr) == 264);
+    assert!(core::mem::offset_of!(ExceptionFrame, sp_el0) == 272);
+    assert!(core::mem::offset_of!(ExceptionFrame, _pad) == 280);
+    assert!(core::mem::offset_of!(ExceptionFrame, simd) == 288);
+};
 
 global_asm!(
     r#"
     .macro save_all_regs
-        sub sp, sp, #288
+        sub sp, sp, #800
         stp x0, x1, [sp, #0]
         stp x2, x3, [sp, #16]
         stp x4, x5, [sp, #32]
@@ -47,9 +61,43 @@ global_asm!(
         mrs x24, sp_el0
         stp x21, x22, [sp, #248]
         stp x23, x24, [sp, #264]
+
+        stp q0, q1, [sp, #288]
+        stp q2, q3, [sp, #320]
+        stp q4, q5, [sp, #352]
+        stp q6, q7, [sp, #384]
+        stp q8, q9, [sp, #416]
+        stp q10, q11, [sp, #448]
+        stp q12, q13, [sp, #480]
+        stp q14, q15, [sp, #512]
+        stp q16, q17, [sp, #544]
+        stp q18, q19, [sp, #576]
+        stp q20, q21, [sp, #608]
+        stp q22, q23, [sp, #640]
+        stp q24, q25, [sp, #672]
+        stp q26, q27, [sp, #704]
+        stp q28, q29, [sp, #736]
+        stp q30, q31, [sp, #768]
     .endm
 
     .macro restore_all_regs
+        ldp q0, q1, [sp, #288]
+        ldp q2, q3, [sp, #320]
+        ldp q4, q5, [sp, #352]
+        ldp q6, q7, [sp, #384]
+        ldp q8, q9, [sp, #416]
+        ldp q10, q11, [sp, #448]
+        ldp q12, q13, [sp, #480]
+        ldp q14, q15, [sp, #512]
+        ldp q16, q17, [sp, #544]
+        ldp q18, q19, [sp, #576]
+        ldp q20, q21, [sp, #608]
+        ldp q22, q23, [sp, #640]
+        ldp q24, q25, [sp, #672]
+        ldp q26, q27, [sp, #704]
+        ldp q28, q29, [sp, #736]
+        ldp q30, q31, [sp, #768]
+
         ldp x21, x22, [sp, #248]
         ldp x23, x24, [sp, #264]
         msr elr_el1, x21
@@ -72,7 +120,7 @@ global_asm!(
         ldp x26, x27, [sp, #208]
         ldp x28, x29, [sp, #224]
         ldr x30, [sp, #240]
-        add sp, sp, #288
+        add sp, sp, #800
     .endm
 
     .section .text.vectors, "ax"

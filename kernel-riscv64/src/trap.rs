@@ -290,6 +290,9 @@ pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kst
         "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
         "ori t0, t0, (1 << 5)",
+        // Clear VS (bits [10:9]) to strictly trap and isolate vector state
+        "li t1, ~(3 << 9)",
+        "and t0, t0, t1",
         "csrw sstatus, t0",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
@@ -365,6 +368,9 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
         "ori t0, t0, (1 << 5)",
+        // Clear VS (bits [10:9]) to strictly trap and isolate vector state
+        "li t1, ~(3 << 9)",
+        "and t0, t0, t1",
         "csrw sstatus, t0",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",

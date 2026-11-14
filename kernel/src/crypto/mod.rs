@@ -6,6 +6,7 @@
 //! Provides bare-metal cryptographic primitives for Merkle tree rootfs verification,
 //! `.rapp` package attestation, and sovereign identity state hashing.
 
+pub mod chacha20poly1305;
 pub mod ed25519;
 pub mod hmac;
 pub mod keystore;
@@ -13,6 +14,7 @@ pub mod rng;
 pub mod sha256;
 pub mod tls_trust;
 
+pub use chacha20poly1305::{AeadError, ChaCha20Poly1305};
 pub use hmac::HmacSha256;
 pub use keystore::{KeySlot, KeystoreError, SecureKeystore, SECURE_KEYSTORE};
 pub use rng::{get_random_bytes, try_get_random_bytes, entropy_state, inject_verified_seed, mix_auxiliary_jitter, EntropyError, EntropyState, HardwareRng, TRNG};

@@ -16,15 +16,20 @@
 //! All sensitive key buffers and keystreams are scrubbed with zeroize_slice.
 
 use alloc::vec::Vec;
-use crate::crypto::{try_get_random_bytes, HmacSha256, KeySlot, SECURE_KEYSTORE, constant_time_eq_32, zeroize_slice};
+use crate::crypto::{try_get_random_bytes, ChaCha20Poly1305, HmacSha256, KeySlot, SECURE_KEYSTORE, constant_time_eq_32, zeroize_slice};
 
 pub const ENCRYPTED_MAGIC: [u8; 4] = *b"ENC1";
 pub const ENCRYPTED_VERSION_V1: u8 = 1;
 pub const ENCRYPTED_VERSION_V2: u8 = 2;
+pub const ENCRYPTED_VERSION_V3: u8 = 3;
 pub const ENCRYPTED_VERSION: u8 = ENCRYPTED_VERSION_V2;
 pub const ENCRYPTED_HEADER_SIZE: usize = 26;
 pub const ENCRYPTED_TAG_SIZE: usize = 32;
 pub const ENCRYPTED_OVERHEAD: usize = ENCRYPTED_HEADER_SIZE + ENCRYPTED_TAG_SIZE;
+
+pub const ENCRYPTED_HEADER_SIZE_V3: usize = 22; // 4 magic + 1 ver + 1 res + 4 len + 12 nonce
+pub const ENCRYPTED_TAG_SIZE_V3: usize = 16;
+pub const ENCRYPTED_OVERHEAD_V3: usize = ENCRYPTED_HEADER_SIZE_V3 + ENCRYPTED_TAG_SIZE_V3;
 
 const DOMAIN_ENC_V2: &[u8] = b"ENC1-ENCRYPT-KEY-V2";
 const DOMAIN_MAC_V2: &[u8] = b"ENC1-AUTHENTICATE-KEY-V2";
@@ -113,13 +118,74 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
     res
 }
 
-/// Authenticates and decrypts an ENC1 envelope (supports Version 2 and legacy Version 1) using an explicit key.
+/// Encrypts a bounded payload into an authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using an explicit key.
+pub fn seal_v3_with_key(plaintext: &[u8], key: &[u8; 32], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+    if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
+    let mut nonce = [0u8; 12];
+    try_get_random_bytes(&mut nonce).map_err(|_| EncryptionError::InsufficientEntropy)?;
+
+    out.clear();
+    out.reserve(ENCRYPTED_OVERHEAD_V3 + plaintext.len());
+    out.extend_from_slice(&ENCRYPTED_MAGIC);
+    out.push(ENCRYPTED_VERSION_V3);
+    out.push(0);
+    out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+    out.extend_from_slice(&nonce);
+    let header_len = out.len();
+    out.extend_from_slice(plaintext);
+
+    let mut tag = [0u8; 16];
+    let (header, payload) = out.split_at_mut(header_len);
+    ChaCha20Poly1305::seal(key, &nonce, header, payload, &mut tag)
+        .map_err(|_| EncryptionError::IntegrityViolation)?;
+
+    out.extend_from_slice(&tag);
+    zeroize_slice(&mut tag);
+    zeroize_slice(&mut nonce);
+    Ok(())
+}
+
+/// Encrypts a bounded payload into an authenticated ENC1 Version 3 (ChaCha20-Poly1305) envelope using storage key.
+pub fn seal_v3(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
+    let mut key = storage_key()?;
+    let res = seal_v3_with_key(plaintext, &key, out);
+    zeroize_slice(&mut key);
+    res
+}
+
+/// Authenticates and decrypts an ENC1 envelope (supports Version 3 AEAD, Version 2 and legacy Version 1) using an explicit key.
 pub fn open_with_key(envelope: &[u8], key: &[u8; 32], out: &mut [u8]) -> Result<usize, EncryptionError> {
-    if envelope.len() < ENCRYPTED_OVERHEAD { return Err(EncryptionError::InvalidFormat); }
+    if envelope.len() < ENCRYPTED_HEADER_SIZE_V3 { return Err(EncryptionError::InvalidFormat); }
     if envelope[..4] != ENCRYPTED_MAGIC {
         return Err(EncryptionError::InvalidFormat);
     }
     let version = envelope[4];
+    if version == ENCRYPTED_VERSION_V3 {
+        if envelope.len() < ENCRYPTED_OVERHEAD_V3 { return Err(EncryptionError::InvalidFormat); }
+        let plain_len = u32::from_le_bytes([envelope[6], envelope[7], envelope[8], envelope[9]]) as usize;
+        let expected_len = ENCRYPTED_OVERHEAD_V3.checked_add(plain_len).ok_or(EncryptionError::InvalidFormat)?;
+        if expected_len != envelope.len() { return Err(EncryptionError::InvalidFormat); }
+        if out.len() < plain_len { return Err(EncryptionError::BufferTooSmall); }
+
+        let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE_V3;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&envelope[10..22]);
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&envelope[tag_offset..]);
+
+        out[..plain_len].copy_from_slice(&envelope[22..tag_offset]);
+        let aad = &envelope[..22];
+        let res = ChaCha20Poly1305::open(key, &nonce, aad, &mut out[..plain_len], &tag);
+        zeroize_slice(&mut tag);
+        zeroize_slice(&mut nonce);
+        if res.is_err() {
+            zeroize_slice(&mut out[..plain_len]);
+            return Err(EncryptionError::IntegrityViolation);
+        }
+        return Ok(plain_len);
+    }
+
+    if envelope.len() < ENCRYPTED_OVERHEAD { return Err(EncryptionError::InvalidFormat); }
     if version != ENCRYPTED_VERSION_V1 && version != ENCRYPTED_VERSION_V2 {
         return Err(EncryptionError::InvalidFormat);
     }
@@ -430,6 +496,38 @@ mod tests {
         assert_eq!(
             open_with_key(&envelope, &TEST_KEY, &mut out),
             Err(EncryptionError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn test_v3_chacha20poly1305_roundtrip_and_tamper() {
+        let plaintext = b"RFC 8439 ChaCha20-Poly1305 authenticated storage envelope";
+        let mut envelope = Vec::new();
+        seal_v3_with_key(plaintext, &TEST_KEY, &mut envelope).unwrap();
+
+        assert_eq!(envelope[..4], ENCRYPTED_MAGIC);
+        assert_eq!(envelope[4], ENCRYPTED_VERSION_V3);
+
+        let mut out = alloc::vec![0u8; plaintext.len()];
+        let len = open_with_key(&envelope, &TEST_KEY, &mut out).unwrap();
+        assert_eq!(len, plaintext.len());
+        assert_eq!(&out[..len], plaintext);
+
+        // Tamper with ciphertext byte
+        let mut tampered = envelope.clone();
+        tampered[22] ^= 0x01;
+        assert_eq!(
+            open_with_key(&tampered, &TEST_KEY, &mut out),
+            Err(EncryptionError::IntegrityViolation)
+        );
+
+        // Tamper with Poly1305 tag
+        let mut tampered_tag = envelope.clone();
+        let last = tampered_tag.len() - 1;
+        tampered_tag[last] ^= 0x80;
+        assert_eq!(
+            open_with_key(&tampered_tag, &TEST_KEY, &mut out),
+            Err(EncryptionError::IntegrityViolation)
         );
     }
 }

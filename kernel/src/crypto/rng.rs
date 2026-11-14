@@ -108,15 +108,37 @@ impl HardwareRng {
             }
             let rng_field = (isar0 >> 60) & 0x0F;
             if rng_field >= 1 {
-                self.state = EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" };
-                return;
+                let mut test_val: u64 = 0;
+                let mut success: u8 = 0;
+                for _ in 0..10 {
+                    unsafe {
+                        core::arch::asm!(
+                            "mrs {val}, s3_3_c2_c4_0",
+                            "cset {succ}, ne",
+                            val = out(reg) test_val,
+                            succ = out(reg_byte) success,
+                            options(nostack)
+                        );
+                    }
+                    if success != 0 {
+                        break;
+                    }
+                }
+                if success != 0 {
+                    self.state = EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" };
+                    self.mix_entropy(test_val);
+                    return;
+                }
             }
             self.state = EntropyState::DegradedPseudoOnly;
         }
 
         #[cfg(target_arch = "riscv64")]
         {
-            // RISC-V: Check for Zkr entropy extension (CSR 0x015)
+            // RISC-V: Zkr entropy extension (CSR 0x015 'seed').
+            // Direct CSR reads trap if Zkr is not implemented in physical silicon.
+            // Under microkernel security rules, we fail closed and report DegradedPseudoOnly
+            // unless hardware verification confirms Zkr presence.
             self.state = EntropyState::DegradedPseudoOnly;
         }
 
@@ -187,6 +209,29 @@ impl HardwareRng {
                     }
                     return Err(EntropyError::HardwareUnavailable);
                 }
+
+                #[cfg(target_arch = "aarch64")]
+                if matches!(self.state, EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" }) {
+                    for _ in 0..10 {
+                        let val: u64;
+                        let success: u8;
+                        unsafe {
+                            core::arch::asm!(
+                                "mrs {val}, s3_3_c2_c4_0",
+                                "cset {succ}, ne",
+                                val = out(reg) val,
+                                succ = out(reg_byte) success,
+                                options(nostack)
+                            );
+                        }
+                        if success != 0 {
+                            self.mix_entropy(val);
+                            return Ok(val);
+                        }
+                    }
+                    return Err(EntropyError::HardwareUnavailable);
+                }
+
                 self.expand_pool()
             }
             EntropyState::ExplicitSeeded => {
