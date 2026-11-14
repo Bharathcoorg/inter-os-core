@@ -108,11 +108,23 @@ pub enum UserLockState {
 /// - **Fail-Closed Policy:** If the credential record cannot be read, format version is unknown,
 ///   or the checksum fails, the kernel fails closed: the credential is not loaded, the profile
 ///   remains in `UserLockState::Locked` or `Lockout`, and unauthorized login is strictly denied.
-/// - **PBKDF2 Work Factor Rationale:** Default work factor is 5,000 iterations of PBKDF2-HMAC-SHA256.
-///   On target mobile cores, this executes in ~3.4 ms, which fits within the interactive 5.0 ms
-///   frame budget (avoiding UI stutters or high battery drain during unlock) while providing a 5×
-///   work factor increase over legacy 1,000-round credentials. Legacy credentials are transparently
-///   upgraded to 5,000 rounds upon the next successful unlock.
+/// - **Password-Hardening Strategy & Threat Model:**
+///   - *On-Device Online Defense:* Online brute-force attacks against physical devices are mitigated
+///     by kernel-enforced rate-limiting and persistent lockout (maximum 5 failed attempts triggering
+///     a 30-second cold-boot-persisting lockout).
+///   - *Work Factor Decoupling:* Password verification executes outside the 60fps compositor render
+///     loop (asynchronous IPC authentication worker) so work factor is never constrained by a 5ms
+///     frame budget.
+///   - *Microkernel no_std Bounds & Version 1 Scope:* Version 1 uses 5,000 rounds of PBKDF2-HMAC-SHA256.
+///     Because PBKDF2 is compute-bound rather than memory-hard, it does *not* provide resistance against
+///     massively parallel GPU/ASIC offline dictionary attacks if raw unencrypted flash is dumped.
+///     In the current `#![no_std]` core with constrained kernel stack and zero heap allocations during
+///     interactive paths, memory-hard algorithms (e.g. Argon2id requiring 64+ MiB of RAM) cannot run
+///     in-kernel.
+///   - *Migration Path (Version 2):* The on-disk header contains an explicit format version field.
+///     Once userspace authentication architecture is deployed with virtual memory paging, Version 2
+///     will introduce Argon2id password hashing and hardware-bound key sealing. Existing Version 1
+///     accounts remain fully backwards compatible and will migrate automatically upon unlock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
     pub salt: [u8; 16],
@@ -122,10 +134,45 @@ pub struct Credential {
     pub iterations: u32,
 }
 
+/// RAII zeroizing buffer wrapper for sensitive credential records.
+/// Ensures the underlying buffer is unconditionally scrubbed with volatile writes
+/// on every exit path (early return, error, panic, or normal completion).
+pub struct ZeroizingBuffer<const N: usize> {
+    buf: [u8; N],
+}
+
+impl<const N: usize> ZeroizingBuffer<N> {
+    #[inline]
+    pub fn new() -> Self {
+        Self { buf: [0u8; N] }
+    }
+}
+
+impl<const N: usize> core::ops::Deref for ZeroizingBuffer<N> {
+    type Target = [u8; N];
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.buf
+    }
+}
+
+impl<const N: usize> core::ops::DerefMut for ZeroizingBuffer<N> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buf
+    }
+}
+
+impl<const N: usize> Drop for ZeroizingBuffer<N> {
+    #[inline]
+    fn drop(&mut self) {
+        crate::crypto::zeroize_slice(&mut self.buf);
+    }
+}
+
 impl Credential {
-    /// Default number of PBKDF2-HMAC-SHA256 iterations (RFC 2898 / RFC 8018).
-    /// Provides password-hardening resistance against GPU/ASIC brute-force attacks
-    /// while remaining bounded within ~3.5ms execution on mobile cores.
+    /// Default number of PBKDF2-HMAC-SHA256 iterations (RFC 2898 / RFC 8018) for Version 1 records.
+    /// Provides baseline password-stretching within no_std microkernel constraints.
     pub const DEFAULT_PBKDF2_ROUNDS: u32 = 5000;
     /// Legacy PBKDF2 iteration count for backwards compatibility and migration.
     pub const LEGACY_PBKDF2_ROUNDS: u32 = 1000;
@@ -155,13 +202,12 @@ impl Credential {
 
     /// Verifies candidate secret against stored salt and hash using PBKDF2-HMAC-SHA256
     /// with the credential's own recorded iteration count and constant-time 32-byte equality comparison.
-    /// Intermediate secret-dependent buffers are wiped with volatile stores.
+    /// Intermediate secret-dependent buffers are wiped with volatile stores via ZeroizingBuffer.
     pub fn verify(&self, secret: &[u8]) -> bool {
-        let mut candidate_hash = [0u8; 32];
-        crate::crypto::HmacSha256::pbkdf2(secret, &self.salt, self.iterations, &mut candidate_hash);
-        let matches = crate::crypto::constant_time_eq_32(&candidate_hash, &self.hash);
-        crate::crypto::zeroize_slice(&mut candidate_hash);
-        matches
+        let mut candidate_guard = ZeroizingBuffer::<32>::new();
+        let candidate_hash = &mut *candidate_guard;
+        crate::crypto::HmacSha256::pbkdf2(secret, &self.salt, self.iterations, candidate_hash);
+        crate::crypto::constant_time_eq_32(candidate_hash, &self.hash)
     }
 }
 
@@ -654,7 +700,8 @@ impl UserManager {
     /// Persists the salted credential hash, failed attempts, and work factor to `/user/{uid}/vault/.credential` in VFS.
     pub fn save_credential_to_vfs(uid: UserId, cred: &Credential) {
         let path = format!("/user/{}/vault/.credential", uid.0);
-        let mut buf = [0u8; 68];
+        let mut buf_guard = ZeroizingBuffer::<68>::new();
+        let buf = &mut *buf_guard;
         buf[0..4].copy_from_slice(b"UCRD");
         buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // Format Version 1
         buf[8..24].copy_from_slice(&cred.salt);
@@ -665,7 +712,7 @@ impl UserManager {
         buf[64..68].copy_from_slice(&csum.to_le_bytes());
         let outcome = {
             let mut vfs = VFS.lock();
-            vfs.create_file(&path, &buf, false);
+            vfs.create_file(&path, buf, false);
             vfs.sync()
         };
         // WHY the result is reported: this used to be discarded, so a write the
@@ -685,17 +732,20 @@ impl UserManager {
                 path
             ),
         }
-        crate::crypto::zeroize_slice(&mut buf);
     }
 
     /// Restores a previously persisted credential from VFS on boot.
     /// Fails closed if the storage record is corrupt or tampered with.
+    /// The temporary credential buffer is automatically and unconditionally wiped
+    /// via ZeroizingBuffer RAII Drop on all exit paths (missing/short records,
+    /// invalid magic, unknown version, checksum mismatch, or successful load).
     pub fn load_persisted_credential(&mut self, uid: UserId) {
         let path = format!("/user/{}/vault/.credential", uid.0);
-        let mut buf = [0u8; 68];
+        let mut buf_guard = ZeroizingBuffer::<68>::new();
+        let buf = &mut *buf_guard;
         let bytes_read = {
             let vfs = VFS.lock();
-            vfs.read_file_by_path(&path, &mut buf).unwrap_or(0)
+            vfs.read_file_by_path(&path, buf).unwrap_or(0)
         };
         if bytes_read < 52 || &buf[0..4] != b"UCRD" {
             return;
@@ -736,8 +786,6 @@ impl UserManager {
             };
             (salt, hash, failed_attempts, Credential::LEGACY_PBKDF2_ROUNDS)
         };
-
-        crate::crypto::zeroize_slice(&mut buf);
 
         if let Some(profile) = self.users.get_mut(&uid) {
             let max_failed = 5;
@@ -1532,5 +1580,23 @@ mod tests {
         let profile = rebooted.get_user(UserId::OWNER).unwrap();
         assert_eq!(profile.lock_state, UserLockState::Locked);
         assert!(profile.credential.is_none(), "Corrupted credential must not be loaded");
+    }
+
+    #[test]
+    fn test_zeroizing_buffer_raii_drop() {
+        let raw_ptr;
+        {
+            let mut guard = ZeroizingBuffer::<64>::new();
+            for (i, byte) in guard.iter_mut().enumerate() {
+                *byte = (i as u8) ^ 0xAA;
+            }
+            assert_ne!(guard[0], 0);
+            raw_ptr = guard.as_mut_ptr();
+            // Drop executes at end of scope
+        }
+        unsafe {
+            let slice = core::slice::from_raw_parts(raw_ptr, 64);
+            assert!(slice.iter().all(|&b| b == 0), "ZeroizingBuffer must zeroize on drop");
+        }
     }
 }

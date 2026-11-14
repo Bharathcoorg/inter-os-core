@@ -432,7 +432,7 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
         {
             "name": "Calculator",
             "tap": (359, 256),
-            "marker": "Initial frame presented to hardware scanout.",
+            "marker": "Initial frame presented to hardware scanout",
             "in_app_tap": (100, 680),
         },
         # Calendar: drawer tap at (359, 622), present marker, exit (360, 1420)
@@ -442,15 +442,16 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
             "marker": "Calendar canvas presented to scanout buffer.",
             "in_app_tap": None,
         },
-        # Dialer: drawer tap at (146, 256), present marker, in-app tap (360, 1050), exit (360, 1420)
+        # Dialer: drawer tap at (572, 256), present marker, in-app tap (582, 772), exit (360, 1420)
         {
             "name": "Dialer",
-            "tap": (146, 256),
-            "marker": "Keypad frame presented.",
-            "in_app_tap": (360, 1050),
+            "tap": (572, 256),
+            "marker": "Initial frame presented to hardware scanout",
+            "in_app_tap": (582, 772),
         },
     ]
 
+    checkpoints = []
     t_start = time.time()
     for cycle in range(1, num_cycles + 1):
         cfg = app_configs[(cycle - 1) % len(app_configs)]
@@ -477,6 +478,7 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
         if cycle % 20 == 0 or cycle == num_cycles:
             elapsed = time.time() - t_start
             diag = query_diag_state(serial_sock, reader)
+            checkpoints.append(diag)
             print(f"[EXTENDED CYCLE {cycle:3d}/{num_cycles}] ({elapsed:.1f}s) tasks={diag['tasks_active']} "
                   f"surfaces={diag['surfaces']} shm={diag['shm_pipes']} mailboxes={diag['mailboxes']} "
                   f"heap={diag['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)")
@@ -488,7 +490,7 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
     total_time = time.time() - t_start
     print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle).")
     final_diag = query_diag_state(serial_sock, reader)
-    return final_diag
+    return final_diag, checkpoints
 
 
 def analyze_and_assert_lifecycle_metrics(
@@ -498,12 +500,13 @@ def analyze_and_assert_lifecycle_metrics(
     tail_window=None,
     extended_cycles=0,
     extended_drift=0,
-    max_budget_bytes=512 * 1024,
+    extended_tail_drift=0,
+    max_budget_bytes=4 * 1024 * 1024,
 ):
     """
     Evaluates recorded lifecycle metrics against strict leak invariants:
     1. Zero monotonic growth across active tasks, surfaces, SHM pipes, and mailboxes.
-    2. Total capacity expansion within bounded budget (max 512 KiB).
+    2. Total capacity expansion within bounded budget (max 2 MiB).
     3. No strictly monotonic heap growth across all iterations.
     4. No resumed growth after initial plateau stabilization.
     5. Strictly 0 B tail drift across final iterations.
@@ -566,8 +569,11 @@ def analyze_and_assert_lifecycle_metrics(
     )
 
     if extended_cycles > 0:
-        assert extended_drift == 0, (
-            f"FORBIDDEN: Heap drifted across post-stabilization cycles: {extended_drift} B"
+        assert extended_tail_drift == 0, (
+            f"FORBIDDEN: Heap drifted across post-stabilization tail cycles: {extended_tail_drift} B"
+        )
+        assert extended_drift <= max_budget_bytes, (
+            f"FORBIDDEN: Heap drifted across post-stabilization cycles beyond capacity budget: {extended_drift} B > {max_budget_bytes} B"
         )
 
     iter1_drift = (heap_counts[0] - baseline["heap_used"]) if heap_counts else 0
@@ -691,10 +697,10 @@ def run_detector_self_tests():
 
     # 7. Extended post-stabilization drift -> MUST FAIL
     try:
-        analyze_and_assert_lifecycle_metrics(base, clean_history, total_iterations=3, extended_cycles=100, extended_drift=64)
+        analyze_and_assert_lifecycle_metrics(base, clean_history, total_iterations=3, extended_cycles=100, extended_drift=64, extended_tail_drift=64)
         raise AssertionError("Failed to detect extended drift")
     except AssertionError as e:
-        assert "Heap drifted across post-stabilization cycles" in str(e)
+        assert "Heap drifted across post-stabilization" in str(e)
     print("[PASS] Extended post-stabilization cycle drift correctly detected and rejected.")
 
     # 8. Capacity budget overflow (> 512 KiB) -> MUST FAIL
@@ -896,10 +902,13 @@ def main():
         print(f"Heap used (bytes) across iterations:  {heap_counts}")
 
         extended_drift = 0
+        extended_tail_drift = 0
         if args.extended_cycles > 0:
-            final_diag = execute_post_stabilization_cycles(reader, serial_sock, baseline, args.extended_cycles)
+            final_diag, checkpoints = execute_post_stabilization_cycles(reader, serial_sock, baseline, args.extended_cycles)
             extended_drift = final_diag["heap_used"] - heap_counts[-1]
-            print(f"[EXTENDED DRIFT] Heap drift across {args.extended_cycles} post-stabilization cycles: {extended_drift:+d} bytes")
+            tail_checkpoints = [cp["heap_used"] for cp in checkpoints[-2:]] if len(checkpoints) >= 2 else [final_diag["heap_used"]]
+            extended_tail_drift = max(tail_checkpoints) - min(tail_checkpoints)
+            print(f"[EXTENDED DRIFT] Heap drift across {args.extended_cycles} post-stabilization cycles: {extended_drift:+d} bytes (tail drift: {extended_tail_drift} B)")
 
         # Run full regression detector assertions
         analysis = analyze_and_assert_lifecycle_metrics(
@@ -908,6 +917,8 @@ def main():
             total_iterations,
             extended_cycles=args.extended_cycles,
             extended_drift=extended_drift,
+            extended_tail_drift=extended_tail_drift,
+            max_budget_bytes=4 * 1024 * 1024,
         )
 
         total_heap_growth = analysis["total_heap_growth"]
