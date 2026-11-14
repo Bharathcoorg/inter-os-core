@@ -6222,14 +6222,7 @@ pub fn sys_share_sheet_dispatch(
         msg_payload[pos..pos + to_copy].copy_from_slice(&uri_bytes[..to_copy]);
         pos += to_copy;
 
-        let ipc_msg = IpcMessage {
-            sender: current_id,
-            msg_type: IPC_MSG_SHARE,
-            transferred_cap: None,
-            shm_descriptor: None,
-            payload: msg_payload,
-            len: pos,
-        };
+        let ipc_msg = IpcMessage::new(current_id, IPC_MSG_SHARE, &msg_payload[..pos]);
 
         // Deliver to the target mailbox. `deliver_system_message` re-verifies the
         // object-scoped IpcSend inside the router, so the check cannot be skipped

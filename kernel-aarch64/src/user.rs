@@ -15,10 +15,7 @@ pub const USER_STACK_PADDR: u64 = 0x4420_0000;
 pub const USER_STACK_SIZE: u64 = 16384;
 
 #[no_mangle]
-pub static mut KERNEL_SAVED_CONTEXT: crate::task::ArmContext = crate::task::ArmContext {
-    x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0,
-    x25: 0, x26: 0, x27: 0, x28: 0, fp: 0, lr: 0, sp: 0,
-};
+pub static mut KERNEL_SAVED_CONTEXT: crate::task::ArmContext = crate::task::ArmContext::empty();
 
 pub static mut EL0_HARDWARE_ENTERED: bool = false;
 pub static mut EL0_TICKS_CAPTURED: u64 = 0;

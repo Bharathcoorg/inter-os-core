@@ -42,11 +42,48 @@ static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointId(pub u64);
 
+/// Authenticated provenance of an IPC message verified by the microkernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageProvenance {
+    /// Originated from the kernel supervisor (TaskId(0)).
+    Kernel,
+    /// Originated from an authenticated system service with verified ServiceId.
+    SystemService(u8),
+    /// Originated from an isolated Ring 3 application task.
+    UserTask(TaskId),
+}
+
+impl MessageProvenance {
+    /// Derives authentic provenance for a sender TaskId using kernel service registry.
+    pub fn derive(sender: TaskId) -> Self {
+        if sender == TaskId(0) {
+            MessageProvenance::Kernel
+        } else {
+            let mut matched_service = None;
+            for sid_code in 0..16 {
+                if let Some(sid) = crate::services::ServiceId::from_u8(sid_code) {
+                    if crate::services::task_id(sid) == Some(sender) {
+                        matched_service = Some(sid_code);
+                        break;
+                    }
+                }
+            }
+            if let Some(code) = matched_service {
+                MessageProvenance::SystemService(code)
+            } else {
+                MessageProvenance::UserTask(sender)
+            }
+        }
+    }
+}
+
 /// A discrete IPC message exchanged between two tasks.
 #[derive(Debug, Clone)]
 pub struct IpcMessage {
-    /// Identity of the transmitting task.
+    /// Authenticated identity of the transmitting task.
     pub sender: TaskId,
+    /// Kernel-verified message provenance.
+    pub provenance: MessageProvenance,
     /// Protocol or application-defined message type code.
     pub msg_type: u32,
     /// Optional capability transferred in-band with the message.
@@ -60,13 +97,15 @@ pub struct IpcMessage {
 }
 
 impl IpcMessage {
-    /// Constructs a new IPC message from a byte slice.
+    /// Constructs a new IPC message from a byte slice with kernel-verified provenance.
     pub fn new(sender: TaskId, msg_type: u32, data: &[u8]) -> Self {
         let len = data.len().min(IPC_MAX_PAYLOAD);
         let mut payload = [0u8; IPC_MAX_PAYLOAD];
         payload[..len].copy_from_slice(&data[..len]);
+        let provenance = MessageProvenance::derive(sender);
         Self {
             sender,
+            provenance,
             msg_type,
             transferred_cap: None,
             shm_descriptor: None,
@@ -272,7 +311,7 @@ impl IpcRouter {
         sender_caps: &CapabilityTable,
         cap_slot: usize,
         dest: TaskId,
-        msg: IpcMessage,
+        mut msg: IpcMessage,
     ) -> Result<(), IpcError> {
         sender_caps.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0)?;
 
@@ -281,9 +320,12 @@ impl IpcRouter {
             return Err(IpcError::MailboxFull);
         }
 
+        // Enforce kernel provenance: the sender metadata cannot be spoofed by caller
+        msg.sender = sender;
+        msg.provenance = MessageProvenance::derive(sender);
+
         mailbox.queue.push_back(msg);
         crate::event::post_event(dest, crate::event::EVENT_IPC_MSG);
-        let _ = sender;
         Ok(())
     }
 
@@ -465,7 +507,34 @@ pub fn run_ipc_adversarial_tests() {
     );
     crate::serial_println!("[TEST] IPC Invariant: Process Death Mailbox & Endpoint Cleanup Enforced [PASSED]");
 
+    // 5. Authenticated Sender Provenance Test (Anti-Spoofing)
+    // A caller attempting to pass a preconstructed message with a forged sender ID (e.g. TaskId(0))
+    // must have the message sender strictly overwritten by the kernel with the verified caller ID.
+    router.register_task(target_id);
+    let forged_sender_msg = IpcMessage::new(TaskId(0), 0x5555, b"FORGED_SENDER_ATTEMPT");
+    assert_eq!(forged_sender_msg.sender, TaskId(0));
+    assert_eq!(forged_sender_msg.provenance, MessageProvenance::Kernel);
+
+    assert!(router
+        .deliver_system_message(sender_id, &sender_caps, bound_slot, target_id, forged_sender_msg)
+        .is_ok());
+
+    let received = router.receive_direct(target_id).unwrap().expect("must receive message");
+    assert_eq!(received.sender, sender_id, "Kernel must overwrite forged sender ID with authenticated sender");
+    assert_eq!(received.provenance, MessageProvenance::UserTask(sender_id), "Kernel must stamp authentic UserTask provenance");
+    crate::serial_println!("[TEST] IPC Invariant: Authenticated Sender Provenance Anti-Spoofing Enforced [PASSED]");
+
     crate::serial_println!("[TEST] Zero-Trust Microkernel IPC: 100% Attested & Enforced.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipc_router_adversarial_suite() {
+        run_ipc_adversarial_tests();
+    }
 }
 
 

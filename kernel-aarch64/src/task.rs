@@ -18,7 +18,7 @@ use spin::Mutex;
 pub const STACK_SIZE: usize = 16384; // 16 KiB per kernel task stack
 
 #[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct ArmContext {
     pub x19: u64,
     pub x20: u64,
@@ -33,6 +33,26 @@ pub struct ArmContext {
     pub fp: u64, // x29
     pub lr: u64, // x30
     pub sp: u64,
+    pub _pad: u64,
+    // Callee-saved SIMD / FP registers (d8-d15 per AAPCS64)
+    pub d8: u64,
+    pub d9: u64,
+    pub d10: u64,
+    pub d11: u64,
+    pub d12: u64,
+    pub d13: u64,
+    pub d14: u64,
+    pub d15: u64,
+}
+
+impl ArmContext {
+    pub const fn empty() -> Self {
+        Self {
+            x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
+            fp: 0, lr: 0, sp: 0, _pad: 0,
+            d8: 0, d9: 0, d10: 0, d11: 0, d12: 0, d13: 0, d14: 0, d15: 0,
+        }
+    }
 }
 
 #[unsafe(naked)]
@@ -49,6 +69,11 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         // Save current stack pointer
         "mov x2, sp",
         "str x2, [x0, #96]",
+        // Save callee-saved SIMD/FP registers d8-d15 (AAPCS64)
+        "stp d8, d9, [x0, #112]",
+        "stp d10, d11, [x0, #128]",
+        "stp d12, d13, [x0, #144]",
+        "stp d14, d15, [x0, #160]",
 
         // Restore x19-x28 from new_ctx (x1)
         "ldp x19, x20, [x1, #0]",
@@ -61,6 +86,11 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         // Restore stack pointer
         "ldr x2, [x1, #96]",
         "mov sp, x2",
+        // Restore callee-saved SIMD/FP registers d8-d15
+        "ldp d8, d9, [x1, #112]",
+        "ldp d10, d11, [x1, #128]",
+        "ldp d12, d13, [x1, #144]",
+        "ldp d14, d15, [x1, #160]",
 
         // Branch to restored lr (x30)
         "ret",
@@ -704,14 +734,8 @@ pub fn yield_now() {
 }
 
 static mut TEST_SWITCH_FLAG: u32 = 0;
-static mut MAIN_CTX: ArmContext = ArmContext {
-    x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
-    fp: 0, lr: 0, sp: 0,
-};
-static mut WORKER_CTX: ArmContext = ArmContext {
-    x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
-    fp: 0, lr: 0, sp: 0,
-};
+static mut MAIN_CTX: ArmContext = ArmContext::empty();
+static mut WORKER_CTX: ArmContext = ArmContext::empty();
 static mut WORKER_STACK: [u8; 8192] = [0u8; 8192];
 
 extern "C" fn test_worker_entry() {

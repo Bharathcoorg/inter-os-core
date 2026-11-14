@@ -1449,12 +1449,16 @@ impl DrmKmsController {
         count
     }
 
-    /// Sets surface position and z-order.
+    /// Sets surface position and z-order with caller privilege enforcement.
     pub fn set_surface_geometry(&mut self, id: u32, x: i32, y: i32, z_order: u32, visible: bool) -> bool {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id) {
             s.x = x;
             s.y = y;
-            s.z_order = z_order;
+            if Self::is_trusted_system_owner(s.owner_task) {
+                s.z_order = z_order;
+            } else {
+                s.z_order = z_order.clamp(200, 899);
+            }
             s.visible = visible;
             s.dirty = true;
             self.frame_dirty = true;
@@ -3462,6 +3466,28 @@ mod tests {
         // Full screen must be completely occluded including the edge tiles!
         assert!(map.is_region_occluded(0, 0, 720, 1440));
         assert!(map.is_region_occluded(704, 1408, 720, 1440));
+    }
+
+    #[test]
+    fn test_unprivileged_z_order_escalation_clamped() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        let unprivileged_owner = 9999u64;
+
+        // Attempting to create a surface at desktop layer (z=50) as untrusted must clamp to application band (>= 200)
+        let s1 = kms.create_surface(100, 100, 50, unprivileged_owner);
+        assert_eq!(kms.surfaces.iter().find(|s| s.id == s1).unwrap().z_order, 200);
+
+        // Attempting to create a surface at overlay layer (z=1500) as untrusted must clamp to application band (<= 899)
+        let s2 = kms.create_surface(100, 100, 1500, unprivileged_owner);
+        assert_eq!(kms.surfaces.iter().find(|s| s.id == s2).unwrap().z_order, 899);
+
+        // Attempting to escalate z_order to overlay via set_surface_geometry must clamp to 899
+        assert!(kms.set_surface_geometry(s1, 0, 0, 2000, true));
+        assert_eq!(kms.surfaces.iter().find(|s| s.id == s1).unwrap().z_order, 899);
+
+        // Attempting to demote z_order to desktop via set_surface_geometry_owned must clamp to 200
+        assert!(kms.set_surface_geometry_owned(s1, unprivileged_owner, 0, 0, 10, true));
+        assert_eq!(kms.surfaces.iter().find(|s| s.id == s1).unwrap().z_order, 200);
     }
 
     #[test]

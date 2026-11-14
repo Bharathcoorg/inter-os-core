@@ -13,7 +13,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::crypto::Sha256;
 use crate::fs::VFS;
 
 /// Path of the persisted account map.
@@ -104,25 +103,18 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// Creates a new credential from raw secret bytes using a random salt.
-    ///
-    /// WHY the salt comes from the hardware TRNG: the previous salt was derived
-    /// from a caller-supplied `tick ^ constant`, and the kernel calls this at
-    /// first boot where the tick counter is still zero. That made the salt a
-    /// fixed, publicly known constant, so the stored value was a single
-    /// unsalted-equivalent SHA-256 of the secret and identical secrets produced
-    /// identical hashes across every boot and every device.
-    ///
-    /// The `secret` is retained only as a transient argument. It is never
-    /// stored, and no default or derived secret is ever supplied by the kernel.
+    /// Number of PBKDF2-HMAC-SHA256 iterations (RFC 2898 / RFC 8018).
+    /// Provides password-hardening resistance against GPU/ASIC brute-force attacks
+    /// while remaining bounded within ~10ms execution on mobile cores.
+    pub const PBKDF2_ROUNDS: u32 = 1000;
+
+    /// Creates a new credential from raw secret bytes using a random salt and PBKDF2-HMAC-SHA256.
     pub fn new(secret: &[u8]) -> Self {
         let mut salt = [0u8; 16];
         crate::crypto::get_random_bytes(&mut salt);
 
-        let mut hasher_input = Vec::with_capacity(16 + secret.len());
-        hasher_input.extend_from_slice(&salt);
-        hasher_input.extend_from_slice(secret);
-        let hash = Sha256::digest(&hasher_input);
+        let mut hash = [0u8; 32];
+        crate::crypto::HmacSha256::pbkdf2(secret, &salt, Self::PBKDF2_ROUNDS, &mut hash);
 
         Self {
             salt,
@@ -132,14 +124,15 @@ impl Credential {
         }
     }
 
-    /// Verifies candidate secret against stored salt and hash.
+    /// Verifies candidate secret against stored salt and hash using PBKDF2-HMAC-SHA256
+    /// and constant-time 32-byte equality comparison.
+    /// Intermediate secret-dependent buffers are wiped with volatile stores.
     pub fn verify(&self, secret: &[u8]) -> bool {
-        let mut hasher_input = Vec::with_capacity(16 + secret.len());
-        hasher_input.extend_from_slice(&self.salt);
-        hasher_input.extend_from_slice(secret);
-        let candidate_hash = Sha256::digest(&hasher_input);
-        crate::crypto::zeroize_slice(hasher_input.as_mut_slice());
-        crate::crypto::constant_time_eq_32(&candidate_hash, &self.hash)
+        let mut candidate_hash = [0u8; 32];
+        crate::crypto::HmacSha256::pbkdf2(secret, &self.salt, Self::PBKDF2_ROUNDS, &mut candidate_hash);
+        let matches = crate::crypto::constant_time_eq_32(&candidate_hash, &self.hash);
+        crate::crypto::zeroize_slice(&mut candidate_hash);
+        matches
     }
 }
 
@@ -1286,5 +1279,32 @@ mod tests {
         assert_eq!(mgr.decode_account_map(&orphan_owner[..len]), false);
 
         assert_eq!(mgr.list_users().len(), 0, "nothing was restored");
+    }
+
+    #[test]
+    fn test_credential_pbkdf2_lockout_and_rate_limiting() {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
+
+        // 1 to 4 failed attempts should fail with AuthenticationFailed
+        for attempt in 1..=4 {
+            let res = mgr.unlock(UserId::OWNER, b"wrong_pin", 100);
+            assert_eq!(res, Err(UserError::AuthenticationFailed), "attempt {attempt} must fail");
+            assert_eq!(mgr.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap().failed_attempts, attempt);
+        }
+
+        // 5th failed attempt must trigger LockoutActive
+        let res5 = mgr.unlock(UserId::OWNER, b"wrong_pin", 100);
+        assert_eq!(res5, Err(UserError::LockoutActive), "5th attempt must trigger Lockout");
+
+        // While locked out, even the correct PIN must be rejected
+        let res_locked = mgr.unlock(UserId::OWNER, b"correct_pin_9876", 200);
+        assert_eq!(res_locked, Err(UserError::LockoutActive));
+
+        // After lockout duration expires (tick 3101 > 3100), correct PIN succeeds and resets failed_attempts
+        let res_expired = mgr.unlock(UserId::OWNER, b"correct_pin_9876", 3101);
+        assert_eq!(res_expired, Ok(()));
+        assert_eq!(mgr.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap().failed_attempts, 0);
+        assert_eq!(mgr.get_user(UserId::OWNER).unwrap().lock_state, UserLockState::Unlocked);
     }
 }

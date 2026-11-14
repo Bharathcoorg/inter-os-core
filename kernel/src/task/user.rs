@@ -136,6 +136,7 @@ pub unsafe fn jump_to_ring3(user_entry: usize, user_stack_top: usize) -> ! {
         "pxor xmm13, xmm13",
         "pxor xmm14, xmm14",
         "pxor xmm15, xmm15",
+        "fninit",
 
         // 4. Return from interrupt -> transitions CPU to Ring 3 (CPL = 3)
         "iretq",
@@ -562,6 +563,7 @@ pub unsafe fn jump_to_ring3_thread(
         "pxor xmm13, xmm13",
         "pxor xmm14, xmm14",
         "pxor xmm15, xmm15",
+        "fninit",
 
         "iretq",
 

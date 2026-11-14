@@ -584,53 +584,80 @@ def main():
         print("  POST-STRESS RESOURCE VERIFICATION & MONOTONIC GROWTH ANALYSIS")
         print("=" * 68)
 
-        surface_counts = [m["surfaces"] for m in metrics_history]
-        active_counts = [m["tasks_active"] for m in metrics_history]
-        shm_counts = [m["shm_pipes"] for m in metrics_history]
-        heap_counts = [m["heap_used"] for m in metrics_history]
+        iter_samples = [m for m in metrics_history if m.get("type") == "post_iteration"]
+        iter_indices = [m["iteration"] for m in iter_samples]
+        surface_counts = [m["surfaces"] for m in iter_samples]
+        active_counts = [m["tasks_active"] for m in iter_samples]
+        shm_counts = [m["shm_pipes"] for m in iter_samples]
+        mailbox_counts = [m["mailboxes"] for m in iter_samples]
+        heap_counts = [m["heap_used"] for m in iter_samples]
 
-        print(f"Surface counts across iterations:    {surface_counts}")
-        print(f"Active task counts across iterations: {active_counts}")
-        print(f"SHM pipe counts across iterations:   {shm_counts}")
-        print(f"Heap used (bytes) across iterations: {heap_counts}")
+        print(f"Baseline Heap (Initial Boot):         {baseline['heap_used']} B")
+        print(f"Iteration Indices:                    {iter_indices}")
+        print(f"Surface counts across iterations:     {surface_counts} (expected: {baseline['surfaces']})")
+        print(f"Active task counts across iterations: {active_counts} (expected: {baseline['tasks_active']})")
+        print(f"SHM pipe counts across iterations:    {shm_counts} (expected: {baseline['shm_pipes']})")
+        print(f"Mailbox counts across iterations:     {mailbox_counts} (expected: {baseline['mailboxes']})")
+        print(f"Heap used (bytes) across iterations:  {heap_counts}")
 
         assert all(s == baseline["surfaces"] for s in surface_counts), "Surface count drifted across iterations"
         assert all(a == baseline["tasks_active"] for a in active_counts), "Active task count drifted across iterations"
         assert all(p == baseline["shm_pipes"] for p in shm_counts), "SHM pipe count drifted across iterations"
+        assert all(m == baseline["mailboxes"] for m in mailbox_counts), "Mailbox count drifted across iterations"
 
-        max_heap_drift = max(heap_counts) - min(heap_counts)
-        iter1_drift = (heap_counts[1] - heap_counts[0]) if len(heap_counts) > 1 else 0
-        subsequent_drift = (max(heap_counts[1:]) - min(heap_counts[1:])) if len(heap_counts) > 1 else 0
+        # 1. Enforce bounded maximum capacity expansion budget (max 512 KiB)
+        MAX_ALLOWED_CAPACITY_EXPANSION_BYTES = 512 * 1024
+        total_heap_growth = max(heap_counts) - baseline["heap_used"]
+        print(f"[BUDGET CHECK] Total capacity expansion: {total_heap_growth} B / max budget {MAX_ALLOWED_CAPACITY_EXPANSION_BYTES} B")
+        assert total_heap_growth <= MAX_ALLOWED_CAPACITY_EXPANSION_BYTES, (
+            f"Heap expansion exceeded documented budget: {total_heap_growth} B > {MAX_ALLOWED_CAPACITY_EXPANSION_BYTES} B"
+        )
+
+        # 2. Detect monotonic growth across iterations
+        is_strictly_monotonic = len(heap_counts) >= 3 and all(
+            heap_counts[k] > heap_counts[k - 1] for k in range(1, len(heap_counts))
+        )
+        assert not is_strictly_monotonic, (
+            f"FORBIDDEN: Monotonic heap growth detected across all iterations: {heap_counts}"
+        )
+
+        # 3. Detect resumed growth after stabilization
+        plateau_index = None
+        for k in range(1, len(heap_counts)):
+            if heap_counts[k] == heap_counts[k - 1]:
+                plateau_index = k
+                break
+
+        if plateau_index is not None:
+            plateau_heap = heap_counts[plateau_index]
+            resumed_growth = [h for h in heap_counts[plateau_index:] if h > plateau_heap]
+            assert not resumed_growth, (
+                f"FORBIDDEN: Heap growth resumed after stabilization at iteration {iter_indices[plateau_index]}: "
+                f"plateau={plateau_heap} B, subsequent measurements={heap_counts[plateau_index:]}"
+            )
+
+        # 4. Strict tail drift check
         tail_window = 2 if len(heap_counts) <= 4 else 3
         tail_drift = max(heap_counts[-tail_window:]) - min(heap_counts[-tail_window:])
+        assert tail_drift == 0, (
+            f"Unstable tail drift detected: {tail_drift} B across final {tail_window} iterations: {heap_counts[-tail_window:]}"
+        )
 
-        # Classification taxonomy:
-        # Category A: One-time initialization growth (acceptable if documented and stable)
-        # Category B: Reusable cache growth (acceptable only if bounded and intentional)
-        # Category C: Actual lifecycle leak (FORBIDDEN - fails test)
-        # Category D: Measurement artifact
+        iter1_drift = (heap_counts[0] - baseline["heap_used"]) if heap_counts else 0
+        subsequent_drift = (max(heap_counts) - min(heap_counts)) if heap_counts else 0
+
         if subsequent_drift == 0:
             classification = "Category A: One-time initialization growth / lazy capacity expansion"
             classification_details = (
                 f"+{iter1_drift} B capacity allocation in iteration 1 for scheduler task tables and "
                 "IPC mailbox vectors; strictly zero bytes drifted thereafter across subsequent iterations."
             )
-        elif tail_drift == 0:
-            plateau_start = total_iterations - tail_window + 1
+        else:
+            plateau_start = iter_indices[plateau_index] if plateau_index is not None else (total_iterations - tail_window + 1)
             classification = "Category A: Multi-phase capacity expansion stabilized into steady-state plateau"
             classification_details = (
                 f"Lazy capacity expansion reached steady-state plateau by iteration {plateau_start}; "
                 f"strictly zero bytes drifted across final {tail_window} iterations ({tail_drift} B tail drift)."
-            )
-        elif subsequent_drift < 4096:
-            classification = "Category B: Reusable cache growth"
-            classification_details = f"Bounded cache growth of {subsequent_drift} B across subsequent iterations."
-        else:
-            classification = "Category C: Actual lifecycle leak"
-            classification_details = f"Unbounded monotonic heap growth of {subsequent_drift} B detected."
-            assert subsequent_drift == 0 or tail_drift == 0, (
-                f"Unbounded lifecycle heap leak detected: subsequent_drift={subsequent_drift} bytes, "
-                f"tail_drift={tail_drift} bytes"
             )
 
         print(f"\n[LEAK ANALYSIS] Post-Iter-1 Heap Growth: {iter1_drift:+d} bytes")
@@ -649,7 +676,7 @@ def main():
                 "total_phase_transitions": total_iterations * 20,
                 "baseline": baseline,
                 "metrics_history": metrics_history,
-                "max_heap_drift_bytes": max_heap_drift,
+                "max_heap_drift_bytes": total_heap_growth,
                 "iter1_drift_bytes": iter1_drift,
                 "subsequent_drift_bytes": subsequent_drift,
                 "classification": classification,
