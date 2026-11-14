@@ -1438,8 +1438,11 @@ mod tests {
         assert_eq!(mgr.list_users().len(), 0, "nothing was restored");
     }
 
+    static VFS_CRED_TEST_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_credential_pbkdf2_lockout_and_rate_limiting() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         let mut mgr = UserManager::new();
         mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
 
@@ -1467,6 +1470,7 @@ mod tests {
 
     #[test]
     fn test_lockout_persists_across_reboot_simulation() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         let mut mgr = UserManager::new();
         mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
 
@@ -1496,6 +1500,7 @@ mod tests {
 
     #[test]
     fn test_biometric_unlock_rejected_during_lockout() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         let mut mgr = UserManager::new();
         mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
 
@@ -1515,6 +1520,7 @@ mod tests {
 
     #[test]
     fn test_correct_password_rejected_during_active_lockout() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         let mut mgr = UserManager::new();
         mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
 
@@ -1530,6 +1536,7 @@ mod tests {
 
     #[test]
     fn test_credential_v1_checksum_and_migration() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         // Provision user with legacy 1000 rounds
         let legacy_cred = Credential::new_with_iterations(b"legacy_secret", Credential::LEGACY_PBKDF2_ROUNDS);
         assert_eq!(legacy_cred.iterations, 1000);
@@ -1551,6 +1558,7 @@ mod tests {
 
     #[test]
     fn test_corrupted_credential_fails_closed() {
+        let _lock = VFS_CRED_TEST_LOCK.lock();
         let mut mgr = UserManager::new();
         mgr.provision_owner("Device Owner", Some(b"valid_pin_1234"), 0).expect("provision");
         UserManager::save_credential_to_vfs(UserId::OWNER, mgr.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap());

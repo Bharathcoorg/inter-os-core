@@ -109,6 +109,10 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     // 4c. Test Task Scheduler Lifecycle & Removal Consistency
     task::test_task_lifecycle();
 
+    // 4c-2. Test Floating Point & Callee-Saved Register Context Switch
+    task::init_fp();
+    task::test_context_switching();
+
     // 4d. Test Surface Authorization & Capability Separation
     {
         let mut sm = display::SURFACE_MANAGER.lock();

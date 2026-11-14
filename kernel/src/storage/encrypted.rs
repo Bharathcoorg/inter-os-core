@@ -52,7 +52,7 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
     if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
     // Fail closed before any key material exists: producing a ciphertext here
     // would be a payload readable by anyone holding the zero seed.
-    let key = storage_key()?;
+    let mut key = storage_key()?;
     let mut nonce = [0u8; 16];
     get_random_bytes(&mut nonce);
 
@@ -65,6 +65,7 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
             input[..16].copy_from_slice(&nonce);
             input[16..20].copy_from_slice(&block.to_be_bytes());
             stream = HmacSha256::compute(&key, &input);
+            crate::crypto::zeroize_slice(&mut input);
         }
         ciphertext.push(byte ^ stream[i % 32]);
     }
@@ -79,6 +80,8 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
     out.extend_from_slice(&ciphertext);
 
     let tag = HmacSha256::compute(&key, out);
+    crate::crypto::zeroize_slice(&mut key);
+    crate::crypto::zeroize_slice(&mut stream);
     out.extend_from_slice(&tag);
     Ok(())
 }
@@ -100,9 +103,10 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
     // Same refusal as on the write path. Checking the tag under a key derived
     // from an absent root would compare the caller's tag against one anyone can
     // compute, so the "authenticated" verdict would mean nothing.
-    let key = storage_key()?;
+    let mut key = storage_key()?;
     let actual_tag = HmacSha256::compute(&key, &envelope[..tag_offset]);
     if !constant_time_eq_32(&actual_tag, &expected_tag) {
+        crate::crypto::zeroize_slice(&mut key);
         return Err(EncryptionError::IntegrityViolation);
     }
 
@@ -116,9 +120,12 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
             input[..16].copy_from_slice(nonce);
             input[16..20].copy_from_slice(&block.to_be_bytes());
             stream = HmacSha256::compute(&key, &input);
+            crate::crypto::zeroize_slice(&mut input);
         }
         out[i] = ciphertext[i] ^ stream[i % 32];
     }
+    crate::crypto::zeroize_slice(&mut key);
+    crate::crypto::zeroize_slice(&mut stream);
     Ok(plain_len)
 }
 

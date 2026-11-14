@@ -487,6 +487,15 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
             assert diag["shm_pipes"] == baseline["shm_pipes"], f"SHM leak at cycle {cycle}"
             assert diag["mailboxes"] == baseline["mailboxes"], f"Mailbox leak at cycle {cycle}"
 
+    # Verify no monotonic growth across checkpoints
+    checkpoint_heaps = [cp["heap_used"] for cp in checkpoints]
+    is_strictly_monotonic = len(checkpoint_heaps) >= 3 and all(
+        checkpoint_heaps[k] > checkpoint_heaps[k - 1] for k in range(1, len(checkpoint_heaps))
+    )
+    assert not is_strictly_monotonic, (
+        f"FORBIDDEN: Monotonic heap growth detected across extended cycles: {checkpoint_heaps}"
+    )
+
     total_time = time.time() - t_start
     print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle).")
     final_diag = query_diag_state(serial_sock, reader)
@@ -547,26 +556,33 @@ def analyze_and_assert_lifecycle_metrics(
         f"FORBIDDEN: Monotonic heap growth detected across all iterations: {heap_counts}"
     )
 
-    plateau_index = None
-    for k in range(1, len(heap_counts)):
-        if heap_counts[k] == heap_counts[k - 1]:
-            plateau_index = k
-            break
-
-    if plateau_index is not None:
-        plateau_heap = heap_counts[plateau_index]
-        resumed_growth = [h for h in heap_counts[plateau_index:] if h > plateau_heap]
-        assert not resumed_growth, (
-            f"FORBIDDEN: Heap growth resumed after stabilization at iteration {iter_indices[plateau_index]}: "
-            f"plateau={plateau_heap} B, subsequent measurements={heap_counts[plateau_index:]}"
-        )
-
     if tail_window is None:
         tail_window = 2 if len(heap_counts) <= 4 else 3
     tail_drift = max(heap_counts[-tail_window:]) - min(heap_counts[-tail_window:])
+
+    # Check for un-stabilized intermediate plateau:
+    # If a plateau occurred earlier (k and k+1 were equal) but then heap grew,
+    # did it achieve stabilization by the end of warm-up (tail_drift == 0)?
+    if tail_drift != 0:
+        for k in range(1, len(heap_counts)):
+            if heap_counts[k] == heap_counts[k - 1]:
+                plateau_heap = heap_counts[k]
+                resumed = [h for h in heap_counts[k:] if h > plateau_heap]
+                if resumed:
+                    raise AssertionError(
+                        f"FORBIDDEN: Heap growth resumed after stabilization at iteration {iter_indices[k]}: "
+                        f"plateau={plateau_heap} B, subsequent measurements={heap_counts[k:]}"
+                    )
+        raise AssertionError(
+            f"Unstable tail drift detected: {tail_drift} B across final {tail_window} iterations: {heap_counts[-tail_window:]}"
+        )
+
     assert tail_drift == 0, (
         f"Unstable tail drift detected: {tail_drift} B across final {tail_window} iterations: {heap_counts[-tail_window:]}"
     )
+
+    final_heap = heap_counts[-1]
+    plateau_index = next((i for i in range(len(heap_counts)) if heap_counts[i] == final_heap), len(heap_counts) - 1)
 
     if extended_cycles > 0:
         assert extended_tail_drift == 0, (
@@ -903,8 +919,9 @@ def main():
 
         extended_drift = 0
         extended_tail_drift = 0
+        stabilized_baseline = {**baseline, "heap_used": heap_counts[-1]}
         if args.extended_cycles > 0:
-            final_diag, checkpoints = execute_post_stabilization_cycles(reader, serial_sock, baseline, args.extended_cycles)
+            final_diag, checkpoints = execute_post_stabilization_cycles(reader, serial_sock, stabilized_baseline, args.extended_cycles)
             extended_drift = final_diag["heap_used"] - heap_counts[-1]
             tail_checkpoints = [cp["heap_used"] for cp in checkpoints[-2:]] if len(checkpoints) >= 2 else [final_diag["heap_used"]]
             extended_tail_drift = max(tail_checkpoints) - min(tail_checkpoints)

@@ -110,6 +110,7 @@ pub fn init_fp() {
 }
 
 #[unsafe(naked)]
+#[no_mangle]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut RiscvContext, new_ctx: *const RiscvContext) {
     core::arch::naked_asm!(
         // a0 = old_ctx (*mut RiscvContext), a1 = new_ctx (*const RiscvContext)
@@ -841,6 +842,328 @@ pub fn yield_now() {
             switch_context(old_ctx, new_ctx);
         }
     }
+}
+
+#[no_mangle]
+static mut TEST_SWITCH_FLAG: u32 = 0;
+#[no_mangle]
+static mut MAIN_CTX: RiscvContext = RiscvContext::empty();
+#[no_mangle]
+static mut WORKER_CTX: RiscvContext = RiscvContext::empty();
+static mut WORKER_STACK: [u8; 8192] = [0u8; 8192];
+
+core::arch::global_asm!(
+    r#"
+    .section .rodata
+    .balign 8
+poison_f_const:
+    .quad 0xDEADBEEFCAFEBABE
+poison_s_const:
+    .quad 0xBAD0BAD0BAD0BAD0
+
+    .section .text
+    .global asm_riscv_context_test_runner
+    .type asm_riscv_context_test_runner, @function
+asm_riscv_context_test_runner:
+    // a0: main_ctx (*mut RiscvContext)
+    // a1: worker_ctx (*const RiscvContext)
+    // a2: patterns_f (*const u64)
+    // a3: patterns_s (*const u64)
+    // a4: captured_f (*mut u64)
+    // a5: captured_s (*mut u64)
+    // a6: captured_fcsr (*mut u64)
+
+    // 1. Allocate 128-byte stack frame (16-byte aligned)
+    addi sp, sp, -128
+    sd ra, 0(sp)
+    sd a4, 8(sp)
+    sd a5, 16(sp)
+    sd a6, 24(sp)
+
+    // Save caller's callee-saved s0-s11
+    sd s0, 32(sp)
+    sd s1, 40(sp)
+    sd s2, 48(sp)
+    sd s3, 56(sp)
+    sd s4, 64(sp)
+    sd s5, 72(sp)
+    sd s6, 80(sp)
+    sd s7, 88(sp)
+    sd s8, 96(sp)
+    sd s9, 104(sp)
+    sd s10, 112(sp)
+    sd s11, 120(sp)
+
+    // 2. Load distinguishable test patterns into s0-s11 from a3
+    ld s0, 0(a3)
+    ld s1, 8(a3)
+    ld s2, 16(a3)
+    ld s3, 24(a3)
+    ld s4, 32(a3)
+    ld s5, 40(a3)
+    ld s6, 48(a3)
+    ld s7, 56(a3)
+    ld s8, 64(a3)
+    ld s9, 72(a3)
+    ld s10, 80(a3)
+    ld s11, 88(a3)
+
+    // 3. Load distinguishable test patterns into f0-f31 from a2
+    fld f0, 0(a2)
+    fld f1, 8(a2)
+    fld f2, 16(a2)
+    fld f3, 24(a2)
+    fld f4, 32(a2)
+    fld f5, 40(a2)
+    fld f6, 48(a2)
+    fld f7, 56(a2)
+    fld f8, 64(a2)
+    fld f9, 72(a2)
+    fld f10, 80(a2)
+    fld f11, 88(a2)
+    fld f12, 96(a2)
+    fld f13, 104(a2)
+    fld f14, 112(a2)
+    fld f15, 120(a2)
+    fld f16, 128(a2)
+    fld f17, 136(a2)
+    fld f18, 144(a2)
+    fld f19, 152(a2)
+    fld f20, 160(a2)
+    fld f21, 168(a2)
+    fld f22, 176(a2)
+    fld f23, 184(a2)
+    fld f24, 192(a2)
+    fld f25, 200(a2)
+    fld f26, 208(a2)
+    fld f27, 216(a2)
+    fld f28, 224(a2)
+    fld f29, 232(a2)
+    fld f30, 240(a2)
+    fld f31, 248(a2)
+
+    // 4. Trigger cooperative context switch: a0=main_ctx, a1=worker_ctx
+    call switch_context
+
+    // =====================================================================
+    // RESUMED IN TASK A (Original Task)
+    // Immediately capture all 32 floating-point registers f0-f31 into captured_f.
+    // Zero compiler instructions or register clobbers intervene before this capture.
+    // =====================================================================
+    ld t1, 8(sp)
+    fsd f0, 0(t1)
+    fsd f1, 8(t1)
+    fsd f2, 16(t1)
+    fsd f3, 24(t1)
+    fsd f4, 32(t1)
+    fsd f5, 40(t1)
+    fsd f6, 48(t1)
+    fsd f7, 56(t1)
+    fsd f8, 64(t1)
+    fsd f9, 72(t1)
+    fsd f10, 80(t1)
+    fsd f11, 88(t1)
+    fsd f12, 96(t1)
+    fsd f13, 104(t1)
+    fsd f14, 112(t1)
+    fsd f15, 120(t1)
+    fsd f16, 128(t1)
+    fsd f17, 136(t1)
+    fsd f18, 144(t1)
+    fsd f19, 152(t1)
+    fsd f20, 160(t1)
+    fsd f21, 168(t1)
+    fsd f22, 176(t1)
+    fsd f23, 184(t1)
+    fsd f24, 192(t1)
+    fsd f25, 200(t1)
+    fsd f26, 208(t1)
+    fsd f27, 216(t1)
+    fsd f28, 224(t1)
+    fsd f29, 232(t1)
+    fsd f30, 240(t1)
+    fsd f31, 248(t1)
+
+    // Capture callee-saved GPRs s0-s11 into captured_s
+    ld t1, 16(sp)
+    sd s0, 0(t1)
+    sd s1, 8(t1)
+    sd s2, 16(t1)
+    sd s3, 24(t1)
+    sd s4, 32(t1)
+    sd s5, 40(t1)
+    sd s6, 48(t1)
+    sd s7, 56(t1)
+    sd s8, 64(t1)
+    sd s9, 72(t1)
+    sd s10, 80(t1)
+    sd s11, 88(t1)
+
+    // Capture restored FCSR
+    frcsr t0
+    ld t1, 24(sp)
+    sd t0, 0(t1)
+
+    // Restore caller's callee-saved s0-s11 and return
+    ld s0, 32(sp)
+    ld s1, 40(sp)
+    ld s2, 48(sp)
+    ld s3, 56(sp)
+    ld s4, 64(sp)
+    ld s5, 72(sp)
+    ld s6, 80(sp)
+    ld s7, 88(sp)
+    ld s8, 96(sp)
+    ld s9, 104(sp)
+    ld s10, 112(sp)
+    ld s11, 120(sp)
+    ld ra, 0(sp)
+    addi sp, sp, 128
+    ret
+
+    .global asm_riscv_test_worker_entry
+    .type asm_riscv_test_worker_entry, @function
+asm_riscv_test_worker_entry:
+    // Executing on WORKER_STACK in Worker task context.
+    // Deliberately poison all f0-f31 with distinctive poison pattern
+    la t1, poison_f_const
+    ld t0, 0(t1)
+    fmv.d.x f0, t0
+    fmv.d.x f1, t0
+    fmv.d.x f2, t0
+    fmv.d.x f3, t0
+    fmv.d.x f4, t0
+    fmv.d.x f5, t0
+    fmv.d.x f6, t0
+    fmv.d.x f7, t0
+    fmv.d.x f8, t0
+    fmv.d.x f9, t0
+    fmv.d.x f10, t0
+    fmv.d.x f11, t0
+    fmv.d.x f12, t0
+    fmv.d.x f13, t0
+    fmv.d.x f14, t0
+    fmv.d.x f15, t0
+    fmv.d.x f16, t0
+    fmv.d.x f17, t0
+    fmv.d.x f18, t0
+    fmv.d.x f19, t0
+    fmv.d.x f20, t0
+    fmv.d.x f21, t0
+    fmv.d.x f22, t0
+    fmv.d.x f23, t0
+    fmv.d.x f24, t0
+    fmv.d.x f25, t0
+    fmv.d.x f26, t0
+    fmv.d.x f27, t0
+    fmv.d.x f28, t0
+    fmv.d.x f29, t0
+    fmv.d.x f30, t0
+    fmv.d.x f31, t0
+
+    // Deliberately poison s0-s11
+    la t1, poison_s_const
+    ld t2, 0(t1)
+    mv s0, t2
+    mv s1, t2
+    mv s2, t2
+    mv s3, t2
+    mv s4, t2
+    mv s5, t2
+    mv s6, t2
+    mv s7, t2
+    mv s8, t2
+    mv s9, t2
+    mv s10, t2
+    mv s11, t2
+
+    // Set TEST_SWITCH_FLAG = 0xCAFEBABE
+    la t4, TEST_SWITCH_FLAG
+    li t5, 0xCAFEBABE
+    sw t5, 0(t4)
+
+    // Switch back to Task A:
+    // switch_context(old_ctx=&raw mut WORKER_CTX, new_ctx=&raw const MAIN_CTX)
+    la a0, WORKER_CTX
+    la a1, MAIN_CTX
+    tail switch_context
+    "#
+);
+
+extern "C" {
+    fn asm_riscv_context_test_runner(
+        main_ctx: *mut RiscvContext,
+        worker_ctx: *const RiscvContext,
+        patterns_f: *const u64,
+        patterns_s: *const u64,
+        captured_f: *mut u64,
+        captured_s: *mut u64,
+        captured_fcsr: *mut u64,
+    );
+    fn asm_riscv_test_worker_entry();
+}
+
+pub fn test_context_switching() {
+    crate::println!("--- [Testing RISC-V Callee-Saved Register Context Switcher] ---");
+
+    unsafe {
+        TEST_SWITCH_FLAG = 0;
+        let stack_top = (core::ptr::addr_of!(WORKER_STACK) as u64) + 8192;
+        let mut wctx = WORKER_CTX;
+        wctx.sp = stack_top & !0x0F;
+        wctx.set_ra(asm_riscv_test_worker_entry as *const () as usize as u64);
+        WORKER_CTX = wctx;
+
+        let mut patterns_f = [0u64; 32];
+        for i in 0..32 {
+            patterns_f[i] = 0x1122_3344_5566_7700_u64 | (i as u64);
+        }
+
+        let mut patterns_s = [0u64; 12];
+        for i in 0..12 {
+            patterns_s[i] = 0xAA55_BB66_CC77_0000_u64 | ((i + 1) as u64);
+        }
+
+        let mut captured_f = [0u64; 32];
+        let mut captured_s = [0u64; 12];
+        let mut captured_fcsr = [0u64; 1];
+
+        let mut orig_fcsr: u64;
+        core::arch::asm!("frcsr {}", out(reg) orig_fcsr);
+
+        asm_riscv_context_test_runner(
+            core::ptr::addr_of_mut!(MAIN_CTX),
+            core::ptr::addr_of!(WORKER_CTX),
+            patterns_f.as_ptr(),
+            patterns_s.as_ptr(),
+            captured_f.as_mut_ptr(),
+            captured_s.as_mut_ptr(),
+            captured_fcsr.as_mut_ptr(),
+        );
+
+        let flag_val = core::ptr::read_volatile(core::ptr::addr_of!(TEST_SWITCH_FLAG));
+        assert_eq!(flag_val, 0xCAFE_BABE, "RISC-V Context switch failed to execute worker task");
+
+        for i in 0..32 {
+            assert_eq!(
+                captured_f[i],
+                patterns_f[i],
+                "RISC-V floating-point context switch restoration mismatch on f register"
+            );
+        }
+
+        for i in 0..12 {
+            assert_eq!(
+                captured_s[i],
+                patterns_s[i],
+                "RISC-V callee-saved GPR context switch restoration mismatch on s register"
+            );
+        }
+
+        assert_eq!(captured_fcsr[0], orig_fcsr, "RISC-V FCSR register mismatch across context switch");
+    }
+
+    crate::println!("[TEST] RISC-V Context Switch: ra, sp, s0-s11, all 32 floating-point registers (f0-f31), and FCSR saved & restored VERIFIED.");
 }
 
 pub fn test_task_lifecycle() {

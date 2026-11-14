@@ -102,6 +102,7 @@ pub fn init_fp_simd() {
 }
 
 #[unsafe(naked)]
+#[no_mangle]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *const ArmContext) {
     core::arch::naked_asm!(
         // Save callee-saved registers x19-x28 into old_ctx.x19_x28 (offset 0..80)
@@ -132,10 +133,11 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         "stp q26, q27, [x0, #528]",
         "stp q28, q29, [x0, #560]",
         "stp q30, q31, [x0, #592]",
-        // Save FPCR and FPSR floating point status/control (offset 624)
+        // Save FPCR and FPSR floating point status/control (offset 624..640)
         "mrs x2, fpcr",
         "mrs x3, fpsr",
-        "stp x2, x3, [x0, #624]",
+        "str x2, [x0, #624]",
+        "str x3, [x0, #632]",
 
         // Restore callee-saved registers x19-x28 from new_ctx.x19_x28 (offset 0..80)
         "ldp x19, x20, [x1, #0]",
@@ -165,8 +167,9 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         "ldp q26, q27, [x1, #528]",
         "ldp q28, q29, [x1, #560]",
         "ldp q30, q31, [x1, #592]",
-        // Restore FPCR and FPSR (offset 624)
-        "ldp x2, x3, [x1, #624]",
+        // Restore FPCR and FPSR (offset 624..640)
+        "ldr x2, [x1, #624]",
+        "ldr x3, [x1, #632]",
         "msr fpcr, x2",
         "msr fpsr, x3",
 
@@ -811,50 +814,160 @@ pub fn yield_now() {
     }
 }
 
+#[no_mangle]
 static mut TEST_SWITCH_FLAG: u32 = 0;
+#[no_mangle]
 static mut MAIN_CTX: ArmContext = ArmContext::empty();
+#[no_mangle]
 static mut WORKER_CTX: ArmContext = ArmContext::empty();
 static mut WORKER_STACK: [u8; 8192] = [0u8; 8192];
-static mut RESTORED_Q: [u128; 32] = [0u128; 32];
 
-extern "C" fn test_worker_entry() {
-    unsafe {
-        // Read out all 32 vector registers directly from physical CPU state to verify
-        // that switch_context correctly restored every register across the full bank.
-        core::arch::asm!(
-            "stp q0, q1, [{buf}, #0]",
-            "stp q2, q3, [{buf}, #32]",
-            "stp q4, q5, [{buf}, #64]",
-            "stp q6, q7, [{buf}, #96]",
-            "stp q8, q9, [{buf}, #128]",
-            "stp q10, q11, [{buf}, #160]",
-            "stp q12, q13, [{buf}, #192]",
-            "stp q14, q15, [{buf}, #224]",
-            "stp q16, q17, [{buf}, #256]",
-            "stp q18, q19, [{buf}, #288]",
-            "stp q20, q21, [{buf}, #320]",
-            "stp q22, q23, [{buf}, #352]",
-            "stp q24, q25, [{buf}, #384]",
-            "stp q26, q27, [{buf}, #416]",
-            "stp q28, q29, [{buf}, #448]",
-            "stp q30, q31, [{buf}, #480]",
-            buf = in(reg) core::ptr::addr_of_mut!(RESTORED_Q),
-            options(nostack)
-        );
+core::arch::global_asm!(
+    r#"
+    .section .text
+    .global asm_simd_test_runner
+    .type asm_simd_test_runner, %function
+    asm_simd_test_runner:
+        // AAPCS64: preserve callee-saved GPRs and return address
+        stp x29, x30, [sp, #-80]!
+        stp x19, x20, [sp, #16]
+        stp x21, x22, [sp, #32]
+        stp x23, x24, [sp, #48]
+        stp x25, x26, [sp, #64]
 
-        // Verify each register matches the distinguishable test pattern
-        for i in 0..32 {
-            let expected = ((i as u128 + 1) << 96) | (0x0123_4567_89AB_CDEF_u128 ^ (i as u128));
-            assert_eq!(
-                RESTORED_Q[i],
-                expected,
-                "AArch64 SIMD context switch restoration mismatch on q register"
-            );
-        }
+        // Save pointers across the switch_context call
+        mov x19, x0   // main_ctx
+        mov x20, x1   // worker_ctx
+        mov x21, x3   // captured_q destination buffer
+        mov x22, x4   // captured_fp destination buffer
 
-        TEST_SWITCH_FLAG = 0xCAFE_BABE;
-        switch_context(core::ptr::addr_of_mut!(WORKER_CTX), core::ptr::addr_of!(MAIN_CTX));
-    }
+        // Load all 32 vector registers directly from patterns (in x2)
+        ldp q0, q1, [x2, #0]
+        ldp q2, q3, [x2, #32]
+        ldp q4, q5, [x2, #64]
+        ldp q6, q7, [x2, #96]
+        ldp q8, q9, [x2, #128]
+        ldp q10, q11, [x2, #160]
+        ldp q12, q13, [x2, #192]
+        ldp q14, q15, [x2, #224]
+        ldp q16, q17, [x2, #256]
+        ldp q18, q19, [x2, #288]
+        ldp q20, q21, [x2, #320]
+        ldp q22, q23, [x2, #352]
+        ldp q24, q25, [x2, #384]
+        ldp q26, q27, [x2, #416]
+        ldp q28, q29, [x2, #448]
+        ldp q30, q31, [x2, #480]
+
+        // Trigger cooperative switch_context: x0=main_ctx, x1=worker_ctx
+        mov x0, x19
+        mov x1, x20
+        bl switch_context
+
+        // =====================================================================
+        // RESUMED IN TASK A (Original Task)
+        // IMMEDIATELY store all 32 vector registers directly into captured_q (in x21).
+        // Zero compiler instructions or registers intervene before this capture.
+        // =====================================================================
+        stp q0, q1, [x21, #0]
+        stp q2, q3, [x21, #32]
+        stp q4, q5, [x21, #64]
+        stp q6, q7, [x21, #96]
+        stp q8, q9, [x21, #128]
+        stp q10, q11, [x21, #160]
+        stp q12, q13, [x21, #192]
+        stp q14, q15, [x21, #224]
+        stp q16, q17, [x21, #256]
+        stp q18, q19, [x21, #288]
+        stp q20, q21, [x21, #320]
+        stp q22, q23, [x21, #352]
+        stp q24, q25, [x21, #384]
+        stp q26, q27, [x21, #416]
+        stp q28, q29, [x21, #448]
+        stp q30, q31, [x21, #480]
+
+        // Capture restored FPCR and FPSR
+        mrs x2, fpcr
+        mrs x3, fpsr
+        stp x2, x3, [x22, #0]
+
+        // Restore caller callee-saved GPRs and return to Rust
+        ldp x19, x20, [sp, #16]
+        ldp x21, x22, [sp, #32]
+        ldp x23, x24, [sp, #48]
+        ldp x25, x26, [sp, #64]
+        ldp x29, x30, [sp], #80
+        ret
+
+    .global asm_test_worker_entry
+    .type asm_test_worker_entry, %function
+    asm_test_worker_entry:
+        // Executing in Worker task context on WORKER_STACK.
+        // Deliberately clobber all 32 vector registers with poison value (0xDEADBEEF)
+        // to prove that switch_context actually restores Task A's registers.
+        mov x0, #0xBEEF
+        movk x0, #0xDEAD, lsl #16
+        movk x0, #0xBEEF, lsl #32
+        movk x0, #0xDEAD, lsl #48
+        dup v0.2d, x0
+        dup v1.2d, x0
+        dup v2.2d, x0
+        dup v3.2d, x0
+        dup v4.2d, x0
+        dup v5.2d, x0
+        dup v6.2d, x0
+        dup v7.2d, x0
+        dup v8.2d, x0
+        dup v9.2d, x0
+        dup v10.2d, x0
+        dup v11.2d, x0
+        dup v12.2d, x0
+        dup v13.2d, x0
+        dup v14.2d, x0
+        dup v15.2d, x0
+        dup v16.2d, x0
+        dup v17.2d, x0
+        dup v18.2d, x0
+        dup v19.2d, x0
+        dup v20.2d, x0
+        dup v21.2d, x0
+        dup v22.2d, x0
+        dup v23.2d, x0
+        dup v24.2d, x0
+        dup v25.2d, x0
+        dup v26.2d, x0
+        dup v27.2d, x0
+        dup v28.2d, x0
+        dup v29.2d, x0
+        dup v30.2d, x0
+        dup v31.2d, x0
+
+        // Set TEST_SWITCH_FLAG to 0xCAFEBABE
+        adrp x0, TEST_SWITCH_FLAG
+        add x0, x0, :lo12:TEST_SWITCH_FLAG
+        mov x1, #0xBABE
+        movk x1, #0xCAFE, lsl #16
+        str w1, [x0]
+
+        // Switch back to Task A:
+        // switch_context(old_ctx=&raw mut WORKER_CTX, new_ctx=&raw const MAIN_CTX)
+        adrp x0, WORKER_CTX
+        add x0, x0, :lo12:WORKER_CTX
+        adrp x1, MAIN_CTX
+        add x1, x1, :lo12:MAIN_CTX
+        b switch_context
+    "#
+);
+
+extern "C" {
+    fn asm_simd_test_runner(
+        main_ctx: *mut ArmContext,
+        worker_ctx: *const ArmContext,
+        patterns: *const u128,
+        captured_q: *mut u128,
+        captured_fp: *mut u64,
+    );
+    fn asm_test_worker_entry();
 }
 
 pub fn test_context_switching() {
@@ -865,22 +978,58 @@ pub fn test_context_switching() {
         let stack_top = (core::ptr::addr_of!(WORKER_STACK) as u64) + 8192;
         WORKER_CTX.sp = stack_top & !0x0F;
 
-        // Initialize distinguishable patterns in all 32 vector registers
-        for i in 0..32 {
-            WORKER_CTX.q[i] = ((i as u128 + 1) << 96) | (0x0123_4567_89AB_CDEF_u128 ^ (i as u128));
-        }
-
+        // Set worker entry to pure assembly asm_test_worker_entry
         let mut wctx = WORKER_CTX;
-        wctx.set_lr(test_worker_entry as *const () as usize as u64);
+        wctx.set_lr(asm_test_worker_entry as *const () as usize as u64);
         WORKER_CTX = wctx;
 
-        switch_context(core::ptr::addr_of_mut!(MAIN_CTX), core::ptr::addr_of!(WORKER_CTX));
+        // Distinguishable 128-bit test patterns across all 32 vector registers
+        let mut patterns = [0u128; 32];
+        for i in 0..32 {
+            patterns[i] = ((i as u128 + 1) << 96) | (0x0123_4567_89AB_CDEF_u128 ^ (i as u128));
+        }
 
+        let mut captured_q = [0u128; 32];
+        let mut captured_fp = [0u64; 2]; // [fpcr, fpsr]
+
+        let mut orig_fpcr: u64;
+        let mut orig_fpsr: u64;
+        core::arch::asm!(
+            "mrs {0}, fpcr",
+            "mrs {1}, fpsr",
+            out(reg) orig_fpcr,
+            out(reg) orig_fpsr,
+            options(nomem, nostack)
+        );
+
+        // Execute assembly-first context switch test runner
+        asm_simd_test_runner(
+            core::ptr::addr_of_mut!(MAIN_CTX),
+            core::ptr::addr_of!(WORKER_CTX),
+            patterns.as_ptr(),
+            captured_q.as_mut_ptr(),
+            captured_fp.as_mut_ptr(),
+        );
+
+        // Verify that the worker executed
         let flag_val = core::ptr::read_volatile(core::ptr::addr_of!(TEST_SWITCH_FLAG));
-        assert_eq!(flag_val, 0xCAFE_BABE, "Context switch failed to execute target task");
+        assert_eq!(flag_val, 0xCAFE_BABE, "Context switch failed to execute worker task");
+
+        // Verify that all 32 vector registers were restored bit-exact without compiler clobbering
+        for i in 0..32 {
+            assert_eq!(
+                captured_q[i],
+                patterns[i],
+                "AArch64 SIMD context switch restoration mismatch on q register"
+            );
+        }
+
+        // Verify FPCR and FPSR preservation
+        assert_eq!(captured_fp[0], orig_fpcr, "FPCR register mismatch across context switch");
+        assert_eq!(captured_fp[1], orig_fpsr, "FPSR register mismatch across context switch");
     }
 
-    crate::kprintln!("[TEST] AArch64 Context Switch: x19-x28, fp, lr, sp, and all 32 vector registers (q0-q31) saved & restored VERIFIED.");
+    crate::kprintln!("[TEST] AArch64 Context Switch: x19-x28, fp, lr, sp, all 32 vector registers (q0-q31), and FPCR/FPSR saved & restored VERIFIED.");
 }
 
 fn dummy_test_task() -> ! {
