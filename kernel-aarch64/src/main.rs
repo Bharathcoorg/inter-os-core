@@ -187,8 +187,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
-            gic::IntcDescription::Gicv3 { distributor, redistributors, redistributors_size } => {
-                let mut gicv3 = gic::Gicv3::with_size(distributor, redistributors, redistributors_size);
+            gic::IntcDescription::Gicv3 { distributor, distributor_size, redistributors, redistributors_size } => {
+                let mut gicv3 = gic::Gicv3::with_sizes(distributor, distributor_size, redistributors, redistributors_size);
                 if let Err(e) = unsafe { gicv3.init() } {
                     kprintln!("[WARN] GICv3 initialization failed: {:?}", e);
                 } else {
@@ -196,8 +196,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                         kprintln!("[WARN] GICv3 failed to enable IRQ 27: {:?}", e);
                     }
                     gic::register_active_gicv3(gicv3);
-                    kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
-                        distributor, redistributors, redistributors_size / 1024);
+                    kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X} (size {} KiB), redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
+                        distributor, distributor_size / 1024, redistributors, redistributors_size / 1024);
                 }
             }
             gic::IntcDescription::Unsupported(model) => {
@@ -1529,14 +1529,29 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             kprintln!("[AArch64] CPU 0 sent GICv3 SGI 1 to CPU 1 (ICC_SGI1R_EL1 = 0x{:016X}).", sgi_val);
 
             let mut sgi_spins = 0;
-            while gic::sgi_interrupt_count() == 0 && sgi_spins < 500_000 {
+            while gic::pe_sgi_interrupt_count(1) == 0 && sgi_spins < 500_000 {
                 core::hint::spin_loop();
                 sgi_spins += 1;
             }
-            if gic::sgi_interrupt_count() > 0 {
+            let cpu1_sgi = gic::pe_sgi_interrupt_count(1);
+            let cpu0_sgi = gic::pe_sgi_interrupt_count(0);
+            if cpu1_sgi > 0 {
                 kprintln!("[OK] Multicore GICv3 SGI 1 delivered, acknowledged, and EOI verified on secondary CPU.");
+                kprintln!("[AArch64] GICv3 SGI 1 received specifically by target PE 1 (PE 1 count: {}, PE 0 count: {}).", cpu1_sgi, cpu0_sgi);
             }
-            kprintln!("[TEST] AArch64 Multicore SMP: Dual-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.");
+
+            // Verify independent local timer interrupt delivery on both cores
+            let mut timer_spins = 0;
+            while (gic::pe_timer_interrupt_count(0) == 0 || gic::pe_timer_interrupt_count(1) == 0) && timer_spins < 5_000_000 {
+                core::hint::spin_loop();
+                timer_spins += 1;
+            }
+            let cpu0_timer = gic::pe_timer_interrupt_count(0);
+            let cpu1_timer = gic::pe_timer_interrupt_count(1);
+            kprintln!("[AArch64] Independent per-PE timer delivery: PE 0 timer ticks = {}, PE 1 timer ticks = {}.", cpu0_timer, cpu1_timer);
+            if cpu1_sgi > 0 && cpu0_sgi == 0 && cpu0_timer > 0 && cpu1_timer > 0 {
+                kprintln!("[TEST] AArch64 Multicore SMP: Dual-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.");
+            }
         } else {
             kprintln!("[OK] Multicore: Single-core QEMU topology (secondary CPU inactive).");
         }
@@ -1847,6 +1862,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     }
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     kprintln!();
@@ -1871,9 +1887,15 @@ pub extern "C" fn secondary_cpu_main() -> ! {
     if gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) == gic::ACTIVE_GIC_KIND_GICV3 {
         let active = *gic::ACTIVE_GIC.lock();
         if let gic::ActiveGic::Gicv3(g) = active {
-            let mut local_gicv3 = gic::Gicv3::with_size(g.distributor_base, g.redistributors_base, g.redistributors_size);
+            let mut local_gicv3 = gic::Gicv3::with_sizes(g.distributor_base, g.distributor_size, g.redistributors_base, g.redistributors_size);
             unsafe {
-                let _ = local_gicv3.init_redistributor();
+                if let Err(e) = local_gicv3.init_redistributor() {
+                    kprintln!("[FATAL] Secondary CPU 1 failed to initialize redistributor: {:?}", e);
+                    loop {
+                        #[cfg(target_arch = "aarch64")]
+                        core::arch::asm!("wfe");
+                    }
+                }
             }
             local_gicv3.init_cpu_interface();
             let _ = local_gicv3.enable_irq(27);
@@ -1885,7 +1907,7 @@ pub extern "C" fn secondary_cpu_main() -> ! {
     let mut timer = ArmGenericTimer::new();
     let freq = timer.read_frequency();
     if freq > 0 {
-        timer.program_countdown((freq / 100) as u32);
+        timer.program_countdown((freq / 1000).max(10_000) as u32);
     }
 
     // Unmask IRQs in DAIF

@@ -36,6 +36,8 @@ REQUIRED_SIGNALS = [
     "Secondary CPU 1 online: VBAR, GICv3 Redistributor, and CPU Interface initialized.",
     "CPU 0 sent GICv3 SGI 1 to CPU 1",
     "Multicore GICv3 SGI 1 delivered, acknowledged, and EOI verified on secondary CPU.",
+    "GICv3 SGI 1 received specifically by target PE 1 (PE 1 count: 1, PE 0 count: 0).",
+    "Independent per-PE timer delivery: PE 0 timer ticks =",
     "[TEST] AArch64 Multicore SMP: Dual-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.",
     "Spawning Userspace PID 1 (init) at EL0",
     "[PID1] Inter OS userspace init started in Ring 3.",
@@ -135,6 +137,11 @@ def main():
         for l in captured_lines[-40:]:
             print(f"  {l}")
         return 1
+
+    print("\n--- Diagnostic SMP Evidence ---")
+    for l in captured_lines:
+        if any(k in l for k in ["SMP", "SGI", "PE", "PSCI", "timer delivery", "GICv3"]):
+            print(f"  {l}")
 
     print("\n[SUCCESS] AArch64 Multicore SMP & GICv3 Verification PASSED (100% contract compliance).")
     return 0

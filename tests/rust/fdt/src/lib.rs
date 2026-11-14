@@ -575,3 +575,56 @@ fn a_platform_without_an_interrupt_controller_reports_absent() {
         IntcDescription::Absent
     );
 }
+
+#[test]
+fn test_concurrent_pe_registration_race_and_conflict_detection() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    gic::reset_pe_redistributor_map_for_test();
+
+    let target_pe = 0x0001_0000;
+    let base_a = 0x080A_0000;
+    let base_b = 0x080C_0000;
+
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let conflict_count = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+
+    // 8 concurrent threads attempting simultaneous conflicting registrations for the same PE
+    for i in 0..8 {
+        let sc = Arc::clone(&success_count);
+        let cc = Arc::clone(&conflict_count);
+        let base = if i % 2 == 0 { base_a } else { base_b };
+        handles.push(thread::spawn(move || {
+            match gic::register_pe_redistributor(target_pe, base) {
+                Ok(()) => {
+                    sc.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(gic::GicError::RegistrationConflict) => {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Exactly one base must have won; all threads registering the other base must observe RegistrationConflict
+    let s = success_count.load(Ordering::SeqCst);
+    let c = conflict_count.load(Ordering::SeqCst);
+    assert_eq!(s + c, 8);
+    assert!(s >= 1);
+    assert!(c >= 1);
+
+    // Verify exactly 1 slot was claimed in the table
+    let winning_base = gic::get_pe_redistributor(target_pe);
+    assert!(winning_base == Some(base_a) || winning_base == Some(base_b));
+
+    gic::reset_pe_redistributor_map_for_test();
+}

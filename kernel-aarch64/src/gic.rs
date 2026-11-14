@@ -46,6 +46,7 @@ pub enum IntcDescription {
     },
     Gicv3 {
         distributor: usize,
+        distributor_size: usize,
         redistributors: usize,
         redistributors_size: usize,
     },
@@ -162,6 +163,7 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
                 Some(windows) if windows.len() >= 2 => {
                     return IntcDescription::Gicv3 {
                         distributor: windows[0].0,
+                        distributor_size: windows[0].1,
                         redistributors: windows[1].0,
                         redistributors_size: windows[1].1,
                     };
@@ -203,6 +205,7 @@ pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
         match reg_windows_with_sizes(parser, &node) {
             Some(windows) if windows.len() >= 2 => IntcDescription::Gicv3 {
                 distributor: windows[0].0,
+                distributor_size: windows[0].1,
                 redistributors: windows[1].0,
                 redistributors_size: windows[1].1,
             },
@@ -391,7 +394,7 @@ pub fn validate_mmio_window(
     if width != 4 && width != 8 {
         return Err(GicError::InvalidParameter);
     }
-    if offset % width != 0 {
+    if base % width != 0 || offset % width != 0 {
         return Err(GicError::MisalignedMmioAccess);
     }
     let end = offset.checked_add(width).ok_or(GicError::OutOfBoundsMmioAccess)?;
@@ -399,6 +402,9 @@ pub fn validate_mmio_window(
         return Err(GicError::OutOfBoundsMmioAccess);
     }
     let target_addr = base.checked_add(offset).ok_or(GicError::OutOfBoundsMmioAccess)?;
+    if target_addr % width != 0 {
+        return Err(GicError::MisalignedMmioAccess);
+    }
     Ok(target_addr)
 }
 
@@ -406,6 +412,8 @@ pub const MAX_GIC_PES: usize = 8;
 pub const STATE_EMPTY: u8 = 0;
 pub const STATE_WRITING: u8 = 1;
 pub const STATE_VALID: u8 = 2;
+
+static REGISTRATION_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 static PE_STATE: [core::sync::atomic::AtomicU8; MAX_GIC_PES] = [
     core::sync::atomic::AtomicU8::new(STATE_EMPTY),
@@ -439,43 +447,66 @@ static PE_AFFINITY_MAP: [core::sync::atomic::AtomicU32; MAX_GIC_PES] = [
 ];
 
 pub fn reset_pe_redistributor_map_for_test() {
+    while REGISTRATION_LOCK.compare_exchange(
+        false,
+        true,
+        core::sync::atomic::Ordering::Acquire,
+        core::sync::atomic::Ordering::Relaxed,
+    ).is_err() {
+        core::hint::spin_loop();
+    }
     for i in 0..MAX_GIC_PES {
-        PE_STATE[i].store(STATE_EMPTY, core::sync::atomic::Ordering::Release);
         PE_AFFINITY_MAP[i].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
         PE_REDISTRIBUTOR_MAP[i].store(0, core::sync::atomic::Ordering::Relaxed);
+        PE_STATE[i].store(STATE_EMPTY, core::sync::atomic::Ordering::Release);
+        PE_TIMER_INTERRUPT_COUNT[i].store(0, core::sync::atomic::Ordering::Relaxed);
+        PE_SGI_INTERRUPT_COUNT[i].store(0, core::sync::atomic::Ordering::Relaxed);
     }
+    SGI_INTERRUPT_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+    REGISTRATION_LOCK.store(false, core::sync::atomic::Ordering::Release);
 }
 
 pub fn register_pe_redistributor(affinity: u32, rd_base: usize) -> Result<(), GicError> {
-    // 1. Check if this affinity is already registered
-    for i in 0..MAX_GIC_PES {
-        if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
-            if PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == affinity {
-                if PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == rd_base {
-                    return Ok(()); // Idempotent re-registration with same base
-                } else {
-                    return Err(GicError::RegistrationConflict); // Conflicting base
+    // Acquire registration lock to linearize registration and eliminate TOCTOU races
+    while REGISTRATION_LOCK.compare_exchange(
+        false,
+        true,
+        core::sync::atomic::Ordering::Acquire,
+        core::sync::atomic::Ordering::Relaxed,
+    ).is_err() {
+        core::hint::spin_loop();
+    }
+
+    let result = (|| {
+        // 1. Check if this affinity is already registered
+        for i in 0..MAX_GIC_PES {
+            if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
+                if PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == affinity {
+                    if PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == rd_base {
+                        return Ok(()); // Idempotent re-registration with same base
+                    } else {
+                        return Err(GicError::RegistrationConflict); // Conflicting base
+                    }
                 }
             }
         }
-    }
 
-    // 2. Claim an empty slot
-    for i in 0..MAX_GIC_PES {
-        if PE_STATE[i].compare_exchange(
-            STATE_EMPTY,
-            STATE_WRITING,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-        ).is_ok() {
-            PE_AFFINITY_MAP[i].store(affinity, core::sync::atomic::Ordering::Relaxed);
-            PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Relaxed);
-            PE_STATE[i].store(STATE_VALID, core::sync::atomic::Ordering::Release);
-            return Ok(());
+        // 2. Claim first empty slot
+        for i in 0..MAX_GIC_PES {
+            if PE_STATE[i].load(core::sync::atomic::Ordering::Relaxed) == STATE_EMPTY {
+                PE_STATE[i].store(STATE_WRITING, core::sync::atomic::Ordering::Relaxed);
+                PE_AFFINITY_MAP[i].store(affinity, core::sync::atomic::Ordering::Relaxed);
+                PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Relaxed);
+                PE_STATE[i].store(STATE_VALID, core::sync::atomic::Ordering::Release);
+                return Ok(());
+            }
         }
-    }
 
-    Err(GicError::PeTableFull)
+        Err(GicError::PeTableFull)
+    })();
+
+    REGISTRATION_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    result
 }
 
 pub fn get_pe_redistributor(affinity: u32) -> Option<usize> {
@@ -508,7 +539,7 @@ impl Gicv3 {
             distributor_base,
             distributor_size: 0x10000,
             redistributors_base,
-            redistributors_size: 0,
+            redistributors_size: 0x20000, // Default 128 KiB minimum redistributor frame
             current_rd_base: 0,
         }
     }
@@ -550,6 +581,8 @@ impl Gicv3 {
         let target = validate_mmio_window(self.distributor_base, self.distributor_size, offset, 4)?;
         let ptr = target as *mut u32;
         core::ptr::write_volatile(ptr, val);
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
         Ok(())
     }
 
@@ -558,6 +591,8 @@ impl Gicv3 {
         let target = validate_mmio_window(self.distributor_base, self.distributor_size, offset, 8)?;
         let ptr = target as *mut u64;
         core::ptr::write_volatile(ptr, val);
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
         Ok(())
     }
 
@@ -573,6 +608,8 @@ impl Gicv3 {
         let target = validate_mmio_window(self.redistributors_base, self.redistributors_size, offset, 4)?;
         let ptr = target as *mut u32;
         core::ptr::write_volatile(ptr, val);
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
         Ok(())
     }
 
@@ -649,10 +686,13 @@ impl Gicv3 {
             return Err(GicError::InvalidMmioRange);
         }
 
-        // Set ARE_NS (bit 5) and EnableGrp1NS (bit 1) in GICD_CTLR
+        // Set ARE_NS (bit 5), ARE (bit 4), and EnableGrp1NS (bit 1) in GICD_CTLR
         let mut ctlr = self.gicd_read_checked(0x0000)?;
-        ctlr |= (1 << 5) | (1 << 1);
+        ctlr |= (1 << 5) | (1 << 4) | (1 << 1);
         self.gicd_write_checked(0x0000, ctlr)?;
+
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         // Wait for Register Write Pending (RWP, bit 31) to clear
         let mut spins = 0;
@@ -670,12 +710,17 @@ impl Gicv3 {
         let num_irqs = (32 * (it_lines + 1)).min(1020);
 
         // Set SPIs (32..num_irqs) to Group 1 Non-Secure and default priority
-        for irq_block in 1..(num_irqs / 32) {
+        let num_blocks = (num_irqs + 31) / 32;
+        for irq_block in 1..num_blocks {
             self.gicd_write_checked(0x0080 + (irq_block as usize) * 4, 0xFFFF_FFFF)?;
         }
-        for prio_reg in 8..(num_irqs / 4) {
+        let num_prio_regs = (num_irqs + 3) / 4;
+        for prio_reg in 8..num_prio_regs {
             self.gicd_write_checked(0x0400 + (prio_reg as usize) * 4, 0xA0A0_A0A0)?;
         }
+
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         Ok(())
     }
@@ -694,6 +739,9 @@ impl Gicv3 {
         let mut waker = self.gicr_read_checked(rd_offset + 0x0014)?;
         waker &= !(1 << 1);
         self.gicr_write_checked(rd_offset + 0x0014, waker)?;
+
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         // Poll until ChildrenAsleep (bit 2) is cleared
         let mut spins = 0;
@@ -714,6 +762,9 @@ impl Gicv3 {
             self.gicr_write_checked(sgi_offset + 0x0400 + prio * 4, 0xA0A0_A0A0)?;
         }
 
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+
         Ok(())
     }
 
@@ -725,6 +776,13 @@ impl Gicv3 {
 
         self.init_distributor()?;
         self.init_redistributor()?;
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb");
+        }
+
         self.init_cpu_interface();
         Ok(())
     }
@@ -733,6 +791,9 @@ impl Gicv3 {
     /// SGI/PPI (0..31) are routed to the calling PE's own Redistributor.
     /// SPI (32..1019) are routed to the shared Distributor.
     pub fn enable_irq(&self, irq: u32) -> Result<(), GicError> {
+        if irq >= 1020 {
+            return Err(GicError::InvalidParameter);
+        }
         if irq < 32 {
             let pe_aff = Self::current_pe_affinity();
             let rd_base = get_pe_redistributor(pe_aff)
@@ -761,6 +822,9 @@ impl Gicv3 {
 
     /// Disables an interrupt line.
     pub fn disable_irq(&self, irq: u32) -> Result<(), GicError> {
+        if irq >= 1020 {
+            return Err(GicError::InvalidParameter);
+        }
         if irq < 32 {
             let pe_aff = Self::current_pe_affinity();
             let rd_base = get_pe_redistributor(pe_aff)
@@ -917,6 +981,7 @@ pub fn end_of_interrupt(irq: u32) {
         ACTIVE_GIC_KIND_GICV3 => {
             #[cfg(target_arch = "aarch64")]
             unsafe {
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
                 core::arch::asm!("msr s3_0_c12_c12_1, {val}", val = in(reg) irq as u64, options(nomem, nostack));
                 core::arch::asm!("isb");
             }
@@ -1003,6 +1068,7 @@ pub const fn encode_sgi1r(
 pub fn send_sgi(val: u64) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
         core::arch::asm!("msr s3_0_c12_c11_5, {val}", val = in(reg) val, options(nomem, nostack));
         core::arch::asm!("isb");
     }
@@ -1012,12 +1078,63 @@ pub fn send_sgi(val: u64) {
 
 pub static SGI_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+pub static PE_TIMER_INTERRUPT_COUNT: [core::sync::atomic::AtomicU64; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+pub static PE_SGI_INTERRUPT_COUNT: [core::sync::atomic::AtomicU64; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
 pub fn handle_sgi(_irq: u32) {
     SGI_INTERRUPT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn sgi_interrupt_count() -> u64 {
     SGI_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn record_pe_timer_tick(pe_idx: usize) {
+    if pe_idx < MAX_GIC_PES {
+        PE_TIMER_INTERRUPT_COUNT[pe_idx].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn record_pe_sgi(pe_idx: usize, _irq: u32) {
+    if pe_idx < MAX_GIC_PES {
+        PE_SGI_INTERRUPT_COUNT[pe_idx].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    SGI_INTERRUPT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn pe_timer_interrupt_count(pe_idx: usize) -> u64 {
+    if pe_idx < MAX_GIC_PES {
+        PE_TIMER_INTERRUPT_COUNT[pe_idx].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+pub fn pe_sgi_interrupt_count(pe_idx: usize) -> u64 {
+    if pe_idx < MAX_GIC_PES {
+        PE_SGI_INTERRUPT_COUNT[pe_idx].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -1060,6 +1177,18 @@ mod tests {
         assert_eq!(validate_mmio_window(base, size, size + 4, 4), Err(GicError::OutOfBoundsMmioAccess));
         // Past size for 8-byte read
         assert_eq!(validate_mmio_window(base, size, size + 8, 8), Err(GicError::OutOfBoundsMmioAccess));
+    }
+
+    #[test]
+    fn test_validate_mmio_window_unaligned_base() {
+        let size = 0x1000;
+        // 4-byte read with unaligned base (1, 2, 3)
+        assert_eq!(validate_mmio_window(0x0800_0001, size, 0, 4), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(validate_mmio_window(0x0800_0002, size, 0, 4), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(validate_mmio_window(0x0800_0003, size, 0, 4), Err(GicError::MisalignedMmioAccess));
+
+        // 8-byte read with 4-byte aligned base (not 8-byte aligned)
+        assert_eq!(validate_mmio_window(0x0800_0004, size, 0, 8), Err(GicError::MisalignedMmioAccess));
     }
 
     #[test]
@@ -1148,6 +1277,12 @@ mod tests {
         assert_eq!(irouter, expected);
         assert_eq!(irouter & (1 << 31), 0); // IRM bit must be 0
 
+        // Non-zero Aff3, Aff2, Aff1 complex coordinate: Aff3=0xFF, Aff2=0xAA, Aff1=0x55, Aff0=0x10
+        let complex_irouter = encode_irouter(0xFF, 0xAA, 0x55, 0x10, false);
+        let expected_complex: u64 = (0xFFu64 << 32) | (0xAAu64 << 16) | (0x55u64 << 8) | 0x10u64;
+        assert_eq!(complex_irouter, expected_complex);
+        assert_eq!(complex_irouter & (1 << 31), 0);
+
         // Any participating PE: any_pe=true
         let any_irouter = encode_irouter(0x01, 0x02, 0x03, 0x04, true);
         assert_eq!(any_irouter, 1u64 << 31); // IRM bit must be 1, rest zeroed
@@ -1172,10 +1307,56 @@ mod tests {
         let expected: u64 = (1u64 << 24) | 0x0002;
         assert_eq!(sgi, expected);
 
+        // Complex non-zero Aff3, Aff2, Aff1 with target list: Aff3=0xFE, Aff2=0xDC, Aff1=0xBA, TargetList=0x8001, INTID=14
+        let complex_sgi = encode_sgi1r(0xFE, 0xDC, 0xBA, 0x8001, 14, false);
+        let expected_complex: u64 = ((0xFEu64) << 48) | ((0xDCu64) << 32) | ((14u64) << 24) | ((0xBAu64) << 16) | 0x8001u64;
+        assert_eq!(complex_sgi, expected_complex);
+
         // Broadcast to all except self: IRM=1
         let bcast_sgi = encode_sgi1r(0, 0, 0, 0, 5, true);
         let expected_bcast: u64 = (1u64 << 40) | (5u64 << 24);
         assert_eq!(bcast_sgi, expected_bcast);
+    }
+
+    #[test]
+    fn test_enable_disable_irq_out_of_bounds() {
+        let gic = Gicv3::with_sizes(0x0800_0000, 0x10000, 0x080A_0000, 0x40000);
+        assert_eq!(gic.enable_irq(1020), Err(GicError::InvalidParameter));
+        assert_eq!(gic.enable_irq(1024), Err(GicError::InvalidParameter));
+        assert_eq!(gic.enable_irq(8192), Err(GicError::InvalidParameter));
+
+        assert_eq!(gic.disable_irq(1020), Err(GicError::InvalidParameter));
+        assert_eq!(gic.disable_irq(1024), Err(GicError::InvalidParameter));
+        assert_eq!(gic.disable_irq(8192), Err(GicError::InvalidParameter));
+    }
+
+    #[test]
+    fn test_per_pe_interrupt_counters() {
+        reset_pe_redistributor_map_for_test();
+
+        assert_eq!(pe_timer_interrupt_count(0), 0);
+        assert_eq!(pe_timer_interrupt_count(1), 0);
+        assert_eq!(pe_sgi_interrupt_count(0), 0);
+        assert_eq!(pe_sgi_interrupt_count(1), 0);
+        assert_eq!(sgi_interrupt_count(), 0);
+
+        // Record timer tick on PE 0
+        record_pe_timer_tick(0);
+        assert_eq!(pe_timer_interrupt_count(0), 1);
+        assert_eq!(pe_timer_interrupt_count(1), 0);
+
+        // Record timer tick on PE 1
+        record_pe_timer_tick(1);
+        assert_eq!(pe_timer_interrupt_count(0), 1);
+        assert_eq!(pe_timer_interrupt_count(1), 1);
+
+        // Record SGI 1 on PE 1
+        record_pe_sgi(1, 1);
+        assert_eq!(pe_sgi_interrupt_count(0), 0);
+        assert_eq!(pe_sgi_interrupt_count(1), 1);
+        assert_eq!(sgi_interrupt_count(), 1);
+
+        reset_pe_redistributor_map_for_test();
     }
 }
 

@@ -434,11 +434,16 @@ pub extern "C" fn handle_irq_lower32(_frame: &mut ExceptionFrame) {
 fn dispatch_irq() {
     let irq = crate::gic::acknowledge_irq();
 
+    // Architectural PE identification via MPIDR affinity
+    let pe_aff = crate::gic::Gicv3::current_pe_affinity();
+    let pe_idx = (pe_aff & 0xFF) as usize;
+
     if irq == 27 {
         // PPI 27: ARM Generic Timer Virtual Timer
         unsafe {
             TIMER_INTERRUPT_COUNT += 1;
         }
+        crate::gic::record_pe_timer_tick(pe_idx);
         let mut timer = crate::timer::ArmGenericTimer::new();
         let freq = timer.read_frequency();
         let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
@@ -446,7 +451,7 @@ fn dispatch_irq() {
         crate::gic::end_of_interrupt(irq);
     } else if irq < 16 {
         // SGIs (0..15) Software Generated Interrupts
-        crate::gic::handle_sgi(irq);
+        crate::gic::record_pe_sgi(pe_idx, irq);
         crate::gic::end_of_interrupt(irq);
     } else if irq < 1020 {
         crate::gic::end_of_interrupt(irq);

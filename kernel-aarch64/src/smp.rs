@@ -212,10 +212,14 @@ impl SmpController {
         let sgir_val = ((target_core_mask as u32) << 16) | sgi_intid;
 
         if self.gicd_base != 0 {
-            // Write to GICD_SGIR register
-            let sgir_ptr = (self.gicd_base + GICD_SGIR_OFFSET) as *mut u32;
-            unsafe {
-                core::ptr::write_volatile(sgir_ptr, sgir_val);
+            // Write to GICD_SGIR register with overflow check and barrier
+            if let Some(target) = self.gicd_base.checked_add(GICD_SGIR_OFFSET) {
+                let sgir_ptr = target as *mut u32;
+                unsafe {
+                    core::ptr::write_volatile(sgir_ptr, sgir_val);
+                    #[cfg(target_arch = "aarch64")]
+                    core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                }
             }
         }
 
