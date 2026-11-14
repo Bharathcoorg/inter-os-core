@@ -23,35 +23,49 @@ pub struct TaskId(pub usize);
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C, align(8))]
 pub struct RiscvContext {
-    /// 32 general-purpose registers: x0-x31 (x1=ra, x2=sp, x8=s0/fp, x9=s1, x18-x27=s2-s11) = 32 * 8 = 256 bytes
-    pub x: [u64; 32],
-    /// Supervisor Exception Program Counter SEPC = 8 bytes (offset 256)
-    pub sepc: u64,
-    /// Supervisor Status Register SSTATUS = 8 bytes (offset 264)
-    pub sstatus: u64,
-    /// Full floating-point register file f0-f31 in standard RV64D/RV64F ABI = 32 * 8 = 256 bytes (offset 272)
+    /// Return address (x1 / ra): 8 bytes (offset 0)
+    pub ra: u64,
+    /// Stack pointer (x2 / sp): 8 bytes (offset 8)
+    pub sp: u64,
+    /// Frame pointer / callee-saved (x8 / s0): 8 bytes (offset 16)
+    pub s0: u64,
+    /// Callee-saved register (x9 / s1): 8 bytes (offset 24)
+    pub s1: u64,
+    /// Callee-saved registers (x18-x27 / s2-s11): 10 * 8 = 80 bytes (offset 32..112)
+    pub s2_s11: [u64; 10],
+    /// Full floating-point register file f0-f31 in standard RV64D/RV64F ABI: 32 * 8 = 256 bytes (offset 112..368)
     pub f: [u64; 32],
-    /// Floating-point Control and Status Register FCSR = 8 bytes (offset 528)
+    /// Floating-point Control and Status Register FCSR: 8 bytes (offset 368..376)
     pub fcsr: u64,
 }
 
-// Compile-time verification of layout, total size (536 bytes), 8-byte alignment, and exact field offsets
+// Compile-time verification of cooperative task switch layout, total size (376 bytes),
+// 8-byte alignment, and exact field offsets.
+//
+// NOTE: Asynchronous trap and exception handling (interrupts, ecall syscall dispatch, page faults)
+// uses `TrapFrame` in `trap.rs` with `sret`, `sepc`, `sstatus`, `scause`, and `stval`.
+// `RiscvContext` represents strictly the synchronous, cooperative standard RISC-V ABI task context
+// saved and restored across `switch_context` calls via standard `ret` (`jalr zero, 0(ra)`).
 const _: () = {
-    assert!(core::mem::size_of::<RiscvContext>() == 536);
+    assert!(core::mem::size_of::<RiscvContext>() == 376);
     assert!(core::mem::align_of::<RiscvContext>() == 8);
-    assert!(core::mem::offset_of!(RiscvContext, x) == 0);
-    assert!(core::mem::offset_of!(RiscvContext, sepc) == 256);
-    assert!(core::mem::offset_of!(RiscvContext, sstatus) == 264);
-    assert!(core::mem::offset_of!(RiscvContext, f) == 272);
-    assert!(core::mem::offset_of!(RiscvContext, fcsr) == 528);
+    assert!(core::mem::offset_of!(RiscvContext, ra) == 0);
+    assert!(core::mem::offset_of!(RiscvContext, sp) == 8);
+    assert!(core::mem::offset_of!(RiscvContext, s0) == 16);
+    assert!(core::mem::offset_of!(RiscvContext, s1) == 24);
+    assert!(core::mem::offset_of!(RiscvContext, s2_s11) == 32);
+    assert!(core::mem::offset_of!(RiscvContext, f) == 112);
+    assert!(core::mem::offset_of!(RiscvContext, fcsr) == 368);
 };
 
 impl RiscvContext {
     pub const fn empty() -> Self {
         Self {
-            x: [0u64; 32],
-            sepc: 0,
-            sstatus: 0,
+            ra: 0,
+            sp: 0,
+            s0: 0,
+            s1: 0,
+            s2_s11: [0u64; 10],
             f: [0u64; 32],
             fcsr: 0,
         }
@@ -59,23 +73,22 @@ impl RiscvContext {
 
     #[inline]
     pub fn ra(&self) -> u64 {
-        self.x[1]
+        self.ra
     }
 
     #[inline]
     pub fn set_ra(&mut self, val: u64) {
-        self.x[1] = val;
-        self.sepc = val;
+        self.ra = val;
     }
 
     #[inline]
     pub fn sp(&self) -> u64 {
-        self.x[2]
+        self.sp
     }
 
     #[inline]
     pub fn set_sp(&mut self, val: u64) {
-        self.x[2] = val;
+        self.sp = val;
     }
 }
 
@@ -99,114 +112,117 @@ pub fn init_fp() {
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut RiscvContext, new_ctx: *const RiscvContext) {
     core::arch::naked_asm!(
-        // Save callee-saved general-purpose registers to old_ctx.x (a0)
-        "sd ra, 1*8(a0)",
-        "sd sp, 2*8(a0)",
-        "sd s0, 8*8(a0)",
-        "sd s1, 9*8(a0)",
-        "sd s2, 18*8(a0)",
-        "sd s3, 19*8(a0)",
-        "sd s4, 20*8(a0)",
-        "sd s5, 21*8(a0)",
-        "sd s6, 22*8(a0)",
-        "sd s7, 23*8(a0)",
-        "sd s8, 24*8(a0)",
-        "sd s9, 25*8(a0)",
-        "sd s10, 26*8(a0)",
-        "sd s11, 27*8(a0)",
-        // Save sepc (offset 256 = 32*8) and sstatus (offset 264 = 33*8)
-        "sd ra, 32*8(a0)",
-        "csrr t0, sstatus",
-        "sd t0, 33*8(a0)",
-        // Save full floating point register file f0-f31 (offset 272 = 34*8 to 65*8)
-        "fsd f0, 34*8(a0)",
-        "fsd f1, 35*8(a0)",
-        "fsd f2, 36*8(a0)",
-        "fsd f3, 37*8(a0)",
-        "fsd f4, 38*8(a0)",
-        "fsd f5, 39*8(a0)",
-        "fsd f6, 40*8(a0)",
-        "fsd f7, 41*8(a0)",
-        "fsd f8, 42*8(a0)",
-        "fsd f9, 43*8(a0)",
-        "fsd f10, 44*8(a0)",
-        "fsd f11, 45*8(a0)",
-        "fsd f12, 46*8(a0)",
-        "fsd f13, 47*8(a0)",
-        "fsd f14, 48*8(a0)",
-        "fsd f15, 49*8(a0)",
-        "fsd f16, 50*8(a0)",
-        "fsd f17, 51*8(a0)",
-        "fsd f18, 52*8(a0)",
-        "fsd f19, 53*8(a0)",
-        "fsd f20, 54*8(a0)",
-        "fsd f21, 55*8(a0)",
-        "fsd f22, 56*8(a0)",
-        "fsd f23, 57*8(a0)",
-        "fsd f24, 58*8(a0)",
-        "fsd f25, 59*8(a0)",
-        "fsd f26, 60*8(a0)",
-        "fsd f27, 61*8(a0)",
-        "fsd f28, 62*8(a0)",
-        "fsd f29, 63*8(a0)",
-        "fsd f30, 64*8(a0)",
-        "fsd f31, 65*8(a0)",
-        // Save FCSR floating-point status/control (offset 528 = 66*8)
-        "frcsr t0",
-        "sd t0, 66*8(a0)",
+        // a0 = old_ctx (*mut RiscvContext), a1 = new_ctx (*const RiscvContext)
+        // 1. Save callee-saved GPRs to old_ctx (offset 0..112)
+        "sd ra, 0(a0)",
+        "sd sp, 8(a0)",
+        "sd s0, 16(a0)",
+        "sd s1, 24(a0)",
+        "sd s2, 32(a0)",
+        "sd s3, 40(a0)",
+        "sd s4, 48(a0)",
+        "sd s5, 56(a0)",
+        "sd s6, 64(a0)",
+        "sd s7, 72(a0)",
+        "sd s8, 80(a0)",
+        "sd s9, 88(a0)",
+        "sd s10, 96(a0)",
+        "sd s11, 104(a0)",
 
-        // Restore callee-saved general-purpose registers from new_ctx.x (a1)
-        "ld ra, 1*8(a1)",
-        "ld sp, 2*8(a1)",
-        "ld s0, 8*8(a1)",
-        "ld s1, 9*8(a1)",
-        "ld s2, 18*8(a1)",
-        "ld s3, 19*8(a1)",
-        "ld s4, 20*8(a1)",
-        "ld s5, 21*8(a1)",
-        "ld s6, 22*8(a1)",
-        "ld s7, 23*8(a1)",
-        "ld s8, 24*8(a1)",
-        "ld s9, 25*8(a1)",
-        "ld s10, 26*8(a1)",
-        "ld s11, 27*8(a1)",
-        // Restore full floating point register file f0-f31
-        "fld f0, 34*8(a1)",
-        "fld f1, 35*8(a1)",
-        "fld f2, 36*8(a1)",
-        "fld f3, 37*8(a1)",
-        "fld f4, 38*8(a1)",
-        "fld f5, 39*8(a1)",
-        "fld f6, 40*8(a1)",
-        "fld f7, 41*8(a1)",
-        "fld f8, 42*8(a1)",
-        "fld f9, 43*8(a1)",
-        "fld f10, 44*8(a1)",
-        "fld f11, 45*8(a1)",
-        "fld f12, 46*8(a1)",
-        "fld f13, 47*8(a1)",
-        "fld f14, 48*8(a1)",
-        "fld f15, 49*8(a1)",
-        "fld f16, 50*8(a1)",
-        "fld f17, 51*8(a1)",
-        "fld f18, 52*8(a1)",
-        "fld f19, 53*8(a1)",
-        "fld f20, 54*8(a1)",
-        "fld f21, 55*8(a1)",
-        "fld f22, 56*8(a1)",
-        "fld f23, 57*8(a1)",
-        "fld f24, 58*8(a1)",
-        "fld f25, 59*8(a1)",
-        "fld f26, 60*8(a1)",
-        "fld f27, 61*8(a1)",
-        "fld f28, 62*8(a1)",
-        "fld f29, 63*8(a1)",
-        "fld f30, 64*8(a1)",
-        "fld f31, 65*8(a1)",
-        // Restore FCSR
-        "ld t0, 66*8(a1)",
+        // 2. Save full floating point register file f0-f31 (offset 112..368)
+        "fsd f0, 112(a0)",
+        "fsd f1, 120(a0)",
+        "fsd f2, 128(a0)",
+        "fsd f3, 136(a0)",
+        "fsd f4, 144(a0)",
+        "fsd f5, 152(a0)",
+        "fsd f6, 160(a0)",
+        "fsd f7, 168(a0)",
+        "fsd f8, 176(a0)",
+        "fsd f9, 184(a0)",
+        "fsd f10, 192(a0)",
+        "fsd f11, 200(a0)",
+        "fsd f12, 208(a0)",
+        "fsd f13, 216(a0)",
+        "fsd f14, 224(a0)",
+        "fsd f15, 232(a0)",
+        "fsd f16, 240(a0)",
+        "fsd f17, 248(a0)",
+        "fsd f18, 256(a0)",
+        "fsd f19, 264(a0)",
+        "fsd f20, 272(a0)",
+        "fsd f21, 280(a0)",
+        "fsd f22, 288(a0)",
+        "fsd f23, 296(a0)",
+        "fsd f24, 304(a0)",
+        "fsd f25, 312(a0)",
+        "fsd f26, 320(a0)",
+        "fsd f27, 328(a0)",
+        "fsd f28, 336(a0)",
+        "fsd f29, 344(a0)",
+        "fsd f30, 352(a0)",
+        "fsd f31, 360(a0)",
+
+        // 3. Save FCSR floating-point status/control (offset 368)
+        "frcsr t0",
+        "sd t0, 368(a0)",
+
+        // RESTORE from new_ctx (a1)
+        // 1. Restore callee-saved GPRs (offset 0..112)
+        "ld ra, 0(a1)",
+        "ld sp, 8(a1)",
+        "ld s0, 16(a1)",
+        "ld s1, 24(a1)",
+        "ld s2, 32(a1)",
+        "ld s3, 40(a1)",
+        "ld s4, 48(a1)",
+        "ld s5, 56(a1)",
+        "ld s6, 64(a1)",
+        "ld s7, 72(a1)",
+        "ld s8, 80(a1)",
+        "ld s9, 88(a1)",
+        "ld s10, 96(a1)",
+        "ld s11, 104(a1)",
+
+        // 2. Restore full floating point register file f0-f31 (offset 112..368)
+        "fld f0, 112(a1)",
+        "fld f1, 120(a1)",
+        "fld f2, 128(a1)",
+        "fld f3, 136(a1)",
+        "fld f4, 144(a1)",
+        "fld f5, 152(a1)",
+        "fld f6, 160(a1)",
+        "fld f7, 168(a1)",
+        "fld f8, 176(a1)",
+        "fld f9, 184(a1)",
+        "fld f10, 192(a1)",
+        "fld f11, 200(a1)",
+        "fld f12, 208(a1)",
+        "fld f13, 216(a1)",
+        "fld f14, 224(a1)",
+        "fld f15, 232(a1)",
+        "fld f16, 240(a1)",
+        "fld f17, 248(a1)",
+        "fld f18, 256(a1)",
+        "fld f19, 264(a1)",
+        "fld f20, 272(a1)",
+        "fld f21, 280(a1)",
+        "fld f22, 288(a1)",
+        "fld f23, 296(a1)",
+        "fld f24, 304(a1)",
+        "fld f25, 312(a1)",
+        "fld f26, 320(a1)",
+        "fld f27, 328(a1)",
+        "fld f28, 336(a1)",
+        "fld f29, 344(a1)",
+        "fld f30, 352(a1)",
+        "fld f31, 360(a1)",
+
+        // 3. Restore FCSR (offset 368)
+        "ld t0, 368(a1)",
         "fscsr t0",
 
+        // 4. Return to restored return address (ra)
         "ret",
     );
 }

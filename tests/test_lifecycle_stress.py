@@ -491,13 +491,238 @@ def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=
     return final_diag
 
 
+def analyze_and_assert_lifecycle_metrics(
+    baseline,
+    metrics_history,
+    total_iterations,
+    tail_window=None,
+    extended_cycles=0,
+    extended_drift=0,
+    max_budget_bytes=512 * 1024,
+):
+    """
+    Evaluates recorded lifecycle metrics against strict leak invariants:
+    1. Zero monotonic growth across active tasks, surfaces, SHM pipes, and mailboxes.
+    2. Total capacity expansion within bounded budget (max 512 KiB).
+    3. No strictly monotonic heap growth across all iterations.
+    4. No resumed growth after initial plateau stabilization.
+    5. Strictly 0 B tail drift across final iterations.
+    6. Strictly 0 B drift across post-stabilization extended cycles.
+
+    Raises AssertionError on any violation.
+    """
+    iter_samples = [m for m in metrics_history if m.get("type") == "post_iteration"]
+    iter_indices = [m["iteration"] for m in iter_samples]
+    surface_counts = [m["surfaces"] for m in iter_samples]
+    active_counts = [m["tasks_active"] for m in iter_samples]
+    shm_counts = [m["shm_pipes"] for m in iter_samples]
+    mailbox_counts = [m["mailboxes"] for m in iter_samples]
+    heap_counts = [m["heap_used"] for m in iter_samples]
+
+    assert all(s == baseline["surfaces"] for s in surface_counts), (
+        f"Surface leak detected across iterations: {surface_counts} (expected: {baseline['surfaces']})"
+    )
+    assert all(a == baseline["tasks_active"] for a in active_counts), (
+        f"Active task leak detected across iterations: {active_counts} (expected: {baseline['tasks_active']})"
+    )
+    assert all(p == baseline["shm_pipes"] for p in shm_counts), (
+        f"SHM pipe leak detected across iterations: {shm_counts} (expected: {baseline['shm_pipes']})"
+    )
+    assert all(m == baseline["mailboxes"] for m in mailbox_counts), (
+        f"Mailbox leak detected across iterations: {mailbox_counts} (expected: {baseline['mailboxes']})"
+    )
+
+    total_heap_growth = max(heap_counts) - baseline["heap_used"]
+    assert total_heap_growth <= max_budget_bytes, (
+        f"Heap expansion exceeded documented budget: {total_heap_growth} B > {max_budget_bytes} B"
+    )
+
+    is_strictly_monotonic = len(heap_counts) >= 3 and all(
+        heap_counts[k] > heap_counts[k - 1] for k in range(1, len(heap_counts))
+    )
+    assert not is_strictly_monotonic, (
+        f"FORBIDDEN: Monotonic heap growth detected across all iterations: {heap_counts}"
+    )
+
+    plateau_index = None
+    for k in range(1, len(heap_counts)):
+        if heap_counts[k] == heap_counts[k - 1]:
+            plateau_index = k
+            break
+
+    if plateau_index is not None:
+        plateau_heap = heap_counts[plateau_index]
+        resumed_growth = [h for h in heap_counts[plateau_index:] if h > plateau_heap]
+        assert not resumed_growth, (
+            f"FORBIDDEN: Heap growth resumed after stabilization at iteration {iter_indices[plateau_index]}: "
+            f"plateau={plateau_heap} B, subsequent measurements={heap_counts[plateau_index:]}"
+        )
+
+    if tail_window is None:
+        tail_window = 2 if len(heap_counts) <= 4 else 3
+    tail_drift = max(heap_counts[-tail_window:]) - min(heap_counts[-tail_window:])
+    assert tail_drift == 0, (
+        f"Unstable tail drift detected: {tail_drift} B across final {tail_window} iterations: {heap_counts[-tail_window:]}"
+    )
+
+    if extended_cycles > 0:
+        assert extended_drift == 0, (
+            f"FORBIDDEN: Heap drifted across post-stabilization cycles: {extended_drift} B"
+        )
+
+    iter1_drift = (heap_counts[0] - baseline["heap_used"]) if heap_counts else 0
+    subsequent_drift = (max(heap_counts) - min(heap_counts)) if heap_counts else 0
+
+    if subsequent_drift == 0:
+        classification = "Category A: One-time initialization growth / lazy capacity expansion"
+        classification_details = (
+            f"+{iter1_drift} B capacity allocation in iteration 1 for scheduler task tables and "
+            "IPC mailbox vectors; strictly zero bytes drifted thereafter across subsequent iterations."
+        )
+    else:
+        plateau_start = iter_indices[plateau_index] if plateau_index is not None else (total_iterations - tail_window + 1)
+        classification = "Category A: Multi-phase capacity expansion stabilized into steady-state plateau"
+        classification_details = (
+            f"Lazy capacity expansion reached steady-state plateau by iteration {plateau_start}; "
+            f"strictly zero bytes drifted across final {tail_window} iterations ({tail_drift} B tail drift)."
+        )
+
+    return {
+        "total_heap_growth": total_heap_growth,
+        "iter1_drift": iter1_drift,
+        "subsequent_drift": subsequent_drift,
+        "tail_drift": tail_drift,
+        "tail_window": tail_window,
+        "classification": classification,
+        "classification_details": classification_details,
+        "plateau_index": plateau_index,
+    }
+
+
+def run_detector_self_tests():
+    """
+    Self-test the regression detector harness with synthetic inputs,
+    proving that each invariant violation raises an AssertionError and causes a non-zero exit code.
+    """
+    print("--- [Self-Testing Lifecycle Stress Regression Detector] ---")
+    base = {
+        "tasks_total": 14,
+        "tasks_active": 14,
+        "surfaces": 3,
+        "mailboxes": 13,
+        "endpoints": 13,
+        "shm_pipes": 5,
+        "heap_used": 10400000,
+        "heap_free": 6000000,
+    }
+
+    # 1. Clean steady-state run -> MUST PASS
+    clean_history = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 3, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+    ]
+    res = analyze_and_assert_lifecycle_metrics(base, clean_history, total_iterations=3)
+    assert res["tail_drift"] == 0
+    print("[PASS] Clean steady-state accepted.")
+
+    # 2. Synthetic surface leak -> MUST FAIL
+    surf_leak = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 4, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, surf_leak, total_iterations=2)
+        raise AssertionError("Failed to detect surface leak")
+    except AssertionError as e:
+        assert "Surface leak detected" in str(e)
+    print("[PASS] Surface leak correctly detected and rejected.")
+
+    # 3. Synthetic task leak -> MUST FAIL
+    task_leak = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 3, "tasks_active": 15, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, task_leak, total_iterations=2)
+        raise AssertionError("Failed to detect task leak")
+    except AssertionError as e:
+        assert "Active task leak detected" in str(e)
+    print("[PASS] Active task leak correctly detected and rejected.")
+
+    # 4. Strictly monotonic heap growth -> MUST FAIL
+    monotonic_leak = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10600000},
+        {"iteration": 3, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10700000},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, monotonic_leak, total_iterations=3)
+        raise AssertionError("Failed to detect monotonic heap growth")
+    except AssertionError as e:
+        assert "Monotonic heap growth detected" in str(e)
+    print("[PASS] Monotonic heap growth correctly detected and rejected.")
+
+    # 5. Resumed growth after plateau -> MUST FAIL
+    resumed_leak = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 3, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10600000},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, resumed_leak, total_iterations=3)
+        raise AssertionError("Failed to detect resumed heap growth")
+    except AssertionError as e:
+        assert "Heap growth resumed after stabilization" in str(e)
+    print("[PASS] Resumed heap growth correctly detected and rejected.")
+
+    # 6. Tail drift in final iterations -> MUST FAIL
+    tail_drift_leak = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500200},
+        {"iteration": 2, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500000},
+        {"iteration": 3, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10500050},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, tail_drift_leak, total_iterations=3, tail_window=2)
+        raise AssertionError("Failed to detect tail drift")
+    except AssertionError as e:
+        assert "Unstable tail drift detected" in str(e)
+    print("[PASS] Unstable tail drift correctly detected and rejected.")
+
+    # 7. Extended post-stabilization drift -> MUST FAIL
+    try:
+        analyze_and_assert_lifecycle_metrics(base, clean_history, total_iterations=3, extended_cycles=100, extended_drift=64)
+        raise AssertionError("Failed to detect extended drift")
+    except AssertionError as e:
+        assert "Heap drifted across post-stabilization cycles" in str(e)
+    print("[PASS] Extended post-stabilization cycle drift correctly detected and rejected.")
+
+    # 8. Capacity budget overflow (> 512 KiB) -> MUST FAIL
+    budget_overflow = [
+        {"iteration": 1, "type": "post_iteration", "surfaces": 3, "tasks_active": 14, "shm_pipes": 5, "mailboxes": 13, "heap_used": 10400000 + 600 * 1024},
+    ]
+    try:
+        analyze_and_assert_lifecycle_metrics(base, budget_overflow, total_iterations=1, max_budget_bytes=512*1024)
+        raise AssertionError("Failed to detect budget overflow")
+    except AssertionError as e:
+        assert "Heap expansion exceeded documented budget" in str(e)
+    print("[PASS] Budget expansion limit correctly detected and rejected.")
+
+    print("\n[SUCCESS] All 8 regression detector self-tests passed with strict non-zero rejection enforcement.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Deterministic InterOS Lifecycle Stress Test")
     parser.add_argument("--iterations", type=int, default=10, help="Number of lifecycle iterations (default: 10)")
     parser.add_argument("--quick", action="store_true", help="Quick mode (3 iterations)")
     parser.add_argument("--extended-cycles", type=int, default=0, help="Number of post-stabilization lifecycle cycles to execute (e.g. 100)")
     parser.add_argument("--screendump", action="store_true", help="Record framebuffer screendump on first iteration")
+    parser.add_argument("--test-detector", action="store_true", help="Run self-test on regression detector with synthetic leak scenarios")
     args = parser.parse_args()
+
+    if args.test_detector:
+        return run_detector_self_tests()
 
     total_iterations = 3 if args.quick else args.iterations
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
@@ -670,78 +895,37 @@ def main():
         print(f"Mailbox counts across iterations:     {mailbox_counts} (expected: {baseline['mailboxes']})")
         print(f"Heap used (bytes) across iterations:  {heap_counts}")
 
-        assert all(s == baseline["surfaces"] for s in surface_counts), "Surface count drifted across iterations"
-        assert all(a == baseline["tasks_active"] for a in active_counts), "Active task count drifted across iterations"
-        assert all(p == baseline["shm_pipes"] for p in shm_counts), "SHM pipe count drifted across iterations"
-        assert all(m == baseline["mailboxes"] for m in mailbox_counts), "Mailbox count drifted across iterations"
-
-        # 1. Enforce bounded maximum capacity expansion budget (max 512 KiB)
-        MAX_ALLOWED_CAPACITY_EXPANSION_BYTES = 512 * 1024
-        total_heap_growth = max(heap_counts) - baseline["heap_used"]
-        print(f"[BUDGET CHECK] Total capacity expansion: {total_heap_growth} B / max budget {MAX_ALLOWED_CAPACITY_EXPANSION_BYTES} B")
-        assert total_heap_growth <= MAX_ALLOWED_CAPACITY_EXPANSION_BYTES, (
-            f"Heap expansion exceeded documented budget: {total_heap_growth} B > {MAX_ALLOWED_CAPACITY_EXPANSION_BYTES} B"
-        )
-
-        # 2. Detect monotonic growth across iterations
-        is_strictly_monotonic = len(heap_counts) >= 3 and all(
-            heap_counts[k] > heap_counts[k - 1] for k in range(1, len(heap_counts))
-        )
-        assert not is_strictly_monotonic, (
-            f"FORBIDDEN: Monotonic heap growth detected across all iterations: {heap_counts}"
-        )
-
-        # 3. Detect resumed growth after stabilization
-        plateau_index = None
-        for k in range(1, len(heap_counts)):
-            if heap_counts[k] == heap_counts[k - 1]:
-                plateau_index = k
-                break
-
-        if plateau_index is not None:
-            plateau_heap = heap_counts[plateau_index]
-            resumed_growth = [h for h in heap_counts[plateau_index:] if h > plateau_heap]
-            assert not resumed_growth, (
-                f"FORBIDDEN: Heap growth resumed after stabilization at iteration {iter_indices[plateau_index]}: "
-                f"plateau={plateau_heap} B, subsequent measurements={heap_counts[plateau_index:]}"
-            )
-
-        # 4. Strict tail drift check
-        tail_window = 2 if len(heap_counts) <= 4 else 3
-        tail_drift = max(heap_counts[-tail_window:]) - min(heap_counts[-tail_window:])
-        assert tail_drift == 0, (
-            f"Unstable tail drift detected: {tail_drift} B across final {tail_window} iterations: {heap_counts[-tail_window:]}"
-        )
-
-        iter1_drift = (heap_counts[0] - baseline["heap_used"]) if heap_counts else 0
-        subsequent_drift = (max(heap_counts) - min(heap_counts)) if heap_counts else 0
-
-        if subsequent_drift == 0:
-            classification = "Category A: One-time initialization growth / lazy capacity expansion"
-            classification_details = (
-                f"+{iter1_drift} B capacity allocation in iteration 1 for scheduler task tables and "
-                "IPC mailbox vectors; strictly zero bytes drifted thereafter across subsequent iterations."
-            )
-        else:
-            plateau_start = iter_indices[plateau_index] if plateau_index is not None else (total_iterations - tail_window + 1)
-            classification = "Category A: Multi-phase capacity expansion stabilized into steady-state plateau"
-            classification_details = (
-                f"Lazy capacity expansion reached steady-state plateau by iteration {plateau_start}; "
-                f"strictly zero bytes drifted across final {tail_window} iterations ({tail_drift} B tail drift)."
-            )
-
-        print(f"\n[LEAK ANALYSIS] Post-Iter-1 Heap Growth: {iter1_drift:+d} bytes")
-        print(f"[LEAK ANALYSIS] Classification: {classification}")
-        print(f"[LEAK ANALYSIS] Details: {classification_details}")
-        print(f"[LEAK ANALYSIS] Subsequent Drift (Iter 1 -> {total_iterations}): {subsequent_drift} bytes (STABLE)")
-        print(f"[LEAK ANALYSIS] No monotonic leak detected across {total_iterations} full smartphone lifecycle iterations.")
-
         extended_drift = 0
         if args.extended_cycles > 0:
             final_diag = execute_post_stabilization_cycles(reader, serial_sock, baseline, args.extended_cycles)
             extended_drift = final_diag["heap_used"] - heap_counts[-1]
             print(f"[EXTENDED DRIFT] Heap drift across {args.extended_cycles} post-stabilization cycles: {extended_drift:+d} bytes")
-            assert extended_drift == 0, f"FORBIDDEN: Heap drifted across post-stabilization cycles: {extended_drift} B"
+
+        # Run full regression detector assertions
+        analysis = analyze_and_assert_lifecycle_metrics(
+            baseline,
+            metrics_history,
+            total_iterations,
+            extended_cycles=args.extended_cycles,
+            extended_drift=extended_drift,
+        )
+
+        total_heap_growth = analysis["total_heap_growth"]
+        iter1_drift = analysis["iter1_drift"]
+        subsequent_drift = analysis["subsequent_drift"]
+        tail_drift = analysis["tail_drift"]
+        tail_window = analysis["tail_window"]
+        classification = analysis["classification"]
+        classification_details = analysis["classification_details"]
+
+        print(f"\n[LEAK ANALYSIS] Post-Iter-1 Heap Growth: {iter1_drift:+d} bytes")
+        print(f"[LEAK ANALYSIS] Classification: {classification}")
+        print(f"[LEAK ANALYSIS] Details: {classification_details}")
+        print(f"[LEAK ANALYSIS] Subsequent Drift (Iter 1 -> {total_iterations}): {subsequent_drift} bytes (STABLE)")
+        print(f"[LEAK ANALYSIS] Tail Drift (Final {tail_window} iters): {tail_drift} bytes (STABLE)")
+        if args.extended_cycles > 0:
+            print(f"[LEAK ANALYSIS] Extended Cycles Drift ({args.extended_cycles} cycles): {extended_drift} bytes (STABLE)")
+        print(f"[LEAK ANALYSIS] No monotonic leak detected across {total_iterations} full smartphone lifecycle iterations.")
 
         out_report = ROOT / "target" / "stress_metrics.json"
         out_report.parent.mkdir(exist_ok=True)

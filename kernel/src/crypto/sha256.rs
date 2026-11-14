@@ -176,6 +176,7 @@ impl Sha256 {
         self.buffer_len = 0;
         self.total_bytes = 0;
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        core::hint::black_box(self.h.as_mut_ptr());
     }
 
     fn process_block(&mut self, block: &[u8; SHA256_BLOCK_SIZE]) {
@@ -234,6 +235,21 @@ impl Sha256 {
         self.h[5] = self.h[5].wrapping_add(f);
         self.h[6] = self.h[6].wrapping_add(g);
         self.h[7] = self.h[7].wrapping_add(h);
+
+        // Volatile zeroization of message schedule words from execution stack
+        for word in w.iter_mut() {
+            unsafe {
+                core::ptr::write_volatile(word, 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        core::hint::black_box(w.as_mut_ptr());
+    }
+}
+
+impl Drop for Sha256 {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 

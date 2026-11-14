@@ -273,7 +273,7 @@ impl SecureKeystore {
         get_random_bytes(&mut nonce);
 
         // Derive slot encryption key
-        let slot_key = self.derive_key(slot, b"cred_storage");
+        let mut slot_key = self.derive_key(slot, b"cred_storage");
 
         // Generate keystream and encrypt via XOR
         let mut ciphertext = Vec::with_capacity(plaintext.len());
@@ -298,6 +298,10 @@ impl SecureKeystore {
         auth_input.extend_from_slice(&nonce);
         auth_input.extend_from_slice(&ciphertext);
         let auth_tag = HmacSha256::compute(&slot_key, &auth_input);
+
+        // Wipe temporary slot key and keystream from stack
+        crate::crypto::zeroize_slice(&mut slot_key);
+        crate::crypto::zeroize_slice(&mut block_keystream);
 
         let mut alias = [0u8; 32];
         let copy_len = alias_str.len().min(32);
@@ -339,7 +343,7 @@ impl SecureKeystore {
             .find(|e| e.slot == slot_idx && &e.alias[..e.alias_len] == alias_bytes)
             .ok_or(KeystoreError::EntryNotFound)?;
 
-        let slot_key = self.derive_key(slot, b"cred_storage");
+        let mut slot_key = self.derive_key(slot, b"cred_storage");
 
         // 1. Verify authentication tag in constant time
         let mut auth_input = Vec::new();
@@ -350,6 +354,7 @@ impl SecureKeystore {
         let expected_tag = HmacSha256::compute(&slot_key, &auth_input);
 
         if !constant_time_eq(&entry.auth_tag, &expected_tag) {
+            crate::crypto::zeroize_slice(&mut slot_key);
             return Err(KeystoreError::IntegrityViolation);
         }
 
@@ -364,10 +369,15 @@ impl SecureKeystore {
                 stream_input[..16].copy_from_slice(&entry.nonce);
                 stream_input[16..20].copy_from_slice(&block_idx.to_be_bytes());
                 block_keystream = HmacSha256::compute(&slot_key, &stream_input);
+                crate::crypto::zeroize_slice(&mut stream_input);
                 block_idx += 1;
             }
             plaintext.push(byte ^ block_keystream[i % 32]);
         }
+
+        // Scrub temporary key material and keystream buffer
+        crate::crypto::zeroize_slice(&mut slot_key);
+        crate::crypto::zeroize_slice(&mut block_keystream);
 
         Ok(plaintext)
     }

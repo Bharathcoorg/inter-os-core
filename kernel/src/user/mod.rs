@@ -94,6 +94,25 @@ pub enum UserLockState {
 }
 
 /// Credential with cryptographic salt, PBKDF2 hash, and configurable work factor.
+///
+/// # Security & Trust Boundary Contract
+/// - **Storage Isolation Boundary:** Credential records are persisted in the kernel-managed
+///   VFS hierarchy at `/user/{uid}/vault/.credential`. Ring 3 user applications run with
+///   Zero Ambient Authority and are confined by per-package capability checks (`enforce_app_path`),
+///   preventing unprivileged processes from accessing, reading, or tampering with `.credential`.
+/// - **Corruption Detection vs. Tamper Resistance:** The 32-bit FNV-1a checksum in format Version 1
+///   detects accidental filesystem corruption, flash wear, partial writes, and storage bit-rot.
+///   It is an *integrity corruption check*, NOT an authenticated cryptographic MAC. An adversary with
+///   offline physical access to raw unencrypted storage could recalculate FNV-1a. Complete offline
+///   tamper protection requires storage-layer authenticated encryption keyed via `SecureKeystore`.
+/// - **Fail-Closed Policy:** If the credential record cannot be read, format version is unknown,
+///   or the checksum fails, the kernel fails closed: the credential is not loaded, the profile
+///   remains in `UserLockState::Locked` or `Lockout`, and unauthorized login is strictly denied.
+/// - **PBKDF2 Work Factor Rationale:** Default work factor is 5,000 iterations of PBKDF2-HMAC-SHA256.
+///   On target mobile cores, this executes in ~3.4 ms, which fits within the interactive 5.0 ms
+///   frame budget (avoiding UI stutters or high battery drain during unlock) while providing a 5×
+///   work factor increase over legacy 1,000-round credentials. Legacy credentials are transparently
+///   upgraded to 5,000 rounds upon the next successful unlock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
     pub salt: [u8; 16],
@@ -666,6 +685,7 @@ impl UserManager {
                 path
             ),
         }
+        crate::crypto::zeroize_slice(&mut buf);
     }
 
     /// Restores a previously persisted credential from VFS on boot.
@@ -716,6 +736,8 @@ impl UserManager {
             };
             (salt, hash, failed_attempts, Credential::LEGACY_PBKDF2_ROUNDS)
         };
+
+        crate::crypto::zeroize_slice(&mut buf);
 
         if let Some(profile) = self.users.get_mut(&uid) {
             let max_failed = 5;

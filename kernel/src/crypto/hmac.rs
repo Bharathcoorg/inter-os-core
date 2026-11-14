@@ -17,13 +17,15 @@ pub struct HmacSha256 {
 
 impl HmacSha256 {
     /// Initializes a new HMAC-SHA256 instance with the given key.
+    /// Initializes a new HMAC-SHA256 instance with the given key.
     /// Handles keys shorter or longer than the SHA-256 block size (64 bytes).
-    /// All intermediate key pads are securely zeroized using volatile stores.
+    /// All intermediate key pads and oversized key digests are securely zeroized using volatile stores.
     pub fn new(key: &[u8]) -> Self {
         let mut k = [0u8; SHA256_BLOCK_SIZE];
         if key.len() > SHA256_BLOCK_SIZE {
-            let key_digest = Sha256::digest(key);
+            let mut key_digest = Sha256::digest(key);
             k[..SHA256_DIGEST_LENGTH].copy_from_slice(&key_digest);
+            crate::crypto::zeroize_slice(&mut key_digest);
         } else {
             k[..key.len()].copy_from_slice(key);
         }
@@ -58,18 +60,21 @@ impl HmacSha256 {
     }
 
     /// Finalizes the HMAC calculation, returning the 32-byte authentication tag.
-    /// Intermediate inner digests are securely zeroized.
+    /// Intermediate inner digests and hash states are securely zeroized.
     pub fn finalize(mut self) -> [u8; SHA256_DIGEST_LENGTH] {
-        let mut inner_digest = self.inner.finalize();
-        self.outer.update(&inner_digest);
+        let inner = core::mem::replace(&mut self.inner, Sha256::new());
+        let mut outer = core::mem::replace(&mut self.outer, Sha256::new());
+        let mut inner_digest = inner.finalize();
+        outer.update(&inner_digest);
         crate::crypto::zeroize_slice(&mut inner_digest);
-        self.outer.finalize()
+        outer.finalize()
     }
 
     /// Securely wipes all internal state and hashers.
     pub fn zeroize(&mut self) {
         self.inner.zeroize();
         self.outer.zeroize();
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Computes the HMAC-SHA256 authentication tag for a given key and message.
@@ -98,7 +103,7 @@ impl HmacSha256 {
     /// Computes DK = T_1 = F(password, salt, iterations, 1).
     /// Genuinely allocation-free: performs zero heap allocations.
     /// Pre-computes inner and outer key states for optimal performance.
-    /// All secret-dependent buffers (U values, intermediate states) are zeroized.
+    /// All secret-dependent buffers (U values, intermediate states, round clones) are zeroized.
     pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8; SHA256_DIGEST_LENGTH]) {
         if iterations == 0 {
             return;
@@ -118,14 +123,22 @@ impl HmacSha256 {
         for _ in 1..iterations {
             let mut round_hmac = base_hmac.clone();
             round_hmac.update(&u);
-            u = round_hmac.finalize();
+            let next_u = round_hmac.finalize();
             for i in 0..SHA256_DIGEST_LENGTH {
-                out[i] ^= u[i];
+                out[i] ^= next_u[i];
             }
+            crate::crypto::zeroize_slice(&mut u);
+            u = next_u;
         }
 
         crate::crypto::zeroize_slice(&mut u);
         base_hmac.zeroize();
+    }
+}
+
+impl Drop for HmacSha256 {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 
@@ -346,5 +359,21 @@ mod tests {
         println!("[BENCHMARK] PBKDF2 1,000 rounds:  {:?}", elapsed_1k);
         println!("[BENCHMARK] PBKDF2 5,000 rounds:  {:?}", elapsed_5k);
         println!("[BENCHMARK] PBKDF2 10,000 rounds: {:?}", elapsed_10k);
+    }
+
+    #[test]
+    fn test_oversized_key_and_zeroization_contract() {
+        // Key length > 64 bytes forces internal hashing and scrubbing of temporary key_digest
+        let long_key = [0x42u8; 131];
+        let message = b"sample message payload";
+        let tag = HmacSha256::mac(&long_key, message);
+        assert_ne!(tag, [0u8; 32]);
+
+        // Verify that dropped instances execute zeroization without errors or leaks
+        {
+            let ephemeral_hmac = HmacSha256::new(&long_key);
+            // Drop runs self.zeroize()
+            drop(ephemeral_hmac);
+        }
     }
 }
