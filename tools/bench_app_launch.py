@@ -97,7 +97,7 @@ BOOT_READY_MARKER = "Step 5: Initial presentation complete"
 
 QEMU_ARGS_BASE = [
     "-machine", "q35",
-    "-cpu", "qemu64",
+    "-cpu", "qemu64,+rdrand",
     "-m", "1024M",
     "-display", "none",
     "-snapshot",

@@ -57,7 +57,7 @@ ARCHES = {
         "qemu_bin": "qemu-system-x86_64",
         "artifact": os.path.join("target", "inter-os-bios.img"),
         "artifact_kind": "bootable BIOS raw disk image",
-        "extra_args": ["-machine", "q35", "-cpu", "qemu64"],
+        "extra_args": ["-machine", "q35", "-cpu", "qemu64,+rdrand"],
         "drive_arg": "-drive",
         "ready_marker": "Step 5: Initial presentation complete",
         "endpoint": (

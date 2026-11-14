@@ -138,7 +138,7 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
     qemu_cmd = [
         qemu_exe,
         "-machine", "q35",
-        "-cpu", "qemu64",
+        "-cpu", "qemu64,+rdrand",
         "-drive", f"format=raw,file={kernel_img}",
         "-snapshot",
         "-m", "1024M",

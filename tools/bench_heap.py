@@ -121,7 +121,7 @@ def run(root, timeout_s, boot_timeout_s, results_dir):
     ser_log = os.path.join(results_dir, "heap-serial.log")
 
     args = [
-        qemu_exe, "-machine", "q35", "-cpu", "qemu64", "-m", "1024M",
+        qemu_exe, "-machine", "q35", "-cpu", "qemu64,+rdrand", "-m", "1024M",
         "-drive", "format=raw,file=%s" % artifact,
         "-snapshot", "-display", "none", "-no-reboot",
         "-chardev", "socket,id=ser0,host=127.0.0.1,port=%d,server=on,wait=off" % port,

@@ -159,7 +159,7 @@ def launch_qemu_session(qemu_exe, boot_img, storage_img, port=5558):
     args = [
         qemu_exe,
         "-machine", "q35",
-        "-cpu", "qemu64",
+        "-cpu", "qemu64,+rdrand",
         "-m", "1024M",
         "-device", "piix3-ide,id=ide",
         "-drive", f"file={boot_img},format=raw,if=none,id=bootd,snapshot=on",

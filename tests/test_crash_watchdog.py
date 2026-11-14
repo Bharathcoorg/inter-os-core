@@ -127,6 +127,7 @@ def main():
     time.sleep(0.5)
     args = [
         qemu_exe,
+        "-cpu", "qemu64,+rdrand",
         "-drive", f"file={boot_img},format=raw,snapshot=on",
         "-m", "1024M",
         "-display", "none",
