@@ -154,6 +154,7 @@ impl Sha256 {
             digest[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
         }
 
+        self.zeroize();
         digest
     }
 
@@ -162,6 +163,19 @@ impl Sha256 {
         let mut hasher = Self::new();
         hasher.update(data);
         hasher.finalize()
+    }
+
+    /// Securely wipes all internal state and buffers using volatile zeroization.
+    pub fn zeroize(&mut self) {
+        crate::crypto::zeroize_slice(&mut self.buffer);
+        for word in self.h.iter_mut() {
+            unsafe {
+                core::ptr::write_volatile(word, 0);
+            }
+        }
+        self.buffer_len = 0;
+        self.total_bytes = 0;
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     fn process_block(&mut self, block: &[u8; SHA256_BLOCK_SIZE]) {

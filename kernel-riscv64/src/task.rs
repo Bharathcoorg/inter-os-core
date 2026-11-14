@@ -21,93 +21,191 @@ pub const STACK_SIZE: usize = 16384; // 16 KiB per kernel task stack
 pub struct TaskId(pub usize);
 
 #[derive(Debug, Clone, Copy, Default)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct RiscvContext {
-    pub ra: u64,
-    pub sp: u64,
-    pub s0: u64,
-    pub s1: u64,
-    pub s2: u64,
-    pub s3: u64,
-    pub s4: u64,
-    pub s5: u64,
-    pub s6: u64,
-    pub s7: u64,
-    pub s8: u64,
-    pub s9: u64,
-    pub s10: u64,
-    pub s11: u64,
-    // Callee-saved floating point registers (fs0-fs11 in standard RV64D/RV64F ABI)
-    pub fs0: u64,
-    pub fs1: u64,
-    pub fs2: u64,
-    pub fs3: u64,
-    pub fs4: u64,
-    pub fs5: u64,
-    pub fs6: u64,
-    pub fs7: u64,
-    pub fs8: u64,
-    pub fs9: u64,
-    pub fs10: u64,
-    pub fs11: u64,
+    /// 32 general-purpose registers: x0-x31 (x1=ra, x2=sp, x8=s0/fp, x9=s1, x18-x27=s2-s11) = 32 * 8 = 256 bytes
+    pub x: [u64; 32],
+    /// Supervisor Exception Program Counter SEPC = 8 bytes (offset 256)
+    pub sepc: u64,
+    /// Supervisor Status Register SSTATUS = 8 bytes (offset 264)
+    pub sstatus: u64,
+    /// Full floating-point register file f0-f31 in standard RV64D/RV64F ABI = 32 * 8 = 256 bytes (offset 272)
+    pub f: [u64; 32],
+    /// Floating-point Control and Status Register FCSR = 8 bytes (offset 528)
+    pub fcsr: u64,
+}
+
+// Compile-time verification of layout, total size (536 bytes), 8-byte alignment, and exact field offsets
+const _: () = {
+    assert!(core::mem::size_of::<RiscvContext>() == 536);
+    assert!(core::mem::align_of::<RiscvContext>() == 8);
+    assert!(core::mem::offset_of!(RiscvContext, x) == 0);
+    assert!(core::mem::offset_of!(RiscvContext, sepc) == 256);
+    assert!(core::mem::offset_of!(RiscvContext, sstatus) == 264);
+    assert!(core::mem::offset_of!(RiscvContext, f) == 272);
+    assert!(core::mem::offset_of!(RiscvContext, fcsr) == 528);
+};
+
+impl RiscvContext {
+    pub const fn empty() -> Self {
+        Self {
+            x: [0u64; 32],
+            sepc: 0,
+            sstatus: 0,
+            f: [0u64; 32],
+            fcsr: 0,
+        }
+    }
+
+    #[inline]
+    pub fn ra(&self) -> u64 {
+        self.x[1]
+    }
+
+    #[inline]
+    pub fn set_ra(&mut self, val: u64) {
+        self.x[1] = val;
+        self.sepc = val;
+    }
+
+    #[inline]
+    pub fn sp(&self) -> u64 {
+        self.x[2]
+    }
+
+    #[inline]
+    pub fn set_sp(&mut self, val: u64) {
+        self.x[2] = val;
+    }
+}
+
+/// Enables floating-point execution by setting `sstatus.FS` to Initial (0b01)
+/// while ensuring Vector extension (`sstatus.VS` bits [10:9]) remains Off (0b00)
+/// to strictly prevent silent vector state corruption.
+pub fn init_fp() {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        let mut sstatus: u64;
+        core::arch::asm!("csrr {}, sstatus", out(reg) sstatus, options(nomem, nostack, preserves_flags));
+        // Set FS bits [14:13] to Initial (0b01)
+        sstatus &= !(3u64 << 13);
+        sstatus |= 1u64 << 13;
+        // Clear VS bits [10:9] to Off (0b00)
+        sstatus &= !(3u64 << 9);
+        core::arch::asm!("csrw sstatus, {}", in(reg) sstatus, options(nomem, nostack, preserves_flags));
+    }
 }
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut RiscvContext, new_ctx: *const RiscvContext) {
     core::arch::naked_asm!(
-        "sd ra, 0*8(a0)",
-        "sd sp, 1*8(a0)",
-        "sd s0, 2*8(a0)",
-        "sd s1, 3*8(a0)",
-        "sd s2, 4*8(a0)",
-        "sd s3, 5*8(a0)",
-        "sd s4, 6*8(a0)",
-        "sd s5, 7*8(a0)",
-        "sd s6, 8*8(a0)",
-        "sd s7, 9*8(a0)",
-        "sd s8, 10*8(a0)",
-        "sd s9, 11*8(a0)",
-        "sd s10, 12*8(a0)",
-        "sd s11, 13*8(a0)",
-        "fsd fs0, 14*8(a0)",
-        "fsd fs1, 15*8(a0)",
-        "fsd fs2, 16*8(a0)",
-        "fsd fs3, 17*8(a0)",
-        "fsd fs4, 18*8(a0)",
-        "fsd fs5, 19*8(a0)",
-        "fsd fs6, 20*8(a0)",
-        "fsd fs7, 21*8(a0)",
-        "fsd fs8, 22*8(a0)",
-        "fsd fs9, 23*8(a0)",
-        "fsd fs10, 24*8(a0)",
-        "fsd fs11, 25*8(a0)",
+        // Save callee-saved general-purpose registers to old_ctx.x (a0)
+        "sd ra, 1*8(a0)",
+        "sd sp, 2*8(a0)",
+        "sd s0, 8*8(a0)",
+        "sd s1, 9*8(a0)",
+        "sd s2, 18*8(a0)",
+        "sd s3, 19*8(a0)",
+        "sd s4, 20*8(a0)",
+        "sd s5, 21*8(a0)",
+        "sd s6, 22*8(a0)",
+        "sd s7, 23*8(a0)",
+        "sd s8, 24*8(a0)",
+        "sd s9, 25*8(a0)",
+        "sd s10, 26*8(a0)",
+        "sd s11, 27*8(a0)",
+        // Save sepc (offset 256 = 32*8) and sstatus (offset 264 = 33*8)
+        "sd ra, 32*8(a0)",
+        "csrr t0, sstatus",
+        "sd t0, 33*8(a0)",
+        // Save full floating point register file f0-f31 (offset 272 = 34*8 to 65*8)
+        "fsd f0, 34*8(a0)",
+        "fsd f1, 35*8(a0)",
+        "fsd f2, 36*8(a0)",
+        "fsd f3, 37*8(a0)",
+        "fsd f4, 38*8(a0)",
+        "fsd f5, 39*8(a0)",
+        "fsd f6, 40*8(a0)",
+        "fsd f7, 41*8(a0)",
+        "fsd f8, 42*8(a0)",
+        "fsd f9, 43*8(a0)",
+        "fsd f10, 44*8(a0)",
+        "fsd f11, 45*8(a0)",
+        "fsd f12, 46*8(a0)",
+        "fsd f13, 47*8(a0)",
+        "fsd f14, 48*8(a0)",
+        "fsd f15, 49*8(a0)",
+        "fsd f16, 50*8(a0)",
+        "fsd f17, 51*8(a0)",
+        "fsd f18, 52*8(a0)",
+        "fsd f19, 53*8(a0)",
+        "fsd f20, 54*8(a0)",
+        "fsd f21, 55*8(a0)",
+        "fsd f22, 56*8(a0)",
+        "fsd f23, 57*8(a0)",
+        "fsd f24, 58*8(a0)",
+        "fsd f25, 59*8(a0)",
+        "fsd f26, 60*8(a0)",
+        "fsd f27, 61*8(a0)",
+        "fsd f28, 62*8(a0)",
+        "fsd f29, 63*8(a0)",
+        "fsd f30, 64*8(a0)",
+        "fsd f31, 65*8(a0)",
+        // Save FCSR floating-point status/control (offset 528 = 66*8)
+        "frcsr t0",
+        "sd t0, 66*8(a0)",
 
-        "ld ra, 0*8(a1)",
-        "ld sp, 1*8(a1)",
-        "ld s0, 2*8(a1)",
-        "ld s1, 3*8(a1)",
-        "ld s2, 4*8(a1)",
-        "ld s3, 5*8(a1)",
-        "ld s4, 6*8(a1)",
-        "ld s5, 7*8(a1)",
-        "ld s6, 8*8(a1)",
-        "ld s7, 9*8(a1)",
-        "ld s8, 10*8(a1)",
-        "ld s9, 11*8(a1)",
-        "ld s10, 12*8(a1)",
-        "ld s11, 13*8(a1)",
-        "fld fs0, 14*8(a1)",
-        "fld fs1, 15*8(a1)",
-        "fld fs2, 16*8(a1)",
-        "fld fs3, 17*8(a1)",
-        "fld fs4, 18*8(a1)",
-        "fld fs5, 19*8(a1)",
-        "fld fs6, 20*8(a1)",
-        "fld fs7, 21*8(a1)",
-        "fld fs8, 22*8(a1)",
-        "fld fs9, 23*8(a1)",
-        "fld fs10, 24*8(a1)",
-        "fld fs11, 25*8(a1)",
+        // Restore callee-saved general-purpose registers from new_ctx.x (a1)
+        "ld ra, 1*8(a1)",
+        "ld sp, 2*8(a1)",
+        "ld s0, 8*8(a1)",
+        "ld s1, 9*8(a1)",
+        "ld s2, 18*8(a1)",
+        "ld s3, 19*8(a1)",
+        "ld s4, 20*8(a1)",
+        "ld s5, 21*8(a1)",
+        "ld s6, 22*8(a1)",
+        "ld s7, 23*8(a1)",
+        "ld s8, 24*8(a1)",
+        "ld s9, 25*8(a1)",
+        "ld s10, 26*8(a1)",
+        "ld s11, 27*8(a1)",
+        // Restore full floating point register file f0-f31
+        "fld f0, 34*8(a1)",
+        "fld f1, 35*8(a1)",
+        "fld f2, 36*8(a1)",
+        "fld f3, 37*8(a1)",
+        "fld f4, 38*8(a1)",
+        "fld f5, 39*8(a1)",
+        "fld f6, 40*8(a1)",
+        "fld f7, 41*8(a1)",
+        "fld f8, 42*8(a1)",
+        "fld f9, 43*8(a1)",
+        "fld f10, 44*8(a1)",
+        "fld f11, 45*8(a1)",
+        "fld f12, 46*8(a1)",
+        "fld f13, 47*8(a1)",
+        "fld f14, 48*8(a1)",
+        "fld f15, 49*8(a1)",
+        "fld f16, 50*8(a1)",
+        "fld f17, 51*8(a1)",
+        "fld f18, 52*8(a1)",
+        "fld f19, 53*8(a1)",
+        "fld f20, 54*8(a1)",
+        "fld f21, 55*8(a1)",
+        "fld f22, 56*8(a1)",
+        "fld f23, 57*8(a1)",
+        "fld f24, 58*8(a1)",
+        "fld f25, 59*8(a1)",
+        "fld f26, 60*8(a1)",
+        "fld f27, 61*8(a1)",
+        "fld f28, 62*8(a1)",
+        "fld f29, 63*8(a1)",
+        "fld f30, 64*8(a1)",
+        "fld f31, 65*8(a1)",
+        // Restore FCSR
+        "ld t0, 66*8(a1)",
+        "fscsr t0",
 
         "ret",
     );
@@ -387,8 +485,8 @@ impl Scheduler {
         }
         let stack = Box::new([0u8; STACK_SIZE]);
         let mut context = RiscvContext::default();
-        context.sp = kstack_top as u64;
-        context.ra = user_process_entry as *const () as usize as u64;
+        context.set_sp(kstack_top as u64);
+        context.set_ra(user_process_entry as *const () as usize as u64);
 
         let mut cap_table = CapabilityTable::new();
         let _ = cap_table.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
@@ -441,8 +539,8 @@ impl Scheduler {
         let kernel_sp = ((stack.as_ptr() as usize) + STACK_SIZE) & !0x0F;
 
         let mut context = RiscvContext::default();
-        context.sp = kernel_sp as u64;
-        context.ra = user_process_entry as *const () as usize as u64;
+        context.set_sp(kernel_sp as u64);
+        context.set_ra(user_process_entry as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
@@ -497,8 +595,8 @@ impl Scheduler {
         let kernel_sp = ((stack.as_ptr() as usize) + STACK_SIZE) & !0x0F;
 
         let mut context = RiscvContext::default();
-        context.sp = kernel_sp as u64;
-        context.ra = user_process_entry as *const () as usize as u64;
+        context.set_sp(kernel_sp as u64);
+        context.set_ra(user_process_entry as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 

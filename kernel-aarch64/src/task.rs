@@ -20,77 +20,145 @@ pub const STACK_SIZE: usize = 16384; // 16 KiB per kernel task stack
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C, align(16))]
 pub struct ArmContext {
-    pub x19: u64,
-    pub x20: u64,
-    pub x21: u64,
-    pub x22: u64,
-    pub x23: u64,
-    pub x24: u64,
-    pub x25: u64,
-    pub x26: u64,
-    pub x27: u64,
-    pub x28: u64,
-    pub fp: u64, // x29
-    pub lr: u64, // x30
+    /// 31 general-purpose registers: x0-x30 (x29=FP, x30=LR) = 31 * 8 = 248 bytes
+    pub x: [u64; 31],
+    /// Dedicated stack pointer SP_EL0 = 8 bytes (offset 248)
     pub sp: u64,
-    pub _pad: u64,
-    // Callee-saved SIMD / FP registers (d8-d15 per AAPCS64)
-    pub d8: u64,
-    pub d9: u64,
-    pub d10: u64,
-    pub d11: u64,
-    pub d12: u64,
-    pub d13: u64,
-    pub d14: u64,
-    pub d15: u64,
+    /// Exception Link Register ELR_EL1 / Return PC = 8 bytes (offset 256)
+    pub elr: u64,
+    /// Saved Program Status Register SPSR_EL1 = 8 bytes (offset 264)
+    pub spsr: u64,
+    /// Full 128-bit SIMD / FP vector register bank: q0-q31 = 32 * 16 = 512 bytes (offset 272)
+    pub q: [u128; 32],
+    /// Floating-Point Control Register = 8 bytes (offset 784)
+    pub fpcr: u64,
+    /// Floating-Point Status Register = 8 bytes (offset 792)
+    pub fpsr: u64,
 }
+
+// Compile-time verification of layout, total size (800 bytes), 16-byte alignment, and exact field offsets
+const _: () = {
+    assert!(core::mem::size_of::<ArmContext>() == 800);
+    assert!(core::mem::align_of::<ArmContext>() == 16);
+    assert!(core::mem::offset_of!(ArmContext, x) == 0);
+    assert!(core::mem::offset_of!(ArmContext, sp) == 248);
+    assert!(core::mem::offset_of!(ArmContext, elr) == 256);
+    assert!(core::mem::offset_of!(ArmContext, spsr) == 264);
+    assert!(core::mem::offset_of!(ArmContext, q) == 272);
+    assert!(core::mem::offset_of!(ArmContext, fpcr) == 784);
+    assert!(core::mem::offset_of!(ArmContext, fpsr) == 792);
+};
 
 impl ArmContext {
     pub const fn empty() -> Self {
         Self {
-            x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
-            fp: 0, lr: 0, sp: 0, _pad: 0,
-            d8: 0, d9: 0, d10: 0, d11: 0, d12: 0, d13: 0, d14: 0, d15: 0,
+            x: [0u64; 31],
+            sp: 0,
+            elr: 0,
+            spsr: 0,
+            q: [0u128; 32],
+            fpcr: 0,
+            fpsr: 0,
         }
+    }
+
+    #[inline]
+    pub fn lr(&self) -> u64 {
+        self.x[30]
+    }
+
+    #[inline]
+    pub fn set_lr(&mut self, val: u64) {
+        self.x[30] = val;
+        self.elr = val;
+    }
+}
+
+/// Enables standard NEON/FP floating-point execution in EL0 and EL1 while strictly
+/// trapping unsupported SVE (ZEN=0) and SME (SMEN=0) instructions to prevent state leakage.
+pub fn init_fp_simd() {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let mut cpacr: u64;
+        core::arch::asm!("mrs {}, cpacr_el1", out(reg) cpacr, options(nomem, nostack, preserves_flags));
+        // Set FPEN bits [21:20] to 0b11 (enable full FP/SIMD at EL0 and EL1)
+        cpacr |= 3u64 << 20;
+        // Clear ZEN bits [17:16] to 0b00 (trap SVE instructions to #UD/exception)
+        cpacr &= !(3u64 << 16);
+        // Clear SMEN bits [25:24] to 0b00 (trap SME instructions)
+        cpacr &= !(3u64 << 24);
+        core::arch::asm!("msr cpacr_el1, {}", in(reg) cpacr, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
     }
 }
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *const ArmContext) {
     core::arch::naked_asm!(
-        // Save x19-x28 into old_ctx (x0)
-        "stp x19, x20, [x0, #0]",
-        "stp x21, x22, [x0, #16]",
-        "stp x23, x24, [x0, #32]",
-        "stp x25, x26, [x0, #48]",
-        "stp x27, x28, [x0, #64]",
-        // Save x29 (fp) and x30 (lr)
-        "stp x29, x30, [x0, #80]",
-        // Save current stack pointer
+        // Save callee-saved registers x19-x30 into old_ctx.x (x0)
+        "stp x19, x20, [x0, #152]",
+        "stp x21, x22, [x0, #168]",
+        "stp x23, x24, [x0, #184]",
+        "stp x25, x26, [x0, #200]",
+        "stp x27, x28, [x0, #216]",
+        "stp x29, x30, [x0, #232]",
+        // Save current stack pointer (offset 248) and return address (offset 256)
         "mov x2, sp",
-        "str x2, [x0, #96]",
-        // Save callee-saved SIMD/FP registers d8-d15 (AAPCS64)
-        "stp d8, d9, [x0, #112]",
-        "stp d10, d11, [x0, #128]",
-        "stp d12, d13, [x0, #144]",
-        "stp d14, d15, [x0, #160]",
+        "str x2, [x0, #248]",
+        "str x30, [x0, #256]",
+        // Save full 128-bit vector register bank q0-q31 (512 bytes at offset 272)
+        "stp q0, q1, [x0, #272]",
+        "stp q2, q3, [x0, #304]",
+        "stp q4, q5, [x0, #336]",
+        "stp q6, q7, [x0, #368]",
+        "stp q8, q9, [x0, #400]",
+        "stp q10, q11, [x0, #432]",
+        "stp q12, q13, [x0, #464]",
+        "stp q14, q15, [x0, #496]",
+        "stp q16, q17, [x0, #528]",
+        "stp q18, q19, [x0, #560]",
+        "stp q20, q21, [x0, #592]",
+        "stp q22, q23, [x0, #624]",
+        "stp q24, q25, [x0, #656]",
+        "stp q26, q27, [x0, #688]",
+        "stp q28, q29, [x0, #720]",
+        "stp q30, q31, [x0, #752]",
+        // Save FPCR and FPSR floating point status/control (offset 784)
+        "mrs x2, fpcr",
+        "mrs x3, fpsr",
+        "stp x2, x3, [x0, #784]",
 
-        // Restore x19-x28 from new_ctx (x1)
-        "ldp x19, x20, [x1, #0]",
-        "ldp x21, x22, [x1, #16]",
-        "ldp x23, x24, [x1, #32]",
-        "ldp x25, x26, [x1, #48]",
-        "ldp x27, x28, [x1, #64]",
-        // Restore x29 (fp) and x30 (lr)
-        "ldp x29, x30, [x1, #80]",
+        // Restore callee-saved registers x19-x30 from new_ctx.x (x1)
+        "ldp x19, x20, [x1, #152]",
+        "ldp x21, x22, [x1, #168]",
+        "ldp x23, x24, [x1, #184]",
+        "ldp x25, x26, [x1, #200]",
+        "ldp x27, x28, [x1, #216]",
+        "ldp x29, x30, [x1, #232]",
         // Restore stack pointer
-        "ldr x2, [x1, #96]",
+        "ldr x2, [x1, #248]",
         "mov sp, x2",
-        // Restore callee-saved SIMD/FP registers d8-d15
-        "ldp d8, d9, [x1, #112]",
-        "ldp d10, d11, [x1, #128]",
-        "ldp d12, d13, [x1, #144]",
-        "ldp d14, d15, [x1, #160]",
+        // Restore full 128-bit vector register bank q0-q31
+        "ldp q0, q1, [x1, #272]",
+        "ldp q2, q3, [x1, #304]",
+        "ldp q4, q5, [x1, #336]",
+        "ldp q6, q7, [x1, #368]",
+        "ldp q8, q9, [x1, #400]",
+        "ldp q10, q11, [x1, #432]",
+        "ldp q12, q13, [x1, #464]",
+        "ldp q14, q15, [x1, #496]",
+        "ldp q16, q17, [x1, #528]",
+        "ldp q18, q19, [x1, #560]",
+        "ldp q20, q21, [x1, #592]",
+        "ldp q22, q23, [x1, #624]",
+        "ldp q24, q25, [x1, #656]",
+        "ldp q26, q27, [x1, #688]",
+        "ldp q28, q29, [x1, #720]",
+        "ldp q30, q31, [x1, #752]",
+        // Restore FPCR and FPSR
+        "ldp x2, x3, [x1, #784]",
+        "msr fpcr, x2",
+        "msr fpsr, x3",
 
         // Branch to restored lr (x30)
         "ret",
@@ -224,7 +292,7 @@ impl Scheduler {
 
         let mut context = ArmContext::default();
         context.sp = aligned_sp;
-        context.lr = entry_fn as *const () as usize as u64;
+        context.set_lr(entry_fn as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
@@ -272,7 +340,7 @@ impl Scheduler {
 
         let mut context = ArmContext::default();
         context.sp = kernel_sp;
-        context.lr = user_process_entry as *const () as usize as u64;
+        context.set_lr(user_process_entry as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
@@ -321,7 +389,7 @@ impl Scheduler {
         let kernel_sp = ((stack.as_ptr() as u64) + STACK_SIZE as u64) & !0x0F;
         let mut context = ArmContext::default();
         context.sp = kernel_sp;
-        context.lr = user_process_entry as *const () as usize as u64;
+        context.set_lr(user_process_entry as *const () as usize as u64);
 
         let cap_table = CapabilityTable::new();
         self.tasks.push(TaskControlBlock {
@@ -373,7 +441,7 @@ impl Scheduler {
 
         let mut context = ArmContext::default();
         context.sp = kernel_sp;
-        context.lr = user_process_entry as *const () as usize as u64;
+        context.set_lr(user_process_entry as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
@@ -752,7 +820,9 @@ pub fn test_context_switching() {
         TEST_SWITCH_FLAG = 0;
         let stack_top = (core::ptr::addr_of!(WORKER_STACK) as u64) + 8192;
         WORKER_CTX.sp = stack_top & !0x0F;
-        WORKER_CTX.lr = test_worker_entry as *const () as usize as u64;
+        let mut wctx = WORKER_CTX;
+        wctx.set_lr(test_worker_entry as *const () as usize as u64);
+        WORKER_CTX = wctx;
 
         switch_context(core::ptr::addr_of_mut!(MAIN_CTX), core::ptr::addr_of!(WORKER_CTX));
 

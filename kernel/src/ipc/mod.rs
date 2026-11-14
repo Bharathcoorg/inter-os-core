@@ -535,6 +535,15 @@ mod tests {
     fn test_ipc_router_adversarial_suite() {
         run_ipc_adversarial_tests();
     }
+
+    #[test]
+    fn test_provenance_service_impersonation_rejection() {
+        let rogue_task = TaskId(99);
+        let prov = MessageProvenance::derive(rogue_task);
+        assert_eq!(prov, MessageProvenance::UserTask(rogue_task));
+        assert_ne!(prov, MessageProvenance::Kernel);
+        assert_ne!(prov, MessageProvenance::SystemService(0));
+    }
 }
 
 

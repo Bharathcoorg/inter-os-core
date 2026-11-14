@@ -422,10 +422,80 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     print(f"\n  [STRESS ITERATION {iter_num}] All lifecycle operations completed successfully.")
 
 
+def execute_post_stabilization_cycles(reader, serial_sock, baseline, num_cycles=100):
+    print("\n" + "=" * 68)
+    print(f"  EXTENDED POST-STABILIZATION WORKLOAD: {num_cycles} CYCLES")
+    print("=" * 68)
+
+    app_configs = [
+        # Calculator: drawer tap at (359, 256), present marker, in-app tap (100, 680), exit (360, 1420)
+        {
+            "name": "Calculator",
+            "tap": (359, 256),
+            "marker": "Initial frame presented to hardware scanout.",
+            "in_app_tap": (100, 680),
+        },
+        # Calendar: drawer tap at (359, 622), present marker, exit (360, 1420)
+        {
+            "name": "Calendar",
+            "tap": (359, 622),
+            "marker": "Calendar canvas presented to scanout buffer.",
+            "in_app_tap": None,
+        },
+        # Dialer: drawer tap at (146, 256), present marker, in-app tap (360, 1050), exit (360, 1420)
+        {
+            "name": "Dialer",
+            "tap": (146, 256),
+            "marker": "Keypad frame presented.",
+            "in_app_tap": (360, 1050),
+        },
+    ]
+
+    t_start = time.time()
+    for cycle in range(1, num_cycles + 1):
+        cfg = app_configs[(cycle - 1) % len(app_configs)]
+
+        # 1. Open app drawer via dock tap at (590, 1110)
+        reader.send(b"TAP 590 1110\n")
+        assert reader.wait_for("render_app_drawer complete", timeout=15.0), f"Cycle {cycle}: drawer open failed"
+
+        # 2. Tap application icon
+        reader.send(f"TAP {cfg['tap'][0]} {cfg['tap'][1]}\n".encode('ascii'))
+        assert reader.wait_for(cfg["marker"], timeout=20.0), f"Cycle {cycle}: {cfg['name']} launch failed"
+
+        # 3. Optional in-app input
+        if cfg["in_app_tap"]:
+            reader.send(f"TAP {cfg['in_app_tap'][0]} {cfg['in_app_tap'][1]}\n".encode('ascii'))
+            time.sleep(0.05)
+
+        # 4. Exit via Home gesture bar (360, 1420)
+        reader.send(b"TAP 360 1420\n")
+        assert reader.wait_for("Foreground application exited and was reaped", timeout=15.0), f"Cycle {cycle}: reaping failed"
+        assert reader.wait_for("Home surface rendered.", timeout=15.0), f"Cycle {cycle}: home render failed"
+
+        # Periodically check telemetry and log progress
+        if cycle % 20 == 0 or cycle == num_cycles:
+            elapsed = time.time() - t_start
+            diag = query_diag_state(serial_sock, reader)
+            print(f"[EXTENDED CYCLE {cycle:3d}/{num_cycles}] ({elapsed:.1f}s) tasks={diag['tasks_active']} "
+                  f"surfaces={diag['surfaces']} shm={diag['shm_pipes']} mailboxes={diag['mailboxes']} "
+                  f"heap={diag['heap_used']} B (delta: {diag['heap_used'] - baseline['heap_used']:+d} B)")
+            assert diag["surfaces"] == baseline["surfaces"], f"Surface leak at cycle {cycle}"
+            assert diag["tasks_active"] == baseline["tasks_active"], f"Task leak at cycle {cycle}"
+            assert diag["shm_pipes"] == baseline["shm_pipes"], f"SHM leak at cycle {cycle}"
+            assert diag["mailboxes"] == baseline["mailboxes"], f"Mailbox leak at cycle {cycle}"
+
+    total_time = time.time() - t_start
+    print(f"\n[EXTENDED SUCCESS] Completed {num_cycles} post-stabilization cycles in {total_time:.1f}s ({total_time/num_cycles:.2f}s/cycle).")
+    final_diag = query_diag_state(serial_sock, reader)
+    return final_diag
+
+
 def main():
     parser = argparse.ArgumentParser(description="Deterministic InterOS Lifecycle Stress Test")
     parser.add_argument("--iterations", type=int, default=10, help="Number of lifecycle iterations (default: 10)")
     parser.add_argument("--quick", action="store_true", help="Quick mode (3 iterations)")
+    parser.add_argument("--extended-cycles", type=int, default=0, help="Number of post-stabilization lifecycle cycles to execute (e.g. 100)")
     parser.add_argument("--screendump", action="store_true", help="Record framebuffer screendump on first iteration")
     args = parser.parse_args()
 
@@ -666,6 +736,13 @@ def main():
         print(f"[LEAK ANALYSIS] Subsequent Drift (Iter 1 -> {total_iterations}): {subsequent_drift} bytes (STABLE)")
         print(f"[LEAK ANALYSIS] No monotonic leak detected across {total_iterations} full smartphone lifecycle iterations.")
 
+        extended_drift = 0
+        if args.extended_cycles > 0:
+            final_diag = execute_post_stabilization_cycles(reader, serial_sock, baseline, args.extended_cycles)
+            extended_drift = final_diag["heap_used"] - heap_counts[-1]
+            print(f"[EXTENDED DRIFT] Heap drift across {args.extended_cycles} post-stabilization cycles: {extended_drift:+d} bytes")
+            assert extended_drift == 0, f"FORBIDDEN: Heap drifted across post-stabilization cycles: {extended_drift} B"
+
         out_report = ROOT / "target" / "stress_metrics.json"
         out_report.parent.mkdir(exist_ok=True)
         with open(out_report, "w", encoding="utf-8") as f:
@@ -673,7 +750,9 @@ def main():
                 "target": "x86_64",
                 "iterations_completed": total_iterations,
                 "operations_per_iteration": 20,
-                "total_phase_transitions": total_iterations * 20,
+                "total_phase_transitions": total_iterations * 20 + args.extended_cycles,
+                "extended_cycles_completed": args.extended_cycles,
+                "post_stabilization_drift_bytes": extended_drift,
                 "baseline": baseline,
                 "metrics_history": metrics_history,
                 "max_heap_drift_bytes": total_heap_growth,
@@ -686,15 +765,16 @@ def main():
                 "shm_pipes_leaked": 0,
                 "result": "PASS",
                 "evidence_statement": (
-                    f"No monotonic resource growth detected across {total_iterations} iterations ({total_iterations*20} operations). "
-                    f"Initial +{iter1_drift} B allocation classified as {classification}; "
+                    f"No monotonic resource growth detected across {total_iterations} iterations ({total_iterations*20} operations) "
+                    + (f"plus {args.extended_cycles} post-stabilization cycles. " if args.extended_cycles > 0 else ". ")
+                    + f"Initial +{iter1_drift} B allocation classified as {classification}; "
                     + (f"subsequent drift is bounded ({subsequent_drift} B) with strictly 0 B tail drift across final {tail_window} iterations." if subsequent_drift > 0 else "subsequent drift is strictly 0 B.")
                 )
             }, f, indent=2)
 
         print(f"[STRESS REPORT] Machine-readable metrics saved to: {out_report}")
         print("\n" + "=" * 68)
-        print(f"  LIFECYCLE STRESS TEST: PASSED (100%) ({total_iterations} iterations, {total_iterations*20} operations)")
+        print(f"  LIFECYCLE STRESS TEST: PASSED (100%) ({total_iterations} iterations, {total_iterations*20 + args.extended_cycles} operations)")
         print("=" * 68)
         return 0
 

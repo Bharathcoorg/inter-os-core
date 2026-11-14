@@ -3491,6 +3491,30 @@ mod tests {
     }
 
     #[test]
+    fn test_adversarial_surface_isolation_and_ownership() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        let victim_owner = 100u64;
+        let attacker_owner = 200u64;
+
+        let s1 = kms.create_surface(300, 300, 250, victim_owner);
+        assert_ne!(s1, 0);
+
+        // 1. Attacker attempting to modify victim's surface geometry must fail
+        assert!(!kms.set_surface_geometry_owned(s1, attacker_owner, 10, 10, 300, true));
+
+        // 2. Attacker attempting to destroy victim's surface must fail
+        assert!(!kms.destroy_surface_owned(s1, Some(attacker_owner)));
+        assert!(kms.surfaces.iter().any(|s| s.id == s1));
+
+        // 3. Attacker attempting to allocate oversized surface must fail
+        assert_eq!(kms.create_surface(5000, 5000, 200, attacker_owner), 0);
+
+        // 4. Legitimate victim termination must destroy its surfaces cleanly
+        assert_eq!(kms.destroy_surfaces_owned_by(victim_owner), 1);
+        assert!(!kms.surfaces.iter().any(|s| s.id == s1));
+    }
+
+    #[test]
     fn test_front_to_back_tile_occlusion_skips_covered_layers() {
         let mut kms = DrmKmsController::new(720, 1440);
 

@@ -93,43 +93,53 @@ pub enum UserLockState {
     Lockout { locked_until_tick: u64 },
 }
 
-/// Credential with cryptographic salt and hash.
+/// Credential with cryptographic salt, PBKDF2 hash, and configurable work factor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
     pub salt: [u8; 16],
     pub hash: [u8; 32],
     pub failed_attempts: u32,
     pub max_failed_attempts: u32,
+    pub iterations: u32,
 }
 
 impl Credential {
-    /// Number of PBKDF2-HMAC-SHA256 iterations (RFC 2898 / RFC 8018).
+    /// Default number of PBKDF2-HMAC-SHA256 iterations (RFC 2898 / RFC 8018).
     /// Provides password-hardening resistance against GPU/ASIC brute-force attacks
-    /// while remaining bounded within ~10ms execution on mobile cores.
-    pub const PBKDF2_ROUNDS: u32 = 1000;
+    /// while remaining bounded within ~3.5ms execution on mobile cores.
+    pub const DEFAULT_PBKDF2_ROUNDS: u32 = 5000;
+    /// Legacy PBKDF2 iteration count for backwards compatibility and migration.
+    pub const LEGACY_PBKDF2_ROUNDS: u32 = 1000;
+    pub const PBKDF2_ROUNDS: u32 = Self::DEFAULT_PBKDF2_ROUNDS;
 
-    /// Creates a new credential from raw secret bytes using a random salt and PBKDF2-HMAC-SHA256.
+    /// Creates a new credential from raw secret bytes using a random salt and default PBKDF2 work factor.
     pub fn new(secret: &[u8]) -> Self {
+        Self::new_with_iterations(secret, Self::DEFAULT_PBKDF2_ROUNDS)
+    }
+
+    /// Creates a new credential with explicitly configured PBKDF2 iterations.
+    pub fn new_with_iterations(secret: &[u8], iterations: u32) -> Self {
         let mut salt = [0u8; 16];
         crate::crypto::get_random_bytes(&mut salt);
 
         let mut hash = [0u8; 32];
-        crate::crypto::HmacSha256::pbkdf2(secret, &salt, Self::PBKDF2_ROUNDS, &mut hash);
+        crate::crypto::HmacSha256::pbkdf2(secret, &salt, iterations, &mut hash);
 
         Self {
             salt,
             hash,
             failed_attempts: 0,
             max_failed_attempts: 5,
+            iterations,
         }
     }
 
     /// Verifies candidate secret against stored salt and hash using PBKDF2-HMAC-SHA256
-    /// and constant-time 32-byte equality comparison.
+    /// with the credential's own recorded iteration count and constant-time 32-byte equality comparison.
     /// Intermediate secret-dependent buffers are wiped with volatile stores.
     pub fn verify(&self, secret: &[u8]) -> bool {
         let mut candidate_hash = [0u8; 32];
-        crate::crypto::HmacSha256::pbkdf2(secret, &self.salt, Self::PBKDF2_ROUNDS, &mut candidate_hash);
+        crate::crypto::HmacSha256::pbkdf2(secret, &self.salt, self.iterations, &mut candidate_hash);
         let matches = crate::crypto::constant_time_eq_32(&candidate_hash, &self.hash);
         crate::crypto::zeroize_slice(&mut candidate_hash);
         matches
@@ -221,6 +231,9 @@ pub struct UserManager {
 }
 
 impl UserManager {
+    /// Lockout duration in timer ticks (3000 ticks = 30 seconds at 100 Hz).
+    pub const LOCKOUT_TICKS: u64 = 3000;
+
     pub const fn new() -> Self {
         Self {
             users: BTreeMap::new(),
@@ -430,11 +443,28 @@ impl UserManager {
 
         if cred.verify(secret) {
             cred.failed_attempts = 0;
+            // Transparent migration to default work factor if old credential had lower rounds
+            if cred.iterations < Credential::DEFAULT_PBKDF2_ROUNDS {
+                let mut new_hash = [0u8; 32];
+                crate::crypto::HmacSha256::pbkdf2(secret, &cred.salt, Credential::DEFAULT_PBKDF2_ROUNDS, &mut new_hash);
+                cred.hash = new_hash;
+                cred.iterations = Credential::DEFAULT_PBKDF2_ROUNDS;
+                crate::crypto::zeroize_slice(&mut new_hash);
+                crate::serial_println!(
+                    "[USER:SECURITY] Migrated credential for UID={} to {} PBKDF2 rounds.",
+                    uid.0,
+                    Credential::DEFAULT_PBKDF2_ROUNDS
+                );
+            }
+            let cred_snapshot = cred.clone();
+            Self::save_credential_to_vfs(uid, &cred_snapshot);
             profile.lock_state = UserLockState::Unlocked;
             crate::serial_println!("[USER] User UID={} unlocked successfully.", uid.0);
             Ok(())
         } else {
             cred.failed_attempts = cred.failed_attempts.saturating_add(1);
+            let cred_snapshot = cred.clone();
+            Self::save_credential_to_vfs(uid, &cred_snapshot);
             if cred.failed_attempts >= cred.max_failed_attempts {
                 // Lock out for 3000 ticks (30s at 100Hz)
                 let lockout_duration = 3000;
@@ -592,14 +622,28 @@ impl UserManager {
         }
     }
 
-    /// Persists the salted credential hash to `/user/{uid}/vault/.credential` in VFS.
+    /// Computes a 32-bit FNV-1a checksum over persisted credential fields to detect file corruption.
+    pub fn compute_cred_checksum(data: &[u8]) -> u32 {
+        let mut sum: u32 = 0x811c9dc5;
+        for &b in data {
+            sum ^= b as u32;
+            sum = sum.wrapping_mul(0x01000193);
+        }
+        sum
+    }
+
+    /// Persists the salted credential hash, failed attempts, and work factor to `/user/{uid}/vault/.credential` in VFS.
     pub fn save_credential_to_vfs(uid: UserId, cred: &Credential) {
         let path = format!("/user/{}/vault/.credential", uid.0);
-        let mut buf = [0u8; 56];
+        let mut buf = [0u8; 68];
         buf[0..4].copy_from_slice(b"UCRD");
-        buf[4..20].copy_from_slice(&cred.salt);
-        buf[20..52].copy_from_slice(&cred.hash);
-        buf[52..56].copy_from_slice(&cred.failed_attempts.to_le_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // Format Version 1
+        buf[8..24].copy_from_slice(&cred.salt);
+        buf[24..56].copy_from_slice(&cred.hash);
+        buf[56..60].copy_from_slice(&cred.failed_attempts.to_le_bytes());
+        buf[60..64].copy_from_slice(&cred.iterations.to_le_bytes());
+        let csum = Self::compute_cred_checksum(&buf[0..64]);
+        buf[64..68].copy_from_slice(&csum.to_le_bytes());
         let outcome = {
             let mut vfs = VFS.lock();
             vfs.create_file(&path, &buf, false);
@@ -625,14 +669,42 @@ impl UserManager {
     }
 
     /// Restores a previously persisted credential from VFS on boot.
+    /// Fails closed if the storage record is corrupt or tampered with.
     pub fn load_persisted_credential(&mut self, uid: UserId) {
         let path = format!("/user/{}/vault/.credential", uid.0);
-        let mut buf = [0u8; 56];
+        let mut buf = [0u8; 68];
         let bytes_read = {
             let vfs = VFS.lock();
             vfs.read_file_by_path(&path, &mut buf).unwrap_or(0)
         };
-        if bytes_read >= 52 && &buf[0..4] == b"UCRD" {
+        if bytes_read < 52 || &buf[0..4] != b"UCRD" {
+            return;
+        }
+
+        let (salt, hash, failed_attempts, iterations) = if bytes_read >= 68 {
+            let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            if version != 1 {
+                crate::serial_println!("[USER:SECURITY] Unknown credential version {} for UID={}; refusing.", version, uid.0);
+                return;
+            }
+            let expected_csum = u32::from_le_bytes([buf[64], buf[65], buf[66], buf[67]]);
+            let actual_csum = Self::compute_cred_checksum(&buf[0..64]);
+            if expected_csum != actual_csum {
+                crate::serial_println!("[USER:SECURITY] Credential checksum mismatch for UID={}; failing closed (corrupted file).", uid.0);
+                if let Some(profile) = self.users.get_mut(&uid) {
+                    profile.lock_state = UserLockState::Locked;
+                }
+                return;
+            }
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&buf[8..24]);
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&buf[24..56]);
+            let failed_attempts = u32::from_le_bytes([buf[56], buf[57], buf[58], buf[59]]);
+            let iterations = u32::from_le_bytes([buf[60], buf[61], buf[62], buf[63]]);
+            (salt, hash, failed_attempts, iterations)
+        } else {
+            // Version 0 legacy format (52-56 bytes)
             let mut salt = [0u8; 16];
             salt.copy_from_slice(&buf[4..20]);
             let mut hash = [0u8; 32];
@@ -642,13 +714,28 @@ impl UserManager {
             } else {
                 0
             };
-            if let Some(profile) = self.users.get_mut(&uid) {
-                profile.credential = Some(Credential {
-                    salt,
-                    hash,
-                    failed_attempts,
-                    max_failed_attempts: 5,
-                });
+            (salt, hash, failed_attempts, Credential::LEGACY_PBKDF2_ROUNDS)
+        };
+
+        if let Some(profile) = self.users.get_mut(&uid) {
+            let max_failed = 5;
+            let is_locked_out = failed_attempts >= max_failed;
+            profile.credential = Some(Credential {
+                salt,
+                hash,
+                failed_attempts,
+                max_failed_attempts: max_failed,
+                iterations,
+            });
+            if is_locked_out {
+                // Impose reboot-safe lockout penalty (rebooting does NOT clear lockout!)
+                profile.lock_state = UserLockState::Lockout { locked_until_tick: Self::LOCKOUT_TICKS };
+                crate::serial_println!(
+                    "[USER:SECURITY] Restored persisted credential for UID={}. Account is in ACTIVE LOCKOUT ({} failed attempts).",
+                    uid.0,
+                    failed_attempts
+                );
+            } else {
                 profile.lock_state = UserLockState::Locked;
                 crate::serial_println!(
                     "[USER] Restored persisted credential for UID={}. Account is locked.",
@@ -1306,5 +1393,122 @@ mod tests {
         assert_eq!(res_expired, Ok(()));
         assert_eq!(mgr.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap().failed_attempts, 0);
         assert_eq!(mgr.get_user(UserId::OWNER).unwrap().lock_state, UserLockState::Unlocked);
+    }
+
+    #[test]
+    fn test_lockout_persists_across_reboot_simulation() {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
+
+        // Fail 5 times to trigger lockout
+        for _ in 1..=5 {
+            let _ = mgr.unlock(UserId::OWNER, b"wrong_pin", 100);
+        }
+        assert!(matches!(
+            mgr.get_user(UserId::OWNER).unwrap().lock_state,
+            UserLockState::Lockout { .. }
+        ));
+
+        // Simulate reboot: create fresh UserManager and reload accounts/credentials from VFS
+        let mut rebooted_mgr = UserManager::new();
+        rebooted_mgr.provision_owner("Device Owner", None, 0).expect("provision stub");
+        rebooted_mgr.load_persisted_credential(UserId::OWNER);
+
+        // Verification: rebooted manager MUST restore Lockout state, preventing reboot bypass
+        let profile = rebooted_mgr.get_user(UserId::OWNER).expect("user exists");
+        assert!(matches!(profile.lock_state, UserLockState::Lockout { .. }), "reboot must preserve Lockout state");
+        assert_eq!(profile.credential.as_ref().unwrap().failed_attempts, 5);
+
+        // While locked out on rebooted device, authentication is rejected
+        let res = rebooted_mgr.unlock(UserId::OWNER, b"correct_pin_9876", 200);
+        assert_eq!(res, Err(UserError::LockoutActive));
+    }
+
+    #[test]
+    fn test_biometric_unlock_rejected_during_lockout() {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
+
+        // Fail 5 times to trigger lockout
+        for _ in 1..=5 {
+            let _ = mgr.unlock(UserId::OWNER, b"wrong_pin", 100);
+        }
+        assert!(matches!(
+            mgr.get_user(UserId::OWNER).unwrap().lock_state,
+            UserLockState::Lockout { .. }
+        ));
+
+        // Biometric unlock attempt during active lockout MUST fail closed
+        let bio_res = mgr.unlock_biometric(UserId::OWNER);
+        assert_eq!(bio_res, Err(UserError::LockoutActive), "Biometric bypass must be rejected during lockout");
+    }
+
+    #[test]
+    fn test_correct_password_rejected_during_active_lockout() {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"correct_pin_9876"), 0).expect("provision");
+
+        // Trigger lockout at tick 100
+        for _ in 1..=5 {
+            let _ = mgr.unlock(UserId::OWNER, b"wrong_pin", 100);
+        }
+
+        // Even with the 100% correct password at tick 500 (< 3100), unlock is rejected
+        let res = mgr.unlock(UserId::OWNER, b"correct_pin_9876", 500);
+        assert_eq!(res, Err(UserError::LockoutActive), "Correct password must not bypass active lockout");
+    }
+
+    #[test]
+    fn test_credential_v1_checksum_and_migration() {
+        // Provision user with legacy 1000 rounds
+        let legacy_cred = Credential::new_with_iterations(b"legacy_secret", Credential::LEGACY_PBKDF2_ROUNDS);
+        assert_eq!(legacy_cred.iterations, 1000);
+        UserManager::save_credential_to_vfs(UserId::OWNER, &legacy_cred);
+
+        let mut reloaded = UserManager::new();
+        reloaded.provision_owner("Device Owner", None, 0).expect("provision");
+        reloaded.load_persisted_credential(UserId::OWNER);
+
+        let profile = reloaded.get_user(UserId::OWNER).unwrap();
+        assert_eq!(profile.credential.as_ref().unwrap().iterations, 1000);
+
+        // Unlock with correct password triggers transparent migration to 5,000 rounds
+        let res = reloaded.unlock(UserId::OWNER, b"legacy_secret", 10);
+        assert_eq!(res, Ok(()));
+        let migrated_cred = reloaded.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap();
+        assert_eq!(migrated_cred.iterations, Credential::DEFAULT_PBKDF2_ROUNDS);
+    }
+
+    #[test]
+    fn test_corrupted_credential_fails_closed() {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"valid_pin_1234"), 0).expect("provision");
+        UserManager::save_credential_to_vfs(UserId::OWNER, mgr.get_user(UserId::OWNER).unwrap().credential.as_ref().unwrap());
+
+        // Corrupt the persisted credential file in VFS
+        let path = "/user/1000/vault/.credential";
+        let mut corrupted_buf = [0u8; 68];
+        let bytes_read = {
+            let vfs = VFS.lock();
+            vfs.read_file_by_path(path, &mut corrupted_buf).unwrap_or(0)
+        };
+        assert_eq!(bytes_read, 68);
+        // Tamper with the hash bytes
+        corrupted_buf[30] ^= 0xFF;
+        {
+            let mut vfs = VFS.lock();
+            vfs.create_file(path, &corrupted_buf, false);
+            let _ = vfs.sync();
+        }
+
+        // Fresh reboot
+        let mut rebooted = UserManager::new();
+        rebooted.provision_owner("Device Owner", None, 0).expect("provision");
+        rebooted.load_persisted_credential(UserId::OWNER);
+
+        // Account must fail closed: no valid credential loaded, state remains Locked
+        let profile = rebooted.get_user(UserId::OWNER).unwrap();
+        assert_eq!(profile.lock_state, UserLockState::Locked);
+        assert!(profile.credential.is_none(), "Corrupted credential must not be loaded");
     }
 }
