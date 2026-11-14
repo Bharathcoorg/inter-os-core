@@ -444,6 +444,10 @@ fn dispatch_irq() {
         let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
         timer.program_countdown(countdown);
         crate::gic::end_of_interrupt(irq);
+    } else if irq < 16 {
+        // SGIs (0..15) Software Generated Interrupts
+        crate::gic::handle_sgi(irq);
+        crate::gic::end_of_interrupt(irq);
     } else if irq < 1020 {
         crate::gic::end_of_interrupt(irq);
     }

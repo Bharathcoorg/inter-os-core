@@ -683,4 +683,70 @@ mod tests {
         poly1305_mac(&key, msg, &mut tag);
         assert_eq!(tag, expected_tag, "Poly1305 MAC must match RFC 8439 Section 2.5.2 test vector");
     }
+
+    #[test]
+    fn test_rfc8439_various_payload_sizes() {
+        let key = [0x5au8; 32];
+        let nonce = [0xa5u8; 12];
+        let aad = b"header_metadata";
+        let sizes = [1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024];
+
+        for &sz in &sizes {
+            let mut plaintext = alloc::vec![0u8; sz];
+            for (i, byte) in plaintext.iter_mut().enumerate() {
+                *byte = ((i * 3 + 7) & 0xFF) as u8;
+            }
+            let original = plaintext.clone();
+            let mut buffer = plaintext.clone();
+            let mut tag = [0u8; 16];
+
+            ChaCha20Poly1305::seal(&key, &nonce, aad, &mut buffer, &mut tag)
+                .expect("seal failed for size");
+            assert_ne!(&buffer, &original);
+
+            // Tamper tag
+            let mut bad_tag = tag;
+            bad_tag[0] ^= 0x01;
+            assert_eq!(
+                ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &bad_tag),
+                Err(AeadError::IntegrityViolation)
+            );
+            assert_ne!(&buffer, &original, "Buffer must remain intact ciphertext on failure");
+
+            // Open with valid tag
+            ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &tag)
+                .expect("open failed for size");
+            assert_eq!(&buffer, &original);
+        }
+    }
+
+    #[test]
+    fn test_rfc8439_tag_tampering_comprehensive() {
+        let key = [0x99u8; 32];
+        let nonce = [0x88u8; 12];
+        let aad = b"AAD_VERIFY";
+        let mut buffer = *b"Tamper resilience across all 16 tag bytes";
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, aad, &mut buffer, &mut tag).expect("seal failed");
+
+        for byte_idx in 0..16 {
+            let mut bad_tag = tag;
+            bad_tag[byte_idx] ^= 0x01; // flip LSB
+            assert_eq!(
+                ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &bad_tag),
+                Err(AeadError::IntegrityViolation),
+                "Tampered tag byte {} (LSB) must be rejected",
+                byte_idx
+            );
+
+            bad_tag[byte_idx] ^= 0x81; // flip MSB
+            assert_eq!(
+                ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &bad_tag),
+                Err(AeadError::IntegrityViolation),
+                "Tampered tag byte {} (MSB) must be rejected",
+                byte_idx
+            );
+        }
+    }
 }

@@ -107,5 +107,71 @@ global_asm!(
     .Lhalt:
         wfe
         b .Lhalt
+
+    .global secondary_cpu_entry
+    secondary_cpu_entry:
+        // 1. Inspect execution level (CurrentEL[3:2])
+        mrs x1, CurrentEL
+        lsr x1, x1, #2
+        cmp x1, #2
+        b.ne .Lsecondary_el1_entry
+
+        // In EL2: Prepare clean transition to EL1
+        mov x2, #3
+        msr cnthctl_el2, x2
+        msr cntvoff_el2, xzr
+        msr cptr_el2, xzr
+
+        mrs x2, id_aa64pfr0_el1
+        ubfx x2, x2, #24, #4
+        cbz x2, 1f
+        mov x2, #0x09
+        msr s3_4_c12_c9_5, x2
+        isb
+1:
+        mov x2, #(1 << 31)
+        msr hcr_el2, x2
+        mov x2, #0x3c5
+        msr spsr_el2, x2
+        adr x2, .Lsecondary_el1_entry
+        msr elr_el2, x2
+        eret
+
+    .Lsecondary_el1_entry:
+        dsb ish
+        ic iallu
+        dsb ish
+        isb
+
+        tlbi vmalle1
+        dsb ish
+        isb
+
+        mrs x2, sctlr_el1
+        mov x3, #0x1005
+        bic x2, x2, x3
+        mov x3, #(3 << 3)
+        orr x2, x2, x3
+        msr sctlr_el1, x2
+        isb
+
+        mov x2, #(3 << 20)
+        msr cpacr_el1, x2
+        isb
+
+        // Set dedicated secondary boot stack pointer
+        adrp x1, __secondary_stack_top
+        add sp, x1, :lo12:__secondary_stack_top
+
+        // Enter Rust secondary CPU main
+        bl secondary_cpu_main
+
+    .Lsecondary_halt:
+        wfe
+        b .Lsecondary_halt
     "#
 );
+
+extern "C" {
+    pub fn secondary_cpu_entry();
+}

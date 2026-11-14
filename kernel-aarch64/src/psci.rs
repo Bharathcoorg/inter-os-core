@@ -29,6 +29,7 @@ pub enum PsciConduit {
     Emulated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PsciController {
     pub conduit: PsciConduit,
     pub major_version: u16,

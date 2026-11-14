@@ -12,3 +12,4 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+spin = "0.9.8"

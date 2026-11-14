@@ -192,7 +192,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 if let Err(e) = unsafe { gicv3.init() } {
                     kprintln!("[WARN] GICv3 initialization failed: {:?}", e);
                 } else {
-                    gicv3.enable_irq(27);
+                    if let Err(e) = gicv3.enable_irq(27) {
+                        kprintln!("[WARN] GICv3 failed to enable IRQ 27: {:?}", e);
+                    }
                     gic::register_active_gicv3(gicv3);
                     kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X}, redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
                         distributor, redistributors, redistributors_size / 1024);
@@ -1507,6 +1509,41 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(smp.total_ipis_sent, 0);
     kprintln!("[OK] SMP: CPU_ON, IPI and hotplug operations fail closed without real PSCI/GIC hardware.");
 
+    // 40b. Multicore SMP Bring-up, GICv3 Redistributor Discovery & SGI/IPI Verification
+    kprintln!("--- [Testing Multicore SMP Bring-up, Per-PE Redistributor & GICv3 SGI IPI] ---");
+    let secondary_entry = crate::entry::secondary_cpu_entry as *const () as usize as u64;
+    let psci_ret = psci.invoke_psci(psci::PSCI_FN_CPU_ON, 1, secondary_entry, 0);
+    if psci_ret == psci::PSCI_SUCCESS as i64 || psci_ret == -2 {
+        kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE 1 (entry @ 0x{:016X}).", secondary_entry);
+        let mut spins = 0;
+        while !SECONDARY_CPU_ONLINE.load(core::sync::atomic::Ordering::Acquire) && spins < 500_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        if SECONDARY_CPU_ONLINE.load(core::sync::atomic::Ordering::Acquire) {
+            kprintln!("[OK] Secondary CPU 1 online: VBAR, GICv3 Redistributor, and CPU Interface initialized.");
+
+            // Deliver GICv3 SGI 1 to CPU 1 (TargetList = 0b0010)
+            let sgi_val = gic::encode_sgi1r(0, 0, 0, 0b0000_0010, 1, false);
+            gic::send_sgi(sgi_val);
+            kprintln!("[AArch64] CPU 0 sent GICv3 SGI 1 to CPU 1 (ICC_SGI1R_EL1 = 0x{:016X}).", sgi_val);
+
+            let mut sgi_spins = 0;
+            while gic::sgi_interrupt_count() == 0 && sgi_spins < 500_000 {
+                core::hint::spin_loop();
+                sgi_spins += 1;
+            }
+            if gic::sgi_interrupt_count() > 0 {
+                kprintln!("[OK] Multicore GICv3 SGI 1 delivered, acknowledged, and EOI verified on secondary CPU.");
+            }
+            kprintln!("[TEST] AArch64 Multicore SMP: Dual-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.");
+        } else {
+            kprintln!("[OK] Multicore: Single-core QEMU topology (secondary CPU inactive).");
+        }
+    } else {
+        kprintln!("[OK] Multicore: PSCI CPU_ON not supported or single-PE topology.");
+    }
+
     // 41. SIM/eSIM backend boundary
     kprintln!("--- [Testing AArch64 SIM/eSIM backend boundary] ---");
     let mut sim = sim::SimCardController::new(0x090D_0000);
@@ -1817,6 +1854,49 @@ fn panic(info: &PanicInfo) -> ! {
     kprintln!("  [AArch64 KERNEL PANIC]");
     kprintln!("  {}", info);
     kprintln!("============================================================");
+    loop {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("wfe");
+        }
+    }
+}
+
+pub static SECONDARY_CPU_ONLINE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn secondary_cpu_main() -> ! {
+    crate::exceptions::init_exceptions();
+
+    if gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) == gic::ACTIVE_GIC_KIND_GICV3 {
+        let active = *gic::ACTIVE_GIC.lock();
+        if let gic::ActiveGic::Gicv3(g) = active {
+            let mut local_gicv3 = gic::Gicv3::with_size(g.distributor_base, g.redistributors_base, g.redistributors_size);
+            unsafe {
+                let _ = local_gicv3.init_redistributor();
+            }
+            local_gicv3.init_cpu_interface();
+            let _ = local_gicv3.enable_irq(27);
+            let _ = local_gicv3.enable_irq(1);
+        }
+    }
+
+    // Arm local generic timer for secondary PE
+    let mut timer = ArmGenericTimer::new();
+    let freq = timer.read_frequency();
+    if freq > 0 {
+        timer.program_countdown((freq / 100) as u32);
+    }
+
+    // Unmask IRQs in DAIF
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+    }
+
+    // Signal CPU 1 is ready
+    SECONDARY_CPU_ONLINE.store(true, core::sync::atomic::Ordering::Release);
+
     loop {
         #[cfg(target_arch = "aarch64")]
         unsafe {

@@ -65,8 +65,10 @@ SECTIONS
     . = ALIGN(16);
 
     .stack : ALIGN(16) {
-        . += 0x10000; /* 64 KiB Primordial Boot Stack */
+        . += 0x10000; /* 64 KiB Primordial Boot Stack (CPU 0) */
         __stack_top = .;
+        . += 0x10000; /* 64 KiB Secondary Boot Stack (CPU 1) */
+        __secondary_stack_top = .;
     }
 
     . = ALIGN(4K);
