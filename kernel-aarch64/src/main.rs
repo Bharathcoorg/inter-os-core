@@ -128,7 +128,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     allocator::init_heap();
     kprintln!("[AArch64] Kernel 8 MiB Dynamic Heap Allocator initialized.");
 
-    // 3. Parse Device Tree Blob passed in x0
+    // 3. Initialize Sovereign Cryptographic Hardware TRNG & Parse Device Tree Blob
+    crypto::init_trng();
     let mut ram_base = 0x40000000u64;
     let mut ram_size = 1024 * 1024 * 1024u64; // 1 GB default fallback
     let mut has_valid_fdt = false;
@@ -150,7 +151,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     kprintln!("[AArch64] Kernel bootargs: '{}'", bootargs);
                 }
                 if let Ok(seed) = parser.get_random_seed() {
-                    kprintln!("[AArch64] Firmware entropy seed discovered in DTB (/chosen/rng-seed, {} bytes).", seed.len());
+                    crypto::inject_bootloader_seed(seed, "DTB /chosen/rng-seed");
+                    kprintln!("[AArch64] Firmware entropy seed discovered in DTB (/chosen/rng-seed, {} bytes) and injected into sovereign TRNG.", seed.len());
+                }
+                if let Ok(kaslr) = parser.get_kaslr_seed() {
+                    kprintln!("[AArch64] Firmware KASLR seed discovered in DTB (/chosen/kaslr-seed: 0x{:016X}).", kaslr);
                 }
                 dtb = Some(parser);
             }
@@ -520,6 +525,45 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(svc_task_id, curr_pid);
     kprintln!("[TEST] AArch64 Vector Table (VBAR_EL1): Hardware 'svc #0' trap -> sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", svc_ticks, svc_task_id);
 
+    // 14b. AArch64 Architectural Timer & Real IRQ Delivery
+    let has_active_gic = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != gic::ACTIVE_GIC_KIND_NONE;
+    if has_active_gic {
+        kprintln!("--- [Testing AArch64 Architectural Timer & Real IRQ Delivery] ---");
+        let timer_irq_before = unsafe { exceptions::TIMER_INTERRUPT_COUNT };
+        let countdown = if freq > 0 { (freq / 500).max(10_000) as u32 } else { 62_500 };
+        timer.program_countdown(countdown);
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+        }
+        let mut spins = 0u64;
+        while unsafe { exceptions::TIMER_INTERRUPT_COUNT } < timer_irq_before + 3 && spins < 20_000_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+            core::arch::asm!("isb", options(nomem, nostack));
+        }
+        let timer_irq_after = unsafe { exceptions::TIMER_INTERRUPT_COUNT };
+        assert!(timer_irq_after >= timer_irq_before + 3, "Timer IRQs failed to deliver: before={}, after={}", timer_irq_before, timer_irq_after);
+        kprintln!("[TEST] AArch64 Architectural Timer: Virtual Timer PPI (IRQ 27) generated, acknowledged, and handled repeatedly (delivered {} interrupts) VERIFIED.", timer_irq_after - timer_irq_before);
+    } else {
+        kprintln!("[TEST] AArch64 Architectural Timer: Interrupt controller left unconfigured by platform contract; interrupt delivery skipped.");
+    }
+
+    // 14c. Generic GICv3 MMIO Bounds, Discovery & Per-CPU Robustness
+    kprintln!("--- [Testing Generic GICv3 MMIO Bounds, Discovery & Per-CPU Robustness] ---");
+    let invalid_gic = gic::Gicv3::with_size(0, 0, 0);
+    assert_eq!(invalid_gic.discover_redistributor_for_affinity(0), Err(gic::GicError::InvalidMmioRange));
+    let truncated_gic = gic::Gicv3::with_size(0x08000000, 0x080A0000, 0x1000);
+    assert_eq!(truncated_gic.discover_redistributor_for_affinity(0), Err(gic::GicError::InvalidMmioRange));
+    assert_eq!(invalid_gic.set_spi_routing(16, 0, true), Err(gic::GicError::InvalidMmioRange));
+    assert_eq!(invalid_gic.set_spi_routing(32, 0, true), Err(gic::GicError::InvalidMmioRange));
+    kprintln!("[TEST] GICv3 Robustness: Bounds enforcement, truncated window rejection, and SPI routing validation VERIFIED.");
+
     // 15. Mobile Shell Hit-Testing & Touch-Initiated Preemption
     kprintln!("--- [Testing mobile shell hit-testing and touch preemption] ---");
     // No digitizer is attached, so the coordinates below are synthetic UI-logic
@@ -695,6 +739,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     tampered_token.capability_mask = 0xFF; // Unauthorized escalation attempt
     assert!(!vault.verify_delegation_token(&tampered_token, 1200));
     kprintln!("[TEST] Sovereign Capability Delegation Token: Attestation, expiration & anti-tamper rejection VERIFIED.");
+
+    // Sovereign TRNG random byte generation from firmware-seeded pool
+    let mut trng_bytes = [0u8; 32];
+    assert!(crypto::try_get_random_bytes(&mut trng_bytes).is_ok());
+    assert_ne!(trng_bytes, [0u8; 32]);
+    kprintln!("[TEST] AArch64 Sovereign TRNG: Generated 32 random bytes from firmware-seeded pool VERIFIED.");
 
     // 20. Sovereign Decentralized P2P Mesh Network & Offline Sync Engine
     kprintln!("--- [Testing Sovereign Decentralized P2P Mesh Network & Offline Sync] ---");

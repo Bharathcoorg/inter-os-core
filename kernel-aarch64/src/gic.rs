@@ -362,6 +362,62 @@ pub enum GicError {
     RedistributorNotFound,
     RedistributorSleepTimeout,
     InvalidMmioRange,
+    TruncatedRedistributorWindow,
+    OutOfBoundsMmioAccess,
+}
+
+pub const MAX_GIC_PES: usize = 8;
+static PE_REDISTRIBUTOR_MAP: [core::sync::atomic::AtomicUsize; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0),
+];
+static PE_AFFINITY_MAP: [core::sync::atomic::AtomicU32; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+    core::sync::atomic::AtomicU32::new(u32::MAX),
+];
+
+pub fn register_pe_redistributor(affinity: u32, rd_base: usize) {
+    for i in 0..MAX_GIC_PES {
+        let existing = PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Acquire);
+        if existing == affinity {
+            PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Release);
+            return;
+        } else if existing == u32::MAX {
+            if PE_AFFINITY_MAP[i].compare_exchange(
+                u32::MAX,
+                affinity,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ).is_ok() {
+                PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Release);
+                return;
+            }
+        }
+    }
+}
+
+pub fn get_pe_redistributor(affinity: u32) -> Option<usize> {
+    for i in 0..MAX_GIC_PES {
+        if PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Acquire) == affinity {
+            let base = PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Acquire);
+            if base != 0 {
+                return Some(base);
+            }
+        }
+    }
+    None
 }
 
 /// GICv3 system-register and memory-mapped driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
@@ -405,21 +461,31 @@ impl Gicv3 {
     }
 
     #[inline(always)]
-    unsafe fn gicr_read(&self, offset: usize) -> u32 {
+    pub unsafe fn gicr_read_checked(&self, offset: usize) -> Result<u32, GicError> {
+        if self.redistributors_size > 0 && offset.checked_add(4).map_or(true, |end| end > self.redistributors_size) {
+            return Err(GicError::OutOfBoundsMmioAccess);
+        }
         let ptr = (self.redistributors_base + offset) as *const u32;
-        core::ptr::read_volatile(ptr)
+        Ok(core::ptr::read_volatile(ptr))
     }
 
     #[inline(always)]
-    unsafe fn gicr_write(&self, offset: usize, val: u32) {
+    pub unsafe fn gicr_write_checked(&self, offset: usize, val: u32) -> Result<(), GicError> {
+        if self.redistributors_size > 0 && offset.checked_add(4).map_or(true, |end| end > self.redistributors_size) {
+            return Err(GicError::OutOfBoundsMmioAccess);
+        }
         let ptr = (self.redistributors_base + offset) as *mut u32;
         core::ptr::write_volatile(ptr, val);
+        Ok(())
     }
 
     #[inline(always)]
-    unsafe fn gicr_read_64(&self, offset: usize) -> u64 {
+    pub unsafe fn gicr_read_64_checked(&self, offset: usize) -> Result<u64, GicError> {
+        if self.redistributors_size > 0 && offset.checked_add(8).map_or(true, |end| end > self.redistributors_size) {
+            return Err(GicError::OutOfBoundsMmioAccess);
+        }
         let ptr = (self.redistributors_base + offset) as *const u64;
-        core::ptr::read_volatile(ptr)
+        Ok(core::ptr::read_volatile(ptr))
     }
 
     /// Reads the current processing element's affinity from `MPIDR_EL1`.
@@ -438,43 +504,46 @@ impl Gicv3 {
 
     /// Walks the Redistributor frames in MMIO space to find the Redistributor
     /// belonging to the PE with the target affinity.
+    ///
+    /// Validates MMIO window bounds before every read and rejects zero-sized,
+    /// truncated, or misaligned windows. Never falls back to affinity zero.
     pub fn discover_redistributor_for_affinity(&self, target_aff: u32) -> Result<usize, GicError> {
-        if self.redistributors_base == 0 {
+        if self.redistributors_base == 0 || self.redistributors_size < 0x20000 {
             return Err(GicError::InvalidMmioRange);
         }
 
         let mut cursor = self.redistributors_base;
         loop {
-            let offset_from_base = cursor - self.redistributors_base;
-            // Read 64-bit GICR_TYPER at offset 0x0008 of current RD_base
-            let typer = unsafe { self.gicr_read_64(offset_from_base + 0x0008) };
-            let rdist_aff = (typer >> 32) as u32;
+            let offset_from_base = cursor.checked_sub(self.redistributors_base)
+                .ok_or(GicError::InvalidMmioRange)?;
 
-            if rdist_aff == target_aff {
-                return Ok(cursor);
+            // Verify that GICR_TYPER (8 bytes at offset 0x0008) is inside the declared window
+            if offset_from_base.checked_add(0x0010).map_or(true, |end| end > self.redistributors_size) {
+                return Err(GicError::TruncatedRedistributorWindow);
             }
+
+            // Read 64-bit GICR_TYPER at offset 0x0008 of current RD_base
+            let typer = unsafe { self.gicr_read_64_checked(offset_from_base + 0x0008)? };
+            let rdist_aff = (typer >> 32) as u32;
 
             let has_vlpis = (typer & (1 << 1)) != 0; // Bit 1: VLPIS
             let stride = if has_vlpis { 0x40000 } else { 0x20000 }; // 256 KiB vs 128 KiB
             let is_last = (typer & (1 << 4)) != 0; // Bit 4: Last
 
-            if self.redistributors_size > 0 {
-                if offset_from_base.checked_add(stride).map_or(true, |next| next > self.redistributors_size) {
-                    break;
-                }
+            // Validate that the entire frame (RD + SGI [+ VLPI]) fits in the declared window
+            if offset_from_base.checked_add(stride).map_or(true, |end| end > self.redistributors_size) {
+                return Err(GicError::TruncatedRedistributorWindow);
+            }
+
+            if rdist_aff == target_aff {
+                return Ok(cursor);
             }
 
             if is_last {
-                break;
+                return Err(GicError::RedistributorNotFound);
             }
 
-            cursor += stride;
-        }
-
-        if target_aff == 0 {
-            Ok(self.redistributors_base)
-        } else {
-            Err(GicError::RedistributorNotFound)
+            cursor = cursor.checked_add(stride).ok_or(GicError::InvalidMmioRange)?;
         }
     }
 
@@ -517,20 +586,22 @@ impl Gicv3 {
 
     /// Initializes the Redistributor for the current PE.
     pub unsafe fn init_redistributor(&mut self) -> Result<(), GicError> {
-        if self.current_rd_base == 0 {
-            self.current_rd_base = self.discover_redistributor_for_affinity(Self::current_pe_affinity())?;
-        }
+        let pe_aff = Self::current_pe_affinity();
+        let rd_base = self.discover_redistributor_for_affinity(pe_aff)?;
+        self.current_rd_base = rd_base;
+        register_pe_redistributor(pe_aff, rd_base);
 
-        let rd_offset = self.current_rd_base - self.redistributors_base;
+        let rd_offset = rd_base.checked_sub(self.redistributors_base)
+            .ok_or(GicError::InvalidMmioRange)?;
 
         // Clear ProcessorSleep (bit 1) in GICR_WAKER to wake up Redistributor
-        let mut waker = self.gicr_read(rd_offset + 0x0014);
+        let mut waker = self.gicr_read_checked(rd_offset + 0x0014)?;
         waker &= !(1 << 1);
-        self.gicr_write(rd_offset + 0x0014, waker);
+        self.gicr_write_checked(rd_offset + 0x0014, waker)?;
 
         // Poll until ChildrenAsleep (bit 2) is cleared
         let mut spins = 0;
-        while (self.gicr_read(rd_offset + 0x0014) & (1 << 2)) != 0 {
+        while (self.gicr_read_checked(rd_offset + 0x0014)? & (1 << 2)) != 0 {
             core::hint::spin_loop();
             spins += 1;
             if spins >= 100_000 {
@@ -541,10 +612,10 @@ impl Gicv3 {
         // SGI_base is at rd_base + 0x10000 (64 KiB frame)
         let sgi_offset = rd_offset + 0x10000;
         // Configure SGIs/PPIs (0..31) to Group 1 Non-Secure
-        self.gicr_write(sgi_offset + 0x0080, 0xFFFF_FFFF);
+        self.gicr_write_checked(sgi_offset + 0x0080, 0xFFFF_FFFF)?;
         // Set default priority for SGIs and PPIs
         for prio in 0..8 {
-            self.gicr_write(sgi_offset + 0x0400 + prio * 4, 0xA0A0_A0A0);
+            self.gicr_write_checked(sgi_offset + 0x0400 + prio * 4, 0xA0A0_A0A0)?;
         }
 
         Ok(())
@@ -552,7 +623,7 @@ impl Gicv3 {
 
     /// Full generic GICv3 initialization: Distributor, Redistributor, and CPU Interface.
     pub unsafe fn init(&mut self) -> Result<(), GicError> {
-        if self.distributor_base == 0 || self.redistributors_base == 0 {
+        if self.distributor_base == 0 || self.redistributors_base == 0 || self.redistributors_size < 0x20000 {
             return Err(GicError::InvalidMmioRange);
         }
 
@@ -563,24 +634,24 @@ impl Gicv3 {
     }
 
     /// Enables an interrupt line.
+    /// SGI/PPI (0..31) are routed to the calling PE's own Redistributor.
+    /// SPI (32..1019) are routed to the shared Distributor.
     pub fn enable_irq(&self, irq: u32) {
         if irq < 32 {
-            // SGI/PPI: programmed in Redistributor SGI frame (offset 0x10000)
-            unsafe {
-                let rd_offset = if self.current_rd_base >= self.redistributors_base {
-                    self.current_rd_base - self.redistributors_base
-                } else {
-                    0
-                };
+            let pe_aff = Self::current_pe_affinity();
+            let rd_base = get_pe_redistributor(pe_aff).unwrap_or(self.current_rd_base);
+            if rd_base >= self.redistributors_base {
+                let rd_offset = rd_base - self.redistributors_base;
                 let sgi_offset = rd_offset + 0x10000;
                 let bit = 1 << irq;
-                self.gicr_write(sgi_offset + 0x0100, bit);
+                unsafe {
+                    let _ = self.gicr_write_checked(sgi_offset + 0x0100, bit);
+                }
             }
         } else if self.distributor_base != 0 {
-            // SPI: programmed in Distributor
+            let reg_offset = 0x0100 + ((irq / 32) as usize) * 4;
+            let bit = 1 << (irq % 32);
             unsafe {
-                let reg_offset = 0x0100 + ((irq / 32) as usize) * 4;
-                let bit = 1 << (irq % 32);
                 self.gicd_write(reg_offset, bit);
             }
         }
@@ -589,23 +660,44 @@ impl Gicv3 {
     /// Disables an interrupt line.
     pub fn disable_irq(&self, irq: u32) {
         if irq < 32 {
-            unsafe {
-                let rd_offset = if self.current_rd_base >= self.redistributors_base {
-                    self.current_rd_base - self.redistributors_base
-                } else {
-                    0
-                };
+            let pe_aff = Self::current_pe_affinity();
+            let rd_base = get_pe_redistributor(pe_aff).unwrap_or(self.current_rd_base);
+            if rd_base >= self.redistributors_base {
+                let rd_offset = rd_base - self.redistributors_base;
                 let sgi_offset = rd_offset + 0x10000;
                 let bit = 1 << irq;
-                self.gicr_write(sgi_offset + 0x0180, bit);
+                unsafe {
+                    let _ = self.gicr_write_checked(sgi_offset + 0x0180, bit);
+                }
             }
         } else if self.distributor_base != 0 {
+            let reg_offset = 0x0180 + ((irq / 32) as usize) * 4;
+            let bit = 1 << (irq % 32);
             unsafe {
-                let reg_offset = 0x0180 + ((irq / 32) as usize) * 4;
-                let bit = 1 << (irq % 32);
                 self.gicd_write(reg_offset, bit);
             }
         }
+    }
+
+    /// Configures affinity routing for an SPI (IRQ 32..1019) via GICD_IROUTER<n>.
+    pub fn set_spi_routing(&self, irq: u32, affinity: u64, any_pe: bool) -> Result<(), GicError> {
+        if self.distributor_base == 0 {
+            return Err(GicError::InvalidMmioRange);
+        }
+        if irq < 32 || irq >= 1020 {
+            return Err(GicError::InvalidMmioRange);
+        }
+        let offset = 0x6000 + (irq as usize) * 8;
+        let val = if any_pe {
+            1u64 << 31 // IRM = 1 (route to any participating PE)
+        } else {
+            affinity & 0xFF00_00FF_FFFF // Aff3.Aff2.Aff1.Aff0
+        };
+        unsafe {
+            let ptr = (self.distributor_base + offset) as *mut u64;
+            core::ptr::write_volatile(ptr, val);
+        }
+        Ok(())
     }
 
     /// Initializes the CPU interface via system registers.
@@ -657,7 +749,7 @@ pub const ACTIVE_GIC_KIND_NONE: u8 = 0;
 pub const ACTIVE_GIC_KIND_GICV2: u8 = 1;
 pub const ACTIVE_GIC_KIND_GICV3: u8 = 2;
 
-static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
+pub static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
 static ACTIVE_GICC_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Global active interrupt controller on the platform.

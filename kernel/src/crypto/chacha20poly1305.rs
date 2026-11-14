@@ -523,6 +523,77 @@ mod tests {
     }
 
     #[test]
+    fn test_rfc8439_aad_tamper_rejection() {
+        let key = [0x5au8; 32];
+        let nonce = [0x36u8; 12];
+        let mut aad = *b"AUTHENTICATED_HEADER_V1";
+        let plaintext = b"Sensitive microkernel capability delegation token";
+        let mut buffer = *plaintext;
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, &aad, &mut buffer, &mut tag).expect("seal failed");
+
+        // Tamper with every byte of AAD individually
+        for i in 0..aad.len() {
+            aad[i] ^= 0x80;
+            let mut test_buf = buffer;
+            assert_eq!(
+                ChaCha20Poly1305::open(&key, &nonce, &aad, &mut test_buf, &tag),
+                Err(AeadError::IntegrityViolation),
+                "Tampered AAD byte {} must be rejected", i
+            );
+            aad[i] ^= 0x80; // Restore
+        }
+    }
+
+    #[test]
+    fn test_rfc8439_ciphertext_tamper_rejection() {
+        let key = [0x7bu8; 32];
+        let nonce = [0x9cu8; 12];
+        let aad = b"AUTH_CONTEXT";
+        let plaintext = b"Confidential kernel DRAM payload block";
+        let mut buffer = *plaintext;
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, aad, &mut buffer, &mut tag).expect("seal failed");
+
+        // Tamper with every byte of ciphertext individually
+        for i in 0..buffer.len() {
+            buffer[i] ^= 0x01;
+            assert_eq!(
+                ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &tag),
+                Err(AeadError::IntegrityViolation),
+                "Tampered ciphertext byte {} must be rejected", i
+            );
+            buffer[i] ^= 0x01; // Restore
+        }
+    }
+
+    #[test]
+    fn test_rfc8439_no_plaintext_leak_on_tag_mismatch() {
+        let key = [0xeeu8; 32];
+        let nonce = [0x11u8; 12];
+        let aad = b"AAD_UNMODIFIED";
+        let plaintext = b"Secret payload that must never leak on authentication error";
+        let mut buffer = *plaintext;
+        let mut tag = [0u8; 16];
+
+        ChaCha20Poly1305::seal(&key, &nonce, aad, &mut buffer, &mut tag).expect("seal failed");
+
+        let ciphertext_snapshot = buffer;
+        let mut corrupted_tag = tag;
+        corrupted_tag[15] ^= 0x01; // Invalidate tag
+
+        // Call open with corrupted tag
+        let res = ChaCha20Poly1305::open(&key, &nonce, aad, &mut buffer, &corrupted_tag);
+        assert_eq!(res, Err(AeadError::IntegrityViolation));
+
+        // Buffer must remain intact ciphertext: zero plaintext decrypted or leaked into caller memory
+        assert_eq!(buffer, ciphertext_snapshot, "Buffer must remain untouched ciphertext on authentication failure");
+        assert_ne!(&buffer[..], plaintext, "Buffer must not contain decrypted plaintext on authentication failure");
+    }
+
+    #[test]
     fn test_rfc8439_empty_payload() {
         let key = [0x42u8; 32];
         let nonce = [0x24u8; 12];

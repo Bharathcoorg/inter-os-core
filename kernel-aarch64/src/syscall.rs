@@ -609,10 +609,15 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
         }
         SYS_GET_RANDOM => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
-            let kbuf = [0x42u8; 64];
             let to_fill = len.min(64);
-            let _ = copy_to_user(addr, &kbuf[..to_fill]);
-            to_fill as i64
+            let mut kbuf = [0u8; 64];
+            if crate::crypto::try_get_random_bytes(&mut kbuf[..to_fill]).is_ok() {
+                let _ = copy_to_user(addr, &kbuf[..to_fill]);
+                crate::crypto::zeroize_slice(&mut kbuf);
+                to_fill as i64
+            } else {
+                -1 // Fail closed: refusing to provide predictable material when entropy is unavailable
+            }
         }
         SYS_CAP_REQUEST_CONSENT => 1, // Granted
         SYS_EVENT_POLL => {

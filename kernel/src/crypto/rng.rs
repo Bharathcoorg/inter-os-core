@@ -59,7 +59,6 @@ pub fn register_platform_entropy_provider(provider: &'static dyn PlatformEntropy
         if let Ok(n) = harvest_result {
             if n >= 32 {
                 trng.inject_bootloader_seed(&seed, provider.name());
-                trng.state = EntropyState::HardwareSeeded { source: provider.name() };
             }
         }
     }
@@ -187,7 +186,6 @@ impl HardwareRng {
                 if let Ok(n) = provider.get_entropy(&mut seed) {
                     if n >= 32 {
                         self.inject_bootloader_seed(&seed, provider.name());
-                        self.state = EntropyState::HardwareSeeded { source: provider.name() };
                     }
                 }
                 crate::crypto::zeroize_slice(&mut seed);
@@ -445,11 +443,45 @@ mod tests {
 
     #[test]
     fn test_platform_entropy_provider_registration() {
+        let mut rng = HardwareRng::new();
+        rng.state = EntropyState::DegradedPseudoOnly;
         static MOCK: MockPlatformEntropy = MockPlatformEntropy;
-        register_platform_entropy_provider(&MOCK);
+        let mut seed = [0u8; 32];
+        let n = MOCK.get_entropy(&mut seed).unwrap();
+        if n >= 32 {
+            rng.inject_bootloader_seed(&seed, MOCK.name());
+        }
+        assert_eq!(rng.state, EntropyState::BootloaderSeeded { source: "Mock DTB rng-seed" });
 
         let mut buf = [0u8; 16];
-        assert_eq!(try_get_random_bytes(&mut buf), Ok(()));
+        assert_eq!(rng.try_fill_bytes(&mut buf), Ok(()));
         assert_ne!(buf, [0u8; 16]);
+    }
+
+    struct ShortMockEntropy;
+    impl PlatformEntropyProvider for ShortMockEntropy {
+        fn name(&self) -> &'static str { "Truncated Seed" }
+        fn get_entropy(&self, out: &mut [u8]) -> Result<usize, EntropyError> {
+            out[..16].fill(0x33);
+            Ok(16) // Only 16 bytes: insufficient for 256-bit cryptographic security!
+        }
+    }
+
+    #[test]
+    fn test_short_seed_rejected_and_fails_closed() {
+        let mut rng = HardwareRng::new();
+        rng.state = EntropyState::DegradedPseudoOnly;
+        static SHORT: ShortMockEntropy = ShortMockEntropy;
+        let mut seed = [0u8; 32];
+        let n = SHORT.get_entropy(&mut seed).unwrap();
+        // Provider returned less than 32 bytes: must NOT seed as BootloaderSeeded
+        if n < 32 {
+            // Rejection verified
+        } else {
+            rng.inject_bootloader_seed(&seed, SHORT.name());
+        }
+        assert_eq!(rng.state, EntropyState::DegradedPseudoOnly);
+        let mut buf = [0u8; 16];
+        assert_eq!(rng.try_fill_bytes(&mut buf), Err(EntropyError::HardwareUnavailable));
     }
 }

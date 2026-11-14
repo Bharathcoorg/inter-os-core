@@ -588,7 +588,8 @@ impl<'a> ArmFdtParser<'a> {
         core::str::from_utf8(&prop_bytes[..len]).map_err(|_| FdtError::CorruptedStructure)
     }
 
-    /// Extracts the bootloader-provided random seed from `/chosen/rng-seed` or `/chosen/kaslr-seed`.
+    /// Extracts the bootloader-provided random seed from `/chosen/rng-seed`.
+    /// Requires at least 32 bytes (256 bits) of verified entropy.
     pub fn get_random_seed(&self) -> Result<&'a [u8], FdtError> {
         let chosen_node = self.find_node_by_name("chosen")?;
         if let Ok(seed) = self.get_node_property(&chosen_node, "rng-seed") {
@@ -596,9 +597,19 @@ impl<'a> ArmFdtParser<'a> {
                 return Ok(seed);
             }
         }
+        Err(FdtError::PropertyNotFound)
+    }
+
+    /// Extracts the KASLR seed from `/chosen/kaslr-seed`.
+    /// Note: This is an 8-byte value intended for address randomization,
+    /// and is strictly NOT a substitute for a full 256-bit cryptographic seed.
+    pub fn get_kaslr_seed(&self) -> Result<u64, FdtError> {
+        let chosen_node = self.find_node_by_name("chosen")?;
         if let Ok(seed) = self.get_node_property(&chosen_node, "kaslr-seed") {
             if seed.len() >= 8 {
-                return Ok(seed);
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&seed[..8]);
+                return Ok(u64::from_be_bytes(bytes));
             }
         }
         Err(FdtError::PropertyNotFound)

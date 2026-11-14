@@ -478,3 +478,203 @@ pub fn ed25519_public_key(secret_key: &[u8; 32]) -> [u8; 32] {
     let signing_key = SigningKey::from_bytes(secret_key);
     VerifyingKey::from(&signing_key).to_bytes()
 }
+
+/// Constant-time zeroization of memory slice to prevent secret leakage.
+#[inline(always)]
+pub fn zeroize_slice(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        unsafe { core::ptr::write_volatile(b, 0); }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Entropy Source Classification & Audit Trail
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyState {
+    Uninitialized,
+    HardwareSeeded { source: &'static str },
+    BootloaderSeeded { source: &'static str },
+    TestSeeded,
+    DegradedPseudoOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyError {
+    HardwareUnavailable,
+    InsufficientEntropy,
+}
+
+/// Hardware and Firmware-backed Entropy Generator for AArch64.
+pub struct HardwareRng {
+    pub state: EntropyState,
+    pub has_feat_rng: bool,
+    entropy_pool: [u8; 32],
+    counter: u64,
+}
+
+impl HardwareRng {
+    pub const fn new() -> Self {
+        Self {
+            state: EntropyState::Uninitialized,
+            has_feat_rng: false,
+            entropy_pool: [0u8; 32],
+            counter: 0,
+        }
+    }
+
+    /// Probes AArch64 ID_AA64ISAR0_EL1 for FEAT_RNG (RNDR instruction).
+    pub fn init(&mut self) {
+        let mut isar0: u64 = 0;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack));
+        }
+        let rng_field = (isar0 >> 60) & 0x0F;
+        self.has_feat_rng = rng_field >= 1;
+        if self.has_feat_rng {
+            let mut test_val: u64 = 0;
+            let mut success: u64 = 0;
+            for _ in 0..10 {
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    core::arch::asm!(
+                        "mrs {val}, s3_3_c2_c4_0",
+                        "cset {succ}, ne",
+                        val = out(reg) test_val,
+                        succ = out(reg) success,
+                        options(nostack)
+                    );
+                }
+                if success != 0 {
+                    break;
+                }
+            }
+            if success != 0 {
+                self.state = EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" };
+                self.mix_entropy(test_val);
+                return;
+            }
+        }
+        if self.state == EntropyState::Uninitialized {
+            self.state = EntropyState::DegradedPseudoOnly;
+        }
+    }
+
+    /// Injects a bootloader-provided firmware entropy seed (e.g. DTB `/chosen/rng-seed`).
+    pub fn inject_bootloader_seed(&mut self, seed: &[u8], source: &'static str) {
+        if seed.len() < 32 {
+            return;
+        }
+        self.counter = self.counter.wrapping_add(1);
+        let mut mix_buf = [0u8; 64];
+        mix_buf[0..32].copy_from_slice(&self.entropy_pool);
+        let copy_len = seed.len().min(32);
+        mix_buf[32..32 + copy_len].copy_from_slice(&seed[..copy_len]);
+        self.entropy_pool = Sha256::digest(&mix_buf);
+        zeroize_slice(&mut mix_buf);
+        self.state = EntropyState::BootloaderSeeded { source };
+    }
+
+    /// Injects a deterministic test seed for isolated unit tests.
+    pub fn inject_test_seed(&mut self, seed: &[u8; 32]) {
+        self.counter = self.counter.wrapping_add(1);
+        let mut mix_buf = [0u8; 64];
+        mix_buf[0..32].copy_from_slice(&self.entropy_pool);
+        mix_buf[32..64].copy_from_slice(seed);
+        self.entropy_pool = Sha256::digest(&mix_buf);
+        zeroize_slice(&mut mix_buf);
+        self.state = EntropyState::TestSeeded;
+    }
+
+    /// Mixes 64-bit entropy into internal pool via SHA-256 compression.
+    pub fn mix_entropy(&mut self, entropy: u64) {
+        self.counter = self.counter.wrapping_add(1);
+        let mut mix_buf = [0u8; 48];
+        mix_buf[0..32].copy_from_slice(&self.entropy_pool);
+        mix_buf[32..40].copy_from_slice(&entropy.to_le_bytes());
+        mix_buf[40..48].copy_from_slice(&self.counter.to_le_bytes());
+        self.entropy_pool = Sha256::digest(&mix_buf);
+        zeroize_slice(&mut mix_buf);
+    }
+
+    pub fn try_next_u64(&mut self) -> Result<u64, EntropyError> {
+        match self.state {
+            EntropyState::Uninitialized => Err(EntropyError::InsufficientEntropy),
+            EntropyState::DegradedPseudoOnly => Err(EntropyError::HardwareUnavailable),
+            EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" } => {
+                #[cfg(target_arch = "aarch64")]
+                if self.has_feat_rng {
+                    for _ in 0..10 {
+                        let val: u64;
+                        let success: u64;
+                        unsafe {
+                            core::arch::asm!(
+                                "mrs {val}, s3_3_c2_c4_0",
+                                "cset {succ}, ne",
+                                val = out(reg) val,
+                                succ = out(reg) success,
+                                options(nostack)
+                            );
+                        }
+                        if success != 0 {
+                            self.mix_entropy(val);
+                            return Ok(val);
+                        }
+                    }
+                }
+                self.expand_pool()
+            }
+            EntropyState::HardwareSeeded { .. } | EntropyState::BootloaderSeeded { .. } | EntropyState::TestSeeded => {
+                self.expand_pool()
+            }
+        }
+    }
+
+    fn expand_pool(&mut self) -> Result<u64, EntropyError> {
+        self.counter = self.counter.wrapping_add(1);
+        let mut mix_buf = [0u8; 40];
+        mix_buf[0..32].copy_from_slice(&self.entropy_pool);
+        mix_buf[32..40].copy_from_slice(&self.counter.to_le_bytes());
+        self.entropy_pool = Sha256::digest(&mix_buf);
+        zeroize_slice(&mut mix_buf);
+        let val = u64::from_le_bytes([
+            self.entropy_pool[0], self.entropy_pool[1], self.entropy_pool[2], self.entropy_pool[3],
+            self.entropy_pool[4], self.entropy_pool[5], self.entropy_pool[6], self.entropy_pool[7],
+        ]);
+        Ok(val)
+    }
+
+    pub fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), EntropyError> {
+        let mut offset = 0;
+        while offset < dest.len() {
+            let rnd = self.try_next_u64()?;
+            let rnd_bytes = rnd.to_le_bytes();
+            let chunk = (dest.len() - offset).min(8);
+            dest[offset..offset + chunk].copy_from_slice(&rnd_bytes[..chunk]);
+            offset += chunk;
+        }
+        Ok(())
+    }
+}
+
+pub static TRNG: spin::Mutex<HardwareRng> = spin::Mutex::new(HardwareRng::new());
+
+pub fn init_trng() {
+    TRNG.lock().init();
+}
+
+pub fn entropy_state() -> EntropyState {
+    TRNG.lock().state
+}
+
+pub fn inject_bootloader_seed(seed: &[u8], source: &'static str) {
+    TRNG.lock().inject_bootloader_seed(seed, source);
+}
+
+pub fn try_get_random_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
+    let mut trng = TRNG.lock();
+    if trng.state == EntropyState::Uninitialized {
+        trng.init();
+    }
+    trng.try_fill_bytes(buf)
+}
