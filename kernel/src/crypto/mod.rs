@@ -28,6 +28,39 @@ pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     core::hint::black_box(diff) == 0
 }
 
+/// Constant-time 4-byte array equality comparison (e.g. for SIM PINs).
+#[inline(never)]
+pub fn constant_time_eq_4(a: &[u8; 4], b: &[u8; 4]) -> bool {
+    let diff = (a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3]);
+    core::hint::black_box(diff) == 0
+}
+
+/// Constant-time slice equality comparison preventing timing side-channels.
+#[inline(never)]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    core::hint::black_box(diff) == 0
+}
+
+/// Securely wipes a memory slice with zeros using volatile writes and memory barriers,
+/// guaranteeing that LLVM cannot eliminate the operation via Dead Store Elimination (DSE).
+#[inline(never)]
+pub fn zeroize_slice(buffer: &mut [u8]) {
+    for byte in buffer.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(byte, 0);
+        }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    core::hint::black_box(buffer.as_mut_ptr());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,6 +76,36 @@ mod tests {
             c[i] ^= 0x01;
             assert!(!constant_time_eq_32(&a, &c));
         }
+    }
+
+    #[test]
+    fn test_constant_time_eq_4() {
+        let a = [1, 2, 3, 4];
+        let b = [1, 2, 3, 4];
+        assert!(constant_time_eq_4(&a, &b));
+
+        let c = [1, 2, 3, 5];
+        assert!(!constant_time_eq_4(&a, &c));
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        let a = [10, 20, 30, 40, 50];
+        let b = [10, 20, 30, 40, 50];
+        assert!(constant_time_eq(&a, &b));
+
+        let c = [10, 20, 30, 40, 51];
+        assert!(!constant_time_eq(&a, &c));
+
+        let d = [10, 20, 30];
+        assert!(!constant_time_eq(&a, &d));
+    }
+
+    #[test]
+    fn test_zeroize_slice() {
+        let mut data = [0xAAu8; 64];
+        zeroize_slice(&mut data);
+        assert!(data.iter().all(|&b| b == 0));
     }
 }
 

@@ -2880,8 +2880,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if end == surface.pixels.len() {
                 surface.frame_ready = true;
                 surface.frame_complete = true;
-            } else if offset == 0 && !surface.frame_complete {
+            } else if offset == 0 {
                 surface.frame_ready = false;
+                surface.frame_complete = false;
             }
             if let Some(band) = band {
                 surface.mark_dirty_rows(band.0, band.1);
@@ -4721,7 +4722,7 @@ fn require_display_service(cap_slot: usize) -> Result<TaskId, SyscallResult> {
 /// Creates a display surface on behalf of the Ring-3 display service.
 pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
     let owner = require_display_service(cap_slot)?;
-    if width == 0 || height == 0 || width > 3840 || height > 2160 {
+    if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
         return Err(SyscallResult::InvalidArguments);
     }
     // WHY the room is looked for before the ask rather than after the failure:
@@ -5113,7 +5114,7 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
         crate::serial_println!("[INPUT POLL DENIED] Task {} has no EventPoll cap", task.id.0);
         return Err(SyscallResult::PermissionDenied);
     }
-    let is_inputd = task.name == "inputd";
+    let is_inputd = crate::services::task_id(crate::services::ServiceId::Input) == Some(task.id);
     let task_id = task.id;
     let task_name = task.name;
     drop(sched);
@@ -5143,7 +5144,7 @@ pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
     if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
-    let is_inputd = task.name == "inputd";
+    let is_inputd = crate::services::task_id(crate::services::ServiceId::Input) == Some(task.id);
     let task_id = task.id;
     drop(sched);
 

@@ -1078,11 +1078,11 @@ impl VirtioGpuDriver {
         if !self.present {
             return Err("VirtIO-GPU hardware unattached");
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2160 {
+        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU resource dimensions");
         }
-        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 240 && fps != 360 {
-            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 240, or 360 fps supported");
+        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 165 && fps != 240 && fps != 360 {
+            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 165, 240, or 360 fps supported");
         }
         self.scanout_width = width;
         self.scanout_height = height;
@@ -1113,8 +1113,8 @@ impl VirtioGpuDriver {
 
     /// Configures the scanout target refresh rate (e.g., 60 Hz or 90 Hz).
     pub fn set_target_fps(&mut self, fps: u16) -> Result<(), &'static str> {
-        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 240 && fps != 360 {
-            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 240, or 360 fps supported");
+        if fps != 60 && fps != 90 && fps != 120 && fps != 144 && fps != 165 && fps != 240 && fps != 360 {
+            return Err("Unsupported refresh rate: only 60, 90, 120, 144, 165, 240, or 360 fps supported");
         }
         self.target_fps = fps;
         Ok(())
@@ -1144,7 +1144,7 @@ impl VirtioGpuDriver {
         if resource_id == 0 {
             return Err("Invalid VirtIO-GPU resource ID 0");
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2160 {
+        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU resource dimensions");
         }
         self.active_resource_id = resource_id;
@@ -1214,7 +1214,7 @@ impl VirtioGpuDriver {
                 resource_id: 0,
             });
         }
-        if width == 0 || height == 0 || width > 3840 || height > 2160 {
+        if width == 0 || height == 0 || width > 3840 || height > 2400 || ((width as usize).saturating_mul(height as usize) > 3840 * 2160) {
             return Err("Invalid VirtIO-GPU scanout dimensions");
         }
         self.active_resource_id = resource_id;
@@ -1634,6 +1634,8 @@ mod tests {
 
         driver.set_target_fps(60).expect("switch to 60 fps");
         assert_eq!(driver.target_fps, 60);
+        driver.set_target_fps(165).expect("switch to 165 fps");
+        assert_eq!(driver.target_fps, 165);
 
         assert!(driver.set_target_fps(45).is_err());
 

@@ -244,6 +244,8 @@ pub struct TileOcclusionMap {
     pub occluded: [bool; MAX_TILES],
     pub cols: usize,
     pub rows: usize,
+    pub scanout_w: usize,
+    pub scanout_h: usize,
 }
 
 impl TileOcclusionMap {
@@ -254,6 +256,8 @@ impl TileOcclusionMap {
             occluded: [false; MAX_TILES],
             cols: cols.min(64),
             rows: rows.min(64),
+            scanout_w,
+            scanout_h,
         }
     }
 
@@ -305,11 +309,23 @@ impl TileOcclusionMap {
     }
 
     /// Marks all 64x64 tiles strictly contained inside an opaque rectangle as occluded.
+    ///
+    /// For boundary tiles along the edge of the scanout, if the rectangle extends to or past
+    /// the scanout dimension (e.g. x1 >= scanout_w), that tile's visible area is fully covered
+    /// because there are no display pixels beyond the scanout border.
     pub fn commit_opaque_rect(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
-        let tx0 = (x0 + TILE_SIZE - 1) / TILE_SIZE;
-        let ty0 = (y0 + TILE_SIZE - 1) / TILE_SIZE;
-        let tx1 = (x1 / TILE_SIZE).min(self.cols);
-        let ty1 = (y1 / TILE_SIZE).min(self.rows);
+        let tx0 = if x0 == 0 { 0 } else { (x0 + TILE_SIZE - 1) / TILE_SIZE };
+        let ty0 = if y0 == 0 { 0 } else { (y0 + TILE_SIZE - 1) / TILE_SIZE };
+        let tx1 = if x1 >= self.scanout_w {
+            self.cols
+        } else {
+            (x1 / TILE_SIZE).min(self.cols)
+        };
+        let ty1 = if y1 >= self.scanout_h {
+            self.rows
+        } else {
+            (y1 / TILE_SIZE).min(self.rows)
+        };
 
         if tx1 > tx0 && ty1 > ty0 {
             for ty in ty0..ty1 {
@@ -1155,15 +1171,9 @@ impl DrmKmsController {
         if Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Display).map(|t| t.0)
             || Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0)
             || Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Launcher).map(|t| t.0)
+            || Some(owner_task) == crate::services::task_id(crate::services::ServiceId::Init).map(|t| t.0)
         {
             return true;
-        }
-        if let Some(sched) = crate::task::scheduler::SCHEDULER.try_lock() {
-            if let Some(task) = sched.get_task(crate::task::TaskId(owner_task)) {
-                if task.name == "launcher" || task.name == "compositor" || task.name == "user_init" {
-                    return true;
-                }
-            }
         }
         false
     }
@@ -2415,6 +2425,7 @@ impl DrmKmsController {
         self.scanout_width = width;
         self.scanout_height = height;
         self.refresh_hz = refresh_hz;
+        self.scheduler.refresh_hz = refresh_hz;
         self.frame_dirty = true;
         // New scanout geometry: rows are re-fitted into a different physical
         // framebuffer layout, so the old present band no longer describes it.
@@ -3441,6 +3452,16 @@ mod tests {
 
         // Region [64, 64, 256, 256] extends beyond tile 3 -> not occluded
         assert!(!map.is_region_occluded(64, 64, 256, 256));
+    }
+
+    #[test]
+    fn test_tile_occlusion_map_boundary_edge_culling() {
+        // 720 / 64 = 11.25 (12 tiles), 1440 / 64 = 22.5 (23 tiles)
+        let mut map = TileOcclusionMap::new(720, 1440);
+        map.commit_opaque_rect(0, 0, 720, 1440);
+        // Full screen must be completely occluded including the edge tiles!
+        assert!(map.is_region_occluded(0, 0, 720, 1440));
+        assert!(map.is_region_occluded(704, 1408, 720, 1440));
     }
 
     #[test]

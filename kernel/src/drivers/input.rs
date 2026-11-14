@@ -256,6 +256,7 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
     // otherwise swallow it, and the person would be stuck in the app.
     if (is_home_request(&event) || event.kind == InputEventKind::Back || event.kind == InputEventKind::Recents) && !shell_owns_the_screen() {
         go_home();
+        return;
     }
     let owner = {
         // WHY only the power key is a system key here: the system owns the
@@ -427,7 +428,6 @@ pub fn pump_touch_events() {
         }
         dispatch_to_focused_window(event);
     }
-    crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
 
 #[cfg(test)]

@@ -52,7 +52,10 @@ pub const STACK_CANARY: u64 = 0xDEAD_BEEF_C0DE_CAFE;
 /// allocator fragmentation across repeated process spawn and exit cycles.
 const STACK_POOL_CAPACITY: usize = 4;
 
-static STACK_POOL: Mutex<alloc::vec::Vec<Box<[u8]>>> = Mutex::new(alloc::vec::Vec::new());
+/// Fixed-capacity, allocation-free recycling cache for detached kernel stacks.
+/// Storing detached buffers in a static array guarantees that neither `push` nor `pop`
+/// will ever allocate on the heap or trigger allocator re-entrancy.
+static STACK_POOL: Mutex<[Option<Box<[u8]>>; STACK_POOL_CAPACITY]> = Mutex::new([None, None, None, None]);
 
 /// Dedicated kernel stack memory for a task.
 /// Automatically recycled into `STACK_POOL` on drop when capacity permits,
@@ -77,7 +80,14 @@ impl KernelStack {
     pub fn allocate() -> Self {
         let recycled = {
             if let Some(mut pool) = STACK_POOL.try_lock() {
-                pool.pop()
+                let mut found = None;
+                for slot in pool.iter_mut() {
+                    if slot.is_some() {
+                        found = slot.take();
+                        break;
+                    }
+                }
+                found
             } else {
                 None
             }
@@ -85,9 +95,8 @@ impl KernelStack {
 
         let stack = if let Some(mut s) = recycled {
             if s.len() == TASK_STACK_SIZE {
-                for b in s.iter_mut() {
-                    *b = 0;
-                }
+                // Volatile sanitization ensures LLVM DSE cannot eliminate the zeroing
+                crate::crypto::zeroize_slice(&mut s);
                 s
             } else {
                 Self::create_fresh_stack()
@@ -133,11 +142,21 @@ impl core::ops::DerefMut for KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        if let Some(s) = self.inner.take() {
+        if let Some(mut s) = self.inner.take() {
             if s.len() == TASK_STACK_SIZE {
+                // Scrub stack with volatile writes before caching or releasing to allocator
+                crate::crypto::zeroize_slice(&mut s);
                 if let Some(mut pool) = STACK_POOL.try_lock() {
-                    if pool.len() < STACK_POOL_CAPACITY {
-                        pool.push(s);
+                    let mut stored = false;
+                    for slot in pool.iter_mut() {
+                        if slot.is_none() {
+                            *slot = Some(s);
+                            stored = true;
+                            break;
+                        }
+                    }
+                    if !stored {
+                        // Pool capacity full: s is dropped and returned to LockedHeap
                     }
                 }
             }

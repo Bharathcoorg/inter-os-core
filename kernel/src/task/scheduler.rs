@@ -861,6 +861,7 @@ impl Scheduler {
             }
         }
         let task_name = task.name;
+        task.cap_table.revoke_all();
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::task::process::mark_zombie(id, exit_code);

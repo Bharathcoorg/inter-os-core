@@ -67,10 +67,10 @@ impl SovereignEsim {
         self.subscriber_auth_key = Some(auth_key);
     }
 
-    /// Verifies the subscriber PIN code.
+    /// Verifies the subscriber PIN code using constant-time comparison to prevent timing attacks.
     pub fn verify_pin(&mut self, pin: &[u8; 4]) -> bool {
         match self.pin_code.as_ref() {
-            Some(expected) if expected == pin => {
+            Some(expected) if crate::crypto::constant_time_eq_4(expected, pin) => {
                 self.pin_verified = true;
                 self.status = SimStatus::Ready;
                 true

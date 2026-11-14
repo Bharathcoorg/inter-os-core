@@ -138,7 +138,8 @@ impl Credential {
         hasher_input.extend_from_slice(&self.salt);
         hasher_input.extend_from_slice(secret);
         let candidate_hash = Sha256::digest(&hasher_input);
-        candidate_hash == self.hash
+        crate::crypto::zeroize_slice(hasher_input.as_mut_slice());
+        crate::crypto::constant_time_eq_32(&candidate_hash, &self.hash)
     }
 }
 
