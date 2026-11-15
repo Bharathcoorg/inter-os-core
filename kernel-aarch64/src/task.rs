@@ -400,7 +400,7 @@ impl Scheduler {
                 return Some(pos);
             }
         }
-        if self.current_task_idx < self.tasks.len() {
+        if cid == 0 && self.current_task_idx < self.tasks.len() {
             Some(self.current_task_idx)
         } else {
             None
@@ -755,6 +755,11 @@ impl Scheduler {
             t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
         }).ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
 
+        if self.tasks[pos].switching_out || self.tasks[pos].running_cpu.is_some() {
+            self.abort_reap(handle, None);
+            return Err(-16); // -EBUSY: task is still executing or switching out on a CPU
+        }
+
         if let Some(ref aspace) = self.tasks[pos].address_space {
             if !Self::is_aspace_evacuated(aspace) {
                 self.abort_reap(handle, None);
@@ -769,6 +774,11 @@ impl Scheduler {
         let pos = self.tasks.iter().position(|t| {
             t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
         }).ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
+
+        if self.tasks[pos].switching_out || self.tasks[pos].running_cpu.is_some() {
+            self.abort_reap(handle, None);
+            return Err(-16); // -EBUSY: task kernel stack/context still active on a CPU
+        }
 
         let removed = self.remove_task_at(pos);
         crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
@@ -1166,19 +1176,31 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
     };
 
     // Stage 2: Bounded evacuation check outside SCHEDULER.lock() so remote CPUs
-    // can acquire the lock, execute prepare_switch(), and deactivate the outgoing address space.
-    const MAX_EVACUATION_POLLS: usize = 1000;
+    // can acquire the lock, execute prepare_switch(), finish switch_context +
+    // finish_post_switch(), and deactivate the outgoing address space before we
+    // ever detach or free the task's stack/context/address space.
+    const MAX_EVACUATION_POLLS: usize = 4_096;
     let mut evacuated = false;
-    for _ in 0..MAX_EVACUATION_POLLS {
+    let caller_cid = current_cpu_logical_id();
+    for poll in 0..MAX_EVACUATION_POLLS {
+        let mut kick_cpu: Option<usize> = None;
         let check = {
             let sched = SCHEDULER.lock();
             match sched.tasks.iter().position(|t| {
                 t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
             }) {
-                Some(pos) => match sched.tasks[pos].address_space.as_ref() {
-                    Some(aspace) => Ok(Scheduler::is_aspace_evacuated(aspace)),
-                    None => Ok(true),
-                },
+                Some(pos) => {
+                    let t = &sched.tasks[pos];
+                    let task_evacuated = !t.switching_out && t.running_cpu.is_none();
+                    if !task_evacuated {
+                        kick_cpu = t.running_cpu;
+                    }
+                    let aspace_evacuated = match t.address_space.as_ref() {
+                        Some(aspace) => Scheduler::is_aspace_evacuated(aspace),
+                        None => true,
+                    };
+                    Ok(task_evacuated && aspace_evacuated)
+                }
                 None => Err(-3i64),
             }
         };
@@ -1188,7 +1210,18 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
                 evacuated = true;
                 break;
             }
-            Ok(false) => core::hint::spin_loop(),
+            Ok(false) => {
+                if let Some(cpu) = kick_cpu {
+                    per_cpu(cpu).need_resched.store(true, Ordering::Release);
+                    if poll % 512 == 0 && cpu != caller_cid && is_smp_scheduling_enabled() {
+                        crate::gic::broadcast_sgi_to_mask(0, 1u32 << cpu);
+                    }
+                }
+                // Back off outside SCHEDULER.lock() so remote CPUs can acquire it to finish switch_out
+                for _ in 0..256 {
+                    core::hint::spin_loop();
+                }
+            }
             Err(e) => return Err(e),
         }
     }

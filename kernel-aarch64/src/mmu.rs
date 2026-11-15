@@ -1669,6 +1669,15 @@ impl UserAddressSpace {
         self.mapped_bytes
     }
 
+    /// Validates that `[addr, addr + len)` lies strictly within valid EL0-mapped,
+    /// normal-memory pages of this address space (and is writable when `write == true`).
+    pub fn validate_user_range(&self, addr: u64, len: usize, write: bool) -> Result<(), i64> {
+        if self.destroyed || self.is_closing() {
+            return Err(-14);
+        }
+        validate_ttbr0_user_range(self.ttbr0, addr, len, write)
+    }
+
     pub fn try_activate(&self) -> Result<(), ActivationError> {
         let cid = current_cpu_id() as u32;
         if cid >= 16 {
@@ -2071,6 +2080,120 @@ pub fn test_mmu_ownership_reclamation_errors() {
     drop(aspace_ms1);
     drop(aspace_ms2);
 
+    // 8. Real page-table walk user pointer validation (read/write, W^X RO, unmapped, MMIO, cross-page)
+    {
+        let mut aspace_pt = UserAddressSpace::new().expect("aspace ptr validation");
+        let f_rw = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("rw frame");
+        let f_ro = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("ro frame");
+        aspace_pt.map_private_frame(0x0040_0000, f_rw, true, false).expect("map rw");
+        aspace_pt.map_private_frame(0x0040_2000, f_ro, false, true).expect("map ro+exec");
+
+        assert_eq!(aspace_pt.validate_user_range(0x0040_0000, 64, false), Ok(()));
+        assert_eq!(aspace_pt.validate_user_range(0x0040_0000, 64, true), Ok(()));
+        assert_eq!(aspace_pt.validate_user_range(0x0040_2000, 64, false), Ok(()));
+        assert_eq!(aspace_pt.validate_user_range(0x0040_2000, 64, true), Err(-13));
+        // Unmapped gap between RW and RO pages
+        assert_eq!(aspace_pt.validate_user_range(0x0040_1000, 64, false), Err(-14));
+        // Cross-page range spilling into unmapped gap at 0x0040_1000
+        assert_eq!(aspace_pt.validate_user_range(0x0040_0FF0, 32, false), Err(-14));
+        // Supervisor MMIO device blocks inside 0..1GiB must be rejected
+        assert_eq!(aspace_pt.validate_user_range(0x0800_0000, 16, false), Err(-14));
+        assert_eq!(aspace_pt.validate_user_range(0x0900_0000, 16, true), Err(-14));
+        assert_eq!(aspace_pt.validate_user_range(0x1000_0000, 16, false), Err(-14));
+        // Null / kernel addresses rejected even with zero length
+        assert_eq!(aspace_pt.validate_user_range(0, 0, false), Err(-14));
+        assert_eq!(aspace_pt.validate_user_range(0x4000_0000, 0, false), Err(-14));
+
+        assert_eq!(aspace_pt.unmap_user_page(0x0040_0000, true), Ok(()));
+        assert_eq!(aspace_pt.unmap_user_page(0x0040_2000, true), Ok(()));
+        assert_eq!(aspace_pt.destroy_fallible(), Ok(()));
+    }
+
     crate::kprintln!("[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.");
+}
+
+/// Validates a user virtual range `[addr, addr + len)` directly against an AArch64
+/// `TTBR0_EL1` translation table tree (supporting 4 KiB L3 pages and 2 MiB L2 blocks).
+///
+/// Rejects null/non-canonical/kernel addresses (`< 0x1000 || >= 0x4000_0000`),
+/// overflow, unmapped pages, EL1-only mappings (`DESC_AP_RW_EL1` / `DESC_AP_RO_EL1`),
+/// device-memory (`DESC_ATTR_DEVICE`) MMIO apertures, and writes to read-only pages (`-13`).
+pub fn validate_ttbr0_user_range(ttbr0: u64, addr: u64, len: usize, write: bool) -> Result<(), i64> {
+    const USER_MIN: u64 = 0x0000_1000;
+    const USER_LIMIT: u64 = 0x4000_0000; // Strictly below 1 GiB kernel slot boundary
+
+    if addr < USER_MIN || addr >= USER_LIMIT {
+        return Err(-14);
+    }
+    if ttbr0 == 0 || (ttbr0 & 0xFFF) != 0 {
+        return Err(-14);
+    }
+
+    let end = if len == 0 {
+        addr.checked_add(1).ok_or(-14)?
+    } else {
+        addr.checked_add(len as u64).ok_or(-14)?
+    };
+    if end > USER_LIMIT {
+        return Err(-14);
+    }
+
+    let l1 = unsafe { &*(ttbr0 as *const PageTable) };
+    let l1_entry = l1.entries[0];
+    if (l1_entry & (DESC_VALID | DESC_TABLE)) != (DESC_VALID | DESC_TABLE) {
+        return Err(-14);
+    }
+    let l2_phys = l1_entry & 0x0000_FFFF_FFFF_F000;
+    if l2_phys == 0 {
+        return Err(-14);
+    }
+    let l2 = unsafe { &*(l2_phys as *const PageTable) };
+
+    let start_page = addr & !0xFFF;
+    let last_page = (end - 1) & !0xFFF;
+    let mut page = start_page;
+    loop {
+        let l2_idx = ((page >> 21) & 0x1FF) as usize;
+        let l2_entry = l2.entries[l2_idx];
+        if (l2_entry & DESC_VALID) == 0 {
+            return Err(-14);
+        }
+        let leaf = if (l2_entry & DESC_TABLE) == 0 {
+            l2_entry
+        } else {
+            let l3_phys = l2_entry & 0x0000_FFFF_FFFF_F000;
+            if l3_phys == 0 {
+                return Err(-14);
+            }
+            let l3 = unsafe { &*(l3_phys as *const PageTable) };
+            let l3_idx = ((page >> 12) & 0x1FF) as usize;
+            let l3_entry = l3.entries[l3_idx];
+            if (l3_entry & (DESC_VALID | DESC_PAGE)) != (DESC_VALID | DESC_PAGE) {
+                return Err(-14);
+            }
+            l3_entry
+        };
+
+        // Must be normal cacheable memory (reject supervisor device/MMIO blocks & pages)
+        if (leaf & 0x1C) != DESC_ATTR_NORMAL {
+            return Err(-14);
+        }
+
+        // Check EL0 accessibility (`AP[2:1]`) and writability when `write == true`
+        let ap = leaf & (3 << 6);
+        if ap != DESC_AP_RW_ALL && ap != DESC_AP_RO_ALL {
+            return Err(-14);
+        }
+        if write && ap != DESC_AP_RW_ALL {
+            return Err(-13);
+        }
+
+        if page >= last_page {
+            break;
+        }
+        page += 4096;
+    }
+
+    Ok(())
 }
 

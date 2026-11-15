@@ -70,33 +70,40 @@ pub const SYS_FS_SYNC: u64 = 125;
 pub const SYS_FS_READ_AT: u64 = 164;
 
 fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
-    const START: u64 = 0x0000_1000;
-    const END: u64 = 0x3FFF_FFFF; // 1 GiB user boundary, strictly below kernel DRAM (0x4000_0000)
-    const CODE_START: u64 = 0x0040_0000;
-    const CODE_END: u64 = CODE_START + 0x0020_0000; // 2 MiB code region
-    if addr < START || addr >= END {
-        return Err(-14);
-    }
-    if len == 0 {
-        // Still reject zero-length pointers aimed inside supervisor MMIO apertures
-        if addr >= 0x0100_0000 && addr < 0x1200_0000 {
-            return Err(-14);
+    let _ = addr.checked_add(len as u64).ok_or(-14i64)?;
+    let ttbr0_from_task = {
+        let sched = SCHEDULER.lock();
+        if let Some(pos) = sched.current_task_pos() {
+            if let Some(ref aspace) = sched.tasks[pos].address_space {
+                if aspace.destroyed || aspace.is_closing() {
+                    return Err(-14);
+                }
+                Some(aspace.ttbr0)
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        return Ok(());
-    }
-    let end = addr.checked_add(len as u64).ok_or(-14)?;
-    if end > END {
-        return Err(-14);
-    }
-    // Reject any range overlapping supervisor MMIO apertures (0x0100_0000..0x1200_0000,
-    // covering PL011, GIC, VirtIO MMIO, and PCI Display BAR aperture).
-    if addr < 0x1200_0000 && end > 0x0100_0000 {
-        return Err(-14);
-    }
-    if write && (addr < CODE_END && end > CODE_START) {
-        return Err(-13); // W^X violation
-    }
-    Ok(())
+    };
+    let ttbr0 = match ttbr0_from_task {
+        Some(t) => t,
+        None => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                let t: u64;
+                unsafe {
+                    core::arch::asm!("mrs {}, ttbr0_el1", out(reg) t, options(nostack, nomem));
+                }
+                t & 0x0000_FFFF_FFFF_F000
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                return Err(-14);
+            }
+        }
+    };
+    crate::mmu::validate_ttbr0_user_range(ttbr0, addr, len, write)
 }
 
 pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
@@ -104,16 +111,20 @@ pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<()
         return Err(-22);
     }
     validate_user_range(addr, len, false)?;
-    unsafe {
-        core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len);
+    if len > 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len);
+        }
     }
     Ok(())
 }
 
 fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
     validate_user_range(addr, src.len(), true)?;
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+    if !src.is_empty() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        }
     }
     Ok(())
 }
@@ -208,14 +219,19 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Ok(pair) => pair,
                 Err(err) => return err,
             };
+            if max_len > 0 {
+                if let Err(err) = validate_user_range(addr, max_len, true) {
+                    return err;
+                }
+            }
 
             let mut router = IPC_ROUTER.lock();
             match router.receive(&caps, receiver) {
                 Ok(msg) => {
                     let to_copy = msg.len.min(max_len);
                     if to_copy > 0 {
-                        if copy_to_user(addr, &msg.payload[..to_copy]).is_err() {
-                            return -14;
+                        if let Err(err) = copy_to_user(addr, &msg.payload[..to_copy]) {
+                            return err;
                         }
                     }
                     to_copy as i64
@@ -233,14 +249,19 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Ok(pair) => pair,
                 Err(err) => return err,
             };
+            if max_len > 0 {
+                if let Err(err) = validate_user_range(addr, max_len, true) {
+                    return err;
+                }
+            }
 
             let mut router = IPC_ROUTER.lock();
             match router.receive(&caps, receiver) {
                 Ok(msg) => {
                     let to_copy = msg.len.min(max_len);
                     if to_copy > 0 {
-                        if copy_to_user(addr, &msg.payload[..to_copy]).is_err() {
-                            return -14;
+                        if let Err(err) = copy_to_user(addr, &msg.payload[..to_copy]) {
+                            return err;
                         }
                     }
                     to_copy as i64
@@ -290,11 +311,14 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             if len < 24 {
                 return -22;
             }
+            if let Err(err) = validate_user_range(addr, 24, true) {
+                return err;
+            }
             if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
                 let mut buf = [0u8; 24];
                 ev.encode(&mut buf);
-                if copy_to_user(addr, &buf).is_err() {
-                    return -14;
+                if let Err(err) = copy_to_user(addr, &buf) {
+                    return err;
                 }
                 24
             } else {
@@ -346,12 +370,15 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 (a0 as u32, a1 as usize, a2, a3 as usize)
             };
 
+            if (pixel_ptr & 3) != 0 {
+                return -22;
+            }
             let byte_len = match pixel_count.checked_mul(4) {
                 Some(b) => b,
                 None => return -22,
             };
-            if validate_user_range(pixel_ptr, byte_len, false).is_err() {
-                return -14;
+            if let Err(err) = validate_user_range(pixel_ptr, byte_len, false) {
+                return err;
             }
             if pixel_count == 0 {
                 return 0;
@@ -417,7 +444,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             };
             if len >= 12 {
                 let buf = [1u8, 2u8, 1u8, 1u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8];
-                let _ = copy_to_user(addr, &buf);
+                if let Err(err) = copy_to_user(addr, &buf) {
+                    return err;
+                }
                 12
             } else {
                 -22
@@ -429,8 +458,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Err(err) => return err,
             };
             let is_supervisor = caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok()
-                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok()
-                || caps.check(CapabilityType::DisplayServer, Rights::ADMIN).is_ok();
+                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok();
             if !is_supervisor {
                 return -13; // -EACCES: missing supervisor capability
             }
@@ -446,8 +474,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Err(err) => return err,
             };
             let is_supervisor = caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok()
-                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok()
-                || caps.check(CapabilityType::DisplayServer, Rights::ADMIN).is_ok();
+                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok();
             if !is_supervisor {
                 return -13; // -EACCES: missing supervisor capability
             }
@@ -463,8 +490,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 Err(err) => return err,
             };
             let is_supervisor = caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok()
-                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok()
-                || caps.check(CapabilityType::DisplayServer, Rights::ADMIN).is_ok();
+                || caps.check(CapabilityType::SystemResource, Rights::WRITE).is_ok();
             if !is_supervisor {
                 return -13; // -EACCES: missing supervisor capability
             }
@@ -505,7 +531,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 "org.interos.video_player|video_player|1.0.0|active|/apps/video.elf|Video|VID|Media\n"
             ).as_bytes();
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_APP_LAUNCH => {
@@ -519,15 +547,16 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 return -13; // -EACCES: process launch requires SystemResource capability
             }
             let (name_ptr, name_len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            if name_len == 0 || name_len > 64 {
+                return -22; // -EINVAL
+            }
             let mut name_buf = [0u8; 64];
-            let target_name = if name_len > 0 && name_len <= 64 {
-                if copy_from_user(&mut name_buf, name_ptr, name_len).is_ok() {
-                    core::str::from_utf8(&name_buf[..name_len]).unwrap_or("")
-                } else {
-                    ""
-                }
-            } else {
-                ""
+            if let Err(err) = copy_from_user(&mut name_buf, name_ptr, name_len) {
+                return err;
+            }
+            let target_name = match core::str::from_utf8(&name_buf[..name_len]) {
+                Ok(s) => s,
+                Err(_) => return -22,
             };
 
             let img = crate::images::app_image(target_name)
@@ -544,10 +573,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                     "camerad" => crate::images::service_image(8),
                     "sensord" => crate::images::service_image(11),
                     "aid" => crate::images::service_image(12),
-                    _ => {
-                        let id = a0 as u8;
-                        crate::images::service_image(id)
-                    }
+                    _ => None,
                 });
 
             if let Some(user_img) = img {
@@ -598,7 +624,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"aarch64-qemu-phone";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => 0,
@@ -606,35 +634,45 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"{\"present\":true,\"telemetry_valid\":true,\"voltage_mv\":3850,\"soc\":100,\"capacity\":4000,\"charging\":\"Full\",\"temp\":28,\"governor\":\"Performance\",\"mhz\":2000}";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_THERMAL_QUERY => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"{\"sensor_present\":true,\"temperature_c\":32,\"critical\":false}";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_RTC_GET_TIME => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"{\"year\":2026,\"month\":11,\"day\":11,\"hour\":12,\"minute\":0,\"second\":0,\"unix_epoch\":1770000000,\"tz_offset_min\":330,\"tz\":\"Asia/Kolkata\"}";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_TELEPHONY_QUERY => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"{\"present\":true,\"operator\":\"InterCell LTE\",\"rssi\":25,\"bars\":4,\"dbm\":-65,\"state\":\"RegisteredHome\",\"call_state\":\"Idle\",\"pdp_active\":true,\"ip\":\"10.0.2.15\"}";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_SENSOR_READ => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"{\"present\":false,\"status\":\"NOT_IMPLEMENTED\",\"error\":\"No physical IMU or ambient sensor detected\"}";
             let to_copy = s.len().min(len);
-            let _ = copy_to_user(addr, &s[..to_copy]);
+            if let Err(err) = copy_to_user(addr, &s[..to_copy]) {
+                return err;
+            }
             to_copy as i64
         }
         SYS_GET_RANDOM => {
@@ -721,8 +759,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
             let (caller_pid, is_supervisor) = match get_caller_identity_and_caps() {
                 Ok((pid, caps)) => {
-                    let supervisor = caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok()
-                        || caps.check(CapabilityType::DisplayServer, Rights::ADMIN).is_ok();
+                    let supervisor = caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok();
                     (pid, supervisor)
                 }
                 Err(err) => return err,
@@ -744,10 +781,19 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
         SYS_SETTINGS_GET | SYS_SETTINGS_SET | SYS_STORAGE_QUERY => 0,
         SYS_FS_OPEN | SYS_FS_STAT => -2, // -ENOENT
         SYS_FS_READ | SYS_FS_READ_AT => 0,
-        SYS_FS_WRITE => a2 as i64,
+        SYS_FS_WRITE => {
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return err,
+            };
+            if caps.check(CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+                return -13; // -EACCES
+            }
+            -38 // -ENOSYS: VFS write path not implemented on AArch64 yet
+        }
         SYS_FS_CLOSE | SYS_FS_SYNC | SYS_FS_LIST => 0,
         SYS_BLOCK_READ => -13,
-        SYS_VERIFY_PACKAGE => 0,
+        SYS_VERIFY_PACKAGE => -38, // -ENOSYS: must not fabricate cryptographic verification success
         SYS_DEVFS_IO => 0,
         _ => -38, // -ENOSYS
     }

@@ -14,7 +14,7 @@ use crate::mmu::{allocate_frame, recycle_frame, UserAddressSpace};
 
 pub const USER_STACK_TOP: u64 = 0x2000_0000;
 pub const USER_STACK_SIZE: u64 = 256 * 1024; // 256 KiB stack
-pub const USER_CANONICAL_LIMIT: u64 = 0x0000_8000_0000_0000;
+pub const USER_CANONICAL_LIMIT: u64 = 0x4000_0000;
 
 pub struct LoadedElf {
     pub entry_point: u64,
@@ -65,7 +65,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     let stack_top_addr = USER_STACK_TOP;
     let stack_bottom_addr = stack_top_addr.checked_sub(USER_STACK_SIZE).ok_or("Stack address underflow")?;
     let stack_guard_start = stack_bottom_addr.checked_sub(4096).ok_or("Stack guard address underflow")?;
-    let stack_guard_end = stack_top_addr;
+    let stack_guard_end = stack_top_addr + 65536 + 4096;
 
     let mut aspace = UserAddressSpace::new().ok_or("Failed to create UserAddressSpace")?;
     let mut load_ranges: Vec<(u64, u64, bool, bool)> = Vec::new();
@@ -186,6 +186,16 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
                 let _ = recycle_frame(frame);
                 let _ = aspace.destroy();
                 return Err(e);
+            }
+            if is_exec {
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    let mut off = 0usize;
+                    while off < 4096 {
+                        core::arch::asm!("dc cvau, {0}", in(reg) (frame + off as u64), options(nostack, preserves_flags));
+                        off += 64;
+                    }
+                }
             }
         }
     }

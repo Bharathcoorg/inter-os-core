@@ -2307,7 +2307,7 @@ fn smp_coordinator_worker() -> ! {
 
         for (pid, _cpu) in el0_pids {
             let mut reaped = Err(-30i64);
-            for _ in 0..2_000 {
+            for _ in 0..200_000 {
                 reaped = task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid);
                 if reaped.is_ok() {
                     break;

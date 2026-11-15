@@ -390,6 +390,11 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
                 crate::user::return_to_kernel_mode();
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            // Unmask IRQs before entering the cooperative yield loop so timer preemption can progress
+            core::arch::asm!("msr daifclr, #2", options(nostack));
+        }
         loop {
             crate::task::yield_now();
         }

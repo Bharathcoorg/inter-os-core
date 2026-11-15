@@ -148,14 +148,18 @@ impl UserProcess {
         core::ptr::copy_nonoverlapping(code.as_ptr(), dest, code.len());
         #[cfg(target_arch = "aarch64")]
         {
-            core::arch::asm!(
-                "dc cvau, {0}",
-                "dsb ish",
-                "ic ivau, {0}",
-                "dsb ish",
-                "isb",
-                in(reg) USER_CODE_VADDR
-            );
+            let mut off = 0usize;
+            while off < code.len() {
+                core::arch::asm!("dc cvau, {0}", in(reg) (USER_CODE_VADDR + off as u64), options(nostack, preserves_flags));
+                off += 64;
+            }
+            core::arch::asm!("dsb ish", options(nostack));
+            off = 0;
+            while off < code.len() {
+                core::arch::asm!("ic ivau, {0}", in(reg) (USER_CODE_VADDR + off as u64), options(nostack, preserves_flags));
+                off += 64;
+            }
+            core::arch::asm!("dsb ish", "isb", options(nostack));
         }
     }
 }
