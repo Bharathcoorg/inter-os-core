@@ -157,6 +157,11 @@ pub struct E1000Device {
     tx_index: u16,
     link_up: bool,
     dma: Option<E1000DmaResources>,
+    rx_assembling: bool,
+    rx_discard: bool,
+    rx_accum_len: usize,
+    rx_desc_chain_len: usize,
+    rx_assembly_buf: [u8; MAX_PACKET_SIZE],
 }
 
 unsafe impl Send for E1000Device {}
@@ -173,8 +178,25 @@ impl E1000Device {
         tx_buffer_phys: u64,
         mac: MacAddress,
     ) -> Self {
-        Self { base_vaddr, mac, rx_desc, tx_desc, rx_desc_phys, tx_desc_phys,
-            rx_buffer_phys, tx_buffer_phys, rx_index: 0, tx_index: 0, link_up: false, dma: None }
+        Self {
+            base_vaddr,
+            mac,
+            rx_desc,
+            tx_desc,
+            rx_desc_phys,
+            tx_desc_phys,
+            rx_buffer_phys,
+            tx_buffer_phys,
+            rx_index: 0,
+            tx_index: 0,
+            link_up: false,
+            dma: None,
+            rx_assembling: false,
+            rx_discard: false,
+            rx_accum_len: 0,
+            rx_desc_chain_len: 0,
+            rx_assembly_buf: [0u8; MAX_PACKET_SIZE],
+        }
     }
 
     /// Allocates and owns all DMA memory required by the controller.
@@ -214,11 +236,19 @@ impl E1000Device {
         self.rx_index = 0;
         self.tx_index = 0;
         self.link_up = false;
+        self.rx_assembling = false;
+        self.rx_discard = false;
+        self.rx_accum_len = 0;
+        self.rx_desc_chain_len = 0;
     }
 
     pub fn initialize(&mut self) -> Result<(), NetError> {
         self.rx_index = 0;
         self.tx_index = 0;
+        self.rx_assembling = false;
+        self.rx_discard = false;
+        self.rx_accum_len = 0;
+        self.rx_desc_chain_len = 0;
         unsafe {
             for i in 0..RX_DESC_COUNT {
                 let desc = &mut *self.rx_desc.add(i);
@@ -301,14 +331,23 @@ impl NetworkDevice for E1000Device {
         unsafe {
             let desc = &mut *self.tx_desc.add(idx);
             let status = core::ptr::read_volatile(&desc.status);
-            if status & 1 == 0 && desc.cmd != 0 { return Err(NetError::QueueFull); }
-            desc.length = frame.len() as u16;
-            desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
-            core::ptr::write_volatile(&mut desc.status, 0);
+            if (status & 1) == 0 { return Err(NetError::QueueFull); }
+            core::sync::atomic::fence(Ordering::Acquire);
+
             let buffer = self.tx_buffer_phys + (idx * TX_BUFFER_SIZE) as u64;
             let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_mut_ptr();
             core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer_virt, frame.len());
+
+            // Ensure buffer payload is visible to DMA before descriptor is posted
+            core::sync::atomic::fence(Ordering::Release);
+
             desc.addr = buffer;
+            desc.length = frame.len() as u16;
+            desc.cso = 0;
+            desc.css = 0;
+            desc.special = 0;
+            core::ptr::write_volatile(&mut desc.status, 0);
+            desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
             core::sync::atomic::fence(Ordering::SeqCst);
             write32(self.base_vaddr, TDT, ((idx + 1) % TX_DESC_COUNT) as u32);
         }
@@ -318,62 +357,167 @@ impl NetworkDevice for E1000Device {
 
     fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
         if !self.link_up { return Err(NetError::DeviceDown); }
-        let idx = self.rx_index as usize;
-        unsafe {
-            let desc = &mut *self.rx_desc.add(idx);
-            let status = core::ptr::read_volatile(&desc.status);
-            if status & 1 == 0 { return Err(NetError::NoPacketAvailable); }
-            core::sync::atomic::fence(Ordering::Acquire);
 
-            let expected = self.rx_buffer_phys + (idx * RX_BUFFER_SIZE) as u64;
+        for _ in 0..RX_DESC_COUNT {
+            let idx = self.rx_index as usize;
+            unsafe {
+                let desc = &mut *self.rx_desc.add(idx);
+                let status = core::ptr::read_volatile(&desc.status);
+                if (status & 1) == 0 {
+                    return Err(NetError::NoPacketAvailable);
+                }
+                core::sync::atomic::fence(Ordering::Acquire);
 
-            // Defend against RX ring deadlock on multi-descriptor / jumbo frames (> 2048 bytes).
-            // When hardware delivers a fragmented frame without EOP, software must recycle the descriptor
-            // and advance rx_index; otherwise the ring deadlocks permanently.
-            if status & RX_EOP == 0 {
-                desc.addr = expected;
-                core::ptr::write_volatile(&mut desc.status, 0);
-                core::sync::atomic::fence(Ordering::Release);
-                write32(self.base_vaddr, RDT, idx as u32);
-                self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
-                return Err(NetError::InvalidPacket);
+                let expected = self.rx_buffer_phys + (idx * RX_BUFFER_SIZE) as u64;
+
+                // Defend against descriptor pointer desynchronization or device memory corruption
+                if desc.addr != expected {
+                    self.rx_assembling = false;
+                    self.rx_discard = false;
+                    self.rx_accum_len = 0;
+                    self.rx_desc_chain_len = 0;
+
+                    desc.addr = expected;
+                    core::ptr::write_volatile(&mut desc.status, 0);
+                    core::sync::atomic::fence(Ordering::Release);
+                    write32(self.base_vaddr, RDT, idx as u32);
+                    self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+                    return Err(NetError::InvalidPacket);
+                }
+
+                let is_eop = (status & RX_EOP) != 0;
+                let seg_len = desc.length as usize;
+                let has_error = desc.errors != 0;
+
+                self.rx_desc_chain_len += 1;
+                if self.rx_desc_chain_len > RX_DESC_COUNT {
+                    self.rx_discard = true;
+                    self.rx_assembling = false;
+                    self.rx_accum_len = 0;
+                }
+
+                if self.rx_discard {
+                    desc.addr = expected;
+                    core::ptr::write_volatile(&mut desc.status, 0);
+                    core::sync::atomic::fence(Ordering::Release);
+                    write32(self.base_vaddr, RDT, idx as u32);
+                    self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+
+                    if is_eop {
+                        self.rx_discard = false;
+                        self.rx_desc_chain_len = 0;
+                        return Err(NetError::InvalidPacket);
+                    }
+                    continue;
+                }
+
+                if has_error {
+                    desc.addr = expected;
+                    core::ptr::write_volatile(&mut desc.status, 0);
+                    core::sync::atomic::fence(Ordering::Release);
+                    write32(self.base_vaddr, RDT, idx as u32);
+                    self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+
+                    if is_eop {
+                        self.rx_assembling = false;
+                        self.rx_accum_len = 0;
+                        self.rx_desc_chain_len = 0;
+                        return Err(NetError::InvalidPacket);
+                    } else {
+                        self.rx_discard = true;
+                        self.rx_assembling = false;
+                        self.rx_accum_len = 0;
+                        continue;
+                    }
+                }
+
+                if !is_eop {
+                    if self.rx_accum_len.saturating_add(seg_len) > MAX_PACKET_SIZE {
+                        self.rx_discard = true;
+                        self.rx_assembling = false;
+                        self.rx_accum_len = 0;
+                    } else {
+                        let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
+                        core::ptr::copy_nonoverlapping(
+                            buffer_virt,
+                            self.rx_assembly_buf.as_mut_ptr().add(self.rx_accum_len),
+                            seg_len,
+                        );
+                        self.rx_accum_len += seg_len;
+                        self.rx_assembling = true;
+                    }
+
+                    desc.addr = expected;
+                    core::ptr::write_volatile(&mut desc.status, 0);
+                    core::sync::atomic::fence(Ordering::Release);
+                    write32(self.base_vaddr, RDT, idx as u32);
+                    self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+                    continue;
+                } else {
+                    if self.rx_assembling {
+                        let total_len = self.rx_accum_len.saturating_add(seg_len);
+                        let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
+
+                        let result = if total_len > MAX_PACKET_SIZE {
+                            Err(NetError::InvalidPacket)
+                        } else if total_len > out.len() {
+                            Err(NetError::BufferTooSmall)
+                        } else {
+                            core::ptr::copy_nonoverlapping(
+                                buffer_virt,
+                                self.rx_assembly_buf.as_mut_ptr().add(self.rx_accum_len),
+                                seg_len,
+                            );
+                            core::ptr::copy_nonoverlapping(
+                                self.rx_assembly_buf.as_ptr(),
+                                out.as_mut_ptr(),
+                                total_len,
+                            );
+                            Ok(total_len)
+                        };
+
+                        desc.addr = expected;
+                        core::ptr::write_volatile(&mut desc.status, 0);
+                        core::sync::atomic::fence(Ordering::Release);
+                        write32(self.base_vaddr, RDT, idx as u32);
+                        self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+
+                        self.rx_assembling = false;
+                        self.rx_accum_len = 0;
+                        self.rx_desc_chain_len = 0;
+
+                        if result.is_ok() {
+                            E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return result;
+                    } else {
+                        let result = if seg_len > out.len() {
+                            Err(NetError::BufferTooSmall)
+                        } else if seg_len > MAX_PACKET_SIZE {
+                            Err(NetError::InvalidPacket)
+                        } else {
+                            let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
+                            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), seg_len);
+                            Ok(seg_len)
+                        };
+
+                        desc.addr = expected;
+                        core::ptr::write_volatile(&mut desc.status, 0);
+                        core::sync::atomic::fence(Ordering::Release);
+                        write32(self.base_vaddr, RDT, idx as u32);
+                        self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+                        self.rx_desc_chain_len = 0;
+
+                        if result.is_ok() {
+                            E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return result;
+                    }
+                }
             }
-
-            let len = desc.length as usize;
-
-            // The descriptor's address is written by the device. Bound it to the
-            // buffer this ring was built with rather than trusting it, so a
-            // corrupt descriptor cannot redirect the copy.
-            if desc.addr != expected {
-                // Address desynchronized; restore valid buffer address and recycle descriptor
-                desc.addr = expected;
-                core::ptr::write_volatile(&mut desc.status, 0);
-                core::sync::atomic::fence(Ordering::Release);
-                write32(self.base_vaddr, RDT, idx as u32);
-                self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
-                return Err(NetError::InvalidPacket);
-            }
-
-            let result = if len > out.len() {
-                Err(NetError::BufferTooSmall)
-            } else if len > MAX_PACKET_SIZE {
-                Err(NetError::InvalidPacket)
-            } else {
-                let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
-                core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
-                Ok(len)
-            };
-
-            // Reclaim/recycle the descriptor back to hardware AFTER reading packet data!
-            desc.addr = expected;
-            core::ptr::write_volatile(&mut desc.status, 0);
-            core::sync::atomic::fence(Ordering::Release);
-            write32(self.base_vaddr, RDT, idx as u32);
-            self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
-            E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
-
-            result
         }
+
+        Err(NetError::NoPacketAvailable)
     }
 
     fn has_packets(&self) -> bool {
@@ -411,3 +555,226 @@ impl E1000Device {
 
 pub const fn rx_descriptor_count() -> usize { RX_DESC_COUNT }
 pub const fn tx_descriptor_count() -> usize { TX_DESC_COUNT }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+
+    struct MockE1000Hardware {
+        mmio: [u32; 0x4000],
+        rx_descriptors: [RxDescriptor; RX_DESC_COUNT],
+        tx_descriptors: [TxDescriptor; TX_DESC_COUNT],
+        rx_buffers: [u8; RX_DESC_COUNT * RX_BUFFER_SIZE],
+        tx_buffers: [u8; TX_DESC_COUNT * TX_BUFFER_SIZE],
+    }
+
+    impl MockE1000Hardware {
+        fn new() -> Box<Self> {
+            let mut hw = Box::new(Self {
+                mmio: [0u32; 0x4000],
+                rx_descriptors: [RxDescriptor { addr: 0, length: 0, checksum: 0, status: 0, errors: 0, special: 0 }; RX_DESC_COUNT],
+                tx_descriptors: [TxDescriptor { addr: 0, length: 0, cso: 0, cmd: 0, status: 1, css: 0, special: 0 }; TX_DESC_COUNT],
+                rx_buffers: [0u8; RX_DESC_COUNT * RX_BUFFER_SIZE],
+                tx_buffers: [0u8; TX_DESC_COUNT * TX_BUFFER_SIZE],
+            });
+
+            for i in 0..RX_DESC_COUNT {
+                hw.rx_descriptors[i].addr = hw.rx_buffers.as_mut_ptr() as u64 + (i * RX_BUFFER_SIZE) as u64;
+            }
+            for i in 0..TX_DESC_COUNT {
+                hw.tx_descriptors[i].addr = hw.tx_buffers.as_mut_ptr() as u64 + (i * TX_BUFFER_SIZE) as u64;
+                hw.tx_descriptors[i].status = 1;
+            }
+            hw
+        }
+
+        fn create_device(&mut self) -> E1000Device {
+            let base_vaddr = self.mmio.as_mut_ptr() as usize;
+            let rx_desc = self.rx_descriptors.as_mut_ptr();
+            let tx_desc = self.tx_descriptors.as_mut_ptr();
+            let rx_desc_phys = rx_desc as u64;
+            let tx_desc_phys = tx_desc as u64;
+            let rx_buffer_phys = self.rx_buffers.as_mut_ptr() as u64;
+            let tx_buffer_phys = self.tx_buffers.as_mut_ptr() as u64;
+            let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+
+            let mut dev = unsafe {
+                E1000Device::new(
+                    base_vaddr,
+                    rx_desc,
+                    tx_desc,
+                    rx_desc_phys,
+                    tx_desc_phys,
+                    rx_buffer_phys,
+                    tx_buffer_phys,
+                    mac,
+                )
+            };
+            dev.link_up = true;
+            dev
+        }
+    }
+
+    #[test]
+    fn test_single_descriptor_rx_success() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // Hardware deposits 64-byte frame at slot 0
+        let payload = [0xABu8; 64];
+        hw.rx_buffers[0..64].copy_from_slice(&payload);
+        hw.rx_descriptors[0].length = 64;
+        hw.rx_descriptors[0].status = 1 | RX_EOP; // DD=1, EOP=1
+
+        let mut out = [0u8; 1514];
+        let res = dev.receive(&mut out);
+        assert_eq!(res, Ok(64));
+        assert_eq!(&out[0..64], &payload);
+        assert_eq!(dev.rx_index, 1);
+        assert_eq!(hw.rx_descriptors[0].status, 0); // Recycled
+    }
+
+    #[test]
+    fn test_multi_descriptor_rx_assembly_success() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // Descriptor 0: 300 bytes, EOP=0
+        let part1 = [0x11u8; 300];
+        hw.rx_buffers[0..300].copy_from_slice(&part1);
+        hw.rx_descriptors[0].length = 300;
+        hw.rx_descriptors[0].status = 1; // DD=1, EOP=0
+
+        // Descriptor 1: 200 bytes, EOP=1
+        let part2 = [0x22u8; 200];
+        let offset1 = RX_BUFFER_SIZE;
+        hw.rx_buffers[offset1..offset1 + 200].copy_from_slice(&part2);
+        hw.rx_descriptors[1].length = 200;
+        hw.rx_descriptors[1].status = 1 | RX_EOP; // DD=1, EOP=1
+
+        let mut out = [0u8; 1514];
+        let res = dev.receive(&mut out);
+        assert_eq!(res, Ok(500));
+        assert_eq!(&out[0..300], &part1);
+        assert_eq!(&out[300..500], &part2);
+        assert_eq!(dev.rx_index, 2);
+        assert_eq!(hw.rx_descriptors[0].status, 0);
+        assert_eq!(hw.rx_descriptors[1].status, 0);
+    }
+
+    #[test]
+    fn test_multi_descriptor_partial_never_delivered() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // Descriptor 0 arrives with DD=1, EOP=0
+        let part1 = [0x33u8; 256];
+        hw.rx_buffers[0..256].copy_from_slice(&part1);
+        hw.rx_descriptors[0].length = 256;
+        hw.rx_descriptors[0].status = 1; // DD=1, EOP=0
+
+        // Descriptor 1 has DD=0 (not arrived yet)
+        hw.rx_descriptors[1].status = 0;
+
+        let mut out = [0u8; 1514];
+        let res = dev.receive(&mut out);
+        // Partial frame must NEVER be delivered!
+        assert_eq!(res, Err(NetError::NoPacketAvailable));
+        assert!(dev.rx_assembling);
+        assert_eq!(dev.rx_accum_len, 256);
+        assert_eq!(dev.rx_index, 1);
+        assert_eq!(hw.rx_descriptors[0].status, 0); // Recycled
+
+        // Now descriptor 1 arrives
+        let part2 = [0x44u8; 128];
+        let offset1 = RX_BUFFER_SIZE;
+        hw.rx_buffers[offset1..offset1 + 128].copy_from_slice(&part2);
+        hw.rx_descriptors[1].length = 128;
+        hw.rx_descriptors[1].status = 1 | RX_EOP; // DD=1, EOP=1
+
+        let res2 = dev.receive(&mut out);
+        assert_eq!(res2, Ok(384));
+        assert_eq!(&out[0..256], &part1);
+        assert_eq!(&out[256..384], &part2);
+        assert_eq!(dev.rx_index, 2);
+        assert!(!dev.rx_assembling);
+    }
+
+    #[test]
+    fn test_multi_descriptor_oversized_discard_mode() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // 2 segments exceeding MAX_PACKET_SIZE 1514
+        hw.rx_descriptors[0].length = 1000;
+        hw.rx_descriptors[0].status = 1; // DD=1, EOP=0
+
+        hw.rx_descriptors[1].length = 800; // 1000 + 800 = 1800 > 1514
+        hw.rx_descriptors[1].status = 1; // DD=1, EOP=0
+
+        hw.rx_descriptors[2].length = 100;
+        hw.rx_descriptors[2].status = 1 | RX_EOP; // DD=1, EOP=1
+
+        let mut out = [0u8; 1514];
+        let res = dev.receive(&mut out);
+        assert_eq!(res, Err(NetError::InvalidPacket));
+        assert_eq!(dev.rx_index, 3);
+        assert!(!dev.rx_assembling);
+        assert!(!dev.rx_discard);
+        // All 3 descriptors recycled
+        assert_eq!(hw.rx_descriptors[0].status, 0);
+        assert_eq!(hw.rx_descriptors[1].status, 0);
+        assert_eq!(hw.rx_descriptors[2].status, 0);
+    }
+
+    #[test]
+    fn test_tx_slot_busy_queue_full() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // Slot 0 has DD=0 (hardware still processing previous transmission)
+        hw.tx_descriptors[0].status = 0;
+
+        let frame = [0x55u8; 100];
+        let res = dev.transmit(&frame);
+        assert_eq!(res, Err(NetError::QueueFull));
+        assert_eq!(dev.tx_index, 0); // Must not advance
+        assert_eq!(hw.tx_buffers[0], 0); // Buffer must not be touched
+    }
+
+    #[test]
+    fn test_tx_success_and_buffer_coherency() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        hw.tx_descriptors[0].status = 1; // DD=1 (ready)
+
+        let frame = [0x77u8; 120];
+        let res = dev.transmit(&frame);
+        assert_eq!(res, Ok(()));
+        assert_eq!(dev.tx_index, 1);
+        assert_eq!(&hw.tx_buffers[0..120], &frame);
+        assert_eq!(hw.tx_descriptors[0].length, 120);
+        assert_eq!(hw.tx_descriptors[0].status, 0); // Status cleared for hardware
+        assert_eq!(hw.tx_descriptors[0].cmd, TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS);
+    }
+
+    #[test]
+    fn test_rx_address_corruption_recovery() {
+        let mut hw = MockE1000Hardware::new();
+        let mut dev = hw.create_device();
+
+        // Corrupt descriptor address written by buggy device/DMA
+        hw.rx_descriptors[0].addr = 0xDEAD_BEEF_0000;
+        hw.rx_descriptors[0].status = 1 | RX_EOP;
+
+        let mut out = [0u8; 1514];
+        let res = dev.receive(&mut out);
+        assert_eq!(res, Err(NetError::InvalidPacket));
+        assert_eq!(dev.rx_index, 1);
+        // Desynchronized address must be restored to expected physical buffer address
+        assert_eq!(hw.rx_descriptors[0].addr, hw.rx_buffers.as_mut_ptr() as u64);
+        assert_eq!(hw.rx_descriptors[0].status, 0);
+    }
+}

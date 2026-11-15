@@ -29,6 +29,10 @@ impl<'a> UdpDatagram<'a> {
         let length = u16::from_be_bytes([buf[4], buf[5]]) as usize;
         let checksum = u16::from_be_bytes([buf[6], buf[7]]);
 
+        if dst_port == 0 {
+            return Err("Invalid UDP destination port (zero)");
+        }
+
         if buf.len() < length || length < UDP_HEADER_LEN {
             return Err("Invalid UDP datagram length field");
         }

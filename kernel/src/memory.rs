@@ -266,7 +266,18 @@ pub fn allocate_dma_frames(count: usize) -> Option<alloc::vec::Vec<PhysFrame<Siz
 
 /// Converts a physical address into its bootloader-provided direct-map virtual address.
 pub fn physical_to_virtual(physical: PhysAddr) -> VirtAddr {
-    phys_mem_offset() + physical.as_u64()
+    #[cfg(test)]
+    {
+        if let Some(offset) = *PHYSICAL_MEMORY_OFFSET.lock() {
+            offset + physical.as_u64()
+        } else {
+            VirtAddr::new(physical.as_u64())
+        }
+    }
+    #[cfg(not(test))]
+    {
+        phys_mem_offset() + physical.as_u64()
+    }
 }
 
 /// Converts a virtual address into its guest physical address (GPA).

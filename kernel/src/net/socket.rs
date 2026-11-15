@@ -247,6 +247,21 @@ impl SocketTable {
         Err(NetError::NoPacketAvailable)
     }
 
+    /// Receives a datagram from an owned UDP socket, validating caller identity and capabilities.
+    pub fn recv_owned(
+        &mut self,
+        id: SocketId,
+        owner_task_id: u32,
+        out: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<(usize, Ipv4Address, u16), NetError> {
+        let sock = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if sock.owner_task_id != owner_task_id {
+            return Err(NetError::CapabilityDenied);
+        }
+        sock.recv_from(out, caps)
+    }
+
     pub fn get(&self, id: SocketId) -> Option<&UdpSocket> {
         for sock_opt in self.sockets.iter() {
             if let Some(ref sock) = sock_opt {
@@ -621,7 +636,7 @@ impl TcpConnectionTable {
         conn.fin_retries = 0;
         conn.fin_deadline = 0;
         conn.state = match conn.state {
-            crate::net::TcpState::FinWait => crate::net::TcpState::Established,
+            crate::net::TcpState::FinWait | crate::net::TcpState::FinWait1 => crate::net::TcpState::Established,
             crate::net::TcpState::LastAck => crate::net::TcpState::CloseWait,
             state => state,
         };
@@ -633,7 +648,7 @@ impl TcpConnectionTable {
         if conn.fin_pending && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1)) {
             conn.fin_pending = false;
             conn.fin_retries = 0;
-            if conn.state == crate::net::TcpState::FinWait {
+            if conn.state == crate::net::TcpState::FinWait || conn.state == crate::net::TcpState::FinWait1 {
                 conn.time_wait_until = crate::interrupts::get_system_ticks().saturating_add(crate::net::tcp::TCP_TIME_WAIT);
                 conn.state = crate::net::TcpState::TimeWait;
             } else if conn.state == crate::net::TcpState::LastAck {

@@ -22,6 +22,18 @@ impl MacAddress {
     pub fn is_broadcast(&self) -> bool {
         self.0 == Self::BROADCAST.0
     }
+
+    pub fn is_multicast(&self) -> bool {
+        self.0[0] & 1 != 0
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0 == Self::ZERO.0
+    }
+
+    pub fn is_unicast(&self) -> bool {
+        !self.is_multicast() && !self.is_zero()
+    }
 }
 
 impl fmt::Debug for MacAddress {

@@ -161,6 +161,22 @@ impl ArpRequestState {
 
 static ARP_REQUESTS: Mutex<[ArpRequestState; 8]> = Mutex::new([ArpRequestState::EMPTY; 8]);
 
+fn record_in_flight_arp_request(ip: Ipv4Address, now: u64) {
+    let mut requests = ARP_REQUESTS.lock();
+    let slot_index = requests.iter().position(|entry| !entry.valid || entry.ip == ip).unwrap_or(0);
+    requests[slot_index] = ArpRequestState { ip, requested_at: now, valid: true };
+}
+
+fn take_in_flight_arp_request(ip: Ipv4Address) -> bool {
+    let mut requests = ARP_REQUESTS.lock();
+    if let Some(entry) = requests.iter_mut().find(|entry| entry.valid && entry.ip == ip) {
+        entry.valid = false;
+        true
+    } else {
+        false
+    }
+}
+
 /// Global capability-guarded socket table.
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
 pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
@@ -185,6 +201,9 @@ pub static IPV6_NEIGHBOR_CACHE: Mutex<crate::net::ipv6::NeighborCache> = Mutex::
 /// Global IPv6 routing table.
 pub static IPV6_ROUTING_TABLE: Mutex<crate::net::ipv6::Ipv6RoutingTable> = Mutex::new(crate::net::ipv6::Ipv6RoutingTable::new());
 
+/// Global IPv6 address lifecycle table (SLAAC / DAD).
+pub static IPV6_ADDRESSES: Mutex<crate::net::ipv6::Ipv6AddressTable> = Mutex::new(crate::net::ipv6::Ipv6AddressTable::new());
+
 /// Host link-local IPv6 address (e.g. fe80::... derived from MAC or SLAAC).
 pub static HOST_IPV6_LINK_LOCAL: Mutex<crate::net::ipv6::Ipv6Address> = Mutex::new(crate::net::ipv6::Ipv6Address::UNSPECIFIED);
 
@@ -208,7 +227,12 @@ fn transmit_arp_request(target_ip: Ipv4Address) -> Result<(), NetError> {
     };
     let mut frame_buf = [0u8; 1514];
     let len = frame.serialize(&mut frame_buf).map_err(|_| NetError::BufferTooSmall)?;
-    NETWORK_DEVICE.lock().transmit(&frame_buf[..len])
+    let res = NETWORK_DEVICE.lock().transmit(&frame_buf[..len]);
+    if res.is_ok() {
+        let now = crate::interrupts::get_system_ticks();
+        record_in_flight_arp_request(target_ip, now);
+    }
+    res
 }
 
 /// Whether one address is reachable without a router, on the prefix this host
@@ -304,11 +328,15 @@ pub fn emit_gateway_arp_request(manager: &mut NetworkDeviceManager) {
         return;
     };
     match manager.transmit(&frame_buf[..frame_len]) {
-        Ok(()) => serial_println!(
-            "[NET LIVE] Real ARP who-has {}.{}.{}.{} handed to the {:?} NIC as a {} byte Ethernet frame; awaiting gateway reply.",
-            GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
-            info.kind, frame_len
-        ),
+        Ok(()) => {
+            let now = crate::interrupts::get_system_ticks();
+            record_in_flight_arp_request(GATEWAY_IP, now);
+            serial_println!(
+                "[NET LIVE] Real ARP who-has {}.{}.{}.{} handed to the {:?} NIC as a {} byte Ethernet frame; awaiting gateway reply.",
+                GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
+                info.kind, frame_len
+            );
+        }
         Err(e) => serial_println!("[NET LIVE] Real ARP probe transmit failed: {:?}", e),
     }
 }
@@ -577,67 +605,97 @@ pub fn poll_network_interface() -> usize {
             match frame.ethertype {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
+                        let local_mac = NETWORK_DEVICE.lock().info().mac;
+
+                        // Ethernet L2 destination filtering: must be unicast to our interface or broadcast
+                        if frame.dst_mac != local_mac && !frame.dst_mac.is_broadcast() {
+                            record_net_drop(NetDropKind::PortOrConnectionMismatch, "arp_dst_mac_mismatch");
+                            continue;
+                        }
+
                         // Cross-layer validation: sender MAC in ARP payload MUST match Ethernet source MAC
                         if frame.src_mac != arp_pkt.sender_mac {
                             record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_mac_inconsistency");
                             continue;
                         }
+
                         // Anti-spoofing: sender IP must not claim our host IP
                         if arp_pkt.sender_ip == DEFAULT_HOST_IP {
                             record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_self_ip_spoof");
                             continue;
                         }
 
-                        let now = crate::interrupts::get_system_ticks();
-
-                        // Pin default gateway as permanent ARP entry; dynamic entries refresh with bounded lifetime
-                        if arp_pkt.sender_ip == GATEWAY_IP {
-                            ARP_TABLE.lock().insert_permanent(GATEWAY_IP, arp_pkt.sender_mac);
-                        } else {
-                            ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, now);
-                        }
-
-                        // End-to-end proof: the real ARP request emitted when the
-                        // E1000 was bound (emit_gateway_arp_request) left the
-                        // guest, and a real reply came back through the
-                        // controller's RX ring. Log it once, honestly, with the
-                        // reply's real source address, MAC and frame length.
-                        if arp_pkt.opcode == ArpOpcode::Reply
-                            && arp_pkt.sender_ip == GATEWAY_IP
-                            && !LIVE_GATEWAY_ARP_LOGGED.swap(true, Ordering::SeqCst)
-                        {
-                            serial_println!(
-                                "[NET LIVE] Real ARP reply received: gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}; a real packet left the guest and came back ({} byte Ethernet frame).",
-                                GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
-                                arp_pkt.sender_mac.0[0], arp_pkt.sender_mac.0[1], arp_pkt.sender_mac.0[2],
-                                arp_pkt.sender_mac.0[3], arp_pkt.sender_mac.0[4], arp_pkt.sender_mac.0[5],
-                                len
-                            );
-                        }
-                        if let Some(entry) = ARP_REQUESTS.lock().iter_mut().find(|entry| entry.valid && entry.ip == arp_pkt.sender_ip) {
-                            entry.valid = false;
-                        }
-                        if arp_pkt.opcode == ArpOpcode::Request && arp_pkt.target_ip == DEFAULT_HOST_IP {
-                            let local_mac = NETWORK_DEVICE.lock().info().mac;
-                            let reply = ArpPacket {
-                                opcode: ArpOpcode::Reply,
-                                sender_mac: local_mac,
-                                sender_ip: DEFAULT_HOST_IP,
-                                target_mac: arp_pkt.sender_mac,
-                                target_ip: arp_pkt.sender_ip,
-                            };
-                            let mut arp_buf = [0u8; 28];
-                            if let Ok(n) = reply.serialize(&mut arp_buf) {
-                                let response = EthernetFrame {
-                                    dst_mac: arp_pkt.sender_mac,
-                                    src_mac: local_mac,
-                                    ethertype: EtherType::Arp,
-                                    payload: &arp_buf[..n],
-                                };
-                                let mut frame_buf = [0u8; 1514];
-                                if let Ok(n) = response.serialize(&mut frame_buf) {
-                                    let _ = NETWORK_DEVICE.lock().transmit(&frame_buf[..n]);
+                        match arp_pkt.opcode {
+                            ArpOpcode::Reply => {
+                                // Validate target MAC and IP in ARP Reply
+                                if arp_pkt.target_mac != local_mac || arp_pkt.target_ip != DEFAULT_HOST_IP {
+                                    record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_reply_target_mismatch");
+                                    continue;
                                 }
+
+                                // Strictly require in-flight correlation; reject unsolicited replies
+                                let had_inflight_request = take_in_flight_arp_request(arp_pkt.sender_ip);
+                                if !had_inflight_request {
+                                    record_net_drop(NetDropKind::PortOrConnectionMismatch, "arp_unsolicited_reply_dropped");
+                                    continue;
+                                }
+
+                                if arp_pkt.sender_ip == GATEWAY_IP {
+                                    let mut table = ARP_TABLE.lock();
+                                    if !table.is_permanent(GATEWAY_IP) {
+                                        table.insert_permanent(GATEWAY_IP, arp_pkt.sender_mac);
+                                    }
+                                    drop(table);
+
+                                    if !LIVE_GATEWAY_ARP_LOGGED.swap(true, Ordering::SeqCst) {
+                                        serial_println!(
+                                            "[NET LIVE] Real ARP reply received: gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}; a real packet left the guest and came back ({} byte Ethernet frame).",
+                                            GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
+                                            arp_pkt.sender_mac.0[0], arp_pkt.sender_mac.0[1], arp_pkt.sender_mac.0[2],
+                                            arp_pkt.sender_mac.0[3], arp_pkt.sender_mac.0[4], arp_pkt.sender_mac.0[5],
+                                            len
+                                        );
+                                    }
+                                } else {
+                                    let now = crate::interrupts::get_system_ticks();
+                                    ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, now);
+                                }
+                            }
+                            ArpOpcode::Request => {
+                                if arp_pkt.target_ip == DEFAULT_HOST_IP {
+                                    let reply = ArpPacket {
+                                        opcode: ArpOpcode::Reply,
+                                        sender_mac: local_mac,
+                                        sender_ip: DEFAULT_HOST_IP,
+                                        target_mac: arp_pkt.sender_mac,
+                                        target_ip: arp_pkt.sender_ip,
+                                    };
+                                    let mut arp_buf = [0u8; 28];
+                                    if let Ok(n) = reply.serialize(&mut arp_buf) {
+                                        let response = EthernetFrame {
+                                            dst_mac: arp_pkt.sender_mac,
+                                            src_mac: local_mac,
+                                            ethertype: EtherType::Arp,
+                                            payload: &arp_buf[..n],
+                                        };
+                                        let mut frame_buf = [0u8; 1514];
+                                        if let Ok(n) = response.serialize(&mut frame_buf) {
+                                            let _ = NETWORK_DEVICE.lock().transmit(&frame_buf[..n]);
+                                        }
+                                    }
+
+                                    // Only refresh existing dynamic mappings; never allocate new slots or touch GATEWAY_IP
+                                    if arp_pkt.sender_ip != GATEWAY_IP {
+                                        let now = crate::interrupts::get_system_ticks();
+                                        let mut table = ARP_TABLE.lock();
+                                        if table.lookup(arp_pkt.sender_ip).is_some() && !table.is_permanent(arp_pkt.sender_ip) {
+                                            table.insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, now);
+                                        }
+                                    }
+                                }
+                            }
+                            ArpOpcode::Unknown(_) => {
+                                record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_unknown_opcode");
                             }
                         }
                     }
@@ -648,6 +706,10 @@ pub fn poll_network_interface() -> usize {
                         continue;
                     }
                     if let Ok(ip_pkt) = Ipv4Packet::parse(frame.payload) {
+                        if ip_pkt.dst != DEFAULT_HOST_IP && ip_pkt.dst != Ipv4Address::BROADCAST && !ip_pkt.dst.is_loopback() {
+                            log_net_drop("ipv4_destination_mismatch");
+                            continue;
+                        }
                         if ip_pkt.protocol == IpProtocol::Tcp {
                             if let Ok(segment) = TcpSegment::parse(ip_pkt.payload) {
                                 if segment.verify_checksum(ip_pkt.src.0, ip_pkt.dst.0, ip_pkt.payload) {
@@ -768,6 +830,12 @@ pub fn poll_network_interface() -> usize {
                 }
                 EtherType::Ipv6 => {
                     if let Ok(ip6_pkt) = Ipv6Packet::parse(frame.payload) {
+                        // Drop packets with multicast source address (RFC 4291 § 2.7)
+                        if ip6_pkt.src.is_multicast() {
+                            record_net_drop(NetDropKind::MalformedChecksumOrLength, "ipv6_multicast_source");
+                            continue;
+                        }
+
                         if ip6_pkt.next_header == 58 { // ICMPv6
                             if ip6_pkt.payload.len() >= 4 {
                                 // RFC 4443 & RFC 8200: Pseudo-header checksum MUST be validated before ANY state mutation
@@ -794,46 +862,114 @@ pub fn poll_network_interface() -> usize {
                                 match icmp_type {
                                     135 => { // Neighbor Solicitation
                                         if let Ok(parsed) = Icmpv6Neighbor::parse(ip6_pkt.payload) {
-                                            if let Some(slla_mac) = parsed.link_layer_address {
-                                                if !ip6_pkt.src.is_unspecified() {
+                                            // RFC 4861 § 7.1.1: If IP source is unspecified (::), packet is DAD probe
+                                            if ip6_pkt.src.is_unspecified() {
+                                                // DAD probe MUST NOT contain SLLA option
+                                                if parsed.link_layer_address.is_some() {
+                                                    record_net_drop(NetDropKind::MalformedChecksumOrLength, "dad_ns_has_slla");
+                                                    continue;
+                                                }
+
+                                                // RFC 4862 DAD conflict detection:
+                                                // If target matches our tentative address, DAD failed!
+                                                let mut addrs = IPV6_ADDRESSES.lock();
+                                                if addrs.contains_tentative(parsed.target) {
+                                                    addrs.mark_invalid(parsed.target);
+                                                    drop(addrs);
+                                                    continue;
+                                                }
+                                                drop(addrs);
+
+                                                // If target matches our established preferred address, defend it!
+                                                // RFC 4861 § 7.2.4: When responding to a DAD probe (src == ::),
+                                                // NA MUST be addressed to all-nodes multicast (ff02::1),
+                                                // Solicited flag MUST be 0, Override flag MUST be 1.
+                                                let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
+                                                if !host_ip.is_unspecified() && parsed.target == host_ip {
+                                                    let local_mac = NETWORK_DEVICE.lock().info().mac;
+                                                    let mut na_buf = [0u8; 32];
+                                                    na_buf[0] = 136; // NA
+                                                    na_buf[1] = 0;
+                                                    na_buf[2..4].fill(0);
+                                                    na_buf[4] = 0x20; // Solicited=0, Override=1 (RFC 4861 § 7.2.4)
+                                                    na_buf[8..24].copy_from_slice(&parsed.target.0);
+                                                    na_buf[24] = 2; // TLLA
+                                                    na_buf[25] = 1; // 8 bytes
+                                                    na_buf[26..32].copy_from_slice(&local_mac.0);
+
+                                                    let na_dst_ip = Ipv6Address::ALL_NODES;
+                                                    let na_csum = calculate_icmpv6_checksum(&host_ip, &na_dst_ip, &na_buf);
+                                                    na_buf[2..4].copy_from_slice(&na_csum.to_be_bytes());
+
+                                                    let ip6_resp = Ipv6Packet {
+                                                        src: host_ip,
+                                                        dst: na_dst_ip,
+                                                        next_header: 58,
+                                                        hop_limit: 255,
+                                                        payload: &na_buf,
+                                                    };
+                                                    let mut ip6_buf = [0u8; 128];
+                                                    if let Ok(n_ip6) = ip6_resp.serialize(&mut ip6_buf) {
+                                                        let eth_resp = EthernetFrame {
+                                                            dst_mac: MacAddress([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]),
+                                                            src_mac: local_mac,
+                                                            ethertype: EtherType::Ipv6,
+                                                            payload: &ip6_buf[..n_ip6],
+                                                        };
+                                                        let mut eth_buf = [0u8; 1514];
+                                                        if let Ok(n_eth) = eth_resp.serialize(&mut eth_buf) {
+                                                            let _ = NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]);
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                // Unicast Neighbor Solicitation
+                                                if let Some(slla_mac) = parsed.link_layer_address {
+                                                    // RFC 4861: Cross-layer MAC validation
+                                                    if slla_mac != frame.src_mac.0 {
+                                                        record_net_drop(NetDropKind::MalformedChecksumOrLength, "ndp_slla_mac_mismatch");
+                                                        continue;
+                                                    }
                                                     let now = crate::interrupts::get_system_ticks();
                                                     IPV6_NEIGHBOR_CACHE.lock().learn(ip6_pkt.src, slla_mac, now, 300_000);
                                                 }
-                                            }
-                                            let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
-                                            if parsed.target == host_ip || host_ip.is_unspecified() {
-                                                let local_mac = NETWORK_DEVICE.lock().info().mac;
-                                                let mut na_buf = [0u8; 32];
-                                                na_buf[0] = 136; // NA
-                                                na_buf[1] = 0;
-                                                na_buf[2..4].fill(0);
-                                                na_buf[4] = 0x60; // Solicited=1, Override=1
-                                                na_buf[8..24].copy_from_slice(&parsed.target.0);
-                                                na_buf[24] = 2; // TLLA
-                                                na_buf[25] = 1; // 8 bytes
-                                                na_buf[26..32].copy_from_slice(&local_mac.0);
 
-                                                let na_csum = calculate_icmpv6_checksum(&host_ip, &ip6_pkt.src, &na_buf);
-                                                na_buf[2..4].copy_from_slice(&na_csum.to_be_bytes());
+                                                let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
+                                                // Only reply if host IP is established and matches target
+                                                if !host_ip.is_unspecified() && parsed.target == host_ip {
+                                                    let local_mac = NETWORK_DEVICE.lock().info().mac;
+                                                    let mut na_buf = [0u8; 32];
+                                                    na_buf[0] = 136; // NA
+                                                    na_buf[1] = 0;
+                                                    na_buf[2..4].fill(0);
+                                                    na_buf[4] = 0x60; // Solicited=1, Override=1
+                                                    na_buf[8..24].copy_from_slice(&parsed.target.0);
+                                                    na_buf[24] = 2; // TLLA
+                                                    na_buf[25] = 1; // 8 bytes
+                                                    na_buf[26..32].copy_from_slice(&local_mac.0);
 
-                                                let ip6_resp = Ipv6Packet {
-                                                    src: host_ip,
-                                                    dst: ip6_pkt.src,
-                                                    next_header: 58,
-                                                    hop_limit: 255,
-                                                    payload: &na_buf,
-                                                };
-                                                let mut ip6_buf = [0u8; 128];
-                                                if let Ok(n_ip6) = ip6_resp.serialize(&mut ip6_buf) {
-                                                    let eth_resp = EthernetFrame {
-                                                        dst_mac: frame.src_mac,
-                                                        src_mac: local_mac,
-                                                        ethertype: EtherType::Ipv6,
-                                                        payload: &ip6_buf[..n_ip6],
+                                                    let na_csum = calculate_icmpv6_checksum(&host_ip, &ip6_pkt.src, &na_buf);
+                                                    na_buf[2..4].copy_from_slice(&na_csum.to_be_bytes());
+
+                                                    let ip6_resp = Ipv6Packet {
+                                                        src: host_ip,
+                                                        dst: ip6_pkt.src,
+                                                        next_header: 58,
+                                                        hop_limit: 255,
+                                                        payload: &na_buf,
                                                     };
-                                                    let mut eth_buf = [0u8; 1514];
-                                                    if let Ok(n_eth) = eth_resp.serialize(&mut eth_buf) {
-                                                        let _ = NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]);
+                                                    let mut ip6_buf = [0u8; 128];
+                                                    if let Ok(n_ip6) = ip6_resp.serialize(&mut ip6_buf) {
+                                                        let eth_resp = EthernetFrame {
+                                                            dst_mac: frame.src_mac,
+                                                            src_mac: local_mac,
+                                                            ethertype: EtherType::Ipv6,
+                                                            payload: &ip6_buf[..n_ip6],
+                                                        };
+                                                        let mut eth_buf = [0u8; 1514];
+                                                        if let Ok(n_eth) = eth_resp.serialize(&mut eth_buf) {
+                                                            let _ = NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -841,11 +977,32 @@ pub fn poll_network_interface() -> usize {
                                     }
                                     136 => { // Neighbor Advertisement
                                         if let Ok(parsed) = Icmpv6Neighbor::parse(ip6_pkt.payload) {
+                                            // RFC 4861 § 7.2.5: Silently discard any NA with Solicited=1 and multicast destination
+                                            if ip6_pkt.dst.is_multicast() && parsed.solicited {
+                                                record_net_drop(NetDropKind::MalformedChecksumOrLength, "solicited_na_to_multicast");
+                                                continue;
+                                            }
+
+                                            // RFC 4862: If target matches our tentative address, DAD failed!
+                                            let mut addrs = IPV6_ADDRESSES.lock();
+                                            if addrs.contains_tentative(parsed.target) {
+                                                addrs.mark_invalid(parsed.target);
+                                                drop(addrs);
+                                                continue;
+                                            }
+                                            drop(addrs);
+
                                             if let Some(tlla_mac) = parsed.link_layer_address {
+                                                // Cross-layer MAC validation if unicast source
+                                                if !ip6_pkt.src.is_unspecified() && tlla_mac != frame.src_mac.0 {
+                                                    record_net_drop(NetDropKind::MalformedChecksumOrLength, "ndp_tlla_mac_mismatch");
+                                                    continue;
+                                                }
                                                 let now = crate::interrupts::get_system_ticks();
-                                                let _ = IPV6_NEIGHBOR_CACHE.lock().learn_advertisement(
+                                                let _ = IPV6_NEIGHBOR_CACHE.lock().learn_advertisement_with_router(
                                                     parsed.target,
                                                     tlla_mac,
+                                                    parsed.router,
                                                     parsed.override_flag,
                                                     now,
                                                     300_000,
@@ -854,23 +1011,49 @@ pub fn poll_network_interface() -> usize {
                                         }
                                     }
                                     134 => { // Router Advertisement
-                                        if ip6_pkt.src.is_link_local() {
-                                            if let Ok(ra) = Icmpv6RouterAdvertisement::parse(ip6_pkt.payload) {
-                                                if ra.router_lifetime > 0 {
-                                                    let _ = IPV6_ROUTING_TABLE.lock().add(Ipv6Route {
-                                                        prefix: Ipv6Prefix::new(Ipv6Address::UNSPECIFIED, 0),
-                                                        next_hop: Some(ip6_pkt.src),
-                                                        interface: 0,
-                                                        metric: 10,
-                                                    });
-                                                }
-                                                if let Some(prefix) = ra.prefix {
-                                                    let local_mac = NETWORK_DEVICE.lock().info().mac;
-                                                    let auto = Ipv6Autoconfig::new(prefix, local_mac.0);
-                                                    if let Some(addr) = auto.address() {
+                                        if !ip6_pkt.src.is_link_local() {
+                                            record_net_drop(NetDropKind::MalformedChecksumOrLength, "ra_source_not_link_local");
+                                            continue;
+                                        }
+                                        if let Ok(ra) = Icmpv6RouterAdvertisement::parse(ip6_pkt.payload) {
+                                            let now = crate::interrupts::get_system_ticks();
+                                            // Learn router in neighbor cache
+                                            let _ = IPV6_NEIGHBOR_CACHE.lock().learn_advertisement_with_router(
+                                                ip6_pkt.src,
+                                                frame.src_mac.0,
+                                                true,
+                                                true,
+                                                now,
+                                                300_000,
+                                            );
+
+                                            // RFC 4861 § 6.3.4: Router Lifetime 0 means router must NOT be default router
+                                            if ra.router_lifetime == 0 {
+                                                IPV6_ROUTING_TABLE.lock().remove_next_hop(&ip6_pkt.src);
+                                            } else {
+                                                let _ = IPV6_ROUTING_TABLE.lock().add(Ipv6Route {
+                                                    prefix: Ipv6Prefix::new(Ipv6Address::UNSPECIFIED, 0),
+                                                    next_hop: Some(ip6_pkt.src),
+                                                    interface: 0,
+                                                    metric: 10,
+                                                });
+                                            }
+
+                                            // Process Prefix Information Options (PIO) per RFC 4862 SLAAC
+                                            let local_mac = NETWORK_DEVICE.lock().info().mac;
+                                            if let Some(pio) = ra.prefix_info {
+                                                if pio.valid_lifetime == 0 {
+                                                    // Prefix withdrawal
+                                                    IPV6_ADDRESSES.lock().withdraw_prefix(pio.prefix);
+                                                } else if pio.autonomous {
+                                                    let auto = Ipv6Autoconfig::new(pio.prefix, local_mac.0);
+                                                    if let Some(slaac_addr) = auto.address() {
+                                                        let valid_until = now.saturating_add((pio.valid_lifetime as u64).saturating_mul(1000));
+                                                        let pref_until = now.saturating_add((pio.preferred_lifetime as u64).saturating_mul(1000));
+                                                        let _ = IPV6_ADDRESSES.lock().assign_tentative(slaac_addr, valid_until, pref_until);
                                                         let mut host_ip = HOST_IPV6_LINK_LOCAL.lock();
                                                         if host_ip.is_unspecified() {
-                                                            *host_ip = addr;
+                                                            *host_ip = slaac_addr;
                                                         }
                                                     }
                                                 }
@@ -878,40 +1061,51 @@ pub fn poll_network_interface() -> usize {
                                         }
                                     }
                                     128 => { // Echo Request (Ping6)
-                                        let local_mac = NETWORK_DEVICE.lock().info().mac;
-                                        let mut reply_payload = [0u8; 128];
-                                        let copy_len = ip6_pkt.payload.len().min(reply_payload.len());
-                                        reply_payload[..copy_len].copy_from_slice(&ip6_pkt.payload[..copy_len]);
-                                        reply_payload[0] = 129; // Echo Reply
-                                        reply_payload[2..4].fill(0);
-                                        let csum = calculate_icmpv6_checksum(&ip6_pkt.dst, &ip6_pkt.src, &reply_payload[..copy_len]);
-                                        reply_payload[2..4].copy_from_slice(&csum.to_be_bytes());
+                                        let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
+                                        // Reply source must be unicast host_ip (RFC 4443 § 2.3 / 3.2: never multicast source)
+                                        let reply_src = if ip6_pkt.dst.is_multicast() { host_ip } else { ip6_pkt.dst };
+                                        if !reply_src.is_unspecified() {
+                                            let local_mac = NETWORK_DEVICE.lock().info().mac;
+                                            let mut reply_payload = [0u8; 128];
+                                            let copy_len = ip6_pkt.payload.len().min(reply_payload.len());
+                                            reply_payload[..copy_len].copy_from_slice(&ip6_pkt.payload[..copy_len]);
+                                            reply_payload[0] = 129; // Echo Reply
+                                            reply_payload[2..4].fill(0);
+                                            let csum = calculate_icmpv6_checksum(&reply_src, &ip6_pkt.src, &reply_payload[..copy_len]);
+                                            reply_payload[2..4].copy_from_slice(&csum.to_be_bytes());
 
-                                        let ip6_resp = Ipv6Packet {
-                                            src: ip6_pkt.dst,
-                                            dst: ip6_pkt.src,
-                                            next_header: 58,
-                                            hop_limit: 64,
-                                            payload: &reply_payload[..copy_len],
-                                        };
-                                        let mut ip6_buf = [0u8; 256];
-                                        if let Ok(n_ip6) = ip6_resp.serialize(&mut ip6_buf) {
-                                            let eth_resp = EthernetFrame {
-                                                dst_mac: frame.src_mac,
-                                                src_mac: local_mac,
-                                                ethertype: EtherType::Ipv6,
-                                                payload: &ip6_buf[..n_ip6],
+                                            let ip6_resp = Ipv6Packet {
+                                                src: reply_src,
+                                                dst: ip6_pkt.src,
+                                                next_header: 58,
+                                                hop_limit: 64,
+                                                payload: &reply_payload[..copy_len],
                                             };
-                                            let mut eth_buf = [0u8; 1514];
-                                            if let Ok(n_eth) = eth_resp.serialize(&mut eth_buf) {
-                                                let _ = NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]);
+                                            let mut ip6_buf = [0u8; 256];
+                                            if let Ok(n_ip6) = ip6_resp.serialize(&mut ip6_buf) {
+                                                let eth_resp = EthernetFrame {
+                                                    dst_mac: frame.src_mac,
+                                                    src_mac: local_mac,
+                                                    ethertype: EtherType::Ipv6,
+                                                    payload: &ip6_buf[..n_ip6],
+                                                };
+                                                let mut eth_buf = [0u8; 1514];
+                                                if let Ok(n_eth) = eth_resp.serialize(&mut eth_buf) {
+                                                    let _ = NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]);
+                                                }
                                             }
                                         }
+                                    }
+                                    137 => { // Redirect
+                                        // RFC 4861: Drop ICMPv6 Redirect fail-closed to prevent route poisoning
+                                        record_net_drop(NetDropKind::MalformedChecksumOrLength, "icmpv6_redirect_rejected");
                                     }
                                     _ => {
                                         record_net_drop(NetDropKind::UnknownL4Protocol, "unsupported_icmpv6_type");
                                     }
                                 }
+                            } else {
+                                record_net_drop(NetDropKind::MalformedChecksumOrLength, "icmpv6_payload_too_short");
                             }
                         }
                     } else {
@@ -1149,7 +1343,10 @@ pub(crate) fn reset_net_state() {
     *NETWORK_DEVICE.lock() = NetworkDeviceManager::new_loopback();
     *IPV6_NEIGHBOR_CACHE.lock() = NeighborCache::new();
     *IPV6_ROUTING_TABLE.lock() = Ipv6RoutingTable::new();
+    *IPV6_ADDRESSES.lock() = crate::net::ipv6::Ipv6AddressTable::new();
     *HOST_IPV6_LINK_LOCAL.lock() = Ipv6Address::UNSPECIFIED;
+    *ARP_REQUESTS.lock() = [ArpRequestState::EMPTY; 8];
+    LIVE_GATEWAY_ARP_LOGGED.store(false, Ordering::SeqCst);
     DROP_STATS.net_drop_stats_reset();
 }
 
@@ -1813,6 +2010,289 @@ mod tests {
         assert!(
             ARP_TABLE.lock().lookup(test_ip).is_none(),
             "Inconsistent ARP packet must not be entered into the ARP table"
+        );
+    }
+
+    #[test]
+    fn test_unsolicited_arp_reply_rejected_and_solicited_pins_permanent() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let attacker_mac = MacAddress([0x00, 0x50, 0x56, 0x11, 0x22, 0x33]);
+        let gw_mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let host_mac = NETWORK_DEVICE.lock().info().mac;
+
+        // 1. Unsolicited ARP reply claiming to be GATEWAY_IP without prior request
+        let arp_unsolicited = ArpPacket {
+            opcode: ArpOpcode::Reply,
+            sender_mac: attacker_mac,
+            sender_ip: GATEWAY_IP,
+            target_mac: host_mac,
+            target_ip: DEFAULT_HOST_IP,
+        };
+        let mut arp_buf = [0u8; 28];
+        let n_arp = arp_unsolicited.serialize(&mut arp_buf).unwrap();
+        let eth_frame = EthernetFrame {
+            dst_mac: host_mac,
+            src_mac: attacker_mac,
+            ethertype: EtherType::Arp,
+            payload: &arp_buf[..n_arp],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = eth_frame.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        poll_network_interface();
+
+        assert!(
+            ARP_TABLE.lock().lookup(GATEWAY_IP).is_none(),
+            "Unsolicited ARP reply for gateway must be rejected"
+        );
+
+        // 2. Transmit legitimate request, then provide solicited reply
+        let _ = transmit_arp_request(GATEWAY_IP);
+        let arp_solicited = ArpPacket {
+            opcode: ArpOpcode::Reply,
+            sender_mac: gw_mac,
+            sender_ip: GATEWAY_IP,
+            target_mac: host_mac,
+            target_ip: DEFAULT_HOST_IP,
+        };
+        let n_arp = arp_solicited.serialize(&mut arp_buf).unwrap();
+        let eth_frame = EthernetFrame {
+            dst_mac: host_mac,
+            src_mac: gw_mac,
+            ethertype: EtherType::Arp,
+            payload: &arp_buf[..n_arp],
+        };
+        let n_eth = eth_frame.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        poll_network_interface();
+
+        assert_eq!(
+            ARP_TABLE.lock().lookup(GATEWAY_IP),
+            Some(gw_mac),
+            "Solicited ARP reply for gateway must be learned and pinned permanent"
+        );
+
+        // 3. Subsequent unsolicited reply cannot poison or overwrite permanent gateway entry
+        let _ = transmit_arp_request(Ipv4Address([10, 0, 2, 99])); // request for unrelated IP
+        let arp_poison = ArpPacket {
+            opcode: ArpOpcode::Reply,
+            sender_mac: attacker_mac,
+            sender_ip: GATEWAY_IP,
+            target_mac: host_mac,
+            target_ip: DEFAULT_HOST_IP,
+        };
+        let n_arp = arp_poison.serialize(&mut arp_buf).unwrap();
+        let eth_frame = EthernetFrame {
+            dst_mac: host_mac,
+            src_mac: attacker_mac,
+            ethertype: EtherType::Arp,
+            payload: &arp_buf[..n_arp],
+        };
+        let n_eth = eth_frame.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        poll_network_interface();
+
+        assert_eq!(
+            ARP_TABLE.lock().lookup(GATEWAY_IP),
+            Some(gw_mac),
+            "Permanent gateway entry must not be overwritten by spoofed reply"
+        );
+    }
+
+    #[test]
+    fn test_ethernet_unicast_dst_mac_filtering() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let wrong_dst_mac = MacAddress([0x00, 0x11, 0x22, 0x33, 0x44, 0x99]);
+        let src_mac = MacAddress([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let target_ip = Ipv4Address([10, 0, 2, 50]);
+
+        let arp_pkt = ArpPacket {
+            opcode: ArpOpcode::Request,
+            sender_mac: src_mac,
+            sender_ip: target_ip,
+            target_mac: MacAddress::ZERO,
+            target_ip: DEFAULT_HOST_IP,
+        };
+        let mut arp_buf = [0u8; 28];
+        let n_arp = arp_pkt.serialize(&mut arp_buf).unwrap();
+
+        // Frame destination MAC is unicast but not ours!
+        let eth_frame = EthernetFrame {
+            dst_mac: wrong_dst_mac,
+            src_mac,
+            ethertype: EtherType::Arp,
+            payload: &arp_buf[..n_arp],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = eth_frame.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        let prev_drop = DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed);
+        poll_network_interface();
+
+        assert_eq!(
+            DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed),
+            prev_drop + 1,
+            "Unicast frame for different MAC must be dropped"
+        );
+        assert!(
+            ARP_TABLE.lock().lookup(target_ip).is_none(),
+            "Dropped frame must not update ARP table"
+        );
+    }
+
+    #[test]
+    fn test_icmpv6_solicited_na_multicast_discarded() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let src_mac = MacAddress([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let src_ip = Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x00, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55]);
+        let target_ip = Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+
+        // NA with Solicited=1 (0x40) sent to multicast destination ff02::1
+        let mut na_buf = [0u8; 32];
+        na_buf[0] = 136; // NA
+        na_buf[1] = 0;
+        na_buf[4] = 0x40; // Solicited=1
+        na_buf[8..24].copy_from_slice(&target_ip.0);
+        na_buf[24] = 2; // TLLA
+        na_buf[25] = 1;
+        na_buf[26..32].copy_from_slice(&src_mac.0);
+
+        let csum = calculate_icmpv6_checksum(&src_ip, &Ipv6Address::ALL_NODES, &na_buf);
+        na_buf[2..4].copy_from_slice(&csum.to_be_bytes());
+
+        let ip6 = Ipv6Packet {
+            src: src_ip,
+            dst: Ipv6Address::ALL_NODES, // Multicast destination!
+            next_header: 58,
+            hop_limit: 255,
+            payload: &na_buf,
+        };
+        let mut ip6_buf = [0u8; 128];
+        let n_ip6 = ip6.serialize(&mut ip6_buf).unwrap();
+
+        let eth = EthernetFrame {
+            dst_mac: MacAddress([0x33, 0x33, 0x00, 0x00, 0x00, 0x01]),
+            src_mac,
+            ethertype: EtherType::Ipv6,
+            payload: &ip6_buf[..n_ip6],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = eth.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        let prev_drop = DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed);
+        poll_network_interface();
+
+        assert_eq!(
+            DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed),
+            prev_drop + 1,
+            "Solicited NA sent to multicast destination must be silently dropped"
+        );
+        assert!(
+            IPV6_NEIGHBOR_CACHE.lock().lookup(target_ip, 0).is_none(),
+            "Dropped NA must not update neighbor cache"
+        );
+    }
+
+    #[test]
+    fn test_icmpv6_redirect_rejected_fail_closed() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let router_mac = MacAddress([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let router_ip = Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x00, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55]);
+        let host_ip = Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        *HOST_IPV6_LINK_LOCAL.lock() = host_ip;
+
+        // Redirect message (Type 137, Code 0)
+        let mut redir_buf = [0u8; 40];
+        redir_buf[0] = 137;
+        redir_buf[1] = 0;
+        let csum = calculate_icmpv6_checksum(&router_ip, &host_ip, &redir_buf);
+        redir_buf[2..4].copy_from_slice(&csum.to_be_bytes());
+
+        let ip6 = Ipv6Packet {
+            src: router_ip,
+            dst: host_ip,
+            next_header: 58,
+            hop_limit: 255,
+            payload: &redir_buf,
+        };
+        let mut ip6_buf = [0u8; 128];
+        let n_ip6 = ip6.serialize(&mut ip6_buf).unwrap();
+
+        let eth = EthernetFrame {
+            dst_mac: NETWORK_DEVICE.lock().info().mac,
+            src_mac: router_mac,
+            ethertype: EtherType::Ipv6,
+            payload: &ip6_buf[..n_ip6],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = eth.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        let prev_drop = DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed);
+        poll_network_interface();
+
+        assert_eq!(
+            DROP_STATS.malformed_checksum_length.load(Ordering::Relaxed),
+            prev_drop + 1,
+            "ICMPv6 Redirect must be rejected fail-closed"
+        );
+    }
+
+    #[test]
+    fn test_icmpv6_dad_probe_invalidates_tentative_address() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let tentative_ip = Ipv6Address([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 77]);
+        IPV6_ADDRESSES.lock().assign_tentative(tentative_ip, 100_000, 100_000).unwrap();
+        assert!(IPV6_ADDRESSES.lock().contains_tentative(tentative_ip));
+
+        // Inbound DAD probe: NS from :: for tentative_ip
+        let mut ns_buf = [0u8; 24];
+        ns_buf[0] = 135;
+        ns_buf[1] = 0;
+        ns_buf[8..24].copy_from_slice(&tentative_ip.0);
+        let csum = calculate_icmpv6_checksum(&Ipv6Address::UNSPECIFIED, &tentative_ip.solicited_node_multicast(), &ns_buf);
+        ns_buf[2..4].copy_from_slice(&csum.to_be_bytes());
+
+        let ip6 = Ipv6Packet {
+            src: Ipv6Address::UNSPECIFIED,
+            dst: tentative_ip.solicited_node_multicast(),
+            next_header: 58,
+            hop_limit: 255,
+            payload: &ns_buf,
+        };
+        let mut ip6_buf = [0u8; 128];
+        let n_ip6 = ip6.serialize(&mut ip6_buf).unwrap();
+
+        let eth = EthernetFrame {
+            dst_mac: tentative_ip.solicited_node_multicast().multicast_mac(),
+            src_mac: MacAddress([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            ethertype: EtherType::Ipv6,
+            payload: &ip6_buf[..n_ip6],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = eth.serialize(&mut eth_buf).unwrap();
+
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        poll_network_interface();
+
+        assert!(
+            !IPV6_ADDRESSES.lock().contains_tentative(tentative_ip),
+            "DAD collision must mark tentative address invalid"
         );
     }
 }

@@ -7,6 +7,8 @@ use crate::net::ipv4::Ipv4Address;
 
 pub const DNS_HEADER_LEN: usize = 12;
 pub const DNS_MAX_NAME: usize = 253;
+pub const DNS_MAX_POINTER_HOPS: usize = 5;
+pub const DNS_MAX_CNAME_HOPS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DnsQuestion<'a> {
@@ -42,19 +44,101 @@ pub fn encode_query(id: u16, name: &[u8], out: &mut [u8]) -> Result<usize, &'sta
     Ok(p + 0)
 }
 
+/// Decodes a DNS wire-format name (with compression pointers) into dotted ASCII in `out`.
+///
+/// Enforces:
+/// - Strictly backward pointers (ptr < current_pos) to prevent pointer loops.
+/// - Minimum pointer boundary (ptr >= DNS_HEADER_LEN) to prevent pointing into header.
+/// - Maximum recursion depth (hops <= DNS_MAX_POINTER_HOPS) to prevent CPU starvation.
+///
+/// Returns `(bytes_consumed_in_record, decoded_name_len)`.
+pub fn decode_wire_name(
+    packet: &[u8],
+    start_pos: usize,
+    out: &mut [u8; DNS_MAX_NAME],
+) -> Result<(usize, usize), &'static str> {
+    let mut pos = start_pos;
+    let mut out_len = 0usize;
+    let mut hops = 0usize;
+    let mut bytes_consumed = 0usize;
+    let mut encountered_pointer = false;
+
+    loop {
+        if pos >= packet.len() {
+            return Err("truncated DNS name");
+        }
+        let len = packet[pos] as usize;
+        if (len & 0xC0) == 0xC0 {
+            if pos + 2 > packet.len() {
+                return Err("bad DNS name pointer");
+            }
+            let ptr = (((len & 0x3F) as usize) << 8) | (packet[pos + 1] as usize);
+            // Strict backward & bounds check to prevent loops & header corruptions
+            if ptr >= pos || ptr < DNS_HEADER_LEN {
+                return Err("DNS answer name pointer mismatch");
+            }
+            if hops >= DNS_MAX_POINTER_HOPS {
+                return Err("excessive DNS compression pointer hops");
+            }
+            hops += 1;
+            if !encountered_pointer {
+                bytes_consumed = (pos + 2) - start_pos;
+                encountered_pointer = true;
+            }
+            pos = ptr;
+            continue;
+        } else if (len & 0xC0) != 0 {
+            return Err("invalid DNS label");
+        } else if len == 0 {
+            pos += 1;
+            if !encountered_pointer {
+                bytes_consumed = pos - start_pos;
+            }
+            break;
+        } else {
+            pos += 1;
+            if pos + len > packet.len() {
+                return Err("truncated DNS label");
+            }
+            if out_len > 0 {
+                if out_len >= DNS_MAX_NAME { return Err("DNS name too long"); }
+                out[out_len] = b'.';
+                out_len += 1;
+            }
+            if out_len + len > DNS_MAX_NAME { return Err("DNS name too long"); }
+            out[out_len..out_len + len].copy_from_slice(&packet[pos..pos + len]);
+            out_len += len;
+            pos += len;
+        }
+    }
+
+    Ok((bytes_consumed, out_len))
+}
+
 /// Verifies that the question section in a DNS packet matches the expected query name and is A/IN.
 pub fn verify_dns_question_matches_query(packet: &[u8], expected_name: &[u8]) -> Result<(), &'static str> {
     if packet.len() < DNS_HEADER_LEN + 5 {
         return Err("truncated DNS header");
     }
     let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    // QR bit must be 1 (Response): bit 15
+    if (flags & 0x8000) == 0 {
+        return Err("DNS packet is not a response");
+    }
     // Opcode must be standard query (0): bits 14:11
     if (flags & 0x7800) != 0 {
         return Err("DNS non-standard opcode");
     }
+    // TC bit must be 0 (not truncated): bit 9
+    if (flags & 0x0200) != 0 {
+        return Err("DNS response truncated");
+    }
     let qd = u16::from_be_bytes([packet[4], packet[5]]);
     if qd == 0 {
         return Err("DNS response missing question");
+    }
+    if qd != 1 {
+        return Err("DNS response QDCOUNT must be 1");
     }
 
     let mut p = DNS_HEADER_LEN;
@@ -80,7 +164,9 @@ pub fn verify_dns_question_matches_query(packet: &[u8], expected_name: &[u8]) ->
             name_offset += 1;
         }
         let label = &packet[p..p + label_len];
-        if name_offset + label_len > expected_name.len() || &expected_name[name_offset..name_offset + label_len] != label {
+        if name_offset + label_len > expected_name.len()
+            || !expected_name[name_offset..name_offset + label_len].eq_ignore_ascii_case(label)
+        {
             return Err("DNS question name mismatch");
         }
         name_offset += label_len;
@@ -108,44 +194,41 @@ pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'stati
     }
     let flags = u16::from_be_bytes([buf[2], buf[3]]);
     let answers = u16::from_be_bytes([buf[6], buf[7]]);
-    if flags & 0x8000 == 0 || flags & 0x000F != 0 || answers == 0 { return Err("DNS response rejected"); }
-    let qname_start = DNS_HEADER_LEN;
-    let mut p = DNS_HEADER_LEN;
-    let qd = u16::from_be_bytes([buf[4], buf[5]]);
-    if qd == 0 { return Err("DNS response missing question"); }
-    for _ in 0..qd {
-        loop {
-            if p >= buf.len() { return Err("truncated DNS question"); }
-            let len = buf[p] as usize; p += 1;
-            if len == 0 { break; }
-            if len & 0xC0 != 0 || p + len > buf.len() { return Err("invalid DNS label"); }
-            p += len;
-        }
-        if p + 4 > buf.len() { return Err("truncated DNS question"); }
-        p += 4;
+    if flags & 0x8000 == 0 || flags & 0x000F != 0 || answers == 0 {
+        return Err("DNS response rejected");
     }
-    let qname_len = (p - 4) - qname_start;
+    if (flags & 0x7800) != 0 {
+        return Err("DNS non-standard opcode");
+    }
+    if (flags & 0x0200) != 0 {
+        return Err("DNS response truncated");
+    }
+    let qd = u16::from_be_bytes([buf[4], buf[5]]);
+    if qd == 0 {
+        return Err("DNS response missing question");
+    }
+    if qd != 1 {
+        return Err("DNS response QDCOUNT must be 1");
+    }
+
+    // Decode expected question name into dotted ASCII target
+    let mut current_target = [0u8; DNS_MAX_NAME];
+    let (qname_consumed, mut target_len) = decode_wire_name(buf, DNS_HEADER_LEN, &mut current_target)?;
+    let mut p = DNS_HEADER_LEN + qname_consumed;
+    if p + 4 > buf.len() {
+        return Err("truncated DNS question");
+    }
+    p += 4; // Skip QTYPE and QCLASS
+
+    let mut cname_hops = 0usize;
     for _ in 0..answers {
         if p >= buf.len() { return Err("truncated DNS answer"); }
-        if buf[p] & 0xC0 == 0xC0 {
-            if p + 2 > buf.len() { return Err("bad DNS name pointer"); }
-            let ptr = (u16::from_be_bytes([buf[p] & 0x3F, buf[p+1]])) as usize;
-            if ptr != qname_start {
-                return Err("DNS answer name pointer mismatch");
-            }
-            p += 2;
-        } else {
-            let answer_name_start = p;
-            loop {
-                if p >= buf.len() { return Err("truncated DNS name"); }
-                let len = buf[p] as usize; p += 1;
-                if len == 0 { break; }
-                if len & 0xC0 != 0 || p + len > buf.len() { return Err("invalid DNS name"); }
-                p += len;
-            }
-            if p - answer_name_start != qname_len || &buf[answer_name_start..p] != &buf[qname_start..qname_start + qname_len] {
-                return Err("DNS answer name mismatch");
-            }
+        let mut ans_name = [0u8; DNS_MAX_NAME];
+        let (name_consumed, ans_len) = decode_wire_name(buf, p, &mut ans_name)?;
+        p += name_consumed;
+
+        if !ans_name[..ans_len].eq_ignore_ascii_case(&current_target[..target_len]) {
+            return Err("DNS answer name mismatch");
         }
         if p + 10 > buf.len() { return Err("truncated DNS RR"); }
         let qtype = u16::from_be_bytes([buf[p], buf[p+1]]);
@@ -154,6 +237,21 @@ pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'stati
         let rdlen = u16::from_be_bytes([buf[p+8], buf[p+9]]) as usize;
         p += 10;
         if p + rdlen > buf.len() { return Err("truncated DNS rdata"); }
+
+        if qtype == 5 && class == 1 {
+            // CNAME RR: follow alias to canonical name
+            if cname_hops >= DNS_MAX_CNAME_HOPS {
+                return Err("excessive CNAME chaining");
+            }
+            let mut next_target = [0u8; DNS_MAX_NAME];
+            let (_, next_len) = decode_wire_name(buf, p, &mut next_target)?;
+            current_target = next_target;
+            target_len = next_len;
+            cname_hops += 1;
+            p += rdlen;
+            continue;
+        }
+
         if qtype == 1 && class == 1 && rdlen == 4 {
             return Ok(DnsAnswer { qtype, ttl, addr: Ipv4Address([buf[p], buf[p+1], buf[p+2], buf[p+3]]) });
         }
@@ -180,7 +278,14 @@ impl DnsQueryState { pub const fn empty()->Self { Self{id:0,name:[0;DNS_MAX_NAME
 pub struct DnsResolver { next_id:u16, queries:[DnsQueryState;DNS_MAX_INFLIGHT], cache:[DnsCacheEntry;DNS_MAX_CACHE] }
 impl DnsResolver {
     pub const fn new()->Self { Self{next_id:1,queries:[DnsQueryState::empty();DNS_MAX_INFLIGHT],cache:[DnsCacheEntry::empty();DNS_MAX_CACHE]} }
-    pub fn cached(&self,name:&[u8],now:u64)->Option<Ipv4Address>{ self.cache.iter().find(|e|e.valid&&e.expires_at>now&&e.name_len==name.len()&&e.name[..e.name_len]==*name).map(|e|e.addr) }
+    pub fn cached(&self, name: &[u8], now: u64) -> Option<Ipv4Address> {
+        self.cache.iter().find(|e| {
+            e.valid
+                && e.expires_at > now
+                && e.name_len == name.len()
+                && e.name[..e.name_len].eq_ignore_ascii_case(name)
+        }).map(|e| e.addr)
+    }
     pub fn begin(&mut self,name:&[u8],now:u64)->Result<u16,&'static str>{
         if name.is_empty()||name.len()>DNS_MAX_NAME{return Err("invalid DNS name")}
         if self.cached(name,now).is_some(){return Err("DNS cache hit")}
@@ -399,5 +504,140 @@ mod lifecycle_tests {
         assert_eq!(accepted, Ipv4Address([93, 184, 216, 34]));
         // Cached value lookup
         assert_eq!(resolver.cached(b"legit.example.com", 25), Some(Ipv4Address([93, 184, 216, 34])));
+    }
+
+    #[test]
+    fn dns_case_insensitive_question_and_answer_matching() {
+        let mut r = DnsResolver::new();
+        let query_id = r.begin(b"example.com", 0).unwrap();
+
+        // 1. Packet echoes question in UPPERCASE ("EXAMPLE.COM")
+        let mut packet = alloc::vec![
+            (query_id >> 8) as u8, (query_id & 0xFF) as u8, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        packet.extend_from_slice(b"\x07EXAMPLE\x03COM\x00\x00\x01\x00\x01");
+        // Answer echoes name in mixed case ("eXaMpLe.CoM")
+        packet.extend_from_slice(b"\x07eXaMpLe\x03CoM\x00\x00\x01\x00\x01\x00\x00\x00\x3C\x00\x04");
+        packet.extend_from_slice(&[93, 184, 216, 34]);
+
+        let resolved = r.accept_response_from(&packet, DNS_SERVER, 53, 10)
+            .expect("case-insensitive response accepted");
+        assert_eq!(resolved, Ipv4Address([93, 184, 216, 34]));
+
+        // 2. Cache hit with mixed-case query
+        assert_eq!(r.cached(b"ExAmPlE.cOm", 15), Some(Ipv4Address([93, 184, 216, 34])));
+        assert_eq!(r.cached(b"EXAMPLE.COM", 15), Some(Ipv4Address([93, 184, 216, 34])));
+    }
+
+    #[test]
+    fn dns_header_flags_and_qdcount_validation() {
+        // Base packet for test.com
+        let base_hdr = |qr_bit: u16, opcode: u16, tc_bit: u16, qd: u16, an: u16| {
+            let mut p = alloc::vec![0x12, 0x34];
+            let flags = (qr_bit << 15) | (opcode << 11) | (tc_bit << 9) | 0x0180;
+            p.extend_from_slice(&flags.to_be_bytes());
+            p.extend_from_slice(&qd.to_be_bytes());
+            p.extend_from_slice(&an.to_be_bytes());
+            p.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
+            p
+        };
+
+        // Reject Query packet (QR = 0)
+        let mut qr_zero = base_hdr(0, 0, 0, 1, 1);
+        qr_zero.extend_from_slice(b"\x04test\x03com\x00\x00\x01\x00\x01");
+        assert_eq!(verify_dns_question_matches_query(&qr_zero, b"test.com"), Err("DNS packet is not a response"));
+
+        // Reject Non-Standard Opcode (Opcode = 1: IQUERY)
+        let mut bad_opcode = base_hdr(1, 1, 0, 1, 1);
+        bad_opcode.extend_from_slice(b"\x04test\x03com\x00\x00\x01\x00\x01");
+        assert_eq!(verify_dns_question_matches_query(&bad_opcode, b"test.com"), Err("DNS non-standard opcode"));
+
+        // Reject Truncated packet (TC = 1)
+        let mut truncated = base_hdr(1, 0, 1, 1, 1);
+        truncated.extend_from_slice(b"\x04test\x03com\x00\x00\x01\x00\x01");
+        assert_eq!(verify_dns_question_matches_query(&truncated, b"test.com"), Err("DNS response truncated"));
+
+        // Reject Multiple Questions (QDCOUNT = 2)
+        let mut qd_two = base_hdr(1, 0, 0, 2, 1);
+        qd_two.extend_from_slice(b"\x04test\x03com\x00\x00\x01\x00\x01");
+        assert_eq!(verify_dns_question_matches_query(&qd_two, b"test.com"), Err("DNS response QDCOUNT must be 1"));
+    }
+
+    #[test]
+    fn dns_compression_pointer_security_bounds() {
+        // Construct standard header and question at offset 12
+        let mut base = alloc::vec![
+            0xAA, 0xBB, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        base.extend_from_slice(b"\x04loop\x03com\x00\x00\x01\x00\x01");
+        let ans_offset = base.len();
+
+        // 1. Self-referential loop: pointer pointing to itself (ans_offset)
+        let mut loop_pkt = base.clone();
+        loop_pkt.push(0xC0 | ((ans_offset >> 8) as u8));
+        loop_pkt.push((ans_offset & 0xFF) as u8);
+        loop_pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 1, 1, 1, 1]);
+        assert_eq!(parse_a_answer(&loop_pkt, 0xAABB), Err("DNS answer name pointer mismatch"));
+
+        // 2. Forward pointer: pointer pointing past itself
+        let mut fwd_pkt = base.clone();
+        let fwd_target = ans_offset + 10;
+        fwd_pkt.push(0xC0 | ((fwd_target >> 8) as u8));
+        fwd_pkt.push((fwd_target & 0xFF) as u8);
+        fwd_pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 1, 1, 1, 1]);
+        assert_eq!(parse_a_answer(&fwd_pkt, 0xAABB), Err("DNS answer name pointer mismatch"));
+
+        // 3. Out-of-bounds pointer into DNS header (offset 4 < 12)
+        let mut hdr_pkt = base.clone();
+        hdr_pkt.extend_from_slice(&[0xC0, 0x04]);
+        hdr_pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 1, 1, 1, 1]);
+        assert_eq!(parse_a_answer(&hdr_pkt, 0xAABB), Err("DNS answer name pointer mismatch"));
+    }
+
+    #[test]
+    fn dns_cname_chain_resolution_and_bailiwick() {
+        let mut r = DnsResolver::new();
+        let query_id = r.begin(b"alias.example.com", 0).unwrap();
+
+        // Response with 2 answers:
+        // Answer 1: alias.example.com -> CNAME canonical.example.com
+        // Answer 2: canonical.example.com -> A 93.184.216.34
+        let mut packet = alloc::vec![
+            (query_id >> 8) as u8, (query_id & 0xFF) as u8, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x02, // QD=1, AN=2
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        // Question: alias.example.com
+        packet.extend_from_slice(b"\x05alias\x07example\x03com\x00\x00\x01\x00\x01");
+
+        // Answer 1: pointer to question (0xC00C), TYPE=CNAME(5), CLASS=1, TTL=60, RDLEN=21
+        packet.extend_from_slice(&[0xC0, 0x0C]);
+        packet.extend_from_slice(&[0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C]);
+        // RDATA: \x09canonical\x07example\x03com\x00 (length = 23 bytes)
+        packet.extend_from_slice(&[0x00, 0x17]); // rdlen = 23
+        let cname_rdata_offset = packet.len();
+        packet.extend_from_slice(b"\x09canonical\x07example\x03com\x00");
+
+        // Answer 2: Pointer to canonical name in CNAME RDATA, TYPE=A(1), CLASS=1, TTL=60, RDLEN=4
+        packet.push(0xC0 | ((cname_rdata_offset >> 8) as u8));
+        packet.push((cname_rdata_offset & 0xFF) as u8);
+        packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04]);
+        packet.extend_from_slice(&[93, 184, 216, 34]);
+
+        let resolved = r.accept_response_from(&packet, DNS_SERVER, 53, 100)
+            .expect("CNAME alias chained to A record");
+        assert_eq!(resolved, Ipv4Address([93, 184, 216, 34]));
+
+        // Poisoned Answer 2 targeting unrelated bailiwick (evil.com) must be rejected
+        let mut poisoned = packet.clone();
+        let ans2_idx = poisoned.len() - 16;
+        // Overwrite Answer 2 name pointer to point to question name instead of canonical target
+        poisoned[ans2_idx] = 0xC0;
+        poisoned[ans2_idx + 1] = 0x0C;
+        assert_eq!(parse_a_answer(&poisoned, query_id), Err("DNS answer name mismatch"));
     }
 }

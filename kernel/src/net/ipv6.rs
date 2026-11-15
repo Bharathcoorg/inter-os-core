@@ -9,6 +9,7 @@ pub struct Ipv6Address(pub [u8; 16]);
 impl Ipv6Address {
     pub const LOCALHOST: Self = Self([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     pub const UNSPECIFIED: Self = Self([0; 16]);
+    pub const ALL_NODES: Self = Self([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     #[inline]
     pub fn is_multicast(&self) -> bool {
@@ -28,6 +29,27 @@ impl Ipv6Address {
     #[inline]
     pub fn is_loopback(&self) -> bool {
         self.0 == Self::LOCALHOST.0
+    }
+
+    #[inline]
+    pub fn solicited_node_multicast(&self) -> Ipv6Address {
+        let mut bytes = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xff, 0, 0, 0];
+        bytes[13] = self.0[13];
+        bytes[14] = self.0[14];
+        bytes[15] = self.0[15];
+        Ipv6Address(bytes)
+    }
+
+    #[inline]
+    pub fn multicast_mac(&self) -> crate::net::ethernet::MacAddress {
+        crate::net::ethernet::MacAddress([
+            0x33,
+            0x33,
+            self.0[12],
+            self.0[13],
+            self.0[14],
+            self.0[15],
+        ])
     }
 }
 
@@ -59,7 +81,7 @@ impl<'a> Ipv6Packet<'a> {
             return Err("invalid IPv6 version");
         }
         let payload_len = u16::from_be_bytes([data[4], data[5]]) as usize;
-        if data.len() != 40 + payload_len {
+        if data.len() < 40 + payload_len {
             return Err("IPv6 payload length mismatch");
         }
         let mut src = [0u8; 16];
@@ -71,7 +93,7 @@ impl<'a> Ipv6Packet<'a> {
             dst: Ipv6Address(dst),
             next_header: data[6],
             hop_limit: data[7],
-            payload: &data[40..],
+            payload: &data[40..40 + payload_len],
         })
     }
 
@@ -120,7 +142,8 @@ pub fn calculate_icmpv6_checksum(src: &Ipv6Address, dst: &Ipv6Address, payload: 
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    !(sum as u16)
+    let res = !(sum as u16);
+    if res == 0 { 0xffff } else { res }
 }
 
 /// Verifies that received ICMPv6 message matches RFC 4443 pseudo-header checksum.
@@ -251,6 +274,17 @@ impl Ipv6RoutingTable {
         false
     }
 
+    pub fn remove_next_hop(&mut self, next_hop: &Ipv6Address) -> bool {
+        let mut removed = false;
+        for entry in &mut self.routes {
+            if entry.map(|r| r.next_hop.as_ref() == Some(next_hop)).unwrap_or(false) {
+                *entry = None;
+                removed = true;
+            }
+        }
+        removed
+    }
+
     pub fn remove_interface(&mut self, interface: u8) {
         for entry in &mut self.routes {
             if entry.map(|r| r.interface == interface).unwrap_or(false) {
@@ -277,6 +311,7 @@ impl Ipv6RoutingTable {
 pub struct NeighborEntry {
     pub address: Ipv6Address,
     pub mac: [u8; 6],
+    pub is_router: bool,
     pub reachable_until: u64,
 }
 
@@ -295,7 +330,7 @@ impl NeighborCache {
 
     #[inline]
     pub fn is_valid_neighbor_ip(addr: Ipv6Address) -> bool {
-        !addr.is_multicast() && !addr.is_unspecified()
+        !addr.is_multicast() && !addr.is_unspecified() && !addr.is_loopback()
     }
 
     pub const fn new() -> Self {
@@ -308,6 +343,18 @@ impl NeighborCache {
         &mut self,
         address: Ipv6Address,
         mac: [u8; 6],
+        override_flag: bool,
+        now: u64,
+        ttl: u64,
+    ) -> Result<(), &'static str> {
+        self.learn_advertisement_with_router(address, mac, false, override_flag, now, ttl)
+    }
+
+    pub fn learn_advertisement_with_router(
+        &mut self,
+        address: Ipv6Address,
+        mac: [u8; 6],
+        is_router: bool,
         override_flag: bool,
         now: u64,
         ttl: u64,
@@ -327,9 +374,13 @@ impl NeighborCache {
         if let Some(entry) = self.entries.iter_mut().flatten().find(|e| e.address == address) {
             if entry.mac != mac && !override_flag {
                 // RFC 4861 § 7.2.5: Do NOT update link-layer address without override flag!
+                if !is_router {
+                    entry.is_router = false;
+                }
                 return Ok(());
             }
             entry.mac = mac;
+            entry.is_router = is_router;
             entry.reachable_until = reachable_until;
             return Ok(());
         }
@@ -339,6 +390,7 @@ impl NeighborCache {
             *slot = Some(NeighborEntry {
                 address,
                 mac,
+                is_router,
                 reachable_until,
             });
             return Ok(());
@@ -358,13 +410,14 @@ impl NeighborCache {
         self.entries[min_idx] = Some(NeighborEntry {
             address,
             mac,
+            is_router,
             reachable_until,
         });
         Ok(())
     }
 
     pub fn learn(&mut self, address: Ipv6Address, mac: [u8; 6], now: u64, ttl: u64) {
-        let _ = self.learn_advertisement(address, mac, true, now, ttl);
+        let _ = self.learn_advertisement_with_router(address, mac, false, false, now, ttl);
     }
 
     pub fn lookup(&self, address: Ipv6Address, now: u64) -> Option<[u8; 6]> {
@@ -469,9 +522,9 @@ impl Icmpv6Neighbor {
                 .try_into()
                 .map_err(|_| "invalid ICMPv6 target")?,
         );
-        // RFC 4861 § 7.1.1 & 7.1.2: Target Address MUST NOT be a multicast address
-        if target.is_multicast() {
-            return Err("ICMPv6 target address must not be multicast");
+        // RFC 4861 § 4.3, 4.4, 7.1.1 & 7.1.2: Target Address MUST NOT be multicast or unspecified
+        if target.is_multicast() || target.is_unspecified() {
+            return Err("ICMPv6 target address must not be multicast or unspecified");
         }
         let flags = if kind == ICMPV6_NEIGHBOR_ADVERTISEMENT {
             buf[4]
@@ -491,27 +544,39 @@ impl Icmpv6Neighbor {
             // RFC 4861 § 4.3 & 4.4:
             // Option 1 (SLLA) is ONLY valid on Neighbor Solicitation.
             // Option 2 (TLLA) is ONLY valid on Neighbor Advertisement.
+            // Options 3 (Prefix Info) and 4 (Redirected Header) are illegal in NS and NA.
             if kind == ICMPV6_NEIGHBOR_SOLICITATION && opt_type == 2 {
                 return Err("TLLA option illegal in Neighbor Solicitation");
             }
+            if kind == ICMPV6_NEIGHBOR_SOLICITATION && (opt_type == 3 || opt_type == 4) {
+                return Err("illegal option in Neighbor Solicitation");
+            }
             if kind == ICMPV6_NEIGHBOR_ADVERTISEMENT && opt_type == 1 {
                 return Err("SLLA option illegal in Neighbor Advertisement");
+            }
+            if kind == ICMPV6_NEIGHBOR_ADVERTISEMENT && (opt_type == 3 || opt_type == 4) {
+                return Err("illegal option in Neighbor Advertisement");
             }
             // For Ethernet, SLLA/TLLA option length MUST be exactly 8 bytes (1 unit of 8 octets)
             if opt_type == 1 || opt_type == 2 {
                 if opt_len != 8 {
                     return Err("illegal link-layer address option length for Ethernet");
                 }
-                if link_layer_address.is_none() {
-                    let mut mac = [0u8; 6];
-                    mac.copy_from_slice(&buf[p + 2..p + 8]);
-                    if !NeighborCache::is_valid_unicast_mac(mac) {
-                        return Err("illegal multicast or zero MAC in ICMPv6 option");
-                    }
-                    link_layer_address = Some(mac);
+                if link_layer_address.is_some() {
+                    return Err("duplicate link-layer address option");
                 }
+                let mut mac = [0u8; 6];
+                mac.copy_from_slice(&buf[p + 2..p + 8]);
+                if !NeighborCache::is_valid_unicast_mac(mac) {
+                    return Err("illegal multicast or zero MAC in ICMPv6 option");
+                }
+                link_layer_address = Some(mac);
             }
             p += opt_len;
+        }
+
+        if p != buf.len() {
+            return Err("malformed ICMPv6 neighbor option trailing bytes");
         }
 
         Ok(Self {
@@ -526,12 +591,22 @@ impl Icmpv6Neighbor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Icmpv6PrefixInfo {
+    pub prefix: Ipv6Prefix,
+    pub on_link: bool,
+    pub autonomous: bool,
+    pub valid_lifetime: u32,
+    pub preferred_lifetime: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Icmpv6RouterAdvertisement {
     pub hop_limit: u8,
     pub router_lifetime: u16,
     pub reachable_time: u32,
     pub retrans_timer: u32,
     pub prefix: Option<Ipv6Prefix>,
+    pub prefix_info: Option<Icmpv6PrefixInfo>,
 }
 
 impl Icmpv6RouterAdvertisement {
@@ -540,6 +615,7 @@ impl Icmpv6RouterAdvertisement {
             return Err("invalid ICMPv6 router advertisement");
         }
         let mut prefix = None;
+        let mut prefix_info = None;
         let mut p = 16usize;
         while p + 2 <= buf.len() {
             let typ = buf[p];
@@ -551,16 +627,27 @@ impl Icmpv6RouterAdvertisement {
             if typ == 3 && len >= 32 {
                 let plen = buf[p + 2];
                 let flags = buf[p + 3];
+                let on_link = (flags & 0x80) != 0;
                 let autonomous = (flags & 0x40) != 0;
                 let valid_lifetime = u32::from_be_bytes([buf[p + 4], buf[p + 5], buf[p + 6], buf[p + 7]]);
                 let preferred_lifetime = u32::from_be_bytes([buf[p + 8], buf[p + 9], buf[p + 10], buf[p + 11]]);
 
-                if plen <= 128 && preferred_lifetime <= valid_lifetime && autonomous {
+                if plen <= 128 && preferred_lifetime <= valid_lifetime {
                     let mut a = [0u8; 16];
                     a.copy_from_slice(&buf[p + 16..p + 32]);
                     let addr = Ipv6Address(a);
                     if !addr.is_multicast() && !addr.is_link_local() {
-                        prefix = Some(Ipv6Prefix::new(addr, plen));
+                        let pref = Ipv6Prefix::new(addr, plen);
+                        prefix_info = Some(Icmpv6PrefixInfo {
+                            prefix: pref,
+                            on_link,
+                            autonomous,
+                            valid_lifetime,
+                            preferred_lifetime,
+                        });
+                        if autonomous && valid_lifetime > 0 {
+                            prefix = Some(pref);
+                        }
                     }
                 }
             }
@@ -572,8 +659,154 @@ impl Icmpv6RouterAdvertisement {
             reachable_time: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
             retrans_timer: u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]),
             prefix,
+            prefix_info,
         })
     }
+}
+
+/// IPv6 address lifecycle state machine per RFC 4862.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Ipv6AddressState {
+    Tentative,
+    Preferred,
+    Deprecated,
+    Invalid,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Ipv6AddressEntry {
+    pub address: Ipv6Address,
+    pub state: Ipv6AddressState,
+    pub valid_until: u64,
+    pub preferred_until: u64,
+    pub dad_transmits_remaining: u8,
+}
+
+impl Ipv6AddressEntry {
+    pub const fn empty() -> Self {
+        Self {
+            address: Ipv6Address::UNSPECIFIED,
+            state: Ipv6AddressState::Invalid,
+            valid_until: 0,
+            preferred_until: 0,
+            dad_transmits_remaining: 0,
+        }
+    }
+}
+
+pub const MAX_IPV6_ADDRS: usize = 4;
+pub struct Ipv6AddressTable {
+    pub addrs: [Ipv6AddressEntry; MAX_IPV6_ADDRS],
+}
+
+impl Ipv6AddressTable {
+    pub const fn new() -> Self {
+        Self {
+            addrs: [Ipv6AddressEntry::empty(); MAX_IPV6_ADDRS],
+        }
+    }
+
+    pub fn assign_tentative(&mut self, addr: Ipv6Address, valid_until: u64, preferred_until: u64) -> Result<(), &'static str> {
+        if addr.is_unspecified() || addr.is_multicast() {
+            return Err("illegal IPv6 address");
+        }
+        for entry in self.addrs.iter_mut() {
+            if entry.state != Ipv6AddressState::Invalid && entry.address == addr {
+                return Ok(());
+            }
+        }
+        for entry in self.addrs.iter_mut() {
+            if entry.state == Ipv6AddressState::Invalid {
+                *entry = Ipv6AddressEntry {
+                    address: addr,
+                    state: Ipv6AddressState::Tentative,
+                    valid_until,
+                    preferred_until,
+                    dad_transmits_remaining: 1,
+                };
+                return Ok(());
+            }
+        }
+        Err("IPv6 address table full")
+    }
+
+    pub fn mark_preferred(&mut self, addr: Ipv6Address) -> bool {
+        for entry in self.addrs.iter_mut() {
+            if entry.address == addr && entry.state == Ipv6AddressState::Tentative {
+                entry.state = Ipv6AddressState::Preferred;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn mark_invalid(&mut self, addr: Ipv6Address) -> bool {
+        for entry in self.addrs.iter_mut() {
+            if entry.address == addr {
+                entry.state = Ipv6AddressState::Invalid;
+                entry.valid_until = 0;
+                entry.preferred_until = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn withdraw_prefix(&mut self, prefix: Ipv6Prefix) {
+        for entry in self.addrs.iter_mut() {
+            if entry.state != Ipv6AddressState::Invalid && prefix.contains(entry.address) {
+                entry.state = Ipv6AddressState::Invalid;
+                entry.valid_until = 0;
+                entry.preferred_until = 0;
+            }
+        }
+    }
+
+    pub fn contains_tentative(&self, addr: Ipv6Address) -> bool {
+        self.addrs.iter().any(|e| e.state == Ipv6AddressState::Tentative && e.address == addr)
+    }
+
+    pub fn contains_assigned(&self, addr: Ipv6Address) -> bool {
+        self.addrs.iter().any(|e| (e.state == Ipv6AddressState::Preferred || e.state == Ipv6AddressState::Deprecated) && e.address == addr)
+    }
+}
+
+/// Builds an RFC 4862 Duplicate Address Detection (DAD) probe frame.
+/// Source IPv6 is :: (unspecified), Destination is solicited-node multicast (ff02::1:ffxx:xxxx).
+/// Destination MAC is 33:33:ff:xx:xx:xx.
+pub fn build_dad_probe_frame(
+    tentative_addr: Ipv6Address,
+    local_mac: crate::net::ethernet::MacAddress,
+    out: &mut [u8; 1514],
+) -> Result<usize, &'static str> {
+    let sol_node = tentative_addr.solicited_node_multicast();
+    let mcast_mac = sol_node.multicast_mac();
+
+    let mut ns_buf = [0u8; 24]; // 24 bytes NS without SLLA (RFC 4861 § 7.1.1 forbids SLLA on DAD probe)
+    ns_buf[0] = 135; // NS
+    ns_buf[1] = 0;
+    ns_buf[8..24].copy_from_slice(&tentative_addr.0);
+
+    let csum = calculate_icmpv6_checksum(&Ipv6Address::UNSPECIFIED, &sol_node, &ns_buf);
+    ns_buf[2..4].copy_from_slice(&csum.to_be_bytes());
+
+    let ip6 = Ipv6Packet {
+        src: Ipv6Address::UNSPECIFIED,
+        dst: sol_node,
+        next_header: 58,
+        hop_limit: 255,
+        payload: &ns_buf,
+    };
+    let mut ip6_buf = [0u8; 128];
+    let ip6_len = ip6.serialize(&mut ip6_buf)?;
+
+    let eth = crate::net::ethernet::EthernetFrame {
+        dst_mac: mcast_mac,
+        src_mac: local_mac,
+        ethertype: crate::net::ethernet::EtherType::Ipv6,
+        payload: &ip6_buf[..ip6_len],
+    };
+    eth.serialize(out)
 }
 
 #[cfg(test)]
@@ -843,6 +1076,78 @@ mod tests {
         assert_eq!(
             Icmpv6Neighbor::parse(&mcast_mac_ns),
             Err("illegal multicast or zero MAC in ICMPv6 option")
+        );
+    }
+
+    #[test]
+    fn ndp_option_parser_rejects_duplicate_options_and_trailing_bytes() {
+        // Valid NA with 1 TLLA
+        let valid_na = [
+            136u8, 0, 0, 0,
+            0x60, 0, 0, 0,
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // TLLA 1
+        ];
+        assert!(Icmpv6Neighbor::parse(&valid_na).is_ok());
+
+        // Duplicate TLLA option in NA MUST be rejected
+        let duplicate_tlla_na = [
+            136u8, 0, 0, 0,
+            0x60, 0, 0, 0,
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // TLLA 1
+            2, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x77, // TLLA 2 (duplicate!)
+        ];
+        assert_eq!(
+            Icmpv6Neighbor::parse(&duplicate_tlla_na),
+            Err("duplicate link-layer address option")
+        );
+
+        // Trailing non-option junk byte MUST be rejected
+        let trailing_byte_na = [
+            136u8, 0, 0, 0,
+            0x60, 0, 0, 0,
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+            0xFF, // Trailing junk byte
+        ];
+        assert_eq!(
+            Icmpv6Neighbor::parse(&trailing_byte_na),
+            Err("malformed ICMPv6 neighbor option trailing bytes")
+        );
+    }
+
+    #[test]
+    fn ndp_target_address_rejects_unspecified() {
+        let unspecified_target_ns = [
+            135u8, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // :: (unspecified target)
+            1, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        ];
+        assert_eq!(
+            Icmpv6Neighbor::parse(&unspecified_target_ns),
+            Err("ICMPv6 target address must not be multicast or unspecified")
+        );
+    }
+
+    #[test]
+    fn neighbor_cache_ns_slla_cannot_poison_existing_entry() {
+        let mut cache = NeighborCache::new();
+        let target = Ipv6Address([0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let legit_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let attacker_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+
+        // Establish legitimate entry (e.g. from authenticated router/NA)
+        cache.learn_advertisement(target, legit_mac, true, 100, 300).unwrap();
+        assert_eq!(cache.lookup(target, 105), Some(legit_mac));
+
+        // Attacker sends Neighbor Solicitation with SLLA (override_flag = false)
+        cache.learn_advertisement_with_router(target, attacker_mac, false, false, 110, 300).unwrap();
+        assert_eq!(
+            cache.lookup(target, 115),
+            Some(legit_mac),
+            "NS SLLA MUST NOT poison existing neighbor cache entry!"
         );
     }
 }

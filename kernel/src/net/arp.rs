@@ -155,6 +155,10 @@ impl ArpTable {
         // If entry exists, mark permanent and update MAC
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
+                if entry.is_permanent {
+                    // Already permanent: immutable, cannot be overwritten or altered!
+                    return;
+                }
                 entry.mac = mac;
                 entry.is_permanent = true;
                 entry.expires_at = u64::MAX;

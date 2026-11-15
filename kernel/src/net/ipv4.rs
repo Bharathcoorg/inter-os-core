@@ -163,6 +163,14 @@ impl<'a> Ipv4Packet<'a> {
             return Err("Invalid IPv4 source address (multicast or broadcast)");
         }
 
+        if src == Ipv4Address::UNSPECIFIED {
+            return Err("Invalid IPv4 source address (zero/unspecified)");
+        }
+
+        if dst == Ipv4Address::UNSPECIFIED {
+            return Err("Invalid IPv4 destination address (zero/unspecified)");
+        }
+
         Ok(Ipv4Packet {
             src,
             dst,
