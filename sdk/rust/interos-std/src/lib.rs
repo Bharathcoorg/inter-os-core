@@ -3409,10 +3409,11 @@ pub fn service_list(out: &mut [u8]) -> Result<usize, i64> {
 /// Queries stable service metadata. The response is a 12-byte ABI record.
 pub fn service_query(service_id: u8, out: &mut [u8; 12]) -> Result<usize, i64> {
     let r = unsafe {
-        syscall2(
+        syscall3(
             SyscallNumber::ServiceQuery,
             service_id as u64,
             out.as_mut_ptr() as u64,
+            out.len() as u64,
         )
     };
     if r >= 0 {
@@ -3500,12 +3501,13 @@ pub fn storage_query() -> Result<u64, i64> {
 /// Lists immediate VFS directory children using a read capability.
 pub fn fs_list(path: &str, out: &mut [u8]) -> Result<usize, i64> {
     let r = unsafe {
-        syscall4(
+        syscall5(
             SyscallNumber::FsList,
             RESERVED_CAP_SLOT,
             path.as_ptr() as u64,
             path.len() as u64,
             out.as_mut_ptr() as u64,
+            out.len() as u64,
         )
     };
     if r >= 0 {

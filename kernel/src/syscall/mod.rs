@@ -11,10 +11,10 @@ pub mod entry;
 pub mod user_ptr;
 pub use entry::set_current_kernel_rsp;
 #[cfg(not(test))]
-pub use user_ptr::copy_from_user;
+pub use user_ptr::{copy_from_user, read_user_string};
 
 pub use user_ptr::{
-    copy_to_user, read_user_string, read_user_value, write_user_value,
+    copy_to_user, read_user_value, write_user_value,
     validate_user_buffer, UserAccessError, UserPtr, UserSlice, UserSliceMut,
 };
 
@@ -50,6 +50,15 @@ pub fn copy_from_user(dst: &mut [u8], src_addr: u64, len: usize) -> Result<usize
     } else {
         user_ptr::copy_from_user(dst, src_addr, len)
     }
+}
+
+#[cfg(test)]
+pub fn read_user_string<'a>(addr: u64, len: usize, dst: &'a mut [u8]) -> Result<&'a str, UserAccessError> {
+    if len == 0 {
+        return Ok("");
+    }
+    let copied = copy_from_user(dst, addr, len)?;
+    core::str::from_utf8(&dst[..copied]).map_err(|_| UserAccessError::InvalidUtf8)
 }
 
 use crate::audio::{
@@ -2047,6 +2056,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if target_len == 0 || target_len > 128 || out_len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
+            if (a4 == 0) != (a5 == 0) {
+                return SyscallResult::InvalidArguments as i64;
+            }
             let mut target_buf = [0u8; 128];
             let target = match read_user_string(a2, target_len, &mut target_buf) {
                 Ok(s) => s,
@@ -2055,8 +2067,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let mut out_kbuf = [0u8; 256];
             match sys_revocation_audit(cmd, target, out_kbuf.as_mut_ptr(), out_len) {
                 Ok(n) => {
-                    if copy_to_user(a4, &out_kbuf[..n]).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
+                    if a4 != 0 {
+                        let copy_n = core::cmp::min(n, out_len);
+                        if copy_n > 0 && copy_to_user(a4, &out_kbuf[..copy_n]).is_err() {
+                            return SyscallResult::InvalidArguments as i64;
+                        }
                     }
                     n as i64
                 }
@@ -2997,7 +3012,21 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
-        85 => { let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        85 => {
+            let out_len = a5 as usize;
+            if out_len == 0 { return SyscallResult::InvalidArguments as i64; }
+            let cap = core::cmp::min(out_len, 4096);
+            let mut out = [0u8; 4096];
+            match sys_fs_list(a1 as usize, a2, a3 as usize, &mut out[..cap]) {
+                Ok(n) => {
+                    if copy_to_user(a4, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
         86 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }
         87 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
         88 => { match sys_service_recover_failed(a1 as u8) { Ok(n) => n as i64, Err(e) => e as i64 } }
@@ -3217,7 +3246,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         },
         102 => {
-            if a2 < 12 { return SyscallResult::InvalidArguments as i64; }
+            if a2 == 0 || (a3 != 0 && a3 < 12) {
+                return SyscallResult::InvalidArguments as i64;
+            }
             let mut out = [0u8; 12];
             match sys_service_query(a1 as u8, &mut out) {
                 Ok(n) => { if copy_to_user(a2, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 } }
@@ -5854,12 +5885,12 @@ pub fn sys_revocation_audit(
         1 => {
             // Revoke package
             let ticks = crate::interrupts::get_system_ticks();
-            let _ = reg.revoke_package(
+            reg.revoke_package(
                 target,
                 crate::package::RevocationReason::MaliciousBehavior,
                 ticks,
                 "did:inter:sentinel:userspace_audit",
-            );
+            ).map_err(|_| SyscallResult::DeviceError)?;
             Ok(1)
         }
         _ => Err(SyscallResult::InvalidArguments),
@@ -8728,6 +8759,141 @@ fn browser_clock_monotonic_increments() {
         {
             let vfs = VFS.lock();
             assert!(vfs.lookup("/storage/dispatch_dir").is_some(), "directory must exist in VFS after syscall 161");
+        }
+
+        clear_test_user_buffers();
+    }
+
+    #[test]
+    fn syscall_85_fs_list_requires_nonzero_len_and_bounds_slice() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut vfs = VFS.lock();
+            let _ = vfs.mkdir("/storage");
+            let _ = vfs.mkdir("/storage/list_bound_test");
+            let _ = vfs.mkdir("/storage/list_bound_test/alpha");
+            let _ = vfs.mkdir("/storage/list_bound_test/beta");
+        }
+
+        let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+        let init_slot = caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(9085),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+        let slot = {
+            let mut sched = SCHEDULER.lock();
+            sched.init(caps);
+            if let Some(task) = sched.current_task_mut() {
+                task.cap_table.insert(crate::capability::Capability {
+                    id: crate::capability::CapabilityId(9085),
+                    cap_type: CapabilityType::FileSystemRead,
+                    rights: Rights::READ,
+                    object_id: 0,
+                }).unwrap_or(init_slot)
+            } else {
+                init_slot
+            }
+        };
+
+        let user_addr = 0x3000u64;
+        let dir_path = b"/storage/list_bound_test";
+        register_test_user_buffer(user_addr, dir_path);
+
+        // Dispatch with out_len (a5) == 0 must fail cleanly with InvalidArguments
+        let res_zero = sys_dispatch(85, slot as u64, user_addr, dir_path.len() as u64, 0x3100, 0);
+        assert_eq!(res_zero, SyscallResult::InvalidArguments as i64);
+
+        // Listing into a small caller slice must respect out.len()
+        let mut tiny_out = [0u8; 4];
+        let written = sys_fs_list(slot, user_addr, dir_path.len(), &mut tiny_out)
+            .expect("sys_fs_list should succeed with valid read capability");
+        assert!(written <= tiny_out.len(), "written {} must not exceed slice len {}", written, tiny_out.len());
+
+        let mut full_out = [0u8; 128];
+        let full_written = sys_fs_list(slot, user_addr, dir_path.len(), &mut full_out)
+            .expect("sys_fs_list should list full directory into larger slice");
+        assert!(full_written >= written);
+
+        clear_test_user_buffers();
+    }
+
+    #[test]
+    fn syscall_102_service_query_checks_out_len_not_ptr() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::services::init();
+
+        // Null pointer rejected
+        assert_eq!(sys_dispatch(102, 1, 0, 12, 0, 0), SyscallResult::InvalidArguments as i64);
+        // Non-zero output length smaller than 12 bytes rejected
+        assert_eq!(sys_dispatch(102, 1, 0x2000, 4, 0, 0), SyscallResult::InvalidArguments as i64);
+        assert_eq!(sys_dispatch(102, 1, 0x2000, 11, 0, 0), SyscallResult::InvalidArguments as i64);
+
+        // Underlying service query enforces >= 12 bytes and populates schema
+        let mut small = [0u8; 11];
+        assert_eq!(sys_service_query(1, &mut small), Err(SyscallResult::InvalidArguments));
+
+        let mut exact = [0u8; 12];
+        assert_eq!(sys_service_query(1, &mut exact), Ok(12));
+        assert_eq!(exact[0], 1);
+        assert_eq!(exact[10], 1);
+    }
+
+    #[test]
+    fn syscall_48_revocation_audit_roundtrip_and_out_ptr_pair_check() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+        let sys_cap = crate::capability::Capability {
+            id: crate::capability::CapabilityId(9048),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        };
+        caps.insert(sys_cap.clone()).unwrap();
+        {
+            let mut sched = SCHEDULER.lock();
+            sched.init(caps);
+            if let Some(task) = sched.current_task_mut() {
+                let _ = task.cap_table.insert(sys_cap);
+            }
+        }
+
+        let target_addr = 0x3400u64;
+        let target = b"org.example.revoked_abi_test";
+        register_test_user_buffer(target_addr, target);
+
+        // Mismatched out_ptr / out_len pairs must fail with InvalidArguments
+        assert_eq!(
+            sys_dispatch(48, 0, target_addr, target.len() as u64, 0x3500, 0),
+            SyscallResult::InvalidArguments as i64
+        );
+        assert_eq!(
+            sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 16),
+            SyscallResult::InvalidArguments as i64
+        );
+
+        // Before revocation, check returns 0 when out_ptr == 0 && out_len == 0
+        assert_eq!(sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0), 0);
+        // Revoke must agree with durable state: either succeeds (1) and check reads 1,
+        // or fails closed on unmounted storage (DeviceError) and check still reads 0.
+        let revoke_res = sys_dispatch(48, 1, target_addr, target.len() as u64, 0, 0);
+        if revoke_res == 1 {
+            assert_eq!(sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0), 1);
+        } else {
+            assert_eq!(revoke_res, SyscallResult::DeviceError as i64);
+            assert_eq!(sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0), 0);
+            crate::package::REVOCATION_REGISTRY
+                .lock()
+                .place_package_on_crl(
+                    "org.example.revoked_abi_test",
+                    crate::package::RevocationReason::MaliciousBehavior,
+                    1,
+                    "system",
+                )
+                .expect("in-memory CRL test insert");
+            assert_eq!(sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0), 1);
         }
 
         clear_test_user_buffers();

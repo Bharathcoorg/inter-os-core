@@ -1888,8 +1888,7 @@ fn handle_serial_command(cmd: &[u8]) {
 
     if verb.eq_ignore_ascii_case("POWER_KEY") || verb.eq_ignore_ascii_case("LOCK_KEY") {
         let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-        let _ = kms.toggle_powered();
-        kms.set_powered(true);
+        let on = kms.toggle_powered();
         let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
         let _ = display.composite_and_flip();
         crate::input::post_key_event(crate::input::KeyEvent {
@@ -1910,7 +1909,7 @@ fn handle_serial_command(cmd: &[u8]) {
             alt: false,
             meta: false,
         });
-        crate::serial_println!("[POWER] display_on=true source=device_studio");
+        crate::serial_println!("[POWER] display_on={} source=device_studio", on);
         return;
     }
 
