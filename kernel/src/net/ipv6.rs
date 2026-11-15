@@ -395,6 +395,27 @@ pub struct Ipv6Autoconfig {
 }
 
 impl Ipv6Autoconfig {
+    pub fn new(prefix: Ipv6Prefix, mac: [u8; 6]) -> Self {
+        let interface_id = [
+            mac[0] ^ 0x02,
+            mac[1],
+            mac[2],
+            0xff,
+            0xfe,
+            mac[3],
+            mac[4],
+            mac[5],
+        ];
+        Self {
+            prefix,
+            interface_id,
+        }
+    }
+
+    pub fn from_mac_address(prefix: Ipv6Prefix, mac: super::ethernet::MacAddress) -> Self {
+        Self::new(prefix, mac.0)
+    }
+
     pub fn valid(&self)->bool {
         self.prefix.prefix_len == 64
             && !self.prefix.address.is_multicast()
@@ -465,13 +486,28 @@ impl Icmpv6Neighbor {
             let opt_type = buf[p];
             let opt_len = (buf[p + 1] as usize) * 8;
             if opt_len < 8 || p + opt_len > buf.len() {
-                break;
+                return Err("malformed ICMPv6 neighbor option");
             }
-            // Option 1 = SLLA, Option 2 = TLLA. For Ethernet, opt_len == 8 bytes.
-            if (opt_type == 1 || opt_type == 2) && opt_len >= 8 && link_layer_address.is_none() {
-                let mut mac = [0u8; 6];
-                mac.copy_from_slice(&buf[p + 2..p + 8]);
-                if NeighborCache::is_valid_unicast_mac(mac) {
+            // RFC 4861 § 4.3 & 4.4:
+            // Option 1 (SLLA) is ONLY valid on Neighbor Solicitation.
+            // Option 2 (TLLA) is ONLY valid on Neighbor Advertisement.
+            if kind == ICMPV6_NEIGHBOR_SOLICITATION && opt_type == 2 {
+                return Err("TLLA option illegal in Neighbor Solicitation");
+            }
+            if kind == ICMPV6_NEIGHBOR_ADVERTISEMENT && opt_type == 1 {
+                return Err("SLLA option illegal in Neighbor Advertisement");
+            }
+            // For Ethernet, SLLA/TLLA option length MUST be exactly 8 bytes (1 unit of 8 octets)
+            if opt_type == 1 || opt_type == 2 {
+                if opt_len != 8 {
+                    return Err("illegal link-layer address option length for Ethernet");
+                }
+                if link_layer_address.is_none() {
+                    let mut mac = [0u8; 6];
+                    mac.copy_from_slice(&buf[p + 2..p + 8]);
+                    if !NeighborCache::is_valid_unicast_mac(mac) {
+                        return Err("illegal multicast or zero MAC in ICMPv6 option");
+                    }
                     link_layer_address = Some(mac);
                 }
             }
@@ -523,7 +559,7 @@ impl Icmpv6RouterAdvertisement {
                     let mut a = [0u8; 16];
                     a.copy_from_slice(&buf[p + 16..p + 32]);
                     let addr = Ipv6Address(a);
-                    if !addr.is_multicast() {
+                    if !addr.is_multicast() && !addr.is_link_local() {
                         prefix = Some(Ipv6Prefix::new(addr, plen));
                     }
                 }
@@ -755,5 +791,58 @@ mod tests {
         valid_na[8] = 0xff;
         valid_na[9] = 0x02;
         assert!(Icmpv6Neighbor::parse(&valid_na).is_err());
+
+        // Valid Neighbor Solicitation (Type 135) with SLLA (Option 1)
+        let valid_ns = [
+            135u8, 0, 0, 0, // Type 135 (NS), Code 0, Checksum
+            0, 0, 0, 0,     // Reserved
+            // Target address: 2001:db8::1
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            // Option 1 (SLLA), Length 1 (8 bytes)
+            1, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        ];
+        let parsed_ns = Icmpv6Neighbor::parse(&valid_ns).expect("valid NS");
+        assert_eq!(parsed_ns.kind, 135);
+        assert_eq!(parsed_ns.link_layer_address, Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
+
+        // RFC 4861 § 4.3 violation: TLLA (Option 2) inside NS MUST be rejected
+        let mut illegal_ns = valid_ns;
+        illegal_ns[24] = 2; // Option 2 (TLLA) in NS
+        assert_eq!(
+            Icmpv6Neighbor::parse(&illegal_ns),
+            Err("TLLA option illegal in Neighbor Solicitation")
+        );
+
+        // RFC 4861 § 4.4 violation: SLLA (Option 1) inside NA MUST be rejected
+        let illegal_na = [
+            136u8, 0, 0, 0,
+            0x60, 0, 0, 0,
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            1, 1, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // Option 1 in NA
+        ];
+        assert_eq!(
+            Icmpv6Neighbor::parse(&illegal_na),
+            Err("SLLA option illegal in Neighbor Advertisement")
+        );
+
+        // Truncated option: Length specifies 1 unit (8 bytes), but only 6 provided
+        let truncated_opt = [
+            135u8, 0, 0, 0,
+            0, 0, 0, 0,
+            0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            1, 1, 0x52, 0x54, 0x00, 0x12, // Only 6 bytes!
+        ];
+        assert_eq!(
+            Icmpv6Neighbor::parse(&truncated_opt),
+            Err("malformed ICMPv6 neighbor option")
+        );
+
+        // Multicast MAC in SLLA option MUST be rejected
+        let mut mcast_mac_ns = valid_ns;
+        mcast_mac_ns[26] = 0x01; // Multicast bit set in MAC
+        assert_eq!(
+            Icmpv6Neighbor::parse(&mcast_mac_ns),
+            Err("illegal multicast or zero MAC in ICMPv6 option")
+        );
     }
 }

@@ -49,9 +49,11 @@ const TDT: usize = 0x3818;
 const RAL0: usize = 0x5400;
 const RAH0: usize = 0x5404;
 const RAH_AV: u32 = 1 << 31;
+const IMC: usize = 0x00D8;
 const RX_DESC_COUNT: usize = 16;
 const TX_DESC_COUNT: usize = 16;
 pub const RX_BUFFER_SIZE: usize = 2048;
+pub const TX_BUFFER_SIZE: usize = 2048;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -209,10 +211,14 @@ impl E1000Device {
                 if read32(self.base_vaddr, CTRL) & (1 << 26) == 0 { break; }
             }
         }
+        self.rx_index = 0;
+        self.tx_index = 0;
         self.link_up = false;
     }
 
     pub fn initialize(&mut self) -> Result<(), NetError> {
+        self.rx_index = 0;
+        self.tx_index = 0;
         unsafe {
             for i in 0..RX_DESC_COUNT {
                 let desc = &mut *self.rx_desc.add(i);
@@ -223,11 +229,14 @@ impl E1000Device {
             }
             for i in 0..TX_DESC_COUNT {
                 let desc = &mut *self.tx_desc.add(i);
-                desc.addr = self.tx_buffer_phys + (i * RX_BUFFER_SIZE) as u64;
+                desc.addr = self.tx_buffer_phys + (i * TX_BUFFER_SIZE) as u64;
                 desc.length = 0;
                 desc.cmd = 0;
                 desc.status = 1;
             }
+            // Mask all hardware interrupts since driver operates in polling mode
+            write32(self.base_vaddr, IMC, 0xFFFF_FFFF);
+
             write32(self.base_vaddr, RDBAL, self.rx_desc_phys as u32);
             write32(self.base_vaddr, RDBAH, (self.rx_desc_phys >> 32) as u32);
             write32(self.base_vaddr, RDLEN, (RX_DESC_COUNT * 16) as u32);
@@ -249,9 +258,9 @@ impl E1000Device {
             write32(self.base_vaddr, RAL0, ral);
             write32(self.base_vaddr, RAH0, rah);
             // RCTL: EN(1<<1) | UPE(1<<3) | MPE(1<<4) | BAM(1<<15) | SECRC(1<<26)
-            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26) | (1 << 30));
+            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26));
             write32(self.base_vaddr, TCTL, (1 << 1) | (1 << 3) | (0x10 << 4) | (0x40 << 12));
-            write32(self.base_vaddr, CTRL, read32(self.base_vaddr, CTRL) | (1 << 1));
+            write32(self.base_vaddr, CTRL, read32(self.base_vaddr, CTRL) | (1 << 1) | (1 << 6));
             self.link_up = true;
         }
         Ok(())
@@ -287,19 +296,20 @@ impl NetworkDevice for E1000Device {
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
         if !self.link_up { return Err(NetError::DeviceDown); }
-        if frame.len() > MAX_PACKET_SIZE { return Err(NetError::BufferTooSmall); }
+        if frame.is_empty() || frame.len() > MAX_PACKET_SIZE { return Err(NetError::BufferTooSmall); }
         let idx = self.tx_index as usize;
         unsafe {
             let desc = &mut *self.tx_desc.add(idx);
-            if desc.status & 1 == 0 && desc.cmd != 0 { return Err(NetError::QueueFull); }
+            let status = core::ptr::read_volatile(&desc.status);
+            if status & 1 == 0 && desc.cmd != 0 { return Err(NetError::QueueFull); }
             desc.length = frame.len() as u16;
             desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
-            desc.status = 0;
-            let buffer = self.tx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
+            core::ptr::write_volatile(&mut desc.status, 0);
+            let buffer = self.tx_buffer_phys + (idx * TX_BUFFER_SIZE) as u64;
             let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_mut_ptr();
             core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer_virt, frame.len());
             desc.addr = buffer;
-            compiler_fence(Ordering::Release);
+            core::sync::atomic::fence(Ordering::SeqCst);
             write32(self.base_vaddr, TDT, ((idx + 1) % TX_DESC_COUNT) as u32);
         }
         self.tx_index = ((idx + 1) % TX_DESC_COUNT) as u16;
@@ -311,17 +321,34 @@ impl NetworkDevice for E1000Device {
         let idx = self.rx_index as usize;
         unsafe {
             let desc = &mut *self.rx_desc.add(idx);
-            if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
+            let status = core::ptr::read_volatile(&desc.status);
+            if status & 1 == 0 { return Err(NetError::NoPacketAvailable); }
+            core::sync::atomic::fence(Ordering::Acquire);
+
+            let expected = self.rx_buffer_phys + (idx * RX_BUFFER_SIZE) as u64;
+
+            // Defend against RX ring deadlock on multi-descriptor / jumbo frames (> 2048 bytes).
+            // When hardware delivers a fragmented frame without EOP, software must recycle the descriptor
+            // and advance rx_index; otherwise the ring deadlocks permanently.
+            if status & RX_EOP == 0 {
+                desc.addr = expected;
+                core::ptr::write_volatile(&mut desc.status, 0);
+                core::sync::atomic::fence(Ordering::Release);
+                write32(self.base_vaddr, RDT, idx as u32);
+                self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+                return Err(NetError::InvalidPacket);
+            }
+
             let len = desc.length as usize;
 
             // The descriptor's address is written by the device. Bound it to the
             // buffer this ring was built with rather than trusting it, so a
             // corrupt descriptor cannot redirect the copy.
-            let expected = self.rx_buffer_phys + (idx * RX_BUFFER_SIZE) as u64;
             if desc.addr != expected {
-                // Address desynchronized; recycle descriptor before returning
-                desc.status = 0;
-                compiler_fence(Ordering::Release);
+                // Address desynchronized; restore valid buffer address and recycle descriptor
+                desc.addr = expected;
+                core::ptr::write_volatile(&mut desc.status, 0);
+                core::sync::atomic::fence(Ordering::Release);
                 write32(self.base_vaddr, RDT, idx as u32);
                 self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
                 return Err(NetError::InvalidPacket);
@@ -338,9 +365,9 @@ impl NetworkDevice for E1000Device {
             };
 
             // Reclaim/recycle the descriptor back to hardware AFTER reading packet data!
-            // This prevents the NIC from overwriting the buffer while the CPU copies it.
-            desc.status = 0;
-            compiler_fence(Ordering::Release);
+            desc.addr = expected;
+            core::ptr::write_volatile(&mut desc.status, 0);
+            core::sync::atomic::fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
             self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
             E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -350,7 +377,7 @@ impl NetworkDevice for E1000Device {
     }
 
     fn has_packets(&self) -> bool {
-        unsafe { (*self.rx_desc.add(self.rx_index as usize)).status & RX_EOP != 0 }
+        unsafe { (core::ptr::read_volatile(&(*self.rx_desc.add(self.rx_index as usize)).status) & 1) != 0 }
     }
 }
 
@@ -362,7 +389,7 @@ impl E1000Device {
         unsafe {
             let desc = &*self.tx_desc.add(idx);
             for _ in 0..100_000 {
-                if desc.status & 1 != 0 { return Ok(()); }
+                if core::ptr::read_volatile(&desc.status) & 1 != 0 { return Ok(()); }
                 core::hint::spin_loop();
             }
         }

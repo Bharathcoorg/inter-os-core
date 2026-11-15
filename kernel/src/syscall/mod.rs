@@ -3887,17 +3887,17 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
             let mut table = crate::net::SOCKET_TABLE.lock();
             table.get_mut(socket)
                 .ok_or(NetError::NoPacketAvailable)
-                .and_then(|s| s.recv_from(&mut rx, &caps).map(|v| v.0))
+                .and_then(|s| s.recv_from(&mut rx, &caps))
         };
-        if let Ok(bytes) = received {
+        if let Ok((bytes, from_ip, from_port)) = received {
             let mut resolver = crate::net::DNS_RESOLVER.lock();
-            match resolver.accept_response(&rx[..bytes], current_tick) {
+            match resolver.accept_response_from(&rx[..bytes], from_ip, from_port, current_tick) {
                 Ok(addr) => {
                     drop(resolver);
                     let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                     return Ok(addr);
                 }
-                Err(_) if bytes >= 2 && u16::from_be_bytes([rx[0], rx[1]]) == query_id => {
+                Err(_) if bytes >= 2 && u16::from_be_bytes([rx[0], rx[1]]) == query_id && from_ip == crate::net::DNS_SERVER && from_port == 53 => {
                     // The server answered this query but carried no usable A
                     // record (an error rcode, an empty answer, or a malformed
                     // body). Retrying the same name cannot change that verdict,

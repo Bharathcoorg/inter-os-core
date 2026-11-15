@@ -1,6 +1,6 @@
 # InterOS Core — VFS & Network Threat Model
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Audit Scope:** Virtual Filesystem (VFS) and Network Stack  
 **Classification:** Threat Model & Security Architecture  
 **Status:** Canonical Reference  
@@ -35,9 +35,9 @@ The InterOS security architecture is designed around zero ambient authority, obj
 ### Key Trust Boundaries:
 1. **Application / Kernel Boundary**: Applications run in unprivileged user mode (Ring 3 / EL0 / U-mode). All interactions occur via syscall traps. Syscall parameters (pointers, lengths, offsets) are treated as untrusted and strictly validated for userspace boundaries and integer overflow.
 2. **Inter-Application Boundary**: Applications cannot communicate directly or access each other's memory or storage. Storage is segregated by reverse-DNS package identifier under `/user/<uid>/apps/<pkg>`.
-3. **Kernel / Hardware DMA Boundary**: The network controller (E1000) performs DMA to physical RAM. Descriptors and buffer ownership are arbitrated via status bits and hardware memory barriers.
+3. **Kernel / Hardware DMA Boundary**: The network controller (E1000) performs DMA to physical RAM. Descriptors and buffer ownership are arbitrated via status bits, volatile accesses, and hardware memory barriers.
 4. **Link-Local Network Boundary**: Broadcast and multicast traffic from the local network segment is untrusted. NDP, ARP, and ICMPv6 packets are validated against spoofing, DoS, and cache poisoning.
-5. **Remote Network Boundary**: Off-link IP packets and DNS responses are untrusted. Fragments are dropped, and DNS answers must strictly match query names.
+5. **Remote Network Boundary**: Off-link IP packets and DNS responses are untrusted. Fragments are dropped, and DNS answers must strictly match in-flight query names.
 
 ---
 
@@ -69,13 +69,13 @@ The InterOS security architecture is designed around zero ambient authority, obj
 
 | Threat ID | Threat Description | Severity | Mitigation in InterOS Core |
 | :--- | :--- | :--- | :--- |
-| **THREAT-NET-01** | **E1000 DMA Memory Corruption**<br>NIC DMAs up to 2048 bytes into 1514-byte descriptor buffers. | Critical | Allocates 8 pages (32 KiB) for 16 descriptors strided at 2048 bytes, matching hardware `BSIZE = 2048`. |
-| **THREAT-NET-02** | **E1000 DMA Race Condition**<br>NIC overwrites receive buffer while CPU reads packet. | High | Copy-before-recycle: kernel copies payload to buffer before clearing descriptor status and advancing `RDT`. |
-| **THREAT-NET-03** | **NDP Off-Link Spoofing**<br>Off-link attacker injects fake Neighbor Advertisement. | High | RFC 4861 strict Hop Limit == 255 verification; packets with Hop Limit < 255 are dropped immediately. |
-| **THREAT-NET-04** | **Neighbor Cache Poisoning**<br>Injecting multicast MAC or ignoring Override flag to redirect traffic. | Medium | Validates unicast MAC; honors RFC 4861 Override (O) flag; evicts closest-to-expiry on saturation. |
-| **THREAT-NET-05** | **ARP Cache Gateway Eviction DoS**<br>Flooding ARP requests to evict slot 0 (default gateway). | Medium | Cache saturation evicts entry with minimum `expires_at`, preserving live default gateway. |
-| **THREAT-NET-06** | **IPv4 Fragment Reassembly Evasion**<br>Sending fragments to bypass port or protocol filtering. | Medium | Explicitly drops any IPv4 packet with More Fragments (MF) set or non-zero fragment offset. |
-| **THREAT-NET-07** | **Kaminsky DNS Cache Poisoning**<br>Injecting fake A records for unrequested domains in DNS answers. | High | `parse_a_answer` requires answer RR name to match query name (pointer or literal check). |
+| **THREAT-NET-01** | **E1000 DMA Memory Corruption & Stride Mismatch**<br>NIC DMAs up to 2048 bytes into 1514-byte descriptor buffers, or unaligned stride crosses page boundary. | Critical | Allocates 8 pages (32 KiB) for 16 RX buffers strided at 2048 bytes; synchronizes `transmit()` to compute buffers with `TX_BUFFER_SIZE` (2048). Enforces `Ordering::SeqCst` memory fences. |
+| **THREAT-NET-02** | **E1000 DMA Race & Non-EOP Deadlock**<br>NIC overwrites receive buffer while CPU reads packet, or multi-descriptor packets deadlock RX ring. | High | Copy-before-recycle: copies payload before recycling descriptor. Non-EOP detector recycles descriptor, updates `RDT`, advances `rx_index`, and reports `InvalidPacket` to eliminate ring freeze. |
+| **THREAT-NET-03** | **NDP Off-Link Spoofing & Malformed Options**<br>Off-link attacker injects fake Neighbor Advertisement, or corrupt options bypass validation. | High | RFC 4861 strict Hop Limit == 255 and Code == 0 enforcement in live receive dispatch. Fail-closed option parsing: SLLA allowed only on NS, TLLA only on NA, lengths verified to 8 bytes. |
+| **THREAT-NET-04** | **Neighbor Cache Poisoning & DoS**<br>Injecting multicast MAC or ignoring Override flag to redirect traffic; unbounded routing table growth. | Medium | Validates unicast MAC; honors RFC 4861 Override (O) flag; evicts closest-to-expiry on saturation. Deduplicates routing table entries on prefix collisions. |
+| **THREAT-NET-05** | **ARP Cache Gateway Eviction & MAC Spoofing**<br>Flooding ARP requests to evict default gateway; inconsistent Ethernet vs ARP MACs. | Medium | Pinned gateway with `is_permanent` flag preventing eviction or downgrade under saturation. Cross-layer consistency drops frames where `frame.src_mac != arp.sender_mac`. |
+| **THREAT-NET-06** | **IPv4 Fragment Reassembly Evasion**<br>Sending fragments to bypass port or protocol filtering. | Medium | Explicitly drops any IPv4 packet with More Fragments (MF) set or non-zero fragment offset. Rejects multicast/broadcast source addresses. |
+| **THREAT-NET-07** | **Kaminsky DNS Cache Poisoning**<br>Injecting fake A records for unrequested domains in DNS answers; spoofing from rogue servers. | High | Verifies that question section of received DNS answer strictly matches the active queried domain name. Enforces responses only from configured gateway resolver `10.0.2.3:53`. |
 | **THREAT-NET-08** | **TCP Retransmission Starvation**<br>Maxed-out retransmission slot halting queue traversal. | Medium | Loop replaces slot with `None` and continues scanning remaining slots. |
 
 ---

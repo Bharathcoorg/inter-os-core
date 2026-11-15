@@ -42,6 +42,66 @@ pub fn encode_query(id: u16, name: &[u8], out: &mut [u8]) -> Result<usize, &'sta
     Ok(p + 0)
 }
 
+/// Verifies that the question section in a DNS packet matches the expected query name and is A/IN.
+pub fn verify_dns_question_matches_query(packet: &[u8], expected_name: &[u8]) -> Result<(), &'static str> {
+    if packet.len() < DNS_HEADER_LEN + 5 {
+        return Err("truncated DNS header");
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    // Opcode must be standard query (0): bits 14:11
+    if (flags & 0x7800) != 0 {
+        return Err("DNS non-standard opcode");
+    }
+    let qd = u16::from_be_bytes([packet[4], packet[5]]);
+    if qd == 0 {
+        return Err("DNS response missing question");
+    }
+
+    let mut p = DNS_HEADER_LEN;
+    let mut name_offset = 0usize;
+
+    // Decode and verify labels
+    loop {
+        if p >= packet.len() {
+            return Err("truncated DNS question name");
+        }
+        let label_len = packet[p] as usize;
+        p += 1;
+        if label_len == 0 {
+            break;
+        }
+        if (label_len & 0xC0) != 0 || p + label_len > packet.len() {
+            return Err("invalid DNS label in question");
+        }
+        if name_offset > 0 {
+            if name_offset >= expected_name.len() || expected_name[name_offset] != b'.' {
+                return Err("DNS question name mismatch");
+            }
+            name_offset += 1;
+        }
+        let label = &packet[p..p + label_len];
+        if name_offset + label_len > expected_name.len() || &expected_name[name_offset..name_offset + label_len] != label {
+            return Err("DNS question name mismatch");
+        }
+        name_offset += label_len;
+        p += label_len;
+    }
+
+    if name_offset != expected_name.len() {
+        return Err("DNS question name length mismatch");
+    }
+
+    if p + 4 > packet.len() {
+        return Err("truncated DNS question QTYPE/QCLASS");
+    }
+    let qtype = u16::from_be_bytes([packet[p], packet[p + 1]]);
+    let qclass = u16::from_be_bytes([packet[p + 2], packet[p + 3]]);
+    if qtype != 1 || qclass != 1 {
+        return Err("DNS question is not A / IN");
+    }
+    Ok(())
+}
+
 pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'static str> {
     if buf.len() < DNS_HEADER_LEN || u16::from_be_bytes([buf[0], buf[1]]) != expected_id {
         return Err("DNS response id mismatch");
@@ -149,13 +209,48 @@ impl DnsResolver {
         false
     }
     pub fn build_query(&self,id:u16,out:&mut[u8])->Result<usize,&'static str>{let q=self.queries.iter().find(|q|q.valid&&q.id==id).ok_or("unknown DNS query")?;encode_query(id,&q.name[..q.name_len],out)}
+
+    /// Accepts and integrates a DNS response with strict question-to-query association.
     pub fn accept_response(&mut self, packet: &[u8], now: u64) -> Result<Ipv4Address, &'static str> {
-        if packet.len() < 2 { return Err("DNS response too small"); }
+        if packet.len() < DNS_HEADER_LEN { return Err("DNS response too small"); }
         let id = u16::from_be_bytes([packet[0], packet[1]]);
-        let a=parse_a_answer(packet,id)?;let q=self.queries.iter_mut().find(|q|q.valid&&q.id==id).ok_or("unknown DNS query")?;
-        let mut e=DnsCacheEntry::empty();e.name[..q.name_len].copy_from_slice(&q.name[..q.name_len]);e.name_len=q.name_len;e.addr=a.addr;e.expires_at=now.saturating_add((a.ttl as u64).max(1)*1000);e.valid=true;
-        if let Some(dst)=self.cache.iter_mut().find(|e|!e.valid||e.expires_at<=now){*dst=e}else{self.cache[0]=e} q.valid=false;Ok(a.addr)
+        let q = self.queries.iter_mut().find(|q| q.valid && q.id == id).ok_or("unknown DNS query")?;
+
+        // Anti-Spoofing Defense: Verify the question in the response matches the outstanding query's domain!
+        verify_dns_question_matches_query(packet, &q.name[..q.name_len])?;
+
+        let a = parse_a_answer(packet, id)?;
+        let mut e = DnsCacheEntry::empty();
+        e.name[..q.name_len].copy_from_slice(&q.name[..q.name_len]);
+        e.name_len = q.name_len;
+        e.addr = a.addr;
+        e.expires_at = now.saturating_add((a.ttl as u64).max(1) * 1000);
+        e.valid = true;
+        if a.ttl > 0 {
+            if let Some(dst) = self.cache.iter_mut().find(|e| !e.valid || e.expires_at <= now) {
+                *dst = e;
+            } else {
+                self.cache[0] = e;
+            }
+        }
+        q.valid = false;
+        Ok(a.addr)
     }
+
+    /// Accepts and validates a DNS response ensuring sender is the authoritative upstream DNS server.
+    pub fn accept_response_from(
+        &mut self,
+        packet: &[u8],
+        sender_ip: Ipv4Address,
+        sender_port: u16,
+        now: u64,
+    ) -> Result<Ipv4Address, &'static str> {
+        if sender_ip != DNS_SERVER || sender_port != 53 {
+            return Err("DNS response sender mismatch");
+        }
+        self.accept_response(packet, now)
+    }
+
     pub fn poll_timeouts(&mut self,now:u64)->usize{let mut expired=0;for q in self.queries.iter_mut(){if q.valid&&now>=q.deadline{if q.retries>=DNS_MAX_RETRIES{q.valid=false;expired+=1}else{q.retries+=1;q.deadline=now.saturating_add(DNS_RETRY_TICKS)}}}expired}
     pub fn query(&self,id:u16)->Option<&DnsQueryState>{self.queries.iter().find(|q|q.valid&&q.id==id)}
 }
@@ -244,5 +339,65 @@ mod lifecycle_tests {
             parse_a_answer(&bad_name_packet, 0x1234),
             Err("DNS answer name mismatch")
         );
+    }
+
+    #[test]
+    fn accept_response_rejects_question_spoofing_and_unauthorized_server() {
+        let mut resolver = DnsResolver::new();
+        let query_id = resolver.begin(b"legit.example.com", 0).unwrap();
+
+        // 1. Construct response with matching query_id, but spoofed question "attacker.com"
+        let mut spoofed_packet = alloc::vec![
+            (query_id >> 8) as u8, (query_id & 0xFF) as u8, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        // Question: \x08attacker\x03com\x00, qtype=1, qclass=1
+        spoofed_packet.extend_from_slice(b"\x08attacker\x03com\x00\x00\x01\x00\x01");
+        // Answer for attacker.com
+        spoofed_packet.extend_from_slice(&[
+            0xC0, 0x0C,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x3C,
+            0x00, 0x04,
+            6, 6, 6, 6,
+        ]);
+
+        // Attempt to accept response: MUST BE REJECTED because question doesn't match "legit.example.com"
+        let res = resolver.accept_response(&spoofed_packet, 10);
+        assert_eq!(res, Err("DNS question name mismatch"));
+
+        // 2. Construct response with legitimate question "legit.example.com"
+        let mut legit_packet = alloc::vec![
+            (query_id >> 8) as u8, (query_id & 0xFF) as u8, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        // Question: \x05legit\x07example\x03com\x00
+        legit_packet.extend_from_slice(b"\x05legit\x07example\x03com\x00\x00\x01\x00\x01");
+        legit_packet.extend_from_slice(&[
+            0xC0, 0x0C,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x3C,
+            0x00, 0x04,
+            93, 184, 216, 34,
+        ]);
+
+        // 3. Test accept_response_from with wrong IP or wrong port
+        let wrong_ip = Ipv4Address([10, 0, 2, 4]);
+        assert_eq!(
+            resolver.accept_response_from(&legit_packet, wrong_ip, 53, 20),
+            Err("DNS response sender mismatch")
+        );
+        assert_eq!(
+            resolver.accept_response_from(&legit_packet, DNS_SERVER, 5353, 20),
+            Err("DNS response sender mismatch")
+        );
+
+        // 4. Test accept_response_from with valid DNS_SERVER:53
+        let accepted = resolver.accept_response_from(&legit_packet, DNS_SERVER, 53, 20).unwrap();
+        assert_eq!(accepted, Ipv4Address([93, 184, 216, 34]));
+        // Cached value lookup
+        assert_eq!(resolver.cached(b"legit.example.com", 25), Some(Ipv4Address([93, 184, 216, 34])));
     }
 }

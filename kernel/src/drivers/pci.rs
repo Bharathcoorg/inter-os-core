@@ -264,6 +264,7 @@ pub fn initialize_e1000_network() -> Result<(), &'static str> {
         crate::net::E1000Device::allocate_with_dma(mapped.as_u64() as usize, mac)
             .ok_or("Unable to allocate contiguous E1000 DMA memory")?
     };
+    nic.reset();
     nic.initialize().map_err(|_| "E1000 controller initialization failed")?;
     if !nic.read_link_status() {
         return Err("E1000 controller reports link down after initialization");

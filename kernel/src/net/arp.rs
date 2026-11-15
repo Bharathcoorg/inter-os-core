@@ -114,11 +114,12 @@ pub const MAX_ARP_ENTRIES: usize = 16;
 pub const ARP_CACHE_TICKS: u64 = 600_000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct ArpEntry {
-    ip: Ipv4Address,
-    mac: MacAddress,
-    valid: bool,
-    expires_at: u64,
+pub struct ArpEntry {
+    pub ip: Ipv4Address,
+    pub mac: MacAddress,
+    pub valid: bool,
+    pub is_permanent: bool,
+    pub expires_at: u64,
 }
 
 /// In-Kernel Static/Dynamic ARP Resolution Table
@@ -134,6 +135,7 @@ impl ArpTable {
                 ip: Ipv4Address::UNSPECIFIED,
                 mac: MacAddress::ZERO,
                 valid: false,
+                is_permanent: false,
                 expires_at: 0,
             }; MAX_ARP_ENTRIES],
             count: 0,
@@ -146,6 +148,61 @@ impl ArpTable {
         self.insert_with_expiry(ip, mac, 0, u64::MAX);
     }
 
+    /// Inserts or pins an immutable permanent ARP entry (e.g. default gateway or static binding).
+    /// Permanent entries can NEVER be evicted by dynamic ARP cache saturation,
+    /// nor can they be downgraded or overwritten by untrusted wire ARP packets.
+    pub fn insert_permanent(&mut self, ip: Ipv4Address, mac: MacAddress) {
+        // If entry exists, mark permanent and update MAC
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.ip == ip {
+                entry.mac = mac;
+                entry.is_permanent = true;
+                entry.expires_at = u64::MAX;
+                return;
+            }
+        }
+
+        // Reuse an invalid or non-permanent expired slot
+        for entry in self.entries.iter_mut() {
+            if !entry.valid || (!entry.is_permanent && entry.expires_at == 0) {
+                if !entry.valid {
+                    self.count += 1;
+                }
+                entry.ip = ip;
+                entry.mac = mac;
+                entry.valid = true;
+                entry.is_permanent = true;
+                entry.expires_at = u64::MAX;
+                return;
+            }
+        }
+
+        // Evict dynamic entry with closest expiry
+        let mut oldest_idx = None;
+        let mut min_expiry = u64::MAX;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if !entry.is_permanent && entry.expires_at < min_expiry {
+                min_expiry = entry.expires_at;
+                oldest_idx = Some(i);
+            }
+        }
+
+        if let Some(idx) = oldest_idx {
+            self.entries[idx] = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+                is_permanent: true,
+                expires_at: u64::MAX,
+            };
+        }
+    }
+
+    /// Returns whether the specified IP has a permanent/immutable ARP binding.
+    pub fn is_permanent(&self, ip: Ipv4Address) -> bool {
+        self.entries.iter().any(|e| e.valid && e.ip == ip && e.is_permanent)
+    }
+
     /// Inserts or refreshes a dynamic ARP mapping with a bounded lifetime.
     pub fn insert_at(&mut self, ip: Ipv4Address, mac: MacAddress, now: u64) {
         self.insert_with_expiry(ip, mac, now, now.saturating_add(ARP_CACHE_TICKS));
@@ -154,36 +211,49 @@ impl ArpTable {
     fn insert_with_expiry(&mut self, ip: Ipv4Address, mac: MacAddress, now: u64, expires_at: u64) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
+                // RFC Security: Dynamic wire packets MUST NOT overwrite or downgrade permanent entries!
+                if entry.is_permanent {
+                    return;
+                }
                 entry.mac = mac;
                 entry.expires_at = expires_at;
                 return;
             }
         }
 
-        // Reuse an expired entry before consuming a genuinely free slot.
+        // Reuse an invalid or expired non-permanent entry before consuming a genuinely free slot.
         for entry in self.entries.iter_mut() {
-            if !entry.valid || entry.expires_at <= now {
+            if !entry.valid || (!entry.is_permanent && entry.expires_at <= now) {
                 if !entry.valid {
                     self.count += 1;
                 }
                 entry.ip = ip;
                 entry.mac = mac;
                 entry.valid = true;
+                entry.is_permanent = false;
                 entry.expires_at = expires_at;
                 return;
             }
         }
 
-        // Evict entry closest to expiry if full (never blindly overwrite slot 0).
-        let mut oldest_idx = 0;
-        let mut min_expiry = self.entries[0].expires_at;
+        // Evict non-permanent entry closest to expiry if full (never evict permanent entries).
+        let mut oldest_idx = None;
+        let mut min_expiry = u64::MAX;
         for (i, entry) in self.entries.iter().enumerate() {
-            if entry.expires_at < min_expiry {
+            if !entry.is_permanent && entry.expires_at < min_expiry {
                 min_expiry = entry.expires_at;
-                oldest_idx = i;
+                oldest_idx = Some(i);
             }
         }
-        self.entries[oldest_idx] = ArpEntry { ip, mac, valid: true, expires_at };
+        if let Some(idx) = oldest_idx {
+            self.entries[idx] = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+                is_permanent: false,
+                expires_at,
+            };
+        }
     }
 
     /// Looks up the hardware MAC address for a given IPv4 address.
@@ -322,5 +392,33 @@ mod tests {
 
         // Verify new entry was inserted!
         assert_eq!(table.lookup(new_ip), Some(new_mac));
+    }
+
+    #[test]
+    fn permanent_gateway_cannot_be_evicted_or_downgraded() {
+        let mut table = ArpTable::new();
+        let gateway_ip = Ipv4Address([10, 0, 2, 2]);
+        let gateway_mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+
+        table.insert_permanent(gateway_ip, gateway_mac);
+        assert!(table.is_permanent(gateway_ip));
+        assert_eq!(table.lookup(gateway_ip), Some(gateway_mac));
+
+        // 1. Attempt to downgrade / spoof via dynamic wire packet: MUST BE IGNORED
+        let fake_mac = MacAddress([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
+        table.insert_at(gateway_ip, fake_mac, 100);
+        assert_eq!(table.lookup(gateway_ip), Some(gateway_mac)); // Unchanged!
+        assert!(table.is_permanent(gateway_ip));
+
+        // 2. Flood 30 dynamic entries with much larger expiration timestamps
+        for i in 10..=40 {
+            let ip = Ipv4Address([10, 0, 2, i as u8]);
+            let mac = MacAddress([0x00, 0x22, 0x33, 0x44, 0x55, i as u8]);
+            table.insert_at(ip, mac, 1000 + (i as u64) * 10);
+        }
+
+        // Verify Gateway was NEVER evicted despite extreme cache saturation
+        assert_eq!(table.lookup(gateway_ip), Some(gateway_mac));
+        assert!(table.is_permanent(gateway_ip));
     }
 }
