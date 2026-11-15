@@ -1626,6 +1626,9 @@ class VncScanoutClient:
         self.latest_jpeg = None
         self.latest_png = None
         self._last_published_rgba = None
+        self._buf_lock = threading.Lock()
+        self._pending_publish_timer = None
+        self._pending_publish_t_start = 0.0
         # When a portrait session's desktop was last confirmed to be the guest's
         # real geometry, as a timestamp. WHY a timestamp and not a flag: the
         # guest genuinely does present 1280x720 for the first moments of boot,
@@ -1695,6 +1698,11 @@ class VncScanoutClient:
             self.latest_jpeg = None
             self.latest_png = None
             self._last_published_rgba = None
+            timer = self._pending_publish_timer
+            if timer is not None:
+                timer.cancel()
+                self._pending_publish_timer = None
+            self._pending_publish_t_start = 0.0
             self.frame_cond.notify_all()
 
     def _monitor_scanout_size(self):
@@ -1876,27 +1884,28 @@ class VncScanoutClient:
                         self._abort_session(s, "VNC rect out of bounds")
                     total_bytes = rw * rh_val * 4
                     mv = memoryview(self.scanout_buf)
-                    if rw == self.width and rx == 0:
-                        dst_offset = ry * self.width * 4
-                        pos = 0
-                        while pos < total_bytes:
-                            n = s.recv_into(mv[dst_offset + pos : dst_offset + total_bytes], min(131072, total_bytes - pos))
-                            if n == 0:
-                                raise EOFError()
-                            pos += n
-                    else:
-                        temp_buf = bytearray(total_bytes)
-                        t_mv = memoryview(temp_buf)
-                        pos = 0
-                        while pos < total_bytes:
-                            n = s.recv_into(t_mv[pos:], min(131072, total_bytes - pos))
-                            if n == 0:
-                                raise EOFError()
-                            pos += n
-                        for row in range(rh_val):
-                            src_off = row * rw * 4
-                            dst_off = ((ry + row) * self.width + rx) * 4
-                            self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
+                    with self._buf_lock:
+                        if rw == self.width and rx == 0:
+                            dst_offset = ry * self.width * 4
+                            pos = 0
+                            while pos < total_bytes:
+                                n = s.recv_into(mv[dst_offset + pos : dst_offset + total_bytes], min(131072, total_bytes - pos))
+                                if n == 0:
+                                    raise EOFError()
+                                pos += n
+                        else:
+                            temp_buf = bytearray(total_bytes)
+                            t_mv = memoryview(temp_buf)
+                            pos = 0
+                            while pos < total_bytes:
+                                n = s.recv_into(t_mv[pos:], min(131072, total_bytes - pos))
+                                if n == 0:
+                                    raise EOFError()
+                                pos += n
+                            for row in range(rh_val):
+                                src_off = row * rw * 4
+                                dst_off = ((ry + row) * self.width + rx) * 4
+                                self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
 
                 self._publish_frame(t_frame_start)
 
@@ -1966,36 +1975,44 @@ class VncScanoutClient:
         if not box:
             return
 
-        if now - self.latest_raw_time < 0.033:
+        elapsed_since_last = now - self.latest_raw_time
+        if elapsed_since_last < 0.033:
+            self._schedule_trailing_publish(t_start, max(0.001, 0.033 - elapsed_since_last))
             return
+
+        timer = getattr(self, "_pending_publish_timer", None)
+        if timer is not None:
+            timer.cancel()
+            self._pending_publish_timer = None
 
         off_x, off_y, x2, y2 = box
         crop_w = x2 - off_x
         crop_h = y2 - off_y
 
-        try:
-            import numpy as np
-            arr = np.frombuffer(self.scanout_buf, dtype=np.uint8).reshape((h, w, 4))
-            if is_landscape:
-                crop = arr
-                crop_w, crop_h = w, h
-            else:
-                crop = arr[off_y:y2, off_x:x2]
-            rgba = crop[:, :, [2, 1, 0, 3]].tobytes()
-        except Exception:
-            # Fallback pure-python slice & BGRA->RGBA
-            out = bytearray(crop_w * crop_h * 4)
-            for row in range(crop_h):
-                src_row = ((off_y + row) * w + off_x) * 4
-                dst_row = row * crop_w * 4
-                for col in range(crop_w):
-                    s_idx = src_row + col * 4
-                    d_idx = dst_row + col * 4
-                    out[d_idx] = self.scanout_buf[s_idx + 2]      # R
-                    out[d_idx + 1] = self.scanout_buf[s_idx + 1]  # G
-                    out[d_idx + 2] = self.scanout_buf[s_idx]      # B
-                    out[d_idx + 3] = 0xFF                         # A
-            rgba = bytes(out)
+        with self._buf_lock:
+            try:
+                import numpy as np
+                arr = np.frombuffer(self.scanout_buf, dtype=np.uint8).reshape((h, w, 4))
+                if is_landscape:
+                    crop = arr
+                    crop_w, crop_h = w, h
+                else:
+                    crop = arr[off_y:y2, off_x:x2]
+                rgba = crop[:, :, [2, 1, 0, 3]].tobytes()
+            except Exception:
+                # Fallback pure-python slice & BGRA->RGBA
+                out = bytearray(crop_w * crop_h * 4)
+                for row in range(crop_h):
+                    src_row = ((off_y + row) * w + off_x) * 4
+                    dst_row = row * crop_w * 4
+                    for col in range(crop_w):
+                        s_idx = src_row + col * 4
+                        d_idx = dst_row + col * 4
+                        out[d_idx] = self.scanout_buf[s_idx + 2]      # R
+                        out[d_idx + 1] = self.scanout_buf[s_idx + 1]  # G
+                        out[d_idx + 2] = self.scanout_buf[s_idx]      # B
+                        out[d_idx + 3] = 0xFF                         # A
+                rgba = bytes(out)
 
         # WHY skip identical frames: an idle guest answers the long-poll
         # re-request with an empty update, and publishing it would tick the
@@ -2032,6 +2049,21 @@ class VncScanoutClient:
             _transport_metrics['frame_us'] = elapsed_us
 
             self.frame_cond.notify_all()
+
+    def _schedule_trailing_publish(self, t_start, delay):
+        self._pending_publish_t_start = t_start
+        existing = self._pending_publish_timer
+        if existing is not None and existing.is_alive():
+            return
+        timer = threading.Timer(delay, self._flush_trailing_publish)
+        timer.daemon = True
+        self._pending_publish_timer = timer
+        timer.start()
+
+    def _flush_trailing_publish(self):
+        self._pending_publish_timer = None
+        if self.running and self.connected:
+            self._publish_frame(self._pending_publish_t_start or time.time())
 
     def get_binary_frame(self, client_seq=0, timeout=0.040):
         with self.frame_cond:

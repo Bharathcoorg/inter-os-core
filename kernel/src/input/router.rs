@@ -226,9 +226,14 @@ impl InputRouter {
                 None
             }
             PointerPhase::Move => {
-                let state = &mut self.pointers[index];
-                if !state.active { return None; }
-                state.current = event.position;
+                let prev = self.pointers[index].current;
+                let owner = self.pointers[index].owner;
+                let start = self.pointers[index].start;
+                {
+                    let state = &mut self.pointers[index];
+                    if !state.active { return None; }
+                    state.current = event.position;
+                }
 
                 let mut active = [0usize; 2];
                 let mut count = 0usize;
@@ -266,6 +271,21 @@ impl InputRouter {
                     }
                 } else {
                     self.pinch_initial_distance = None;
+                    if owner == PointerOwner::App {
+                        let total_dist = (event.position.x - start.x).abs().max((event.position.y - start.y).abs());
+                        let step_dx = event.position.x - prev.x;
+                        let step_dy = event.position.y - prev.y;
+                        if total_dist > TAP_SLOP && (step_dx != 0 || step_dy != 0) {
+                            return Some(GestureEvent {
+                                kind: GestureKind::Scroll,
+                                position: event.position,
+                                delta_x: step_dx,
+                                delta_y: step_dy,
+                                pointer_id: event.pointer_id,
+                                scale_milli: 1000,
+                            });
+                        }
+                    }
                 }
                 None
             }
@@ -888,5 +908,25 @@ mod canonical_integration_tests {
         let gesture = router.dispatch_pointer_at(m1, 720, 24, 12).expect("pinch gesture");
         assert_eq!(gesture.kind, GestureKind::Pinch);
         assert!(gesture.scale_milli > 1000);
+    }
+
+    #[test]
+    fn live_move_emits_scroll_beyond_tap_slop_and_suppresses_wobble() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(InputSource::DeviceStudio, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Down, 300, 700);
+        let wobble = PointerEvent::new(InputSource::DeviceStudio, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Move, 305, 690);
+        let drag1 = PointerEvent::new(InputSource::DeviceStudio, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Move, 305, 640);
+        let drag2 = PointerEvent::new(InputSource::DeviceStudio, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Move, 305, 610);
+
+        assert!(router.dispatch_pointer_at(down, 720, 24, 100).is_none());
+        assert!(router.dispatch_pointer_at(wobble, 720, 24, 120).is_none());
+
+        let g1 = router.dispatch_pointer_at(drag1, 720, 24, 140).expect("live move past slop should emit Scroll");
+        assert_eq!(g1.kind, GestureKind::Scroll);
+        assert_eq!(g1.delta_y, -50);
+
+        let g2 = router.dispatch_pointer_at(drag2, 720, 24, 160).expect("subsequent move should emit incremental delta");
+        assert_eq!(g2.kind, GestureKind::Scroll);
+        assert_eq!(g2.delta_y, -30);
     }
 }

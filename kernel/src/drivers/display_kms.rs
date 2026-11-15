@@ -862,6 +862,9 @@ pub struct DrmKmsController {
     pub scheduler: FrameScheduler,
     /// When true and honest dirty bands are present, bypasses the full-scanout buffer diff pass.
     pub skip_scanout_diff: bool,
+    /// Tracks which single full-cover surface already matches `back_buffer` so subsequent
+    /// identity presents only copy `dirty_rows` instead of rewriting the full 1M pixels.
+    pub full_cover_synced_id: Option<u32>,
 }
 
 impl DrmKmsController {
@@ -913,6 +916,7 @@ impl DrmKmsController {
             present_dirty_rows: (0, height as usize),
             scheduler: FrameScheduler::new(60),
             skip_scanout_diff: true,
+            full_cover_synced_id: None,
         }
     }
 
@@ -924,6 +928,7 @@ impl DrmKmsController {
     /// 720x1440 front buffer regardless of what changed.
     pub fn mark_present_full(&mut self) {
         self.present_dirty_rows = (0, self.scanout_height as usize);
+        self.full_cover_synced_id = None;
     }
 
     /// Widens the pending present band to cover scanout rows `[y0, y1)`.
@@ -1794,7 +1799,17 @@ impl DrmKmsController {
         });
         if !has_full_cover {
             self.back_buffer.fill(PLATFORM_BACKGROUND);
+            self.full_cover_synced_id = None;
         }
+        let active_visible_surfaces = self.surfaces.iter().filter(|s| {
+            !s.occluded
+                && s.visible
+                && s.frame_ready
+                && s.frame_complete
+                && s.has_frame
+                && s.opacity > 0
+                && focused.map_or(true, |(owner, z)| s.owner_task == owner || s.z_order >= z)
+        }).count();
 
         let mut base_drawn = false;
 
@@ -1890,17 +1905,32 @@ impl DrmKmsController {
                     DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
                 ) && s_w == sw && s_h == sh && sx == 0 && sy == 0 && surface.opacity == 255
             {
-                // Identity full cover: the base surface matches the entire scanout.
-                // Always copy the entire surface so that clean rows never retain
-                // stale PLATFORM_BACKGROUND fill bytes in the back buffer, and narrow
-                // only the presented band to the damaged rows.
-                self.back_buffer.copy_from_slice(&surface.pixels);
-                if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                let row_partial = active_visible_surfaces == 1
+                    && self.full_cover_synced_id == Some(surface.id)
+                    && surface.dirty_rows.1 > surface.dirty_rows.0
+                    && surface.dirty_rows.0 < sh as usize
+                    && surface.pixels.len() == self.back_buffer.len();
+                if row_partial {
                     let y0 = surface.dirty_rows.0.min(sh as usize);
                     let y1 = surface.dirty_rows.1.min(sh as usize);
+                    let start = y0 * (sw as usize);
+                    let end = y1 * (sw as usize);
+                    self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
                     union_rows(&mut present_band, y0, y1);
                 } else {
-                    union_rows(&mut present_band, 0, sh as usize);
+                    self.back_buffer.copy_from_slice(&surface.pixels);
+                    if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                        let y0 = surface.dirty_rows.0.min(sh as usize);
+                        let y1 = surface.dirty_rows.1.min(sh as usize);
+                        union_rows(&mut present_band, y0, y1);
+                    } else {
+                        union_rows(&mut present_band, 0, sh as usize);
+                    }
+                    self.full_cover_synced_id = if active_visible_surfaces == 1 {
+                        Some(surface.id)
+                    } else {
+                        None
+                    };
                 }
                 surface.dirty = false;
                 surface.dirty_rows = (0, 0);
@@ -1950,13 +1980,28 @@ impl DrmKmsController {
                     && self.scanout_width as usize == dst_w && self.scanout_height as usize == dst_h
                     && !landscape && surface.opacity == 255
                 {
-                    self.back_buffer.copy_from_slice(&surface.pixels);
-                    // WHY the mapping is the identity here: this branch requires
-                    // the destination rect to match the scanout exactly, and the
-                    // blit above is a straight `copy_from_slice`. Surface row `r`
-                    // therefore lands on scanout row `0 + r`, so the tracked band copies 1:1.
-                    if surface.dirty_rows.1 > surface.dirty_rows.0 {
-                        union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(dst_y + dst_h));
+                    let row_partial = active_visible_surfaces == 1
+                        && self.full_cover_synced_id == Some(surface.id)
+                        && surface.dirty_rows.1 > surface.dirty_rows.0
+                        && surface.dirty_rows.0 < dst_h
+                        && surface.pixels.len() == self.back_buffer.len();
+                    if row_partial {
+                        let y0 = surface.dirty_rows.0.min(dst_h);
+                        let y1 = surface.dirty_rows.1.min(dst_h);
+                        let start = y0 * dst_w;
+                        let end = y1 * dst_w;
+                        self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
+                        union_rows(&mut present_band, y0, y1);
+                    } else {
+                        self.back_buffer.copy_from_slice(&surface.pixels);
+                        if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                            union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(dst_y + dst_h));
+                        }
+                        self.full_cover_synced_id = if active_visible_surfaces == 1 {
+                            Some(surface.id)
+                        } else {
+                            None
+                        };
                     }
                     surface.dirty = false;
                     surface.dirty_rows = (0, 0);
@@ -2520,6 +2565,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     present_dirty_rows: (0, 1440),
     scheduler: FrameScheduler::new(60),
     skip_scanout_diff: true,
+    full_cover_synced_id: None,
 });
 
 #[cfg(test)]

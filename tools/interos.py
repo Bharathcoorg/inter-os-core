@@ -862,15 +862,15 @@ def cmd_test(args):
         log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
         return 1
 
+    log(f"Executing InterOS test suite (Target: {test_target})...")
+    overall_rc = 0
+
     if test_target in ["kernel", "all"]:
         rc = run_kernel_tests()
         if rc != 0:
             overall_rc = rc
             if test_target == "kernel":
                 return rc
-
-    log(f"Executing InterOS test suite (Target: {test_target})...")
-    overall_rc = 0
 
     if test_target in ["contracts", "all"]:
         contracts_script = WORKSPACE_ROOT / "tests" / "run_all_contracts.py"
