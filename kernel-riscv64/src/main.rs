@@ -233,7 +233,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         let excess_pid = sched.spawn_user_process(1, "overflow", 0x1000, 0x2000, None, capability::CapabilityTable::new());
         assert_eq!(excess_pid, 0, "Spawn beyond MAX_TASKS must return 0");
         while sched.tasks.len() > orig_len {
-            sched.tasks.pop();
+            if let Some(popped) = sched.tasks.pop() {
+                ipc::IPC_ROUTER.lock().unregister_task(popped.id);
+            }
         }
         drop(sched);
 
@@ -251,13 +253,246 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         assert!(sched.reap_task(99, false, active_pid).is_ok());
         drop(sched);
 
-        // Partial ELF load rollback
-        let corrupt_elf = [0x7fu8, b'E', b'L', b'F', 0, 0, 0];
+        // Partial multi-segment ELF load rollback & malformed ELF validation
         let baseline = mmu::active_allocated_frames();
+        let corrupt_elf = [0x7fu8, b'E', b'L', b'F', 0, 0, 0];
         assert!(elf::load_elf(&corrupt_elf).is_err());
+
+        let write_u16 = |b: &mut [u8], off: usize, v: u16| {
+            b[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        let write_u32 = |b: &mut [u8], off: usize, v: u32| {
+            b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let write_u64 = |b: &mut [u8], off: usize, v: u64| {
+            b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        };
+
+        // 1) Unaligned e_entry
+        let mut unaligned_elf = TEST_PROC_RISCV_ELF;
+        write_u64(&mut unaligned_elf, 24, 0x40_0079);
+        assert!(elf::load_elf(&unaligned_elf).is_err(), "Odd RISC-V e_entry must fail");
+
+        // 2) Overflowing p_filesz
+        let mut oob_elf = TEST_PROC_RISCV_ELF;
+        write_u64(&mut oob_elf, 96, u64::MAX - 16);
+        assert!(elf::load_elf(&oob_elf).is_err(), "Overflowing p_filesz must fail");
+
+        // 3) Multi-segment rollback: seg0 maps 0x40_0000 + page tables; seg1 violates W^X
+        let mut partial_elf = TEST_PROC_RISCV_ELF;
+        write_u16(&mut partial_elf, 56, 2); // e_phnum = 2
+        write_u64(&mut partial_elf, 24, 0x40_0100);
+        write_u32(&mut partial_elf, 120, 1); // PT_LOAD
+        write_u32(&mut partial_elf, 124, 3); // PF_W | PF_X (2 | 1)
+        write_u64(&mut partial_elf, 128, 0);
+        write_u64(&mut partial_elf, 136, 0x41_0000);
+        write_u64(&mut partial_elf, 144, 0x41_0000);
+        write_u64(&mut partial_elf, 152, 0x1000);
+        write_u64(&mut partial_elf, 160, 0x1000);
+        write_u64(&mut partial_elf, 168, 0x1000);
+        assert!(elf::load_elf(&partial_elf).is_err(), "W^X second segment must fail");
+
+        // 4) Overlapping 4 KiB page segments (disjoint VAs in same 4 KiB page)
+        let mut overlap_elf = partial_elf;
+        write_u64(&mut overlap_elf, 96, 0x200);       // Phdr0 p_filesz = 0x200
+        write_u64(&mut overlap_elf, 104, 0x200);      // Phdr0 p_memsz  = 0x200
+        write_u32(&mut overlap_elf, 124, 4);          // PF_R
+        write_u64(&mut overlap_elf, 128, 0x800);      // p_offset aligned with p_vaddr mod 4KiB
+        write_u64(&mut overlap_elf, 136, 0x40_0800);
+        write_u64(&mut overlap_elf, 144, 0x40_0800);
+        write_u64(&mut overlap_elf, 152, 0x100);
+        write_u64(&mut overlap_elf, 160, 0x100);
+        assert!(elf::load_elf(&overlap_elf).is_err(), "Overlapping 4 KiB page segments must fail");
+
         assert_eq!(mmu::active_allocated_frames(), baseline, "ELF load failure must roll back all frames");
     }
     println!("[TEST] Process Safety Invariants: Quota exhaustion, active reap rejection & ELF rollback VERIFIED.");
+    println!("[TEST] Multi-segment ELF rollback & 4 KiB overlap rejection VERIFIED.");
+
+    // Real U-Mode Syscall ABI, Capability Denial, IPC Meta, ServiceQuery & Page Fault Recovery
+    {
+        let baseline = mmu::active_allocated_frames();
+        let rv_li = |rd: u32, imm: i32| -> u32 {
+            (((imm as u32) & 0xFFF) << 20) | (rd << 7) | 0x13
+        };
+        let rv_bne = |rs1: u32, rs2: u32, off: isize| -> u32 {
+            let u = off as u32;
+            (((u >> 12) & 1) << 31)
+                | (((u >> 5) & 0x3F) << 25)
+                | (rs2 << 20)
+                | (rs1 << 15)
+                | (1 << 12)
+                | (((u >> 1) & 0xF) << 8)
+                | (((u >> 11) & 1) << 7)
+                | 0x63
+        };
+        let rv_j = |off: isize| -> u32 {
+            let u = off as u32;
+            (((u >> 20) & 1) << 31)
+                | (((u >> 1) & 0x3FF) << 21)
+                | (((u >> 11) & 1) << 20)
+                | (((u >> 12) & 0xFF) << 12)
+                | 0x6F
+        };
+        let emit_u32_vec = |b: &mut [u8], start: usize, words: &[u32]| {
+            for (idx, w) in words.iter().enumerate() {
+                let off = start + idx * 4;
+                b[off..off + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        };
+
+        let mut syscall_elf = TEST_PROC_RISCV_ELF;
+        syscall_elf[24..32].copy_from_slice(&0x40_0100u64.to_le_bytes());
+
+        // Fixed fail stubs at offset 0x400: 8 bytes each: li a0, (11+i); j 0x480
+        let mut fail_stubs = [0u32; 24];
+        for i in 0..12usize {
+            let pc = 0x400 + i * 8;
+            fail_stubs[i * 2] = rv_li(10, 11 + i as i32);
+            fail_stubs[i * 2 + 1] = rv_j(0x480 - (pc as isize + 4));
+        }
+        emit_u32_vec(&mut syscall_elf, 0x400, &fail_stubs);
+        emit_u32_vec(&mut syscall_elf, 0x480, &[
+            rv_li(17, 2), // SYS_EXIT
+            0x0000_0073,  // ecall
+            rv_j(0),      // j .
+        ]);
+
+        let bne_fail = |pc_byte: usize, rs1: u32, rs2: u32, fail_idx: usize| -> u32 {
+            let target = 0x400 + fail_idx * 8;
+            rv_bne(rs1, rs2, target as isize - pc_byte as isize)
+        };
+
+        let mut insns = [0u32; 72];
+        let mut n = 0usize;
+        let pc = |idx: usize| 0x100 + idx * 4;
+
+        // addi sp, sp, -64
+        insns[n] = 0xFC01_0113; n += 1;
+        // 1) SYS_VERIFY_PACKAGE (14) == -38 (fail 0)
+        insns[n] = rv_li(17, 14); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, -38); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 0); n += 1;
+        // 2) SYS_SURFACE_CREATE (69) without DisplayServer cap == -13 (fail 1)
+        insns[n] = rv_li(17, 69); n += 1;
+        insns[n] = rv_li(10, 100); n += 1;
+        insns[n] = rv_li(11, 100); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, -13); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 1); n += 1;
+        // 3) SYS_SERVICE_QUERY (102, id=1, a1=sp, a2=12) == 12 & rec[0]==1 (fails 2,3)
+        insns[n] = rv_li(17, 102); n += 1;
+        insns[n] = rv_li(10, 1); n += 1;
+        insns[n] = 0x0001_0593; n += 1; // addi a1, sp, 0
+        insns[n] = rv_li(12, 12); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, 12); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 2); n += 1;
+        insns[n] = 0x0001_4503; n += 1; // lbu a0, 0(sp)
+        insns[n] = rv_li(5, 1); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 3); n += 1;
+        // 4) SYS_IPC_RECV (6, a0=0, a1=0x10000 unmapped, a2=16) == -14 (fail 4)
+        insns[n] = rv_li(17, 6); n += 1;
+        insns[n] = rv_li(10, 0); n += 1;
+        insns[n] = 0x0001_05B7; n += 1; // lui a1, 0x10 (0x10000)
+        insns[n] = rv_li(12, 16); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, -14); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 4); n += 1;
+        // 5) SYS_GET_TASK_ID -> s1 (x9), SYS_IPC_SEND -> SYS_IPC_RECV_META (a0=0)
+        insns[n] = rv_li(17, 7); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = 0x0005_0493; n += 1; // mv s1, a0
+        insns[n] = rv_li(11, 42); n += 1;
+        insns[n] = 0x00B1_2423; n += 1; // sw a1, 8(sp)
+        insns[n] = rv_li(17, 5); n += 1;  // SYS_IPC_SEND
+        insns[n] = 0x0004_8513; n += 1; // mv a0, s1
+        insns[n] = rv_li(11, 9); n += 1;  // msg_type=9
+        insns[n] = 0x0081_0613; n += 1; // addi a2, sp, 8
+        insns[n] = rv_li(13, 4); n += 1;  // a3=4
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, 4); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 5); n += 1;
+        insns[n] = rv_li(17, 103); n += 1; // SYS_IPC_RECV_META
+        insns[n] = rv_li(10, 0); n += 1;   // RESERVED_CAP_SLOT
+        insns[n] = 0x0101_0593; n += 1;    // addi a1, sp, 16
+        insns[n] = rv_li(12, 16); n += 1;
+        insns[n] = 0x0201_0693; n += 1;    // addi a3, sp, 32 (sender u64)
+        insns[n] = 0x0281_0713; n += 1;    // addi a4, sp, 40 (type u32)
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_li(5, 4); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 6); n += 1;
+        insns[n] = 0x0101_4503; n += 1;    // lbu a0, 16(sp)
+        insns[n] = rv_li(5, 42); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 7); n += 1;
+        insns[n] = 0x0201_3503; n += 1;    // ld a0, 32(sp)
+        insns[n] = bne_fail(pc(n), 10, 9, 8); n += 1;
+        insns[n] = 0x0281_2503; n += 1;    // lw a0, 40(sp)
+        insns[n] = rv_li(5, 9); n += 1;
+        insns[n] = bne_fail(pc(n), 10, 5, 9); n += 1;
+        // All passed -> SYS_EXIT(0)
+        insns[n] = rv_li(10, 0); n += 1;
+        insns[n] = rv_li(17, 2); n += 1;
+        insns[n] = 0x0000_0073; n += 1;
+        insns[n] = rv_j(0); n += 1;
+        emit_u32_vec(&mut syscall_elf, 0x100, &insns[..n]);
+
+        let loaded = elf::load_elf(&syscall_elf).expect("Load RISC-V U-mode syscall ELF");
+        let mut caps = capability::CapabilityTable::new();
+        let _ = caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
+        let _ = caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+        let (pid_ok, satp_ok) = {
+            let mut sched = task::SCHEDULER.lock();
+            let s = loaded.address_space.satp;
+            let pid = sched.spawn_user_process(99, "rv_umode_verify", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
+                sched.current_task_idx = pos;
+                sched.tasks[pos].state = task::TaskState::Running;
+            }
+            (pid, s)
+        };
+        unsafe {
+            trap::IN_LIFECYCLE_TEST = true;
+            mmu::switch_satp(satp_ok);
+            trap::enter_user_mode_with_return(loaded.entry_point, loaded.stack_top, trap::kernel_stack_top());
+            mmu::switch_satp(kernel_satp);
+        }
+        assert_eq!(task::reap_task_locksafe(99, false, pid_ok), Ok(0), "RISC-V U-mode syscall/IPC/capability checks must exit(0)");
+
+        // U-mode unmapped load page fault containment
+        let mut fault_elf = TEST_PROC_RISCV_ELF;
+        emit_u32_vec(&mut fault_elf, 120, &[
+            0x0001_0537, // lui a0, 0x10 (unmapped VA 0x10000)
+            0x0005_3583, // ld a1, 0(a0) -> Load Page Fault (13)
+            rv_li(17, 2),
+            rv_li(10, 0),
+            0x0000_0073,
+            rv_j(0),
+        ]);
+        let loaded_f = elf::load_elf(&fault_elf).expect("Load RISC-V U-mode fault ELF");
+        let (pid_f, satp_f) = {
+            let mut sched = task::SCHEDULER.lock();
+            let s = loaded_f.address_space.satp;
+            let pid = sched.spawn_user_process(99, "rv_umode_fault", loaded_f.entry_point, loaded_f.stack_top, Some(loaded_f.address_space), capability::CapabilityTable::new());
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
+                sched.current_task_idx = pos;
+                sched.tasks[pos].state = task::TaskState::Running;
+            }
+            (pid, s)
+        };
+        trap::LAST_USER_FAULT_CODE.store(0, core::sync::atomic::Ordering::Release);
+        unsafe {
+            mmu::switch_satp(satp_f);
+            trap::enter_user_mode_with_return(loaded_f.entry_point, loaded_f.stack_top, trap::kernel_stack_top());
+            mmu::switch_satp(kernel_satp);
+            trap::IN_LIFECYCLE_TEST = false;
+        }
+        assert_eq!(trap::LAST_USER_FAULT_CODE.load(core::sync::atomic::Ordering::Acquire), -11);
+        assert!(task::reap_task_locksafe(99, false, pid_f).is_ok());
+        assert_eq!(mmu::active_allocated_frames(), baseline, "RISC-V U-mode syscall & fault verification must leak zero frames");
+        println!("[TEST] RISC-V U-Mode Syscall ABI (IPC Meta, ServiceQuery, EACCES, EFAULT & Page Fault Containment) VERIFIED.");
+    }
 
     // Physical Frame Ownership & Reference Counting
     {

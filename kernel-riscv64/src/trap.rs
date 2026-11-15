@@ -22,11 +22,11 @@ pub struct TrapFrame {
 // Global kernel stack for trap handling if task stack is unavailable
 static mut TRAP_KERNEL_STACK: [u8; 16384] = [0; 16384];
 
-/// Initializes RISC-V trap vectors by setting `stvec` and `sscratch`.
+/// Initializes RISC-V trap vectors by setting `stvec` and clearing `sscratch`.
+/// `sscratch == 0` indicates S-mode execution; non-zero holds the active U-mode task kernel stack.
 pub unsafe fn init_traps() {
     let trap_handler_addr = trap_entry as *const () as usize;
-    let stack_top = (&raw const TRAP_KERNEL_STACK) as usize + 16384;
-    // Direct mode: set bottom 2 bits to 0
+    let initial_sscratch: usize = 0;
     asm!(
         "csrw stvec, {0}",
         "csrw sscratch, {1}",
@@ -35,7 +35,7 @@ pub unsafe fn init_traps() {
         // in the page tables. It is re-enabled only around an explicit copy.
         "csrrc zero, sstatus, {2}",
         in(reg) trap_handler_addr,
-        in(reg) stack_top,
+        in(reg) initial_sscratch,
         in(reg) crate::mmu::SSTATUS_SUM,
         options(nostack)
     );
@@ -54,18 +54,29 @@ pub fn read_sstatus() -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn trap_entry() -> ! {
     naked_asm!(
-        // 1. Swap user SP with kernel stack in sscratch
+        // 1. Distinguish U-mode (sscratch == kstack_top != 0) from S-mode (sscratch == 0)
         "csrrw sp, sscratch, sp",
-        // 2. Allocate space for TrapFrame (32 regs * 8 + 4 CSRs * 8 = 288 bytes)
+        "bnez sp, 1f",
+        // Trap originated in S-mode: sscratch holds interrupted kernel sp, sp is 0.
+        "csrrw sp, sscratch, zero",
         "addi sp, sp, -288",
-        // 3. Save general registers
         "sd x1,  8*1(sp)",
-        // Save original SP (currently in sscratch)
-        "csrr t0, sscratch",
+        "sd t0,  8*5(sp)",
+        "addi t0, sp, 288",
         "sd t0,  8*2(sp)",
+        "j 2f",
+        // Trap originated in U-mode: sp holds kstack_top, sscratch holds user sp.
+        // Zero sscratch immediately so any nested S-mode trap detects S-mode.
+        "1:",
+        "addi sp, sp, -288",
+        "sd x1,  8*1(sp)",
+        "sd t0,  8*5(sp)",
+        "csrrw t0, sscratch, zero",
+        "sd t0,  8*2(sp)",
+        "2:",
         "sd x3,  8*3(sp)",
         "sd x4,  8*4(sp)",
-        "sd x5,  8*5(sp)",
+        "sd x6,  8*6(sp)",
         "sd x6,  8*6(sp)",
         "sd x7,  8*7(sp)",
         "sd x8,  8*8(sp)",
@@ -113,6 +124,16 @@ pub unsafe extern "C" fn trap_entry() -> ! {
         "csrw sstatus, t1",
         "csrw sepc, t2",
 
+        // Check whether returning to U-mode (SPP==0 -> arm sscratch=kstack_top) or S-mode (SPP!=0 -> sscratch=0)
+        "andi t0, t1, (1 << 8)",
+        "bnez t0, 3f",
+        "addi t0, sp, 288",
+        "csrw sscratch, t0",
+        "j 4f",
+        "3:",
+        "csrw sscratch, zero",
+        "4:",
+
         // 7. Restore general registers
         "ld x1,  8*1(sp)",
         "ld x3,  8*3(sp)",
@@ -145,13 +166,8 @@ pub unsafe extern "C" fn trap_entry() -> ! {
         "ld x30, 8*30(sp)",
         "ld x31, 8*31(sp)",
 
-        // Restore the user SP directly and keep sscratch bound to the kernel stack.
-        // The previous implementation left the user SP in sscratch, causing a
-        // second user trap to allocate its TrapFrame on the user stack.
-        "ld t0,  8*2(sp)",
-        "addi sp, sp, 288",
-        "csrw sscratch, sp",
-        "mv sp, t0",
+        // Restore original SP (user sp or interrupted kernel sp) last
+        "ld sp,  8*2(sp)",
         "sret",
     );
 }
@@ -233,11 +249,9 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     }
                 }
             }
-            // Environment call from S-mode
+            // Environment call from S-mode is never a valid syscall path
             9 => {
-                let width = unsafe { crate::mmu::instruction_len(tf.sepc) };
-                tf.sepc += width;
-                crate::syscall::dispatch_syscall(tf);
+                panic!("Environment call from S-mode at sepc=0x{:016x}", tf.sepc);
             }
             // Instruction Page Fault (12), Load Page Fault (13), Store Page Fault (15)
             12 | 13 | 15 => {
@@ -255,8 +269,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
                 let exited = crate::task::SCHEDULER.lock().exit_current();
                 println!("[TRAP] Faulted userspace task marked exited: {}", exited);
+                if unsafe { IN_LIFECYCLE_TEST } {
+                    LAST_USER_FAULT_CODE.store(-11, core::sync::atomic::Ordering::Release);
+                    unsafe {
+                        return_to_kernel_mode();
+                    }
+                }
+                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
-                    unsafe { core::arch::asm!("wfi"); }
+                    crate::task::yield_now();
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
                 }
             }
             // Illegal instruction
@@ -273,8 +295,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 }
                 let exited = crate::task::SCHEDULER.lock().exit_current();
                 println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
+                if unsafe { IN_LIFECYCLE_TEST } {
+                    LAST_USER_FAULT_CODE.store(-4, core::sync::atomic::Ordering::Release);
+                    unsafe {
+                        return_to_kernel_mode();
+                    }
+                }
+                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
-                    unsafe { core::arch::asm!("wfi"); }
+                    crate::task::yield_now();
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
                 }
             }
             _ => {
@@ -290,8 +320,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     panic!("Unhandled supervisor exception scause={} at sepc=0x{:016x}", code, tf.sepc);
                 }
                 let _ = crate::task::SCHEDULER.lock().exit_current();
+                if unsafe { IN_LIFECYCLE_TEST } {
+                    LAST_USER_FAULT_CODE.store(-1, core::sync::atomic::Ordering::Release);
+                    unsafe {
+                        return_to_kernel_mode();
+                    }
+                }
+                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
-                    unsafe { core::arch::asm!("wfi"); }
+                    crate::task::yield_now();
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
                 }
             }
         }
@@ -314,17 +352,32 @@ pub unsafe extern "C" fn enter_user_mode_with_args(
 ) -> ! {
     naked_asm!(
         // a0 = entry_point, a1 = user_sp, a2 = kstack_top, a3 = arg0, a4 = arg1
-        // 1. Initialize sscratch with kernel stack for handling traps from U-mode
-        "csrw sscratch, a2",
-        // 2. Clear SPP (bit 8) so return lands in U-mode, set SPIE (bit 5), clear SUM (bit 18)
+        // 1. Clear SIE, SPP (bit 8), SUM (bit 18), and VS (bits [10:9]), set SPIE (bit 5) and
+        // FS = Initial (0b01, bit 13) BEFORE arming sscratch so an S-mode interrupt cannot land
+        // between csrw sscratch and sret, U-mode cannot fault on FP or inherit VS, and
+        // subsequent S-mode context switches never trap on fsd/fld with FS=Off.
         "csrr t0, sstatus",
         "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
-        "li t1, ~((3 << 9) | (3 << 13))",
+        "li t1, ~((1 << 1) | (3 << 9) | (3 << 13))",
         "and t0, t0, t1",
-        "ori t0, t0, (1 << 5)",
-        // Clear VS (bits [10:9]) and FS (bits [14:13]) to strictly trap and isolate vector and floating-point state
+        "li t1, (1 << 5) | (1 << 13)",
+        "or t0, t0, t1",
         "csrw sstatus, t0",
+        // Sanitize all FP registers and fcsr so U-mode never observes kernel/prior FP state,
+        // then reset FS back to Initial (0b01).
+        "fscsr zero",
+        "fmv.d.x f0, zero", "fmv.d.x f1, zero", "fmv.d.x f2, zero", "fmv.d.x f3, zero",
+        "fmv.d.x f4, zero", "fmv.d.x f5, zero", "fmv.d.x f6, zero", "fmv.d.x f7, zero",
+        "fmv.d.x f8, zero", "fmv.d.x f9, zero", "fmv.d.x f10, zero", "fmv.d.x f11, zero",
+        "fmv.d.x f12, zero", "fmv.d.x f13, zero", "fmv.d.x f14, zero", "fmv.d.x f15, zero",
+        "fmv.d.x f16, zero", "fmv.d.x f17, zero", "fmv.d.x f18, zero", "fmv.d.x f19, zero",
+        "fmv.d.x f20, zero", "fmv.d.x f21, zero", "fmv.d.x f22, zero", "fmv.d.x f23, zero",
+        "fmv.d.x f24, zero", "fmv.d.x f25, zero", "fmv.d.x f26, zero", "fmv.d.x f27, zero",
+        "fmv.d.x f28, zero", "fmv.d.x f29, zero", "fmv.d.x f30, zero", "fmv.d.x f31, zero",
+        "csrw sstatus, t0",
+        // 2. Initialize sscratch with kernel stack for handling traps from U-mode
+        "csrw sscratch, a2",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
         // 4. Set user SP = a1 (enforcing standard 16-byte ABI alignment)
@@ -390,6 +443,7 @@ pub static mut KERNEL_SAVED_CTX: KernelSavedContext = KernelSavedContext {
 };
 
 pub static mut IN_LIFECYCLE_TEST: bool = false;
+pub static LAST_USER_FAULT_CODE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 /// Drops CPU execution privilege from S-mode to U-mode via `sret`, saving kernel context
 /// so `return_to_kernel_mode` can return back to kernel execution.
@@ -413,17 +467,32 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "sd s10, 96(t0)",
         "sd s11, 104(t0)",
 
-        // 1. Initialize sscratch with kernel stack for handling traps from U-mode
-        "csrw sscratch, a2",
-        // 2. Clear SPP (bit 8) so return lands in U-mode, set SPIE (bit 5), clear SUM (bit 18)
+        // 1. Clear SIE, SPP (bit 8), SUM (bit 18), and VS (bits [10:9]), set SPIE (bit 5) and
+        // FS = Initial (0b01, bit 13) BEFORE arming sscratch so an S-mode interrupt cannot land
+        // between csrw sscratch and sret, U-mode cannot fault on FP or inherit VS, and
+        // subsequent S-mode context switches never trap on fsd/fld with FS=Off.
         "csrr t0, sstatus",
         "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
-        "li t1, ~((3 << 9) | (3 << 13))",
+        "li t1, ~((1 << 1) | (3 << 9) | (3 << 13))",
         "and t0, t0, t1",
-        "ori t0, t0, (1 << 5)",
-        // Clear VS (bits [10:9]) and FS (bits [14:13]) to strictly trap and isolate vector and floating-point state
+        "li t1, (1 << 5) | (1 << 13)",
+        "or t0, t0, t1",
         "csrw sstatus, t0",
+        // Sanitize all FP registers and fcsr so U-mode never observes kernel/prior FP state,
+        // then reset FS back to Initial (0b01).
+        "fscsr zero",
+        "fmv.d.x f0, zero", "fmv.d.x f1, zero", "fmv.d.x f2, zero", "fmv.d.x f3, zero",
+        "fmv.d.x f4, zero", "fmv.d.x f5, zero", "fmv.d.x f6, zero", "fmv.d.x f7, zero",
+        "fmv.d.x f8, zero", "fmv.d.x f9, zero", "fmv.d.x f10, zero", "fmv.d.x f11, zero",
+        "fmv.d.x f12, zero", "fmv.d.x f13, zero", "fmv.d.x f14, zero", "fmv.d.x f15, zero",
+        "fmv.d.x f16, zero", "fmv.d.x f17, zero", "fmv.d.x f18, zero", "fmv.d.x f19, zero",
+        "fmv.d.x f20, zero", "fmv.d.x f21, zero", "fmv.d.x f22, zero", "fmv.d.x f23, zero",
+        "fmv.d.x f24, zero", "fmv.d.x f25, zero", "fmv.d.x f26, zero", "fmv.d.x f27, zero",
+        "fmv.d.x f28, zero", "fmv.d.x f29, zero", "fmv.d.x f30, zero", "fmv.d.x f31, zero",
+        "csrw sstatus, t0",
+        // 2. Initialize sscratch with kernel stack for handling traps from U-mode
+        "csrw sscratch, a2",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
         // 4. Set user SP = a1 (enforcing standard 16-byte ABI alignment)
@@ -457,6 +526,7 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
 #[unsafe(naked)]
 pub unsafe extern "C" fn return_to_kernel_mode() -> ! {
     naked_asm!(
+        "csrw sscratch, zero",
         "la t0, {ctx}",
         "ld ra, 0(t0)",
         "ld sp, 8(t0)",

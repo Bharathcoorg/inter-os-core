@@ -209,7 +209,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             ticks as i64
         }
 
-        // 5: IpcSend (5 => -38 if unsupported or unhandled)
+        // 5: IpcSend
         SYS_IPC_SEND => {
             let recipient = a0 as u32;
             let msg_type = a1 as u32;
@@ -221,6 +221,8 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 Ok((curr_id, caps)) => {
                     let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
                     if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
+                        -14
+                    } else if len == 0 && (addr == 0 || addr >= KERNEL_DRAM_START) {
                         -14
                     } else {
                         let mut router = crate::ipc::IPC_ROUTER.lock();
@@ -236,10 +238,13 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             }
         }
 
-        // 6: IpcRecv (6 => -38 if unsupported or unhandled)
+        // 6: IpcRecv
         SYS_IPC_RECV => {
-            let addr = a0;
-            let max_len = (a1 as usize).min(crate::ipc::IPC_MAX_PAYLOAD);
+            let (addr, max_len) = if a0 < 0x1000 && (a1 >= 0x1000 || a2 > 0 || a1 == 0) {
+                (a1, (a2 as usize).min(crate::ipc::IPC_MAX_PAYLOAD))
+            } else {
+                (a0, (a1 as usize).min(crate::ipc::IPC_MAX_PAYLOAD))
+            };
 
             match get_caller_identity_and_caps() {
                 Err(err) => err,
@@ -251,8 +256,11 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     } {
                         err
                     } else {
-                        let mut router = crate::ipc::IPC_ROUTER.lock();
-                        match router.receive(&caps, curr_id) {
+                        let recv_res = {
+                            let mut router = crate::ipc::IPC_ROUTER.lock();
+                            router.receive(&caps, curr_id)
+                        };
+                        match recv_res {
                             Ok(msg) => {
                                 let to_copy = msg.len.min(max_len);
                                 if to_copy > 0 {
@@ -275,24 +283,66 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
 
         SYS_IPC_RECV_META => {
-            let addr = a0;
+            let a4 = tf.regs[14];
+            let (addr, max_len, sender_ptr, type_ptr) = if a0 < 0x1000 {
+                (a1, (a2 as usize).min(crate::ipc::IPC_MAX_PAYLOAD), _a3, a4)
+            } else {
+                (a0, (a1 as usize).min(crate::ipc::IPC_MAX_PAYLOAD), a2, _a3)
+            };
+
             match get_caller_identity_and_caps() {
                 Err(err) => err,
                 Ok((curr_id, caps)) => {
-                    if let Err(err) = validate_user_range(addr, 12, true) {
+                    let precheck = (|| -> Result<(), i64> {
+                        if max_len > 0 {
+                            validate_user_range(addr, max_len, true)?;
+                        }
+                        if sender_ptr != 0 {
+                            if (sender_ptr & 7) != 0 {
+                                return Err(-22);
+                            }
+                            validate_user_range(sender_ptr, 8, true)?;
+                        }
+                        if type_ptr != 0 {
+                            if (type_ptr & 3) != 0 {
+                                return Err(-22);
+                            }
+                            validate_user_range(type_ptr, 4, true)?;
+                        }
+                        Ok(())
+                    })();
+                    if let Err(err) = precheck {
                         err
                     } else {
-                        let mut router = crate::ipc::IPC_ROUTER.lock();
-                        match router.receive_meta(&caps, curr_id) {
-                            Ok((sender, msg_type, len)) => {
-                                let mut meta = [0u8; 12];
-                                meta[0..4].copy_from_slice(&sender.to_le_bytes());
-                                meta[4..8].copy_from_slice(&msg_type.to_le_bytes());
-                                meta[8..12].copy_from_slice(&(len as u32).to_le_bytes());
-                                match copy_to_user(addr, &meta) {
-                                    Ok(()) => 12,
-                                    Err(err) => err,
+                        let recv_res = {
+                            let mut router = crate::ipc::IPC_ROUTER.lock();
+                            router.receive(&caps, curr_id)
+                        };
+                        match recv_res {
+                            Ok(msg) => {
+                                let to_copy = msg.len.min(max_len);
+                                if to_copy > 0 {
+                                    if let Err(err) = copy_to_user(addr, &msg.payload[..to_copy]) {
+                                        return {
+                                            tf.regs[10] = err as usize;
+                                        };
+                                    }
                                 }
+                                if sender_ptr != 0 {
+                                    if let Err(err) = copy_to_user(sender_ptr, &(msg.sender as u64).to_le_bytes()) {
+                                        return {
+                                            tf.regs[10] = err as usize;
+                                        };
+                                    }
+                                }
+                                if type_ptr != 0 {
+                                    if let Err(err) = copy_to_user(type_ptr, &msg.msg_type.to_le_bytes()) {
+                                        return {
+                                            tf.regs[10] = err as usize;
+                                        };
+                                    }
+                                }
+                                to_copy as i64
                             }
                             Err(crate::ipc::IpcError::MailboxEmpty) => -11,
                             Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
@@ -339,7 +389,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             } else if is_test || a0 == 0 {
                 -13 // -EACCES
             } else {
-                0
+                -38 // -ENOSYS: VFS read path not implemented on RISC-V yet
             }
         }
 
@@ -358,7 +408,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 11: FsClose
         SYS_FS_CLOSE | SYS_FS_SYNC | SYS_FS_LIST => {
-            if is_test || a0 == 0 { -13 } else { 0 }
+            if is_test || a0 == 0 { -13 } else { -38 }
         }
 
         SYS_FS_STAT => -2,
@@ -469,10 +519,10 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 -13
             } else {
                 let a4 = tf.regs[14];
-                let (surface_id, offset, pixel_ptr, pixel_count) = if a0 < 0x1000 && a4 > 0 {
+                let (surface_id, offset, pixel_ptr, pixel_count) = if a0 == 0 {
                     (a1 as u32, a2 as usize, _a3, a4 as usize)
-                } else if a0 < 0x1000 && _a3 > 0 {
-                    (a1 as u32, 0usize, a2, _a3 as usize)
+                } else if a0 < 0x1000 && _a3 >= 0x1000 && a2 < 0x1000 {
+                    (a1 as u32, a2 as usize, _a3, a4 as usize)
                 } else {
                     (a0 as u32, a1 as usize, a2, _a3 as usize)
                 };
@@ -485,28 +535,56 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     } else if pixel_count == 0 {
                         0
                     } else {
-                        let mut sm = crate::display::SURFACE_MANAGER.lock();
-                        if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
-                            if s.owner_task != caller_pid {
-                                -13 // -EACCES: caller does not own this surface
-                            } else if offset >= s.pixels.len() {
-                                -22
-                            } else {
-                                let copy_len = pixel_count.min(s.pixels.len() - offset);
-                                unsafe {
-                                    crate::mmu::with_user_memory(|| {
-                                        core::ptr::copy_nonoverlapping(
-                                            pixel_ptr as *const u32,
-                                            s.pixels.as_mut_ptr().add(offset),
-                                            copy_len,
-                                        );
-                                    });
+                        let mut written = 0usize;
+                        let mut kbuf = [0u8; 256 * 4];
+                        let mut write_res: i64 = 0;
+                        while written < pixel_count {
+                            let chunk = (pixel_count - written).min(256);
+                            let src_addr = match written.checked_mul(4).and_then(|b| pixel_ptr.checked_add(b)) {
+                                Some(a) => a,
+                                None => {
+                                    write_res = -14;
+                                    break;
                                 }
-                                copy_len as i64
+                            };
+                            if let Err(err) = copy_from_user(&mut kbuf[..chunk * 4], src_addr, chunk * 4) {
+                                write_res = err;
+                                break;
                             }
-                        } else {
-                            -2 // -ENOENT
+                            let mut sm = crate::display::SURFACE_MANAGER.lock();
+                            if let Some(s) = sm.surfaces.iter_mut().find(|s| s.id == surface_id) {
+                                if s.owner_task != caller_pid {
+                                    write_res = -13;
+                                    break;
+                                }
+                                let dst_off = match offset.checked_add(written) {
+                                    Some(o) if o < s.pixels.len() => o,
+                                    _ => {
+                                        write_res = if written == 0 { -22 } else { written as i64 };
+                                        break;
+                                    }
+                                };
+                                let copy_len = chunk.min(s.pixels.len() - dst_off);
+                                for i in 0..copy_len {
+                                    let base = i * 4;
+                                    s.pixels[dst_off + i] = u32::from_ne_bytes([
+                                        kbuf[base],
+                                        kbuf[base + 1],
+                                        kbuf[base + 2],
+                                        kbuf[base + 3],
+                                    ]);
+                                }
+                                written += copy_len;
+                                write_res = written as i64;
+                                if copy_len < chunk {
+                                    break;
+                                }
+                            } else {
+                                write_res = -2;
+                                break;
+                            }
                         }
+                        write_res
                     }
                 } else {
                     -22
@@ -728,15 +806,21 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
         // 102: ServiceQuery
         SYS_SERVICE_QUERY => {
-            let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
-            if len >= 12 {
-                let buf = [1u8, 2u8, 1u8, 1u8, 1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8];
-                match copy_to_user(addr, &buf) {
-                    Ok(()) => 12,
-                    Err(err) => err,
-                }
-            } else {
+            let service_id = a0 as u8;
+            let addr = a1;
+            let len = a2;
+            if addr == 0 || len < 12 {
                 -22
+            } else {
+                let mut buf = [0u8; 12];
+                if !crate::services::query_record(service_id, &mut buf) {
+                    -22
+                } else {
+                    match copy_to_user(addr, &buf) {
+                        Ok(()) => 12,
+                        Err(err) => err,
+                    }
+                }
             }
         }
 
@@ -826,17 +910,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 -22 // -EINVAL
             }
         }
-        SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => 0,
-        SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => 0,
-        SYS_BATTERY_QUERY => 100,
-        SYS_THERMAL_QUERY => 32,
+        SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => -38,
+        SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => -38,
+        SYS_BATTERY_QUERY | SYS_THERMAL_QUERY => -38,
         SYS_GET_RANDOM => {
             let (_addr, _len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
             -1 // Fail closed: no hardware CSPRNG/entropy source bound on RISC-V virt yet
         }
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => -38, // -ENOSYS: must not fabricate cryptographic verification success
-        SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => 0,
+        SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => -38,
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
             let (caller_pid, is_supervisor) = match get_caller_identity_and_caps() {

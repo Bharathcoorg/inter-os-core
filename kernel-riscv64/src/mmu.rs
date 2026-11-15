@@ -46,15 +46,23 @@ pub unsafe fn with_user_memory<R>(f: impl FnOnce() -> R) -> R {
 /// With the C extension enabled a 16-bit compressed instruction is distinguished
 /// from a 32-bit one by the low two bits being `11` for the long form.
 pub unsafe fn instruction_len(addr: usize) -> usize {
-    if addr >= 0x1000 && addr <= USER_SPACE_MAX {
+    if (addr & 1) != 0 {
+        return 4;
+    }
+    if addr >= USER_SPACE_MIN && addr <= USER_SPACE_MAX {
         let satp: usize;
         asm!("csrr {0}, satp", out(reg) satp, options(nostack, nomem));
         if validate_sv39_user_range(satp, addr, 2, false).is_err() {
             return 4;
         }
+        let halfword = with_user_memory(|| core::ptr::read_volatile(addr as *const u16));
+        return if halfword & 0x3 != 0x3 { 2 } else { 4 };
     }
-    let halfword = with_user_memory(|| core::ptr::read_volatile(addr as *const u16));
-    if halfword & 0x3 != 0x3 { 2 } else { 4 }
+    if addr >= crate::syscall::KERNEL_DRAM_START {
+        let halfword = core::ptr::read_volatile(addr as *const u16);
+        return if halfword & 0x3 != 0x3 { 2 } else { 4 };
+    }
+    4
 }
 
 #[repr(C, align(4096))]

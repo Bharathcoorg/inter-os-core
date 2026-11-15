@@ -246,14 +246,18 @@ class PlatformRealityTests(unittest.TestCase):
 
     def test_riscv_unsupported_ipc_does_not_report_success(self):
         syscall = self.read("kernel-riscv64/src/syscall.rs")
-        self.assertIn("5 => -38", syscall)
-        self.assertIn("6 => -38", syscall)
-        self.assertIn("SCHEDULER.lock().current_task_id()", syscall)
+        self.assertIn("SYS_IPC_SEND =>", syscall)
+        self.assertIn("SYS_IPC_RECV =>", syscall)
+        self.assertIn("crate::ipc::IPC_ROUTER.lock()", syscall)
+        self.assertIn("IpcError::CapabilityDenied", syscall)
+        self.assertIn("SCHEDULER.lock()", syscall)
 
     def test_riscv_trap_epilogue_preserves_kernel_stack(self):
         trap = self.read("kernel-riscv64/src/trap.rs")
-        self.assertIn("csrw sscratch, sp", trap)
-        self.assertIn("mv sp, t0", trap)
+        self.assertIn("bnez sp, 1f", trap)
+        self.assertIn("csrw sscratch, t0", trap)
+        self.assertIn("csrw sscratch, zero", trap)
+        self.assertIn("ld sp,  8*2(sp)", trap)
         self.assertNotIn('csrrw sp, sscratch, sp",\n        "sret"', trap)
 
     def test_riscv_faults_and_exit_update_scheduler_state(self):

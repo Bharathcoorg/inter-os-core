@@ -211,6 +211,24 @@ pub fn service_state(id: u8) -> Option<ServiceState> {
     None
 }
 
+/// Writes the 12-byte discovery ABI record for `id` into `out` from live `SERVICES` state.
+pub fn query_record(id: u8, out: &mut [u8; 12]) -> bool {
+    for svc in &SERVICES {
+        if svc.id as u8 == id {
+            out[0] = svc.id as u8;
+            out[1] = svc.state.load(Ordering::Acquire);
+            out[2] = svc.restart;
+            out[3] = svc.critical;
+            out[4..6].copy_from_slice(&1u16.to_le_bytes());
+            out[6..10].copy_from_slice(&svc.generation.load(Ordering::Acquire).to_le_bytes());
+            out[10] = 1;
+            out[11] = 0;
+            return true;
+        }
+    }
+    false
+}
+
 pub static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 pub fn start(id: u8) -> Result<u32, ()> {

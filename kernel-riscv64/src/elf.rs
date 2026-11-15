@@ -47,6 +47,18 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     if e_phnum == 0 || e_phentsize < 56 {
         return Err("Invalid program header table");
     }
+    if (e_entry & 1) != 0 {
+        return Err("ELF entry point is misaligned for RISC-V");
+    }
+    let ph_table_bytes = e_phnum
+        .checked_mul(e_phentsize)
+        .ok_or("Program header table size overflow")?;
+    let ph_table_end = e_phoff
+        .checked_add(ph_table_bytes)
+        .ok_or("Program header table offset overflow")?;
+    if ph_table_end > elf_data.len() {
+        return Err("Program header table exceeds ELF file bounds");
+    }
 
     let stack_top_addr = crate::mmu::ELF_USER_STACK_TOP;
     let stack_pages = 64; // 256 KiB user stack
@@ -55,15 +67,14 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     let stack_guard_end = stack_top_addr;
 
     let mut aspace = UserAddressSpace::new().ok_or("Failed to create UserAddressSpace")?;
+    let mut mapped_page_ranges = [(0usize, 0usize); 32];
+    let mut mapped_range_count = 0usize;
     let mut entry_in_executable_segment = false;
 
     // Helper closure to load segments; on error aspace.destroy() will be called
     let load_res: Result<(), &'static str> = (|| {
         for i in 0..e_phnum {
             let ph_start = e_phoff + i * e_phentsize;
-            if ph_start + e_phentsize > elf_data.len() {
-                return Err("Program header exceeds ELF file bounds");
-            }
 
             let p_type = u32::from_le_bytes(elf_data[ph_start..ph_start + 4].try_into().unwrap());
             if p_type == 3 { // PT_INTERP
@@ -78,12 +89,22 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let p_vaddr = u64::from_le_bytes(elf_data[ph_start + 16..ph_start + 24].try_into().unwrap()) as usize;
             let p_filesz = u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
             let p_memsz = u64::from_le_bytes(elf_data[ph_start + 40..ph_start + 48].try_into().unwrap()) as usize;
+            let p_align = u64::from_le_bytes(elf_data[ph_start + 48..ph_start + 56].try_into().unwrap()) as usize;
 
+            if p_memsz == 0 {
+                continue;
+            }
             if p_offset.checked_add(p_filesz).map_or(true, |end| end > elf_data.len()) {
                 return Err("Segment file size exceeds ELF file bounds");
             }
             if p_filesz > p_memsz {
                 return Err("Segment file size exceeds memory size");
+            }
+            if p_align != 0 && (p_align & (p_align - 1)) != 0 {
+                return Err("ELF segment alignment is not a power of two");
+            }
+            if p_align > 1 && (p_vaddr % p_align) != (p_offset % p_align) {
+                return Err("ELF segment virtual/file alignment mismatch");
             }
 
             let seg_end_vaddr = p_vaddr.checked_add(p_memsz).ok_or("Segment vaddr overflow")?;
@@ -110,6 +131,17 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
                 .checked_add(PAGE_SIZE - 1)
                 .ok_or("Segment page alignment overflow")?
                 & !(PAGE_SIZE - 1);
+            if mapped_page_ranges[..mapped_range_count]
+                .iter()
+                .any(|&(ps, pe)| page_start < pe && page_end > ps)
+            {
+                return Err("ELF load segments overlap within the same 4 KiB page");
+            }
+            if mapped_range_count >= mapped_page_ranges.len() {
+                return Err("Too many PT_LOAD segments in ELF image");
+            }
+            mapped_page_ranges[mapped_range_count] = (page_start, page_end);
+            mapped_range_count += 1;
 
             let mut cur_page = page_start;
             while cur_page < page_end {

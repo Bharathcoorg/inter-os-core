@@ -113,6 +113,16 @@ pub fn init_fp() {
 #[no_mangle]
 pub unsafe extern "C" fn switch_context(old_ctx: *mut RiscvContext, new_ctx: *const RiscvContext) {
     core::arch::naked_asm!(
+        // Ensure sstatus.FS is non-zero before executing FP save/restore instructions so
+        // context switching from a trap path never raises an S-mode illegal instruction.
+        "csrr t0, sstatus",
+        "srli t1, t0, 13",
+        "andi t1, t1, 3",
+        "bnez t1, 1f",
+        "li t1, (1 << 13)",
+        "or t0, t0, t1",
+        "csrw sstatus, t0",
+        "1:",
         // a0 = old_ctx (*mut RiscvContext), a1 = new_ctx (*const RiscvContext)
         // 1. Save callee-saved GPRs to old_ctx (offset 0..112)
         "sd ra, 0(a0)",
