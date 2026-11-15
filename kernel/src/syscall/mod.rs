@@ -1013,6 +1013,7 @@ pub fn sys_fs_write(
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::ReadOnlyFileSystem => SyscallResult::ReadOnlyFs,
             FsError::InvalidFd => SyscallResult::InvalidFd,
+            FsError::IsADirectory => SyscallResult::IsADirectory,
             _ => SyscallResult::InvalidArguments,
         })?;
 

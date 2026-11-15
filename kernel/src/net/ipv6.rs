@@ -62,6 +62,58 @@ mod tests {
         let q=Ipv6Packet::parse(&b[..n]).unwrap();
         assert_eq!(q.src,p.src); assert_eq!(q.dst,p.dst); assert_eq!(q.payload,p.payload);
     }
+
+    #[test]
+    fn neighbor_cache_learn_expires_and_recycles_stale_slots() {
+        let mut cache = NeighborCache::new();
+        // Fill all 32 entries with TTL = 10 at now = 100 (expire at 110)
+        for i in 0..MAX_IPV6_NEIGHBORS {
+            let mut addr = [0u8; 16];
+            addr[15] = i as u8;
+            cache.learn(Ipv6Address(addr), [0x52, 0x54, 0x00, 0x12, 0x34, i as u8], 100, 10);
+        }
+        assert_eq!(cache.len(), MAX_IPV6_NEIGHBORS);
+
+        // At now = 105, lookup should succeed
+        let test_addr = Ipv6Address([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5]);
+        assert!(cache.lookup(test_addr, 105).is_some());
+
+        // At now = 115, all previous entries are expired.
+        // Calling learn on a new 33rd entry must expire the stale entries and succeed in inserting!
+        let new_addr = Ipv6Address([0x20, 0x01, 0,0,0,0,0,0,0,0,0,0,0,0,0,0x99]);
+        cache.learn(new_addr, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], 115, 100);
+
+        assert_eq!(cache.lookup(new_addr, 115), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        assert_eq!(cache.lookup(test_addr, 115), None, "expired entry must not be returned");
+        assert_eq!(cache.len(), 1, "only the newly learned entry should be in cache");
+    }
+
+    #[test]
+    fn ipv6_routing_table_longest_prefix_match() {
+        let mut table = Ipv6RoutingTable::new();
+        let default_route = Ipv6Route {
+            prefix: Ipv6Prefix { address: Ipv6Address([0; 16]), prefix_len: 0 },
+            next_hop: Some(Ipv6Address([0xfe, 0x80, 0,0,0,0,0,0,0,0,0,0,0,0,0,1])),
+            interface: 1,
+            metric: 100,
+        };
+        let specific_route = Ipv6Route {
+            prefix: Ipv6Prefix { address: Ipv6Address([0x20, 1, 0xdb, 8, 0,0,0,0,0,0,0,0,0,0,0,0]), prefix_len: 32 },
+            next_hop: Some(Ipv6Address([0xfe, 0x80, 0,0,0,0,0,0,0,0,0,0,0,0,0,2])),
+            interface: 2,
+            metric: 10,
+        };
+        table.add(default_route).expect("add default");
+        table.add(specific_route).expect("add specific");
+
+        let target_match = Ipv6Address([0x20, 1, 0xdb, 8, 0,0,0,0,0,0,0,0,0,0,0,0x55]);
+        let matched = table.lookup(target_match).expect("must find route");
+        assert_eq!(matched.interface, 2, "must choose /32 specific route over default /0");
+
+        let other_target = Ipv6Address([0x26, 0, 0x14, 0x06, 0,0,0,0,0,0,0,0,0,0,0,1]);
+        let matched_default = table.lookup(other_target).expect("must find default route");
+        assert_eq!(matched_default.interface, 1, "must fallback to default route");
+    }
 }
 
 
@@ -91,6 +143,7 @@ impl NeighborCache {
  pub const fn new()->Self{Self{entries:[None;MAX_IPV6_NEIGHBORS]}}
  pub fn learn(&mut self,address:Ipv6Address,mac:[u8;6],now:u64,ttl:u64){
   if let Some(e)=self.entries.iter_mut().flatten().find(|e|e.address==address){*e=NeighborEntry{address,mac,reachable_until:now.saturating_add(ttl)};return;}
+  self.expire(now);
   if let Some(slot)=self.entries.iter_mut().find(|e|e.is_none()){*slot=Some(NeighborEntry{address,mac,reachable_until:now.saturating_add(ttl)});}
  }
  pub fn lookup(&self,address:Ipv6Address,now:u64)->Option<[u8;6]>{self.entries.iter().flatten().find(|e|e.address==address&&now<=e.reachable_until).map(|e|e.mac)}

@@ -723,6 +723,11 @@ impl Vfs {
         self.bump_storage_generation(&norm_path);
 
         if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
+            if let Some(inode) = self.inodes.get(&existing_id) {
+                if inode.file_type == FileType::Directory || inode.file_type == FileType::DeviceNode {
+                    return existing_id;
+                }
+            }
             let was_backed = self
                 .inodes
                 .get(&existing_id)
@@ -1604,6 +1609,10 @@ impl Vfs {
             };
             let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
 
+            if inode.file_type == FileType::Directory {
+                return Err(FsError::IsADirectory);
+            }
+
             if inode.file_type == FileType::ReadOnlySystem {
                 return Err(FsError::ReadOnlyFileSystem);
             }
@@ -1987,6 +1996,10 @@ pub fn read_file_for_task(
 
         let block_backed = self.inodes.get(&inode_id).map(|i| i.block_backed).unwrap_or(false);
         let inode = self.inodes.get_mut(&inode_id).ok_or(FsError::FileNotFound)?;
+
+        if inode.file_type == FileType::Directory {
+            return Err(FsError::IsADirectory);
+        }
 
         if inode.file_type == FileType::DeviceNode {
             return crate::fs::devfs::device_write(&inode.path, buf);
@@ -5750,6 +5763,42 @@ mod tests {
             source.read_exact(&mut expected).expect("the model's tail reads");
         }
         assert_eq!(tail, expected, "the last 24 bytes of the model are on the disk");
+    }
+
+    #[test]
+    fn opening_or_writing_directory_is_refused_with_is_a_directory() {
+        let mut vfs = Vfs::new();
+        let dir_inode_id = vfs.mkdir("/storage/test_dir");
+
+        let mut caps = CapabilityTable::new_for_task(TaskId(100), 8);
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(1001),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::WRITE,
+            object_id: dir_inode_id.0,
+        }).expect("insert cap");
+        caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(1002),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: dir_inode_id.0,
+        }).expect("insert cap");
+
+        // 1. Opening directory with Rights::WRITE must return Err(FsError::IsADirectory)
+        let open_res = vfs.open(TaskId(100), &caps, 0, "/storage/test_dir", Rights::WRITE);
+        assert_eq!(open_res, Err(FsError::IsADirectory), "Opening directory with Rights::WRITE must return IsADirectory");
+
+        // 2. Opening directory with Rights::READ must also return Err(FsError::IsADirectory)
+        let read_open_res = vfs.open(TaskId(100), &caps, 1, "/storage/test_dir", Rights::READ);
+        assert_eq!(read_open_res, Err(FsError::IsADirectory), "Opening directory with Rights::READ must return IsADirectory");
+
+        // 3. Calling create_file on an existing directory path must preserve directory node without corruption
+        let created_id = vfs.create_file("/storage/test_dir", b"corrupting data", false);
+        assert_eq!(created_id, dir_inode_id);
+        let inode = vfs.inodes.get(&dir_inode_id).expect("dir inode");
+        assert_eq!(inode.file_type, FileType::Directory, "create_file must not overwrite directory with file");
+        assert_eq!(inode.size, 0);
+        assert!(inode.data.as_slice().is_empty());
     }
 }
 
