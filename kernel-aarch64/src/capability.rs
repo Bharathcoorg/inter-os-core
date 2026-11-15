@@ -52,6 +52,7 @@ pub enum CapabilityType {
     FileSystemRead,
     FileSystemWrite,
     EventPoll,
+    CryptoEntropyRead,
     SystemResource,
 }
 

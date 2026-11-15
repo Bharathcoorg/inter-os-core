@@ -385,7 +385,7 @@ impl Scheduler {
         if !is_reserved_pid(pid) && self.tasks.iter().any(|t| t.id == pid) {
             return pid;
         }
-        if self.current_task_idx < self.tasks.len() {
+        if cid == 0 && self.current_task_idx < self.tasks.len() {
             self.tasks[self.current_task_idx].id
         } else {
             INVALID_PID
@@ -1160,7 +1160,13 @@ pub fn secondary_scheduler_loop(logical_id: usize) -> ! {
         #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!("msr daifset, #2", options(nomem, nostack));
-            if !per_cpu(logical_id).need_resched.load(Ordering::Acquire) {
+            let has_runnable = if is_smp_scheduling_enabled() {
+                let sched = SCHEDULER.lock();
+                sched.tasks.iter().any(|t| t.is_runnable_on(logical_id))
+            } else {
+                false
+            };
+            if !has_runnable && !per_cpu(logical_id).need_resched.load(Ordering::Acquire) {
                 core::arch::asm!("dsb sy", "wfi", options(nomem, nostack));
             }
             core::arch::asm!("msr daifclr, #2", options(nomem, nostack));

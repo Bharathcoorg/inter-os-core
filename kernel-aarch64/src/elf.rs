@@ -50,6 +50,9 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     if e_entry < 0x1000 || e_entry >= USER_CANONICAL_LIMIT {
         return Err("ELF entry point is outside the canonical user range");
     }
+    if (e_entry & 3) != 0 {
+        return Err("ELF entry point must be 4-byte aligned on AArch64");
+    }
 
     let e_phoff = u64::from_le_bytes(elf_data[32..40].try_into().unwrap()) as usize;
     let e_phentsize = u16::from_le_bytes([elf_data[54], elf_data[55]]) as usize;
@@ -61,6 +64,11 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     if e_phentsize != 56 {
         return Err("Invalid program header entry size (expected 56)");
     }
+    let ph_table_bytes = e_phnum.checked_mul(e_phentsize).ok_or("Program header table size overflow")?;
+    let ph_table_end = e_phoff.checked_add(ph_table_bytes).ok_or("Program header offset overflow")?;
+    if ph_table_end > elf_data.len() {
+        return Err("Program header table exceeds ELF file bounds");
+    }
 
     let stack_top_addr = USER_STACK_TOP;
     let stack_bottom_addr = stack_top_addr.checked_sub(USER_STACK_SIZE).ok_or("Stack address underflow")?;
@@ -69,14 +77,11 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
     let mut aspace = UserAddressSpace::new().ok_or("Failed to create UserAddressSpace")?;
     let mut load_ranges: Vec<(u64, u64, bool, bool)> = Vec::new();
+    let mut mapped_page_ranges: Vec<(u64, u64)> = Vec::new();
     let mut entry_in_executable_segment = false;
 
     for i in 0..e_phnum {
         let ph_start = e_phoff + i * e_phentsize;
-        if ph_start + e_phentsize > elf_data.len() {
-            let _ = aspace.destroy();
-            return Err("Program header exceeds ELF file bounds");
-        }
 
         let p_type = u32::from_le_bytes(elf_data[ph_start..ph_start + 4].try_into().unwrap());
         if p_type == 3 {
@@ -98,7 +103,14 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             continue;
         }
 
-        if p_offset.checked_add(p_filesz).ok_or("Segment file size overflow")? > elf_data.len() {
+        let seg_end_file = match p_offset.checked_add(p_filesz) {
+            Some(end) => end,
+            None => {
+                let _ = aspace.destroy();
+                return Err("Segment file size overflow");
+            }
+        };
+        if seg_end_file > elf_data.len() {
             let _ = aspace.destroy();
             return Err("Segment file size exceeds ELF binary length");
         }
@@ -160,6 +172,11 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
         let start_page = p_vaddr & !0xFFF;
         let end_page = (seg_end_vaddr + 0xFFF) & !0xFFF;
+        if mapped_page_ranges.iter().any(|(ps, pe)| start_page < *pe && end_page > *ps) {
+            let _ = aspace.destroy();
+            return Err("ELF load segments overlap within the same 4 KiB page");
+        }
+        mapped_page_ranges.push((start_page, end_page));
 
         for page_vaddr in (start_page..end_page).step_by(4096) {
             let frame = match allocate_frame() {
@@ -190,10 +207,11 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             if is_exec {
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
+                    let (d_line, _) = crate::mmu::cache_line_sizes();
                     let mut off = 0usize;
                     while off < 4096 {
                         core::arch::asm!("dc cvau, {0}", in(reg) (frame + off as u64), options(nostack, preserves_flags));
-                        off += 64;
+                        off = off.saturating_add(d_line);
                     }
                 }
             }

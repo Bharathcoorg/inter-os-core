@@ -148,16 +148,23 @@ impl UserProcess {
         core::ptr::copy_nonoverlapping(code.as_ptr(), dest, code.len());
         #[cfg(target_arch = "aarch64")]
         {
-            let mut off = 0usize;
-            while off < code.len() {
-                core::arch::asm!("dc cvau, {0}", in(reg) (USER_CODE_VADDR + off as u64), options(nostack, preserves_flags));
-                off += 64;
+            let (d_line, i_line) = crate::mmu::cache_line_sizes();
+            // Clean the written physical alias to PoU so modified instructions reach shared memory/PoU
+            let p_start = (USER_CODE_PADDR as usize) & !(d_line - 1);
+            let p_end = (USER_CODE_PADDR as usize).saturating_add(code.len());
+            let mut addr = p_start;
+            while addr < p_end {
+                core::arch::asm!("dc cvau, {0}", in(reg) addr, options(nostack, preserves_flags));
+                addr = addr.saturating_add(d_line);
             }
             core::arch::asm!("dsb ish", options(nostack));
-            off = 0;
-            while off < code.len() {
-                core::arch::asm!("ic ivau, {0}", in(reg) (USER_CODE_VADDR + off as u64), options(nostack, preserves_flags));
-                off += 64;
+            // Invalidate I-cache lines covering the executed user virtual alias (and PoU)
+            let v_start = (USER_CODE_VADDR as usize) & !(i_line - 1);
+            let v_end = (USER_CODE_VADDR as usize).saturating_add(code.len());
+            let mut vaddr = v_start;
+            while vaddr < v_end {
+                core::arch::asm!("ic ivau, {0}", in(reg) vaddr, options(nostack, preserves_flags));
+                vaddr = vaddr.saturating_add(i_line);
             }
             core::arch::asm!("dsb ish", "isb", options(nostack));
         }

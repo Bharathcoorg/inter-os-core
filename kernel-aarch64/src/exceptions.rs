@@ -328,6 +328,10 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
                     crate::user::return_to_kernel_mode();
                 }
             } else {
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    core::arch::asm!("msr daifclr, #2", options(nostack));
+                }
                 loop {
                     crate::task::yield_now();
                 }
@@ -406,11 +410,14 @@ pub extern "C" fn handle_sync_lower32(frame: &mut ExceptionFrame) {
     handle_sync(frame, "Lower32");
 }
 
+pub static IN_VBAR_SVC_TEST: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
     let ec = (frame.esr >> 26) & 0x3F;
 
-    if ec == 0x15 {
-        // EC 0x15: SVC instruction execution in AArch64 state
+    if ec == 0x15 && IN_VBAR_SVC_TEST.load(core::sync::atomic::Ordering::Acquire) {
+        // EC 0x15: SVC instruction permitted only during the guarded boot self-test in EL1h
         let syscall_nr = frame.regs[8];
         let a0 = frame.regs[0];
         let a1 = frame.regs[1];

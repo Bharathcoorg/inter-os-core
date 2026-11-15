@@ -29,6 +29,7 @@ pub enum SmpError {
     CapabilityDenied,
     CoreAlreadyOnline,
     CoreAlreadyOffline,
+    CoreBusy,
     InvalidCoreId,
     PsciBootFailed,
     HardwareDisabled,
@@ -182,6 +183,16 @@ impl SmpController {
         if core_id == 0 {
             // Cannot power off primary boot core
             return Err(SmpError::InvalidCoreId);
+        }
+
+        {
+            let sched = crate::task::SCHEDULER.lock();
+            if sched.tasks.iter().any(|t| {
+                t.running_cpu == Some(core_id as usize)
+                    || (t.switching_out && t.affinity_mask == (1u32 << core_id))
+            }) {
+                return Err(SmpError::CoreBusy);
+            }
         }
 
         let core = self.cores.get_mut(core_id as usize).ok_or(SmpError::InvalidCoreId)?;

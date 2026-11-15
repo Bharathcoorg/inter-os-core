@@ -542,10 +542,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // 14. AArch64 Architectural Exception Vector Table (VBAR_EL1) & Hardware SVC Dispatch
     kprintln!("--- [Testing AArch64 Architectural Exception Vector Table & Hardware SVC] ---");
     exceptions::init_exceptions();
+    exceptions::IN_VBAR_SVC_TEST.store(true, core::sync::atomic::Ordering::Release);
     let svc_ticks = unsafe { exceptions::svc_call(syscall::SYS_GET_TICKS, 0, 0, 0, 0) };
     assert!(svc_ticks >= 0);
     let svc_task_id = unsafe { exceptions::svc_call(syscall::SYS_GET_TASK_ID, 0, 0, 0, 0) };
     assert_eq!(svc_task_id, curr_pid);
+    exceptions::IN_VBAR_SVC_TEST.store(false, core::sync::atomic::Ordering::Release);
     kprintln!("[TEST] AArch64 Vector Table (VBAR_EL1): Hardware 'svc #0' trap -> sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", svc_ticks, svc_task_id);
 
     // 14b. AArch64 Architectural Timer & Real IRQ Delivery
@@ -1879,7 +1881,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let excess_pid = sched.spawn_user_process(1, "overflow", 0x1000, 0x2000, None, capability::CapabilityTable::new());
         assert_eq!(excess_pid, 0, "Spawn beyond MAX_TASKS must return 0");
         while sched.tasks.len() > orig_len {
-            sched.tasks.pop();
+            if let Some(popped) = sched.tasks.pop() {
+                ipc::IPC_ROUTER.lock().unregister_task(popped.id);
+            }
         }
         drop(sched);
 
@@ -1897,13 +1901,253 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         assert!(sched.reap_task(1, false, active_pid).is_ok());
         drop(sched);
 
-        // Partial ELF load rollback
-        let corrupt_elf = [0x7fu8, b'E', b'L', b'F', 0, 0, 0];
+        // Partial multi-segment ELF load rollback & malformed header/segment validation
         let baseline = mmu::active_allocated_frames();
+        let corrupt_elf = [0x7fu8, b'E', b'L', b'F', 0, 0, 0];
         assert!(elf::load_elf(&corrupt_elf).is_err());
+
+        let write_u16 = |b: &mut [u8], off: usize, v: u16| {
+            b[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        let write_u32 = |b: &mut [u8], off: usize, v: u32| {
+            b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let write_u64 = |b: &mut [u8], off: usize, v: u64| {
+            b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        };
+
+        // 1) Unaligned e_entry
+        let mut unaligned_elf = TEST_PROC_AARCH64_ELF;
+        write_u64(&mut unaligned_elf, 24, 0x40_007A);
+        assert!(elf::load_elf(&unaligned_elf).is_err(), "Unaligned AArch64 e_entry must fail");
+
+        // 2) p_offset + p_filesz overflow / OOB
+        let mut oob_elf = TEST_PROC_AARCH64_ELF;
+        write_u64(&mut oob_elf, 96, u64::MAX - 16);
+        assert!(elf::load_elf(&oob_elf).is_err(), "Overflowing p_filesz must fail");
+
+        // 3) Partial multi-segment rollback: seg0 maps valid 4 KiB page + L2/L3 tables; seg1 fails W^X
+        let mut partial_elf = TEST_PROC_AARCH64_ELF;
+        write_u16(&mut partial_elf, 56, 2); // e_phnum = 2
+        write_u64(&mut partial_elf, 24, 0x40_0100);
+        // Phdr 1 at offset 120: invalid PF_W | PF_X (flags = 3) at VA 0x41_0000
+        write_u32(&mut partial_elf, 120, 1); // PT_LOAD
+        write_u32(&mut partial_elf, 124, 3); // PF_W | PF_X (2 | 1)
+        write_u64(&mut partial_elf, 128, 0);
+        write_u64(&mut partial_elf, 136, 0x41_0000);
+        write_u64(&mut partial_elf, 144, 0x41_0000);
+        write_u64(&mut partial_elf, 152, 0x1000);
+        write_u64(&mut partial_elf, 160, 0x1000);
+        write_u64(&mut partial_elf, 168, 0x1000);
+        assert!(elf::load_elf(&partial_elf).is_err(), "W^X second segment must fail after seg0 maps");
+
+        // 4) Overlapping 4 KiB page segments (disjoint VAs in same 4 KiB page)
+        let mut overlap_elf = partial_elf;
+        write_u64(&mut overlap_elf, 96, 0x200);       // Phdr0 p_filesz = 0x200
+        write_u64(&mut overlap_elf, 104, 0x200);      // Phdr0 p_memsz  = 0x200
+        write_u32(&mut overlap_elf, 124, 4);          // PF_R
+        write_u64(&mut overlap_elf, 128, 0x800);      // p_offset aligned with p_vaddr mod 4KiB
+        write_u64(&mut overlap_elf, 136, 0x40_0800);  // collides with page 0x40_0000
+        write_u64(&mut overlap_elf, 144, 0x40_0800);
+        write_u64(&mut overlap_elf, 152, 0x100);
+        write_u64(&mut overlap_elf, 160, 0x100);
+        assert!(elf::load_elf(&overlap_elf).is_err(), "Overlapping 4 KiB PT_LOAD page must fail");
+
         assert_eq!(mmu::active_allocated_frames(), baseline, "ELF load failure must roll back all frames");
+
+        // Verify power_off_core refuses CoreBusy when a task holds running_cpu = Some(1)
+        let busy_pid = {
+            let mut sched = task::SCHEDULER.lock();
+            let pid = sched.spawn_user_process(1, "core1_busy_probe", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+            if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == pid) {
+                t.running_cpu = Some(1);
+                t.state = task::TaskState::Running;
+            }
+            pid
+        };
+        let mut busy_smp = smp::SmpController::new(0, psci);
+        busy_smp.hardware_present = true;
+        busy_smp.cores[1].state = smp::CoreState::Online;
+        assert_eq!(busy_smp.power_off_core(1, &smp_caps), Err(smp::SmpError::CoreBusy));
+        {
+            let mut sched = task::SCHEDULER.lock();
+            if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == busy_pid) {
+                t.running_cpu = None;
+                t.state = task::TaskState::Terminated;
+            }
+            assert!(sched.reap_task(1, true, busy_pid).is_ok());
+        }
     }
     kprintln!("[TEST] Process Safety Invariants: Quota exhaustion, active reap rejection & ELF rollback VERIFIED.");
+    kprintln!("[TEST] SMP power_off_core CoreBusy invariant & multi-seg ELF rollback VERIFIED.");
+
+    // 45c2. Real EL0 Syscall Enforcement, IPC Meta ABI, ServiceQuery & Synchronous Fault Recovery
+    {
+        let baseline = mmu::active_allocated_frames();
+        let emit_u32_vec = |b: &mut [u8], start: usize, words: &[u32]| {
+            for (idx, w) in words.iter().enumerate() {
+                let off = start + idx * 4;
+                b[off..off + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        };
+
+        // Branch-free-indexed EL0 verification blob at offset 0x100 (e_entry = 0x40_0100)
+        // Failure codes 11..20 exit immediately via trailing fail/exit blocks.
+        let mut syscall_elf = TEST_PROC_AARCH64_ELF;
+        syscall_elf[24..32].copy_from_slice(&0x40_0100u64.to_le_bytes());
+        // Helper to emit b.ne <code_target>: we lay out clean fixed-stride 2-insn fail stubs at offset 0x400
+        // Fail stub i is at offset 0x400 + i * 8: mov x0, #(11+i); b exit_stub(0x480)
+        let mut fail_stubs = [0u32; 32];
+        for i in 0..12usize {
+            let fail_pc = 0x400 + i * 8;
+            let exit_pc = 0x480;
+            let imm26 = (((exit_pc as isize - (fail_pc + 4) as isize) >> 2) as u32) & 0x03FF_FFFF;
+            fail_stubs[i * 2] = 0xD280_0000 | (((11 + i as u32) & 0xFFFF) << 5); // mov x0, #(11+i)
+            fail_stubs[i * 2 + 1] = 0x1400_0000 | imm26; // b exit_stub
+        }
+        emit_u32_vec(&mut syscall_elf, 0x400, &fail_stubs[..24]);
+        emit_u32_vec(&mut syscall_elf, 0x480, &[
+            0xD280_0048, // mov x8, #2 (SYS_EXIT)
+            0xD400_0001, // svc #0
+            0x1400_0000, // b .
+        ]);
+
+        let bne_to_fail = |pc_byte: usize, fail_idx: usize| -> u32 {
+            let target = 0x400 + fail_idx * 8;
+            let diff = ((target as isize - pc_byte as isize) >> 2) as u32;
+            0x5400_0001 | ((diff & 0x7_FFFF) << 5)
+        };
+
+        let mut insns = [0u32; 64];
+        let mut n = 0usize;
+        let pc = |idx: usize| 0x100 + idx * 4;
+
+        // Allocate stack frame: sub sp, sp, #64
+        insns[n] = 0xD101_03FF; n += 1;
+        // 1) SYS_VERIFY_PACKAGE (14) -> -38 (fail 0 -> code 11)
+        insns[n] = 0xD280_01C8; n += 1; // mov x8, #14
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xB100_981F; n += 1; // cmn x0, #38
+        insns[n] = bne_to_fail(pc(n), 0); n += 1;
+        // 2) SYS_GET_RANDOM (31) without CryptoEntropyRead -> -13 (fail 1 -> code 12)
+        insns[n] = 0xD280_03E8; n += 1; // mov x8, #31
+        insns[n] = 0x9100_03E0; n += 1; // add x0, sp, #0
+        insns[n] = 0xD280_0201; n += 1; // mov x1, #16
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xB100_341F; n += 1; // cmn x0, #13
+        insns[n] = bne_to_fail(pc(n), 1); n += 1;
+        // 3) SYS_SERVICE_QUERY (102, id=1, addr=sp, len=12) -> 12 & rec[0]==1 (fails 2,3)
+        insns[n] = 0xD280_0CC8; n += 1; // mov x8, #102
+        insns[n] = 0xD280_0020; n += 1; // mov x0, #1
+        insns[n] = 0x9100_03E1; n += 1; // add x1, sp, #0
+        insns[n] = 0xD280_0182; n += 1; // mov x2, #12
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xF100_301F; n += 1; // cmp x0, #12
+        insns[n] = bne_to_fail(pc(n), 2); n += 1;
+        insns[n] = 0x3940_03E0; n += 1; // ldrb w0, [sp, #0]
+        insns[n] = 0xF100_041F; n += 1; // cmp x0, #1
+        insns[n] = bne_to_fail(pc(n), 3); n += 1;
+        // 4) SYS_IPC_RECV (6, a0=0, a1=0x10000 unmapped, a2=16) -> -14 (fail 4)
+        insns[n] = 0xD280_00C8; n += 1; // mov x8, #6
+        insns[n] = 0xD280_0000; n += 1; // mov x0, #0
+        insns[n] = 0xD2A0_0021; n += 1; // mov x1, #0x10000
+        insns[n] = 0xD280_0202; n += 1; // mov x2, #16
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xB100_381F; n += 1; // cmn x0, #14
+        insns[n] = bne_to_fail(pc(n), 4); n += 1;
+        // 5) SYS_GET_TASK_ID (7) -> x20, then SYS_IPC_SEND (5) & SYS_IPC_RECV_META (103, a0=0)
+        insns[n] = 0xD280_00E8; n += 1; // mov x8, #7
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xAA00_03F4; n += 1; // mov x20, x0
+        insns[n] = 0xD280_0541; n += 1; // mov x1, #42
+        insns[n] = 0xB900_0BE1; n += 1; // str w1, [sp, #8]
+        insns[n] = 0xD280_00A8; n += 1; // mov x8, #5 (SYS_IPC_SEND)
+        insns[n] = 0xAA14_03E0; n += 1; // mov x0, x20
+        insns[n] = 0xD280_0121; n += 1; // mov x1, #9 (msg_type)
+        insns[n] = 0x9100_23E2; n += 1; // add x2, sp, #8
+        insns[n] = 0xD280_0083; n += 1; // mov x3, #4
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xF100_101F; n += 1; // cmp x0, #4
+        insns[n] = bne_to_fail(pc(n), 5); n += 1;
+        insns[n] = 0xD280_0CE8; n += 1; // mov x8, #103 (SYS_IPC_RECV_META)
+        insns[n] = 0xD280_0000; n += 1; // mov x0, #0 (RESERVED_CAP_SLOT)
+        insns[n] = 0x9100_43E1; n += 1; // add x1, sp, #16
+        insns[n] = 0xD280_0202; n += 1; // mov x2, #16
+        insns[n] = 0x9100_83E3; n += 1; // add x3, sp, #32
+        insns[n] = 0x9100_A3E4; n += 1; // add x4, sp, #40
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0xF100_101F; n += 1; // cmp x0, #4
+        insns[n] = bne_to_fail(pc(n), 6); n += 1;
+        insns[n] = 0x3940_43E0; n += 1; // ldrb w0, [sp, #16]
+        insns[n] = 0xF100_A81F; n += 1; // cmp x0, #42
+        insns[n] = bne_to_fail(pc(n), 7); n += 1;
+        insns[n] = 0xF940_13E0; n += 1; // ldr x0, [sp, #32]
+        insns[n] = 0xEB14_001F; n += 1; // cmp x0, x20
+        insns[n] = bne_to_fail(pc(n), 8); n += 1;
+        insns[n] = 0xB940_2BE0; n += 1; // ldr w0, [sp, #40]
+        insns[n] = 0xF100_241F; n += 1; // cmp x0, #9
+        insns[n] = bne_to_fail(pc(n), 9); n += 1;
+        // All passed -> exit 0
+        insns[n] = 0xD280_0000; n += 1; // mov x0, #0
+        insns[n] = 0xD280_0048; n += 1; // mov x8, #2
+        insns[n] = 0xD400_0001; n += 1; // svc #0
+        insns[n] = 0x1400_0000; n += 1; // b .
+        emit_u32_vec(&mut syscall_elf, 0x100, &insns[..n]);
+
+        let loaded = elf::load_elf(&syscall_elf).expect("Load EL0 syscall test ELF");
+        let mut caps = capability::CapabilityTable::new();
+        caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
+        caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+        let (pid_ok, ttbr0_ok) = {
+            let mut sched = task::SCHEDULER.lock();
+            let tt = loaded.address_space.ttbr0;
+            let pid = sched.spawn_user_process(1, "el0_syscall_verify", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
+                sched.current_task_idx = pos;
+                sched.tasks[pos].state = task::TaskState::Running;
+            }
+            (pid, tt)
+        };
+        unsafe {
+            user::IN_SECTION17_SMOKE = false;
+            user::IN_LIFECYCLE_TEST = true;
+            mmu::ArmMmu::switch_to_task(ttbr0_ok);
+            user::enter_user_mode(loaded.entry_point, loaded.stack_top);
+            mmu::ArmMmu::switch_to_kernel();
+        }
+        assert_eq!(task::reap_task_locksafe(1, false, pid_ok), Ok(0), "EL0 syscall/IPC/capability/fault checks must exit(0)");
+
+        // Unrecoverable EL0 unmapped memory fault must terminate only faulting task (-11)
+        let mut fault_elf = TEST_PROC_AARCH64_ELF;
+        emit_u32_vec(&mut fault_elf, 120, &[
+            0xD282_0000, // mov x0, #0x1000 (unmapped in child TTBR0)
+            0xF940_0001, // ldr x1, [x0] -> EL0 Data Abort EC=0x24
+            0xD280_0048, // mov x8, #2
+            0xD280_0000, // mov x0, #0
+            0xD400_0001, // svc #0
+            0x1400_0000, // b .
+        ]);
+        let loaded_f = elf::load_elf(&fault_elf).expect("Load EL0 fault test ELF");
+        let (pid_f, ttbr0_f) = {
+            let mut sched = task::SCHEDULER.lock();
+            let tt = loaded_f.address_space.ttbr0;
+            let pid = sched.spawn_user_process(1, "el0_fault_verify", loaded_f.entry_point, loaded_f.stack_top, Some(loaded_f.address_space), capability::CapabilityTable::new());
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
+                sched.current_task_idx = pos;
+                sched.tasks[pos].state = task::TaskState::Running;
+            }
+            (pid, tt)
+        };
+        unsafe {
+            mmu::ArmMmu::switch_to_task(ttbr0_f);
+            user::enter_user_mode(loaded_f.entry_point, loaded_f.stack_top);
+            mmu::ArmMmu::switch_to_kernel();
+            user::IN_LIFECYCLE_TEST = false;
+        }
+        assert_eq!(task::reap_task_locksafe(1, false, pid_f), Ok(-11), "Faulting EL0 task must terminate with SIGSEGV (-11)");
+        assert_eq!(mmu::active_allocated_frames(), baseline, "EL0 syscall & fault verification must leak zero frames");
+        kprintln!("[TEST] AArch64 EL0 Syscall ABI (IPC Meta, ServiceQuery, Entropy Deny, EFAULT & Fault Containment) VERIFIED.");
+    }
 
     // 45d. Physical Frame Ownership & Reference Counting
     {
@@ -2274,10 +2518,11 @@ fn smp_coordinator_worker() -> ! {
         assert_eq!(mig_exit, 0);
         kprintln!("[TEST] Multicore Cross-CPU Migration & SIMD/GPR Preservation (migrations={}) VERIFIED.", mig_count);
 
-        // Scheduled EL0 Execution on Secondary CPU 1 + Cross-CPU TLB Shootdown SGI
+        // Scheduled EL0 Execution on Secondary CPUs + Cross-CPU TLB Shootdown SGI
         let tlb_ipis_before = task::per_cpu(1).tlb_ipis.load(Ordering::Acquire);
         let mut el0_pids = alloc::vec::Vec::new();
-        for cycle in 0..4usize {
+        let num_el0 = (online_count - 1).clamp(1, 3);
+        for cycle in 0..num_el0 {
             let loaded = elf::load_elf(test_elf).expect("Load EL0 ELF for SMP test");
             let mut caps = CapabilityTable::new();
             caps.mint(CapabilityType::IpcSend, Rights::INVOKE, None);
@@ -2305,20 +2550,38 @@ fn smp_coordinator_worker() -> ! {
         // Send cross-CPU TLB Shootdown SGI 1 to CPU 1 during EL0 activity
         gic::broadcast_sgi_to_mask(1, 1u32 << 1);
 
-        for (pid, _cpu) in el0_pids {
+        for (pid, target_cpu) in el0_pids {
             let mut reaped = Err(-30i64);
-            for _ in 0..200_000 {
+            let mut ebusy_retries = 0usize;
+            for iter in 0..200_000 {
                 reaped = task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid);
-                if reaped.is_ok() {
-                    break;
+                match reaped {
+                    Ok(_) => break,
+                    Err(-16) => {
+                        ebusy_retries += 1;
+                        if ebusy_retries >= 16 {
+                            break;
+                        }
+                        task::yield_now();
+                        core::hint::spin_loop();
+                    }
+                    Err(-30) => {
+                        if iter % 256 == 0 {
+                            gic::broadcast_sgi_to_mask(0, 1u32 << target_cpu);
+                        }
+                        task::yield_now();
+                        for _ in 0..64 {
+                            core::hint::spin_loop();
+                        }
+                    }
+                    Err(_) => break,
                 }
-                task::yield_now();
-                core::hint::spin_loop();
             }
             assert_eq!(reaped, Ok(0), "Scheduled EL0 SMP child PID {} must exit(0) and reap cleanly", pid);
         }
         let tlb_ipis_after = task::per_cpu(1).tlb_ipis.load(Ordering::Acquire);
         assert!(tlb_ipis_after > tlb_ipis_before, "CPU 1 must receive cross-CPU TLB shootdown SGI 1");
+
         kprintln!("[TEST] Multicore Scheduled EL0 & Cross-CPU TLB Shootdown (CPU 1 TLB IPIs {} -> {}) VERIFIED.",
             tlb_ipis_before, tlb_ipis_after);
     }

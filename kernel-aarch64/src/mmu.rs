@@ -83,6 +83,27 @@ static MMU_TABLE_LOCK: crate::sync::IrqSpinLock<()> = crate::sync::IrqSpinLock::
 
 pub struct ArmMmu;
 
+/// Returns `(d_line_bytes, i_line_bytes)` queried from architectural `CTR_EL0`.
+/// Falls back to 64-byte lines on non-AArch64 host test targets.
+#[inline]
+pub fn cache_line_sizes() -> (usize, usize) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let ctr: u64;
+        core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+        let d_pow = ((ctr >> 16) & 0xF) as usize;
+        let i_pow = (ctr & 0xF) as usize;
+        // Clamp exponents to sane cache-line shift range (4..=4096 bytes)
+        let d_line = (4usize << d_pow.min(10)).max(4);
+        let i_line = (4usize << i_pow.min(10)).max(4);
+        (d_line, i_line)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        (64, 64)
+    }
+}
+
 impl ArmMmu {
     /// Cleans D-cache lines covering `[start, start + len)` to the Point of Coherency (`dc cvac`),
     /// ensuring secondary PEs with MMU/caches disabled observe consistent memory prior to MMU enable.
@@ -92,7 +113,7 @@ impl ArmMmu {
         }
         #[cfg(target_arch = "aarch64")]
         unsafe {
-            let line = 64usize;
+            let (line, _) = cache_line_sizes();
             let mut addr = start & !(line - 1);
             let end = start.saturating_add(len);
             while addr < end {
