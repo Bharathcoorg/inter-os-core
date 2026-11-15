@@ -75,9 +75,72 @@ pub static ACTIVE_RAM_BASE: core::sync::atomic::AtomicU64 =
 pub static ACTIVE_RAM_SIZE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(1024 * 1024 * 1024);
 
+static SAVED_MAIR_EL1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SAVED_TCR_EL1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SAVED_KERNEL_TTBR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static MMU_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static MMU_TABLE_LOCK: crate::sync::IrqSpinLock<()> = crate::sync::IrqSpinLock::new(());
+
 pub struct ArmMmu;
 
 impl ArmMmu {
+    /// Cleans D-cache lines covering `[start, start + len)` to the Point of Coherency (`dc cvac`),
+    /// ensuring secondary PEs with MMU/caches disabled observe consistent memory prior to MMU enable.
+    pub fn clean_dcache_range(start: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let line = 64usize;
+            let mut addr = start & !(line - 1);
+            let end = start.saturating_add(len);
+            while addr < end {
+                core::arch::asm!("dc cvac, {0}", in(reg) addr, options(nostack, preserves_flags));
+                addr = addr.saturating_add(line);
+            }
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        let _ = (start, len);
+    }
+
+    /// Initializes MAIR_EL1, TCR_EL1, TTBR0_EL1, I/D-caches and the MMU on a secondary PE
+    /// using the translation tables configured by CPU 0.
+    pub fn init_secondary() -> bool {
+        if !MMU_INITIALIZED.load(core::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let mair = SAVED_MAIR_EL1.load(core::sync::atomic::Ordering::Relaxed);
+        let tcr = SAVED_TCR_EL1.load(core::sync::atomic::Ordering::Relaxed);
+        let ttbr0 = SAVED_KERNEL_TTBR0.load(core::sync::atomic::Ordering::Relaxed);
+        if tcr == 0 || ttbr0 == 0 {
+            return false;
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("ic iallu", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+
+            core::arch::asm!("msr mair_el1, {}", in(reg) mair, options(nomem, nostack));
+            core::arch::asm!("msr tcr_el1, {}", in(reg) tcr, options(nomem, nostack));
+            core::arch::asm!("msr ttbr0_el1, {}", in(reg) ttbr0, options(nomem, nostack));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+
+            let mut sctlr: u64;
+            core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
+            sctlr |= (1 << 0) | (1 << 2) | (1 << 12);
+            core::arch::asm!("msr sctlr_el1, {}", in(reg) sctlr, options(nomem, nostack));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+        }
+        true
+    }
     pub fn init_and_enable(ram_base: u64, ram_size: u64) {
         let base = if ram_base == 0 { 0x4000_0000 } else { ram_base };
         let size = if ram_size == 0 { 1024 * 1024 * 1024 } else { ram_size };
@@ -252,6 +315,13 @@ impl ArmMmu {
 
                 // 7. Install TTBR0_EL1
                 let l1_phys = core::ptr::addr_of!(L1_TABLE) as u64;
+                SAVED_MAIR_EL1.store(MAIR_VALUE, core::sync::atomic::Ordering::Relaxed);
+                SAVED_TCR_EL1.store(tcr_val, core::sync::atomic::Ordering::Relaxed);
+                SAVED_KERNEL_TTBR0.store(l1_phys, core::sync::atomic::Ordering::Relaxed);
+
+                Self::clean_dcache_range(l1_phys as usize, core::mem::size_of::<PageTable>());
+                Self::clean_dcache_range(l2_phys as usize, core::mem::size_of::<PageTable>());
+
                 core::arch::asm!("msr ttbr0_el1, {}", in(reg) l1_phys);
                 core::arch::asm!("isb");
 
@@ -269,6 +339,8 @@ impl ArmMmu {
                 sctlr |= (1 << 0) | (1 << 2) | (1 << 12);
                 core::arch::asm!("msr sctlr_el1, {}", in(reg) sctlr);
                 core::arch::asm!("isb");
+
+                MMU_INITIALIZED.store(true, core::sync::atomic::Ordering::Release);
             }
 
             let alloc_base = base + 0x0800_0000;
@@ -297,6 +369,7 @@ impl ArmMmu {
         if size == 0 || start_paddr == 0 {
             return false;
         }
+        let _table_guard = MMU_TABLE_LOCK.lock();
         let first = start_paddr / L2_BLOCK;
         let last = (start_paddr + size - 1) / L2_BLOCK;
         for index in first..=last {
@@ -328,7 +401,7 @@ impl ArmMmu {
         }
         unsafe {
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
@@ -352,6 +425,7 @@ impl ArmMmu {
         if size == 0 {
             return false;
         }
+        let _table_guard = MMU_TABLE_LOCK.lock();
 
         if start_paddr % L1_BLOCK == 0 && size % L1_BLOCK == 0 {
             let first = start_paddr / L1_BLOCK;
@@ -374,7 +448,7 @@ impl ArmMmu {
             }
             unsafe {
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+                core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
                 core::arch::asm!("isb", options(nostack, preserves_flags));
             }
@@ -403,7 +477,7 @@ impl ArmMmu {
                     | DESC_VALID;
             }
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
@@ -434,6 +508,7 @@ impl ArmMmu {
         if first_in_gib + count > 512 {
             return false;
         }
+        let _table_guard = MMU_TABLE_LOCK.lock();
 
         unsafe {
             let l2_phys = core::ptr::addr_of!(L2_HIGH_TABLE) as u64;
@@ -456,7 +531,7 @@ impl ArmMmu {
                         | DESC_VALID;
             }
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
@@ -491,6 +566,7 @@ impl ArmMmu {
         if size == 0 || start_paddr == 0 {
             return false;
         }
+        let _table_guard = MMU_TABLE_LOCK.lock();
         let first = start_paddr / L2_BLOCK;
         let last = (start_paddr + size - 1) / L2_BLOCK;
         unsafe {
@@ -533,7 +609,7 @@ impl ArmMmu {
                 }
             }
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
@@ -638,7 +714,7 @@ impl ArmMmu {
         // Level 1 Entry 0: points to user L2 table
         user_l1.entries[0] = l2_phys | DESC_TABLE | DESC_VALID;
 
-        // Map all discovered RAM gigapages as Kernel-only (DESC_AP_RW_EL1)
+        // Map all discovered RAM gigapages as Kernel-only (DESC_AP_RW_EL1 | DESC_UXN)
         for gb_idx in start_gb..(start_gb + num_gbs).min(512) {
             if gb_idx == 0 {
                 continue;
@@ -648,6 +724,7 @@ impl ArmMmu {
                 | DESC_SH_INNER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_NORMAL
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
         }
@@ -658,6 +735,7 @@ impl ArmMmu {
                 | DESC_SH_INNER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_NORMAL
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
         }
@@ -1014,7 +1092,8 @@ impl ArmFrameAllocator {
     }
 }
 
-pub static FRAME_ALLOCATOR: spin::Mutex<ArmFrameAllocator> = spin::Mutex::new(ArmFrameAllocator::empty());
+pub static FRAME_ALLOCATOR: crate::sync::IrqSpinLock<ArmFrameAllocator> =
+    crate::sync::IrqSpinLock::new(ArmFrameAllocator::empty());
 
 pub fn init_frame_allocator(base_paddr: u64, total_frames: usize) {
     let mut alloc = FRAME_ALLOCATOR.lock();
@@ -1098,7 +1177,8 @@ pub struct QuarantinedFrame {
     pub reason: &'static str,
 }
 
-pub static QUARANTINED_FRAMES: spin::Mutex<Vec<QuarantinedFrame>> = spin::Mutex::new(Vec::new());
+pub static QUARANTINED_FRAMES: crate::sync::IrqSpinLock<Vec<QuarantinedFrame>> =
+    crate::sync::IrqSpinLock::new(Vec::new());
 
 pub fn quarantine_frame_with_meta(paddr: u64, ownership: FrameOwnership, reason: &'static str) {
     let mut q = QUARANTINED_FRAMES.lock();
@@ -1121,11 +1201,7 @@ pub fn is_quarantined(paddr: u64) -> bool {
 }
 
 pub fn current_cpu_id() -> u8 {
-    let mpidr: u64;
-    unsafe {
-        core::arch::asm!("mrs {0}, mpidr_el1", out(reg) mpidr);
-    }
-    (mpidr & 0xFF) as u8
+    crate::task::current_cpu_logical_id() as u8
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1268,6 +1344,7 @@ impl UserAddressSpace {
                 | DESC_SH_INNER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_NORMAL
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
         }
@@ -1278,6 +1355,7 @@ impl UserAddressSpace {
                 | DESC_SH_INNER
                 | DESC_AP_RW_EL1
                 | DESC_ATTR_NORMAL
+                | DESC_UXN
                 | DESC_BLOCK
                 | DESC_VALID;
         }
@@ -1552,6 +1630,13 @@ impl UserAddressSpace {
             core::arch::asm!("dsb ish", options(nostack));
             core::arch::asm!("isb", options(nostack));
         }
+        let cid = current_cpu_id() as u32;
+        let current_mask = if cid < 16 { 1u32 << cid } else { 0 };
+        let remote_active = self.active_cpus() & !current_mask;
+        if remote_active != 0 {
+            // SGI 1 = TlbShootdown IPI to remote PEs currently executing with this AS
+            crate::gic::broadcast_sgi_to_mask(1, remote_active);
+        }
 
         if release {
             match mapping.kind {
@@ -1678,6 +1763,18 @@ impl UserAddressSpace {
         // If currently active on this CPU, switch away to kernel and deactivate
         if (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & current_mask) != 0 {
             self.deactivate();
+        }
+
+        // Notify any remote CPUs that still hold or have not acknowledged this address space
+        // before waiting for remote evacuation.
+        let cur_before_wait = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
+        let remote_active_init = cur_before_wait & LIFECYCLE_ACTIVE_CPUS_MASK & !current_mask;
+        let remote_unack_init = (self.executed_cpus.load(core::sync::atomic::Ordering::Acquire)
+            & !current_mask)
+            & !self.acknowledged_cpus.load(core::sync::atomic::Ordering::Acquire);
+        let shootdown_mask = remote_active_init | remote_unack_init;
+        if shootdown_mask != 0 {
+            crate::gic::broadcast_sgi_to_mask(1, shootdown_mask);
         }
 
         // Bounded loop waiting for remote CPUs to deactivate and acknowledge

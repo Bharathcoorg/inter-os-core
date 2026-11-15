@@ -8,7 +8,7 @@
 //! 2. Allwinner 8250 / Synopsys DesignWare 16550A UART (MMIO base: `0x01c28000` on PinePhone A64).
 
 use core::fmt;
-use spin::Mutex;
+use crate::sync::IrqSpinLock;
 
 // ============================================================================
 // ARM PrimeCell PL011 Register Definitions (QEMU virt)
@@ -503,17 +503,20 @@ impl From<QcomGeniUart> for KernelUart {
     }
 }
 
-pub static UART: Mutex<KernelUart> = Mutex::new(KernelUart::new_pl011(DEFAULT_PL011_BASE));
+pub static UART: IrqSpinLock<KernelUart> = IrqSpinLock::new(KernelUart::new_pl011(DEFAULT_PL011_BASE));
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    if let Some(mut uart) = UART.try_lock() {
-        let _ = uart.write_fmt(args);
-    } else {
-        let mut pl = Pl011Uart::new(DEFAULT_PL011_BASE);
-        let _ = pl.write_fmt(args);
+    for _ in 0..500_000u32 {
+        if let Some(mut uart) = UART.try_lock() {
+            let _ = uart.write_fmt(args);
+            return;
+        }
+        core::hint::spin_loop();
     }
+    let mut pl = Pl011Uart::new(DEFAULT_PL011_BASE);
+    let _ = pl.write_fmt(args);
 }
 
 #[macro_export]

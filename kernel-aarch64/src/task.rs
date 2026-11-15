@@ -13,9 +13,12 @@
 extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use spin::Mutex;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::sync::IrqSpinLock as Mutex;
 
 pub const STACK_SIZE: usize = 16384; // 16 KiB per kernel task stack
+pub const MAX_CPUS: usize = 8;
+pub const DEFAULT_TIME_SLICE: u8 = 4;
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C, align(16))]
@@ -210,6 +213,13 @@ pub struct TaskControlBlock {
     pub is_service: bool,
     pub service_id: Option<u8>,
     pub service_generation: Option<u32>,
+    pub running_cpu: Option<usize>,
+    pub switching_out: bool,
+    pub affinity_mask: u32,
+    pub time_slice_remaining: u8,
+    pub last_cpu: Option<usize>,
+    pub migrations: u64,
+    pub kernel_entry_fn: Option<fn() -> !>,
 }
 
 impl TaskControlBlock {
@@ -220,6 +230,17 @@ impl TaskControlBlock {
     pub fn capabilities_mut(&mut self) -> &mut CapabilityTable {
         &mut self.cap_table
     }
+
+    #[inline]
+    pub fn is_runnable_on(&self, cpu_id: usize) -> bool {
+        if self.state != TaskState::Ready || self.switching_out || self.running_cpu.is_some() {
+            return false;
+        }
+        if cpu_id >= MAX_CPUS {
+            return false;
+        }
+        (self.affinity_mask & (1u32 << cpu_id)) != 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,10 +250,115 @@ pub struct ReapHandle {
     pub exit_code: i32,
 }
 
+#[repr(C, align(64))]
+pub struct PerCpuData {
+    pub logical_id: usize,
+    pub idle_context: ArmContext,
+    pub current_pid: AtomicU32,
+    pub pending_release_pid: AtomicU32,
+    pub need_resched: AtomicBool,
+    pub tlb_shootdown_pending: AtomicBool,
+    pub timer_ticks: AtomicU64,
+    pub context_switches: AtomicU64,
+    pub resched_ipis: AtomicU64,
+    pub tlb_ipis: AtomicU64,
+}
+
+impl PerCpuData {
+    pub const fn new(logical_id: usize) -> Self {
+        Self {
+            logical_id,
+            idle_context: ArmContext::empty(),
+            current_pid: AtomicU32::new(INVALID_PID),
+            pending_release_pid: AtomicU32::new(INVALID_PID),
+            need_resched: AtomicBool::new(false),
+            tlb_shootdown_pending: AtomicBool::new(false),
+            timer_ticks: AtomicU64::new(0),
+            context_switches: AtomicU64::new(0),
+            resched_ipis: AtomicU64::new(0),
+            tlb_ipis: AtomicU64::new(0),
+        }
+    }
+}
+
+pub static mut PER_CPU_DATA: [PerCpuData; MAX_CPUS] = [
+    PerCpuData::new(0),
+    PerCpuData::new(1),
+    PerCpuData::new(2),
+    PerCpuData::new(3),
+    PerCpuData::new(4),
+    PerCpuData::new(5),
+    PerCpuData::new(6),
+    PerCpuData::new(7),
+];
+
+pub static SMP_SCHEDULING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_smp_scheduling_enabled(enabled: bool) {
+    SMP_SCHEDULING_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn is_smp_scheduling_enabled() -> bool {
+    SMP_SCHEDULING_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn init_per_cpu(logical_id: usize) {
+    let slot = if logical_id < MAX_CPUS { logical_id } else { 0 };
+    unsafe {
+        let ptr = &raw mut PER_CPU_DATA[slot];
+        (*ptr).logical_id = slot;
+        (*ptr).current_pid.store(INVALID_PID, Ordering::Release);
+        (*ptr).pending_release_pid.store(INVALID_PID, Ordering::Release);
+        (*ptr).need_resched.store(false, Ordering::Release);
+        (*ptr).tlb_shootdown_pending.store(false, Ordering::Release);
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!("msr tpidr_el1, {0}", "isb", in(reg) (ptr as u64), options(nostack));
+        }
+    }
+}
+
+#[inline]
+pub fn current_cpu_logical_id() -> usize {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let tpidr: u64;
+        core::arch::asm!("mrs {0}, tpidr_el1", out(reg) tpidr, options(nomem, nostack));
+        let base = (&raw const PER_CPU_DATA[0]) as u64;
+        let stride = core::mem::size_of::<PerCpuData>() as u64;
+        let end = base + (MAX_CPUS as u64) * stride;
+        if tpidr >= base && tpidr < end && (tpidr - base) % stride == 0 {
+            let ptr = tpidr as *const PerCpuData;
+            return (*ptr).logical_id.min(MAX_CPUS - 1);
+        }
+        0
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        0
+    }
+}
+
+#[inline]
+pub fn per_cpu(logical_id: usize) -> &'static PerCpuData {
+    let idx = if logical_id < MAX_CPUS { logical_id } else { 0 };
+    unsafe { &*(&raw const PER_CPU_DATA[idx]) }
+}
+
+pub fn current_cpu_pid() -> u32 {
+    let cid = current_cpu_logical_id();
+    let pid = per_cpu(cid).current_pid.load(Ordering::Acquire);
+    if !is_reserved_pid(pid) {
+        return pid;
+    }
+    SCHEDULER.lock().current_pid()
+}
+
 pub struct Scheduler {
-    pub tasks: Vec<TaskControlBlock>,
+    pub tasks: Vec<Box<TaskControlBlock>>,
     pub current_task_idx: usize,
     pub next_pid: u32,
+    pub rr_cursor: [usize; MAX_CPUS],
 }
 
 pub const MAX_TASKS: usize = 256;
@@ -249,14 +375,35 @@ impl Scheduler {
             tasks: Vec::new(),
             current_task_idx: 0,
             next_pid: 0,
+            rr_cursor: [0; MAX_CPUS],
         }
     }
 
     pub fn current_pid(&self) -> u32 {
+        let cid = current_cpu_logical_id();
+        let pid = per_cpu(cid).current_pid.load(Ordering::Acquire);
+        if !is_reserved_pid(pid) && self.tasks.iter().any(|t| t.id == pid) {
+            return pid;
+        }
         if self.current_task_idx < self.tasks.len() {
             self.tasks[self.current_task_idx].id
         } else {
             INVALID_PID
+        }
+    }
+
+    pub fn current_task_pos(&self) -> Option<usize> {
+        let cid = current_cpu_logical_id();
+        let pid = per_cpu(cid).current_pid.load(Ordering::Acquire);
+        if !is_reserved_pid(pid) {
+            if let Some(pos) = self.tasks.iter().position(|t| t.id == pid) {
+                return Some(pos);
+            }
+        }
+        if self.current_task_idx < self.tasks.len() {
+            Some(self.current_task_idx)
+        } else {
+            None
         }
     }
 
@@ -283,7 +430,7 @@ impl Scheduler {
     }
 
     pub fn remove_task_at(&mut self, pos: usize) -> TaskControlBlock {
-        let removed = self.tasks.remove(pos);
+        let removed = *self.tasks.remove(pos);
         if pos < self.current_task_idx {
             self.current_task_idx = self.current_task_idx.saturating_sub(1);
         } else if self.current_task_idx >= self.tasks.len() && !self.tasks.is_empty() {
@@ -297,6 +444,17 @@ impl Scheduler {
     }
 
     pub fn spawn_with_caps(&mut self, name: &'static str, entry_fn: fn() -> !, cap_table: CapabilityTable) {
+        self.spawn_kernel_task_with_options(name, entry_fn, cap_table, 0, 0xFFFF_FFFF);
+    }
+
+    pub fn spawn_kernel_task_with_options(
+        &mut self,
+        name: &'static str,
+        entry_fn: fn() -> !,
+        cap_table: CapabilityTable,
+        priority: u8,
+        affinity_mask: u32,
+    ) -> u32 {
         let task_id = self.allocate_pid().expect("PID allocation failure during kernel daemon spawn");
         let stack = Box::new([0u8; STACK_SIZE]);
 
@@ -305,11 +463,11 @@ impl Scheduler {
 
         let mut context = ArmContext::default();
         context.sp = aligned_sp;
-        context.set_lr(entry_fn as *const () as usize as u64);
+        context.set_lr(kernel_task_trampoline as *const () as usize as u64);
 
         crate::ipc::IPC_ROUTER.lock().register_task(task_id);
 
-        self.tasks.push(TaskControlBlock {
+        self.tasks.push(Box::new(TaskControlBlock {
             id: task_id,
             parent_id: 0,
             name,
@@ -318,7 +476,7 @@ impl Scheduler {
             stack,
             cap_table,
             cpu_ticks: 0,
-            priority: 0,
+            priority,
             address_space: None,
             page_table: None,
             user_entry: 0,
@@ -328,7 +486,15 @@ impl Scheduler {
             is_service: false,
             service_id: None,
             service_generation: None,
-        });
+            running_cpu: None,
+            switching_out: false,
+            affinity_mask,
+            time_slice_remaining: DEFAULT_TIME_SLICE,
+            last_cpu: None,
+            migrations: 0,
+            kernel_entry_fn: Some(entry_fn),
+        }));
+        task_id
     }
 
     pub fn spawn_user_process(
@@ -359,7 +525,7 @@ impl Scheduler {
 
         let ttbr0 = address_space.as_ref().map(|a| a.ttbr0);
 
-        self.tasks.push(TaskControlBlock {
+        self.tasks.push(Box::new(TaskControlBlock {
             id: task_id,
             parent_id,
             name,
@@ -378,7 +544,14 @@ impl Scheduler {
             is_service: false,
             service_id: None,
             service_generation: None,
-        });
+            running_cpu: None,
+            switching_out: false,
+            affinity_mask: 0xFFFF_FFFF,
+            time_slice_remaining: DEFAULT_TIME_SLICE,
+            last_cpu: None,
+            migrations: 0,
+            kernel_entry_fn: None,
+        }));
         task_id
     }
 
@@ -405,7 +578,7 @@ impl Scheduler {
         context.set_lr(user_process_entry as *const () as usize as u64);
 
         let cap_table = CapabilityTable::new();
-        self.tasks.push(TaskControlBlock {
+        self.tasks.push(Box::new(TaskControlBlock {
             id,
             parent_id: 0,
             name: "primordial_task",
@@ -424,7 +597,14 @@ impl Scheduler {
             is_service: false,
             service_id: None,
             service_generation: None,
-        });
+            running_cpu: None,
+            switching_out: false,
+            affinity_mask: 0xFFFF_FFFF,
+            time_slice_remaining: DEFAULT_TIME_SLICE,
+            last_cpu: None,
+            migrations: 0,
+            kernel_entry_fn: None,
+        }));
         true
     }
 
@@ -460,7 +640,7 @@ impl Scheduler {
 
         let ttbr0 = address_space.as_ref().map(|a| a.ttbr0);
 
-        self.tasks.push(TaskControlBlock {
+        self.tasks.push(Box::new(TaskControlBlock {
             id: task_id,
             parent_id: SUPERVISOR_PID,
             name,
@@ -479,7 +659,14 @@ impl Scheduler {
             is_service: true,
             service_id: Some(service_id),
             service_generation: Some(generation),
-        });
+            running_cpu: None,
+            switching_out: false,
+            affinity_mask: 0xFFFF_FFFF,
+            time_slice_remaining: DEFAULT_TIME_SLICE,
+            last_cpu: None,
+            migrations: 0,
+            kernel_entry_fn: None,
+        }));
         task_id
     }
 
@@ -626,12 +813,12 @@ impl Scheduler {
         let curr_idx = self.current_task_idx;
         let mut next_idx = (curr_idx + 1) % self.tasks.len();
         let mut count = 0;
-        while self.tasks[next_idx].state != TaskState::Ready && count < self.tasks.len() {
+        while (!self.tasks[next_idx].is_runnable_on(0)) && count < self.tasks.len() {
             next_idx = (next_idx + 1) % self.tasks.len();
             count += 1;
         }
 
-        if curr_idx == next_idx || self.tasks[next_idx].state != TaskState::Ready {
+        if curr_idx == next_idx || !self.tasks[next_idx].is_runnable_on(0) {
             return (None, None);
         }
 
@@ -668,6 +855,306 @@ impl Scheduler {
         let new_ctx = &self.tasks[next_idx].context as *const ArmContext;
 
         (Some(old_ctx), Some(new_ctx))
+    }
+
+    /// Selects the best runnable task for `cpu_id` (priority + per-CPU round-robin),
+    /// handling idle-to-task, task-to-task, and task-to-idle transitions safely.
+    ///
+    /// Outgoing tasks enter `switching_out = true` until `finish_post_switch()` completes
+    /// after `switch_context`, preventing another CPU from stealing a task mid-save.
+    pub fn prepare_switch_for_cpu(&mut self, cpu_id: usize) -> Option<(*mut ArmContext, *const ArmContext)> {
+        if cpu_id >= MAX_CPUS {
+            return None;
+        }
+        let pcpu = per_cpu(cpu_id);
+        let curr_pid = pcpu.current_pid.load(Ordering::Acquire);
+        let curr_pos = if !is_reserved_pid(curr_pid) {
+            self.tasks.iter().position(|t| t.id == curr_pid)
+        } else {
+            None
+        };
+
+        let curr_still_runnable = curr_pos
+            .map(|p| {
+                self.tasks[p].state == TaskState::Running
+                    && !self.tasks[p].switching_out
+                    && (self.tasks[p].affinity_mask & (1u32 << cpu_id)) != 0
+            })
+            .unwrap_or(false);
+
+        let n = self.tasks.len();
+        let start = if n == 0 {
+            0
+        } else if let Some(c) = curr_pos {
+            (c + 1) % n
+        } else {
+            self.rr_cursor[cpu_id] % n
+        };
+
+        let mut best_pos: Option<usize> = None;
+        let mut best_prio: u8 = u8::MAX;
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            let t = &self.tasks[idx];
+            if t.is_runnable_on(cpu_id) && t.priority < best_prio {
+                best_prio = t.priority;
+                best_pos = Some(idx);
+                if best_prio == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Don't switch away from a higher-priority task unless its timeslice hit 0 or it is no longer Running.
+        if let (Some(cpos), Some(npos)) = (curr_pos, best_pos) {
+            if curr_still_runnable
+                && self.tasks[cpos].time_slice_remaining > 0
+                && self.tasks[npos].priority > self.tasks[cpos].priority
+            {
+                best_pos = None;
+            }
+        }
+
+        // If current task stopped running (Exited/Terminated/Blocked/Reaping) or idle has no runnable tasks:
+        let next_pos = match (curr_pos, best_pos) {
+            (_, Some(npos)) => Some(npos),
+            (Some(cpos), None) => {
+                // Keep running if still Running and permitted on this CPU; otherwise park onto idle_context.
+                if curr_still_runnable {
+                    self.tasks[cpos].time_slice_remaining = DEFAULT_TIME_SLICE;
+                    return None;
+                }
+                None
+            }
+            (None, None) => return None,
+        };
+
+        // Transactional TTBR0 / UserAddressSpace switch BEFORE committing state transitions.
+        if let Some(npos) = next_pos {
+            if let Some(ref aspace) = self.tasks[npos].address_space {
+                if let Err(e) = aspace.try_activate() {
+                    crate::kprintln!("[SCHED CPU {}] Activation failed for PID {}: {:?}", cpu_id, self.tasks[npos].id, e);
+                    return None;
+                }
+                if let Some(cpos) = curr_pos {
+                    if let Some(ref out_aspace) = self.tasks[cpos].address_space {
+                        out_aspace.deactivate_after_switch();
+                    }
+                }
+            } else if let Some(cpos) = curr_pos {
+                if let Some(ref out_aspace) = self.tasks[cpos].address_space {
+                    out_aspace.deactivate();
+                } else {
+                    crate::mmu::ArmMmu::switch_to_kernel();
+                }
+            } else {
+                crate::mmu::ArmMmu::switch_to_kernel();
+            }
+        } else if let Some(cpos) = curr_pos {
+            if let Some(ref out_aspace) = self.tasks[cpos].address_space {
+                out_aspace.deactivate();
+            } else {
+                crate::mmu::ArmMmu::switch_to_kernel();
+            }
+        }
+
+        let old_ctx: *mut ArmContext = if let Some(cpos) = curr_pos {
+            let out_task = &mut self.tasks[cpos];
+            out_task.switching_out = true;
+            out_task.running_cpu = Some(cpu_id);
+            pcpu.pending_release_pid.store(out_task.id, Ordering::Release);
+            &mut out_task.context as *mut ArmContext
+        } else {
+            pcpu.pending_release_pid.store(INVALID_PID, Ordering::Release);
+            unsafe { &raw mut PER_CPU_DATA[cpu_id].idle_context }
+        };
+
+        let n_tasks = self.tasks.len().max(1);
+        let new_ctx: *const ArmContext = if let Some(npos) = next_pos {
+            let ctx_ptr = {
+                let in_task = &mut self.tasks[npos];
+                if let Some(prev_cpu) = in_task.last_cpu {
+                    if prev_cpu != cpu_id {
+                        in_task.migrations = in_task.migrations.saturating_add(1);
+                    }
+                }
+                in_task.last_cpu = Some(cpu_id);
+                in_task.state = TaskState::Running;
+                in_task.running_cpu = Some(cpu_id);
+                in_task.switching_out = false;
+                in_task.time_slice_remaining = DEFAULT_TIME_SLICE;
+                in_task.cpu_ticks += 1;
+                pcpu.current_pid.store(in_task.id, Ordering::Release);
+                (&in_task.context) as *const ArmContext
+            };
+            self.rr_cursor[cpu_id] = (npos + 1) % n_tasks;
+            if cpu_id == 0 {
+                self.current_task_idx = npos;
+            }
+            ctx_ptr
+        } else {
+            pcpu.current_pid.store(INVALID_PID, Ordering::Release);
+            unsafe { &raw const PER_CPU_DATA[cpu_id].idle_context }
+        };
+
+        pcpu.context_switches.fetch_add(1, Ordering::Relaxed);
+        Some((old_ctx, new_ctx))
+    }
+
+    pub fn complete_post_switch_for_cpu(&mut self, cpu_id: usize) {
+        if cpu_id >= MAX_CPUS {
+            return;
+        }
+        let rel_pid = per_cpu(cpu_id).pending_release_pid.swap(INVALID_PID, Ordering::AcqRel);
+        if is_reserved_pid(rel_pid) {
+            return;
+        }
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == rel_pid) {
+            t.switching_out = false;
+            t.running_cpu = None;
+            if t.state == TaskState::Running {
+                t.state = TaskState::Ready;
+            }
+        }
+    }
+}
+
+/// Releases ownership of any outgoing task that just switched off this CPU.
+/// Must be called immediately after `switch_context` returns AND at the start
+/// of every new task trampoline (`kernel_task_trampoline`, `user_process_entry`).
+pub fn finish_post_switch() {
+    let cid = current_cpu_logical_id();
+    let mut sched = SCHEDULER.lock();
+    sched.complete_post_switch_for_cpu(cid);
+}
+
+extern "C" fn kernel_task_trampoline() -> ! {
+    finish_post_switch();
+    let entry_opt = {
+        let sched = SCHEDULER.lock();
+        sched.current_task_pos().and_then(|pos| sched.tasks[pos].kernel_entry_fn)
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+    }
+    if let Some(entry_fn) = entry_opt {
+        entry_fn();
+    }
+    loop {
+        yield_now();
+    }
+}
+
+/// Called from `dispatch_irq` on PPI 27 timer interrupt.
+pub fn on_timer_tick_irq() {
+    let cid = current_cpu_logical_id();
+    let pcpu = per_cpu(cid);
+    pcpu.timer_ticks.fetch_add(1, Ordering::Relaxed);
+
+    if !is_smp_scheduling_enabled() {
+        return;
+    }
+
+    let mut sched = SCHEDULER.lock();
+    let curr_pid = pcpu.current_pid.load(Ordering::Acquire);
+    if is_reserved_pid(curr_pid) {
+        if sched.tasks.iter().any(|t| t.is_runnable_on(cid)) {
+            pcpu.need_resched.store(true, Ordering::Release);
+        }
+        return;
+    }
+    if let Some(pos) = sched.tasks.iter().position(|t| t.id == curr_pid) {
+        sched.tasks[pos].cpu_ticks += 1;
+        if sched.tasks[pos].state != TaskState::Running {
+            pcpu.need_resched.store(true, Ordering::Release);
+            return;
+        }
+        if sched.tasks[pos].time_slice_remaining > 1 {
+            sched.tasks[pos].time_slice_remaining -= 1;
+        } else {
+            sched.tasks[pos].time_slice_remaining = 0;
+            if sched.tasks.iter().any(|t| t.is_runnable_on(cid)) {
+                pcpu.need_resched.store(true, Ordering::Release);
+            }
+        }
+    } else {
+        pcpu.need_resched.store(true, Ordering::Release);
+    }
+}
+
+/// Called from `dispatch_irq` on SGI 0 (Reschedule IPI).
+pub fn on_reschedule_ipi() {
+    let cid = current_cpu_logical_id();
+    let pcpu = per_cpu(cid);
+    pcpu.resched_ipis.fetch_add(1, Ordering::Relaxed);
+    if is_smp_scheduling_enabled() {
+        pcpu.need_resched.store(true, Ordering::Release);
+    }
+}
+
+/// Called from `dispatch_irq` on SGI 1 (TLB Shootdown IPI).
+pub fn on_tlb_shootdown_ipi() {
+    let cid = current_cpu_logical_id();
+    let pcpu = per_cpu(cid);
+    pcpu.tlb_ipis.fetch_add(1, Ordering::Relaxed);
+    pcpu.tlb_shootdown_pending.store(false, Ordering::Release);
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+    }
+    if is_smp_scheduling_enabled() {
+        let curr_pid = pcpu.current_pid.load(Ordering::Acquire);
+        if !is_reserved_pid(curr_pid) {
+            let sched = SCHEDULER.lock();
+            if let Some(pos) = sched.tasks.iter().position(|t| t.id == curr_pid) {
+                if let Some(ref aspace) = sched.tasks[pos].address_space {
+                    if aspace.is_closing() {
+                        aspace.deactivate();
+                        pcpu.need_resched.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Performs preemptive task switching at the tail of an IRQ handler (after GIC EOI).
+/// Runs with `DAIF.I = 1`.
+pub fn preempt_from_irq() {
+    if !is_smp_scheduling_enabled() {
+        return;
+    }
+    let cid = current_cpu_logical_id();
+    let pcpu = per_cpu(cid);
+    if !pcpu.need_resched.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let switch_pair = {
+        let mut sched = SCHEDULER.lock();
+        sched.prepare_switch_for_cpu(cid)
+    };
+    if let Some((old_ctx, new_ctx)) = switch_pair {
+        unsafe {
+            switch_context(old_ctx, new_ctx);
+        }
+        finish_post_switch();
+    }
+}
+
+pub fn secondary_scheduler_loop(logical_id: usize) -> ! {
+    loop {
+        if is_smp_scheduling_enabled() {
+            yield_now();
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+            if !per_cpu(logical_id).need_resched.load(Ordering::Acquire) {
+                core::arch::asm!("dsb sy", "wfi", options(nomem, nostack));
+            }
+            core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+        }
     }
 }
 
@@ -789,28 +1276,51 @@ pub(crate) fn terminate_service_task(
 }
 
 pub extern "C" fn user_process_entry() -> ! {
+    finish_post_switch();
     let (entry, sp) = {
         let sched = SCHEDULER.lock();
-        let curr = sched.current_task_idx;
-        (sched.tasks[curr].user_entry, sched.tasks[curr].user_stack_top)
+        let pos = sched.current_task_pos().unwrap_or(0);
+        (sched.tasks[pos].user_entry, sched.tasks[pos].user_stack_top)
     };
     unsafe {
-        crate::user::enter_user_mode(entry, sp);
+        crate::user::enter_scheduled_user_mode(entry, sp);
     }
-    loop {}
 }
 
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
 pub fn yield_now() {
-    let (old_opt, new_opt) = {
+    #[cfg(target_arch = "aarch64")]
+    let saved_daif: u64;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("mrs {0}, daif", out(reg) saved_daif, options(nomem, nostack));
+        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+    }
+
+    let cid = current_cpu_logical_id();
+    let switch_pair = {
         let mut sched = SCHEDULER.lock();
-        sched.prepare_switch()
+        if is_smp_scheduling_enabled() {
+            sched.prepare_switch_for_cpu(cid)
+        } else {
+            let (o, n) = sched.prepare_switch();
+            match (o, n) {
+                (Some(old_c), Some(new_c)) => Some((old_c, new_c)),
+                _ => None,
+            }
+        }
     };
-    if let (Some(old_ctx), Some(new_ctx)) = (old_opt, new_opt) {
+    if let Some((old_ctx, new_ctx)) = switch_pair {
         unsafe {
             switch_context(old_ctx, new_ctx);
         }
+        finish_post_switch();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("msr daif, {0}", in(reg) saved_daif, options(nomem, nostack));
     }
 }
 

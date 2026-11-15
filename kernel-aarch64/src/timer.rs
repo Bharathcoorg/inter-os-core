@@ -34,6 +34,7 @@ impl ArmGenericTimer {
         unsafe {
             core::arch::asm!("msr cntv_tval_el0, {}", in(reg) ticks as u64);
             core::arch::asm!("msr cntv_ctl_el0, {}", in(reg) 1u64);
+            core::arch::asm!("isb");
         }
         #[cfg(not(target_arch = "aarch64"))]
         {

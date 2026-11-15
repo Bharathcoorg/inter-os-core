@@ -164,7 +164,7 @@ impl SmpController {
             context_id,
         );
 
-        if psci_ret == PSCI_SUCCESS as i64 || psci_ret == -2 {
+        if psci_ret == PSCI_SUCCESS as i64 {
             core.state = CoreState::Online;
             Ok(())
         } else {
@@ -197,7 +197,7 @@ impl SmpController {
         Ok(())
     }
 
-    /// Dispatches an Inter-Processor Interrupt (IPI) via GICv2 Software Generated Interrupts (SGIR).
+    /// Dispatches an Inter-Processor Interrupt (IPI) via the active GIC (GICv3 `ICC_SGI1R_EL1` or GICv2 `GICD_SGIR`).
     pub fn dispatch_ipi(
         &mut self,
         target_core_mask: u8,
@@ -209,9 +209,13 @@ impl SmpController {
             .map_err(|_| SmpError::CapabilityDenied)?;
 
         let sgi_intid = ipi_kind as u32;
-        let sgir_val = ((target_core_mask as u32) << 16) | sgi_intid;
-
-        if self.gicd_base != 0 {
+        let active_kind = crate::gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire);
+        if active_kind == crate::gic::ACTIVE_GIC_KIND_GICV3
+            || active_kind == crate::gic::ACTIVE_GIC_KIND_GICV2
+        {
+            crate::gic::broadcast_sgi_to_mask(sgi_intid, target_core_mask as u32);
+        } else if self.gicd_base != 0 {
+            let sgir_val = ((target_core_mask as u32) << 16) | sgi_intid;
             // Write to GICD_SGIR register with overflow check and barrier
             if let Some(target) = self.gicd_base.checked_add(GICD_SGIR_OFFSET) {
                 let sgir_ptr = target as *mut u32;

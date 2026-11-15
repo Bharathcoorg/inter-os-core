@@ -162,28 +162,29 @@ global_asm!(
         msr cpacr_el1, x2
         isb
 
-        // Determine secondary logical core ID (1..7) for stack assignment:
-        // Prefer context_id passed in x19; fallback to MPIDR_EL1 Aff0 if unpopulated.
-        cmp x19, #0
-        b.eq 2f
+        // Validate PSCI context_id (x19) strictly within secondary logical slots 1..7.
+        // Never derive logical CPU identity from MPIDR_EL1 Aff0 (which collides across clusters).
+        cmp x19, #1
+        b.lo .Lsecondary_halt
         cmp x19, #7
-        b.hi 2f
-        mov x0, x19
-        b 3f
-2:
-        mrs x0, mpidr_el1
-        and x0, x0, #0x7
-        cbnz x0, 3f
-        mov x0, #1
-3:
-        // Set dedicated per-core 64 KiB secondary stack pointer:
-        // sp = __secondary_stacks_start + (x0 * 0x10000)
+        b.hi .Lsecondary_halt
+
+        // Set dedicated per-core 64 KiB secondary stack pointer and validate full range + alignment:
+        // sp = __secondary_stacks_start + (logical_id << 16), must be in (__secondary_stacks_start..=__secondary_stacks_end]
         adrp x1, __secondary_stacks_start
         add x1, x1, :lo12:__secondary_stacks_start
-        lsl x2, x0, #16
-        add sp, x1, x2
+        adrp x3, __secondary_stacks_end
+        add x3, x3, :lo12:__secondary_stacks_end
+        lsl x2, x19, #16
+        add x1, x1, x2
+        cmp x1, x3
+        b.hi .Lsecondary_halt
+        tst x1, #0xF
+        b.ne .Lsecondary_halt
+        mov sp, x1
 
-        // Enter Rust secondary CPU main with logical core ID in x0
+        mov x0, x19
+        // Enter Rust secondary CPU main with validated logical core ID in x0
         bl secondary_cpu_main
 
     .Lsecondary_halt:
@@ -194,4 +195,44 @@ global_asm!(
 
 extern "C" {
     pub fn secondary_cpu_entry();
+    static __secondary_stacks_start: u8;
+    static __secondary_stacks_end: u8;
+}
+
+pub const SECONDARY_STACK_STRIDE: usize = 0x10000;
+pub const MAX_SECONDARY_LOGICAL_ID: usize = 7;
+
+/// Validates a secondary logical core ID and computes its isolated 64 KiB stack bounds `(bottom, top)`.
+/// Fails closed (`None`) on CPU 0, out-of-range IDs, unaligned regions, or out-of-bounds slots.
+pub const fn validate_secondary_stack_slot(
+    logical_id: usize,
+    stacks_start: usize,
+    stacks_end: usize,
+) -> Option<(usize, usize)> {
+    if logical_id == 0 || logical_id > MAX_SECONDARY_LOGICAL_ID {
+        return None;
+    }
+    if stacks_start == 0 || stacks_end <= stacks_start || (stacks_start & 0xF) != 0 {
+        return None;
+    }
+    let Some(offset_end) = logical_id.checked_mul(SECONDARY_STACK_STRIDE) else {
+        return None;
+    };
+    let Some(stack_top) = stacks_start.checked_add(offset_end) else {
+        return None;
+    };
+    let Some(stack_bottom) = stack_top.checked_sub(SECONDARY_STACK_STRIDE) else {
+        return None;
+    };
+    if stack_bottom < stacks_start || stack_top > stacks_end || (stack_top & 0xF) != 0 {
+        return None;
+    }
+    Some((stack_bottom, stack_top))
+}
+
+/// Validates a logical secondary CPU slot against the linked `.stack` secondary arena.
+pub fn validate_linked_secondary_stack_slot(logical_id: usize) -> Option<(usize, usize)> {
+    let start = core::ptr::addr_of!(__secondary_stacks_start) as usize;
+    let end = core::ptr::addr_of!(__secondary_stacks_end) as usize;
+    validate_secondary_stack_slot(logical_id, start, end)
 }

@@ -74,15 +74,23 @@ fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
     const END: u64 = 0x3FFF_FFFF; // 1 GiB user boundary, strictly below kernel DRAM (0x4000_0000)
     const CODE_START: u64 = 0x0040_0000;
     const CODE_END: u64 = CODE_START + 0x0020_0000; // 2 MiB code region
-    if addr < START || len == 0 {
-        return if len == 0 { Ok(()) } else { Err(-14) };
+    if addr < START || addr >= END {
+        return Err(-14);
+    }
+    if len == 0 {
+        // Still reject zero-length pointers aimed inside supervisor MMIO apertures
+        if addr >= 0x0100_0000 && addr < 0x1200_0000 {
+            return Err(-14);
+        }
+        return Ok(());
     }
     let end = addr.checked_add(len as u64).ok_or(-14)?;
     if end > END {
         return Err(-14);
     }
-    // Reject any range overlapping supervisor MMIO apertures (0x0100_0000..0x0A00_0000)
-    if addr < 0x0A00_0000 && end > 0x0100_0000 {
+    // Reject any range overlapping supervisor MMIO apertures (0x0100_0000..0x1200_0000,
+    // covering PL011, GIC, VirtIO MMIO, and PCI Display BAR aperture).
+    if addr < 0x1200_0000 && end > 0x0100_0000 {
         return Err(-14);
     }
     if write && (addr < CODE_END && end > CODE_START) {
@@ -112,8 +120,8 @@ fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
 
 fn get_caller_identity_and_caps() -> Result<(u32, crate::capability::CapabilityTable), i64> {
     let sched = SCHEDULER.lock();
-    if sched.current_task_idx < sched.tasks.len() {
-        let t = &sched.tasks[sched.current_task_idx];
+    if let Some(pos) = sched.current_task_pos() {
+        let t = &sched.tasks[pos];
         Ok((t.id, t.cap_table.clone()))
     } else {
         Err(-13) // -EACCES: fail closed
@@ -338,9 +346,15 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 (a0 as u32, a1 as usize, a2, a3 as usize)
             };
 
-            let byte_len = pixel_count * 4;
+            let byte_len = match pixel_count.checked_mul(4) {
+                Some(b) => b,
+                None => return -22,
+            };
             if validate_user_range(pixel_ptr, byte_len, false).is_err() {
                 return -14;
+            }
+            if pixel_count == 0 {
+                return 0;
             }
 
             let mut sm = crate::display::SURFACE_MANAGER.lock();
@@ -495,6 +509,15 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             to_copy as i64
         }
         SYS_APP_LAUNCH => {
+            let (caller_pid, caller_caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return err,
+            };
+            if caller_caps.check(CapabilityType::SystemResource, Rights::WRITE).is_err()
+                && caller_caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_err()
+            {
+                return -13; // -EACCES: process launch requires SystemResource capability
+            }
             let (name_ptr, name_len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let mut name_buf = [0u8; 64];
             let target_name = if name_len > 0 && name_len <= 64 {
@@ -538,8 +561,6 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
 
                 match crate::elf::load_elf(user_img.elf) {
                     Ok(loaded) => {
-                        let mut sched = SCHEDULER.lock();
-                        let caller_pid = sched.current_pid();
                         let mut caps = crate::capability::CapabilityTable::new();
                         caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
                         caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
@@ -548,8 +569,17 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                         caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                         caps.mint(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ, None);
                         caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
-                        let tid = sched.spawn_user_process(caller_pid, user_img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
-                        drop(sched);
+                        if user_img.name == "launcher" || user_img.name == "compositor" {
+                            caps.mint(crate::capability::CapabilityType::SystemResource, crate::capability::Rights::WRITE, None);
+                        }
+                        let tid = {
+                            let mut sched = SCHEDULER.lock();
+                            sched.spawn_user_process(caller_pid, user_img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps)
+                        };
+                        if tid > 0 {
+                            let self_bit = 1u32 << crate::task::current_cpu_logical_id();
+                            crate::gic::broadcast_sgi_to_mask(0, 0xFFu32 & !self_bit);
+                        }
                         crate::kprintln!("[SPAWN] AArch64 Userspace process '{}' spawned (PID {})", user_img.name, tid);
                         tid as i64
                     }
@@ -625,7 +655,17 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             crate::crypto::zeroize_slice(&mut kbuf);
             res
         }
-        SYS_CAP_REQUEST_CONSENT => 1, // Granted
+        SYS_CAP_REQUEST_CONSENT => {
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return err,
+            };
+            if caps.check(CapabilityType::SystemResource, Rights::ADMIN).is_ok() {
+                1
+            } else {
+                -13 // -EACCES: interactive consent broker required for unprivileged callers
+            }
+        }
         SYS_EVENT_POLL => {
             let (caller_pid, has_cap) = match get_caller_identity_and_caps() {
                 Ok((pid, caps)) => {
@@ -667,8 +707,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 return -22; // -EINVAL
             };
             let sched = SCHEDULER.lock();
-            let curr_idx = sched.current_task_idx;
-            if curr_idx < sched.tasks.len() {
+            if let Some(curr_idx) = sched.current_task_pos() {
                 let task = &sched.tasks[curr_idx];
                 for (slot, cap) in task.cap_table.entries.iter().enumerate() {
                     if cap.cap_type == ct {

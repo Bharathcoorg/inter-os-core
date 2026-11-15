@@ -23,6 +23,7 @@ pub const GICD_ISENABLER: usize = 0x100;
 pub const GICD_ICENABLER: usize = 0x180;
 pub const GICD_IPRIORITYR: usize = 0x400;
 pub const GICD_ITARGETSR: usize = 0x800;
+pub const GICD_SGIR: usize = 0xF00;
 
 pub const GICC_CTLR: usize = 0x000;
 pub const GICC_PMR: usize = 0x004;
@@ -316,9 +317,25 @@ impl Gicv2 {
 
         self.gicd_write(GICD_CTLR, 0x03);
 
-        self.gicc_write(GICC_PMR, 0xFF);
-        self.gicc_write(GICC_BPR, 0x00);
-        self.gicc_write(GICC_CTLR, 0x03);
+        self.init_cpu_interface();
+    }
+
+    /// Initializes the banked GICv2 per-CPU distributor PPI/SGI priorities & CPU interface.
+    /// Must be called on CPU 0 (via `init()`) and on each secondary CPU upon boot.
+    pub unsafe fn init_cpu_interface(&self) {
+        if self.gicd_base != 0 {
+            // Configure banked SGI (0..15) and PPI (16..31) priorities
+            for reg_idx in 0..8usize {
+                self.gicd_write(GICD_IPRIORITYR + reg_idx * 4, 0xA0A0A0A0);
+            }
+            // Enable SGIs (0..15) on this PE's banked GICD_ISENABLER0
+            self.gicd_write(GICD_ISENABLER, 0x0000_FFFF);
+        }
+        if self.gicc_base != 0 {
+            self.gicc_write(GICC_PMR, 0xFF);
+            self.gicc_write(GICC_BPR, 0x00);
+            self.gicc_write(GICC_CTLR, 0x03);
+        }
     }
 
     pub fn enable_irq(&self, irq: u32) {
@@ -1114,6 +1131,7 @@ pub const ACTIVE_GIC_KIND_GICV3: u8 = 2;
 
 pub static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
 static ACTIVE_GICC_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static ACTIVE_GICD_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Global active interrupt controller on the platform.
 #[derive(Debug, Clone, Copy)]
@@ -1126,14 +1144,17 @@ pub enum ActiveGic {
 pub static ACTIVE_GIC: spin::Mutex<ActiveGic> = spin::Mutex::new(ActiveGic::None);
 
 pub fn register_active_gicv2(gic: Gicv2) {
+    // Store the full controller descriptor BEFORE publishing ACTIVE_GIC_KIND with Release ordering.
+    ACTIVE_GICD_BASE.store(gic.gicd_base, core::sync::atomic::Ordering::Release);
     ACTIVE_GICC_BASE.store(gic.gicc_base, core::sync::atomic::Ordering::Release);
-    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV2, core::sync::atomic::Ordering::Release);
     *ACTIVE_GIC.lock() = ActiveGic::Gicv2(gic);
+    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV2, core::sync::atomic::Ordering::Release);
 }
 
 pub fn register_active_gicv3(gic: Gicv3) {
-    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV3, core::sync::atomic::Ordering::Release);
+    // Store the full controller descriptor BEFORE publishing ACTIVE_GIC_KIND with Release ordering.
     *ACTIVE_GIC.lock() = ActiveGic::Gicv3(gic);
+    ACTIVE_GIC_KIND.store(ACTIVE_GIC_KIND_GICV3, core::sync::atomic::Ordering::Release);
 }
 
 /// Acknowledges pending interrupt. This function is lock-free and wait-free,
@@ -1268,6 +1289,101 @@ pub fn send_sgi(val: u64) {
     }
     #[cfg(not(target_arch = "aarch64"))]
     let _ = val;
+}
+
+/// Computes coalesced `ICC_SGI1R_EL1` values (grouped by `(Aff3, Aff2, Aff1)`) for a bitmask
+/// of logical PE IDs (`0..MAX_GIC_PES`) registered in `PE_MPIDR_MAP`.
+///
+/// Stack-allocated and lock-free (safe to invoke from IRQ or TLB-shootdown paths).
+pub fn compute_sgi1r_for_mask(sgi_id: u32, cpu_mask: u32) -> ([u64; MAX_GIC_PES], usize) {
+    if cpu_mask == 0 || sgi_id >= 16 {
+        return ([0u64; MAX_GIC_PES], 0);
+    }
+    let mut keys: [(u8, u8, u8, u16); MAX_GIC_PES] = [(0, 0, 0, 0); MAX_GIC_PES];
+    let mut count = 0usize;
+    let intid = sgi_id as u8;
+
+    for slot in 0..MAX_GIC_PES {
+        if (cpu_mask & (1u32 << slot)) == 0 {
+            continue;
+        }
+        if let Some(mpidr) = get_pe_mpidr_by_logical_id(slot) {
+            let (aff3, aff2, aff1, aff0) = decode_mpidr_affinity(mpidr);
+            if aff0 >= 16 {
+                continue;
+            }
+            let target_bit = 1u16 << aff0;
+            let mut merged = false;
+            for k in &mut keys[..count] {
+                if k.0 == aff3 && k.1 == aff2 && k.2 == aff1 {
+                    k.3 |= target_bit;
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged && count < MAX_GIC_PES {
+                keys[count] = (aff3, aff2, aff1, target_bit);
+                count += 1;
+            }
+        }
+    }
+
+    let mut sgi_vals = [0u64; MAX_GIC_PES];
+    for i in 0..count {
+        let (aff3, aff2, aff1, target_list) = keys[i];
+        sgi_vals[i] = encode_sgi1r(aff3, aff2, aff1, target_list, intid, false);
+    }
+    (sgi_vals, count)
+}
+
+/// Broadcasts a Software Generated Interrupt (`0..15`) to the logical CPUs selected by `cpu_mask`.
+/// Supports both GICv3 (`ICC_SGI1R_EL1` with multi-cluster MPIDR affinity coalescing) and
+/// GICv2 (`GICD_SGIR`), using lock-free atomic controller state.
+pub fn broadcast_sgi_to_mask(sgi_id: u32, cpu_mask: u32) -> usize {
+    if cpu_mask == 0 || sgi_id >= 16 {
+        return 0;
+    }
+    match ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) {
+        ACTIVE_GIC_KIND_GICV3 => {
+            let (vals, count) = compute_sgi1r_for_mask(sgi_id, cpu_mask);
+            for i in 0..count {
+                send_sgi(vals[i]);
+            }
+            count
+        }
+        ACTIVE_GIC_KIND_GICV2 => {
+            let gicd = ACTIVE_GICD_BASE.load(core::sync::atomic::Ordering::Acquire);
+            if gicd == 0 {
+                return 0;
+            }
+            let target_list = (cpu_mask & 0xFF) << 16;
+            let sgir_val = target_list | (sgi_id & 0xF);
+            unsafe {
+                core::ptr::write_volatile((gicd + GICD_SGIR) as *mut u32, sgir_val);
+                #[cfg(target_arch = "aarch64")]
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Initializes GICv2 per-CPU interface and banked distributor registers when GICv2 is active.
+pub fn init_active_gicv2_secondary() {
+    if ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != ACTIVE_GIC_KIND_GICV2 {
+        return;
+    }
+    let gicd = ACTIVE_GICD_BASE.load(core::sync::atomic::Ordering::Acquire);
+    let gicc = ACTIVE_GICC_BASE.load(core::sync::atomic::Ordering::Acquire);
+    if gicd != 0 && gicc != 0 {
+        let gic = Gicv2::new(gicd, gicc);
+        unsafe {
+            gic.init_cpu_interface();
+        }
+        // Enable timer PPI 27 on this secondary PE's banked GICD_ISENABLER0
+        gic.enable_irq(27);
+    }
 }
 
 pub static SGI_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

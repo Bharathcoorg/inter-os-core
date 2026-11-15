@@ -725,6 +725,77 @@ impl<'a> ArmFdtParser<'a> {
         }
         Some(read_cell(reg, address_cells))
     }
+
+    /// Reads the firmware PSCI conduit method (`"hvc"` or `"smc"`) from `/psci` (or `arm,psci*`).
+    pub fn parse_psci_method(&self) -> Option<&'a str> {
+        let node = self
+            .find_node_by_compatible("arm,psci-1.0")
+            .or_else(|_| self.find_node_by_compatible("arm,psci-0.2"))
+            .or_else(|_| self.find_node_by_compatible("arm,psci"))
+            .or_else(|_| self.find_node_by_name("psci"))
+            .ok()?;
+        let bytes = self.get_node_property(&node, "method").ok()?;
+        let s = core::str::from_utf8(bytes).ok()?;
+        Some(s.trim_end_matches('\0'))
+    }
+
+    /// Discovers CPU MPIDR affinity values (`reg`) from all `device_type = "cpu"` nodes under `/cpus`.
+    pub fn parse_cpu_mpidrs(&self) -> Vec<u64> {
+        let mut mpidrs = Vec::new();
+        let cpus_addr_cells = self
+            .find_node_by_name("cpus")
+            .ok()
+            .and_then(|n| self.get_node_property(&n, "#address-cells").ok())
+            .and_then(read_usize)
+            .filter(|&c| c == 1 || c == 2)
+            .unwrap_or_else(|| self.root_address_cells());
+
+        let mut offset = self.header.off_dt_struct as usize;
+        let limit = self.struct_limit();
+        while offset + 4 <= limit {
+            let token = u32::from_be_bytes([
+                self.data[offset],
+                self.data[offset + 1],
+                self.data[offset + 2],
+                self.data[offset + 3],
+            ]);
+            offset += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let node_start = offset;
+                    let Some((name, next)) = self.read_name(offset, limit) else {
+                        break;
+                    };
+                    offset = next;
+                    let node = ArmFdtNode {
+                        name,
+                        struct_offset: node_start,
+                    };
+                    let is_cpu = self
+                        .get_node_property(&node, "device_type")
+                        .ok()
+                        .and_then(|p| core::str::from_utf8(p).ok())
+                        .map(|s| s.trim_end_matches('\0') == "cpu")
+                        .unwrap_or(false);
+                    if is_cpu {
+                        if let Some(mpidr) = self.get_node_reg_base(&node, cpus_addr_cells) {
+                            mpidrs.push(mpidr);
+                        }
+                    }
+                }
+                FDT_PROP => {
+                    let Ok((next, _)) = self.read_property(offset, limit) else {
+                        break;
+                    };
+                    offset = next;
+                }
+                FDT_END_NODE | FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        mpidrs
+    }
 }
 
 /// Decodes a big-endian 32- or 64-bit cell list into a single integer.

@@ -29,6 +29,7 @@ pub static mut IN_LIFECYCLE_TEST: bool = false;
 
 extern "C" {
     pub fn enter_user_mode(entry_point: u64, user_sp: u64);
+    pub fn enter_scheduled_user_mode(entry_point: u64, user_sp: u64) -> !;
     pub fn return_to_kernel_mode() -> !;
     pub static el0_payload_start: u8;
     pub static el0_payload_end: u8;
@@ -61,11 +62,22 @@ global_asm!(
         // 4. Set up SPSR_EL1:
         // M[3:0] = 0b0000 (EL0t)
         // M[4]   = 0 (AArch64 execution state)
-        // DAIF[9:6] = 0b1111 (0x3c0: Debug, SError, IRQ, FIQ masked during test)
+        // DAIF[9:6] = 0b1111 (0x3c0: Debug, SError, IRQ, FIQ masked during smoke test)
         mov x4, #0x3c0
         msr spsr_el1, x4
 
         // 5. Real hardware privilege transition from EL1 to EL0
+        eret
+
+    .global enter_scheduled_user_mode
+    enter_scheduled_user_mode:
+        // x0 = entry_point, x1 = user_sp
+        // Enter EL0t with hardware interrupts UNMASKED (SPSR_EL1 = 0) so
+        // per-task preemption via GIC timer PPI 27 and SGI IPIs functions normally.
+        msr sp_el0, x1
+        msr elr_el1, x0
+        msr spsr_el1, xzr
+        isb
         eret
 
     .global return_to_kernel_mode

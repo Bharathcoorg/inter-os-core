@@ -58,9 +58,9 @@ impl PsciController {
                     core::arch::asm!(
                         "smc #0",
                         inout("x0") func_id as u64 => res,
-                        in("x1") arg0,
-                        in("x2") arg1,
-                        in("x3") arg2,
+                        inout("x1") arg0 => _,
+                        inout("x2") arg1 => _,
+                        inout("x3") arg2 => _,
                         options(nostack)
                     );
                 }
@@ -73,9 +73,9 @@ impl PsciController {
                     core::arch::asm!(
                         "hvc #0",
                         inout("x0") func_id as u64 => res,
-                        in("x1") arg0,
-                        in("x2") arg1,
-                        in("x3") arg2,
+                        inout("x1") arg0 => _,
+                        inout("x2") arg1 => _,
+                        inout("x3") arg2 => _,
                         options(nostack)
                     );
                 }

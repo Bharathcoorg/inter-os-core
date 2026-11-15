@@ -107,9 +107,9 @@ global_asm!(
 
         ldp x21, x22, [sp, #248]
         ldp x23, x24, [sp, #264]
-        ldr x25, [sp, #280]
+        ldr w25, [sp, #280]
         msr fpcr, x25
-        lsr x26, x25, #32
+        ldr w26, [sp, #284]
         msr fpsr, x26
         msr elr_el1, x21
         msr spsr_el1, x22
@@ -262,8 +262,14 @@ global_asm!(
         restore_all_regs
         eret
 
-    vector_lower32_sync:
     vector_lower32_irq:
+        save_all_regs
+        mov x0, sp
+        bl handle_irq_lower32
+        restore_all_regs
+        eret
+
+    vector_lower32_sync:
     vector_lower32_fiq:
     vector_lower32_serror:
         save_all_regs
@@ -312,8 +318,7 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
             crate::user::record_el0_exit(code);
             {
                 let mut sched = crate::task::SCHEDULER.lock();
-                let curr = sched.current_task_idx;
-                if curr < sched.tasks.len() {
+                if let Some(curr) = sched.current_task_pos() {
                     sched.tasks[curr].state = crate::task::TaskState::Terminated;
                     sched.tasks[curr].exit_code = Some(code);
                 }
@@ -337,14 +342,13 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
         } else if syscall_nr == crate::syscall::SYS_GET_TASK_ID {
             unsafe { crate::user::EL0_TASK_ID_CAPTURED = ret as u64; }
         }
-    } else if ec == 0x00 {
-        // EC 0x00: Unknown reason / Trapped access from lower EL (e.g. CurrentEL read attempt)
+    } else if ec == 0x00 && unsafe { crate::user::IN_SECTION17_SMOKE } {
+        // EC 0x00 (Section 17 smoke test only): Trapped 'mrs CurrentEL' from EL0
         crate::kprintln!("[TEST] AArch64 EL0 Privilege Isolation: Attempted 'mrs CurrentEL' from EL0 trapped (EC=0x00) VERIFIED.");
         unsafe { crate::user::EL0_PRIVILEGE_TRAP_VERIFIED = true; }
-        // Advance past the 4-byte trapped instruction
         frame.elr += 4;
-    } else if ec == 0x24 {
-        // EC 0x24: Data Abort from lower Exception level (e.g. Kernel DRAM read attempt)
+    } else if ec == 0x24 && unsafe { crate::user::IN_SECTION17_SMOKE } {
+        // EC 0x24 (Section 17 smoke test only): Data Abort from EL0 reading Kernel DRAM
         let far: u64;
         #[cfg(target_arch = "aarch64")]
         unsafe {
@@ -356,10 +360,39 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
         }
         crate::kprintln!("[TEST] AArch64 EL0 MMU Memory Isolation: Unauthorized read of kernel DRAM @ 0x{:08X} trapped (EC=0x24) VERIFIED.", far);
         unsafe { crate::user::EL0_MMU_TRAP_VERIFIED = true; }
-        // Advance past the 4-byte faulting load instruction
         frame.elr += 4;
     } else {
-        handle_sync(frame, "Lower64");
+        // Unapproved synchronous fault from EL0 (data abort, instruction abort, illegal instruction, etc.):
+        // fail closed by terminating only the offending task and switching cleanly away.
+        let far: u64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {}, far_el1", out(reg) far);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            far = 0;
+        }
+        let faulty_pid = crate::task::current_cpu_pid();
+        crate::kprintln!(
+            "[FAULT] EL0 task PID {} terminated on synchronous fault EC=0x{:02X} ESR=0x{:016X} ELR=0x{:016X} FAR=0x{:016X}",
+            faulty_pid, ec, frame.esr, frame.elr, far
+        );
+        {
+            let mut sched = crate::task::SCHEDULER.lock();
+            if let Some(curr) = sched.current_task_pos() {
+                sched.tasks[curr].state = crate::task::TaskState::Terminated;
+                sched.tasks[curr].exit_code = Some(-11); // SIGSEGV
+            }
+        }
+        if unsafe { crate::user::IN_SECTION17_SMOKE || crate::user::IN_LIFECYCLE_TEST } {
+            unsafe {
+                crate::user::return_to_kernel_mode();
+            }
+        }
+        loop {
+            crate::task::yield_now();
+        }
     }
 }
 
@@ -438,26 +471,47 @@ fn dispatch_irq() {
     }
 
     // Resolve executing PE's full MPIDR affinity (Aff3..Aff0) to its registered logical CPU ID.
-    // Never fall back to Aff0-only indexing, which collides across multi-cluster topologies.
     let logical_id = crate::gic::Gicv3::current_logical_id();
+    let pe_slot = match logical_id {
+        Ok(pe_idx) => Some(pe_idx),
+        Err(_) => {
+            if crate::gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire)
+                == crate::gic::ACTIVE_GIC_KIND_GICV2
+            {
+                Some(crate::task::current_cpu_logical_id())
+            } else {
+                None
+            }
+        }
+    };
 
     if irq == 27 {
         // PPI 27: ARM Generic Timer Virtual Timer
         TIMER_INTERRUPT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if let Ok(pe_idx) = logical_id {
+        if let Some(pe_idx) = pe_slot {
             crate::gic::record_pe_timer_tick(pe_idx);
         }
         let mut timer = crate::timer::ArmGenericTimer::new();
         let freq = timer.read_frequency();
         let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
         timer.program_countdown(countdown);
+        crate::task::on_timer_tick_irq();
         crate::gic::end_of_interrupt(irq);
+        crate::task::preempt_from_irq();
     } else if irq < 16 {
         // SGIs (0..15) Software Generated Interrupts
-        if let Ok(pe_idx) = logical_id {
+        if let Some(pe_idx) = pe_slot {
             crate::gic::record_pe_sgi(pe_idx, irq);
         }
+        match irq {
+            0 => crate::task::on_reschedule_ipi(),
+            1 => crate::task::on_tlb_shootdown_ipi(),
+            _ => {}
+        }
         crate::gic::end_of_interrupt(irq);
+        if irq == 0 || irq == 1 {
+            crate::task::preempt_from_irq();
+        }
     } else {
         crate::gic::end_of_interrupt(irq);
     }

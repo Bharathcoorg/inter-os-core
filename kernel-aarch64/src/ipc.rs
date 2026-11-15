@@ -7,13 +7,13 @@
 //! Transmission is strictly enforced: tasks must possess `CapabilityType::IpcSend`
 //! targeted at the recipient's `TaskId`. Reception requires `CapabilityType::IpcReceive`.
 
-use spin::Mutex;
+use crate::sync::IrqSpinLock as Mutex;
 
 use crate::capability::{CapError, CapabilityTable, CapabilityType, Rights};
 
 pub const IPC_MAX_PAYLOAD: usize = 64;
 pub const MAILBOX_CAPACITY: usize = 8;
-pub const MAX_TASKS: usize = 16;
+pub const MAX_TASKS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IpcMessage {

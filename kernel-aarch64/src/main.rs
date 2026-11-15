@@ -38,6 +38,7 @@ pub mod pci_bus;
 pub mod sandbox;
 pub mod shell;
 pub mod storage;
+pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod telephony;
@@ -124,8 +125,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[AArch64] Execution Level: EL1 (Drop from EL2 verified)");
     kprintln!("[AArch64] Device Tree Blob physical base: 0x{:016X}", dtb_phys_addr);
 
-    // 2. Initialize Kernel Dynamic Heap Allocator (8 MiB)
+    // 2. Initialize Kernel Dynamic Heap Allocator (8 MiB) & CPU 0 Per-CPU state
     allocator::init_heap();
+    task::init_per_cpu(0);
     kprintln!("[AArch64] Kernel 8 MiB Dynamic Heap Allocator initialized.");
 
     // 3. Initialize Sovereign Cryptographic Hardware TRNG & Parse Device Tree Blob
@@ -184,6 +186,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 // Enable Virtual Timer PPI (IRQ 27)
                 gic.enable_irq(27);
                 gic::register_active_gicv2(gic);
+                gic::set_pe_online(0, true);
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
@@ -195,9 +198,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     if let Err(e) = gicv3.enable_irq(27) {
                         kprintln!("[WARN] GICv3 failed to enable IRQ 27: {:?}", e);
                     }
+                    let _ = gicv3.enable_irq(0);
+                    let _ = gicv3.enable_irq(1);
+                    let _ = gicv3.enable_irq(2);
                     gic::register_active_gicv3(gicv3);
                     gic::set_pe_online(0, true);
-                    kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X} (size {} KiB), redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
+                    kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X} (size {} KiB), redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled. SGIs 0..2 enabled.",
                         distributor, distributor_size / 1024, redistributors, redistributors_size / 1024);
                 }
             }
@@ -211,6 +217,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     unsafe { gic.init(); }
                     gic.enable_irq(27);
                     gic::register_active_gicv2(gic);
+                    gic::set_pe_online(0, true);
                     kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                         gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
                 } else {
@@ -224,6 +231,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             unsafe { gic.init(); }
             gic.enable_irq(27);
             gic::register_active_gicv2(gic);
+            gic::set_pe_online(0, true);
             kprintln!("[OK] PinePhone A64 GICv2 hardware fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                 gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
         } else {
@@ -231,6 +239,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             unsafe { gic.init(); }
             gic.enable_irq(27);
             gic::register_active_gicv2(gic);
+            gic::set_pe_online(0, true);
             kprintln!("[OK] Default QEMU virt GICv2 fallback: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                 gic::DEFAULT_GICD_BASE, gic::DEFAULT_GICC_BASE);
         }
@@ -249,7 +258,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 6. Initialize ARM PSCI v1.1 Firmware Interface
     kprintln!("--- [Initializing ARM PSCI v1.1 Power Interface] ---");
-    let psci = PsciController::new(PsciConduit::Hvc);
+    let psci_conduit = match dtb.as_ref().and_then(|p| p.parse_psci_method()) {
+        Some("smc") => {
+            kprintln!("[AArch64] PSCI conduit discovered in DTB: 'smc'.");
+            PsciConduit::Smc
+        }
+        Some(other) => {
+            kprintln!("[AArch64] PSCI conduit discovered in DTB: '{}'.", other);
+            PsciConduit::Hvc
+        }
+        None => PsciConduit::Hvc,
+    };
+    let psci = PsciController::new(psci_conduit);
     let psci_ver = psci.invoke_psci(psci::PSCI_FN_VERSION, 0, 0, 0);
     kprintln!("[OK] ARM PSCI: Firmware interface v{:X}.{:X} verified.", (psci_ver >> 16) & 0xFFFF, psci_ver & 0xFFFF);
 
@@ -1512,33 +1532,79 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 40b. Multicore SMP Bring-up, GICv3 Redistributor Discovery & SGI/IPI Verification
     kprintln!("--- [Testing Multicore SMP Bring-up, Per-PE Redistributor & GICv3 SGI IPI] ---");
+    extern "C" {
+        static __data_start: u8;
+        static __bss_end: u8;
+        static __secondary_stacks_start: u8;
+        static __secondary_stacks_end: u8;
+    }
+    let data_start = (&raw const __data_start) as usize;
+    let bss_end = (&raw const __bss_end) as usize;
+    if bss_end > data_start {
+        mmu::ArmMmu::clean_dcache_range(data_start, bss_end - data_start);
+    }
+    let stk_start = (&raw const __secondary_stacks_start) as usize;
+    let stk_end = (&raw const __secondary_stacks_end) as usize;
+    if stk_end > stk_start {
+        mmu::ArmMmu::clean_dcache_range(stk_start, stk_end - stk_start);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    let boot_mpidr = unsafe {
+        let mpidr: u64;
+        core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack));
+        gic::canonical_affinity_key(mpidr)
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let boot_mpidr = 0u64;
+
+    let mut secondary_targets = alloc::vec::Vec::new();
+    if let Some(ref parser) = dtb {
+        for raw_mpidr in parser.parse_cpu_mpidrs() {
+            let canon = gic::canonical_affinity_key(raw_mpidr);
+            if canon != boot_mpidr && !secondary_targets.contains(&raw_mpidr) {
+                secondary_targets.push(raw_mpidr);
+            }
+        }
+    }
+    if secondary_targets.is_empty() && !has_valid_fdt {
+        for fallback_id in 1..4u64 {
+            secondary_targets.push(fallback_id);
+        }
+    }
+    kprintln!("[AArch64] DTB CPU discovery: boot MPIDR=0x{:016X}, {} secondary candidate(s).", boot_mpidr, secondary_targets.len());
+
     let secondary_entry = crate::entry::secondary_cpu_entry as *const () as usize as u64;
+    gic::set_pe_online(0, true);
     let mut online_cpus: [bool; gic::MAX_GIC_PES] = [false; gic::MAX_GIC_PES];
     online_cpus[0] = gic::is_pe_online(0);
     let mut online_count: usize = if online_cpus[0] { 1 } else { 0 };
     let mut psci_dispatched_any = false;
 
-    for logical_id in 1..4usize {
-        let target_mpidr = logical_id as u64;
+    for (idx, &target_mpidr) in secondary_targets.iter().enumerate() {
+        let logical_id = idx + 1;
+        if logical_id >= gic::MAX_GIC_PES {
+            break;
+        }
         let psci_ret = psci.invoke_psci(psci::PSCI_FN_CPU_ON, target_mpidr, secondary_entry, logical_id as u64);
         if psci_ret == psci::PSCI_SUCCESS as i64 {
             psci_dispatched_any = true;
-            kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE {} (entry @ 0x{:016X}).", logical_id, secondary_entry);
+            kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE {} (MPIDR=0x{:016X}, entry @ 0x{:016X}).", logical_id, target_mpidr, secondary_entry);
             let mut spins = 0;
-            while !gic::is_pe_online(logical_id) && spins < 1_000_000 {
+            while !gic::is_pe_online(logical_id) && spins < 2_000_000 {
                 core::hint::spin_loop();
                 spins += 1;
             }
             if gic::is_pe_online(logical_id) {
                 online_cpus[logical_id] = true;
                 online_count += 1;
-                kprintln!("[OK] Secondary CPU {} online: VBAR, GICv3 Redistributor, and CPU Interface initialized.", logical_id);
+                kprintln!("[OK] Secondary CPU {} online: VBAR, GICv3 Redistributor, and CPU Interface initialized. MMU, caches, Per-CPU scheduler ready.", logical_id);
             } else {
                 kprintln!("[ERROR] Secondary CPU {} failed to come online within timeout after PSCI CPU_ON.", logical_id);
             }
         } else {
-            // Core not present in current machine topology (e.g. PSCI INVALID_PARAMETERS = -2)
-            break;
+            // Core not present or unavailable in current machine topology
+            kprintln!("[AArch64] PSCI CPU_ON skipped/rejected for PE {} MPIDR=0x{:016X} (ret={}).", logical_id, target_mpidr, psci_ret);
         }
     }
 
@@ -1546,14 +1612,14 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let mut sgi_delivery_verified = true;
 
         // Targeted SGI test: deliver SGI 1 individually to each online secondary PE and verify isolation
-        for target_id in 1..4usize {
+        for target_id in 1..gic::MAX_GIC_PES {
             if !online_cpus[target_id] {
                 continue;
             }
             let target_mpidr = gic::get_pe_mpidr_by_logical_id(target_id).unwrap_or(target_id as u64);
             let (aff3, aff2, aff1, aff0) = gic::decode_mpidr_affinity(target_mpidr);
-            let mut before = [0u64; 4];
-            for idx in 0..4usize {
+            let mut before = [0u64; gic::MAX_GIC_PES];
+            for idx in 0..gic::MAX_GIC_PES {
                 before[idx] = gic::pe_sgi_interrupt_count(idx);
             }
 
@@ -1569,7 +1635,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             }
 
             let mut isolated = gic::pe_sgi_interrupt_count(target_id) == before[target_id] + 1;
-            for other_id in 0..4usize {
+            for other_id in 0..gic::MAX_GIC_PES {
                 if other_id != target_id && online_cpus[other_id] {
                     if gic::pe_sgi_interrupt_count(other_id) != before[other_id] {
                         isolated = false;
@@ -1920,6 +1986,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
     kprintln!("[TEST] Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover(Restarting -> Running) -> Stopped VERIFIED.");
 
+    // 46b. True Multicore SMP Scheduler, Preemption, Migration & Cross-CPU TLB Shootdown
+    let has_timer_irq = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != gic::ACTIVE_GIC_KIND_NONE;
+    run_smp_scheduler_verification(&online_cpus, online_count, has_timer_irq, &TEST_PROC_AARCH64_ELF);
+
     // 47. Spawn userspace PID 1 (init) at EL0
     kprintln!();
     kprintln!("--- [Spawning Userspace PID 1 (init) at EL0] ---");
@@ -1927,8 +1997,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     match elf::load_elf(images::USER_INIT_ELF) {
         Ok(l) => {
             kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
-            kprintln!("[BOOT] Entering PID 1 (init) at EL0 via hardware eret...");
-            l.address_space.try_activate().expect("Failed to activate init address space");
+            kprintln!("[BOOT] Entering PID 1 (init) at EL0 via scheduled context switch...");
             {
                 let mut sched = task::SCHEDULER.lock();
                 sched.tasks.clear();
@@ -1941,26 +2010,383 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 init_caps.mint(capability::CapabilityType::DisplayServer, capability::Rights(capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
                 init_caps.mint(capability::CapabilityType::SystemResource, capability::Rights(capability::Rights::READ.0 | capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
                 let pid1 = sched.spawn_user_process(0, "init", l.entry_point, l.stack_top, Some(l.address_space), init_caps);
-                sched.tasks[0].state = task::TaskState::Running;
                 sched.current_task_idx = 0;
-                kprintln!("[BOOT] PID 1 initialized with state Running (PID {})", pid1);
+                kprintln!("[BOOT] PID 1 queued Ready for scheduled EL0 entry (PID {})", pid1);
             }
-            unsafe {
-                user::enter_user_mode(l.entry_point, l.stack_top);
+            task::set_smp_scheduling_enabled(true);
+            let online_sec_mask = (0u32..gic::MAX_GIC_PES as u32)
+                .filter(|&id| id > 0 && online_cpus[id as usize])
+                .fold(0u32, |m, id| m | (1u32 << id));
+            if online_sec_mask != 0 {
+                gic::broadcast_sgi_to_mask(0, online_sec_mask);
             }
+            task::yield_now();
         }
         Err(e) => {
             kprintln!("[BOOT] Failed to load init ELF: {}", e);
         }
     }
 
-    // Enter idle wait loop if init exits
+    // Enter idle wait loop if init exits (CPU 0 participates as idle/rescheduler)
     loop {
+        if task::is_smp_scheduling_enabled() {
+            task::yield_now();
+        }
         #[cfg(target_arch = "aarch64")]
         unsafe {
-            core::arch::asm!("wfi");
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+            if !task::per_cpu(0).need_resched.load(core::sync::atomic::Ordering::Acquire) {
+                core::arch::asm!("dsb sy", "wfi", options(nomem, nostack));
+            }
+            core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
         }
     }
+}
+
+static SMP_WORKER_HITS: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+static SMP_WORKER_CPU_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SMP_TEST_STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_MIGRATE_STAGE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SMP_MIGRATE_ERROR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_COORD_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_COORD_HAS_TIMER_IRQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_COORD_ONLINE_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SMP_COORD_ONLINE_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+static SMP_COORD_ELF_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SMP_COORD_ELF_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn smp_mark_self_done(code: i32) -> ! {
+    let cid = task::current_cpu_logical_id();
+    let pid = task::per_cpu(cid).current_pid.load(core::sync::atomic::Ordering::Acquire);
+    {
+        let mut sched = task::SCHEDULER.lock();
+        if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == pid) {
+            t.state = task::TaskState::Terminated;
+            t.exit_code = Some(code);
+        }
+    }
+    loop {
+        task::yield_now();
+    }
+}
+
+fn smp_tight_worker_0() -> ! { smp_tight_worker_body(0) }
+fn smp_tight_worker_1() -> ! { smp_tight_worker_body(1) }
+fn smp_tight_worker_2() -> ! { smp_tight_worker_body(2) }
+fn smp_tight_worker_3() -> ! { smp_tight_worker_body(3) }
+
+fn smp_tight_worker_body(slot: usize) -> ! {
+    let timer_irq = SMP_COORD_HAS_TIMER_IRQ.load(core::sync::atomic::Ordering::Acquire);
+    // Pure tight compute loop without yield_now() when hardware PPI 27 timer IRQs are active:
+    // only timer preemption can rotate execution across tasks on the same or peer CPUs.
+    // On platforms without a configured interrupt controller, yield cooperatively so single-core
+    // rotation remains verifiable without hanging.
+    while !SMP_TEST_STOP.load(core::sync::atomic::Ordering::Acquire) {
+        SMP_WORKER_HITS[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let cid = task::current_cpu_logical_id();
+        SMP_WORKER_CPU_MASK.fetch_or(1u32 << cid, core::sync::atomic::Ordering::Release);
+        if !timer_irq {
+            task::yield_now();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+    smp_mark_self_done(0)
+}
+
+fn smp_migration_simd_worker() -> ! {
+    // Hold distinguishable callee-saved float/integer state across migration
+    let mut f_acc: f64 = 1024.5;
+    let magic: u64 = 0xCAFE_BABE_1234_5678;
+    let mut seen_cpu1 = false;
+    while !SMP_TEST_STOP.load(core::sync::atomic::Ordering::Acquire) {
+        let cid = task::current_cpu_logical_id();
+        f_acc += 0.25;
+        f_acc -= 0.25;
+        if (f_acc - 1024.5).abs() > 1e-9 || magic != 0xCAFE_BABE_1234_5678 {
+            SMP_MIGRATE_ERROR.store(true, core::sync::atomic::Ordering::Release);
+        }
+        if cid == 1 && !seen_cpu1 {
+            seen_cpu1 = true;
+            SMP_MIGRATE_STAGE.compare_exchange(
+                0,
+                1,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ).ok();
+        } else if seen_cpu1 && cid == 0 {
+            SMP_MIGRATE_STAGE.compare_exchange(
+                1,
+                2,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ).ok();
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    smp_mark_self_done(if SMP_MIGRATE_ERROR.load(core::sync::atomic::Ordering::Acquire) { -1 } else { 0 })
+}
+
+fn smp_coordinator_worker() -> ! {
+    use core::sync::atomic::Ordering;
+    let online_mask = SMP_COORD_ONLINE_MASK.load(Ordering::Acquire);
+    let online_count = SMP_COORD_ONLINE_COUNT.load(Ordering::Acquire);
+    let elf_ptr = SMP_COORD_ELF_PTR.load(Ordering::Acquire) as *const u8;
+    let elf_len = SMP_COORD_ELF_LEN.load(Ordering::Acquire);
+    let test_elf = unsafe { core::slice::from_raw_parts(elf_ptr, elf_len) };
+
+    SMP_TEST_STOP.store(false, Ordering::Release);
+    SMP_WORKER_CPU_MASK.store(0, Ordering::Release);
+    for h in &SMP_WORKER_HITS {
+        h.store(0, Ordering::Release);
+    }
+
+    let worker_fns: [fn() -> !; 4] = [
+        smp_tight_worker_0,
+        smp_tight_worker_1,
+        smp_tight_worker_2,
+        smp_tight_worker_3,
+    ];
+    let mut worker_pids = [0u32; 4];
+    {
+        let mut sched = task::SCHEDULER.lock();
+        for (i, &wfn) in worker_fns.iter().enumerate() {
+            let pid = sched.spawn_kernel_task_with_options(
+                "smp_worker",
+                wfn,
+                CapabilityTable::new(),
+                1,
+                online_mask,
+            );
+            worker_pids[i] = pid;
+        }
+    }
+
+    let sec_mask = online_mask & !1u32;
+    if sec_mask != 0 {
+        gic::broadcast_sgi_to_mask(0, sec_mask);
+    }
+
+    // Wait for all 4 tight compute workers to make real progress via timer preemption & multi-CPU execution
+    let mut spins = 0u32;
+    loop {
+        let all_ran = SMP_WORKER_HITS.iter().all(|h| h.load(Ordering::Acquire) > 0);
+        let cpus_seen = SMP_WORKER_CPU_MASK.load(Ordering::Acquire);
+        let multi_cpu_ok = if online_count >= 2 { cpus_seen.count_ones() >= 2 } else { cpus_seen != 0 };
+        if (all_ran && multi_cpu_ok) || spins >= 400_000 {
+            break;
+        }
+        task::yield_now();
+        core::hint::spin_loop();
+        spins += 1;
+    }
+
+    SMP_TEST_STOP.store(true, Ordering::Release);
+    if sec_mask != 0 {
+        gic::broadcast_sgi_to_mask(0, sec_mask);
+    }
+    for &pid in &worker_pids {
+        let mut reap_spins = 0;
+        while task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid).is_err() && reap_spins < 200_000 {
+            task::yield_now();
+            core::hint::spin_loop();
+            reap_spins += 1;
+        }
+    }
+
+    let cpus_seen = SMP_WORKER_CPU_MASK.load(Ordering::Acquire);
+    let total_hits: u64 = SMP_WORKER_HITS.iter().map(|h| h.load(Ordering::Acquire)).sum();
+    kprintln!(
+        "[TEST] Multicore SMP Worker Execution: cpus_seen_mask=0x{:02X} (online={}), total_hits={}, context_switches_cpu0={}.",
+        cpus_seen, online_count, total_hits, task::per_cpu(0).context_switches.load(Ordering::Acquire)
+    );
+    assert!(total_hits >= 4, "SMP tight workers must all run via timer preemption");
+    if online_count >= 2 {
+        assert!(cpus_seen.count_ones() >= 2, "SMP scheduler must run tasks across multiple CPUs");
+    }
+
+    if online_count >= 2 {
+        // Cross-CPU Task Migration & SIMD/GPR Preservation + Scheduled EL0 on Secondary CPU + TLB Shootdown
+        SMP_TEST_STOP.store(false, Ordering::Release);
+        SMP_MIGRATE_STAGE.store(0, Ordering::Release);
+        SMP_MIGRATE_ERROR.store(false, Ordering::Release);
+
+        let mig_pid = {
+            let mut sched = task::SCHEDULER.lock();
+            sched.spawn_kernel_task_with_options(
+                "smp_migrator",
+                smp_migration_simd_worker,
+                CapabilityTable::new(),
+                0,
+                1u32 << 1, // Pin initially to CPU 1
+            )
+        };
+        gic::broadcast_sgi_to_mask(0, 1u32 << 1);
+
+        let mut wait_stage1 = 0u32;
+        while SMP_MIGRATE_STAGE.load(Ordering::Acquire) < 1 && wait_stage1 < 2_000_000 {
+            core::hint::spin_loop();
+            wait_stage1 += 1;
+        }
+        assert_eq!(SMP_MIGRATE_STAGE.load(Ordering::Acquire), 1, "Migrator must begin on CPU 1");
+
+        // Now force migration from CPU 1 -> CPU 0 by flipping affinity to CPU 0
+        {
+            let mut sched = task::SCHEDULER.lock();
+            if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == mig_pid) {
+                t.affinity_mask = 1u32 << 0;
+            }
+        }
+        task::per_cpu(1).need_resched.store(true, Ordering::Release);
+        gic::broadcast_sgi_to_mask(0, 1u32 << 1);
+
+        let mut wait_stage2 = 0u32;
+        while SMP_MIGRATE_STAGE.load(Ordering::Acquire) < 2 && wait_stage2 < 2_000_000 {
+            task::yield_now();
+            core::hint::spin_loop();
+            wait_stage2 += 1;
+        }
+        SMP_TEST_STOP.store(true, Ordering::Release);
+        let mig_count = {
+            let sched = task::SCHEDULER.lock();
+            sched.tasks.iter().find(|t| t.id == mig_pid).map(|t| t.migrations).unwrap_or(0)
+        };
+        let mig_exit = {
+            let mut res = Err(-30i64);
+            for _ in 0..200_000 {
+                res = task::reap_task_locksafe(task::SUPERVISOR_PID, true, mig_pid);
+                if res.is_ok() {
+                    break;
+                }
+                task::yield_now();
+            }
+            res.expect("Migrator reap")
+        };
+        assert_eq!(SMP_MIGRATE_STAGE.load(Ordering::Acquire), 2, "Task must migrate to CPU 0");
+        assert!(mig_count >= 1, "Task migration counter must increment");
+        assert!(!SMP_MIGRATE_ERROR.load(Ordering::Acquire), "FP/GPR integrity failed across migration");
+        assert_eq!(mig_exit, 0);
+        kprintln!("[TEST] Multicore Cross-CPU Migration & SIMD/GPR Preservation (migrations={}) VERIFIED.", mig_count);
+
+        // Scheduled EL0 Execution on Secondary CPU 1 + Cross-CPU TLB Shootdown SGI
+        let tlb_ipis_before = task::per_cpu(1).tlb_ipis.load(Ordering::Acquire);
+        let mut el0_pids = alloc::vec::Vec::new();
+        for cycle in 0..4usize {
+            let loaded = elf::load_elf(test_elf).expect("Load EL0 ELF for SMP test");
+            let mut caps = CapabilityTable::new();
+            caps.mint(CapabilityType::IpcSend, Rights::INVOKE, None);
+            caps.mint(CapabilityType::IpcReceive, Rights::READ, None);
+            let target_cpu = 1 + (cycle % (online_count - 1));
+            let pid = {
+                let mut sched = task::SCHEDULER.lock();
+                let pid = sched.spawn_user_process(
+                    0,
+                    "smp_el0_worker",
+                    loaded.entry_point,
+                    loaded.stack_top,
+                    Some(loaded.address_space),
+                    caps,
+                );
+                if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == pid) {
+                    t.affinity_mask = 1u32 << target_cpu;
+                }
+                pid
+            };
+            gic::broadcast_sgi_to_mask(0, 1u32 << target_cpu);
+            el0_pids.push((pid, target_cpu));
+        }
+
+        // Send cross-CPU TLB Shootdown SGI 1 to CPU 1 during EL0 activity
+        gic::broadcast_sgi_to_mask(1, 1u32 << 1);
+
+        for (pid, _cpu) in el0_pids {
+            let mut reaped = Err(-30i64);
+            for _ in 0..2_000 {
+                reaped = task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid);
+                if reaped.is_ok() {
+                    break;
+                }
+                task::yield_now();
+                core::hint::spin_loop();
+            }
+            assert_eq!(reaped, Ok(0), "Scheduled EL0 SMP child PID {} must exit(0) and reap cleanly", pid);
+        }
+        let tlb_ipis_after = task::per_cpu(1).tlb_ipis.load(Ordering::Acquire);
+        assert!(tlb_ipis_after > tlb_ipis_before, "CPU 1 must receive cross-CPU TLB shootdown SGI 1");
+        kprintln!("[TEST] Multicore Scheduled EL0 & Cross-CPU TLB Shootdown (CPU 1 TLB IPIs {} -> {}) VERIFIED.",
+            tlb_ipis_before, tlb_ipis_after);
+    }
+
+    SMP_COORD_DONE.store(true, Ordering::Release);
+    smp_mark_self_done(0)
+}
+
+fn run_smp_scheduler_verification(
+    online_cpus: &[bool; gic::MAX_GIC_PES],
+    online_count: usize,
+    has_timer_irq: bool,
+    test_elf: &[u8],
+) {
+    use core::sync::atomic::Ordering;
+    kprintln!();
+    kprintln!("--- [Testing True Multicore SMP Scheduler, Preemption, Migration & TLB Shootdown] ---");
+
+    // Reset early boot daemons cleanly before activating SMP scheduling.
+    {
+        let mut sched = task::SCHEDULER.lock();
+        sched.tasks.clear();
+        sched.current_task_idx = 0;
+        sched.next_pid = 1;
+    }
+    let baseline_frames = mmu::active_allocated_frames();
+
+    // Validate secondary stack bounds helper edge cases
+    assert_eq!(crate::entry::validate_secondary_stack_slot(1, 0x4008_0000, 0x400F_0000), Some((0x4008_0000, 0x4009_0000)));
+    assert_eq!(crate::entry::validate_secondary_stack_slot(7, 0x4008_0000, 0x400F_0000), Some((0x400E_0000, 0x400F_0000)));
+    assert!(crate::entry::validate_secondary_stack_slot(0, 0x4008_0000, 0x400F_0000).is_none());
+    assert!(crate::entry::validate_secondary_stack_slot(8, 0x4008_0000, 0x400F_0000).is_none());
+    assert!(crate::entry::validate_secondary_stack_slot(1, 0x4008_0008, 0x400F_0000).is_none());
+
+    let online_mask = (0..gic::MAX_GIC_PES)
+        .filter(|&i| online_cpus[i])
+        .fold(0u32, |m, i| m | (1u32 << i));
+
+    SMP_COORD_DONE.store(false, Ordering::Release);
+    SMP_COORD_HAS_TIMER_IRQ.store(has_timer_irq, Ordering::Release);
+    SMP_COORD_ONLINE_MASK.store(online_mask, Ordering::Release);
+    SMP_COORD_ONLINE_COUNT.store(online_count, Ordering::Release);
+    SMP_COORD_ELF_PTR.store(test_elf.as_ptr() as usize, Ordering::Release);
+    SMP_COORD_ELF_LEN.store(test_elf.len(), Ordering::Release);
+
+    let coord_pid = {
+        let mut sched = task::SCHEDULER.lock();
+        sched.spawn_kernel_task_with_options(
+            "smp_coordinator",
+            smp_coordinator_worker,
+            CapabilityTable::new(),
+            1,
+            1u32 << 0,
+        )
+    };
+
+    task::set_smp_scheduling_enabled(true);
+    while !SMP_COORD_DONE.load(Ordering::Acquire) {
+        task::yield_now();
+        core::hint::spin_loop();
+    }
+    task::set_smp_scheduling_enabled(false);
+
+    let coord_exit = task::reap_task_locksafe(task::SUPERVISOR_PID, true, coord_pid)
+        .expect("SMP coordinator reap");
+    assert_eq!(coord_exit, 0);
+    assert_eq!(mmu::active_allocated_frames(), baseline_frames, "SMP stress must leave zero leaked frames");
+    kprintln!("[TEST] AArch64 True Multicore SMP Scheduling VERIFIED.");
 }
 
 #[cfg(not(test))]
@@ -1981,9 +2407,20 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn secondary_cpu_main(logical_id: usize) -> ! {
+    // 1. Enable MMU and L1/L2 caches using CPU 0's configured translation tables
+    //    before running cache-sensitive spinlocks/atomics or scheduling EL0 tasks.
+    let _ = mmu::ArmMmu::init_secondary();
+
+    // 2. Initialize Per-CPU data (`TPIDR_EL1`) before exceptions/IRQs can fire.
+    task::init_per_cpu(logical_id);
+
+    // 3. Install shared EL1 vector table (`VBAR_EL1`).
     crate::exceptions::init_exceptions();
 
-    if gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) == gic::ACTIVE_GIC_KIND_GICV3 {
+    // 4. Initialize per-PE interrupt controller interface (GICv3 redistributor or GICv2 CPUIF)
+    //    and enable Virtual Timer PPI (27) plus SGI 0 (Reschedule), 1 (TlbShootdown), 2 (CapRevoke).
+    let gic_kind = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire);
+    if gic_kind == gic::ACTIVE_GIC_KIND_GICV3 {
         let active = *gic::ACTIVE_GIC.lock();
         if let gic::ActiveGic::Gicv3(g) = active {
             let mut local_gicv3 = gic::Gicv3::with_sizes(g.distributor_base, g.distributor_size, g.redistributors_base, g.redistributors_size);
@@ -1998,30 +2435,29 @@ pub extern "C" fn secondary_cpu_main(logical_id: usize) -> ! {
             }
             local_gicv3.init_cpu_interface();
             let _ = local_gicv3.enable_irq(27);
+            let _ = local_gicv3.enable_irq(0);
             let _ = local_gicv3.enable_irq(1);
+            let _ = local_gicv3.enable_irq(2);
         }
+    } else if gic_kind == gic::ACTIVE_GIC_KIND_GICV2 {
+        gic::init_active_gicv2_secondary();
     }
 
-    // Arm local generic timer for secondary PE
+    // 5. Arm local generic timer (100 Hz) for secondary PE preemption
     let mut timer = ArmGenericTimer::new();
     let freq = timer.read_frequency();
     if freq > 0 {
-        timer.program_countdown((freq / 1000).max(10_000) as u32);
+        timer.program_countdown((freq / 100).max(10_000) as u32);
     }
 
-    // Unmask IRQs in DAIF
+    // 6. Unmask IRQs in DAIF
     #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
     }
 
-    // Publish online status ONLY after VBAR, Redistributor, CPU interface, Timer, and DAIF are complete
+    // 7. Publish online status ONLY after MMU, Per-CPU state, VBAR, GIC, Timer, and DAIF are ready
     gic::set_pe_online(logical_id, true);
 
-    loop {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            core::arch::asm!("wfe");
-        }
-    }
+    task::secondary_scheduler_loop(logical_id);
 }

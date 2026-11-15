@@ -50,7 +50,9 @@ SECTIONS
     . = ALIGN(4K);
 
     .data : ALIGN(4K) {
+        __data_start = .;
         *(.data .data.*)
+        __data_end = .;
     }
 
     . = ALIGN(4K);
