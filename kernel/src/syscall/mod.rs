@@ -3246,7 +3246,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         },
         102 => {
-            if a2 == 0 || (a3 != 0 && a3 < 12) {
+            if a2 == 0 || a3 < 12 {
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut out = [0u8; 12];
@@ -8826,7 +8826,8 @@ fn browser_clock_monotonic_increments() {
 
         // Null pointer rejected
         assert_eq!(sys_dispatch(102, 1, 0, 12, 0, 0), SyscallResult::InvalidArguments as i64);
-        // Non-zero output length smaller than 12 bytes rejected
+        // Zero output length and non-zero lengths smaller than 12 bytes rejected
+        assert_eq!(sys_dispatch(102, 1, 0x2000, 0, 0, 0), SyscallResult::InvalidArguments as i64);
         assert_eq!(sys_dispatch(102, 1, 0x2000, 4, 0, 0), SyscallResult::InvalidArguments as i64);
         assert_eq!(sys_dispatch(102, 1, 0x2000, 11, 0, 0), SyscallResult::InvalidArguments as i64);
 
@@ -8852,10 +8853,12 @@ fn browser_clock_monotonic_increments() {
             object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
         };
         caps.insert(sys_cap.clone()).unwrap();
+        let mut orig_caps = None;
         {
             let mut sched = SCHEDULER.lock();
             sched.init(caps);
             if let Some(task) = sched.current_task_mut() {
+                orig_caps = Some(task.cap_table.clone());
                 let _ = task.cap_table.insert(sys_cap);
             }
         }
@@ -8897,6 +8900,31 @@ fn browser_clock_monotonic_increments() {
         }
 
         clear_test_user_buffers();
+
+        // Missing SystemControl capability must deny RevocationAudit (48)
+        let unpriv_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+        {
+            let mut sched = SCHEDULER.lock();
+            if let Some(task) = sched.current_task_mut() {
+                task.cap_table = unpriv_caps;
+            }
+        }
+        register_test_user_buffer(target_addr, target);
+        assert_eq!(
+            sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0),
+            SyscallResult::PermissionDenied as i64
+        );
+        assert_eq!(
+            sys_dispatch(48, 1, target_addr, target.len() as u64, 0, 0),
+            SyscallResult::PermissionDenied as i64
+        );
+        clear_test_user_buffers();
+        if let Some(prev) = orig_caps {
+            let mut sched = SCHEDULER.lock();
+            if let Some(task) = sched.current_task_mut() {
+                task.cap_table = prev;
+            }
+        }
     }
 }
 #[test]
