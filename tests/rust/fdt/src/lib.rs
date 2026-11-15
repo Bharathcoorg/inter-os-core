@@ -582,6 +582,7 @@ fn test_concurrent_pe_registration_race_and_conflict_detection() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
+    let _test_guard = gic::GlobalPeTestGuard::acquire();
     gic::reset_pe_redistributor_map_for_test();
 
     let target_pe = 0x0001_0000;
@@ -625,6 +626,113 @@ fn test_concurrent_pe_registration_race_and_conflict_detection() {
     // Verify exactly 1 slot was claimed in the table
     let winning_base = gic::get_pe_redistributor(target_pe);
     assert!(winning_base == Some(base_a) || winning_base == Some(base_b));
+
+    gic::reset_pe_redistributor_map_for_test();
+}
+
+#[test]
+fn test_pe_identity_multi_cluster_no_aff0_collision() {
+    let _test_guard = gic::GlobalPeTestGuard::acquire();
+    gic::reset_pe_redistributor_map_for_test();
+
+    // Cluster 0, Core 0 (Aff1=0, Aff0=0) vs Cluster 1, Core 0 (Aff1=1, Aff0=0)
+    // Plus non-zero Aff2 & Aff3 nodes with Aff0=0
+    let mpidr_c0 = 0x0000_0000_0000_0000u64;
+    let mpidr_c1 = 0x0000_0000_0000_0100u64; // Aff1=1, Aff0=0
+    let mpidr_aff2 = 0x0000_0000_0005_0000u64; // Aff2=5, Aff0=0
+    let mpidr_aff3 = 0x0000_000A_0000_0000u64; // Aff3=10, Aff0=0
+
+    assert_eq!(gic::register_pe(0, mpidr_c0, 0x080A_0000), Ok(()));
+    assert_eq!(gic::register_pe(1, mpidr_c1, 0x080C_0000), Ok(()));
+    assert_eq!(gic::register_pe(2, mpidr_aff2, 0x080E_0000), Ok(()));
+    assert_eq!(gic::register_pe(3, mpidr_aff3, 0x0810_0000), Ok(()));
+
+    // Must resolve strictly without collapsing Aff0=0 clusters together
+    assert_eq!(gic::logical_id_for_affinity(mpidr_c0), Ok(0));
+    assert_eq!(gic::logical_id_for_affinity(mpidr_c1), Ok(1));
+    assert_eq!(gic::logical_id_for_affinity(mpidr_aff2), Ok(2));
+    assert_eq!(gic::logical_id_for_affinity(mpidr_aff3), Ok(3));
+
+    assert_eq!(gic::get_pe_redistributor_by_logical_id(0), Some(0x080A_0000));
+    assert_eq!(gic::get_pe_redistributor_by_logical_id(1), Some(0x080C_0000));
+    assert_eq!(gic::get_pe_redistributor_by_logical_id(2), Some(0x080E_0000));
+    assert_eq!(gic::get_pe_redistributor_by_logical_id(3), Some(0x0810_0000));
+
+    // Duplicate MPIDR on a different logical ID must fail closed
+    assert_eq!(gic::register_pe(4, mpidr_c1, 0x0812_0000), Err(gic::GicError::DuplicateAffinity));
+
+    // Idempotent re-registration on the same logical ID with same base succeeds
+    assert_eq!(gic::register_pe(1, mpidr_c1, 0x080C_0000), Ok(()));
+
+    // Conflicting base on same logical ID rejected
+    assert_eq!(gic::register_pe(1, mpidr_c1, 0x0814_0000), Err(gic::GicError::RegistrationConflict));
+
+    // Conflicting affinity on occupied logical ID rejected
+    assert_eq!(gic::register_pe(1, 0x0000_0000_0000_0200u64, 0x080C_0000), Err(gic::GicError::RegistrationConflict));
+
+    // Unknown MPIDR fails closed
+    assert_eq!(gic::logical_id_for_affinity(0x0000_00FF_00FF_FFFF), Err(gic::GicError::UnknownPeAffinity));
+
+    gic::reset_pe_redistributor_map_for_test();
+}
+
+#[test]
+fn test_concurrent_different_pe_registrations_and_lockfree_lookups() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let _test_guard = gic::GlobalPeTestGuard::acquire();
+    gic::reset_pe_redistributor_map_for_test();
+
+    let stop_readers = Arc::new(AtomicBool::new(false));
+    let mut reader_handles = Vec::new();
+
+    // Spawn 2 lock-free reader threads verifying no torn reads occur while 8 writers register concurrently
+    for _ in 0..2 {
+        let stop_flag = Arc::clone(&stop_readers);
+        reader_handles.push(thread::spawn(move || {
+            while !stop_flag.load(Ordering::Acquire) {
+                for id in 0..gic::MAX_GIC_PES {
+                    let expected_mpidr = ((id as u64) << 8) | 0x01; // Distinct Aff1, shared Aff0=1
+                    let expected_rd = 0x080A_0000 + id * 0x20000;
+                    if let Ok(resolved) = gic::logical_id_for_affinity(expected_mpidr) {
+                        assert_eq!(resolved, id, "Partial or corrupted logical ID publication!");
+                        assert_eq!(
+                            gic::get_pe_redistributor_by_logical_id(id),
+                            Some(expected_rd),
+                            "Redistributor base not published before STATE_VALID!"
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    // Spawn 8 writer threads concurrently registering distinct PEs 0..7
+    let mut writer_handles = Vec::new();
+    for id in 0..gic::MAX_GIC_PES {
+        writer_handles.push(thread::spawn(move || {
+            let mpidr = ((id as u64) << 8) | 0x01;
+            let rd_base = 0x080A_0000 + id * 0x20000;
+            assert_eq!(gic::register_pe(id, mpidr, rd_base), Ok(()));
+        }));
+    }
+
+    for h in writer_handles {
+        h.join().unwrap();
+    }
+    stop_readers.store(true, Ordering::Release);
+    for h in reader_handles {
+        h.join().unwrap();
+    }
+
+    // Verify all 8 slots populated consistently and out-of-range fails
+    for id in 0..gic::MAX_GIC_PES {
+        let mpidr = ((id as u64) << 8) | 0x01;
+        assert_eq!(gic::logical_id_for_affinity(mpidr), Ok(id));
+    }
+    assert_eq!(gic::register_pe(8, 0x0901, 0x081A_0000), Err(gic::GicError::InvalidParameter));
 
     gic::reset_pe_redistributor_map_for_test();
 }

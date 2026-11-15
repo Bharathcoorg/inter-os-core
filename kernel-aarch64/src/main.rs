@@ -196,6 +196,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                         kprintln!("[WARN] GICv3 failed to enable IRQ 27: {:?}", e);
                     }
                     gic::register_active_gicv3(gicv3);
+                    gic::set_pe_online(0, true);
                     kprintln!("[OK] GICv3 from device tree: distributor @ 0x{:08X} (size {} KiB), redistributors @ 0x{:08X} (size {} KiB), full generic GICv3 initialized, IRQ 27 enabled.",
                         distributor, distributor_size / 1024, redistributors, redistributors_size / 1024);
                 }
@@ -531,7 +532,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let has_active_gic = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != gic::ACTIVE_GIC_KIND_NONE;
     if has_active_gic {
         kprintln!("--- [Testing AArch64 Architectural Timer & Real IRQ Delivery] ---");
-        let timer_irq_before = unsafe { exceptions::TIMER_INTERRUPT_COUNT };
+        let timer_irq_before = exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
         let countdown = if freq > 0 { (freq / 500).max(10_000) as u32 } else { 62_500 };
         timer.program_countdown(countdown);
         #[cfg(target_arch = "aarch64")]
@@ -540,7 +541,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             core::arch::asm!("isb", options(nomem, nostack));
         }
         let mut spins = 0u64;
-        while unsafe { exceptions::TIMER_INTERRUPT_COUNT } < timer_irq_before + 3 && spins < 20_000_000 {
+        while exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire) < timer_irq_before + 3 && spins < 20_000_000 {
             core::hint::spin_loop();
             spins += 1;
         }
@@ -549,7 +550,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             core::arch::asm!("msr daifset, #2", options(nomem, nostack));
             core::arch::asm!("isb", options(nomem, nostack));
         }
-        let timer_irq_after = unsafe { exceptions::TIMER_INTERRUPT_COUNT };
+        let timer_irq_after = exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
         assert!(timer_irq_after >= timer_irq_before + 3, "Timer IRQs failed to deliver: before={}, after={}", timer_irq_before, timer_irq_after);
         kprintln!("[TEST] AArch64 Architectural Timer: Virtual Timer PPI (IRQ 27) generated, acknowledged, and handled repeatedly (delivered {} interrupts) VERIFIED.", timer_irq_after - timer_irq_before);
     } else {
@@ -1512,51 +1513,151 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // 40b. Multicore SMP Bring-up, GICv3 Redistributor Discovery & SGI/IPI Verification
     kprintln!("--- [Testing Multicore SMP Bring-up, Per-PE Redistributor & GICv3 SGI IPI] ---");
     let secondary_entry = crate::entry::secondary_cpu_entry as *const () as usize as u64;
-    let psci_ret = psci.invoke_psci(psci::PSCI_FN_CPU_ON, 1, secondary_entry, 0);
-    if psci_ret == psci::PSCI_SUCCESS as i64 || psci_ret == -2 {
-        kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE 1 (entry @ 0x{:016X}).", secondary_entry);
-        let mut spins = 0;
-        while !SECONDARY_CPU_ONLINE.load(core::sync::atomic::Ordering::Acquire) && spins < 500_000 {
-            core::hint::spin_loop();
-            spins += 1;
-        }
-        if SECONDARY_CPU_ONLINE.load(core::sync::atomic::Ordering::Acquire) {
-            kprintln!("[OK] Secondary CPU 1 online: VBAR, GICv3 Redistributor, and CPU Interface initialized.");
+    let mut online_cpus: [bool; gic::MAX_GIC_PES] = [false; gic::MAX_GIC_PES];
+    online_cpus[0] = gic::is_pe_online(0);
+    let mut online_count: usize = if online_cpus[0] { 1 } else { 0 };
+    let mut psci_dispatched_any = false;
 
-            // Deliver GICv3 SGI 1 to CPU 1 (TargetList = 0b0010)
-            let sgi_val = gic::encode_sgi1r(0, 0, 0, 0b0000_0010, 1, false);
+    for logical_id in 1..4usize {
+        let target_mpidr = logical_id as u64;
+        let psci_ret = psci.invoke_psci(psci::PSCI_FN_CPU_ON, target_mpidr, secondary_entry, logical_id as u64);
+        if psci_ret == psci::PSCI_SUCCESS as i64 {
+            psci_dispatched_any = true;
+            kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE {} (entry @ 0x{:016X}).", logical_id, secondary_entry);
+            let mut spins = 0;
+            while !gic::is_pe_online(logical_id) && spins < 1_000_000 {
+                core::hint::spin_loop();
+                spins += 1;
+            }
+            if gic::is_pe_online(logical_id) {
+                online_cpus[logical_id] = true;
+                online_count += 1;
+                kprintln!("[OK] Secondary CPU {} online: VBAR, GICv3 Redistributor, and CPU Interface initialized.", logical_id);
+            } else {
+                kprintln!("[ERROR] Secondary CPU {} failed to come online within timeout after PSCI CPU_ON.", logical_id);
+            }
+        } else {
+            // Core not present in current machine topology (e.g. PSCI INVALID_PARAMETERS = -2)
+            break;
+        }
+    }
+
+    if psci_dispatched_any && online_count >= 2 {
+        let mut sgi_delivery_verified = true;
+
+        // Targeted SGI test: deliver SGI 1 individually to each online secondary PE and verify isolation
+        for target_id in 1..4usize {
+            if !online_cpus[target_id] {
+                continue;
+            }
+            let target_mpidr = gic::get_pe_mpidr_by_logical_id(target_id).unwrap_or(target_id as u64);
+            let (aff3, aff2, aff1, aff0) = gic::decode_mpidr_affinity(target_mpidr);
+            let mut before = [0u64; 4];
+            for idx in 0..4usize {
+                before[idx] = gic::pe_sgi_interrupt_count(idx);
+            }
+
+            let target_list = 1u16 << (aff0 & 0x0F);
+            let sgi_val = gic::encode_sgi1r(aff3, aff2, aff1, target_list, 1, false);
             gic::send_sgi(sgi_val);
-            kprintln!("[AArch64] CPU 0 sent GICv3 SGI 1 to CPU 1 (ICC_SGI1R_EL1 = 0x{:016X}).", sgi_val);
+            kprintln!("[AArch64] CPU 0 sent GICv3 SGI 1 to CPU {} (ICC_SGI1R_EL1 = 0x{:016X}).", target_id, sgi_val);
 
             let mut sgi_spins = 0;
-            while gic::pe_sgi_interrupt_count(1) == 0 && sgi_spins < 500_000 {
+            while gic::pe_sgi_interrupt_count(target_id) <= before[target_id] && sgi_spins < 1_000_000 {
                 core::hint::spin_loop();
                 sgi_spins += 1;
             }
-            let cpu1_sgi = gic::pe_sgi_interrupt_count(1);
-            let cpu0_sgi = gic::pe_sgi_interrupt_count(0);
-            if cpu1_sgi > 0 {
-                kprintln!("[OK] Multicore GICv3 SGI 1 delivered, acknowledged, and EOI verified on secondary CPU.");
-                kprintln!("[AArch64] GICv3 SGI 1 received specifically by target PE 1 (PE 1 count: {}, PE 0 count: {}).", cpu1_sgi, cpu0_sgi);
+
+            let mut isolated = gic::pe_sgi_interrupt_count(target_id) == before[target_id] + 1;
+            for other_id in 0..4usize {
+                if other_id != target_id && online_cpus[other_id] {
+                    if gic::pe_sgi_interrupt_count(other_id) != before[other_id] {
+                        isolated = false;
+                        kprintln!("[ERROR] SGI 1 leaked to unintended PE {} (before={}, after={})!",
+                            other_id, before[other_id], gic::pe_sgi_interrupt_count(other_id));
+                    }
+                }
             }
 
-            // Verify independent local timer interrupt delivery on both cores
-            let mut timer_spins = 0;
-            while (gic::pe_timer_interrupt_count(0) == 0 || gic::pe_timer_interrupt_count(1) == 0) && timer_spins < 5_000_000 {
-                core::hint::spin_loop();
-                timer_spins += 1;
+            if isolated {
+                let target_sgi = gic::pe_sgi_interrupt_count(target_id);
+                let cpu0_sgi = gic::pe_sgi_interrupt_count(0);
+                if target_id == 1 {
+                    kprintln!("[OK] Multicore GICv3 SGI 1 delivered, acknowledged, and EOI verified on secondary CPU.");
+                }
+                kprintln!("[AArch64] GICv3 SGI 1 received specifically by target PE {} (PE {} count: {}, PE 0 count: {}).",
+                    target_id, target_id, target_sgi, cpu0_sgi);
+            } else {
+                sgi_delivery_verified = false;
+                kprintln!("[ERROR] Targeted SGI 1 verification failed for PE {}.", target_id);
             }
-            let cpu0_timer = gic::pe_timer_interrupt_count(0);
-            let cpu1_timer = gic::pe_timer_interrupt_count(1);
-            kprintln!("[AArch64] Independent per-PE timer delivery: PE 0 timer ticks = {}, PE 1 timer ticks = {}.", cpu0_timer, cpu1_timer);
-            if cpu1_sgi > 0 && cpu0_sgi == 0 && cpu0_timer > 0 && cpu1_timer > 0 {
-                kprintln!("[TEST] AArch64 Multicore SMP: Dual-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.");
-            }
-        } else {
-            kprintln!("[OK] Multicore: Single-core QEMU topology (secondary CPU inactive).");
         }
-    } else {
+
+        // Verify independent local timer interrupt delivery on all online cores
+        let mut timer_spins = 0;
+        loop {
+            let mut all_timers_fired = true;
+            for idx in 0..4usize {
+                if online_cpus[idx] && gic::pe_timer_interrupt_count(idx) == 0 {
+                    all_timers_fired = false;
+                    break;
+                }
+            }
+            if all_timers_fired || timer_spins >= 5_000_000 {
+                break;
+            }
+            core::hint::spin_loop();
+            timer_spins += 1;
+        }
+
+        let mut all_timers_ok = true;
+        let mut distinct_identities_ok = true;
+        let mut mpidrs = [0u64; 4];
+        let mut rdbases = [0usize; 4];
+
+        for idx in 0..4usize {
+            if online_cpus[idx] {
+                let mpidr = gic::get_pe_mpidr_by_logical_id(idx).unwrap_or(u64::MAX);
+                let rdbase = gic::get_pe_redistributor_by_logical_id(idx).unwrap_or(0);
+                let t_ticks = gic::pe_timer_interrupt_count(idx);
+                let s_cnt = gic::pe_sgi_interrupt_count(idx);
+                mpidrs[idx] = mpidr;
+                rdbases[idx] = rdbase;
+
+                if t_ticks == 0 {
+                    all_timers_ok = false;
+                }
+                if rdbase == 0 || mpidr == u64::MAX {
+                    distinct_identities_ok = false;
+                }
+                for prev in 0..idx {
+                    if online_cpus[prev] && (mpidrs[prev] == mpidr || rdbases[prev] == rdbase) {
+                        distinct_identities_ok = false;
+                        kprintln!("[ERROR] Duplicate MPIDR or redistributor between PE {} and PE {}!", prev, idx);
+                    }
+                }
+
+                kprintln!(
+                    "CPU logical={} mpidr=0x{:016X} redistributor=0x{:016X} online=true timer_ticks={} sgi_received={}",
+                    idx, mpidr, rdbase, t_ticks, s_cnt
+                );
+            }
+        }
+
+        let cpu0_timer = gic::pe_timer_interrupt_count(0);
+        let cpu1_timer = gic::pe_timer_interrupt_count(1);
+        kprintln!("[AArch64] Independent per-PE timer delivery: PE 0 timer ticks = {}, PE 1 timer ticks = {}.", cpu0_timer, cpu1_timer);
+
+        if sgi_delivery_verified && all_timers_ok && distinct_identities_ok {
+            kprintln!("[TEST] AArch64 Multicore SMP: {}-core boot, per-PE redistributors, and GICv3 SGI IPI VERIFIED.", online_count);
+        } else {
+            kprintln!("[ERROR] AArch64 Multicore SMP verification invariant failed: sgi={}, timers={}, identities={}",
+                sgi_delivery_verified, all_timers_ok, distinct_identities_ok);
+        }
+    } else if !psci_dispatched_any {
         kprintln!("[OK] Multicore: PSCI CPU_ON not supported or single-PE topology.");
+    } else {
+        kprintln!("[ERROR] Multicore: Secondary CPU failed to complete initialization.");
     }
 
     // 41. SIM/eSIM backend boundary
@@ -1878,10 +1979,8 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
-pub static SECONDARY_CPU_ONLINE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
 #[no_mangle]
-pub extern "C" fn secondary_cpu_main() -> ! {
+pub extern "C" fn secondary_cpu_main(logical_id: usize) -> ! {
     crate::exceptions::init_exceptions();
 
     if gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) == gic::ACTIVE_GIC_KIND_GICV3 {
@@ -1889,8 +1988,8 @@ pub extern "C" fn secondary_cpu_main() -> ! {
         if let gic::ActiveGic::Gicv3(g) = active {
             let mut local_gicv3 = gic::Gicv3::with_sizes(g.distributor_base, g.distributor_size, g.redistributors_base, g.redistributors_size);
             unsafe {
-                if let Err(e) = local_gicv3.init_redistributor() {
-                    kprintln!("[FATAL] Secondary CPU 1 failed to initialize redistributor: {:?}", e);
+                if let Err(e) = local_gicv3.init_redistributor_for_logical_id(logical_id) {
+                    kprintln!("[FATAL] Secondary CPU {} failed to initialize redistributor: {:?}", logical_id, e);
                     loop {
                         #[cfg(target_arch = "aarch64")]
                         core::arch::asm!("wfe");
@@ -1916,8 +2015,8 @@ pub extern "C" fn secondary_cpu_main() -> ! {
         core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
     }
 
-    // Signal CPU 1 is ready
-    SECONDARY_CPU_ONLINE.store(true, core::sync::atomic::Ordering::Release);
+    // Publish online status ONLY after VBAR, Redistributor, CPU interface, Timer, and DAIF are complete
+    gic::set_pe_online(logical_id, true);
 
     loop {
         #[cfg(target_arch = "aarch64")]

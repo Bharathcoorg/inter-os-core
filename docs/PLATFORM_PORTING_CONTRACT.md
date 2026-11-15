@@ -26,7 +26,16 @@ The microkernel verifies update manifests, payload digests, signatures, and mono
 
 ---
 
-## 4. Reality Contract
+## 4. SMP & Interrupt Controller Boundaries
+
+- **Generic AArch64 SMP Core:** Generic core bring-up uses PSCI `CPU_ON`, full `MPIDR_EL1` (`Aff3..Aff0`) logical-PE registration, bounds-checked GICv3 distributor/redistributor MMIO windows, per-PE redistributors, and affinity-based SGI routing.
+- **QEMU Verification Scope:** Dual-core (`-smp 2`) and quad-core (`-smp 4`) bring-up are verified only on emulated `qemu-system-aarch64 -M virt,gic-version=3` with homogeneous cores and contiguous GICR windows.
+- **Board-Port Responsibilities:** Physical SoCs must supply verified DTB/ACPI CPU and GICR stride descriptors, clock/power/interconnect initialization, and heterogeneous-core scheduling parameters.
+- **Unsupported Lifecycle Paths:** Runtime CPU hotplug (`PSCI CPU_OFF` / online core teardown) is not supported in the generic kernel and fails closed when hardware bindings are absent.
+
+---
+
+## 5. Reality Contract
 
 In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md), hardware availability and verification levels must remain truthful:
 - QEMU virtual devices are explicitly classified as `Emulated`.

@@ -409,7 +409,7 @@ fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
     }
 }
 
-pub static mut TIMER_INTERRUPT_COUNT: u64 = 0;
+pub static TIMER_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 #[no_mangle]
 pub extern "C" fn handle_irq_el1t(_frame: &mut ExceptionFrame) {
@@ -433,17 +433,20 @@ pub extern "C" fn handle_irq_lower32(_frame: &mut ExceptionFrame) {
 
 fn dispatch_irq() {
     let irq = crate::gic::acknowledge_irq();
+    if irq >= 1020 {
+        return;
+    }
 
-    // Architectural PE identification via MPIDR affinity
-    let pe_aff = crate::gic::Gicv3::current_pe_affinity();
-    let pe_idx = (pe_aff & 0xFF) as usize;
+    // Resolve executing PE's full MPIDR affinity (Aff3..Aff0) to its registered logical CPU ID.
+    // Never fall back to Aff0-only indexing, which collides across multi-cluster topologies.
+    let logical_id = crate::gic::Gicv3::current_logical_id();
 
     if irq == 27 {
         // PPI 27: ARM Generic Timer Virtual Timer
-        unsafe {
-            TIMER_INTERRUPT_COUNT += 1;
+        TIMER_INTERRUPT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if let Ok(pe_idx) = logical_id {
+            crate::gic::record_pe_timer_tick(pe_idx);
         }
-        crate::gic::record_pe_timer_tick(pe_idx);
         let mut timer = crate::timer::ArmGenericTimer::new();
         let freq = timer.read_frequency();
         let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
@@ -451,9 +454,11 @@ fn dispatch_irq() {
         crate::gic::end_of_interrupt(irq);
     } else if irq < 16 {
         // SGIs (0..15) Software Generated Interrupts
-        crate::gic::record_pe_sgi(pe_idx, irq);
+        if let Ok(pe_idx) = logical_id {
+            crate::gic::record_pe_sgi(pe_idx, irq);
+        }
         crate::gic::end_of_interrupt(irq);
-    } else if irq < 1020 {
+    } else {
         crate::gic::end_of_interrupt(irq);
     }
 }

@@ -67,7 +67,9 @@ SECTIONS
     .stack : ALIGN(16) {
         . += 0x10000; /* 64 KiB Primordial Boot Stack (CPU 0) */
         __stack_top = .;
-        . += 0x10000; /* 64 KiB Secondary Boot Stack (CPU 1) */
+        __secondary_stacks_start = .;
+        . += 0x70000; /* 64 KiB per Secondary Core (cores 1..7: 7 * 64 KiB = 448 KiB) */
+        __secondary_stacks_end = .;
         __secondary_stack_top = .;
     }
 

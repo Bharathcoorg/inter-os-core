@@ -110,6 +110,9 @@ global_asm!(
 
     .global secondary_cpu_entry
     secondary_cpu_entry:
+        // Save context_id (logical core ID) in callee-saved register x19
+        mov x19, x0
+
         // 1. Inspect execution level (CurrentEL[3:2])
         mrs x1, CurrentEL
         lsr x1, x1, #2
@@ -159,11 +162,28 @@ global_asm!(
         msr cpacr_el1, x2
         isb
 
-        // Set dedicated secondary boot stack pointer
-        adrp x1, __secondary_stack_top
-        add sp, x1, :lo12:__secondary_stack_top
+        // Determine secondary logical core ID (1..7) for stack assignment:
+        // Prefer context_id passed in x19; fallback to MPIDR_EL1 Aff0 if unpopulated.
+        cmp x19, #0
+        b.eq 2f
+        cmp x19, #7
+        b.hi 2f
+        mov x0, x19
+        b 3f
+2:
+        mrs x0, mpidr_el1
+        and x0, x0, #0x7
+        cbnz x0, 3f
+        mov x0, #1
+3:
+        // Set dedicated per-core 64 KiB secondary stack pointer:
+        // sp = __secondary_stacks_start + (x0 * 0x10000)
+        adrp x1, __secondary_stacks_start
+        add x1, x1, :lo12:__secondary_stacks_start
+        lsl x2, x0, #16
+        add sp, x1, x2
 
-        // Enter Rust secondary CPU main
+        // Enter Rust secondary CPU main with logical core ID in x0
         bl secondary_cpu_main
 
     .Lsecondary_halt:

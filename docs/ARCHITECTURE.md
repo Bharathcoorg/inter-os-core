@@ -39,7 +39,7 @@ InterOS Core is a research prototype of a smartphone operating system written in
 +-------------------------------------------------------------------------+
 |                   Hardware Abstraction Layer (HAL)                      |
 |      x86_64 (Canonical QEMU) |       AArch64 (QEMU virt)        | RISC-V 64|
-|   - APIC / PIC / PIT         |   - PSCI / GICv2 / ArchTimer     | - SBI / PLIC|
+|   - APIC / PIC / PIT         |   - PSCI / GICv2&v3 / ArchTimer  | - SBI / PLIC|
 |   - Linear DRM/KMS VBE       |   - SimpleFB Framebuffer         | - NS16550A  |
 +-------------------------------------------------------------------------+
 ```
@@ -339,9 +339,10 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 | **Syscall Pointer Safety** | Full per-task page-table validation | Bounded user-copy helpers | Bounded user-copy helpers |
 | **Per-Task Kernel Stack** | TSS RSP0 / IST Double Fault | SP_EL1 per-thread | `sscratch` saved frame |
 | **Capability Model** | QEMU-enforced | Unit-tested | Unit-tested |
+| **Multicore / SMP** | Uniprocessor (APIC SIPI unimplemented) | Generic PSCI `CPU_ON` + GICv3 SMP (`-smp 2`, `-smp 4` QEMU-verified); GICv2 uniprocessor fallback | Uniprocessor QEMU boot |
 | **Framebuffer GUI** | 720x1440 software KMS scanout (1:1 composition from the 720x1440 authoring space) | SimpleFB Framebuffer | NS16550A Serial |
 | **ACR Container** | Shared crate ready | Shared crate ready | Shared crate ready |
-| **Verification State** | **QEMU-verified** | **Unit-tested / QEMU virt** | **Unit-tested / QEMU virt** |
+| **Verification State** | **QEMU-verified** | **Unit-tested / QEMU virt (UP & GICv3 SMP)** | **Unit-tested / QEMU virt** |
 
 ---
 
@@ -350,3 +351,8 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 1. **DMA / IOMMU**: Device DMA currently relies on physical frame allocation from a reserved frame region. Full SMMU / IOMMU page table integration for hardware peripherals is ongoing.
 2. **GPU Acceleration**: Display rendering utilizes linear software framebuffers (`SimpleFB` / DRM KMS). Hardware-accelerated GPU pipelines are planned for future revisions.
 3. **Physical Hardware Deployment**: The Fastboot v2 packer (`tools/mkbootimg`) exists but produces no phone boot image: an ARM64 device image needs a real device tree blob and a real initramfs, neither is in this tree, and the packer refuses to substitute placeholders rather than emit a container that would flash and not boot. Physical device deployment is unverified; execution is currently verified in QEMU only.
+4. **AArch64 SMP, CPU Hotplug & Physical SoC Gaps**:
+   - **Generic SMP Architecture (Implemented):** `kernel-aarch64` provides generic SMP bring-up via PSCI `CPU_ON` with isolated 64 KiB secondary stacks indexed by logical CPU ID, full 64-bit `MPIDR_EL1` (`Aff3..Aff0`) topology registration behind an IRQ-safe RAII lock, bounds-checked GICD/GICR MMIO windows, per-PE GICv3 redistributor initialization (`WAKER`, `IGROUPR0`, `ISENABLER0`), affinity-targeted `ICC_SGI1R_EL1` IPIs, and atomic per-PE architectural virtual timer (`PPI 27`) / SGI counters.
+   - **QEMU-Verified Behavior:** `tests/verify_aarch64_smp.py` verifies `qemu-system-aarch64 -M virt,gic-version=3` across both `-smp 2` and `-smp 4` configurations (independent EL1 secondary bring-up, strict `online=true` publication after full initialization, distinct `MPIDR_EL1` and per-PE redistributor bases, targeted `SGI 1` isolation with zero leakage, and per-PE `timer_ticks >= 1`), while `tests/verify_aarch64_boot.py` verifies the default `-M virt` GICv2 fallback path.
+   - **Unsupported CPU Hotplug:** Runtime CPU hotplug (`PSCI CPU_OFF`, core power-down, redistributor sleep teardown, and dynamic IRQ migration) is **not implemented** (`SmpController::power_off_core` fails closed with `HardwareDisabled` when unbound or updates software state only).
+   - **Platform-Specific Bring-Up & Hardware Gaps Not Covered by QEMU:** QEMU `virt` models homogeneous emulated cores with contiguous GICR frames and synthetic PSCI/GICv3 timing. Physical SoC bring-up requires board-specific FDT/ACPI topology discovery, clock/power-domain/regulator sequencing, heterogeneous core (`big.LITTLE` / asymmetric cache/ISA) handling, hardware cache coherency/interconnect power management, thermal/DVFS policy, and physical SPI/LPI/ITS interrupt validation that QEMU emulation does not exercise.

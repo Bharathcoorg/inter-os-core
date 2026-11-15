@@ -370,6 +370,8 @@ pub enum GicError {
     MisalignedMmioAccess,
     InvalidParameter,
     RegistrationConflict,
+    DuplicateAffinity,
+    UnknownPeAffinity,
     PeTableFull,
 }
 
@@ -415,6 +417,51 @@ pub const STATE_VALID: u8 = 2;
 
 static REGISTRATION_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// IRQ-safe RAII guard for PE registration serialization.
+///
+/// Masks local IRQs on AArch64 while holding `REGISTRATION_LOCK` to prevent
+/// recursive deadlock if an interrupt occurs during registration. All lookups
+/// (`logical_id_for_affinity`, `get_pe_redistributor`, etc.) remain 100%
+/// lock-free and wait-free, safe for interrupt handlers.
+struct RegistrationLockGuard {
+    #[cfg(target_arch = "aarch64")]
+    saved_daif: u64,
+}
+
+impl RegistrationLockGuard {
+    fn acquire() -> Self {
+        #[cfg(target_arch = "aarch64")]
+        let saved_daif: u64 = unsafe {
+            let daif: u64;
+            core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+            daif
+        };
+        while REGISTRATION_LOCK.compare_exchange(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        ).is_err() {
+            core::hint::spin_loop();
+        }
+        Self {
+            #[cfg(target_arch = "aarch64")]
+            saved_daif,
+        }
+    }
+}
+
+impl Drop for RegistrationLockGuard {
+    fn drop(&mut self) {
+        REGISTRATION_LOCK.store(false, core::sync::atomic::Ordering::Release);
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nomem, nostack));
+        }
+    }
+}
+
 static PE_STATE: [core::sync::atomic::AtomicU8; MAX_GIC_PES] = [
     core::sync::atomic::AtomicU8::new(STATE_EMPTY),
     core::sync::atomic::AtomicU8::new(STATE_EMPTY),
@@ -435,92 +482,202 @@ static PE_REDISTRIBUTOR_MAP: [core::sync::atomic::AtomicUsize; MAX_GIC_PES] = [
     core::sync::atomic::AtomicUsize::new(0),
     core::sync::atomic::AtomicUsize::new(0),
 ];
-static PE_AFFINITY_MAP: [core::sync::atomic::AtomicU32; MAX_GIC_PES] = [
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
-    core::sync::atomic::AtomicU32::new(u32::MAX),
+static PE_MPIDR_MAP: [core::sync::atomic::AtomicU64; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+    core::sync::atomic::AtomicU64::new(u64::MAX),
+];
+static PE_ONLINE: [core::sync::atomic::AtomicBool; MAX_GIC_PES] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
 ];
 
+/// Canonicalizes an MPIDR_EL1 value by preserving all 4 architectural affinity levels
+/// (Aff3[39:32], Aff2[23:16], Aff1[15:8], Aff0[7:0]) and masking non-affinity bits.
+pub const fn canonical_affinity_key(mpidr: u64) -> u64 {
+    let (aff3, aff2, aff1, aff0) = decode_mpidr_affinity(mpidr);
+    ((aff3 as u64) << 32) | ((aff2 as u64) << 16) | ((aff1 as u64) << 8) | (aff0 as u64)
+}
+
+/// Converts a raw MPIDR_EL1 value into the 32-bit GICR_TYPER affinity encoding:
+/// Aff3[31:24] | Aff2[23:16] | Aff1[15:8] | Aff0[7:0].
+pub const fn mpidr_to_gicr_affinity(mpidr: u64) -> u32 {
+    let (aff3, aff2, aff1, aff0) = decode_mpidr_affinity(mpidr);
+    ((aff3 as u32) << 24) | ((aff2 as u32) << 16) | ((aff1 as u32) << 8) | (aff0 as u32)
+}
+
+/// Converts a 32-bit GICR_TYPER affinity value into canonical 64-bit MPIDR affinity format.
+pub const fn gicr_affinity_to_mpidr(gicr_aff: u32) -> u64 {
+    let aff3 = ((gicr_aff >> 24) & 0xFF) as u64;
+    let aff2 = ((gicr_aff >> 16) & 0xFF) as u64;
+    let aff1 = ((gicr_aff >> 8) & 0xFF) as u64;
+    let aff0 = (gicr_aff & 0xFF) as u64;
+    (aff3 << 32) | (aff2 << 16) | (aff1 << 8) | aff0
+}
+
 pub fn reset_pe_redistributor_map_for_test() {
-    while REGISTRATION_LOCK.compare_exchange(
-        false,
-        true,
-        core::sync::atomic::Ordering::Acquire,
-        core::sync::atomic::Ordering::Relaxed,
-    ).is_err() {
-        core::hint::spin_loop();
-    }
+    let _guard = RegistrationLockGuard::acquire();
     for i in 0..MAX_GIC_PES {
-        PE_AFFINITY_MAP[i].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+        PE_MPIDR_MAP[i].store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
         PE_REDISTRIBUTOR_MAP[i].store(0, core::sync::atomic::Ordering::Relaxed);
+        PE_ONLINE[i].store(false, core::sync::atomic::Ordering::Relaxed);
         PE_STATE[i].store(STATE_EMPTY, core::sync::atomic::Ordering::Release);
         PE_TIMER_INTERRUPT_COUNT[i].store(0, core::sync::atomic::Ordering::Relaxed);
         PE_SGI_INTERRUPT_COUNT[i].store(0, core::sync::atomic::Ordering::Relaxed);
     }
     SGI_INTERRUPT_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
-    REGISTRATION_LOCK.store(false, core::sync::atomic::Ordering::Release);
 }
 
-pub fn register_pe_redistributor(affinity: u32, rd_base: usize) -> Result<(), GicError> {
-    // Acquire registration lock to linearize registration and eliminate TOCTOU races
-    while REGISTRATION_LOCK.compare_exchange(
-        false,
-        true,
-        core::sync::atomic::Ordering::Acquire,
-        core::sync::atomic::Ordering::Relaxed,
-    ).is_err() {
-        core::hint::spin_loop();
+/// Registers a Processing Element at an explicit logical ID with its full MPIDR affinity
+/// and GICv3 redistributor MMIO base address.
+///
+/// Rejects duplicate hardware affinities mapped to different logical IDs (`DuplicateAffinity`),
+/// conflicting redistributor bases or occupied slots (`RegistrationConflict`), and out-of-range
+/// logical IDs (`InvalidParameter`). Guarantees idempotent re-registration when all fields match.
+pub fn register_pe(logical_id: usize, mpidr: u64, rd_base: usize) -> Result<(), GicError> {
+    if logical_id >= MAX_GIC_PES || rd_base == 0 {
+        return Err(GicError::InvalidParameter);
     }
+    let key = canonical_affinity_key(mpidr);
+    let _guard = RegistrationLockGuard::acquire();
 
-    let result = (|| {
-        // 1. Check if this affinity is already registered
-        for i in 0..MAX_GIC_PES {
-            if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
-                if PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == affinity {
-                    if PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == rd_base {
-                        return Ok(()); // Idempotent re-registration with same base
-                    } else {
-                        return Err(GicError::RegistrationConflict); // Conflicting base
-                    }
-                }
-            }
-        }
-
-        // 2. Claim first empty slot
-        for i in 0..MAX_GIC_PES {
-            if PE_STATE[i].load(core::sync::atomic::Ordering::Relaxed) == STATE_EMPTY {
-                PE_STATE[i].store(STATE_WRITING, core::sync::atomic::Ordering::Relaxed);
-                PE_AFFINITY_MAP[i].store(affinity, core::sync::atomic::Ordering::Relaxed);
-                PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Relaxed);
-                PE_STATE[i].store(STATE_VALID, core::sync::atomic::Ordering::Release);
-                return Ok(());
-            }
-        }
-
-        Err(GicError::PeTableFull)
-    })();
-
-    REGISTRATION_LOCK.store(false, core::sync::atomic::Ordering::Release);
-    result
-}
-
-pub fn get_pe_redistributor(affinity: u32) -> Option<usize> {
+    // 1. Inspect existing valid registrations for duplicate affinity or slot collision
     for i in 0..MAX_GIC_PES {
         if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
-            if PE_AFFINITY_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == affinity {
-                let base = PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed);
-                if base != 0 {
-                    return Some(base);
+            let existing_key = PE_MPIDR_MAP[i].load(core::sync::atomic::Ordering::Relaxed);
+            let existing_base = PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed);
+            if existing_key == key {
+                if i != logical_id {
+                    return Err(GicError::DuplicateAffinity);
+                }
+                return if existing_base == rd_base {
+                    Ok(())
+                } else {
+                    Err(GicError::RegistrationConflict)
+                };
+            }
+            if i == logical_id {
+                return Err(GicError::RegistrationConflict);
+            }
+        }
+    }
+
+    // 2. Claim the designated logical slot
+    if PE_STATE[logical_id].load(core::sync::atomic::Ordering::Relaxed) != STATE_EMPTY {
+        return Err(GicError::RegistrationConflict);
+    }
+    PE_STATE[logical_id].store(STATE_WRITING, core::sync::atomic::Ordering::Relaxed);
+    PE_MPIDR_MAP[logical_id].store(key, core::sync::atomic::Ordering::Relaxed);
+    PE_REDISTRIBUTOR_MAP[logical_id].store(rd_base, core::sync::atomic::Ordering::Relaxed);
+    PE_STATE[logical_id].store(STATE_VALID, core::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Registers a PE by 32-bit GICR affinity, automatically allocating the next free logical slot.
+pub fn register_pe_redistributor(affinity: u32, rd_base: usize) -> Result<(), GicError> {
+    if rd_base == 0 {
+        return Err(GicError::InvalidParameter);
+    }
+    let key = gicr_affinity_to_mpidr(affinity);
+    let _guard = RegistrationLockGuard::acquire();
+
+    // 1. Check if this affinity is already registered
+    for i in 0..MAX_GIC_PES {
+        if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
+            if PE_MPIDR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == key {
+                if PE_REDISTRIBUTOR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == rd_base {
+                    return Ok(());
+                } else {
+                    return Err(GicError::RegistrationConflict);
                 }
             }
+        }
+    }
+
+    // 2. Claim first empty slot
+    for i in 0..MAX_GIC_PES {
+        if PE_STATE[i].load(core::sync::atomic::Ordering::Relaxed) == STATE_EMPTY {
+            PE_STATE[i].store(STATE_WRITING, core::sync::atomic::Ordering::Relaxed);
+            PE_MPIDR_MAP[i].store(key, core::sync::atomic::Ordering::Relaxed);
+            PE_REDISTRIBUTOR_MAP[i].store(rd_base, core::sync::atomic::Ordering::Relaxed);
+            PE_STATE[i].store(STATE_VALID, core::sync::atomic::Ordering::Release);
+            return Ok(());
+        }
+    }
+
+    Err(GicError::PeTableFull)
+}
+
+/// Lock-free, wait-free lookup resolving full MPIDR affinity (Aff3..Aff0) to its logical CPU ID.
+pub fn logical_id_for_affinity(mpidr: u64) -> Result<usize, GicError> {
+    let key = canonical_affinity_key(mpidr);
+    for i in 0..MAX_GIC_PES {
+        if PE_STATE[i].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
+            if PE_MPIDR_MAP[i].load(core::sync::atomic::Ordering::Relaxed) == key {
+                return Ok(i);
+            }
+        }
+    }
+    Err(GicError::UnknownPeAffinity)
+}
+
+pub fn get_pe_redistributor_by_logical_id(logical_id: usize) -> Option<usize> {
+    if logical_id >= MAX_GIC_PES {
+        return None;
+    }
+    if PE_STATE[logical_id].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
+        let base = PE_REDISTRIBUTOR_MAP[logical_id].load(core::sync::atomic::Ordering::Relaxed);
+        if base != 0 {
+            return Some(base);
         }
     }
     None
+}
+
+pub fn get_pe_mpidr_by_logical_id(logical_id: usize) -> Option<u64> {
+    if logical_id >= MAX_GIC_PES {
+        return None;
+    }
+    if PE_STATE[logical_id].load(core::sync::atomic::Ordering::Acquire) == STATE_VALID {
+        let key = PE_MPIDR_MAP[logical_id].load(core::sync::atomic::Ordering::Relaxed);
+        if key != u64::MAX {
+            return Some(key);
+        }
+    }
+    None
+}
+
+pub fn get_pe_redistributor(affinity: u32) -> Option<usize> {
+    let key = gicr_affinity_to_mpidr(affinity);
+    if let Ok(logical_id) = logical_id_for_affinity(key) {
+        return get_pe_redistributor_by_logical_id(logical_id);
+    }
+    None
+}
+
+pub fn set_pe_online(logical_id: usize, online: bool) {
+    if logical_id < MAX_GIC_PES {
+        PE_ONLINE[logical_id].store(online, core::sync::atomic::Ordering::Release);
+    }
+}
+
+pub fn is_pe_online(logical_id: usize) -> bool {
+    if logical_id < MAX_GIC_PES {
+        PE_ONLINE[logical_id].load(core::sync::atomic::Ordering::Acquire)
+    } else {
+        false
+    }
 }
 
 /// GICv3 system-register and memory-mapped driver for modern ARM SoCs (e.g. Qualcomm Snapdragon SM8250).
@@ -587,6 +744,13 @@ impl Gicv3 {
     }
 
     #[inline(always)]
+    pub unsafe fn gicd_read_64_checked(&self, offset: usize) -> Result<u64, GicError> {
+        let target = validate_mmio_window(self.distributor_base, self.distributor_size, offset, 8)?;
+        let ptr = target as *const u64;
+        Ok(core::ptr::read_volatile(ptr))
+    }
+
+    #[inline(always)]
     pub unsafe fn gicd_write_64_checked(&self, offset: usize, val: u64) -> Result<(), GicError> {
         let target = validate_mmio_window(self.distributor_base, self.distributor_size, offset, 8)?;
         let ptr = target as *mut u64;
@@ -620,19 +784,25 @@ impl Gicv3 {
         Ok(core::ptr::read_volatile(ptr))
     }
 
-    /// Reads the current processing element's affinity from `MPIDR_EL1`.
-    pub fn current_pe_affinity() -> u32 {
+    /// Reads the raw hardware `MPIDR_EL1` register of the executing PE.
+    pub fn current_raw_mpidr() -> u64 {
         #[allow(unused_mut)]
         let mut mpidr: u64 = 0;
         #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack));
         }
-        let aff3 = ((mpidr >> 32) & 0xFF) as u32;
-        let aff2 = ((mpidr >> 16) & 0xFF) as u32;
-        let aff1 = ((mpidr >> 8) & 0xFF) as u32;
-        let aff0 = (mpidr & 0xFF) as u32;
-        (aff3 << 24) | (aff2 << 16) | (aff1 << 8) | aff0
+        mpidr
+    }
+
+    /// Resolves the executing PE's full `MPIDR_EL1` affinity to its registered logical CPU ID.
+    pub fn current_logical_id() -> Result<usize, GicError> {
+        logical_id_for_affinity(Self::current_raw_mpidr())
+    }
+
+    /// Reads the current processing element's 32-bit GICR affinity from `MPIDR_EL1`.
+    pub fn current_pe_affinity() -> u32 {
+        mpidr_to_gicr_affinity(Self::current_raw_mpidr())
     }
 
     /// Walks the Redistributor frames in MMIO space to find the Redistributor
@@ -692,6 +862,7 @@ impl Gicv3 {
         self.gicd_write_checked(0x0000, ctlr)?;
 
         #[cfg(target_arch = "aarch64")]
+        // Ensure GICD_CTLR write is visible to GIC before polling RWP
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         // Wait for Register Write Pending (RWP, bit 31) to clear
@@ -720,9 +891,21 @@ impl Gicv3 {
         }
 
         #[cfg(target_arch = "aarch64")]
+        // Order SPI group/priority writes before CPU interface enablement
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         Ok(())
+    }
+
+    /// Initializes the Redistributor for the executing PE under a specific logical CPU ID.
+    pub unsafe fn init_redistributor_for_logical_id(&mut self, logical_id: usize) -> Result<(), GicError> {
+        let pe_mpidr = Self::current_raw_mpidr();
+        let pe_aff = mpidr_to_gicr_affinity(pe_mpidr);
+        let rd_base = self.discover_redistributor_for_affinity(pe_aff)?;
+        self.current_rd_base = rd_base;
+        register_pe(logical_id, pe_mpidr, rd_base)?;
+
+        self.wake_and_configure_redistributor(rd_base)
     }
 
     /// Initializes the Redistributor for the current PE.
@@ -732,6 +915,10 @@ impl Gicv3 {
         self.current_rd_base = rd_base;
         register_pe_redistributor(pe_aff, rd_base)?;
 
+        self.wake_and_configure_redistributor(rd_base)
+    }
+
+    unsafe fn wake_and_configure_redistributor(&self, rd_base: usize) -> Result<(), GicError> {
         let rd_offset = rd_base.checked_sub(self.redistributors_base)
             .ok_or(GicError::InvalidMmioRange)?;
 
@@ -741,6 +928,7 @@ impl Gicv3 {
         self.gicr_write_checked(rd_offset + 0x0014, waker)?;
 
         #[cfg(target_arch = "aarch64")]
+        // Ensure GICR_WAKER write reaches the Redistributor before polling ChildrenAsleep
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         // Poll until ChildrenAsleep (bit 2) is cleared
@@ -754,7 +942,7 @@ impl Gicv3 {
         }
 
         // SGI_base is at rd_base + 0x10000 (64 KiB frame)
-        let sgi_offset = rd_offset + 0x10000;
+        let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
         // Configure SGIs/PPIs (0..31) to Group 1 Non-Secure
         self.gicr_write_checked(sgi_offset + 0x0080, 0xFFFF_FFFF)?;
         // Set default priority for SGIs and PPIs
@@ -763,6 +951,7 @@ impl Gicv3 {
         }
 
         #[cfg(target_arch = "aarch64")]
+        // Ensure SGI/PPI configuration is visible before CPU interface activation
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
 
         Ok(())
@@ -775,10 +964,11 @@ impl Gicv3 {
         }
 
         self.init_distributor()?;
-        self.init_redistributor()?;
+        self.init_redistributor_for_logical_id(0)?;
 
         #[cfg(target_arch = "aarch64")]
         {
+            // Order distributor/redistributor MMIO setup before system-register CPU interface writes
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb");
         }
@@ -795,14 +985,15 @@ impl Gicv3 {
             return Err(GicError::InvalidParameter);
         }
         if irq < 32 {
-            let pe_aff = Self::current_pe_affinity();
-            let rd_base = get_pe_redistributor(pe_aff)
+            let pe_mpidr = Self::current_raw_mpidr();
+            let logical_id = logical_id_for_affinity(pe_mpidr)?;
+            let rd_base = get_pe_redistributor_by_logical_id(logical_id)
                 .ok_or(GicError::RedistributorNotFound)?;
             if rd_base < self.redistributors_base {
                 return Err(GicError::InvalidMmioRange);
             }
             let rd_offset = rd_base - self.redistributors_base;
-            let sgi_offset = rd_offset + 0x10000;
+            let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
             let bit = 1 << irq;
             unsafe {
                 self.gicr_write_checked(sgi_offset + 0x0100, bit)?;
@@ -826,14 +1017,15 @@ impl Gicv3 {
             return Err(GicError::InvalidParameter);
         }
         if irq < 32 {
-            let pe_aff = Self::current_pe_affinity();
-            let rd_base = get_pe_redistributor(pe_aff)
+            let pe_mpidr = Self::current_raw_mpidr();
+            let logical_id = logical_id_for_affinity(pe_mpidr)?;
+            let rd_base = get_pe_redistributor_by_logical_id(logical_id)
                 .ok_or(GicError::RedistributorNotFound)?;
             if rd_base < self.redistributors_base {
                 return Err(GicError::InvalidMmioRange);
             }
             let rd_offset = rd_base - self.redistributors_base;
-            let sgi_offset = rd_offset + 0x10000;
+            let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
             let bit = 1 << irq;
             unsafe {
                 self.gicr_write_checked(sgi_offset + 0x0180, bit)?;
@@ -861,7 +1053,9 @@ impl Gicv3 {
         }
         let (aff3, aff2, aff1, aff0) = decode_mpidr_affinity(affinity);
         let val = encode_irouter(aff3, aff2, aff1, aff0, any_pe);
-        let offset = 0x6000 + (irq as usize) * 8;
+        let offset = 0x6000usize
+            .checked_add((irq as usize).checked_mul(8).ok_or(GicError::InvalidParameter)?)
+            .ok_or(GicError::InvalidParameter)?;
         unsafe {
             self.gicd_write_64_checked(offset, val)?;
         }
@@ -1138,6 +1332,34 @@ pub fn pe_sgi_interrupt_count(pe_idx: usize) -> u64 {
 }
 
 #[cfg(test)]
+static GLOBAL_PE_TEST_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub struct GlobalPeTestGuard;
+
+#[cfg(test)]
+impl GlobalPeTestGuard {
+    pub fn acquire() -> Self {
+        while GLOBAL_PE_TEST_LOCK.compare_exchange(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        ).is_err() {
+            core::hint::spin_loop();
+        }
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for GlobalPeTestGuard {
+    fn drop(&mut self) {
+        GLOBAL_PE_TEST_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1224,6 +1446,7 @@ mod tests {
 
     #[test]
     fn test_pe_redistributor_state_machine_and_idempotency() {
+        let _guard = GlobalPeTestGuard::acquire();
         reset_pe_redistributor_map_for_test();
 
         // 1. Initial lookup returns None
@@ -1252,6 +1475,7 @@ mod tests {
 
     #[test]
     fn test_pe_redistributor_table_full_exhaustion() {
+        let _guard = GlobalPeTestGuard::acquire();
         reset_pe_redistributor_map_for_test();
 
         // Register 8 distinct PEs (0..7)
@@ -1332,6 +1556,7 @@ mod tests {
 
     #[test]
     fn test_per_pe_interrupt_counters() {
+        let _guard = GlobalPeTestGuard::acquire();
         reset_pe_redistributor_map_for_test();
 
         assert_eq!(pe_timer_interrupt_count(0), 0);
