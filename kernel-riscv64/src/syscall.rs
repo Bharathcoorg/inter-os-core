@@ -222,7 +222,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
                     if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
                         -14
-                    } else if len == 0 && (addr == 0 || addr >= KERNEL_DRAM_START) {
+                    } else if len == 0 && addr >= KERNEL_DRAM_START {
                         -14
                     } else {
                         let mut router = crate::ipc::IPC_ROUTER.lock();
@@ -866,7 +866,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
         SYS_USER_GET_CURRENT => 1,
         107 => 0, // UserLockState: 0 = Unlocked
-        108 => 0, // UserUnlock: 0 = Ok(())
+        108 => -38, // UserUnlock: -ENOSYS (fail-closed until full auth provider ported)
         129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
         132 => { // CapLookup
             let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };

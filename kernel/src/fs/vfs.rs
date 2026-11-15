@@ -1352,11 +1352,10 @@ impl Vfs {
         }
         if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
             self.inodes.remove(&inode_id);
+            // A payload that no path names must not outlive the path: leaving it
+            // would hold disk blocks no file can reach.
+            (self.spill.remove)(&spill_path_for(&norm));
         }
-
-        // A payload that no path names must not outlive the path: leaving it
-        // would hold disk blocks no file can reach.
-        (self.spill.remove)(&spill_path_for(&norm));
 
         self.rebuild_children();
         self.bump_data_generation();

@@ -67,3 +67,39 @@ impl<'a> UdpDatagram<'a> {
         Ok(total_len)
     }
 }
+
+/// Verifies RFC 768 UDP checksum against IPv4 pseudo-header.
+/// If transmitted checksum is 0x0000, checksum verification is skipped (optional in IPv4).
+pub fn verify_udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp_raw: &[u8]) -> bool {
+    if udp_raw.len() < UDP_HEADER_LEN {
+        return false;
+    }
+    let transmitted_csum = u16::from_be_bytes([udp_raw[6], udp_raw[7]]);
+    if transmitted_csum == 0 {
+        return true; // Optional in IPv4 RFC 768
+    }
+    let mut pseudo = [0u8; 12];
+    pseudo[0..4].copy_from_slice(&src_ip);
+    pseudo[4..8].copy_from_slice(&dst_ip);
+    pseudo[8] = 0;
+    pseudo[9] = 17; // IP protocol UDP
+    pseudo[10..12].copy_from_slice(&(udp_raw.len() as u16).to_be_bytes());
+
+    let mut sum: u32 = 0;
+    for chunk in pseudo.chunks(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    for chunk in udp_raw.chunks(2) {
+        let word = if chunk.len() == 2 {
+            u16::from_be_bytes([chunk[0], chunk[1]])
+        } else {
+            u16::from_be_bytes([chunk[0], 0])
+        };
+        sum += word as u32;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let computed = !sum as u16;
+    computed == 0
+}

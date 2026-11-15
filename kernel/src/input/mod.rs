@@ -269,8 +269,5 @@ fn post_pointer_contact(source: InputSource, slot: u8, x: u32, y: u32, pressure:
             core::hint::spin_loop();
         }
         crate::drivers::input::dispatch_to_focused_window(event);
-        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-    } else if phase == TouchPhase::Move || phase == TouchPhase::Down {
-        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
     }
 }

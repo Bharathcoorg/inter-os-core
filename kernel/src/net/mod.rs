@@ -31,11 +31,11 @@ pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
 pub use socket::{SocketId, SocketTable, TcpConnection, TcpConnectionTable, UdpSocket, TCP_MAX_RETRIES, TCP_RETRANSMIT_TICKS};
-pub use udp::UdpDatagram;
+pub use udp::{verify_udp_checksum, UdpDatagram};
 pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
 pub use route::{Ipv4Cidr, Route, RoutingTable, MAX_ROUTES};
 pub use ipv6::{
-    calculate_icmpv6_checksum, verify_icmpv6_checksum, verify_ndp_hop_limit,
+    build_dad_probe_frame, calculate_icmpv6_checksum, verify_icmpv6_checksum, verify_ndp_hop_limit,
     Icmpv6Neighbor, Icmpv6RouterAdvertisement, Ipv6Address, Ipv6Autoconfig,
     Ipv6Packet, Ipv6Prefix, Ipv6Route, Ipv6RoutingTable, NeighborCache, NeighborEntry,
 };
@@ -161,17 +161,28 @@ impl ArpRequestState {
 
 static ARP_REQUESTS: Mutex<[ArpRequestState; 8]> = Mutex::new([ArpRequestState::EMPTY; 8]);
 
+pub const ARP_REQUEST_TIMEOUT_TICKS: u64 = 500;
+
 fn record_in_flight_arp_request(ip: Ipv4Address, now: u64) {
     let mut requests = ARP_REQUESTS.lock();
-    let slot_index = requests.iter().position(|entry| !entry.valid || entry.ip == ip).unwrap_or(0);
+    let slot_index = if let Some(idx) = requests.iter().position(|entry| !entry.valid || entry.ip == ip) {
+        idx
+    } else {
+        requests.iter().enumerate().min_by_key(|(_, e)| e.requested_at).map(|(i, _)| i).unwrap_or(0)
+    };
     requests[slot_index] = ArpRequestState { ip, requested_at: now, valid: true };
 }
 
-fn take_in_flight_arp_request(ip: Ipv4Address) -> bool {
+fn take_in_flight_arp_request(ip: Ipv4Address, now: u64) -> bool {
     let mut requests = ARP_REQUESTS.lock();
     if let Some(entry) = requests.iter_mut().find(|entry| entry.valid && entry.ip == ip) {
-        entry.valid = false;
-        true
+        if now.saturating_sub(entry.requested_at) <= ARP_REQUEST_TIMEOUT_TICKS {
+            entry.valid = false;
+            true
+        } else {
+            entry.valid = false;
+            false
+        }
     } else {
         false
     }
@@ -602,17 +613,17 @@ pub fn poll_network_interface() -> usize {
         };
         processed += 1;
         if let Ok(frame) = EthernetFrame::parse(&rx_buf[..len]) {
+            let local_mac = NETWORK_DEVICE.lock().info().mac;
+
+            // Universal Ethernet L2 destination filtering: must be unicast to local station, broadcast, or multicast
+            if !frame.dst_mac.is_broadcast() && !frame.dst_mac.is_multicast() && frame.dst_mac != local_mac {
+                record_net_drop(NetDropKind::PortOrConnectionMismatch, "ethernet_dst_mac_mismatch");
+                continue;
+            }
+
             match frame.ethertype {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
-                        let local_mac = NETWORK_DEVICE.lock().info().mac;
-
-                        // Ethernet L2 destination filtering: must be unicast to our interface or broadcast
-                        if frame.dst_mac != local_mac && !frame.dst_mac.is_broadcast() {
-                            record_net_drop(NetDropKind::PortOrConnectionMismatch, "arp_dst_mac_mismatch");
-                            continue;
-                        }
-
                         // Cross-layer validation: sender MAC in ARP payload MUST match Ethernet source MAC
                         if frame.src_mac != arp_pkt.sender_mac {
                             record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_mac_inconsistency");
@@ -627,6 +638,12 @@ pub fn poll_network_interface() -> usize {
 
                         match arp_pkt.opcode {
                             ArpOpcode::Reply => {
+                                // RFC 826: ARP replies must be unicast to our local MAC (never broadcast/multicast)
+                                if frame.dst_mac.is_broadcast() || frame.dst_mac.is_multicast() {
+                                    record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_broadcast_reply_drop");
+                                    continue;
+                                }
+
                                 // Validate target MAC and IP in ARP Reply
                                 if arp_pkt.target_mac != local_mac || arp_pkt.target_ip != DEFAULT_HOST_IP {
                                     record_net_drop(NetDropKind::MalformedChecksumOrLength, "arp_reply_target_mismatch");
@@ -634,7 +651,8 @@ pub fn poll_network_interface() -> usize {
                                 }
 
                                 // Strictly require in-flight correlation; reject unsolicited replies
-                                let had_inflight_request = take_in_flight_arp_request(arp_pkt.sender_ip);
+                                let now = crate::interrupts::get_system_ticks();
+                                let had_inflight_request = take_in_flight_arp_request(arp_pkt.sender_ip, now);
                                 if !had_inflight_request {
                                     record_net_drop(NetDropKind::PortOrConnectionMismatch, "arp_unsolicited_reply_dropped");
                                     continue;
@@ -812,6 +830,10 @@ pub fn poll_network_interface() -> usize {
                             }
                         } else if ip_pkt.protocol == IpProtocol::Udp {
                             if let Ok(udp_dg) = UdpDatagram::parse(ip_pkt.payload) {
+                                if !verify_udp_checksum(ip_pkt.src.0, ip_pkt.dst.0, ip_pkt.payload) {
+                                    log_net_drop("udp_checksum_mismatch");
+                                    continue;
+                                }
                                 SOCKET_TABLE.lock().deliver_udp(
                                     udp_dg.dst_port,
                                     ip_pkt.src,
@@ -875,9 +897,15 @@ pub fn poll_network_interface() -> usize {
                                                 let mut addrs = IPV6_ADDRESSES.lock();
                                                 if addrs.contains_tentative(parsed.target) {
                                                     addrs.mark_invalid(parsed.target);
+                                                    let mut host_ip = HOST_IPV6_LINK_LOCAL.lock();
+                                                    if *host_ip == parsed.target {
+                                                        *host_ip = Ipv6Address::UNSPECIFIED;
+                                                    }
+                                                    drop(host_ip);
                                                     drop(addrs);
                                                     continue;
                                                 }
+                                                let is_assigned = addrs.contains_assigned(parsed.target);
                                                 drop(addrs);
 
                                                 // If target matches our established preferred address, defend it!
@@ -885,7 +913,7 @@ pub fn poll_network_interface() -> usize {
                                                 // NA MUST be addressed to all-nodes multicast (ff02::1),
                                                 // Solicited flag MUST be 0, Override flag MUST be 1.
                                                 let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
-                                                if !host_ip.is_unspecified() && parsed.target == host_ip {
+                                                if is_assigned && !host_ip.is_unspecified() && parsed.target == host_ip {
                                                     let local_mac = NETWORK_DEVICE.lock().info().mac;
                                                     let mut na_buf = [0u8; 32];
                                                     na_buf[0] = 136; // NA
@@ -1051,8 +1079,16 @@ pub fn poll_network_interface() -> usize {
                                                         let valid_until = now.saturating_add((pio.valid_lifetime as u64).saturating_mul(1000));
                                                         let pref_until = now.saturating_add((pio.preferred_lifetime as u64).saturating_mul(1000));
                                                         let _ = IPV6_ADDRESSES.lock().assign_tentative(slaac_addr, valid_until, pref_until);
+
+                                                        // RFC 4862 § 5.4: Transmit DAD probe frame for tentative SLAAC address
+                                                        let mut dad_buf = [0u8; 1514];
+                                                        if let Ok(dad_len) = build_dad_probe_frame(slaac_addr, local_mac, &mut dad_buf) {
+                                                            let _ = NETWORK_DEVICE.lock().transmit(&dad_buf[..dad_len]);
+                                                        }
+
                                                         let mut host_ip = HOST_IPV6_LINK_LOCAL.lock();
                                                         if host_ip.is_unspecified() {
+                                                            IPV6_ADDRESSES.lock().mark_preferred(slaac_addr);
                                                             *host_ip = slaac_addr;
                                                         }
                                                     }

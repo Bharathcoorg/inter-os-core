@@ -152,7 +152,17 @@ impl InputPipeline {
     }
 
     pub fn route_to_task(&mut self, task: TaskId, event: InputEvent) {
-        if self.queue.len() < 128 { self.queue.push_back((task, event)); }
+        const MAX_PER_TASK: usize = 16;
+        const MAX_TOTAL: usize = 128;
+        let task_count = self.queue.iter().filter(|(owner, _)| *owner == task).count();
+        if task_count >= MAX_PER_TASK {
+            if let Some(pos) = self.queue.iter().position(|(owner, _)| *owner == task) {
+                self.queue.remove(pos);
+            }
+        }
+        if self.queue.len() < MAX_TOTAL {
+            self.queue.push_back((task, event));
+        }
     }
 
     pub fn pop_for_task(&mut self, task: TaskId) -> Option<InputEvent> {

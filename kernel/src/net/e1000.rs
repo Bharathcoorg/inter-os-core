@@ -287,8 +287,8 @@ impl E1000Device {
                 | RAH_AV;
             write32(self.base_vaddr, RAL0, ral);
             write32(self.base_vaddr, RAH0, rah);
-            // RCTL: EN(1<<1) | UPE(1<<3) | MPE(1<<4) | BAM(1<<15) | SECRC(1<<26)
-            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26));
+            // RCTL: EN(1<<1) | MPE(1<<4) | BAM(1<<15) | SECRC(1<<26)
+            write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 4) | (1 << 15) | (1 << 26));
             write32(self.base_vaddr, TCTL, (1 << 1) | (1 << 3) | (0x10 << 4) | (0x40 << 12));
             write32(self.base_vaddr, CTRL, read32(self.base_vaddr, CTRL) | (1 << 1) | (1 << 6));
             self.link_up = true;

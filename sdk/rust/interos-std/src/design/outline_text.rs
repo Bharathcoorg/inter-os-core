@@ -33,7 +33,9 @@ use crate::design::typeface;
 /// Expanding to 680 ensures that full-width headlines, card subtitles, and
 /// long metadata strings are rendered as vector outlines without falling back to
 /// blocky bitmap faces.
-const RUN_W_MAX: usize = 680;
+/// Sized to 720 to accommodate edge-to-edge headlines across the full canonical canvas
+/// without falling back to the 16x24 bitmap face.
+const RUN_W_MAX: usize = 720;
 
 /// Tallest run, in pixels: ascent plus descent at the largest useful em.
 ///
@@ -51,17 +53,9 @@ const SLOTS: usize = 32;
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
 ///
-/// WHY a hundred and twenty-eight and not sixty-four: the key holds the
-/// text itself, so its length is the length of the longest run the face
-/// will draw. A sixty-four byte key refused every sentence longer than
-/// sixty-four characters, and a refused run is drawn by the bitmap face at
-/// the bitmap's whole-cell size -- which is a different size from the rest
-/// of the screen, so a paragraph of prose came out in a larger face than
-/// the label above it. The width limit below is the one that should bind:
-/// a run wider than the coverage buffer cannot be drawn at all, and a
-/// hundred and twenty-eight characters at the caption's size is narrower
-/// than that buffer.
-pub const KEY_MAX: usize = 128;
+/// Expanded to 256 bytes to prevent paragraphs and multi-word sentences
+/// from prematurely falling back to the 16x24 bitmap font.
+pub const KEY_MAX: usize = 256;
 
 /// Ink coverage for the placed runs: 255 is fully inked, 0 is untouched.
 ///

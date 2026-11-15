@@ -18,6 +18,10 @@ impl RoutingTable {
  pub const fn new()->Self{Self{routes:[None;MAX_ROUTES]}}
  pub fn add(&mut self,route:Route)->Result<(),Route>{
   if route.destination.prefix_len>32{return Err(route)}
+  if let Some(existing) = self.routes.iter_mut().flatten().find(|r| r.destination == route.destination) {
+   *existing = route;
+   return Ok(());
+  }
   if let Some(slot)=self.routes.iter_mut().find(|r|r.is_none()){*slot=Some(route);Ok(())}else{Err(route)}
  }
  pub fn remove_interface(&mut self,interface:u8){for r in &mut self.routes{if r.map(|x|x.interface)==Some(interface){*r=None;}}}

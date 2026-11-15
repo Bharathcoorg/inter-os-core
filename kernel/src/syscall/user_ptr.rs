@@ -51,6 +51,9 @@ pub fn validate_user_buffer(addr: u64, len: usize) -> Result<(), UserAccessError
     if addr < USER_SPACE_START {
         return Err(UserAccessError::NullOrGuardPage);
     }
+    if addr > USER_SPACE_END {
+        return Err(UserAccessError::KernelAddressExclusion);
+    }
     if len > MAX_USER_TRANSFER_LEN {
         return Err(UserAccessError::LengthTooLarge);
     }

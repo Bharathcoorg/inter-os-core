@@ -62,8 +62,9 @@ impl Rights {
     pub const WRITE: Rights = Rights(1 << 1);
     pub const EXECUTE: Rights = Rights(1 << 2);
     pub const GRANT: Rights = Rights(1 << 3);
-    pub const INVOKE: Rights = Rights(1 << 4);
-    pub const ADMIN: Rights = Rights(1 << 5);
+    pub const REVOKE: Rights = Rights(1 << 4);
+    pub const INVOKE: Rights = Rights(1 << 5);
+    pub const ADMIN: Rights = Rights(1 << 6);
 
     pub fn contains(self, required: Rights) -> bool {
         (self.0 & required.0) == required.0

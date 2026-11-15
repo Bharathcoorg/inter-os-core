@@ -13,6 +13,10 @@ import xml.etree.ElementTree as ET
 # Explicit, auditable skip list for genuinely runtime-dependent tests
 # that require live QEMU or external device environments.
 RUNTIME_DEPENDENT_SKIPPED_FILES = frozenset({
+    "tests/qemu/network/test_qemu_net_arp_udp.py",
+    "tests/qemu/network/test_qemu_net_ipv6_ndp.py",
+    "tests/qemu/network/test_qemu_net_robustness.py",
+    "tests/qemu/network/test_qemu_net_tcp_dns.py",
     "tests/qemu/test_boot_image_immutable.py",
     "tests/qemu/test_qemu_boot.py",
     "tests/qemu/test_tls_trust_runtime.py",

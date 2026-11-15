@@ -1580,12 +1580,24 @@ def test_the_bounded_read_contract_can_fail():
         "            let mut done = 0usize;\n"
         "            while done < buf_len {\n"
         "                let want = (buf_len - done).min(kbuf.len());\n"
-        "                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {",
+        "                let Some(cur_offset) = offset.checked_add(done) else {\n"
+        "                    return SyscallResult::InvalidArguments as i64;\n"
+        "                };\n"
+        "                let Some(user_addr) = a3.checked_add(done as u64) else {\n"
+        "                    return SyscallResult::InvalidArguments as i64;\n"
+        "                };\n"
+        "                match sys_fs_read_at(cap_slot, fd, cur_offset, &mut kbuf[..want]) {",
         "            let mut kbuf = [0u8; 4096];\n"
         "            let mut done = 0usize;\n"
         "            while done < buf_len {\n"
         "                let want = (buf_len - done).min(kbuf.len());\n"
-        "                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {",
+        "                let Some(cur_offset) = offset.checked_add(done) else {\n"
+        "                    return SyscallResult::InvalidArguments as i64;\n"
+        "                };\n"
+        "                let Some(user_addr) = a3.checked_add(done as u64) else {\n"
+        "                    return SyscallResult::InvalidArguments as i64;\n"
+        "                };\n"
+        "                match sys_fs_read_at(cap_slot, fd, cur_offset, &mut kbuf[..want]) {",
         1,
     )
     assert no_refusal != kernel, "the refusal the kernel rule watches is gone"

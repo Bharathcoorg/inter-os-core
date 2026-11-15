@@ -761,7 +761,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             mask
         }
         107 => 0, // UserLockState: 0 = Unlocked
-        108 => 0, // UserUnlock: 0 = Ok(())
+        108 => -38, // UserUnlock: -ENOSYS (fail-closed until full auth provider ported)
         129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
         132 => { // CapLookup
             let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };

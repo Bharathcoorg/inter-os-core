@@ -29,6 +29,18 @@
 | **15. Multi-Arch Telemetry** | Ports: 4301/44445 (x86), 4302/44446 (ARM), 4303/44447 (RISC-V). | `emulator/server.py:1370-1420` | **ACCEPTED** | Dynamic monitor reconnect, serial reader epoch reset on switch. |
 | **16. Telemetry Truthfulness** | Differentiates guest render cycles, transport FPS, and browser presentation FPS. | `emulator/app.js:798-824`, `test_studio_truth_contract.py` | **ACCEPTED** | No simulated 144Hz badges; 0 FPS displayed truthfully on static screens. |
 
+### 1.1 High-DPI Flagship Hardware & Heap Constraints Matrix
+
+| Target Profile | Resolution | Ratio | Buffer Size (ARGB8888) | Scanout (Front+Back) | Heap Impact (64MB Heap) | Bandwidth (60Hz) | Bandwidth (120Hz) | Status / Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Canonical QEMU** | **720×1440** | **18:9** | 3.95 MiB (4,147,200 B) | 7.91 MiB (8,294,400 B) | 12.3% of heap | 248.8 MB/s | 497.7 MB/s | **ACCEPTED (Canonical Baseline)**. 1:1 authoring match, zero fractional blur. |
+| **FHD+ Reference** | **1080×2160** | **18:9** | 8.90 MiB (9,331,200 B) | 17.80 MiB (18,662,400 B) | 27.8% of heap | 559.9 MB/s | 1,119.7 MB/s | **VERIFIED PROFILE**. Preserves 18:9 canvas; exact 1.5x font match (`font_fhd.rs`). |
+| **Flagship 20:9** | **1080×2400** | **20:9** | 9.89 MiB (10,368,000 B) | 19.78 MiB (20,736,000 B) | 30.9% of heap | 622.1 MB/s | 1,244.2 MB/s | **CONSTRAINED TARGET**. Requires 240px vertical letterbox or 20:9 app authoring. Surface memory limit must not exceed 40 MiB to prevent kernel heap panic. |
+
+#### Flagship High-DPI Memory Rules:
+1. **Kernel Heap Safety Invariant:** When scanout buffers occupy 19.78 MiB, `MAX_SURFACE_BYTES` cannot exceed 40 MiB without risking kernel OOM. Surfaces must be backed by `allocate_dma_frames` physical allocations.
+2. **Platform Truth on 120 FPS:** At 120 Hz (8.33ms budget), full-frame software copy requires ~375M cycles (~187ms) in QEMU TCG. 120 FPS is achievable only through dirty band damage tracking (<5% screen update) or hardware VirtIO-GPU scanout submit.
+
 ---
 
 ## 2. Platform Verification & Evidence Matrix

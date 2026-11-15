@@ -1501,10 +1501,16 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let mut done = 0usize;
             while done < buf_len {
                 let want = (buf_len - done).min(kbuf.len());
-                match sys_fs_read_at(cap_slot, fd, offset + done, &mut kbuf[..want]) {
+                let Some(cur_offset) = offset.checked_add(done) else {
+                    return SyscallResult::InvalidArguments as i64;
+                };
+                let Some(user_addr) = a3.checked_add(done as u64) else {
+                    return SyscallResult::InvalidArguments as i64;
+                };
+                match sys_fs_read_at(cap_slot, fd, cur_offset, &mut kbuf[..want]) {
                     Ok(0) => break,
                     Ok(bytes) => {
-                        if copy_to_user(a3 + done as u64, &kbuf[..bytes]).is_err() {
+                        if copy_to_user(user_addr, &kbuf[..bytes]).is_err() {
                             return SyscallResult::InvalidArguments as i64;
                         }
                         done += bytes;
@@ -3897,7 +3903,11 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                     let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                     return Ok(addr);
                 }
-                Err(_) if bytes >= 2 && u16::from_be_bytes([rx[0], rx[1]]) == query_id && from_ip == crate::net::DNS_SERVER && from_port == 53 => {
+                Err(e) if bytes >= 12
+                    && u16::from_be_bytes([rx[0], rx[1]]) == query_id
+                    && (u16::from_be_bytes([rx[2], rx[3]]) & 0x8000) != 0
+                    && from_ip == crate::net::DNS_SERVER && from_port == 53
+                    && (e == "DNS response returned error rcode" || e == "no A record") => {
                     // The server answered this query but carried no usable A
                     // record (an error rcode, an empty answer, or a malformed
                     // body). Retrying the same name cannot change that verdict,
@@ -6963,6 +6973,10 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> Result<i32, Syscall
     }
 
     let check_ready = |fds: &mut [PollFd]| -> i32 {
+        let current_pid = {
+            let sched = SCHEDULER.lock();
+            sched.current_task_id().map(|id| id.0 as u32).unwrap_or(0)
+        };
         let mut count = 0;
         for pfd in fds.iter_mut() {
             pfd.revents = 0;
@@ -6980,12 +6994,16 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i32) -> Result<i32, Syscall
             } else {
                 if let Some(sock_table) = crate::net::SOCKET_TABLE.try_lock() {
                     let sid = crate::net::socket::SocketId(pfd.fd as u32);
-                    if sock_table.get(sid).is_some() {
-                        if (pfd.events & POLLIN) != 0 && sock_table.get(sid).map(|s| s.rx_count > 0).unwrap_or(false) {
-                            pfd.revents |= POLLIN;
-                        }
-                        if (pfd.events & POLLOUT) != 0 {
-                            pfd.revents |= POLLOUT;
+                    if let Some(sock) = sock_table.get(sid) {
+                        if sock.owner_task_id == current_pid {
+                            if (pfd.events & POLLIN) != 0 && sock.rx_count > 0 {
+                                pfd.revents |= POLLIN;
+                            }
+                            if (pfd.events & POLLOUT) != 0 {
+                                pfd.revents |= POLLOUT;
+                            }
+                        } else {
+                            pfd.revents |= POLLNVAL;
                         }
                     } else {
                         pfd.revents |= POLLNVAL;

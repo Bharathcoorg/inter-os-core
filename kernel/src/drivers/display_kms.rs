@@ -231,9 +231,9 @@ pub fn blend_pixel(src_pixel: u32, dst_pixel: u32, opacity: u8) -> u32 {
         let dr = (dst_pixel >> 16) & 0xFF;
         let dg = (dst_pixel >> 8) & 0xFF;
         let db = dst_pixel & 0xFF;
-        let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
-        let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
-        let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+        let out_r = ((sr * sa + dr * inv_sa + 127) / 255) & 0xFF;
+        let out_g = ((sg * sa + dg * inv_sa + 127) / 255) & 0xFF;
+        let out_b = ((sb * sa + db * inv_sa + 127) / 255) & 0xFF;
         (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b
     } else {
         dst_pixel
@@ -2358,9 +2358,9 @@ impl DrmKmsController {
                             let dr = (dst_pixel >> 16) & 0xFF;
                             let dg = (dst_pixel >> 8) & 0xFF;
                             let db = dst_pixel & 0xFF;
-                            let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
-                            let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
-                            let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+                            let out_r = ((sr * sa + dr * inv_sa + 127) / 255) & 0xFF;
+                            let out_g = ((sg * sa + dg * inv_sa + 127) / 255) & 0xFF;
+                            let out_b = ((sb * sa + db * inv_sa + 127) / 255) & 0xFF;
                             self.back_buffer[dst_idx] = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
                         }
                     }
@@ -2394,9 +2394,9 @@ impl DrmKmsController {
                             let dr = (dst_pixel >> 16) & 0xFF;
                             let dg = (dst_pixel >> 8) & 0xFF;
                             let db = dst_pixel & 0xFF;
-                            let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
-                            let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
-                            let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+                            let out_r = ((sr * sa + dr * inv_sa + 127) / 255) & 0xFF;
+                            let out_g = ((sg * sa + dg * inv_sa + 127) / 255) & 0xFF;
+                            let out_b = ((sb * sa + db * inv_sa + 127) / 255) & 0xFF;
                             self.back_buffer[dst_idx] = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
                         }
                     }

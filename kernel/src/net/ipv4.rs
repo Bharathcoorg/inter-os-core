@@ -150,6 +150,9 @@ impl<'a> Ipv4Packet<'a> {
         }
 
         let frag_flags_offset = u16::from_be_bytes([buf[6], buf[7]]);
+        if (frag_flags_offset & 0x8000) != 0 {
+            return Err("IPv4 reserved flag bit set; packet dropped");
+        }
         if (frag_flags_offset & 0x3FFF) != 0 {
             return Err("IPv4 fragments not supported; packet dropped");
         }

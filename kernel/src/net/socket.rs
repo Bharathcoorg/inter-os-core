@@ -612,7 +612,7 @@ impl TcpConnectionTable {
     pub fn arm_fin(&mut self, id: u32, now: u64) -> Result<u32, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
         let next_state = match conn.state {
-            crate::net::TcpState::Established => crate::net::TcpState::FinWait,
+            crate::net::TcpState::Established => crate::net::TcpState::FinWait1,
             crate::net::TcpState::CloseWait => crate::net::TcpState::LastAck,
             _ => return Err(NetError::NoPacketAvailable),
         };

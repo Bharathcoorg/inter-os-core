@@ -244,7 +244,10 @@ pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'stati
                 return Err("excessive CNAME chaining");
             }
             let mut next_target = [0u8; DNS_MAX_NAME];
-            let (_, next_len) = decode_wire_name(buf, p, &mut next_target)?;
+            let (consumed, next_len) = decode_wire_name(buf, p, &mut next_target)?;
+            if consumed > rdlen {
+                return Err("malformed CNAME rdata overread");
+            }
             current_target = next_target;
             target_len = next_len;
             cname_hops += 1;
@@ -289,7 +292,8 @@ impl DnsResolver {
     pub fn begin(&mut self,name:&[u8],now:u64)->Result<u16,&'static str>{
         if name.is_empty()||name.len()>DNS_MAX_NAME{return Err("invalid DNS name")}
         if self.cached(name,now).is_some(){return Err("DNS cache hit")}
-        let mut id = self.next_id.max(1);
+        let tick_salt = ((now as u16) ^ 0xA5C3).wrapping_mul(31);
+        let mut id = (self.next_id.wrapping_add(tick_salt)).max(1);
         let mut free_id = None;
         for _ in 0..u16::MAX {
             if !self.queries.iter().any(|q| q.valid && q.id == id) {

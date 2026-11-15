@@ -358,6 +358,7 @@ impl Rights {
     pub const GRANT: Rights = Rights(1 << 3);
     pub const REVOKE: Rights = Rights(1 << 4);
     pub const INVOKE: Rights = Rights(1 << 5);
+    pub const ADMIN: Rights = Rights(1 << 6);
 
     /// Checks if all rights specified in `required` are contained within `self`.
     pub fn contains(self, required: Rights) -> bool {

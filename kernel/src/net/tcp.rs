@@ -70,9 +70,14 @@ impl<'a> TcpSegment<'a> {
         if data_offset < TCP_HEADER_LEN || data_offset > buf.len() {
             return Err("invalid TCP data offset");
         }
+        let src_port = u16::from_be_bytes([buf[0], buf[1]]);
+        let dst_port = u16::from_be_bytes([buf[2], buf[3]]);
+        if src_port == 0 || dst_port == 0 {
+            return Err("TCP port 0 is invalid");
+        }
         Ok(Self {
-            src_port: u16::from_be_bytes([buf[0], buf[1]]),
-            dst_port: u16::from_be_bytes([buf[2], buf[3]]),
+            src_port,
+            dst_port,
             seq: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
             ack: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
             flags: u16::from_be_bytes([buf[12] & 0x01, buf[13]]),
@@ -134,9 +139,10 @@ pub fn valid_established_segment(
     snd_una: u32,
     snd_nxt: u32,
 ) -> bool {
+    const SYN: u16 = 0x02;
     const RST: u16 = 0x04;
     const ACK: u16 = 0x10;
-    if segment.flags & RST != 0 || segment.flags & ACK == 0 { return false; }
+    if segment.flags & (SYN | RST) != 0 || segment.flags & ACK == 0 { return false; }
     if seq_gt(segment.seq, expected_seq) { return false; }
     if seq_lt(segment.ack, snd_una) || seq_gt(segment.ack, snd_nxt) { return false; }
     true

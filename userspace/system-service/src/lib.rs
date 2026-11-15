@@ -130,12 +130,23 @@ pub fn run_display() -> ! {
 pub fn run_input() -> ! {
     let _ = std::log("[inputd] userspace input manager online.");
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+    let mut event = std::InputEvent {
+        kind: 0,
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        scale_milli: 1000,
+    };
     loop {
         let _ = std::service_heartbeat(2);
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_TIMER_TICK, 20);
+            let _ = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 20);
         } else {
             std::yield_now();
+        }
+        while std::input_event_poll(&mut event).is_ok() {
+            // Drain normalized service input events to prevent queue saturation
         }
     }
 }
