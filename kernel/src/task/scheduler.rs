@@ -342,7 +342,7 @@ impl Scheduler {
         user_stack: usize,
         tls_base: u64,
         user_arg: u64,
-        cap_table: CapabilityTable,
+        mut cap_table: CapabilityTable,
         priority: u8,
     ) -> Result<TaskId, &'static str> {
         crate::task::process::reserve_thread(process_id)?;
@@ -356,6 +356,7 @@ impl Scheduler {
             }
         };
 
+        cap_table.rekey_all();
         let mut tcb = TaskControlBlock::new("user_thread", crate::task::user::user_thread_entry, cap_table, priority);
         let id = tcb.id;
         let custom_stack = user_stack != 0;

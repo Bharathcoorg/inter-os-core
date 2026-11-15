@@ -6635,24 +6635,33 @@ pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
         (pt, pid_opt)
     };
 
-    if len == 0 || addr % 4096 != 0 || addr < 0x1000 {
+    if len == 0 || len > 128 * 1024 * 1024 || addr % 4096 != 0 || addr < 0x1000 || addr >= 0x0000_8000_0000_0000 {
         return Err(SyscallResult::InvalidArguments);
     }
     let len_aligned = (len.checked_add(4095).ok_or(SyscallResult::InvalidArguments)?) & !4095;
+    let end = addr.checked_add(len_aligned).ok_or(SyscallResult::InvalidArguments)?;
+    if end > 0x0000_8000_0000_0000 {
+        return Err(SyscallResult::InvalidArguments);
+    }
     let page_count = len_aligned / 4096;
 
+    let mut unmapped_pages = 0usize;
     let mut pt = page_table_arc.lock();
     for i in 0..page_count {
         let curr_vaddr = addr + i * 4096;
         let page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
             x86_64::VirtAddr::new(curr_vaddr)
         );
-        let _ = pt.unmap_user_page(page);
+        if pt.unmap_user_page(page).is_ok() {
+            unmapped_pages += 1;
+        }
     }
     drop(pt);
 
-    if let Some(pid) = pid_opt {
-        crate::task::process::release_address_space(pid, len_aligned as usize);
+    if unmapped_pages > 0 {
+        if let Some(pid) = pid_opt {
+            crate::task::process::release_address_space(pid, unmapped_pages.saturating_mul(4096));
+        }
     }
     Ok(())
 }
@@ -6712,9 +6721,6 @@ pub fn sys_thread_exit(code: i32) -> ! {
     let exiting = { SCHEDULER.lock().current_task_id() };
     if let Some(id) = exiting {
         serial_println!("[THREAD] Task {} sys_thread_exit({}) called.", id.0, code);
-        if let Some(pid) = crate::task::process::process_for_task(id) {
-            crate::task::process::cancel_thread_reservation(pid);
-        }
         crate::task::futex::FUTEX_MANAGER.lock().cleanup_task(id);
         crate::event::cleanup_task(id);
         crate::ipc::IPC_ROUTER.lock().cleanup_task(id);

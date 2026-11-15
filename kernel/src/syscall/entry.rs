@@ -167,6 +167,14 @@ pub fn init() {
     serial_println!("[OK] Hardware MSR fast system call and PAT write-combining extensions enabled and verified (SCE, STAR, LSTAR, FMASK, PAT).");
 }
 
+extern "C" fn syscall_noncanonical_return_trap(bad_rip: u64) -> ! {
+    crate::serial_println!(
+        "[SECURITY] Blocked non-canonical sysretq return RIP=0x{:016X}; terminating task in Ring 0.",
+        bad_rip
+    );
+    crate::task::scheduler::terminate_current();
+}
+
 /// Low-level naked hardware entry stub invoked by CPU on `syscall`.
 ///
 /// Hardware sets:
@@ -261,7 +269,14 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop rbx",
         "pop rbp",
 
-        // 7. Restore user return instruction pointer and flags
+        // 7. Validate user return RIP before switching back to User RSP or running sysretq.
+        // A non-canonical or kernel-half RCX causes `sysretq` to fault `#GP` in Ring 0
+        // with RSP already pointing to user memory. Keep interrupts masked on kernel RSP.
+        "mov rcx, [rsp]",
+        "shr rcx, 47",
+        "jnz 3f",
+
+        // Safe to restore user RCX (RIP), R11 (RFLAGS), and user RSP
         "pop rcx", // User RIP restored to RCX for sysretq
         "pop r11", // User RFLAGS restored to R11 for sysretq
 
@@ -276,10 +291,17 @@ pub unsafe extern "C" fn syscall_entry() {
         // - ss <- User Data Selector (0x1B)
         "sysretq",
 
+        "3:",
+        "mov rdi, [rsp]",
+        "add rsp, 24",
+        "sti",
+        "call {bad_return_trap}",
+
         user_rsp = sym USER_RSP_SCRATCH,
         current_kernel_rsp = sym CURRENT_TASK_KERNEL_RSP,
         kernel_stack = sym SYSCALL_KERNEL_STACK,
         sys_dispatch = sym crate::syscall::sys_dispatch,
+        bad_return_trap = sym syscall_noncanonical_return_trap,
     );
 }
 

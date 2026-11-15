@@ -1037,6 +1037,23 @@ impl TaskPageTable {
         Some((phys_addr, p1_entry.flags()))
     }
 
+    /// Validates user canonical virtual address bounds before inspecting page tables.
+    /// Rejects null/guard addresses (`< 0x1000`) and non-canonical / kernel-half
+    /// addresses (`>= 0x0000_8000_0000_0000`) even when `len == 0`.
+    pub fn validate_user_bounds(addr: u64, len: usize) -> Result<Option<u64>, &'static str> {
+        if addr < 0x1000 || addr >= 0x0000_8000_0000_0000 {
+            return Err("address out of user canonical range");
+        }
+        if len == 0 {
+            return Ok(None);
+        }
+        let end = addr.checked_add(len as u64).ok_or("address overflow")?;
+        if end > 0x0000_8000_0000_0000 {
+            return Err("kernel address range");
+        }
+        Ok(Some(end))
+    }
+
     /// Validates a complete userspace byte range against this address space.
     /// Every touched leaf must be present, userspace-accessible, have the
     /// requested write permission, and resolve to a frame owned by this task.
@@ -1046,16 +1063,9 @@ impl TaskPageTable {
         len: usize,
         write: bool,
     ) -> Result<(), &'static str> {
-        if addr < 0x1000 {
-            return Err("null or guard page");
-        }
-        if len == 0 {
+        let Some(end) = Self::validate_user_bounds(addr, len)? else {
             return Ok(());
-        }
-        let end = addr.checked_add(len as u64).ok_or("address overflow")?;
-        if end > 0x0000_8000_0000_0000 {
-            return Err("kernel address range");
-        }
+        };
 
         let first_page = addr & !0xFFF;
         let last_page = (end - 1) & !0xFFF;
@@ -1530,6 +1540,17 @@ mod tests {
             Some(1234),
             "the waiting author proceeds once the guard is released"
         );
+    }
+
+    #[test]
+    fn test_zero_len_user_bounds_rejects_kernel_and_null_addresses() {
+        assert!(TaskPageTable::validate_user_bounds(0, 0).is_err());
+        assert!(TaskPageTable::validate_user_bounds(0x0FFF, 0).is_err());
+        assert!(TaskPageTable::validate_user_bounds(0x0000_8000_0000_0000, 0).is_err());
+        assert!(TaskPageTable::validate_user_bounds(0xFFFF_8000_0000_0000, 0).is_err());
+        assert_eq!(TaskPageTable::validate_user_bounds(0x4000, 0), Ok(None));
+        assert_eq!(TaskPageTable::validate_user_bounds(0x4000, 16), Ok(Some(0x4010)));
+        assert!(TaskPageTable::validate_user_bounds(0x0000_7FFF_FFFF_FFF8, 16).is_err());
     }
 }
 
