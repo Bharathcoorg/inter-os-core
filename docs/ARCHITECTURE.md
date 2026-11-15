@@ -336,7 +336,7 @@ The developer emulator backend (`emulator/server.py`) operates under strict isol
 | **MMU / Paging** | 4-Level CR3 Task Tables | 4-Level TTBR0_EL1 Tables | Sv39 3-Level SATP Mode 8 |
 | **Hardware Isolation** | Ring 0 / Ring 3 | EL1 / EL0 | S-Mode / U-Mode |
 | **Trap / Syscall Entry** | MSR Fast Syscall (LSTAR) | Synchronous EL0 Exception | `stvec` Direct Trap Handler |
-| **Syscall Pointer Safety** | Full per-task page-table validation | Bounded user-copy helpers | Bounded user-copy helpers |
+| **Syscall Pointer Safety** | Full per-task page-table validation | Per-task TTBR0 page-table validation & bounded user-copy helpers | Per-task Sv39 page-table validation & bounded user-copy helpers |
 | **Per-Task Kernel Stack** | TSS RSP0 / IST Double Fault | SP_EL1 per-thread | `sscratch` saved frame |
 | **Capability Model** | QEMU-enforced | Unit-tested | Unit-tested |
 | **Multicore / SMP** | Uniprocessor (APIC SIPI unimplemented) | Generic PSCI `CPU_ON`, secondary MMU/caches, `TPIDR_EL1` per-CPU state, IRQ-safe preemptive SMP scheduler, cross-CPU migration & `SGI 1` TLB shootdown (`-smp 2`, `-smp 4` QEMU-verified); GICv2 fallback supported | Uniprocessor QEMU boot |

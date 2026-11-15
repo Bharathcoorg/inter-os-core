@@ -241,10 +241,17 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
             }
             // Instruction Page Fault (12), Load Page Fault (13), Store Page Fault (15)
             12 | 13 | 15 => {
+                let from_user = (tf.sstatus & (1 << 8)) == 0;
                 println!(
-                    "[TRAP:PAGE_FAULT] Fault at addr: 0x{:016x}, sepc: 0x{:016x}, cause: {}",
-                    tf.stval, tf.sepc, code
+                    "[TRAP:PAGE_FAULT] mode={} addr=0x{:016x} sepc=0x{:016x} cause={}",
+                    if from_user { "U" } else { "S" },
+                    tf.stval,
+                    tf.sepc,
+                    code
                 );
+                if !from_user {
+                    panic!("Supervisor page fault at sepc=0x{:016x} stval=0x{:016x} cause={}", tf.sepc, tf.stval, code);
+                }
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
                 let exited = crate::task::SCHEDULER.lock().exit_current();
                 println!("[TRAP] Faulted userspace task marked exited: {}", exited);
@@ -254,7 +261,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
             }
             // Illegal instruction
             2 => {
-                println!("[TRAP:ILLEGAL_INSN] sepc: 0x{:016x}, val: 0x{:016x}", tf.sepc, tf.stval);
+                let from_user = (tf.sstatus & (1 << 8)) == 0;
+                println!(
+                    "[TRAP:ILLEGAL_INSN] mode={} sepc=0x{:016x} val=0x{:016x}",
+                    if from_user { "U" } else { "S" },
+                    tf.sepc,
+                    tf.stval
+                );
+                if !from_user {
+                    panic!("Supervisor illegal instruction at sepc=0x{:016x}", tf.sepc);
+                }
                 let exited = crate::task::SCHEDULER.lock().exit_current();
                 println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
                 loop {
@@ -262,10 +278,21 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 }
             }
             _ => {
+                let from_user = (tf.sstatus & (1 << 8)) == 0;
                 println!(
-                    "[TRAP:EXCEPTION] scause: {}, sepc: 0x{:016x}, stval: 0x{:016x}",
-                    code, tf.sepc, tf.stval
+                    "[TRAP:EXCEPTION] mode={} scause={} sepc=0x{:016x} stval=0x{:016x}",
+                    if from_user { "U" } else { "S" },
+                    code,
+                    tf.sepc,
+                    tf.stval
                 );
+                if !from_user {
+                    panic!("Unhandled supervisor exception scause={} at sepc=0x{:016x}", code, tf.sepc);
+                }
+                let _ = crate::task::SCHEDULER.lock().exit_current();
+                loop {
+                    unsafe { core::arch::asm!("wfi"); }
+                }
             }
         }
     }

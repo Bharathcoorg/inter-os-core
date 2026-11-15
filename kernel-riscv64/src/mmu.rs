@@ -46,6 +46,13 @@ pub unsafe fn with_user_memory<R>(f: impl FnOnce() -> R) -> R {
 /// With the C extension enabled a 16-bit compressed instruction is distinguished
 /// from a 32-bit one by the low two bits being `11` for the long form.
 pub unsafe fn instruction_len(addr: usize) -> usize {
+    if addr >= 0x1000 && addr <= USER_SPACE_MAX {
+        let satp: usize;
+        asm!("csrr {0}, satp", out(reg) satp, options(nostack, nomem));
+        if validate_sv39_user_range(satp, addr, 2, false).is_err() {
+            return 4;
+        }
+    }
     let halfword = with_user_memory(|| core::ptr::read_volatile(addr as *const u16));
     if halfword & 0x3 != 0x3 { 2 } else { 4 }
 }
@@ -738,6 +745,9 @@ impl UserAddressSpace {
         let vpn0 = (vaddr >> 12) & 0x1FF;
 
         // Level 2 root entry -> Level 1 table
+        if (root.entries[vpn2] & PTE_V) != 0 && (root.entries[vpn2] & (PTE_R | PTE_W | PTE_X)) != 0 {
+            return Err("Virtual address collides with 1GB supervisor gigapage");
+        }
         let mut newly_allocated_lvl1 = None;
         let lvl1_paddr = if root.entries[vpn2] & PTE_V == 0 {
             let frame = allocate_frame_with_ownership(FrameOwnership::Kernel).ok_or("OOM allocating Level 1 page table")?;
@@ -763,7 +773,7 @@ impl UserAddressSpace {
             newly_allocated_lvl0 = Some(frame);
             frame
         } else {
-            if (lvl1.entries[vpn1] & (PTE_R | PTE_X)) != 0 {
+            if (lvl1.entries[vpn1] & (PTE_R | PTE_W | PTE_X)) != 0 {
                 if let Some(f) = newly_allocated_lvl1 {
                     let _ = recycle_frame(f);
                 }
@@ -1446,5 +1456,116 @@ pub fn test_mmu_ownership_reclamation_errors() {
     drop(aspace_ms1);
     drop(aspace_ms2);
 
+    // 8. Real Sv39 page-table walk user pointer validation & gigapage protection
+    {
+        let mut aspace_pt = UserAddressSpace::new().expect("aspace sv39 validation");
+        let f_rw = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("rw frame");
+        let f_ro = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("ro frame");
+        aspace_pt.map_private_frame(0x0040_0000, f_rw, true, false).expect("map rw");
+        aspace_pt.map_private_frame(0x0040_2000, f_ro, false, true).expect("map ro+exec");
+
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_0000, 64, false), Ok(()));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_0000, 64, true), Ok(()));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_2000, 64, false), Ok(()));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_2000, 64, true), Err(-13));
+        // Unmapped gap & cross-page spillover
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_1000, 64, false), Err(-14));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0040_0FF0, 32, false), Err(-14));
+        // Supervisor MMIO megapages & 1 GiB PCIe gigapage without PTE_U must fail
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x0C00_0000, 16, false), Err(-14));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x1000_0000, 16, true), Err(-14));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x3000_0000, 16, false), Err(-14));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x4000_0000, 16, false), Err(-14));
+        // Null & kernel DRAM rejected even with zero len
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0, 0, false), Err(-14));
+        assert_eq!(validate_sv39_user_range(aspace_pt.satp, 0x8000_0000, 0, false), Err(-14));
+
+        assert_eq!(aspace_pt.unmap_user_page(0x0040_0000, true), Ok(()));
+        assert_eq!(aspace_pt.unmap_user_page(0x0040_2000, true), Ok(()));
+        assert_eq!(aspace_pt.destroy_fallible(), Ok(()));
+    }
+
     crate::println!("[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.");
+}
+
+/// Validates a user virtual address range `[addr, addr + len)` directly against an Sv39
+/// page table tree referenced by `satp`.
+///
+/// Rejects null/out-of-range/overflow pointers, unmapped pages, supervisor-only pages
+/// lacking `PTE_U` (CLINT, PLIC, UART, VirtIO, PCIe ECAM, kernel DRAM), non-readable pages,
+/// and writes to read-only user pages (`Err(-13)`).
+pub fn validate_sv39_user_range(satp: usize, addr: usize, len: usize, write: bool) -> Result<(), i64> {
+    if addr < USER_SPACE_MIN || addr > USER_SPACE_MAX {
+        return Err(-14);
+    }
+    let root_paddr = ((satp as u64) & 0x0FFF_FFFF_FFFF) << 12;
+    if root_paddr == 0 {
+        return Err(-14);
+    }
+
+    let end = if len == 0 {
+        addr.checked_add(1).ok_or(-14)?
+    } else {
+        addr.checked_add(len).ok_or(-14)?
+    };
+    if end - 1 > USER_SPACE_MAX {
+        return Err(-14);
+    }
+
+    let root = unsafe { &*(root_paddr as *const PageTable) };
+    let start_page = addr & !(PAGE_SIZE - 1);
+    let last_page = (end - 1) & !(PAGE_SIZE - 1);
+    let mut page = start_page;
+
+    loop {
+        let vpn2 = (page >> 30) & 0x1FF;
+        let vpn1 = (page >> 21) & 0x1FF;
+        let vpn0 = (page >> 12) & 0x1FF;
+
+        let e2 = root.entries[vpn2];
+        if (e2 & PTE_V) == 0 {
+            return Err(-14);
+        }
+        let leaf = if (e2 & (PTE_R | PTE_W | PTE_X)) != 0 {
+            e2
+        } else {
+            let lvl1_paddr = ((e2 >> 10) << 12) as usize;
+            if lvl1_paddr == 0 {
+                return Err(-14);
+            }
+            let lvl1 = unsafe { &*(lvl1_paddr as *const PageTable) };
+            let e1 = lvl1.entries[vpn1];
+            if (e1 & PTE_V) == 0 {
+                return Err(-14);
+            }
+            if (e1 & (PTE_R | PTE_W | PTE_X)) != 0 {
+                e1
+            } else {
+                let lvl0_paddr = ((e1 >> 10) << 12) as usize;
+                if lvl0_paddr == 0 {
+                    return Err(-14);
+                }
+                let lvl0 = unsafe { &*(lvl0_paddr as *const PageTable) };
+                let e0 = lvl0.entries[vpn0];
+                if (e0 & PTE_V) == 0 || (e0 & (PTE_R | PTE_W | PTE_X)) == 0 {
+                    return Err(-14);
+                }
+                e0
+            }
+        };
+
+        if (leaf & PTE_U) == 0 || (leaf & PTE_R) == 0 {
+            return Err(-14);
+        }
+        if write && (leaf & PTE_W) == 0 {
+            return Err(-13);
+        }
+
+        if page >= last_page {
+            break;
+        }
+        page += PAGE_SIZE;
+    }
+
+    Ok(())
 }

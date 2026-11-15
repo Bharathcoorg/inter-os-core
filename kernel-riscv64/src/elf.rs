@@ -79,7 +79,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let p_filesz = u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
             let p_memsz = u64::from_le_bytes(elf_data[ph_start + 40..ph_start + 48].try_into().unwrap()) as usize;
 
-            if p_offset + p_filesz > elf_data.len() {
+            if p_offset.checked_add(p_filesz).map_or(true, |end| end > elf_data.len()) {
                 return Err("Segment file size exceeds ELF file bounds");
             }
             if p_filesz > p_memsz {
@@ -87,6 +87,9 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             }
 
             let seg_end_vaddr = p_vaddr.checked_add(p_memsz).ok_or("Segment vaddr overflow")?;
+            if p_vaddr < 0x1000 || p_vaddr >= seg_end_vaddr || seg_end_vaddr > crate::mmu::USER_SPACE_MAX + 1 {
+                return Err("Invalid or non-canonical user segment range");
+            }
             if p_vaddr < stack_guard_end && seg_end_vaddr > stack_guard_start {
                 return Err("Segment collides with user stack region");
             }
@@ -103,7 +106,10 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             }
 
             let page_start = p_vaddr & !(PAGE_SIZE - 1);
-            let page_end = (seg_end_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let page_end = seg_end_vaddr
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or("Segment page alignment overflow")?
+                & !(PAGE_SIZE - 1);
 
             let mut cur_page = page_start;
             while cur_page < page_end {
