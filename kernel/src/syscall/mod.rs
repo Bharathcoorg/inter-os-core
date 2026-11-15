@@ -1017,14 +1017,14 @@ pub fn sys_fs_write(
             _ => SyscallResult::InvalidArguments,
         })?;
 
-    // Persist before reporting success.
+    // Persist before reporting success (regular files only; skip for character device nodes).
     //
     // Writes land in an in-memory snapshot. Nothing else on the write path
     // called sync(), so a successful write existed only in RAM and was lost on
     // reboot. sync() copies the snapshot out and issues the ATA CACHE FLUSH, so
     // returning before it completes would report a durability the device does
     // not have.
-    if written > 0 {
+    if written > 0 && !vfs.is_device_fd(task_id, fd) {
         if let Err(e) = vfs.sync() {
             crate::serial_println!("[FS] durability flush failed after write: {:?}", e);
             return Err(SyscallResult::DeviceError);
@@ -1458,7 +1458,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 match sys_fs_read(cap_slot, fd, &mut kbuf[..want]) {
                     Ok(0) => break,
                     Ok(bytes) => {
-                        if copy_to_user(a3 + done as u64, &kbuf[..bytes]).is_err() {
+                        let Some(user_addr) = a3.checked_add(done as u64) else {
+                            return SyscallResult::InvalidArguments as i64;
+                        };
+                        if copy_to_user(user_addr, &kbuf[..bytes]).is_err() {
                             return SyscallResult::InvalidArguments as i64;
                         }
                         done += bytes;
@@ -1534,7 +1537,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let mut done = 0usize;
             while done < buf_len {
                 let want = (buf_len - done).min(kbuf.len());
-                if copy_from_user(&mut kbuf[..want], a3 + done as u64, want).is_err() {
+                let Some(user_addr) = a3.checked_add(done as u64) else {
+                    return SyscallResult::InvalidArguments as i64;
+                };
+                if copy_from_user(&mut kbuf[..want], user_addr, want).is_err() {
                     return SyscallResult::InvalidArguments as i64;
                 }
                 match sys_fs_write(cap_slot, fd, &kbuf[..want]) {

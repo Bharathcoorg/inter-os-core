@@ -183,6 +183,28 @@ mod tests {
         assert_eq!(parsed.seq, 10);
         assert_eq!(parsed.payload, b"GET");
     }
+
+    #[test]
+    fn tcp_retransmission_exhaustion_does_not_starve_remaining_slots() {
+        let mut rel = TcpReliability::new();
+        rel.track(100, 10, 0).unwrap();
+        rel.track(200, 20, 0).unwrap();
+        assert_eq!(rel.pending(), 2);
+
+        // Advance slot 0 to the maximum number of attempts
+        if let Some(r) = rel.pending[0].as_mut() {
+            r.attempts = TCP_MAX_RETRANSMISSIONS;
+            r.sent_at = 0;
+            r.rto = 100;
+        }
+
+        // When poll due occurs at tick 150, slot 0 is exhausted and purged,
+        // but due() continues scanning and returns slot 1 (seq 200).
+        let retrans = rel.due(150);
+        assert!(retrans.is_some(), "Retransmission for slot 1 must not be starved by exhausted slot 0");
+        assert_eq!(retrans.unwrap().seq, 200);
+        assert_eq!(rel.pending(), 1, "Exhausted slot 0 must be evicted");
+    }
 }
 
 
@@ -202,7 +224,7 @@ impl TcpReliability {
   if let Some(slot)=self.pending.iter_mut().find(|x|x.is_none()){*slot=Some(Retransmission{seq,len,sent_at:now,attempts:0,rto:TCP_RETRANSMIT_TIMEOUT});Ok(())}else{Err("TCP retransmission queue full")}
  }
  pub fn acknowledge(&mut self,ack:u32){for slot in &mut self.pending{if let Some(r)=*slot{if seq_ge(ack,r.seq.wrapping_add(r.len as u32)){*slot=None;}}}}
- pub fn due(&mut self,now:u64)->Option<Retransmission>{for slot in &mut self.pending{if let Some(mut r)=*slot{if now.saturating_sub(r.sent_at)>=r.rto{if r.attempts>=TCP_MAX_RETRANSMISSIONS{*slot=None;return None;}r.sent_at=now;r.attempts=r.attempts.saturating_add(1);r.rto=(r.rto.saturating_mul(2)).min(TCP_RETRANSMIT_MAX_TIMEOUT);*slot=Some(r);return Some(r);}}}None}
+ pub fn due(&mut self,now:u64)->Option<Retransmission>{for slot in &mut self.pending{if let Some(mut r)=*slot{if now.saturating_sub(r.sent_at)>=r.rto{if r.attempts>=TCP_MAX_RETRANSMISSIONS{*slot=None;continue;}r.sent_at=now;r.attempts=r.attempts.saturating_add(1);r.rto=(r.rto.saturating_mul(2)).min(TCP_RETRANSMIT_MAX_TIMEOUT);*slot=Some(r);return Some(r);}}}None}
  pub fn enter_time_wait(&mut self,now:u64){self.time_wait_until=now.saturating_add(TCP_TIME_WAIT)}
  pub fn time_wait_expired(&self,now:u64)->bool{self.time_wait_until!=0&&now>=self.time_wait_until}
  pub fn in_time_wait(&self,now:u64)->bool{self.time_wait_until!=0&&now<self.time_wait_until}

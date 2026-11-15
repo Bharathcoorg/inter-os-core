@@ -49,8 +49,10 @@ pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'stati
     let flags = u16::from_be_bytes([buf[2], buf[3]]);
     let answers = u16::from_be_bytes([buf[6], buf[7]]);
     if flags & 0x8000 == 0 || flags & 0x000F != 0 || answers == 0 { return Err("DNS response rejected"); }
+    let qname_start = DNS_HEADER_LEN;
     let mut p = DNS_HEADER_LEN;
     let qd = u16::from_be_bytes([buf[4], buf[5]]);
+    if qd == 0 { return Err("DNS response missing question"); }
     for _ in 0..qd {
         loop {
             if p >= buf.len() { return Err("truncated DNS question"); }
@@ -62,18 +64,27 @@ pub fn parse_a_answer(buf: &[u8], expected_id: u16) -> Result<DnsAnswer, &'stati
         if p + 4 > buf.len() { return Err("truncated DNS question"); }
         p += 4;
     }
+    let qname_len = (p - 4) - qname_start;
     for _ in 0..answers {
         if p >= buf.len() { return Err("truncated DNS answer"); }
         if buf[p] & 0xC0 == 0xC0 {
             if p + 2 > buf.len() { return Err("bad DNS name pointer"); }
+            let ptr = (u16::from_be_bytes([buf[p] & 0x3F, buf[p+1]])) as usize;
+            if ptr != qname_start {
+                return Err("DNS answer name pointer mismatch");
+            }
             p += 2;
         } else {
+            let answer_name_start = p;
             loop {
                 if p >= buf.len() { return Err("truncated DNS name"); }
                 let len = buf[p] as usize; p += 1;
                 if len == 0 { break; }
                 if len & 0xC0 != 0 || p + len > buf.len() { return Err("invalid DNS name"); }
                 p += len;
+            }
+            if p - answer_name_start != qname_len || &buf[answer_name_start..p] != &buf[qname_start..qname_start + qname_len] {
+                return Err("DNS answer name mismatch");
             }
         }
         if p + 10 > buf.len() { return Err("truncated DNS RR"); }
@@ -180,5 +191,58 @@ mod lifecycle_tests {
         let second = r.begin(b"two.example", 0).unwrap();
         assert_ne!(first, second);
         assert_ne!(second, 0);
+    }
+
+    #[test]
+    fn dns_answer_name_mismatch_rejected() {
+        // Construct a DNS response packet for example.com with ID 0x1234
+        // Header: id=0x1234, flags=0x8180 (std response, no error), qdcount=1, ancount=1, nscount=0, arcount=0
+        let mut packet = alloc::vec![
+            0x12, 0x34, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        // Question: \x07example\x03com\x00, qtype=1 (A), qclass=1 (IN)
+        packet.extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
+
+        // Valid answer using compression pointer to question name (0xC00C)
+        let mut valid_packet = packet.clone();
+        valid_packet.extend_from_slice(&[
+            0xC0, 0x0C,             // Pointer to byte 12 (question name)
+            0x00, 0x01, 0x00, 0x01, // qtype=A, qclass=IN
+            0x00, 0x00, 0x00, 0x3C, // TTL = 60s
+            0x00, 0x04,             // rdlen = 4
+            192, 0, 2, 1,           // IPv4 address 192.0.2.1
+        ]);
+        let ans = parse_a_answer(&valid_packet, 0x1234).expect("valid answer accepted");
+        assert_eq!(ans.addr, Ipv4Address([192, 0, 2, 1]));
+
+        // Poisoned answer with bad pointer to non-question offset
+        let mut bad_ptr_packet = packet.clone();
+        bad_ptr_packet.extend_from_slice(&[
+            0xC0, 0x00,             // Pointer to byte 0 (not question name!)
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x3C,
+            0x00, 0x04,
+            192, 0, 2, 1,
+        ]);
+        assert_eq!(
+            parse_a_answer(&bad_ptr_packet, 0x1234),
+            Err("DNS answer name pointer mismatch")
+        );
+
+        // Poisoned answer with mismatched literal name
+        let mut bad_name_packet = packet.clone();
+        bad_name_packet.extend_from_slice(b"\x06evilco\x03com\x00");
+        bad_name_packet.extend_from_slice(&[
+            0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x3C,
+            0x00, 0x04,
+            198, 51, 100, 1,
+        ]);
+        assert_eq!(
+            parse_a_answer(&bad_name_packet, 0x1234),
+            Err("DNS answer name mismatch")
+        );
     }
 }

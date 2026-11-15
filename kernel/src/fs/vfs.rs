@@ -476,7 +476,13 @@ impl Vfs {
         let old = normalize_path(old_path); let new = normalize_path(new_path);
         if old == "/" || new == "/" || old == new { return Err(FsError::InvalidPath); }
         let id = self.lookup(&old).ok_or(FsError::FileNotFound)?;
-        if self.path_to_inode.contains_key(&new) { return Err(FsError::InvalidPath); }
+        if self.path_to_inode.contains_key(&new) || self.hard_links.contains_key(&new) { return Err(FsError::InvalidPath); }
+        let src_type = self.inodes.get(&id).map(|i| i.file_type).ok_or(FsError::FileNotFound)?;
+        if src_type == FileType::ReadOnlySystem { return Err(FsError::ReadOnlyFileSystem); }
+        if src_type == FileType::DeviceNode { return Err(FsError::PermissionDenied); }
+        if src_type == FileType::Directory && new.starts_with(&(old.clone() + "/")) {
+            return Err(FsError::InvalidPath);
+        }
         let parent = parent_path(&new); let parent_id = self.lookup(parent).ok_or(FsError::FileNotFound)?;
         if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) { return Err(FsError::NotADirectory); }
         if self.inodes.get(&id).map(|i| i.file_type == FileType::Directory && !i.children.is_empty()).unwrap_or(false) { return Err(FsError::DirectoryNotEmpty); }
@@ -542,6 +548,10 @@ impl Vfs {
         let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
         if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
         let inode_id=handle.inode_id;
+        let inode_type = self.inodes.get(&inode_id).map(|i| i.file_type).ok_or(FsError::FileNotFound)?;
+        if inode_type == FileType::Directory { return Err(FsError::IsADirectory); }
+        if inode_type == FileType::ReadOnlySystem { return Err(FsError::ReadOnlyFileSystem); }
+        if inode_type == FileType::DeviceNode { return Err(FsError::PermissionDenied); }
         let block_backed = self.inodes.get(&inode_id).map(|i| i.block_backed).unwrap_or(false);
         // A device-held payload is resized by the device. The kernel has no
         // bytes to resize, and a resize that left the device copy at its old
@@ -819,6 +829,12 @@ impl Vfs {
         let norm_path = normalize_path(path);
         if let Some(&existing_id) = self.path_to_inode.get(&norm_path) {
             if let Some(inode) = self.inodes.get_mut(&existing_id) {
+                if inode.file_type == FileType::Directory
+                    || inode.file_type == FileType::DeviceNode
+                    || inode.file_type == FileType::ReadOnlySystem
+                {
+                    return existing_id;
+                }
                 if inode.block_backed {
                     return existing_id;
                 }
@@ -1292,17 +1308,32 @@ impl Vfs {
 
     pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
         let norm = normalize_path(path);
+        if norm == "/" { return Err(FsError::InvalidPath); }
         self.bump_storage_generation(&norm);
         if let Some(inode_id) = self.hard_links.remove(&norm) {
             let previous = self.inodes.get(&inode_id).cloned().ok_or(FsError::FileNotFound)?;
+            if previous.file_type == FileType::Directory {
+                self.hard_links.insert(norm, inode_id);
+                return Err(FsError::IsADirectory);
+            }
+            if previous.file_type == FileType::ReadOnlySystem {
+                self.hard_links.insert(norm, inode_id);
+                return Err(FsError::ReadOnlyFileSystem);
+            }
+            if previous.file_type == FileType::DeviceNode {
+                self.hard_links.insert(norm, inode_id);
+                return Err(FsError::PermissionDenied);
+            }
             if let Some(inode) = self.inodes.get_mut(&inode_id) {
                 inode.nlink = inode.nlink.saturating_sub(1);
                 inode.ctime = crate::interrupts::get_system_ticks();
             }
+            self.rebuild_children();
             self.bump_metadata_generation();
             if self.persist_metadata_snapshot().is_err() {
                 self.hard_links.insert(norm, inode_id);
                 self.inodes.insert(inode_id, previous);
+                self.rebuild_children();
                 return Err(FsError::IntegrityViolation);
             }
             return Ok(());
@@ -1310,7 +1341,9 @@ impl Vfs {
 
         let inode_id = self.path_to_inode.get(&norm).copied().ok_or(FsError::FileNotFound)?;
         let previous = self.inodes.get(&inode_id).cloned().ok_or(FsError::FileNotFound)?;
-        if previous.file_type == FileType::Directory { return Err(FsError::InvalidPath); }
+        if previous.file_type == FileType::Directory { return Err(FsError::IsADirectory); }
+        if previous.file_type == FileType::ReadOnlySystem { return Err(FsError::ReadOnlyFileSystem); }
+        if previous.file_type == FileType::DeviceNode { return Err(FsError::PermissionDenied); }
 
         self.path_to_inode.remove(&norm);
         if let Some(inode) = self.inodes.get_mut(&inode_id) {
@@ -1325,12 +1358,14 @@ impl Vfs {
         // would hold disk blocks no file can reach.
         (self.spill.remove)(&spill_path_for(&norm));
 
+        self.rebuild_children();
         self.bump_data_generation();
         self.bump_metadata_generation();
 
         if self.persist_metadata_snapshot().is_err() {
             self.path_to_inode.insert(norm, inode_id);
             self.inodes.insert(inode_id, previous);
+            self.rebuild_children();
             return Err(FsError::IntegrityViolation);
         }
         Ok(())
@@ -1427,14 +1462,29 @@ impl Vfs {
         self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
-    /// Opens a file, creating a task-specific FileDescriptor guarded by capability tokens.
+    /// Resolves the application package identity for a task or any worker thread in its process.
     fn app_package_for_task(task_id: TaskId) -> Option<String> {
-        let name = crate::task::SCHEDULER.lock().get_task(task_id).map(|task| task.name)?;
+        let sched = crate::task::SCHEDULER.lock();
+        let task = sched.get_task(task_id)?;
+        let name = task.name;
+        let proc_id = task.process_id;
         if let Some(pkg) = crate::package::first_party_package_by_process_name(name) {
             return Some(pkg.package_id.to_string());
         }
-        if name.starts_with("org.interos.") && !name.contains('/') && !name.contains('\\') && !name.contains("..") {
+        if (name.starts_with("org.interos.") || (name.contains('.') && !name.contains('/') && !name.contains('\\'))) && !name.contains("..") {
             return Some(name.to_string());
+        }
+        // If this is a worker thread (e.g. named "user_thread"), look up the process leader
+        if let Some(pid) = proc_id {
+            if let Some(leader) = sched.tasks_iter().find(|t| t.process_id == Some(pid) && t.id != task_id) {
+                let leader_name = leader.name;
+                if let Some(pkg) = crate::package::first_party_package_by_process_name(leader_name) {
+                    return Some(pkg.package_id.to_string());
+                }
+                if (leader_name.starts_with("org.interos.") || (leader_name.contains('.') && !leader_name.contains('/') && !leader_name.contains('\\'))) && !leader_name.contains("..") {
+                    return Some(leader_name.to_string());
+                }
+            }
         }
         None
     }
@@ -1570,10 +1620,10 @@ impl Vfs {
                 return Err(no_filesystem_authority(task_caps));
             }
 
-            let inode_id = if let Some(existing) = self.lookup(path) {
-                existing
+            let normalized = normalize_path(path);
+            let (inode_id, newly_created) = if let Some(existing) = self.lookup(&normalized) {
+                (existing, false)
             } else {
-                let normalized = normalize_path(path);
                 let is_storage = normalized.starts_with("/storage/");
                 // WHY the model namespace sits beside `/storage/` here: this
                 // check asks which tree a caller's identity may create in, and
@@ -1605,15 +1655,23 @@ impl Vfs {
                 };
                 self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
                 self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
-                created
+                (created, true)
             };
-            let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+            let inode = match self.inodes.get(&inode_id) {
+                Some(i) => i,
+                None => {
+                    if newly_created { let _ = self.unlink(&normalized); }
+                    return Err(FsError::FileNotFound);
+                }
+            };
 
             if inode.file_type == FileType::Directory {
+                if newly_created { let _ = self.unlink(&normalized); }
                 return Err(FsError::IsADirectory);
             }
 
             if inode.file_type == FileType::ReadOnlySystem {
+                if newly_created { let _ = self.unlink(&normalized); }
                 return Err(FsError::ReadOnlyFileSystem);
             }
 
@@ -1622,7 +1680,7 @@ impl Vfs {
             // may hold several capabilities of the same type with different
             // scopes. A capability of the right type that does not cover
             // this object is a refusal, not a fallback to a broader one.
-            let _cap = task_caps
+            let cap_match = task_caps
                 .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, inode_id.0)
                 .or_else(|| {
                     task_caps.find_capability_for_object(
@@ -1630,18 +1688,31 @@ impl Vfs {
                         Rights::WRITE,
                         inode_id.0,
                     )
-                })
-                .ok_or(FsError::PermissionDenied)?;
-
-            let process = crate::task::process::process_for_task(task_id).ok_or(FsError::PermissionDenied)?;
-        crate::task::process::reserve_open_file(process).map_err(|_| FsError::TableFull)?;
-        match self.allocate_fd(task_id, inode_id, requested_rights) {
-            Ok(fd) => Ok(fd),
-            Err(err) => {
-                crate::task::process::release_open_file(process);
-                Err(err)
+                });
+            if cap_match.is_none() {
+                if newly_created { let _ = self.unlink(&normalized); }
+                return Err(FsError::PermissionDenied);
             }
-        }
+
+            let process = match crate::task::process::process_for_task(task_id) {
+                Some(p) => p,
+                None => {
+                    if newly_created { let _ = self.unlink(&normalized); }
+                    return Err(FsError::PermissionDenied);
+                }
+            };
+            if crate::task::process::reserve_open_file(process).is_err() {
+                if newly_created { let _ = self.unlink(&normalized); }
+                return Err(FsError::TableFull);
+            }
+            match self.allocate_fd(task_id, inode_id, requested_rights) {
+                Ok(fd) => Ok(fd),
+                Err(err) => {
+                    crate::task::process::release_open_file(process);
+                    if newly_created { let _ = self.unlink(&normalized); }
+                    Err(err)
+                }
+            }
         } else {
             // WHY the presence of a filesystem capability is checked before
             // the path is resolved: a caller with no filesystem authority
@@ -2402,8 +2473,18 @@ pub fn read_file_for_task(
             } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
             if !is_persistent_metadata_path(path) { continue; }
             if kind == 1 {
-                let created=self.mkdir(path);
-                if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
+                let created = self.mkdir(path);
+                if let Some(inode) = self.inodes.get_mut(&created) {
+                    inode.uid = uid; inode.gid = gid; inode.mode = mode; inode.nlink = nlink;
+                    inode.atime = atime; inode.mtime = mtime; inode.ctime = ctime;
+                }
+                if id != created.0 && !self.inodes.contains_key(&InodeId(id)) {
+                    if let Some(mut inode) = self.inodes.remove(&created) {
+                        inode.id=InodeId(id);
+                        self.inodes.insert(InodeId(id), inode);
+                        self.path_to_inode.insert(path.to_string(), InodeId(id));
+                    }
+                }
             } else if kind == 2 {
                 // A persisted record whose path already exists is a file the
                 // boot seeds recreated before the snapshot was read. Its bytes
@@ -2426,7 +2507,7 @@ pub fn read_file_for_task(
                     // owns: that would silently merge two files.
                     if id != existing_id.0 && !self.inodes.contains_key(&InodeId(id)) {
                         if let Some(mut inode) = self.inodes.remove(&existing_id) {
-                            inode.id = InodeId(id);
+                            inode.id=InodeId(id);
                             self.inodes.insert(InodeId(id), inode);
                             self.path_to_inode.insert(path.to_string(), InodeId(id));
                         }
@@ -2865,6 +2946,17 @@ pub fn read_file_for_task(
             // Write-behind refused; failure is latched inside persist_metadata_snapshot
         }
         Ok(())
+    }
+
+    /// Returns true if the descriptor points to a virtual character device node (/dev/*).
+    pub fn is_device_fd(&self, task_id: TaskId, fd: FileDescriptor) -> bool {
+        self.task_file_tables
+            .get(&task_id)
+            .and_then(|t| t.get(fd.0 as usize))
+            .and_then(|h| h.as_ref())
+            .and_then(|h| self.inodes.get(&h.inode_id))
+            .map(|i| i.file_type == FileType::DeviceNode)
+            .unwrap_or(false)
     }
 
     /// Records the first persistence refusal and says so, once.
@@ -5799,6 +5891,100 @@ mod tests {
         assert_eq!(inode.file_type, FileType::Directory, "create_file must not overwrite directory with file");
         assert_eq!(inode.size, 0);
         assert!(inode.data.as_slice().is_empty());
+    }
+
+    #[test]
+    fn vfs_unlink_and_rename_enforce_file_types_and_directory_hierarchy() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/parent");
+        vfs.mkdir("/storage/parent/child");
+        vfs.create_file("/storage/parent/file.txt", b"content", false);
+        vfs.create_file("/system/etc/static.txt", b"sys", true);
+        vfs.create_device_node("/dev/null_test");
+
+        // 1. Unlink enforcement
+        assert_eq!(vfs.unlink("/storage/parent"), Err(FsError::IsADirectory));
+        assert_eq!(vfs.unlink("/system/etc/static.txt"), Err(FsError::ReadOnlyFileSystem));
+        assert_eq!(vfs.unlink("/dev/null_test"), Err(FsError::PermissionDenied));
+
+        // 2. Rename enforcement
+        assert_eq!(
+            vfs.rename("/storage/parent", "/storage/parent/child/nested"),
+            Err(FsError::InvalidPath),
+            "Cannot move directory into its own subdirectory"
+        );
+        assert_eq!(
+            vfs.rename("/system/etc/static.txt", "/data/moved.txt"),
+            Err(FsError::ReadOnlyFileSystem)
+        );
+        assert_eq!(
+            vfs.rename("/dev/null_test", "/data/null_moved"),
+            Err(FsError::PermissionDenied)
+        );
+
+        // 3. Parent children list cleanup on unlink allows subsequent rmdir
+        assert_eq!(vfs.unlink("/storage/parent/file.txt"), Ok(()));
+        assert_eq!(vfs.rmdir("/storage/parent/child"), Ok(()));
+        assert_eq!(
+            vfs.rmdir("/storage/parent"),
+            Ok(()),
+            "Parent directory children list must be clean after child unlink, permitting rmdir"
+        );
+    }
+
+    #[test]
+    fn vfs_truncate_enforces_file_types() {
+        let mut vfs = Vfs::new();
+        let dir_id = vfs.mkdir("/storage/trunc_dir");
+        let sys_id = vfs.create_file("/system/static.txt", b"sys", true);
+        let dev_id = vfs.create_device_node("/dev/trunc_dev");
+
+        let task_id = TaskId(500);
+        let mut table = [const { None }; MAX_FD_PER_TASK];
+        table[0] = Some(OpenFileHandle {
+            fd: FileDescriptor(0),
+            inode_id: dir_id,
+            offset: 0,
+            rights: Rights::WRITE,
+        });
+        table[1] = Some(OpenFileHandle {
+            fd: FileDescriptor(1),
+            inode_id: sys_id,
+            offset: 0,
+            rights: Rights::WRITE,
+        });
+        table[2] = Some(OpenFileHandle {
+            fd: FileDescriptor(2),
+            inode_id: dev_id,
+            offset: 0,
+            rights: Rights::WRITE,
+        });
+        vfs.task_file_tables.insert(task_id, table.to_vec());
+
+        assert_eq!(vfs.truncate(task_id, FileDescriptor(0), 0), Err(FsError::IsADirectory));
+        assert_eq!(vfs.truncate(task_id, FileDescriptor(1), 0), Err(FsError::ReadOnlyFileSystem));
+        assert_eq!(vfs.truncate(task_id, FileDescriptor(2), 0), Err(FsError::PermissionDenied));
+    }
+
+    #[test]
+    fn vfs_open_rollback_on_capability_failure_cleans_up_created_inode() {
+        let mut vfs = Vfs::new();
+        let unpriv_task = TaskId(999);
+        let caps = CapabilityTable::new_for_task(unpriv_task, 8);
+
+        // Unprivileged task attempts to open non-existent file with Rights::WRITE
+        let target_path = "/storage/unauthorized.txt";
+        assert!(!vfs.path_to_inode.contains_key(target_path));
+
+        let res = vfs.open(unpriv_task, &caps, 0, target_path, Rights::WRITE);
+        assert!(res.is_err(), "Open without capabilities must fail");
+
+        // The file must NOT exist in the VFS after failure (rollback via unlink succeeded)
+        assert!(
+            !vfs.path_to_inode.contains_key(target_path),
+            "VFS must rollback newly-created inode if capability check or fd reservation fails"
+        );
     }
 }
 

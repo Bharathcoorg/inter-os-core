@@ -51,6 +51,7 @@ const RAH0: usize = 0x5404;
 const RAH_AV: u32 = 1 << 31;
 const RX_DESC_COUNT: usize = 16;
 const TX_DESC_COUNT: usize = 16;
+pub const RX_BUFFER_SIZE: usize = 2048;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -128,8 +129,8 @@ impl E1000DmaResources {
         Some(Self {
             rx_desc_frames: allocate_dma_frames(1)?,
             tx_desc_frames: allocate_dma_frames(1)?,
-            rx_buffer_frames: allocate_dma_frames(6)?,
-            tx_buffer_frames: allocate_dma_frames(6)?,
+            rx_buffer_frames: allocate_dma_frames(8)?,
+            tx_buffer_frames: allocate_dma_frames(8)?,
         })
     }
     fn rx_desc_phys(&self) -> u64 { self.rx_desc_frames[0].start_address().as_u64() }
@@ -215,14 +216,14 @@ impl E1000Device {
         unsafe {
             for i in 0..RX_DESC_COUNT {
                 let desc = &mut *self.rx_desc.add(i);
-                desc.addr = self.rx_buffer_phys + (i * MAX_PACKET_SIZE) as u64;
+                desc.addr = self.rx_buffer_phys + (i * RX_BUFFER_SIZE) as u64;
                 desc.length = 0;
                 desc.status = 0;
                 desc.errors = 0;
             }
             for i in 0..TX_DESC_COUNT {
                 let desc = &mut *self.tx_desc.add(i);
-                desc.addr = self.tx_buffer_phys + (i * MAX_PACKET_SIZE) as u64;
+                desc.addr = self.tx_buffer_phys + (i * RX_BUFFER_SIZE) as u64;
                 desc.length = 0;
                 desc.cmd = 0;
                 desc.status = 1;
@@ -312,27 +313,39 @@ impl NetworkDevice for E1000Device {
             let desc = &mut *self.rx_desc.add(idx);
             if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
             let len = desc.length as usize;
-            // WHY recycle first: returning BufferTooSmall before reclaiming the
-            // descriptor left the ring head parked on this buffer forever, so a
-            // single oversized frame permanently wedged receive.
+
+            // The descriptor's address is written by the device. Bound it to the
+            // buffer this ring was built with rather than trusting it, so a
+            // corrupt descriptor cannot redirect the copy.
+            let expected = self.rx_buffer_phys + (idx * RX_BUFFER_SIZE) as u64;
+            if desc.addr != expected {
+                // Address desynchronized; recycle descriptor before returning
+                desc.status = 0;
+                compiler_fence(Ordering::Release);
+                write32(self.base_vaddr, RDT, idx as u32);
+                self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+                return Err(NetError::InvalidPacket);
+            }
+
+            let result = if len > out.len() {
+                Err(NetError::BufferTooSmall)
+            } else if len > MAX_PACKET_SIZE {
+                Err(NetError::InvalidPacket)
+            } else {
+                let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
+                core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
+                Ok(len)
+            };
+
+            // Reclaim/recycle the descriptor back to hardware AFTER reading packet data!
+            // This prevents the NIC from overwriting the buffer while the CPU copies it.
             desc.status = 0;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
             self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
             E1000_RX_COUNT.fetch_add(1, Ordering::Relaxed);
 
-            if len > out.len() { return Err(NetError::BufferTooSmall); }
-            if len > MAX_PACKET_SIZE { return Err(NetError::InvalidPacket); }
-
-            // The descriptor's address is written by the device. Bound it to the
-            // buffer this ring was built with rather than trusting it, so a
-            // corrupt descriptor cannot redirect the copy.
-            let expected = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
-            if desc.addr != expected { return Err(NetError::InvalidPacket); }
-
-            let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
-            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
-            Ok(len)
+            result
         }
     }
 

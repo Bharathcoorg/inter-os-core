@@ -54,11 +54,22 @@ impl ArpPacket {
             return Err("Unsupported ARP hardware/protocol parameters (expected Ethernet/IPv4)");
         }
 
-        let opcode = ArpOpcode::from(u16::from_be_bytes([buf[6], buf[7]]));
+        let opcode_raw = u16::from_be_bytes([buf[6], buf[7]]);
+        if opcode_raw != 1 && opcode_raw != 2 {
+            return Err("Unsupported ARP opcode");
+        }
+        let opcode = ArpOpcode::from(opcode_raw);
 
         let mut smac = [0u8; 6];
         smac.copy_from_slice(&buf[8..14]);
+        if smac[0] & 1 != 0 || smac == [0; 6] {
+            return Err("ARP sender MAC cannot be multicast or broadcast");
+        }
+
         let sip = Ipv4Address([buf[14], buf[15], buf[16], buf[17]]);
+        if sip.0[0] == 0 || sip.0[0] >= 224 || sip.0 == [255, 255, 255, 255] {
+            return Err("ARP sender IP cannot be zero, multicast, or broadcast");
+        }
 
         let mut tmac = [0u8; 6];
         tmac.copy_from_slice(&buf[18..24]);
@@ -163,8 +174,16 @@ impl ArpTable {
             }
         }
 
-        // Evict slot 0 if full.
-        self.entries[0] = ArpEntry { ip, mac, valid: true, expires_at };
+        // Evict entry closest to expiry if full (never blindly overwrite slot 0).
+        let mut oldest_idx = 0;
+        let mut min_expiry = self.entries[0].expires_at;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.expires_at < min_expiry {
+                min_expiry = entry.expires_at;
+                oldest_idx = i;
+            }
+        }
+        self.entries[oldest_idx] = ArpEntry { ip, mac, valid: true, expires_at };
     }
 
     /// Looks up the hardware MAC address for a given IPv4 address.
@@ -186,5 +205,122 @@ impl ArpTable {
 
     pub fn len(&self) -> usize {
         self.count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arp_roundtrip_and_parse() {
+        let req = ArpPacket {
+            opcode: ArpOpcode::Request,
+            sender_mac: MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+            sender_ip: Ipv4Address([192, 168, 1, 100]),
+            target_mac: MacAddress([0; 6]),
+            target_ip: Ipv4Address([192, 168, 1, 1]),
+        };
+        let mut buf = [0u8; 32];
+        let n = req.serialize(&mut buf).unwrap();
+        assert_eq!(n, ARP_PACKET_LEN);
+
+        let parsed = ArpPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.opcode, ArpOpcode::Request);
+        assert_eq!(parsed.sender_mac, req.sender_mac);
+        assert_eq!(parsed.sender_ip, req.sender_ip);
+        assert_eq!(parsed.target_mac, req.target_mac);
+        assert_eq!(parsed.target_ip, req.target_ip);
+    }
+
+    #[test]
+    fn arp_rejects_illegal_opcodes_mac_and_ip() {
+        let req = ArpPacket {
+            opcode: ArpOpcode::Request,
+            sender_mac: MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+            sender_ip: Ipv4Address([192, 168, 1, 100]),
+            target_mac: MacAddress([0; 6]),
+            target_ip: Ipv4Address([192, 168, 1, 1]),
+        };
+        let mut buf = [0u8; 32];
+        let n = req.serialize(&mut buf).unwrap();
+
+        // 1. Illegal opcode (e.g. 3, RARP)
+        let mut bad_buf = buf;
+        bad_buf[6..8].copy_from_slice(&3u16.to_be_bytes());
+        assert_eq!(ArpPacket::parse(&bad_buf[..n]), Err("Unsupported ARP opcode"));
+
+        // 2. Multicast sender MAC (LSB of first byte is 1)
+        let mut mcast_mac_buf = buf;
+        mcast_mac_buf[8] = 0x01;
+        assert_eq!(
+            ArpPacket::parse(&mcast_mac_buf[..n]),
+            Err("ARP sender MAC cannot be multicast or broadcast")
+        );
+
+        // 3. All-zero sender MAC
+        let mut zero_mac_buf = buf;
+        zero_mac_buf[8..14].copy_from_slice(&[0; 6]);
+        assert_eq!(
+            ArpPacket::parse(&zero_mac_buf[..n]),
+            Err("ARP sender MAC cannot be multicast or broadcast")
+        );
+
+        // 4. Zero sender IP
+        let mut zero_ip_buf = buf;
+        zero_ip_buf[14..18].copy_from_slice(&[0; 4]);
+        assert_eq!(
+            ArpPacket::parse(&zero_ip_buf[..n]),
+            Err("ARP sender IP cannot be zero, multicast, or broadcast")
+        );
+
+        // 5. Multicast sender IP
+        let mut mcast_ip_buf = buf;
+        mcast_ip_buf[14..18].copy_from_slice(&[224, 0, 0, 1]);
+        assert_eq!(
+            ArpPacket::parse(&mcast_ip_buf[..n]),
+            Err("ARP sender IP cannot be zero, multicast, or broadcast")
+        );
+
+        // 6. Broadcast sender IP
+        let mut bcast_ip_buf = buf;
+        bcast_ip_buf[14..18].copy_from_slice(&[255, 255, 255, 255]);
+        assert_eq!(
+            ArpPacket::parse(&bcast_ip_buf[..n]),
+            Err("ARP sender IP cannot be zero, multicast, or broadcast")
+        );
+    }
+
+    #[test]
+    fn arp_table_evicts_closest_to_expiry_not_slot_zero() {
+        let mut table = ArpTable::new();
+        let gateway_ip = Ipv4Address([192, 168, 1, 1]);
+        let gateway_mac = MacAddress([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+
+        // Slot 0: Gateway with large expiration time
+        table.insert_with_expiry(gateway_ip, gateway_mac, 0, 100_000);
+
+        // Fill remaining 15 slots with expiration time 50_000, except slot 5 with 10 (soonest to expire)
+        for i in 2..=16 {
+            let ip = Ipv4Address([192, 168, 1, i as u8]);
+            let mac = MacAddress([0x00, 0x11, 0x22, 0x33, 0x44, i as u8]);
+            let expiry = if i == 6 { 10 } else { 50_000 };
+            table.insert_with_expiry(ip, mac, 0, expiry);
+        }
+        assert_eq!(table.len(), MAX_ARP_ENTRIES);
+
+        // Now insert 17th entry. Table is saturated.
+        let new_ip = Ipv4Address([192, 168, 1, 200]);
+        let new_mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        table.insert_with_expiry(new_ip, new_mac, 0, 60_000);
+
+        // Verify gateway in slot 0 was NOT evicted!
+        assert_eq!(table.lookup(gateway_ip), Some(gateway_mac));
+
+        // Verify the soonest-to-expire entry (192.168.1.6) WAS evicted!
+        assert_eq!(table.lookup(Ipv4Address([192, 168, 1, 6])), None);
+
+        // Verify new entry was inserted!
+        assert_eq!(table.lookup(new_ip), Some(new_mac));
     }
 }
