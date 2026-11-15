@@ -1893,7 +1893,7 @@ pub fn test_reap_evacuation_protocol() {
     // 4, 5 & 6. detach_reaping_aspace rejects while active_cpus != 0, succeeds once deactivate() called,
     // abort_reap restores address_space & sets ReapFailed, and stale ReapHandle cannot reap newer generation.
     let aspace_guard = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
-    let c_guard = sched.spawn_user_process(p1, "guarded_reap", 0, 0, Some(aspace_guard), caps);
+    let c_guard = sched.spawn_user_process(p1, "guarded_reap", 0, 0, Some(aspace_guard), caps.clone());
     let c_guard_pos = sched.tasks.iter().position(|t| t.id == c_guard).unwrap();
     sched.tasks[c_guard_pos]
         .address_space
@@ -1974,6 +1974,81 @@ pub fn test_reap_evacuation_protocol() {
         assert_eq!(g_sched.tasks.len(), orig_len);
         g_sched.next_pid = orig_next_pid;
     }
+
+    // 8. Remote Unacknowledged CPU Rendezvous Rejection & Quarantine Safety
+    let p_rem_parent = sched.spawn_user_process(0, "rem_parent", 0, 0, None, caps.clone());
+    let aspace_remote = crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote test");
+    // Simulate remote CPU 1 executed but has not yet acknowledged
+    aspace_remote.executed_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+    aspace_remote.acknowledged_cpus.fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
+    assert!(!Scheduler::is_aspace_evacuated(&aspace_remote), "Address space with unacknowledged remote CPU must not be evacuated");
+    assert!(aspace_remote.has_unacknowledged_or_active_cpus(), "Must report unacknowledged remote CPU");
+
+    let c_remote = sched.spawn_user_process(p_rem_parent, "remote_child", 0, 0, Some(aspace_remote), caps.clone());
+    let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
+    sched.tasks[c_rem_pos].state = TaskState::Terminated;
+
+    let h_rem = sched.begin_reap(p_rem_parent, false, c_remote).expect("begin_reap on remote_child");
+    assert!(matches!(sched.detach_reaping_aspace(h_rem), Err(-16)), "detach_reaping_aspace must reject while remote CPU unacknowledged");
+    let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
+    assert_eq!(sched.tasks[c_rem_pos].state, TaskState::ReapFailed);
+    assert!(sched.tasks[c_rem_pos].address_space.is_some(), "address space must remain attached in ReapFailed");
+
+    // Direct destroy_fallible() timeout and error check on unacknowledged remote CPU
+    let mut unack_aspace = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
+    unack_aspace.executed_cpus.fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
+    unack_aspace.acknowledged_cpus.fetch_and(!(1 << 2), core::sync::atomic::Ordering::Release);
+    assert_eq!(
+        unack_aspace.destroy_fallible(),
+        Err(crate::mmu::TeardownError::RemoteRendezvousFailed(1 << 2)),
+        "destroy_fallible must time out with RemoteRendezvousFailed when remote CPU does not acknowledge"
+    );
+    // Acknowledge CPU 2 so unack_aspace can be cleanly destroyed without leaking frames
+    unack_aspace.acknowledged_cpus.fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
+    assert!(unack_aspace.destroy_fallible().is_ok());
+
+    // Clean up c_remote after acknowledging remote CPU 1
+    {
+        let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
+        sched.tasks[c_rem_pos].address_space.as_ref().unwrap().acknowledged_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        let h_clean = sched.begin_reap(p_rem_parent, false, c_remote).expect("begin_reap after remote acknowledge");
+        let mut clean_aspace = sched.detach_reaping_aspace(h_clean).expect("detach clean").expect("aspace");
+        assert!(clean_aspace.destroy_fallible().is_ok());
+        assert_eq!(sched.finish_reap(h_clean), Ok(0));
+    }
+    crate::ipc::IPC_ROUTER.lock().unregister_task(p_rem_parent);
+
+    // End-to-end reap_task_locksafe with remote unacknowledged CPU
+    let (orig_len_rem, orig_next_pid_rem, rem_pid) = {
+        let mut g_sched = SCHEDULER.lock();
+        let len = g_sched.tasks.len();
+        let next_p = g_sched.next_pid;
+        let aspace_e2e = crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote e2e");
+        aspace_e2e.executed_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        aspace_e2e.acknowledged_cpus.fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
+        let pid = g_sched.spawn_user_process(1, "remote_e2e", 0, 0, Some(aspace_e2e), CapabilityTable::new());
+        if let Some(t) = g_sched.tasks.iter_mut().find(|t| t.id == pid) {
+            t.state = TaskState::Terminated;
+        }
+        (len, next_p, pid)
+    };
+    assert_eq!(reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid), Err(-16));
+    {
+        let g_sched = SCHEDULER.lock();
+        let t = g_sched.tasks.iter().find(|t| t.id == rem_pid).expect("task must remain after remote EBUSY");
+        assert_eq!(t.state, TaskState::ReapFailed);
+        let aspace_ref = t.address_space.as_ref().expect("aspace must remain attached on remote EBUSY");
+        assert!(!Scheduler::is_aspace_evacuated(aspace_ref));
+        aspace_ref.acknowledged_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        assert!(Scheduler::is_aspace_evacuated(aspace_ref));
+    }
+    assert_eq!(reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid), Ok(0));
+    {
+        let mut g_sched = SCHEDULER.lock();
+        assert_eq!(g_sched.tasks.len(), orig_len_rem);
+        g_sched.next_pid = orig_next_pid_rem;
+    }
+
     crate::mmu::ArmMmu::switch_to_kernel();
     crate::kprintln!("[TEST] AArch64 5-Stage Reap Evacuation Protocol VERIFIED.");
 }

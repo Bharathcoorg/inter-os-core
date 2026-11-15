@@ -692,9 +692,6 @@ impl Scheduler {
                 }
             }
         }
-        unsafe {
-            core::arch::asm!("csrw sscratch, {0}", in(reg) self.tasks[next_idx].kstack_top);
-        }
 
         // Commit transaction
         if self.tasks[curr_idx].state == TaskState::Running {
@@ -873,6 +870,10 @@ poison_f_const:
     .quad 0xDEADBEEFCAFEBABE
 poison_s_const:
     .quad 0xBAD0BAD0BAD0BAD0
+poison_f_const2:
+    .quad 0xBAADF00DCAFEBABE
+poison_s_const2:
+    .quad 0x55AA55AA55AA55AA
 
     .section .text
     .global asm_riscv_context_test_runner
@@ -1111,6 +1112,76 @@ asm_riscv_test_worker_entry:
     la a0, WORKER_CTX
     la a1, MAIN_CTX
     tail switch_context
+
+    .global asm_riscv_test_worker_entry_round2
+    .type asm_riscv_test_worker_entry_round2, @function
+asm_riscv_test_worker_entry_round2:
+    // Executing on WORKER_STACK in Worker task context (Round 2).
+    // Deliberately poison all f0-f31 with distinct round 2 poison pattern
+    la t1, poison_f_const2
+    ld t0, 0(t1)
+    fmv.d.x f0, t0
+    fmv.d.x f1, t0
+    fmv.d.x f2, t0
+    fmv.d.x f3, t0
+    fmv.d.x f4, t0
+    fmv.d.x f5, t0
+    fmv.d.x f6, t0
+    fmv.d.x f7, t0
+    fmv.d.x f8, t0
+    fmv.d.x f9, t0
+    fmv.d.x f10, t0
+    fmv.d.x f11, t0
+    fmv.d.x f12, t0
+    fmv.d.x f13, t0
+    fmv.d.x f14, t0
+    fmv.d.x f15, t0
+    fmv.d.x f16, t0
+    fmv.d.x f17, t0
+    fmv.d.x f18, t0
+    fmv.d.x f19, t0
+    fmv.d.x f20, t0
+    fmv.d.x f21, t0
+    fmv.d.x f22, t0
+    fmv.d.x f23, t0
+    fmv.d.x f24, t0
+    fmv.d.x f25, t0
+    fmv.d.x f26, t0
+    fmv.d.x f27, t0
+    fmv.d.x f28, t0
+    fmv.d.x f29, t0
+    fmv.d.x f30, t0
+    fmv.d.x f31, t0
+
+    // Deliberately poison s0-s11 with distinct round 2 pattern
+    la t1, poison_s_const2
+    ld t2, 0(t1)
+    mv s0, t2
+    mv s1, t2
+    mv s2, t2
+    mv s3, t2
+    mv s4, t2
+    mv s5, t2
+    mv s6, t2
+    mv s7, t2
+    mv s8, t2
+    mv s9, t2
+    mv s10, t2
+    mv s11, t2
+
+    // Deliberately poison FCSR with 0x15 (RDN mode + NV, OF, NX)
+    li t0, 0x15
+    fscsr t0
+
+    // Set TEST_SWITCH_FLAG = 0xBEEFCAFE
+    la t4, TEST_SWITCH_FLAG
+    li t5, 0xBEEFCAFE
+    sw t5, 0(t4)
+
+    // Switch back to Task A
+    la a0, WORKER_CTX
+    la a1, MAIN_CTX
+    tail switch_context
     "#
 );
 
@@ -1127,6 +1198,7 @@ extern "C" {
     );
     fn asm_riscv_test_return_site();
     fn asm_riscv_test_worker_entry();
+    fn asm_riscv_test_worker_entry_round2();
 }
 
 pub fn test_context_switching() {
@@ -1202,6 +1274,89 @@ pub fn test_context_switching() {
             "RISC-V FCSR register mismatch across context switch: expected 0x{:x}, got 0x{:x}",
             test_fcsr & 0xFF,
             captured_fcsr[0] & 0xFF
+        );
+
+        // Verify that WORKER_CTX preserved the worker task's independent FP state bit-exact
+        for i in 0..32 {
+            assert_eq!(
+                core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.f[i])),
+                0xDEAD_BEEF_CAFE_BABE_u64,
+                "WORKER_CTX must preserve worker task's distinct f{} register pattern",
+                i
+            );
+        }
+        assert_eq!(
+            core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.fcsr)) & 0xFF,
+            0x2A,
+            "WORKER_CTX must preserve worker task's distinct FCSR rounding/flag bits"
+        );
+
+        // Round 2: Multi-turn switch with independent, distinct FP patterns and FCSR modes
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TEST_SWITCH_FLAG), 0);
+        let mut wctx2 = core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX));
+        wctx2.sp = stack_top;
+        wctx2.set_ra(asm_riscv_test_worker_entry_round2 as *const () as usize as u64);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(WORKER_CTX), wctx2);
+
+        let mut patterns_f2 = [0u64; 32];
+        for i in 0..32 {
+            patterns_f2[i] = 0x3344_5566_7788_9900_u64 | (i as u64);
+        }
+        let mut patterns_s2 = [0u64; 12];
+        for i in 0..12 {
+            patterns_s2[i] = 0x6677_8899_AABB_0000_u64 | ((i + 1) as u64);
+        }
+        captured_f = [0u64; 32];
+        captured_s = [0u64; 12];
+        captured_fcsr = [0u64; 1];
+        // test_fcsr2: RUP (0b011 = 3, so (3<<5) = 0x60), flags: DZ (0x04) | NX (0x01) = 0x65
+        let test_fcsr2: u64 = 0x65;
+
+        asm_riscv_context_test_runner(
+            core::ptr::addr_of_mut!(MAIN_CTX),
+            core::ptr::addr_of!(WORKER_CTX),
+            patterns_f2.as_ptr(),
+            patterns_s2.as_ptr(),
+            test_fcsr2,
+            captured_f.as_mut_ptr(),
+            captured_s.as_mut_ptr(),
+            captured_fcsr.as_mut_ptr(),
+        );
+
+        let flag_val2 = core::ptr::read_volatile(core::ptr::addr_of!(TEST_SWITCH_FLAG));
+        assert_eq!(flag_val2, 0xBEEF_CAFE, "Round 2 context switch failed to execute worker task");
+
+        for i in 0..32 {
+            assert_eq!(
+                captured_f[i],
+                patterns_f2[i],
+                "Round 2: restoration mismatch on f{} register",
+                i
+            );
+            assert_eq!(
+                core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.f[i])),
+                0xBAAD_F00D_CAFE_BABE_u64,
+                "Round 2: WORKER_CTX must preserve worker task's distinct f{} pattern",
+                i
+            );
+        }
+        for i in 0..12 {
+            assert_eq!(
+                captured_s[i],
+                patterns_s2[i],
+                "Round 2: restoration mismatch on s{} register",
+                i
+            );
+        }
+        assert_eq!(
+            captured_fcsr[0] & 0xFF,
+            test_fcsr2 & 0xFF,
+            "Round 2: FCSR mismatch across context switch"
+        );
+        assert_eq!(
+            core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.fcsr)) & 0xFF,
+            0x15,
+            "Round 2: WORKER_CTX must preserve worker task's distinct FCSR"
         );
 
         // D. Verify return address (ra) and stack pointer (sp) invariants
@@ -1386,10 +1541,12 @@ pub fn test_task_lifecycle() {
     let h2 = sched3.begin_reap(p_idle, false, c_evac).expect("retry begin_reap on ReapFailed");
     assert_eq!(h2.generation, h1.generation.wrapping_add(2));
     let (evac_old, evac_new) = sched3.prepare_switch();
+    let current_sscratch: usize;
     unsafe {
+        core::arch::asm!("csrr {0}, sscratch", out(reg) current_sscratch);
         core::arch::asm!("csrw satp, {0}", "sfence.vma zero, zero", in(reg) saved_satp, options(nostack));
-        core::arch::asm!("csrw sscratch, {0}", in(reg) saved_sscratch);
     }
+    assert_eq!(current_sscratch, saved_sscratch, "prepare_switch must not mutate sscratch during S-mode execution");
     assert!(evac_old.is_some() && evac_new.is_some(), "outgoing switch from Reaping task must succeed");
     assert_eq!(sched3.current_task_idx, 0);
     assert_eq!(sched3.tasks[1].state, TaskState::Reaping, "Reaping state must be preserved across outgoing switch");
@@ -1496,6 +1653,54 @@ pub fn test_task_lifecycle() {
     let h_svc = sched2.begin_reap(SUPERVISOR_PID, true, svc_child).expect("Supervisor begin_reap on service task");
     assert_eq!(h_svc.pid, svc_child);
     assert_eq!(sched2.finish_reap(h_svc), Ok(0));
+
+    // Test 11: Task Termination & Task Slot Reuse Zero FP Leakage Invariant
+    let p_fp = sched2.spawn_user_process(0, "fp_task", 0, 0, None, caps.clone());
+    let fp_pos = sched2.tasks.iter().position(|t| t.id == p_fp).unwrap();
+    for i in 0..32 {
+        sched2.tasks[fp_pos].context.f[i] = 0x55AA_55AA_55AA_5500_u64 | (i as u64);
+    }
+    sched2.tasks[fp_pos].context.fcsr = 0x7F;
+    sched2.tasks[fp_pos].state = TaskState::Terminated;
+
+    let h_fp = sched2.begin_reap(0, true, p_fp).expect("begin_reap on fp_task");
+    assert_eq!(sched2.finish_reap(h_fp), Ok(0));
+
+    // Reclaim/reuse slot with a newly spawned task
+    let p_new = sched2.spawn_user_process(0, "fresh_task", 0, 0, None, caps.clone());
+    let new_pos = sched2.tasks.iter().position(|t| t.id == p_new).unwrap();
+    for i in 0..32 {
+        assert_eq!(
+            sched2.tasks[new_pos].context.f[i],
+            0,
+            "FP register f{} must be strictly zeroed in newly spawned/reused task slot",
+            i
+        );
+    }
+    assert_eq!(
+        sched2.tasks[new_pos].context.fcsr,
+        0,
+        "FCSR must be strictly zeroed in newly spawned/reused task slot"
+    );
+    assert_eq!(sched2.tasks[new_pos].context.s0, 0);
+    assert_eq!(sched2.tasks[new_pos].context.s1, 0);
+    assert_eq!(sched2.tasks[new_pos].context.s2_s11, [0u64; 10]);
+
+    // Verify sstatus.FS and VS state transitions via init_fp()
+    init_fp();
+    let sstatus_val: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, sstatus", out(reg) sstatus_val, options(nomem, nostack));
+    }
+    let fs_val = (sstatus_val >> 13) & 0x3;
+    let vs_val = (sstatus_val >> 9) & 0x3;
+    assert_eq!(fs_val, 1, "sstatus.FS must be Initial (0b01) after init_fp");
+    assert_eq!(vs_val, 0, "sstatus.VS must be Off (0b00) after init_fp");
+
+    // Clean up p_new
+    sched2.tasks[new_pos].state = TaskState::Terminated;
+    let h_new = sched2.begin_reap(0, true, p_new).expect("begin_reap on fresh_task");
+    assert_eq!(sched2.finish_reap(h_new), Ok(0));
 
     crate::println!("[TEST] RISC-V Task Removal Consistency, 5-Stage Reap & Transactional Switch VERIFIED.");
 }

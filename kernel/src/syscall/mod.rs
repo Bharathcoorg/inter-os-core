@@ -8716,6 +8716,55 @@ fn browser_clock_monotonic_increments() {
         clear_test_user_buffers();
     }
 
+    struct TestTaskCapGuard {
+        saved_caps: Option<crate::capability::CapabilityTable>,
+    }
+
+    impl TestTaskCapGuard {
+        fn new_with_caps(caps: crate::capability::CapabilityTable) -> Self {
+            let mut sched = SCHEDULER.lock();
+            let saved = sched.current_task_mut().map(|t| t.cap_table.clone());
+            if let Some(task) = sched.current_task_mut() {
+                task.cap_table = caps;
+            } else {
+                sched.init(caps);
+            }
+            Self { saved_caps: saved }
+        }
+
+        fn set_caps(&mut self, caps: crate::capability::CapabilityTable) {
+            let mut sched = SCHEDULER.lock();
+            if let Some(task) = sched.current_task_mut() {
+                task.cap_table = caps;
+            } else {
+                sched.init(caps);
+            }
+        }
+    }
+
+    impl Drop for TestTaskCapGuard {
+        fn drop(&mut self) {
+            clear_test_user_buffers();
+            if let Some(orig) = self.saved_caps.take() {
+                let mut sched = SCHEDULER.lock();
+                if let Some(task) = sched.current_task_mut() {
+                    task.cap_table = orig;
+                }
+            }
+        }
+    }
+
+    struct RevocationRegistryGuard {
+        package: &'static str,
+    }
+
+    impl Drop for RevocationRegistryGuard {
+        fn drop(&mut self) {
+            let mut reg = crate::package::REVOCATION_REGISTRY.lock();
+            reg.revoked_packages.remove(self.package);
+        }
+    }
+
     #[test]
     fn syscall_161_dispatch_successful_round_trip() {
         let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -8726,7 +8775,7 @@ fn browser_clock_monotonic_increments() {
             let _ = vfs.mkdir("/storage");
         }
 
-        // Initialize scheduler and ensure current task has FileSystemWrite capability
+        // Initialize scheduler and ensure current task has FileSystemWrite capability under RAII guard
         let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
         caps.insert(crate::capability::Capability {
             id: crate::capability::CapabilityId(9161),
@@ -8734,19 +8783,7 @@ fn browser_clock_monotonic_increments() {
             rights: Rights::WRITE,
             object_id: 0,
         }).unwrap();
-
-        {
-            let mut sched = SCHEDULER.lock();
-            sched.init(caps);
-            if let Some(task) = sched.current_task_mut() {
-                let _ = task.cap_table.insert(crate::capability::Capability {
-                    id: crate::capability::CapabilityId(9161),
-                    cap_type: CapabilityType::FileSystemWrite,
-                    rights: Rights::WRITE,
-                    object_id: 0,
-                });
-            }
-        }
+        let _cap_guard = TestTaskCapGuard::new_with_caps(caps);
 
         let user_addr = 0x3000u64;
         let dir_path = b"/storage/dispatch_dir";
@@ -8760,8 +8797,6 @@ fn browser_clock_monotonic_increments() {
             let vfs = VFS.lock();
             assert!(vfs.lookup("/storage/dispatch_dir").is_some(), "directory must exist in VFS after syscall 161");
         }
-
-        clear_test_user_buffers();
     }
 
     #[test]
@@ -8776,26 +8811,13 @@ fn browser_clock_monotonic_increments() {
         }
 
         let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
-        let init_slot = caps.insert(crate::capability::Capability {
+        let slot = caps.insert(crate::capability::Capability {
             id: crate::capability::CapabilityId(9085),
             cap_type: CapabilityType::FileSystemRead,
             rights: Rights::READ,
             object_id: 0,
         }).unwrap();
-        let slot = {
-            let mut sched = SCHEDULER.lock();
-            sched.init(caps);
-            if let Some(task) = sched.current_task_mut() {
-                task.cap_table.insert(crate::capability::Capability {
-                    id: crate::capability::CapabilityId(9085),
-                    cap_type: CapabilityType::FileSystemRead,
-                    rights: Rights::READ,
-                    object_id: 0,
-                }).unwrap_or(init_slot)
-            } else {
-                init_slot
-            }
-        };
+        let _cap_guard = TestTaskCapGuard::new_with_caps(caps);
 
         let user_addr = 0x3000u64;
         let dir_path = b"/storage/list_bound_test";
@@ -8815,8 +8837,6 @@ fn browser_clock_monotonic_increments() {
         let full_written = sys_fs_list(slot, user_addr, dir_path.len(), &mut full_out)
             .expect("sys_fs_list should list full directory into larger slice");
         assert!(full_written >= written);
-
-        clear_test_user_buffers();
     }
 
     #[test]
@@ -8844,6 +8864,7 @@ fn browser_clock_monotonic_increments() {
     #[test]
     fn syscall_48_revocation_audit_roundtrip_and_out_ptr_pair_check() {
         let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _crl_guard = RevocationRegistryGuard { package: "org.example.revoked_abi_test" };
 
         let mut caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
         let sys_cap = crate::capability::Capability {
@@ -8853,15 +8874,7 @@ fn browser_clock_monotonic_increments() {
             object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
         };
         caps.insert(sys_cap.clone()).unwrap();
-        let mut orig_caps = None;
-        {
-            let mut sched = SCHEDULER.lock();
-            sched.init(caps);
-            if let Some(task) = sched.current_task_mut() {
-                orig_caps = Some(task.cap_table.clone());
-                let _ = task.cap_table.insert(sys_cap);
-            }
-        }
+        let mut cap_guard = TestTaskCapGuard::new_with_caps(caps);
 
         let target_addr = 0x3400u64;
         let target = b"org.example.revoked_abi_test";
@@ -8903,12 +8916,7 @@ fn browser_clock_monotonic_increments() {
 
         // Missing SystemControl capability must deny RevocationAudit (48)
         let unpriv_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
-        {
-            let mut sched = SCHEDULER.lock();
-            if let Some(task) = sched.current_task_mut() {
-                task.cap_table = unpriv_caps;
-            }
-        }
+        cap_guard.set_caps(unpriv_caps);
         register_test_user_buffer(target_addr, target);
         assert_eq!(
             sys_dispatch(48, 0, target_addr, target.len() as u64, 0, 0),
@@ -8918,12 +8926,66 @@ fn browser_clock_monotonic_increments() {
             sys_dispatch(48, 1, target_addr, target.len() as u64, 0, 0),
             SyscallResult::PermissionDenied as i64
         );
-        clear_test_user_buffers();
-        if let Some(prev) = orig_caps {
-            let mut sched = SCHEDULER.lock();
-            if let Some(task) = sched.current_task_mut() {
-                task.cap_table = prev;
-            }
+    }
+
+    #[test]
+    fn test_task_cap_guard_restores_on_unwind_and_normal_exit() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut base_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+        base_caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(777),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+
+        // Install base_caps under an outer guard so whatever existed before this test is restored at the end
+        let _outer_guard = TestTaskCapGuard::new_with_caps(base_caps);
+
+        // 1. Normal exit restoration
+        {
+            let mut test_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+            test_caps.insert(crate::capability::Capability {
+                id: crate::capability::CapabilityId(888),
+                cap_type: CapabilityType::SystemControl,
+                rights: Rights::INVOKE,
+                object_id: 0,
+            }).unwrap();
+            let _guard = TestTaskCapGuard::new_with_caps(test_caps);
+            let sched = SCHEDULER.lock();
+            let curr = sched.current_task().expect("current task");
+            assert!(curr.cap_table.find_slot(CapabilityType::SystemControl, Rights::INVOKE).is_some());
+        }
+
+        // After guard drop, base_caps must be restored
+        {
+            let sched = SCHEDULER.lock();
+            let curr = sched.current_task().expect("current task");
+            assert!(curr.cap_table.find_slot(CapabilityType::SystemControl, Rights::INVOKE).is_none());
+            assert!(curr.cap_table.find_slot(CapabilityType::SerialOutput, Rights::WRITE).is_some());
+        }
+
+        // 2. Panicking exit restoration via catch_unwind
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut panic_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 8);
+            panic_caps.insert(crate::capability::Capability {
+                id: crate::capability::CapabilityId(999),
+                cap_type: CapabilityType::FrameBufferDirect,
+                rights: Rights::WRITE,
+                object_id: 0,
+            }).unwrap();
+            let _guard = TestTaskCapGuard::new_with_caps(panic_caps);
+            panic!("intentional test panic to verify RAII unwind restoration");
+        }));
+        assert!(panic_result.is_err(), "catch_unwind must capture panic");
+
+        // After panic unwind, base_caps must STILL be restored
+        {
+            let sched = SCHEDULER.lock();
+            let curr = sched.current_task().expect("current task");
+            assert!(curr.cap_table.find_slot(CapabilityType::FrameBufferDirect, Rights::WRITE).is_none());
+            assert!(curr.cap_table.find_slot(CapabilityType::SerialOutput, Rights::WRITE).is_some());
         }
     }
 }

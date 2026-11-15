@@ -77,7 +77,6 @@ pub unsafe extern "C" fn trap_entry() -> ! {
         "sd x3,  8*3(sp)",
         "sd x4,  8*4(sp)",
         "sd x6,  8*6(sp)",
-        "sd x6,  8*6(sp)",
         "sd x7,  8*7(sp)",
         "sd x8,  8*8(sp)",
         "sd x9,  8*9(sp)",
