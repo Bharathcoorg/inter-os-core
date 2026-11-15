@@ -37,6 +37,10 @@ BASE_REQUIRED_SIGNALS = [
     "redistributors @",
     "full generic GICv3 initialized, IRQ 27 enabled.",
     "[TEST] GICv3 Robustness: Bounds enforcement, truncated window rejection, and SPI routing validation VERIFIED.",
+    "[TEST] Multicore SMP Worker Execution:",
+    "[TEST] Multicore Cross-CPU Migration & SIMD/GPR Preservation",
+    "[TEST] Multicore Scheduled EL0 & Cross-CPU TLB Shootdown",
+    "[TEST] AArch64 True Multicore SMP Scheduling VERIFIED.",
     "Spawning Userspace PID 1 (init) at EL0",
     "[PID1] Inter OS userspace init started in Ring 3.",
 ]
@@ -190,6 +194,32 @@ def verify_smp_topology(qemu_bin: str, image_path: Path, smp_count: int) -> bool
         if lid > 0 and rec["sgi_received"] < 1:
             print(f"[FAILED] Secondary CPU {lid} did not receive targeted SGI: {rec['line']}")
             return False
+
+    worker_match = re.search(
+        r"Multicore SMP Worker Execution:\s+cpus_seen_mask=(0x[0-9A-Fa-f]+)\s+\(online=(\d+)\),\s+total_hits=(\d+)",
+        full_output,
+    )
+    if not worker_match:
+        print("[FAILED] Missing structured Multicore SMP Worker Execution record.")
+        return False
+    seen_mask = int(worker_match.group(1), 16)
+    reported_online = int(worker_match.group(2))
+    total_hits = int(worker_match.group(3))
+    if reported_online != smp_count or bin(seen_mask).count("1") < 2 or total_hits < 4:
+        print(
+            f"[FAILED] Insufficient SMP worker execution evidence: mask=0x{seen_mask:02X}, online={reported_online}, hits={total_hits}"
+        )
+        return False
+
+    mig_match = re.search(r"Multicore Cross-CPU Migration & SIMD/GPR Preservation \(migrations=(\d+)\) VERIFIED\.", full_output)
+    if not mig_match or int(mig_match.group(1)) < 1:
+        print("[FAILED] Cross-CPU migration count < 1 or missing.")
+        return False
+
+    tlb_match = re.search(r"CPU 1 TLB IPIs (\d+) -> (\d+)", full_output)
+    if not tlb_match or int(tlb_match.group(2)) <= int(tlb_match.group(1)):
+        print("[FAILED] Secondary CPU 1 did not observe cross-CPU TLB shootdown SGI 1.")
+        return False
 
     print(f"\n--- Diagnostic SMP Evidence (-smp {smp_count}) ---")
     for lid in range(smp_count):

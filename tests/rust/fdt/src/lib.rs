@@ -736,3 +736,80 @@ fn test_concurrent_different_pe_registrations_and_lockfree_lookups() {
 
     gic::reset_pe_redistributor_map_for_test();
 }
+
+#[test]
+fn test_parse_psci_method_variants_and_absent() {
+    for (method_str, expected) in [
+        (b"smc\0".as_slice(), Some("smc")),
+        (b"hvc\0".as_slice(), Some("hvc")),
+        (b"unknown\0".as_slice(), Some("unknown")),
+    ] {
+        let mut b = Builder::new();
+        b.begin_node("");
+        b.begin_node("psci");
+        b.prop("compatible", b"arm,psci-1.0\0");
+        b.prop("method", method_str);
+        b.end_node();
+        b.end_node();
+        let blob = b.finish();
+        let parser = ArmFdtParser::new(&blob).expect("parse PSCI DTB");
+        assert_eq!(parser.parse_psci_method(), expected);
+    }
+
+    let mut b = Builder::new();
+    b.begin_node("");
+    b.end_node();
+    let empty_blob = b.finish();
+    let parser = ArmFdtParser::new(&empty_blob).expect("parse DTB without /psci");
+    assert_eq!(parser.parse_psci_method(), None);
+}
+
+#[test]
+fn test_parse_cpu_mpidrs_one_and_two_address_cells() {
+    let mut b = Builder::new();
+    b.begin_node("");
+    b.begin_node("cpus");
+    b.prop("#address-cells", &2u32.to_be_bytes());
+    b.prop("#size-cells", &0u32.to_be_bytes());
+    b.begin_node("cpu@0");
+    b.prop("device_type", b"cpu\0");
+    b.prop("reg", &0x0000_0000_8000_0000u64.to_be_bytes());
+    b.end_node();
+    b.begin_node("cpu@101");
+    b.prop("device_type", b"cpu\0");
+    b.prop("reg", &0x0000_0000_8000_0101u64.to_be_bytes());
+    b.end_node();
+    b.end_node();
+    b.end_node();
+    let blob = b.finish();
+    let parser = ArmFdtParser::new(&blob).expect("parse 2-cell /cpus");
+    let mpidrs = parser.parse_cpu_mpidrs();
+    assert_eq!(mpidrs, vec![0x8000_0000, 0x8000_0101]);
+}
+
+#[test]
+fn test_compute_sgi1r_for_mask_multicluster_coalescing() {
+    let _test_guard = gic::GlobalPeTestGuard::acquire();
+    gic::reset_pe_redistributor_map_for_test();
+
+    // Cluster Aff1=0 has PE 0 (Aff0=0) and PE 1 (Aff0=1); cluster Aff1=1 has PE 2 (Aff0=2).
+    assert_eq!(gic::register_pe(0, 0x000, 0x080A_0000), Ok(()));
+    assert_eq!(gic::register_pe(1, 0x001, 0x080C_0000), Ok(()));
+    assert_eq!(gic::register_pe(2, 0x102, 0x080E_0000), Ok(()));
+
+    let (packets, count) = gic::compute_sgi1r_for_mask(1, 0b111);
+    assert_eq!(count, 2, "two distinct Aff1 clusters should coalesce into 2 SGI1R packets");
+    // Cluster 0: Aff1=0, TargetList=0b11, INTID=1 at bits 24..27
+    assert_eq!(packets[0] & 0xFFFF, 0b11);
+    assert_eq!((packets[0] >> 24) & 0xF, 1);
+    assert_eq!((packets[0] >> 16) & 0xFF, 0);
+    // Cluster 1: Aff1=1, TargetList=(1<<2), INTID=1 at bits 24..27
+    assert_eq!(packets[1] & 0xFFFF, 0b100);
+    assert_eq!((packets[1] >> 24) & 0xF, 1);
+    assert_eq!((packets[1] >> 16) & 0xFF, 1);
+
+    // Invalid SGI id >= 16 must emit 0 packets
+    assert_eq!(gic::compute_sgi1r_for_mask(16, 0b111).1, 0);
+
+    gic::reset_pe_redistributor_map_for_test();
+}
