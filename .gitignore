@@ -59,6 +59,7 @@ docs/BUILD_EMBEDDING.md
 aragon4.md
 aragon.md
 target/audit/
+docs/audits/
 *AUDIT*.md
 *REPORT*.md
 *ROADMAP*.md
