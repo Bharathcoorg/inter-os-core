@@ -419,6 +419,15 @@ impl<I: Ac97Io> Ac97Controller<I> {
         let buffer_frames = crate::memory::allocate_dma_frames(buffer_pages)
             .ok_or(Ac97Error::DmaUnavailable)?;
 
+        // Verify allocated DMA buffer frames are physically contiguous before programming descriptors
+        for i in 0..buffer_frames.len().saturating_sub(1) {
+            let curr = buffer_frames[i].start_address().as_u64();
+            let next = buffer_frames[i + 1].start_address().as_u64();
+            if curr.saturating_add(4096) != next {
+                return Err(Ac97Error::DmaUnavailable);
+            }
+        }
+
         // AC'97 buffer descriptor addresses are 32-bit. A machine with more
         // than 4 GiB can hand out a frame the controller cannot reach, so
         // refuse the binding instead of truncating the address and having the

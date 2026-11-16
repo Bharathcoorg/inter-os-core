@@ -318,3 +318,59 @@ pub fn read_user_string<'a>(addr: u64, len: usize, dst: &'a mut [u8]) -> Result<
     core::str::from_utf8(&dst[..copied]).map_err(|_| UserAccessError::InvalidUtf8)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_user_buffer_null_and_guard_page() {
+        assert_eq!(validate_user_buffer(0, 100), Err(UserAccessError::NullOrGuardPage));
+        assert_eq!(validate_user_buffer(0x0FFF, 1), Err(UserAccessError::NullOrGuardPage));
+        assert_eq!(validate_user_buffer(0, 0), Err(UserAccessError::NullOrGuardPage));
+    }
+
+    #[test]
+    fn test_validate_user_buffer_valid_ranges() {
+        assert_eq!(validate_user_buffer(USER_SPACE_START, 0), Ok(()));
+        assert_eq!(validate_user_buffer(USER_SPACE_START, 4096), Ok(()));
+        assert_eq!(validate_user_buffer(0x0040_0000, 64 * 1024), Ok(()));
+        assert_eq!(validate_user_buffer(USER_SPACE_START, MAX_USER_TRANSFER_LEN), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_user_buffer_oversized() {
+        assert_eq!(
+            validate_user_buffer(USER_SPACE_START, MAX_USER_TRANSFER_LEN + 1),
+            Err(UserAccessError::LengthTooLarge)
+        );
+    }
+
+    #[test]
+    fn test_validate_user_buffer_kernel_addresses() {
+        // Canonical higher-half kernel space
+        assert_eq!(
+            validate_user_buffer(0xFFFF_8000_0000_0000, 100),
+            Err(UserAccessError::KernelAddressExclusion)
+        );
+        // Non-canonical gap
+        assert_eq!(
+            validate_user_buffer(0x0000_8000_0000_0000, 100),
+            Err(UserAccessError::KernelAddressExclusion)
+        );
+        // Overflow past user space
+        assert_eq!(
+            validate_user_buffer(USER_SPACE_END - 100, 200),
+            Err(UserAccessError::KernelAddressExclusion)
+        );
+    }
+
+    #[test]
+    fn test_validate_user_buffer_integer_overflow() {
+        assert_eq!(
+            validate_user_buffer(u64::MAX - 10, 20),
+            Err(UserAccessError::KernelAddressExclusion)
+        );
+    }
+}
+
+

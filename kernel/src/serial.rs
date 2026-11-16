@@ -1920,10 +1920,12 @@ fn handle_serial_command(cmd: &[u8]) {
         // "no reading" branch (`status: 'UNCONFIRMED'`) rather than being handed
         // an invented percentage.
         fn report_volume(audio: &crate::audio::AudioManager) {
+            let applied = if audio.ac97.is_some() { "yes" } else { "no" };
             match audio.volume_percent {
                 Some(requested) => crate::serial_println!(
-                    "[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=serial_console",
-                    requested
+                    "[AUDIO] volume_percent={} state=requested applied_to_hardware={} source=serial_console",
+                    requested,
+                    applied
                 ),
                 None => crate::serial_println!(
                     "[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=serial_console"
