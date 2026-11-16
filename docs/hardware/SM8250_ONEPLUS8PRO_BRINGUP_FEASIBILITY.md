@@ -151,3 +151,24 @@ In order to claim any progress beyond this architecture study, future engineerin
 1. **Physical Boot Evidence:** High-resolution unedited video or photograph showing the OnePlus 8 Pro display presenting the InterOS kernel boot console or launcher.
 2. **Serial / RAM Console Dump:** Cryptographically hashed transcript of boot serial output containing real SoC revision registers (`SOC_ID = 356` for SM8250).
 3. **Absence of Fabricated Claims:** Zero simulated pass assertions, zero synthetic hardware logs, and transparent classification in accordance with the Platform Reality Contract.
+
+---
+
+## 8. Authoritative Evidence Classification Matrix & Kernel Gap Analysis
+
+| Component / Subsystem | Verification Level | Real Hardware Silicon Evidence? | QEMU / Emulator Evidence? | Current Kernel Gap / Implementation Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **AArch64 EL1 Exception Entry** | `QEMU VERIFIED` | NO (Physical hardware deferred) | YES (`qemu-system-aarch64 -M virt`) | Functional in QEMU; SM8250 requires `entry.S` EL2->EL1 drop stub. |
+| **ARM GICv3 (GICD & GICR)** | `QEMU VERIFIED` | NO | YES (`-M virt,gic-version=3`) | Implemented in `kernel/src/arch/aarch64/gicv3.rs`; needs SM8250 base addresses (`0x17A00000`). |
+| **ARM Generic Timer (CNTV)** | `QEMU VERIFIED` | NO | YES | Functional via standard ARMv8 architectural MSR/MRS registers. |
+| **SimpleFB Display Scanout** | `SOURCE-ONLY` | NO | YES (Simulated in QEMU virt) | Framebuffer address must be extracted dynamically from ABL device tree. |
+| **Qualcomm GENI UART** | `SOURCE-ONLY` | NO | NO | Stub only; retail phone lacks exposed physical UART header. |
+| **Qualcomm UFS 3.0 Storage** | `NOT IMPLEMENTED` | NO | NO | Block storage requires RAM boot (`fastboot boot`) to bypass UFS. |
+| **Qualcomm SPMI / PMIC** | `NOT IMPLEMENTED` | NO | NO | Power rail regulation relies on bootloader state inheritance. |
+| **OnePlus 8 Pro Touch (GT9886)** | `SOURCE-ONLY / STUB` | NO | NO | Experimental I2C stub in `touch_i2c.rs`; physical I2C bus unmapped. |
+| **Snapdragon X55 5G Modem** | `NOT IMPLEMENTED` | NO | NO | Modem subsystem strictly deferred; non-essential for OS boot. |
+| **Adreno 650 3D GPU** | `NOT IMPLEMENTED` | NO | NO | Software DRM/KMS blitter used; hardware GPU acceleration deferred. |
+
+### Architectural Conclusion
+InterOS Core remains 100% truthful: all current multi-architecture and phone shell capabilities are demonstrated in the canonical QEMU virtualized smartphone environment. Physical bring-up on OnePlus 8 Pro (Snapdragon SM8250) is architecturally feasible via tethered non-destructive `fastboot boot` with SimpleFB, but physical silicon execution remains strictly deferred until physical reference hardware with hardware debug access is authorized.
+
