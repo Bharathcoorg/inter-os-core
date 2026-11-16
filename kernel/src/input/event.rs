@@ -110,6 +110,21 @@ pub enum InputEvent {
     Gesture(TouchGesture),
 }
 
+impl InputEvent {
+    /// Returns true if this event represents a release or cancellation phase
+    /// (e.g. Touch Up/Cancel, Pointer Up/Cancel, Key release) that must never be
+    /// silently dropped on queue overflow to prevent stuck pointers.
+    pub fn is_critical_release(&self) -> bool {
+        match self {
+            InputEvent::Touch(t) => matches!(t.phase, TouchPhase::Up | TouchPhase::Cancel),
+            InputEvent::Pointer(p) => matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel),
+            InputEvent::KeyEvent(k) => k.action == KeyAction::Up,
+            InputEvent::Key { pressed, .. } => !*pressed,
+            InputEvent::Gesture(g) => matches!(g, TouchGesture::Tap { .. } | TouchGesture::Release { .. }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

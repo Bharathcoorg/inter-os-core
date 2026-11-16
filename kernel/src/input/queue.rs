@@ -32,10 +32,20 @@ impl InputQueue {
     }
 
     /// Pushes an event into the queue. Returns true if queued, false if dropped (overflow).
+    ///
+    /// Non-Negotiable Contract: Critical release events (Touch Up/Cancel, Pointer Up/Cancel,
+    /// Key Up) must never be dropped on queue overflow. When capacity is saturated, an older
+    /// intermediate event is evicted to guarantee delivery of the release phase, preventing
+    /// stuck pointers or desynchronized gesture states.
     pub fn push(&mut self, event: InputEvent) -> bool {
         if self.count >= INPUT_QUEUE_CAPACITY {
             self.dropped = self.dropped.saturating_add(1);
-            return false;
+            if event.is_critical_release() {
+                // Evict the oldest queued event to make room for the critical release
+                let _ = self.pop();
+            } else {
+                return false;
+            }
         }
 
         self.buffer[self.tail] = Some(event);
@@ -103,9 +113,9 @@ mod tests {
         assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
         assert_eq!(q.dropped_count(), 0);
 
-        // 65th push must be rejected and recorded
-        let ok = q.push(InputEvent::Key { char_code: 'Z', pressed: false });
-        assert!(!ok, "push beyond capacity must be rejected");
+        // 65th non-critical push must be rejected and recorded
+        let ok = q.push(InputEvent::Key { char_code: 'Z', pressed: true });
+        assert!(!ok, "non-critical push beyond capacity must be rejected");
         assert_eq!(q.dropped_count(), 1);
         assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
 
@@ -115,8 +125,62 @@ mod tests {
         assert_eq!(q.len(), INPUT_QUEUE_CAPACITY - 1);
 
         // Now push succeeds
-        assert!(q.push(InputEvent::Key { char_code: 'Z', pressed: false }));
+        assert!(q.push(InputEvent::Key { char_code: 'Z', pressed: true }));
         assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn test_queue_critical_release_eviction_on_overflow() {
+        let mut q = InputQueue::new();
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            assert!(q.push(InputEvent::Touch(crate::input::touch::TouchPoint {
+                slot: 0,
+                x: 100,
+                y: 200,
+                pressure: 512,
+                phase: crate::input::touch::TouchPhase::Move,
+            })));
+        }
+        assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
+        assert_eq!(q.dropped_count(), 0);
+
+        // A move event is dropped on overflow
+        assert!(!q.push(InputEvent::Touch(crate::input::touch::TouchPoint {
+            slot: 0,
+            x: 105,
+            y: 205,
+            pressure: 512,
+            phase: crate::input::touch::TouchPhase::Move,
+        })));
+        assert_eq!(q.dropped_count(), 1);
+        assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
+
+        // A critical release event (TouchPhase::Up) must NOT be dropped; it evicts oldest
+        assert!(q.push(InputEvent::Touch(crate::input::touch::TouchPoint {
+            slot: 0,
+            x: 105,
+            y: 205,
+            pressure: 0,
+            phase: crate::input::touch::TouchPhase::Up,
+        })));
+        assert_eq!(q.len(), INPUT_QUEUE_CAPACITY);
+        assert_eq!(q.dropped_count(), 2); // dropped counter recorded the eviction
+
+        // Drain the queue; verify the last element is the critical Up event
+        let mut last_event = None;
+        while let Some(ev) = q.pop() {
+            last_event = Some(ev);
+        }
+        assert_eq!(
+            last_event,
+            Some(InputEvent::Touch(crate::input::touch::TouchPoint {
+                slot: 0,
+                x: 105,
+                y: 205,
+                pressure: 0,
+                phase: crate::input::touch::TouchPhase::Up,
+            }))
+        );
     }
 
     #[test]

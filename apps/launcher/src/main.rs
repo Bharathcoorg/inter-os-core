@@ -1484,6 +1484,7 @@ fn refresh_package_catalog(state: &mut LauncherState) {
             || id == b"org.interos.compositor" || id == b"compositor"
             || id == b"org.interos.init" || id == b"init" || id == b"user_init"
             || id == b"org.interos.card_demo" || id == b"card_demo" || id == b"app_card_demo"
+            || id == b"org.interos.webview_demo" || id == b"webview_demo" || id == b"app_webview_demo"
         {
             continue;
         }

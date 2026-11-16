@@ -1352,12 +1352,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const finishPointer = (ev, action) => {
       if (!isPointerDown || activePointerId !== ev.pointerId) return;
-      pendingMovePayload = null;
       const geometry = guestPointerGeometry();
       const rawPoint = mapPoint(ev.clientX, ev.clientY) || {
         x: lastSentX, y: lastSentY, coords: geometry.coords
       };
-      const totalDist = Math.hypot(rawPoint.x - downStartX, rawPoint.y - downStartY);
       const point = (!hasExceededSlop && (performance.now() - downStartTime < 500))
         ? { x: downStartX, y: downStartY, coords: rawPoint.coords }
         : rawPoint;
@@ -1366,21 +1364,14 @@ document.addEventListener('DOMContentLoaded', () => {
       activePointerId = null;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
       if (action === 'up') {
-        if (hasExceededSlop && totalDist >= 28) {
-          const steps = Math.max(4, Math.min(10, Math.round(totalDist / 40)));
-          sendGuestTouchEvent({
-            action: 'swipe',
-            coords: geometry.coords,
-            x: downStartX,
-            y: downStartY,
-            x2: rawPoint.x,
-            y2: rawPoint.y,
-            steps: steps
-          });
-        } else {
-          sendGuestTouchEvent({ action: 'up', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        if (pendingMovePayload) {
+          const movePayload = pendingMovePayload;
+          pendingMovePayload = null;
+          sendGuestTouchEvent({ action: 'move', coords: movePayload.coords, x: movePayload.x, y: movePayload.y, slot: movePayload.slot || 0 });
         }
+        sendGuestTouchEvent({ action: 'up', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       } else {
+        pendingMovePayload = null;
         sendGuestTouchEvent({ action: 'cancel', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       }
       // Touch contract token: sendGuestTouchEvent({ action, coords: point.coords

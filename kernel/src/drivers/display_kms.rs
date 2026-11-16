@@ -1716,7 +1716,7 @@ impl DrmKmsController {
         // over its own canvas, and the two are the same picture.
         let focused = self
             .focused_surface
-            .and_then(|id| self.surfaces.iter().find(|s| s.id == id))
+            .and_then(|id| self.surfaces.iter().find(|s| s.id == id && s.visible && s.opacity > 0 && s.frame_ready && s.frame_complete && s.has_frame))
             .map(|s| (s.owner_task, s.z_order));
 
         // Front-to-back tile occlusion analysis:
@@ -3188,6 +3188,38 @@ mod tests {
         assert_eq!(
             kms.back_buffer[0], 0xFF202830,
             "a surface the owner wrote whole must reach the display"
+        );
+    }
+
+    #[test]
+    fn a_newly_created_unready_surface_leaves_the_existing_desktop_visible_without_blanking() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        // Task 1: Shell / Launcher at z=0
+        let s_desktop = kms.create_surface(720, 1440, 0, 1);
+        let desk_pixels = alloc::vec![0xFF112233; 720 * 1440];
+        kms.write_surface_pixels(s_desktop, 1, 0, &desk_pixels).expect("write desktop");
+        kms.commit_surfaces(Some(1));
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], 0xFF112233, "desktop frame reaches scanout");
+
+        // Task 2: New App launched, creates surface at z=200
+        let s_app = kms.create_surface(720, 1440, 200, 2);
+        assert_eq!(kms.focused_surface, Some(s_app));
+        // App has not written its frame yet: has_frame and frame_complete are false
+        kms.composite();
+        assert_eq!(
+            kms.back_buffer[0], 0xFF112233,
+            "desktop remains visible while newly spawned app is preparing its first frame"
+        );
+
+        // Now app finishes writing its first frame
+        let app_pixels = alloc::vec![0xFF445566; 720 * 1440];
+        kms.write_surface_pixels(s_app, 2, 0, &app_pixels).expect("write app");
+        kms.commit_surfaces(Some(2));
+        kms.composite();
+        assert_eq!(
+            kms.back_buffer[0], 0xFF445566,
+            "app frame covers desktop once complete"
         );
     }
 

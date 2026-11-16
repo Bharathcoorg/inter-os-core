@@ -2179,6 +2179,13 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
 
 
 
+def reset_serial_epoch():
+    """Bumps the serial epoch so any stale worker disconnects and reconnects cleanly."""
+    global serial_epoch
+    with serial_socket_lock:
+        serial_epoch += 1
+
+
 def notify_qemu_relaunched():
     """Release reader sockets bound to the previous QEMU instance.
 
@@ -2451,7 +2458,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-vnc", f"127.0.0.1:{vnc_display}"
     ]
     if arch == "x86_64":
-        cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
+        cmd.extend(["-machine", "q35", "-cpu", "qemu64,+rdrand"])
         # Real virtual display and pointer hardware for the canonical phone VM.
         # The x86_64 profile launches at the canonical scanout declared in
         # SUPPORTED_PROFILES ("guest_width": 720, "guest_height": 1440) and in
