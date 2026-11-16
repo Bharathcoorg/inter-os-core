@@ -170,6 +170,13 @@ impl InputPipeline {
         self.queue.remove(index).map(|(_, event)| event)
     }
 
+    /// Removes all queued input events targeted to a terminating task.
+    pub fn cleanup_task(&mut self, task: TaskId) -> usize {
+        let before = self.queue.len();
+        self.queue.retain(|(owner, _)| *owner != task);
+        before - self.queue.len()
+    }
+
     pub fn pop_service(&mut self) -> Option<InputEvent> { self.service_queue.pop_front() }
 
     pub fn clear(&mut self) {
@@ -179,6 +186,11 @@ impl InputPipeline {
 }
 
 pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new());
+
+/// Removes all queued input events targeted to a terminating task.
+pub fn cleanup_task(task: TaskId) -> usize {
+    INPUT_PIPELINE.lock().cleanup_task(task)
+}
 
 /// Moves recognized hardware gestures into the stable userspace event queue.
 /// Routes normalized input events to the currently focused surface owner.
@@ -441,7 +453,11 @@ pub fn pump_touch_events() {
 }
 
 #[cfg(test)]
-mod tests {    #[test]
+mod tests {
+    use super::*;
+    use crate::drivers::touch_gestures::RecognizedGesture;
+
+    #[test]
     fn the_home_gesture_brings_the_shell_back() {
         let mut kms = crate::drivers::display_kms::DrmKmsController::new(720, 1440);
         kms.set_display_mode(720, 1440, 60).expect("mode");
@@ -543,10 +559,6 @@ mod tests {    #[test]
         assert_eq!(event.scale_milli, 1250);
     }
 
-
-    use super::{InputEvent, InputEventKind};
-    use crate::drivers::touch_gestures::RecognizedGesture;
-
     #[test]
     fn gesture_is_normalized_without_raw_device_details() {
         let e = InputEvent::from_gesture(RecognizedGesture::Pan {
@@ -563,5 +575,111 @@ mod tests {    #[test]
         });
         assert_eq!(e.kind, InputEventKind::Pan);
         assert_eq!((e.x, e.y, e.dx, e.dy), (360, 1100, 0, -320));
+    }
+
+    #[test]
+    fn input_pipeline_cleanup_task_removes_queued_events() {
+        let mut pipe = InputPipeline::new();
+        let e = InputEvent {
+            kind: InputEventKind::Tap,
+            x: 100,
+            y: 200,
+            ..InputEvent::EMPTY
+        };
+        pipe.route_to_task(TaskId(42), e);
+        pipe.route_to_task(TaskId(42), e);
+        pipe.route_to_task(TaskId(99), e);
+        assert_eq!(pipe.queue.len(), 3);
+
+        assert_eq!(pipe.cleanup_task(TaskId(42)), 2);
+        assert_eq!(pipe.queue.len(), 1);
+        assert_eq!(pipe.queue[0].0, TaskId(99));
+    }
+
+    #[test]
+    fn input_pipeline_per_task_routing_and_isolation() {
+        let mut pipe = InputPipeline::new();
+        let e1 = InputEvent { kind: InputEventKind::Tap, x: 100, y: 200, ..InputEvent::EMPTY };
+        let e2 = InputEvent { kind: InputEventKind::DoubleTap, x: 300, y: 400, ..InputEvent::EMPTY };
+
+        pipe.route_to_task(TaskId(10), e1);
+        pipe.route_to_task(TaskId(20), e2);
+
+        // Task 20 cannot pop Task 10's event
+        assert_eq!(pipe.pop_for_task(TaskId(20)), Some(e2));
+        assert_eq!(pipe.pop_for_task(TaskId(20)), None);
+
+        // Task 10's event is still intact and isolated
+        assert_eq!(pipe.pop_for_task(TaskId(10)), Some(e1));
+        assert_eq!(pipe.pop_for_task(TaskId(10)), None);
+    }
+
+    #[test]
+    fn input_pipeline_per_task_backpressure_max_16() {
+        let mut pipe = InputPipeline::new();
+        for i in 0..20 {
+            pipe.route_to_task(TaskId(5), InputEvent {
+                kind: InputEventKind::Pan,
+                x: i,
+                y: 100 + i,
+                ..InputEvent::EMPTY
+            });
+        }
+        // Task queue must be capped at MAX_PER_TASK = 16
+        let mut count = 0;
+        let mut last_x = 0;
+        while let Some(ev) = pipe.pop_for_task(TaskId(5)) {
+            count += 1;
+            last_x = ev.x;
+        }
+        assert_eq!(count, 16, "per-task queue must cap at 16");
+        assert_eq!(last_x, 19, "most recent event must be preserved in queue");
+    }
+
+    #[test]
+    fn input_pipeline_service_queue_independent_drain() {
+        let mut pipe = InputPipeline::new();
+        let svc_ev = InputEvent { kind: InputEventKind::Key, x: 65, y: 1, ..InputEvent::EMPTY };
+        let task_ev = InputEvent { kind: InputEventKind::Tap, x: 250, y: 500, ..InputEvent::EMPTY };
+
+        pipe.push(svc_ev);
+        pipe.route_to_task(TaskId(7), task_ev);
+
+        // Draining service queue does not drain task queue
+        assert_eq!(pipe.pop_service(), Some(svc_ev));
+        assert_eq!(pipe.pop_service(), None);
+
+        // Task event is preserved
+        assert_eq!(pipe.pop_for_task(TaskId(7)), Some(task_ev));
+    }
+
+    #[test]
+    fn input_pipeline_total_capacity_bounded_at_128() {
+        let mut pipe = InputPipeline::new();
+        // Route 10 events to 13 different tasks = 130 attempts
+        for task_idx in 0..13 {
+            for _ in 0..10 {
+                pipe.route_to_task(TaskId(100 + task_idx), InputEvent {
+                    kind: InputEventKind::Tap,
+                    x: 50,
+                    y: 50,
+                    ..InputEvent::EMPTY
+                });
+            }
+        }
+        assert_eq!(pipe.queue.len(), 128, "total queue must not exceed MAX_TOTAL (128)");
+    }
+
+    #[test]
+    fn input_pipeline_clear_flushes_all_state() {
+        let mut pipe = InputPipeline::new();
+        pipe.push(InputEvent { kind: InputEventKind::Key, x: 10, y: 1, ..InputEvent::EMPTY });
+        pipe.route_to_task(TaskId(1), InputEvent { kind: InputEventKind::Tap, x: 10, y: 10, ..InputEvent::EMPTY });
+        assert!(!pipe.queue.is_empty());
+        assert!(!pipe.service_queue.is_empty());
+
+        pipe.clear();
+        assert!(pipe.queue.is_empty());
+        assert!(pipe.service_queue.is_empty());
     }
 }

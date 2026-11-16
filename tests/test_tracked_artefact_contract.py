@@ -146,6 +146,10 @@ TRACKED_BINARY_PAYLOADS = frozenset(
         "sdk/rust/interos-std/tests/fixtures/x509/sslcom_transit_ecc_r2.der",
         "sdk/rust/interos-std/tests/fixtures/x509/yr2_under_root_yr.der",
         "tools/fonts/RobotoCondensed-Regular.ttf",
+        "tests/qemu/network/evidence/trace_arp_udp.pcap",
+        "tests/qemu/network/evidence/trace_ipv6_ndp.pcap",
+        "tests/qemu/network/evidence/trace_robustness.pcap",
+        "tests/qemu/network/evidence/trace_tcp_dns.pcap",
     }
 )
 

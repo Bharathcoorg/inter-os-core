@@ -108,11 +108,37 @@ impl BufferManager {
         }
     }
 
+    /// Releases and removes all display buffers owned by a terminating task.
+    pub fn release_owned_by(&mut self, owner: u64) -> usize {
+        let before = self.buffers.len();
+        self.buffers.retain(|b| b.owner != owner);
+        before - self.buffers.len()
+    }
+
     fn get_mut(&mut self, id: BufferId, owner: u64) -> Result<&mut DisplayBuffer, &'static str> {
         let b = self.buffers.iter_mut().find(|b| b.id == id).ok_or("buffer not found")?;
         if b.owner != owner {
             return Err("buffer ownership denied");
         }
         Ok(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffer_lifecycle_and_owner_reclaim() {
+        let mut bm = BufferManager::new();
+        let _b1 = bm.allocate(42, 720, 1440).expect("allocate b1");
+        let _b2 = bm.allocate(42, 360, 720).expect("allocate b2");
+        let b3 = bm.allocate(99, 720, 1440).expect("allocate b3");
+
+        assert_eq!(bm.buffers.len(), 3);
+        assert_eq!(bm.release_owned_by(42), 2);
+        assert_eq!(bm.buffers.len(), 1);
+        assert_eq!(bm.buffers[0].id, b3);
+        assert_eq!(bm.buffers[0].owner, 99);
     }
 }

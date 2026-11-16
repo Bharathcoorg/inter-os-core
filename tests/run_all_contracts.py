@@ -95,7 +95,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_image_format_truth_contract.py": 4,
     "tests/test_inference_engine_graph_contract.py": 19,
     "tests/test_inference_service_truth_contract.py": 66,
-    "tests/test_input_contract.py": 2,
+    "tests/test_input_contract.py": 7,
     "tests/test_input_coordinate_contract.py": 26,
     "tests/test_kernel_test_diagnostics.py": 16,
     "tests/test_launcher_dirty_band_contract.py": 21,

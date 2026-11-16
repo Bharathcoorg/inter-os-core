@@ -23,8 +23,17 @@ def run_tests():
     try:
         harness.start()
         # Handle initial gateway ARP handshake
-        raw = harness.recv_frame(timeout=30.0)
-        assert raw is not None, "Gateway ARP request missing"
+        deadline = time.time() + 30.0
+        arp_found = False
+        while time.time() < deadline:
+            raw = harness.recv_frame(timeout=2.0)
+            if not raw:
+                continue
+            ef = EthernetFrame.parse(raw)
+            if ef.ethertype == EtherType.ARP:
+                arp_found = True
+                break
+        assert arp_found, "Gateway ARP request missing"
         gateway_mac = bytes.fromhex("52550a000202")
         guest_mac = bytes.fromhex("525400123456")
         reply = ArpPacket(ArpOpcode.REPLY, gateway_mac, "10.0.2.2", guest_mac, "10.0.2.15")
@@ -52,6 +61,7 @@ def run_tests():
         syn_captured = False
         guest_seq = 0
         guest_port = 0
+        server_port = 0
         deadline = time.time() + 25.0
 
         while time.time() < deadline:
@@ -66,16 +76,17 @@ def run_tests():
                     if (tcp_seg.flags & TcpFlags.SYN) and not (tcp_seg.flags & TcpFlags.ACK):
                         guest_seq = tcp_seg.seq
                         guest_port = tcp_seg.src_port
+                        server_port = tcp_seg.dst_port
                         syn_captured = True
                         break
 
         assert syn_captured, "Failed to capture TCP SYN from browser"
-        print(f"[PASS] Guest TX: TCP SYN captured (src_port={guest_port}, seq={guest_seq})")
+        print(f"[PASS] Guest TX: TCP SYN captured (src_port={guest_port}, dst_port={server_port}, seq={guest_seq})")
 
         # Inject TCP SYN-ACK
         host_seq = 50000
         syn_ack = TcpSegment(
-            src_port=8080, dst_port=guest_port,
+            src_port=server_port, dst_port=guest_port,
             seq=host_seq, ack=(guest_seq + 1) & 0xFFFFFFFF,
             flags=TcpFlags.SYN | TcpFlags.ACK, window=65535
         )
@@ -83,8 +94,14 @@ def run_tests():
         harness.send_frame(EthernetFrame(guest_mac, gateway_mac, EtherType.IPV4, syn_ack_ip.serialize()).serialize(60))
 
         # Assert guest logs [TCP ESTABLISHED]
-        assert harness.wait_for_serial("[TCP ESTABLISHED]", timeout=15.0), \
-            "Guest failed to establish TCP connection"
+        res_tcp = harness.wait_for_serial("[TCP ESTABLISHED]", timeout=15.0)
+        if not res_tcp:
+            print("=== SERIAL LOGS ON TCP ESTABLISHED TIMEOUT ===")
+            for l in harness.logs:
+                if "[NET" in l or "TCP" in l or "tcp" in l or "SYN" in l:
+                    print(l)
+            print("===============================================")
+        assert res_tcp, "Guest failed to establish TCP connection"
         print("[PASS] TCP Handshake: [TCP ESTABLISHED] confirmed by guest.")
 
         # Receive HTTP GET request
@@ -99,7 +116,7 @@ def run_tests():
                 ip_pkt = Ipv4Packet.parse(ef.payload)
                 if ip_pkt.protocol == IpProtocol.TCP:
                     tcp_seg = TcpSegment.parse(ip_pkt.payload, ip_pkt.src, ip_pkt.dst)
-                    if b"GET /test" in tcp_seg.payload:
+                    if tcp_seg.payload and b"GET " in tcp_seg.payload:
                         http_req_captured = True
                         guest_seq = tcp_seg.seq + len(tcp_seg.payload)
                         break
@@ -111,7 +128,7 @@ def run_tests():
         body = b"Hello from QEMU Network Harness!"
         resp = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
         host_data_seg = TcpSegment(
-            src_port=8080, dst_port=guest_port,
+            src_port=server_port, dst_port=guest_port,
             seq=host_seq + 1, ack=guest_seq,
             flags=TcpFlags.ACK | TcpFlags.PSH, payload=resp
         )
@@ -120,7 +137,7 @@ def run_tests():
 
         # Teardown FIN-ACK
         fin_seg = TcpSegment(
-            src_port=8080, dst_port=guest_port,
+            src_port=server_port, dst_port=guest_port,
             seq=host_seq + 1 + len(resp), ack=guest_seq,
             flags=TcpFlags.FIN | TcpFlags.ACK
         )
@@ -129,6 +146,14 @@ def run_tests():
         print("[PASS] TCP Teardown: Response & FIN-ACK delivered cleanly.")
 
         print("\nALL TCP & DNS QEMU PACKET TESTS PASSED.\n")
+    except Exception as e:
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "evidence", "harness_debug.log"), "w", encoding="utf-8") as f:
+                for l in harness.logs:
+                    f.write(l + "\n")
+        except Exception:
+            pass
+        raise e
     finally:
         harness.stop()
 

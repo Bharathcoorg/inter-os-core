@@ -94,14 +94,14 @@ class ArpPacket:
         self.proto_size = 4
         self.opcode = opcode
         self.sender_mac = sender_mac[:6]
-        self.sender_ip = socket.inet_aton(sender_ip) if isinstance(sender_ip, str) else sender_ip
+        self.sender_ip = socket.inet_ntoa(sender_ip) if isinstance(sender_ip, (bytes, bytearray)) else str(sender_ip)
         self.target_mac = target_mac[:6]
-        self.target_ip = socket.inet_aton(target_ip) if isinstance(target_ip, str) else target_ip
+        self.target_ip = socket.inet_ntoa(target_ip) if isinstance(target_ip, (bytes, bytearray)) else str(target_ip)
 
     def serialize(self) -> bytes:
         return (
             struct.pack("!HHBBH", self.hw_type, self.proto_type, self.hw_size, self.proto_size, self.opcode)
-            + self.sender_mac + self.sender_ip + self.target_mac + self.target_ip
+            + self.sender_mac + socket.inet_aton(self.sender_ip) + self.target_mac + socket.inet_aton(self.target_ip)
         )
 
     @classmethod
@@ -136,17 +136,19 @@ class Ipv4Packet:
         self.frag_offset = frag_offset
         self.ttl = ttl
         self.protocol = protocol
-        self.src = socket.inet_aton(src) if isinstance(src, str) else src
-        self.dst = socket.inet_aton(dst) if isinstance(dst, str) else dst
+        self.src = socket.inet_ntoa(src) if isinstance(src, (bytes, bytearray)) else str(src)
+        self.dst = socket.inet_ntoa(dst) if isinstance(dst, (bytes, bytearray)) else str(dst)
         self.payload = payload
 
     def serialize(self, force_bad_checksum: bool = False) -> bytes:
         total_len = 20 + len(self.payload)
         flags_frag = ((self.flags & 0x7) << 13) | (self.frag_offset & 0x1FFF)
+        src_bytes = socket.inet_aton(self.src)
+        dst_bytes = socket.inet_aton(self.dst)
         hdr_no_csum = (
             struct.pack("!BBHHHBB", (self.version << 4) | self.ihl, self.dscp_ecn, total_len,
                         self.identification, flags_frag, self.ttl, self.protocol)
-            + b"\x00\x00" + self.src + self.dst
+            + b"\x00\x00" + src_bytes + dst_bytes
         )
         csum = 0xDEAD if force_bad_checksum else internet_checksum(hdr_no_csum)
         hdr = hdr_no_csum[:10] + struct.pack("!H", csum) + hdr_no_csum[12:]
@@ -250,8 +252,8 @@ class TcpSegment:
         hdr_len = data_offset * 4
         payload = data[hdr_len:]
         if src_ip and dst_ip:
-            src_bytes = socket.inet_aton(src_ip)
-            dst_bytes = socket.inet_aton(dst_ip)
+            src_bytes = socket.inet_aton(src_ip) if isinstance(src_ip, str) else src_ip
+            dst_bytes = socket.inet_aton(dst_ip) if isinstance(dst_ip, str) else dst_ip
             pseudo = src_bytes + dst_bytes + struct.pack("!BBH", 0, 6, len(data)) + data
             if internet_checksum(pseudo) != 0:
                 raise ValueError("TCP checksum mismatch")
@@ -327,13 +329,15 @@ class Ipv6Packet:
         self.flow_label = 0
         self.next_header = next_header
         self.hop_limit = hop_limit
-        self.src = socket.inet_pton(socket.AF_INET6, src) if isinstance(src, str) else src
-        self.dst = socket.inet_pton(socket.AF_INET6, dst) if isinstance(dst, str) else dst
+        self.src = socket.inet_ntop(socket.AF_INET6, src) if isinstance(src, (bytes, bytearray)) else str(src)
+        self.dst = socket.inet_ntop(socket.AF_INET6, dst) if isinstance(dst, (bytes, bytearray)) else str(dst)
         self.payload = payload
 
     def serialize(self) -> bytes:
         vtc_fl = (6 << 28) | ((self.traffic_class & 0xFF) << 20) | (self.flow_label & 0xFFFFF)
-        hdr = struct.pack("!IHBB", vtc_fl, len(self.payload), self.next_header, self.hop_limit) + self.src + self.dst
+        src_bytes = socket.inet_pton(socket.AF_INET6, self.src)
+        dst_bytes = socket.inet_pton(socket.AF_INET6, self.dst)
+        hdr = struct.pack("!IHBB", vtc_fl, len(self.payload), self.next_header, self.hop_limit) + src_bytes + dst_bytes
         return hdr + self.payload
 
     @classmethod
@@ -375,12 +379,12 @@ class Icmpv6Codec:
         return struct.pack("!BBH", 134, 0, csum) + msg[4:]
 
     @classmethod
-    def build_neighbor_solicitation(cls, src_ip: str, target_ip: str, slla_mac: bytes = None) -> bytes:
+    def build_neighbor_solicitation(cls, src_ip: str, target_ip: str, slla_mac: bytes = None, dst_ip: str = "ff02::1") -> bytes:
         target_bytes = socket.inet_pton(socket.AF_INET6, target_ip)
         base = struct.pack("!BBHI", 135, 0, 0, 0) + target_bytes
         if slla_mac:
             base += struct.pack("!BB", 1, 1) + slla_mac[:6]
-        csum = cls.checksum(src_ip, "ff02::1", base)
+        csum = cls.checksum(src_ip, dst_ip, base)
         return struct.pack("!BBH", 135, 0, csum) + base[4:]
 
 

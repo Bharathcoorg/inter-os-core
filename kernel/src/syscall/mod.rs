@@ -4465,6 +4465,12 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
                             .lock()
                             .cancel_all_for_package_all_users(pkg);
                     }
+                    crate::task::scheduler::run_deferred_cleanup();
+                    show_shell_surfaces();
+                    if let Some(mut kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                        let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+                        let _ = display.composite_and_flip();
+                    }
                     SyscallResult::Success
                 },
                 Err(_) => SyscallResult::NotReady,

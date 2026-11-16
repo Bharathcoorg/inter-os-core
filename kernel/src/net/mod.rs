@@ -109,6 +109,7 @@ impl NetDropStats {
 pub static DROP_STATS: NetDropStats = NetDropStats::new();
 
 pub fn record_net_drop(kind: NetDropKind, detail: &str) {
+    crate::serial_println!("[NET DROP] {} ({:?})", detail, kind);
     DROP_STATS.record_drop(kind, detail);
 }
 
@@ -135,6 +136,7 @@ pub fn net_drop_stats() -> (u64, u64, u64, u64, u64, u64) {
 
 pub const DEFAULT_HOST_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
 pub const DEFAULT_HOST_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+pub const LOOPBACK_MAC: MacAddress = MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
 /// QEMU user-mode (SLIRP) virtual gateway. A real ARP request addressed here is
 /// answered by QEMU with a real reply, which is the end-to-end proof that a
 /// packet left the guest and a response came back.
@@ -161,7 +163,7 @@ impl ArpRequestState {
 
 static ARP_REQUESTS: Mutex<[ArpRequestState; 8]> = Mutex::new([ArpRequestState::EMPTY; 8]);
 
-pub const ARP_REQUEST_TIMEOUT_TICKS: u64 = 500;
+pub const ARP_REQUEST_TIMEOUT_TICKS: u64 = 20_000;
 
 fn record_in_flight_arp_request(ip: Ipv4Address, now: u64) {
     let mut requests = ARP_REQUESTS.lock();
@@ -270,7 +272,7 @@ fn next_hop_for(dst_ip: Ipv4Address) -> Ipv4Address {
 /// router's.
 fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> {
     if dst_ip.is_loopback() {
-        return Ok(MacAddress([0, 0, 0, 0, 0, 1]));
+        return Ok(LOOPBACK_MAC);
     }
     let next_hop = next_hop_for(dst_ip);
     let now = crate::interrupts::get_system_ticks();
@@ -589,18 +591,18 @@ pub fn poll_network_interface() -> usize {
     let _ = poll_tcp_retransmissions(crate::interrupts::get_system_ticks());
     while processed < MAX_POLL_BUDGET {
         let mut rx_buf = [0u8; 1514];
-        let len = {
+        let (len, is_loopback) = {
             // Drain the kernel loopback queue first, then the controller's
             // receive ring. Both feed the same demultiplexer below, so
             // 127.0.0.1 traffic is delivered without touching the wire.
             let mut loopback = LOOPBACK_DEVICE.lock();
             match loopback.receive(&mut rx_buf) {
-                Ok(len) => len,
+                Ok(len) => (len, true),
                 Err(_) => {
                     drop(loopback);
                     let mut device = NETWORK_DEVICE.lock();
                     match device.receive(&mut rx_buf) {
-                        Ok(len) => len,
+                        Ok(len) => (len, false),
                         Err(e) => {
                             if matches!(e, NetError::QueueFull | NetError::BufferTooSmall) {
                                 record_net_drop(NetDropKind::RxRingBackpressure, "rx_ring_backpressure");
@@ -613,7 +615,11 @@ pub fn poll_network_interface() -> usize {
         };
         processed += 1;
         if let Ok(frame) = EthernetFrame::parse(&rx_buf[..len]) {
-            let local_mac = NETWORK_DEVICE.lock().info().mac;
+            let local_mac = if is_loopback {
+                LOOPBACK_MAC
+            } else {
+                NETWORK_DEVICE.lock().info().mac
+            };
 
             // Universal Ethernet L2 destination filtering: must be unicast to local station, broadcast, or multicast
             if !frame.dst_mac.is_broadcast() && !frame.dst_mac.is_multicast() && frame.dst_mac != local_mac {
@@ -908,12 +914,11 @@ pub fn poll_network_interface() -> usize {
                                                 let is_assigned = addrs.contains_assigned(parsed.target);
                                                 drop(addrs);
 
-                                                // If target matches our established preferred address, defend it!
+                                                // If target matches an established assigned address, defend it!
                                                 // RFC 4861 § 7.2.4: When responding to a DAD probe (src == ::),
                                                 // NA MUST be addressed to all-nodes multicast (ff02::1),
                                                 // Solicited flag MUST be 0, Override flag MUST be 1.
-                                                let host_ip = *HOST_IPV6_LINK_LOCAL.lock();
-                                                if is_assigned && !host_ip.is_unspecified() && parsed.target == host_ip {
+                                                if is_assigned {
                                                     let local_mac = NETWORK_DEVICE.lock().info().mac;
                                                     let mut na_buf = [0u8; 32];
                                                     na_buf[0] = 136; // NA
@@ -926,11 +931,11 @@ pub fn poll_network_interface() -> usize {
                                                     na_buf[26..32].copy_from_slice(&local_mac.0);
 
                                                     let na_dst_ip = Ipv6Address::ALL_NODES;
-                                                    let na_csum = calculate_icmpv6_checksum(&host_ip, &na_dst_ip, &na_buf);
+                                                    let na_csum = calculate_icmpv6_checksum(&parsed.target, &na_dst_ip, &na_buf);
                                                     na_buf[2..4].copy_from_slice(&na_csum.to_be_bytes());
 
                                                     let ip6_resp = Ipv6Packet {
-                                                        src: host_ip,
+                                                        src: parsed.target,
                                                         dst: na_dst_ip,
                                                         next_header: 58,
                                                         hop_limit: 255,

@@ -21,6 +21,7 @@ def main():
     inputd = (ROOT / "kernel/src/drivers/input.rs").read_text(encoding="utf-8")
     syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
     sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    buffer = (ROOT / "kernel/src/gui/buffer.rs").read_text(encoding="utf-8")
 
     must(kms, "owner_task: u64", "window ownership")
     must(kms, "input_enabled: bool", "window input participation")
@@ -52,6 +53,8 @@ def main():
     must(gui, "create_with_id", "stable cross-layer window identity")
     must(gui, "destroy_if", "trusted window cleanup")
     must(guimod, "pub static WINDOW_MANAGER", "authoritative GUI window registry")
+    must(buffer, "pub fn release_owned_by", "buffer manager lifecycle release")
+    must(inputd, "pub fn cleanup_task", "input pipeline task cleanup")
 
     must(sdk, "pub fn window_set_input", "SDK window input API")
     must(sdk, "SyscallNumber::WindowSetInput", "SDK syscall binding")

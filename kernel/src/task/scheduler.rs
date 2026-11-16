@@ -109,6 +109,8 @@ fn reclaim_task(entry: DeferredCleanup) {
     crate::fs::cleanup_task(entry.id);
     crate::event::cleanup_task(entry.id);
     crate::net::cleanup_task(entry.id);
+    crate::drivers::input::cleanup_task(entry.id);
+    crate::gui::BUFFER_MANAGER.lock().release_owned_by(entry.id.0);
     // Authority follows task lifetime. `capability::cleanup_task` revokes the
     // exiting task's delegated leases, prunes them from the kernel-wide
     // registry and drops its consent records; without this a dead task kept

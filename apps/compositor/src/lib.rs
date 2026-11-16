@@ -18,6 +18,12 @@ pub const FHD_H: u32 = 2160;
 pub const FHD_TOTAL_PIXELS: usize = (FHD_W * FHD_H) as usize;
 pub const FHD_NUM_CHUNKS: usize = (FHD_TOTAL_PIXELS + CHUNK - 1) / CHUNK;
 
+/// Native 1080x2400 Flagship 20:9 scanout dimensions and tiling geometry
+pub const FLAGSHIP_W: u32 = 1080;
+pub const FLAGSHIP_H: u32 = 2400;
+pub const FLAGSHIP_TOTAL_PIXELS: usize = (FLAGSHIP_W * FLAGSHIP_H) as usize;
+pub const FLAGSHIP_NUM_CHUNKS: usize = (FLAGSHIP_TOTAL_PIXELS + CHUNK - 1) / CHUNK;
+
 /// Computes the offset and pixel count of a chunk by index.
 pub fn chunk_bounds(chunk_idx: usize) -> Option<(usize, usize)> {
     if chunk_idx >= NUM_CHUNKS {
@@ -35,6 +41,16 @@ pub fn chunk_bounds_fhd(chunk_idx: usize) -> Option<(usize, usize)> {
     }
     let offset = chunk_idx * CHUNK;
     let count = (FHD_TOTAL_PIXELS - offset).min(CHUNK);
+    Some((offset, count))
+}
+
+/// Computes the offset and pixel count of a chunk by index for a full-resolution 1080x2400 surface.
+pub fn chunk_bounds_flagship(chunk_idx: usize) -> Option<(usize, usize)> {
+    if chunk_idx >= FLAGSHIP_NUM_CHUNKS {
+        return None;
+    }
+    let offset = chunk_idx * CHUNK;
+    let count = (FLAGSHIP_TOTAL_PIXELS - offset).min(CHUNK);
     Some((offset, count))
 }
 
@@ -146,6 +162,27 @@ mod tests {
         let (last_offset, last_count) = chunk_bounds_fhd(FHD_NUM_CHUNKS - 1).expect("last fhd chunk");
         assert_eq!(last_offset, 2278 * 1024); // 2,332,672
         assert_eq!(last_count, 128); // 2332800 - 2332672 = 128
+    }
+
+    #[test]
+    fn test_flagship_scanout_geometry() {
+        assert_eq!(FLAGSHIP_TOTAL_PIXELS, 1080 * 2400);
+        assert_eq!(FLAGSHIP_NUM_CHUNKS, 2532); // (2592000 + 1023) / 1024
+
+        let mut total_covered = 0;
+        for i in 0..FLAGSHIP_NUM_CHUNKS {
+            let (offset, count) = chunk_bounds_flagship(i).expect("flagship chunk bounds");
+            assert_eq!(offset, total_covered);
+            assert!(count <= CHUNK);
+            total_covered += count;
+        }
+        assert_eq!(total_covered, FLAGSHIP_TOTAL_PIXELS);
+        assert_eq!(chunk_bounds_flagship(FLAGSHIP_NUM_CHUNKS), None);
+
+        // Remainder chunk check
+        let (last_offset, last_count) = chunk_bounds_flagship(FLAGSHIP_NUM_CHUNKS - 1).expect("last flagship chunk");
+        assert_eq!(last_offset, 2531 * 1024); // 2,591,744
+        assert_eq!(last_count, 256); // 2592000 - 2591744 = 256
     }
 
     #[test]

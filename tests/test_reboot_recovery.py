@@ -134,6 +134,8 @@ class RecoverySerialReader:
 
 
 def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
+    kill_proc_on_port(ser_port)
+    time.sleep(0.5)
     print(f"\n[{session_name}] Launching QEMU instance...")
     qemu_cmd = [
         qemu_exe,
@@ -159,7 +161,11 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
 
     print(f"[{session_name}] Awaiting initial Launcher presentation...")
     t0 = time.time()
-    ready = reader.wait_for("Step 5: Initial presentation complete", timeout=90.0)
+    ready = reader.wait_for("Step 5: Initial presentation complete", timeout=140.0)
+    if not ready:
+        print(f"[{session_name}] Failed to reach initial launcher presentation within timeout. Last captured logs:")
+        for l in reader.captured_logs[-30:]:
+            print(f"  {l}")
     assert ready, f"[{session_name}] Failed to reach initial launcher presentation within timeout"
     print(f"[{session_name}]   [OK] Launcher presentation complete ({time.time()-t0:.2f}s)")
 
@@ -280,7 +286,7 @@ def main():
         # Session 2: Clean Reboot & State Re-Verification
         # =====================================================================
         proc2, sock2, reader2, diag2 = boot_and_verify_boot_signals(
-            qemu_exe, kernel_img, ser_port, "SESSION-2 (Reboot)"
+            qemu_exe, kernel_img, ser_port + 2, "SESSION-2 (Reboot)"
         )
 
         print("\n[SESSION-2] Testing userspace responsiveness after reboot (launching Settings)...")

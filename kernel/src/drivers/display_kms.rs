@@ -1190,10 +1190,13 @@ impl DrmKmsController {
 
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
-        // A client that explicitly requests a 1080x2160 surface is asking for
-        // that native mode; match it rather than silently resampling its frame.
+        // A client that explicitly requests a 1080x2160 or 1080x2400 surface is
+        // asking for that native mode; match it rather than silently resampling its frame.
         if width == 1080 && height == 2160 && (self.scanout_width != 1080 || self.scanout_height != 2160) {
             let _ = self.set_display_mode(1080, 2160, self.refresh_hz);
+        }
+        if width == 1080 && height == 2400 && (self.scanout_width != 1080 || self.scanout_height != 2400) {
+            let _ = self.set_display_mode(1080, 2400, self.refresh_hz);
         }
         let pixels = match (width as usize).checked_mul(height as usize) {
             // Client surfaces have a stricter per-surface budget than the
@@ -3492,6 +3495,187 @@ mod tests {
         let flip_res = display.composite_and_flip();
         assert!(flip_res.is_ok());
         assert!(display.destroy_surface(id, 10).is_ok());
+    }
+
+    #[test]
+    fn explicit_1080x2400_surface_engages_matching_scanout_mode() {
+        // Starts with a 720x1440 controller
+        let mut kms = DrmKmsController::new(720, 1440);
+        assert_eq!(kms.scanout_width, 720);
+        assert_eq!(kms.scanout_height, 1440);
+
+        // App requests a full-resolution 1080x2400 surface
+        let id = kms.create_surface(1080, 2400, 200, 42);
+        assert_ne!(id, 0);
+
+        // Controller must have transitioned to matching 1080x2400 scanout mode
+        assert_eq!(kms.scanout_width, 1080);
+        assert_eq!(kms.scanout_height, 2400);
+        assert_eq!(kms.front_buffer.len(), 1080 * 2400);
+        assert_eq!(kms.back_buffer.len(), 1080 * 2400);
+
+        // Fill with distinct test pattern
+        let surf = kms.surfaces.iter_mut().find(|s| s.id == id).unwrap();
+        surf.pixels[0] = 0xFF556677;
+        surf.pixels[1080 * 2400 - 1] = 0xFF8899AA;
+        surf.mark_frame_drawn();
+
+        kms.composite();
+
+        // Direct 1:1 blit without fractional scaling: pixels map bit-exact
+        assert_eq!(kms.back_buffer[0], 0xFF556677);
+        assert_eq!(kms.back_buffer[1080 * 2400 - 1], 0xFF8899AA);
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn explicit_1080x2400_blit_preserves_alpha_blending() {
+        let mut kms = DrmKmsController::new(1080, 2400);
+        kms.set_display_mode(1080, 2400, 60).expect("mode");
+
+        // Surface 1: Opaque background red (0xFFFF0000) at z=200
+        let s1 = kms.create_surface(1080, 2400, 200, 1);
+        assert_ne!(s1, 0);
+        let s1_idx = kms.surfaces.iter().position(|s| s.id == s1).unwrap();
+        kms.surfaces[s1_idx].pixels.fill(0xFFFF0000);
+        kms.surfaces[s1_idx].mark_frame_drawn();
+
+        // Surface 2: Semi-transparent blue (0x800000FF) at z=201 over background
+        let s2 = kms.create_surface(1080, 2400, 201, 1);
+        assert_ne!(s2, 0);
+        let s2_idx = kms.surfaces.iter().position(|s| s.id == s2).unwrap();
+        kms.surfaces[s2_idx].pixels.fill(0x800000FF);
+        kms.surfaces[s2_idx].mark_frame_drawn();
+
+        kms.composite();
+
+        // 1:1 direct blit at 1080x2400 blends correctly:
+        // 50% blue (128/255) over red: R = ~128, G = 0, B = ~128, A = 255
+        let pixel = kms.back_buffer[1080 * 200 + 200];
+        let a = (pixel >> 24) & 0xFF;
+        let r = (pixel >> 16) & 0xFF;
+        let g = (pixel >> 8) & 0xFF;
+        let b = pixel & 0xFF;
+
+        assert_eq!(a, 0xFF, "Alpha must remain fully opaque");
+        assert!(r >= 120 && r <= 136, "Red should be ~128 from alpha blend, got {r}");
+        assert_eq!(g, 0, "Green should be 0");
+        assert!(b >= 120 && b <= 136, "Blue should be ~128 from alpha blend, got {b}");
+
+        assert!(kms.destroy_surface(s1));
+        assert!(kms.destroy_surface(s2));
+    }
+
+    #[test]
+    fn explicit_1080x2400_blit_maps_dirty_rows_1to1() {
+        let mut kms = DrmKmsController::new(1080, 2400);
+        let id = kms.create_surface(1080, 2400, 200, 1);
+        kms.surfaces[0].mark_frame_drawn();
+        kms.composite();
+        let _ = kms.take_present_dirty_rows();
+        kms.page_flip();
+
+        // Update rows 400..600
+        kms.surfaces[0].dirty = true;
+        kms.surfaces[0].dirty_rows = (400, 600);
+        kms.surfaces[0].pixels[400 * 1080] = 0xFFFFFFFF;
+        kms.composite();
+
+        let (r0, r1) = kms.take_present_dirty_rows();
+        assert_eq!(r0, 400, "1:1 direct blit must preserve start row 400");
+        assert_eq!(r1, 600, "1:1 direct blit must preserve end row 600");
+
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn kms_display_driver_explicit_1080x2400_workflow() {
+        use crate::drivers::display::{DisplayDriver, KmsDisplayDriver};
+        let mut kms = DrmKmsController::new(1080, 2400);
+        let mut display = KmsDisplayDriver::new(&mut kms);
+
+        let (w, h) = display.dimensions();
+        assert_eq!((w, h), (1080, 2400));
+
+        let id = display.create_surface(1080, 2400, 200, 10).expect("create surface");
+        let pixels = [0xFFABCDEFu32; 1080];
+        assert_eq!(display.write_surface_pixels(id, 10, 0, &pixels), Ok(1080));
+        assert!(display.commit_surface(id, 10).is_ok());
+
+        let flip_res = display.composite_and_flip();
+        assert!(flip_res.is_ok());
+        assert!(display.destroy_surface(id, 10).is_ok());
+    }
+
+    #[test]
+    fn test_surface_allocation_pressure_and_budget_exhaustion() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        // Each 720x1440 surface is 4,147,200 bytes.
+        // MAX_SURFACE_BYTES is 48 MiB (50,331,648 bytes).
+        // 12 surfaces take 12 * 4,147,200 = 49,766,400 bytes (fits in 50,331,648).
+        // 13 surfaces would take 13 * 4,147,200 = 53,913,600 bytes (> 48 MiB).
+        let mut surface_ids = [0u32; 12];
+        for i in 0..12 {
+            let id = kms.create_surface(720, 1440, 200 + i as u32, 100 + i as u64);
+            assert_ne!(id, 0, "surface {i} must be created within 48 MB budget");
+            surface_ids[i] = id;
+        }
+
+        let (held, budget) = kms.surface_bytes_held();
+        assert_eq!(held, 12 * 4_147_200);
+        assert_eq!(budget, MAX_SURFACE_BYTES);
+
+        // 13th full-screen surface must be REFUSED (OOM guard)
+        assert!(!kms.can_afford_surface(720 * 1440));
+        let oom_id = kms.create_surface(720, 1440, 300, 999);
+        assert_eq!(oom_id, 0, "surface exceeding MAX_SURFACE_BYTES must be refused");
+
+        // Set surface 0 as backgrounded (invisible)
+        kms.surfaces[0].visible = false;
+        let victim = kms.evictable_app_owner(999);
+        assert_eq!(victim, Some((100, 4_147_200)), "lowest-z invisible surface must be candidate for eviction");
+
+        // Destroy surface 0 and verify budget reclaimed
+        assert!(kms.destroy_surface(surface_ids[0]));
+        let (reclaimed_held, _) = kms.surface_bytes_held();
+        assert_eq!(reclaimed_held, 11 * 4_147_200);
+        assert!(kms.can_afford_surface(720 * 1440));
+
+        // Cleanup remaining
+        for &id in &surface_ids[1..] {
+            assert!(kms.destroy_surface(id));
+        }
+        let (final_held, _) = kms.surface_bytes_held();
+        assert_eq!(final_held, 0);
+    }
+
+    #[test]
+    fn test_surface_resize_and_destruction_lifecycle() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        let s1 = kms.create_surface(360, 720, 200, 10);
+        assert_ne!(s1, 0);
+
+        // Verify geometry
+        let s1_ref = kms.surfaces.iter().find(|s| s.id == s1).unwrap();
+        assert_eq!(s1_ref.width, 360);
+        assert_eq!(s1_ref.height, 720);
+        assert_eq!(s1_ref.pixels.len(), 360 * 720);
+
+        // Update geometry / position
+        assert!(kms.set_surface_geometry(s1, 10, 20, 250, true));
+        let s1_moved = kms.surfaces.iter().find(|s| s.id == s1).unwrap();
+        assert_eq!(s1_moved.x, 10);
+        assert_eq!(s1_moved.y, 20);
+        assert_eq!(s1_moved.z_order, 250);
+
+        // Destroy and recreate with different dimensions
+        assert!(kms.destroy_surface(s1));
+        assert!(kms.surfaces.is_empty());
+
+        let s2 = kms.create_surface(720, 1440, 200, 10);
+        assert_ne!(s2, 0);
+        assert_eq!(kms.surfaces[0].pixels.len(), 720 * 1440);
+        assert!(kms.destroy_surface(s2));
     }
 
     #[test]

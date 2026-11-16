@@ -1328,6 +1328,11 @@ impl Vfs {
                 inode.nlink = inode.nlink.saturating_sub(1);
                 inode.ctime = crate::interrupts::get_system_ticks();
             }
+            if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
+                if let Some(inode) = self.inodes.remove(&inode_id) {
+                    (self.spill.remove)(&spill_path_for(&inode.path));
+                }
+            }
             self.rebuild_children();
             self.bump_metadata_generation();
             if self.persist_metadata_snapshot().is_err() {
@@ -1351,10 +1356,11 @@ impl Vfs {
             inode.ctime = crate::interrupts::get_system_ticks();
         }
         if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
-            self.inodes.remove(&inode_id);
-            // A payload that no path names must not outlive the path: leaving it
-            // would hold disk blocks no file can reach.
-            (self.spill.remove)(&spill_path_for(&norm));
+            if let Some(inode) = self.inodes.remove(&inode_id) {
+                // A payload that no path names must not outlive the path: leaving it
+                // would hold disk blocks no file can reach.
+                (self.spill.remove)(&spill_path_for(&inode.path));
+            }
         }
 
         self.rebuild_children();
@@ -3879,6 +3885,42 @@ mod tests {
         assert!(
             memory_file_len(&name).is_none(),
             "a payload no path names must not outlive the path"
+        );
+    }
+
+    #[test]
+    fn vfs_hard_linked_payload_spill_file_only_deleted_when_nlink_reaches_zero() {
+        let mut vfs = Vfs::with_spill_store(memory_store());
+        vfs.mkdir("/storage");
+        vfs.mkdir("/storage/photos");
+        vfs.create_file(
+            "/storage/photos/shot.ppm",
+            &alloc::vec![0x42u8; 3 * 1024 * 1024],
+            false,
+        );
+        let spilled = vfs.store_spilled_payloads();
+        assert_eq!(spilled.len(), 1);
+        let name = spilled[0].clone();
+        assert!(memory_file_len(&name).is_some());
+
+        // 1. Create a hard link
+        vfs.link("/storage/photos/shot.ppm", "/storage/photos/shot_link.ppm").expect("link");
+
+        // 2. Unlink primary path: nlink goes 2 -> 1, spill file MUST remain
+        vfs.unlink("/storage/photos/shot.ppm").expect("unlink primary");
+        assert_eq!(vfs.lookup("/storage/photos/shot.ppm"), None);
+        assert!(vfs.lookup("/storage/photos/shot_link.ppm").is_some());
+        assert!(
+            memory_file_len(&name).is_some(),
+            "spill file must survive while hard link exists (nlink == 1)"
+        );
+
+        // 3. Unlink remaining hard link: nlink goes 1 -> 0, spill file MUST now be deleted
+        vfs.unlink("/storage/photos/shot_link.ppm").expect("unlink link");
+        assert_eq!(vfs.lookup("/storage/photos/shot_link.ppm"), None);
+        assert!(
+            memory_file_len(&name).is_none(),
+            "spill file must be deleted when nlink reaches zero"
         );
     }
 

@@ -250,6 +250,12 @@ def main() -> None:
     must(sched, "Do not update the service registry while holding the scheduler lock.",
          "scheduler/service lock-order guard")
 
+    # Force-stop lifecycle synchronous cleanup and resource leak prevention:
+    must(syscall, "reap_child(parent, child_id)", "sys_app_stop child reaping")
+    must(syscall, "crate::task::scheduler::run_deferred_cleanup()", "sys_app_stop synchronous deferred cleanup")
+    must(sched, "crate::drivers::input::cleanup_task(entry.id)", "lifecycle input queue cleanup")
+    must(sched, "crate::gui::BUFFER_MANAGER.lock().release_owned_by(entry.id.0)", "lifecycle display buffer cleanup")
+
     print("service lifecycle contract: PASS")
 
 

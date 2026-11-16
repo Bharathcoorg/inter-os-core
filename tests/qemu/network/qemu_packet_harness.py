@@ -26,13 +26,22 @@ from frame_codec import PcapWriter, EthernetFrame
 
 
 class QemuNetworkHarness:
-    def __init__(self, pcap_filename: Optional[str] = None):
+    def __init__(self, pcap_filename: Optional[str] = None, net_mode: str = "connect"):
         self.root = ROOT
         self.kernel_img = os.path.join(ROOT, "target", "inter-os-bios.img")
         self.data_disk = os.path.join(ROOT, "target", "inter-os-data-master.img")
         self.qemu_exe = find_qemu("qemu-system-x86_64.exe")
+        self.net_mode = net_mode
 
-        self.net_port = self._find_free_port()
+        self.net_srv: Optional[socket.socket] = None
+        if self.net_mode == "connect":
+            self.net_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.net_srv.bind(("127.0.0.1", 0))
+            self.net_port = self.net_srv.getsockname()[1]
+            self.net_srv.listen(1)
+        else:
+            self.net_port = self._find_free_port()
+
         self.ser_port = self._find_free_port()
         self.mon_port = self._find_free_port()
 
@@ -60,6 +69,16 @@ class QemuNetworkHarness:
         if not os.path.exists(self.kernel_img):
             raise FileNotFoundError(f"Missing kernel boot image: {self.kernel_img}")
 
+        if not os.path.exists(self.data_disk):
+            with open(self.data_disk, "wb") as f:
+                f.truncate(512 * 1024 * 1024)
+
+        netdev_arg = (
+            f"socket,id=net0,connect=127.0.0.1:{self.net_port}"
+            if self.net_mode == "connect"
+            else f"socket,id=net0,listen=127.0.0.1:{self.net_port}"
+        )
+
         cmd = [
             self.qemu_exe,
             "-machine", "q35",
@@ -69,7 +88,7 @@ class QemuNetworkHarness:
             "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
             "-drive", f"file={self.data_disk},format=raw,if=none,id=datad,snapshot=on",
             "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
-            "-netdev", f"socket,id=net0,listen=127.0.0.1:{self.net_port}",
+            "-netdev", netdev_arg,
             "-device", "e1000,netdev=net0,mac=52:54:00:12:34:56",
             "-m", "1024M",
             "-display", "none",
@@ -82,6 +101,22 @@ class QemuNetworkHarness:
 
         self.proc = subprocess.Popen(cmd, cwd=self.root)
         self._running = True
+
+        # Connect or accept netdev socket
+        if self.net_mode == "connect":
+            self.net_srv.settimeout(15.0)
+            self.net_sock, _ = self.net_srv.accept()
+        else:
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                try:
+                    self.net_sock = socket.create_connection(("127.0.0.1", self.net_port), timeout=1.0)
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            if not self.net_sock:
+                self.stop()
+                raise RuntimeError("Failed to connect to QEMU netdev stream socket")
 
         # Connect serial
         deadline = time.time() + 15.0
@@ -117,18 +152,6 @@ class QemuNetworkHarness:
                     pass
         self._pump_thread = threading.Thread(target=pump, daemon=True)
         self._pump_thread.start()
-
-        # Connect netdev socket
-        deadline = time.time() + 15.0
-        while time.time() < deadline:
-            try:
-                self.net_sock = socket.create_connection(("127.0.0.1", self.net_port), timeout=1.0)
-                break
-            except OSError:
-                time.sleep(0.2)
-        if not self.net_sock:
-            self.stop()
-            raise RuntimeError("Failed to connect to QEMU netdev stream socket")
 
     def recv_frame(self, timeout: float = 5.0) -> Optional[bytes]:
         """Receives one Ethernet frame from the guest virtual NIC."""
@@ -172,14 +195,18 @@ class QemuNetworkHarness:
         return False
 
     def send_console_cmd(self, line: str):
-        if self.reader:
-            self.reader.send(line if line.endswith("\n") else line + "\n")
+        if self.ser_sock:
+            cmd = line if line.endswith("\n") else line + "\n"
+            try:
+                self.ser_sock.sendall(cmd.encode("utf-8"))
+            except OSError:
+                pass
 
     def stop(self):
         self._running = False
         if self.pcap:
             self.pcap.close()
-        for s in (self.net_sock, self.ser_sock, self.mon_sock):
+        for s in (self.net_sock, self.net_srv, self.ser_sock, self.mon_sock):
             if s:
                 try:
                     s.close()

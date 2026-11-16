@@ -23,12 +23,29 @@ def run_tests():
     try:
         harness.start()
         # Handshake gateway ARP
-        raw = harness.recv_frame(timeout=30.0)
+        deadline = time.time() + 30.0
+        arp_found = False
+        while time.time() < deadline:
+            raw = harness.recv_frame(timeout=2.0)
+            if not raw:
+                continue
+            ef = EthernetFrame.parse(raw)
+            if ef.ethertype == EtherType.ARP:
+                arp_found = True
+                break
+        assert arp_found, "Gateway ARP request missing"
         gateway_mac = bytes.fromhex("52550a000202")
         guest_mac = bytes.fromhex("525400123456")
         reply = ArpPacket(ArpOpcode.REPLY, gateway_mac, "10.0.2.2", guest_mac, "10.0.2.15")
         harness.send_frame(EthernetFrame(guest_mac, gateway_mac, EtherType.ARP, reply.serialize()).serialize(60))
-        assert harness.wait_for_serial("Real ARP reply received", timeout=45.0)
+        res = harness.wait_for_serial("Real ARP reply received", timeout=30.0)
+        if not res:
+            print("=== SERIAL LOGS ON ARP HANDSHAKE TIMEOUT ===")
+            for l in harness.logs:
+                if "[NET" in l or "ARP" in l:
+                    print(l)
+            print("============================================")
+        assert res, "Failed to confirm ARP handshake"
 
         # 1. Malformed Packet Rejection: Unknown EtherType (0x8888)
         print("[*] Injecting Non-IPv4/ARP EtherType 0x8888...")

@@ -37,9 +37,12 @@
 | **FHD+ Reference** | **1080×2160** | **18:9** | 8.90 MiB (9,331,200 B) | 17.80 MiB (18,662,400 B) | 27.8% of heap | 559.9 MB/s | 1,119.7 MB/s | **VERIFIED PROFILE**. Preserves 18:9 canvas; exact 1.5x font match (`font_fhd.rs`). |
 | **Flagship 20:9** | **1080×2400** | **20:9** | 9.89 MiB (10,368,000 B) | 19.78 MiB (20,736,000 B) | 30.9% of heap | 622.1 MB/s | 1,244.2 MB/s | **CONSTRAINED TARGET**. Requires 240px vertical letterbox or 20:9 app authoring. Surface memory limit must not exceed 40 MiB to prevent kernel heap panic. |
 
-#### Flagship High-DPI Memory Rules:
-1. **Kernel Heap Safety Invariant:** When scanout buffers occupy 19.78 MiB, `MAX_SURFACE_BYTES` cannot exceed 40 MiB without risking kernel OOM. Surfaces must be backed by `allocate_dma_frames` physical allocations.
-2. **Platform Truth on 120 FPS:** At 120 Hz (8.33ms budget), full-frame software copy requires ~375M cycles (~187ms) in QEMU TCG. 120 FPS is achievable only through dirty band damage tracking (<5% screen update) or hardware VirtIO-GPU scanout submit.
+#### Flagship High-DPI Technical Constraints & Invariants:
+1. **Firmware & Bootloader VBE Boundary:** The BIOS stage-2 bootloader enumerates VESA/VBE modes and greedily initializes the widest landscape mode (1280×720). Runtime mode reprogramming via Bochs DISPI requires the kernel page-table tail to map all physical scanout pages.
+2. **Physical Framebuffer Coverage Gate:** In `kernel/src/framebuffer.rs`, `set_physical_mode(1080, 2400)` enforces `FB_COVERED_BYTES >= 10,368,000`. In the canonical QEMU phone profile, `engage_native_mode()` sizes the tail mapping to 4,149,248 bytes (1013 pages of 4 KiB) for the canonical 720×1440 profile. Reprogramming to 1080×2400 fails closed to prevent unmapped page faults into host video RAM.
+3. **Kernel Heap Safety Invariant:** When scanout buffers occupy 19.78 MiB (10,368,000 bytes front buffer + 10,368,000 bytes back buffer), `MAX_SURFACE_BYTES` cannot remain at 48 MiB on a 64 MiB kernel heap ($19.78 + 48.0 = 67.78\text{ MiB} > 64\text{ MiB}$). Without physical DMA backing (`allocate_dma_frames`), surface memory limit must not exceed 40 MiB to prevent fatal kernel heap exhaustion panics.
+4. **Platform Truth on High Refresh & Emulation Bandwidth:** At 1080×2400 @ 120 FPS, full-frame software copy requires moving 7.47 GB/s through internal DRAM and ~375M cycles (~187ms) in QEMU TCG (~5 FPS observed). High-refresh operation is achievable only through dirty-region row damage tracking (<5% screen update, ~50–150 KB/frame) or hardware-accelerated VirtIO-GPU scanout submission.
+5. **Compositor & Tiling Pipeline Verification:** Logical surface allocation, automatic native mode selection, 1:1 bit-exact composition without resampling, Porter-Duff alpha blending, and row-level damage tracking for 1080×2400 are fully implemented and verified in `DrmKmsController` (`explicit_1080x2400_surface_engages_matching_scanout_mode`, `explicit_1080x2400_blit_preserves_alpha_blending`, `explicit_1080x2400_blit_maps_dirty_rows_1to1`) and userspace tiling (`chunk_bounds_flagship`, 2532 chunks).
 
 ---
 
@@ -48,15 +51,21 @@
 | Verification Target | Test / Automation Command | Expected Outcome | Result |
 | :--- | :--- | :--- | :--- |
 | **1. Workspace Cargo Check** | `cargo check --workspace` | Zero errors across all crates | **Verified (0 errors, 0.12s)** |
-| **2. Kernel Unit Tests** | `cargo test --manifest-path kernel/Cargo.toml` | 100% tests pass | **Verified (601 passed, 0 failed)** |
-| **3. InterOS Std Unit Tests** | `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml` | 100% tests pass | **Verified (459 passed, 0 failed)** |
-| **4. Architecture Contracts** | `python tools/interos.py contracts` | All platform contracts pass | **Verified (25/25 passed)** |
-| **5. Full Contract Suite** | `python tests/run_all_contracts.py` | 100% contracts pass | **Verified (1253/1253 passed, 111 suites)** |
-| **6. Pointer Input Contract** | `python tests/test_qemu_pointer_input.py` | Real guest pointer contracts pass | **Verified (pass)** |
-| **7. HMP Pointer Acceptance** | `python tests/test_qemu_hmp_pointer_acceptance.py` | 4/4 acceptance assertions pass | **Verified (4 passed, 0 failed)** |
-| **8. x86_64 Boot Verification** | `python tests/verify_x86_boot.py` | Boot animation, service init, launcher alive | **Verified** |
-| **9. AArch64 Boot Verification** | `python tests/verify_aarch64_boot.py` | EL0 user execution, service registry init | **Verified** |
-| **10. RISC-V Boot Verification** | `python tests/verify_riscv_boot.py` | U-mode user execution, service registry init | **Verified** |
+| **2. Kernel Unit Tests** | `cargo test --manifest-path kernel/Cargo.toml` | 100% tests pass | **Verified (725 passed, 0 failed, 1 ignored)** |
+| **3. Compositor Crate Tests** | `cargo test --package compositor` | 100% tests pass | **Verified (7 passed, 0 failed)** |
+| **4. InterOS Std Unit Tests** | `cargo test --manifest-path sdk/rust/interos-std/Cargo.toml` | 100% tests pass | **Verified (459 passed, 0 failed)** |
+| **5. Architecture Contracts** | `python tools/interos.py contracts` | All platform contracts pass | **Verified (25/25 passed)** |
+| **6. Full Contract Suite** | `python tests/run_all_contracts.py` | 100% contracts pass | **Verified (1258/1258 passed, 111 suites, all 82 pins met)** |
+| **7. Display Boundary Contracts** | `pytest tests/test_display_contract.py` | 100% tests pass | **Verified (1 passed, 0 failed)** |
+| **8. Framebuffer Pixel Verification** | `pytest tests/test_framebuffer_verification.py` | 100% tests pass | **Verified (14 passed, 0 failed)** |
+| **9. Pointer Input Contract** | `python tests/test_qemu_pointer_input.py` | Real guest pointer contracts pass | **Verified (pass)** |
+| **10. HMP Pointer Acceptance** | `python tests/test_qemu_hmp_pointer_acceptance.py` | 4/4 acceptance assertions pass | **Verified (4 passed, 0 failed)** |
+| **11. Live QEMU ARP/UDP Netdev** | `python tests/qemu/network/test_qemu_net_arp_udp.py` | Live E1000 ARP resolution & UDP checksum drop | **Verified (pass, trace_arp_udp.pcap)** |
+| **12. Live QEMU IPv6/NDP Netdev** | `python tests/qemu/network/test_qemu_net_ipv6_ndp.py` | Live RA/SLAAC/Ping6 & DAD defense | **Verified (pass, trace_ipv6_ndp.pcap)** |
+| **13. Live QEMU Net Robustness** | `python tests/qemu/network/test_qemu_net_robustness.py` | Drop telemetry & 2x RX ring wraparound | **Verified (pass, trace_robustness.pcap)** |
+| **14. Live QEMU TCP/DNS Netdev** | `python tests/qemu/network/test_qemu_net_tcp_dns.py` | TCP handshake & HTTP GET request/reply | **Verified (pass, trace_tcp_dns.pcap)** |
+| **15. Clean Reboot Recovery** | `python tests/test_reboot_recovery.py` | ACPI poweroff & state recovery across reboots | **Verified (pass, code 0)** |
+| **16. x86_64 Boot Verification** | `python tests/verify_x86_boot.py` | Boot animation, service init, launcher alive | **Verified (pass, 720x1440 3742 colors)** |
 
 ### Verified Implementation Commits
 

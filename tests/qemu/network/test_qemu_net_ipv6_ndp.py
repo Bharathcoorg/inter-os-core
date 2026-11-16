@@ -79,8 +79,9 @@ def run_tests():
         print("[PASS] ICMPv6 Echo: Guest transmitted valid Echo Reply (type 129).")
 
         # 4. Inject DAD Probe (RFC 4862) with unspecified source (::)
-        dad_ns = Icmpv6Codec.build_neighbor_solicitation(src_ip="::", target_ip=guest_slaac_ip)
-        ip6_dad = Ipv6Packet(src="::", dst="ff02::1:ff12:3456", next_header=58, payload=dad_ns, hop_limit=255)
+        dad_dst_ip = "ff02::1:ff12:3456"
+        dad_ns = Icmpv6Codec.build_neighbor_solicitation(src_ip="::", target_ip=guest_slaac_ip, dst_ip=dad_dst_ip)
+        ip6_dad = Ipv6Packet(src="::", dst=dad_dst_ip, next_header=58, payload=dad_ns, hop_limit=255)
         dad_frame = EthernetFrame(
             dst_mac=bytes.fromhex("3333ff123456"),
             src_mac=gateway_mac,
@@ -104,6 +105,12 @@ def run_tests():
                     defended = True
                     break
 
+        if not defended:
+            print("=== SERIAL LOGS ON DAD DEFENSE TIMEOUT ===")
+            for l in harness.logs:
+                if "[NET" in l or "IPV6" in l or "icmp" in l or "dad" in l or "ndp" in l or "NA" in l:
+                    print(l)
+            print("===========================================")
         assert defended, "Guest failed to defend address against DAD conflict"
         print("[PASS] NDP / DAD: Guest defended established SLAAC address via Neighbor Advertisement.")
 
