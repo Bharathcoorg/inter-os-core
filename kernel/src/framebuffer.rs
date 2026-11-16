@@ -1673,7 +1673,7 @@ pub fn set_physical_mode(width: u16, height: u16) -> bool {
     let needed = (width as usize)
         .saturating_mul(height as usize)
         .saturating_mul(bpp);
-    if FB_COVERED_BYTES.load(Ordering::Acquire) < needed {
+    if !ensure_framebuffer_mapped(needed) {
         return false;
     }
     let bpp_hw: u16 = if bpp == 4 { 32 } else { 24 };
@@ -1750,6 +1750,51 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
     );
 }
 
+/// Ensures that at least `required_bytes` of the linear framebuffer are virtually mapped
+/// in the kernel page tables. Extends the mapping on-demand up to the hardware VRAM capacity.
+pub fn ensure_framebuffer_mapped(required_bytes: usize) -> bool {
+    let required_rounded = align_up_4k(required_bytes as u64) as usize;
+    let base_va = FB_BASE_VA.load(Ordering::Acquire);
+    let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
+
+    if base_va == 0 {
+        return false;
+    }
+
+    if covered < required_rounded {
+        let tail_virt = VirtAddr::new(align_up_4k(base_va + covered as u64));
+        let tail_size = required_rounded - (tail_virt.as_u64() - base_va) as usize;
+        let last_mapped_va = VirtAddr::new(base_va + covered as u64 - 1);
+        let phys_offset = crate::memory::phys_mem_offset().as_u64();
+        let tail_phys = match kernel_translate(last_mapped_va) {
+            Some(last_pa) => PhysAddr::new(align_up_4k(last_pa.as_u64() + 1)),
+            None if base_va >= phys_offset => {
+                PhysAddr::new(align_up_4k(base_va - phys_offset + covered as u64))
+            }
+            None => PhysAddr::new(align_up_4k(base_va + covered as u64)),
+        };
+        crate::serial_println!(
+            "[DISPLAY_HAL] extending framebuffer mapping: tail virt={:#x} phys={:#x} size={:#x} ({} pages)",
+            tail_virt.as_u64(), tail_phys.as_u64(), tail_size, tail_size / 4096
+        );
+        match crate::memory::map_framebuffer_region(tail_phys, tail_size, tail_virt) {
+            Ok(_) => covered = required_rounded,
+            Err("Framebuffer virtual range already mapped") | Err("MMIO virtual range already mapped") => {
+                covered = required_rounded;
+            }
+            Err(err) => {
+                crate::serial_println!(
+                    "[DISPLAY_HAL] Framebuffer mapping extension failed: {}",
+                    err
+                );
+                return false;
+            }
+        }
+        FB_COVERED_BYTES.store(covered, Ordering::Release);
+    }
+    covered >= required_bytes
+}
+
 /// Engages the phone's native 720x1440 DISPI scanout once paging is live.
 ///
 /// WHY 720x1440 and not a larger FHD-class frame: every platform app paints a
@@ -1780,9 +1825,7 @@ pub fn engage_native_mode() {
     const BPP: usize = 4;
 
     let required_bytes = NATIVE_W * NATIVE_H * BPP; // 4,147,200 (0x3F4800)
-    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 1013 pages = 4,149,248 (0x3F5000)
     let base_va = FB_BASE_VA.load(Ordering::Acquire);
-    let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
 
     if base_va == 0 {
         crate::serial_println!(
@@ -1791,57 +1834,10 @@ pub fn engage_native_mode() {
         return;
     }
 
-    if covered < required_rounded {
-        // Extend ONLY the unmapped tail: the bootloader mapped everything
-        // below `covered`, and map_mmio_region fails (with rollback) on any
-        // already-mapped page, so the tail starts at the first page boundary
-        // beyond the recorded mapping.
-        let tail_virt = VirtAddr::new(align_up_4k(base_va + covered as u64));
-        let tail_size =
-            required_rounded - (tail_virt.as_u64() - base_va) as usize;
-        // VA->PA for the tail: the tail pages are by construction NOT mapped,
-        // so translate the last mapped byte and continue from the next page.
-        // The LFB is one contiguous physical BAR region, so physical
-        // contiguity holds across the tail. Fallbacks cover the two known
-        // bootloader layouts if the CR3 walk fails: direct map
-        // (PA = VA - phys_mem_offset) and identity (QEMU firmware LFB at
-        // 0xFE000000 lives in an identity-ish window).
-        let last_mapped_va = VirtAddr::new(base_va + covered as u64 - 1);
-        let phys_offset = crate::memory::phys_mem_offset().as_u64();
-        let tail_phys = match kernel_translate(last_mapped_va) {
-            Some(last_pa) => PhysAddr::new(align_up_4k(last_pa.as_u64() + 1)),
-            None if base_va >= phys_offset => {
-                PhysAddr::new(align_up_4k(base_va - phys_offset + covered as u64))
-            }
-            None => PhysAddr::new(align_up_4k(base_va + covered as u64)),
-        };
+    if !ensure_framebuffer_mapped(required_bytes) {
         crate::serial_println!(
-            "[DISPLAY_HAL] extending framebuffer mapping: tail virt={:#x} phys={:#x} size={:#x} ({} pages)",
-            tail_virt.as_u64(), tail_phys.as_u64(), tail_size, tail_size / 4096
-        );
-        match crate::memory::map_framebuffer_region(tail_phys, tail_size, tail_virt) {
-            Ok(_) => covered = required_rounded,
-            // The mapper rolled the whole tail back and reports it already
-            // mapped: the scanout range is covered either way (safe).
-            Err("Framebuffer virtual range already mapped") | Err("MMIO virtual range already mapped") => {
-                covered = required_rounded;
-            }
-            Err(err) => {
-                crate::serial_println!(
-                    "[DISPLAY_HAL] DISPI native scanout unavailable (tail map failed: {}); keeping firmware mode",
-                    err
-                );
-                return;
-            }
-        }
-        FB_COVERED_BYTES.store(covered, Ordering::Release);
-    }
-
-
-    if covered < required_bytes {
-        crate::serial_println!(
-            "[DISPLAY_HAL] DISPI native scanout unavailable (covered_bytes={} < required={}); keeping firmware mode",
-            covered, required_bytes
+            "[DISPLAY_HAL] DISPI native scanout unavailable (covered_bytes < required={}); keeping firmware mode",
+            required_bytes
         );
         return;
     }
@@ -1851,6 +1847,7 @@ pub fn engage_native_mode() {
     // landscape 1440x720x32 need exactly 4,147,200 bytes. set_physical_mode
     // re-checks coverage itself before touching any hardware register.
     *DISPI_BPP.lock() = BPP;
+    let covered = FB_COVERED_BYTES.load(Ordering::Acquire);
     if set_physical_mode(NATIVE_W as u16, NATIVE_H as u16) {
         crate::serial_println!(
             "[DISPLAY_HAL] DISPI native scanout {}x{} engaged (bpp=32, mapped_bytes={})",

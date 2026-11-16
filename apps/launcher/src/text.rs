@@ -412,7 +412,7 @@ impl Label {
         let em = crate::scale::em_at(scale, level);
         let (ascent, _descent) = interos_std::design::typeface::line_metrics(em);
         let baseline = (y + crate::scale::ascent_at(scale, level)).max(ascent as usize);
-        let outline = if scale >= 2 {
+        let outline = if em > 0 {
             crate::outline_text::OutlineRun::place(x, baseline, em, run)
         } else {
             None

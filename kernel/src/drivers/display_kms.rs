@@ -1697,7 +1697,7 @@ impl DrmKmsController {
         let sh = self.scanout_height as i32;
 
         let has_mobile_portrait = self.surfaces.iter().any(|s| {
-            s.visible && s.frame_ready && ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160))
+            s.visible && s.frame_ready && ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160) || (s.width == 1080 && s.height == 2400))
         });
 
         // Scanout rows the flip will have to re-present. Seeded with whatever
@@ -1740,7 +1740,7 @@ impl DrmKmsController {
             }
 
             let landscape = matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft);
-            let (x0, y0, x1, y1) = if ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160)) && s.x == 0 && s.y == 0 {
+            let (x0, y0, x1, y1) = if ((s.width == 720 && s.height == 1440) || (s.width == 1080 && s.height == 2160) || (s.width == 1080 && s.height == 2400)) && s.x == 0 && s.y == 0 {
                 if !landscape && s.width == self.scanout_width && s.height == self.scanout_height {
                     (0, 0, self.scanout_width as usize, self.scanout_height as usize)
                 } else {
@@ -1942,9 +1942,9 @@ impl DrmKmsController {
             }
 
             // The canonical mobile portrait canvas has a stable 1:2 aspect ratio
-            // (720x1440 logical, or an explicitly requested 1080x2160 surface).
+            // (720x1440 logical, or an explicitly requested 1080x2160 or 1080x2400 surface).
             // Fit that canvas to the actual scanout preserving geometry.
-            if ((s_w == 720 && s_h == 1440) || (s_w == 1080 && s_h == 2160)) && sx == 0 && sy == 0 {
+            if ((s_w == 720 && s_h == 1440) || (s_w == 1080 && s_h == 2160) || (s_w == 1080 && s_h == 2400)) && sx == 0 && sy == 0 {
                 let (mut dst_w, mut dst_h) = if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
                     (
                         ((s_w as u32).saturating_mul(sh as u32) / (s_h as u32)).max(1).min(self.scanout_width),
@@ -3605,6 +3605,38 @@ mod tests {
         let flip_res = display.composite_and_flip();
         assert!(flip_res.is_ok());
         assert!(display.destroy_surface(id, 10).is_ok());
+    }
+
+    #[test]
+    fn native_720x1440_on_1080x2400_scanout_centers_and_reconstructs() {
+        let mut kms = DrmKmsController::new(1080, 2400);
+        kms.set_display_mode(1080, 2400, 60).expect("mode");
+
+        // Canonical 720x1440 surface presented on 1080x2400 flagship scanout
+        let s_id = kms.create_surface(720, 1440, 100, 42);
+        assert_ne!(s_id, 0);
+
+        let s_idx = kms.surfaces.iter().position(|s| s.id == s_id).unwrap();
+        kms.surfaces[s_idx].pixels.fill(0xFF112233);
+        kms.surfaces[s_idx].mark_frame_drawn();
+
+        kms.composite();
+
+        // 720x1440 scaled 1.5x gives 1080x2160, centered vertically:
+        // dst_y = (2400 - 2160) / 2 = 120.
+        // Rows 0..120 are background (letterbox)
+        assert_eq!(kms.back_buffer[0], PLATFORM_BACKGROUND);
+        assert_eq!(kms.back_buffer[119 * 1080 + 540], PLATFORM_BACKGROUND);
+
+        // Row 120 onwards is the reconstructed content
+        assert_eq!(kms.back_buffer[120 * 1080 + 540], 0xFF112233);
+        assert_eq!(kms.back_buffer[(120 + 1000) * 1080 + 540], 0xFF112233);
+        assert_eq!(kms.back_buffer[(120 + 2159) * 1080 + 540], 0xFF112233);
+
+        // Rows 2280..2400 are background (bottom letterbox)
+        assert_eq!(kms.back_buffer[2280 * 1080 + 540], PLATFORM_BACKGROUND);
+
+        assert!(kms.destroy_surface(s_id));
     }
 
     #[test]
