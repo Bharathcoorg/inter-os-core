@@ -59,7 +59,8 @@ docs/BUILD_EMBEDDING.md
 aragon4.md
 aragon.md
 target/audit/
-docs/audits/
+docs/audits/*
+!docs/audits/POST_REMEDIATION_INDEPENDENT_VERIFICATION.md
 *AUDIT*.md
 *REPORT*.md
 *ROADMAP*.md
