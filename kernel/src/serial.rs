@@ -1818,6 +1818,24 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    if verb.eq_ignore_ascii_case("SET_MODE") || verb.eq_ignore_ascii_case("MODE") {
+        let w = parts.next().and_then(|v| v.parse::<u32>().ok());
+        let h = parts.next().and_then(|v| v.parse::<u32>().ok());
+        if let (Some(w), Some(h)) = (w, h) {
+            let mut kms_ok = false;
+            if let Some(mut kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                if kms.set_display_mode(w, h, 60).is_ok() {
+                    kms_ok = true;
+                }
+            }
+            let fb_ok = crate::framebuffer::set_physical_mode(w as u16, h as u16);
+            crate::serial_println!("[DISPLAY_HAL] SET_MODE {}x{} kms={} physical={}", w, h, kms_ok, fb_ok);
+        } else {
+            crate::serial_println!("[DISPLAY_HAL] SET_MODE syntax error");
+        }
+        return;
+    }
+
     if verb.eq_ignore_ascii_case("SHUTDOWN") || verb.eq_ignore_ascii_case("POWEROFF") {
         crate::serial_println!("[SYSTEM] Clean shutdown requested via COM1 serial.");
         crate::hal::traits::PowerController::shutdown(&crate::hal::platform::POWER);

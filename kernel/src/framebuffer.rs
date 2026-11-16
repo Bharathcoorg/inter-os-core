@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 #[cfg(not(test))]
 use x86_64::instructions::port::Port;
+#[cfg(not(test))]
 use x86_64::structures::paging::{PageTable, PageTableFlags};
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -1553,46 +1554,53 @@ fn align_up_4k(bytes: u64) -> u64 {
 /// direct map. Supports 4 KiB leaves plus 2 MiB/1 GiB huge pages, matching
 /// the pattern of `TaskPageTable::translate` but against the kernel tables.
 fn kernel_translate(vaddr: VirtAddr) -> Option<PhysAddr> {
-    let addr = vaddr.as_u64();
-    let idx = |shift: u32| ((addr >> shift) & 0x1FF) as usize;
-    let phys_offset = crate::memory::phys_mem_offset().as_u64();
-    let table_at = |frame_addr: u64| -> *const PageTable {
-        (VirtAddr::new(phys_offset) + frame_addr).as_ptr::<PageTable>()
-    };
+    #[cfg(test)]
+    {
+        return Some(PhysAddr::new(vaddr.as_u64()));
+    }
+    #[cfg(not(test))]
+    {
+        let addr = vaddr.as_u64();
+        let idx = |shift: u32| ((addr >> shift) & 0x1FF) as usize;
+        let phys_offset = crate::memory::phys_mem_offset().as_u64();
+        let table_at = |frame_addr: u64| -> *const PageTable {
+            (VirtAddr::new(phys_offset) + frame_addr).as_ptr::<PageTable>()
+        };
 
-    let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
-    let pml4 = unsafe { &*table_at(pml4_frame.start_address().as_u64()) };
-    let e4 = &pml4[idx(39)];
-    if !e4.flags().contains(PageTableFlags::PRESENT) {
-        return None;
-    }
+        let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
+        let pml4 = unsafe { &*table_at(pml4_frame.start_address().as_u64()) };
+        let e4 = &pml4[idx(39)];
+        if !e4.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
 
-    let p3 = unsafe { &*table_at(e4.frame().ok()?.start_address().as_u64()) };
-    let e3 = &p3[idx(30)];
-    if !e3.flags().contains(PageTableFlags::PRESENT) {
-        return None;
-    }
-    if e3.flags().contains(PageTableFlags::HUGE_PAGE) {
-        // 1 GiB page leaf.
-        return Some(e3.addr() + (addr & 0x3FFF_FFFF));
-    }
+        let p3 = unsafe { &*table_at(e4.frame().ok()?.start_address().as_u64()) };
+        let e3 = &p3[idx(30)];
+        if !e3.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        if e3.flags().contains(PageTableFlags::HUGE_PAGE) {
+            // 1 GiB page leaf.
+            return Some(e3.addr() + (addr & 0x3FFF_FFFF));
+        }
 
-    let p2 = unsafe { &*table_at(e3.frame().ok()?.start_address().as_u64()) };
-    let e2 = &p2[idx(21)];
-    if !e2.flags().contains(PageTableFlags::PRESENT) {
-        return None;
-    }
-    if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
-        // 2 MiB page leaf.
-        return Some(e2.addr() + (addr & 0x1F_FFFF));
-    }
+        let p2 = unsafe { &*table_at(e3.frame().ok()?.start_address().as_u64()) };
+        let e2 = &p2[idx(21)];
+        if !e2.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+            // 2 MiB page leaf.
+            return Some(e2.addr() + (addr & 0x1F_FFFF));
+        }
 
-    let p1 = unsafe { &*table_at(e2.frame().ok()?.start_address().as_u64()) };
-    let e1 = &p1[idx(12)];
-    if !e1.flags().contains(PageTableFlags::PRESENT) {
-        return None;
+        let p1 = unsafe { &*table_at(e2.frame().ok()?.start_address().as_u64()) };
+        let e1 = &p1[idx(12)];
+        if !e1.flags().contains(PageTableFlags::PRESENT) {
+            return None;
+        }
+        Some(e1.addr() + (addr & 0xFFF))
     }
-    Some(e1.addr() + (addr & 0xFFF))
 }
 
 fn dispi_write(reg: u16, value: u16) {
@@ -1753,6 +1761,15 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
 /// Ensures that at least `required_bytes` of the linear framebuffer are virtually mapped
 /// in the kernel page tables. Extends the mapping on-demand up to the hardware VRAM capacity.
 pub fn ensure_framebuffer_mapped(required_bytes: usize) -> bool {
+    const MAX_VRAM_BYTES: usize = 32 * 1024 * 1024; // 32 MiB hardware VRAM limit
+    if required_bytes > MAX_VRAM_BYTES {
+        crate::serial_println!(
+            "[DISPLAY_HAL] Requested framebuffer size {:#x} exceeds MAX_VRAM_BYTES {:#x}",
+            required_bytes, MAX_VRAM_BYTES
+        );
+        return false;
+    }
+
     let required_rounded = align_up_4k(required_bytes as u64) as usize;
     let base_va = FB_BASE_VA.load(Ordering::Acquire);
     let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
@@ -1778,9 +1795,25 @@ pub fn ensure_framebuffer_mapped(required_bytes: usize) -> bool {
             tail_virt.as_u64(), tail_phys.as_u64(), tail_size, tail_size / 4096
         );
         match crate::memory::map_framebuffer_region(tail_phys, tail_size, tail_virt) {
-            Ok(_) => covered = required_rounded,
-            Err("Framebuffer virtual range already mapped") | Err("MMIO virtual range already mapped") => {
-                covered = required_rounded;
+            Ok(_) => {
+                // Post-verification check: verify all pages in the tail are mapped and valid
+                let pages = tail_size / 4096;
+                let mut all_ok = true;
+                for i in 0..pages {
+                    let va = VirtAddr::new(tail_virt.as_u64() + (i as u64) * 4096);
+                    if kernel_translate(va).is_none() {
+                        all_ok = false;
+                        break;
+                    }
+                }
+                if all_ok {
+                    covered = required_rounded;
+                } else {
+                    crate::serial_println!(
+                        "[DISPLAY_HAL] Framebuffer verification failed: unmapped page in tail"
+                    );
+                    return false;
+                }
             }
             Err(err) => {
                 crate::serial_println!(
