@@ -667,6 +667,20 @@ pub fn spawn_user_process_with_limits(
     tcb.user_stack_top = user_stack_top;
     tcb.parent_id = parent_id;
 
+    let code_digest = crate::crypto::Sha256::digest(elf_data);
+    let (package_id, is_system) = if let Some(pkg) = crate::package::first_party_package_by_process_name(name) {
+        (pkg.package_id, pkg.is_system)
+    } else if let Some(pkg) = crate::package::first_party_package(name) {
+        (pkg.package_id, pkg.is_system)
+    } else {
+        (name, false)
+    };
+    tcb.security_identity = Some(crate::task::SecurityIdentity {
+        package_id,
+        code_digest,
+        is_system,
+    });
+
     let _id = tcb.id;
     let spawned = SCHEDULER.lock().spawn_task(tcb);
     if spawned == TaskId(0) {
@@ -2284,7 +2298,7 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
             id: CapabilityId(2925),
             cap_type: CapabilityType::AgentTask,
             rights: Rights::INVOKE,
-            object_id: 0,
+            object_id: 0x1F,
         }).ok();
     }
 

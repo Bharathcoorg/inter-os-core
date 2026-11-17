@@ -6160,10 +6160,41 @@ pub fn sys_cap_request_consent(
 
     let mut sched = SCHEDULER.lock();
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let current_identity = sched.get_task(current_id).and_then(|t| t.security_identity);
     let current_ticks = crate::interrupts::get_system_ticks();
 
+    // Verify application identity to prevent spoofing:
+    // If caller has a verified security identity, ensure that caller-supplied app_name
+    // does not claim an identity belonging to another first-party package.
+    if let Some(ref identity) = current_identity {
+        if let Some(claimed_pkg) = crate::package::first_party_package(app_name)
+            .or_else(|| crate::package::first_party_package_by_process_name(app_name))
+        {
+            if claimed_pkg.package_id != identity.package_id {
+                serial_println!(
+                    "[CONSENT SECURITY] Impersonation attempt rejected: Task {} (pkg={}) claimed '{}' (pkg={})",
+                    current_id.0,
+                    identity.package_id,
+                    app_name,
+                    claimed_pkg.package_id,
+                );
+                return Err(SyscallResult::PermissionDenied);
+            }
+        }
+    }
+
+    let verified_name = if let Some(ref id) = current_identity {
+        if let Some(pkg) = crate::package::first_party_package(id.package_id) {
+            pkg.display_name
+        } else {
+            app_name
+        }
+    } else {
+        app_name
+    };
+
     let mut pm = PERMISSION_MANAGER.lock();
-    let (req_id, decision) = pm.request_consent(current_id, app_name, perm, auto_approve, current_ticks);
+    let (req_id, decision) = pm.request_consent(current_id, current_identity, verified_name, perm, auto_approve, current_ticks);
     drop(pm);
 
     if decision == ConsentDecision::Granted {
@@ -7304,6 +7335,16 @@ pub fn sys_storage_query() -> Result<u64, SyscallResult> {
     Err(SyscallResult::DeviceError)
 }
 
+fn is_sensitive_settings_key(key: &str) -> bool {
+    key.starts_with("credential.")
+        || key.starts_with("auth.pin")
+        || key.starts_with("auth.password")
+        || key.starts_with("auth.master")
+        || key.starts_with("vault.master")
+        || key.starts_with("keystore.secret")
+        || key.starts_with("secret.")
+}
+
 pub fn sys_settings_get(_cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
     if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
     {
@@ -7318,6 +7359,10 @@ pub fn sys_settings_get(_cap_slot: usize, key_ptr: u64, key_len: usize, out: &mu
     let mut key = [0u8; 96];
     copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
     let key = core::str::from_utf8(&key[..key_len]).map_err(|_| SyscallResult::InvalidArguments)?;
+    if is_sensitive_settings_key(key) && require_system_control().is_err() {
+        serial_println!("[SETTINGS SECURITY] Blocked unauthorized read of sensitive key '{}'", key);
+        return Err(SyscallResult::PermissionDenied);
+    }
     Ok(crate::settings::SETTINGS.lock().get(key, out))
 }
 

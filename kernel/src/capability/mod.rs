@@ -1257,9 +1257,18 @@ impl CapabilityTable {
             slot.cap.as_ref().and_then(|cap| {
                 if cap.cap_type != expected_type
                     || !cap.rights.contains(required_rights)
-                    || (expected_object_id != 0 && cap.object_id != expected_object_id)
                     || revocation::is_revoked(cap.id)
                 {
+                    return None;
+                }
+                let object_matches = if expected_object_id == 0 {
+                    true
+                } else if cap.cap_type == CapabilityType::AgentTask {
+                    cap.object_id == 0 || (cap.object_id & expected_object_id) == expected_object_id
+                } else {
+                    cap.object_id == expected_object_id
+                };
+                if !object_matches {
                     return None;
                 }
                 if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
@@ -1564,7 +1573,7 @@ pub fn run_adversarial_tests() {
         let victim = crate::task::TaskId(124);
         let permission = SensitivePermission::CameraCapture;
         let mut pm = PERMISSION_MANAGER.lock();
-        let (req_id, _) = pm.request_consent(victim, "adversarial.app", permission, false, 0);
+        let (req_id, _) = pm.request_consent(victim, None, "adversarial.app", permission, false, 0);
         assert_eq!(pm.resolve_consent(req_id, ConsentDecision::Granted).map(|r| r.decision), Some(ConsentDecision::Granted));
 
         let mut victim_table = CapabilityTable::new_for_task(victim, 4);
@@ -1604,7 +1613,7 @@ pub fn run_adversarial_tests() {
         let victim = crate::task::TaskId(125);
         let permission = SensitivePermission::RtcClock;
         let mut pm = PERMISSION_MANAGER.lock();
-        let (req_id, _) = pm.request_consent(victim, "onetime.app", permission, false, 0);
+        let (req_id, _) = pm.request_consent(victim, None, "onetime.app", permission, false, 0);
         pm.resolve_consent(req_id, ConsentDecision::GrantedOnce);
         let mut victim_table = CapabilityTable::new_for_task(victim, 4);
         let minted = victim_table

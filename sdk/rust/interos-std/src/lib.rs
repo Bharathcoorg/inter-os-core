@@ -3086,6 +3086,16 @@ pub enum SensitivePermission {
     /// kernel whether the capability is in its table; it cannot grant itself
     /// the authority to run one.
     AgentTask = 15,
+    /// Permission to run the bounded Calculator agent tool.
+    AgentToolCalculator = 16,
+    /// Permission to run the bounded CalendarClock agent tool.
+    AgentToolClock = 17,
+    /// Permission to run the bounded StorageStats agent tool.
+    AgentToolStorage = 18,
+    /// Permission to run the bounded SettingsQuery agent tool.
+    AgentToolSettings = 19,
+    /// Permission to run the bounded CapabilityCheck agent tool.
+    AgentToolCapCheck = 20,
 }
 
 /// Requests dynamic capability consent from the kernel Permission Manager and Mobile Shell.

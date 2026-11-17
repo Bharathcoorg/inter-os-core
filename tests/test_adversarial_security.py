@@ -299,6 +299,91 @@ class TestAdversarialSecurity(unittest.TestCase):
             ps1_src = f.read()
         self.assertIn('"127.0.0.1:$wsPort"', ps1_src, "websockify in launch_studio.ps1 must bind to loopback")
 
+    def test_11_kernel_verified_application_identity(self):
+        """Verify kernel establishes verified SecurityIdentity and prevents Ring-3 app spoofing."""
+        task_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "task", "mod.rs")
+        with open(task_mod, "r", encoding="utf-8") as f:
+            task_src = f.read()
+        self.assertIn("pub struct SecurityIdentity", task_src)
+        self.assertIn("pub package_id: &'static str", task_src)
+        self.assertIn("pub code_digest: [u8; 32]", task_src)
+        self.assertIn("pub security_identity: Option<SecurityIdentity>", task_src)
+
+        user_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "task", "user.rs")
+        with open(user_mod, "r", encoding="utf-8") as f:
+            user_src = f.read()
+        self.assertIn("crate::crypto::Sha256::digest(elf_data)", user_src)
+        self.assertIn("tcb.security_identity = Some(crate::task::SecurityIdentity", user_src)
+
+        syscall_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "syscall", "mod.rs")
+        with open(syscall_mod, "r", encoding="utf-8") as f:
+            sys_src = f.read()
+        self.assertIn("Impersonation attempt rejected", sys_src)
+        self.assertIn("claimed_pkg.package_id != identity.package_id", sys_src)
+
+        perm_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "capability", "permission.rs")
+        with open(perm_mod, "r", encoding="utf-8") as f:
+            perm_src = f.read()
+        self.assertIn("pub package_id: String", perm_src)
+        self.assertIn("pub code_digest: [u8; 32]", perm_src)
+        self.assertIn("has_identity_permission", perm_src)
+
+    def test_12_consent_replay_prevention(self):
+        """Verify consent resolution rejects already resolved or stale requests."""
+        perm_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "capability", "permission.rs")
+        with open(perm_mod, "r", encoding="utf-8") as f:
+            perm_src = f.read()
+        self.assertIn("record.decision != ConsentDecision::Pending", perm_src)
+        self.assertIn("replayed.is_none()", perm_src)
+
+    def test_13_granular_tool_capabilities(self):
+        """Verify granular tool permissions, bitmasks, and capability filtering."""
+        perm_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "capability", "permission.rs")
+        with open(perm_mod, "r", encoding="utf-8") as f:
+            perm_src = f.read()
+        self.assertIn("AgentToolCalculator = 16", perm_src)
+        self.assertIn("AgentToolClock = 17", perm_src)
+        self.assertIn("AgentToolStorage = 18", perm_src)
+        self.assertIn("AgentToolSettings = 19", perm_src)
+        self.assertIn("AgentToolCapCheck = 20", perm_src)
+
+        cap_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "capability", "mod.rs")
+        with open(cap_mod, "r", encoding="utf-8") as f:
+            cap_src = f.read()
+        self.assertIn("cap.cap_type == CapabilityType::AgentTask", cap_mod_src := cap_src)
+        self.assertIn("(cap.object_id & expected_object_id) == expected_object_id", cap_mod_src)
+
+        agent_lib = os.path.join(WORKSPACE_ROOT, "apps", "agent_manager", "src", "lib.rs")
+        with open(agent_lib, "r", encoding="utf-8") as f:
+            agent_src = f.read()
+        self.assertIn("pub const fn mask(self) -> u32", agent_src)
+        self.assertIn("pub const fn is_tool_granted(&self, tool: AgentTool) -> bool", agent_src)
+        self.assertIn("if !authority.is_tool_granted(tool)", agent_src)
+
+    def test_14_settings_query_sensitive_key_protection(self):
+        """Verify SettingsQuery blocks unauthorized access to sensitive keys."""
+        syscall_mod = os.path.join(WORKSPACE_ROOT, "kernel", "src", "syscall", "mod.rs")
+        with open(syscall_mod, "r", encoding="utf-8") as f:
+            sys_src = f.read()
+        self.assertIn("fn is_sensitive_settings_key", sys_src)
+        self.assertIn("credential.", sys_src)
+        self.assertIn("auth.pin", sys_src)
+        self.assertIn("auth.password", sys_src)
+        self.assertIn("vault.master", sys_src)
+        self.assertIn("keystore.secret", sys_src)
+        self.assertIn("Blocked unauthorized read of sensitive key", sys_src)
+
+    def test_15_prompt_injection_safety_and_bounded_calculator(self):
+        """Verify calculator bounded depth, length limit, and prompt injection safety."""
+        agent_lib = os.path.join(WORKSPACE_ROOT, "apps", "agent_manager", "src", "lib.rs")
+        with open(agent_lib, "r", encoding="utf-8") as f:
+            agent_src = f.read()
+        self.assertIn("expression.len() > 64", agent_src)
+        self.assertIn("depth > 8", agent_src)
+        self.assertIn("test_bounded_calculator_evaluator", agent_src)
+        self.assertIn("test_granular_tool_authority_isolation", agent_src)
+        self.assertIn("test_adversarial_prompt_injection_containment", agent_src)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

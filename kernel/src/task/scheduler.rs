@@ -390,6 +390,8 @@ impl Scheduler {
         tcb.user_arg = user_arg;
         tcb.cr3_frame = Some(cr3_frame);
         tcb.page_table = Some(shared_space.clone());
+        let leader_identity = self.tasks.iter().find(|t| t.process_id == Some(process_id)).and_then(|t| t.security_identity);
+        tcb.security_identity = leader_identity;
 
         if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
             let rollback = if !custom_stack {

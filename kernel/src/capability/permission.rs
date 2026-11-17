@@ -72,6 +72,16 @@ pub enum SensitivePermission {
     /// minted for that app by the consent broker rather than handed to it at
     /// spawn time, or every app would hold tool authority it never asked for.
     AgentTask = 15,
+    /// Permission to run the bounded Calculator agent tool.
+    AgentToolCalculator = 16,
+    /// Permission to run the bounded CalendarClock agent tool.
+    AgentToolClock = 17,
+    /// Permission to run the bounded StorageStats agent tool.
+    AgentToolStorage = 18,
+    /// Permission to run the bounded SettingsQuery agent tool.
+    AgentToolSettings = 19,
+    /// Permission to run the bounded CapabilityCheck agent tool.
+    AgentToolCapCheck = 20,
 }
 
 impl SensitivePermission {
@@ -114,6 +124,11 @@ impl SensitivePermission {
             13 => Some(Self::Bluetooth),
             14 => Some(Self::Notifications),
             15 => Some(Self::AgentTask),
+            16 => Some(Self::AgentToolCalculator),
+            17 => Some(Self::AgentToolClock),
+            18 => Some(Self::AgentToolStorage),
+            19 => Some(Self::AgentToolSettings),
+            20 => Some(Self::AgentToolCapCheck),
             _ => None,
         }
     }
@@ -136,6 +151,11 @@ impl SensitivePermission {
             Self::Bluetooth => "Bluetooth & BLE Controller",
             Self::Notifications => "System Notifications",
             Self::AgentTask => "Agent Tool Execution",
+            Self::AgentToolCalculator => "Agent Tool: Calculator",
+            Self::AgentToolClock => "Agent Tool: Calendar & Clock",
+            Self::AgentToolStorage => "Agent Tool: Storage Stats",
+            Self::AgentToolSettings => "Agent Tool: Settings Query",
+            Self::AgentToolCapCheck => "Agent Tool: Capability Check",
         }
     }
 
@@ -157,6 +177,11 @@ impl SensitivePermission {
             Self::Bluetooth => "Allows pairing and transferring data over Bluetooth/BLE.",
             Self::Notifications => "Allows dispatching status and alert notifications to the user.",
             Self::AgentTask => "Allows running bounded agent tools that ask the platform for hardware, storage and service access.",
+            Self::AgentToolCalculator => "Allows executing the bounded integer math calculator tool.",
+            Self::AgentToolClock => "Allows querying real-time clock and calendar metrics via RTC.",
+            Self::AgentToolStorage => "Allows querying storage volume capacity and usage stats.",
+            Self::AgentToolSettings => "Allows querying safe non-sensitive configuration settings.",
+            Self::AgentToolCapCheck => "Allows inspecting capability delegation states.",
         }
     }
 
@@ -234,14 +259,36 @@ impl SensitivePermission {
                 0x9071, // Notification manager IPC object
             ),
             Self::AgentTask => (
-                // WHY `INVOKE` and nothing else: this grant says "this app may
-                // ask the platform to run a bounded tool". It is not authority
-                // over the clock, the disk or the services; every one of those
-                // is a separate capability the kernel checks on its own, and
-                // the tool's own syscall still refuses without it.
+                // WHY `READ | EXECUTE | INVOKE`: broad agent task domain
+                // covering all 5 bounded tools (mask 0x1F).
                 CapabilityType::AgentTask,
-                Rights::INVOKE,
-                0, // The agent task domain
+                Rights::READ.union(Rights::EXECUTE).union(Rights::INVOKE),
+                0x1F,
+            ),
+            Self::AgentToolCalculator => (
+                CapabilityType::AgentTask,
+                Rights::EXECUTE.union(Rights::INVOKE),
+                1 << 0,
+            ),
+            Self::AgentToolClock => (
+                CapabilityType::AgentTask,
+                Rights::READ.union(Rights::INVOKE),
+                1 << 1,
+            ),
+            Self::AgentToolStorage => (
+                CapabilityType::AgentTask,
+                Rights::READ.union(Rights::INVOKE),
+                1 << 2,
+            ),
+            Self::AgentToolSettings => (
+                CapabilityType::AgentTask,
+                Rights::READ.union(Rights::INVOKE),
+                1 << 3,
+            ),
+            Self::AgentToolCapCheck => (
+                CapabilityType::AgentTask,
+                Rights::READ.union(Rights::INVOKE),
+                1 << 4,
             ),
         };
 
@@ -279,6 +326,8 @@ pub struct PermissionRecord {
     pub request_id: u64,
     pub task_id: TaskId,
     pub app_name: String,
+    pub package_id: String,
+    pub code_digest: [u8; 32],
     pub permission: SensitivePermission,
     pub decision: ConsentDecision,
     pub timestamp_ticks: u64,
@@ -315,22 +364,44 @@ impl PermissionManager {
         }
     }
 
+    /// Checks if a verified application identity already holds a granted permission.
+    pub fn has_identity_permission(&self, identity: &crate::task::SecurityIdentity, permission: SensitivePermission) -> bool {
+        self.records.iter().any(|r| {
+            r.package_id == identity.package_id
+                && r.code_digest == identity.code_digest
+                && r.permission == permission
+                && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
+        })
+    }
+
     /// Registers a new permission request.
     pub fn request_consent(
         &mut self,
         task_id: TaskId,
+        identity: Option<crate::task::SecurityIdentity>,
         app_name: &str,
         permission: SensitivePermission,
         auto_approve: bool,
         current_ticks: u64,
     ) -> (u64, ConsentDecision) {
         let _ = auto_approve;
-        if self.has_permission(task_id, permission) || self.has_app_permission(app_name, permission) {
+        if self.has_permission(task_id, permission)
+            || identity.as_ref().is_some_and(|id| self.has_identity_permission(id, permission))
+            || self.has_app_permission(app_name, permission)
+        {
             return (0, ConsentDecision::Granted);
         }
 
+        let pkg_id_str = identity.map(|id| id.package_id).unwrap_or(app_name);
+        let code_digest = identity.map(|id| id.code_digest).unwrap_or([0u8; 32]);
+
         for record in self.records.iter_mut() {
-            if app_names_match(&record.app_name, app_name)
+            let identity_matches = if let Some(ref id) = identity {
+                record.package_id == id.package_id && record.code_digest == id.code_digest
+            } else {
+                app_names_match(&record.app_name, app_name)
+            };
+            if identity_matches
                 && record.permission == permission
                 && record.decision == ConsentDecision::Pending
             {
@@ -349,6 +420,8 @@ impl PermissionManager {
             request_id,
             task_id,
             app_name: String::from(app_name),
+            package_id: String::from(pkg_id_str),
+            code_digest,
             permission,
             decision: ConsentDecision::Pending,
             timestamp_ticks: current_ticks,
@@ -373,13 +446,12 @@ impl PermissionManager {
 
         for record in self.records.iter_mut() {
             if record.request_id == request_id {
-                // WHY only a request that was actually outstanding can lift a
-                // revocation: otherwise an old, already-resolved request id could
-                // be replayed to un-revoke a capability that was taken back
-                // afterwards.
-                let was_outstanding = record.decision == ConsentDecision::Pending;
+                // Replay prevention: only a request that was actually pending can be resolved.
+                if record.decision != ConsentDecision::Pending {
+                    return None;
+                }
                 record.decision = decision;
-                if was_outstanding && (decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce) {
+                if decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce {
                     // A fresh consent resolution is the one event that
                     // re-establishes authority for this capability identity.
                     crate::capability::revocation::reinstate(
@@ -571,6 +643,7 @@ pub fn init() {
     // 1. A caller cannot self-approve a new sensitive permission.
     let (req1_id, decision1) = pm.request_consent(
         TaskId(21),
+        None,
         "interos.camera",
         SensitivePermission::CameraCapture,
         true,
@@ -584,9 +657,14 @@ pub fn init() {
     assert!(resolved1.is_some());
     assert!(pm.has_permission(TaskId(21), SensitivePermission::CameraCapture));
 
+    // Replay prevention: re-resolving an already-resolved request must be rejected.
+    let replayed = pm.resolve_consent(req1_id, ConsentDecision::Granted);
+    assert!(replayed.is_none(), "Consent replay must be rejected");
+
     // 3. Test interactive pending request
     let (req2_id, decision2) = pm.request_consent(
         TaskId(23),
+        None,
         "interos.browser",
         SensitivePermission::NetworkSend,
         false,
@@ -603,11 +681,46 @@ pub fn init() {
     assert!(pm.active_prompt.is_none());
     assert!(pm.has_permission(TaskId(23), SensitivePermission::NetworkSend));
 
-    // 5. Test capability minting
+    // 5. Test verified security identity and binary replacement defense
+    let id_v1 = crate::task::SecurityIdentity {
+        package_id: "org.interos.sample",
+        code_digest: [0x11; 32],
+        is_system: false,
+    };
+    let (req3_id, _) = pm.request_consent(
+        TaskId(30),
+        Some(id_v1),
+        "Sample App",
+        SensitivePermission::Files,
+        false,
+        110,
+    );
+    pm.resolve_consent(req3_id, ConsentDecision::Granted);
+    assert!(pm.has_identity_permission(&id_v1, SensitivePermission::Files));
+
+    // An attacker replacing the binary (different digest) must NOT inherit the grant:
+    let id_replaced = crate::task::SecurityIdentity {
+        package_id: "org.interos.sample",
+        code_digest: [0x22; 32],
+        is_system: false,
+    };
+    assert!(!pm.has_identity_permission(&id_replaced, SensitivePermission::Files), "Replaced binary must not inherit grant");
+
+    // 6. Test capability minting & granular tool masks
     let cap = SensitivePermission::TelephonyModem.to_capability(TaskId(19));
     assert_eq!(cap.cap_type, CapabilityType::HardwarePortIo);
     assert!(cap.rights.contains(Rights::READ));
     assert!(cap.rights.contains(Rights::INVOKE));
+
+    let calc_cap = SensitivePermission::AgentToolCalculator.to_capability(TaskId(19));
+    assert_eq!(calc_cap.cap_type, CapabilityType::AgentTask);
+    assert_eq!(calc_cap.object_id, 1 << 0);
+    assert!(calc_cap.rights.contains(Rights::EXECUTE));
+
+    let clock_cap = SensitivePermission::AgentToolClock.to_capability(TaskId(19));
+    assert_eq!(clock_cap.cap_type, CapabilityType::AgentTask);
+    assert_eq!(clock_cap.object_id, 1 << 1);
+    assert!(clock_cap.rights.contains(Rights::READ));
 
     serial_println!("[TEST] Capability Consent Engine: Dynamic permission gating & verification PASSED.");
 }

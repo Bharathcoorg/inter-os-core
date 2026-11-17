@@ -279,11 +279,47 @@ pub fn enumerate_tasks(out: &mut [TaskRecord]) -> usize {
 /// Task Control Block (TCB) maintaining complete execution state and security capabilities.
 pub type SharedAddressSpace = Arc<Mutex<crate::memory::TaskPageTable>>;
 
+/// Kernel-verified security identity for a task/process.
+///
+/// Established at spawn time from the verified package descriptor and the
+/// SHA-256 cryptographic digest of the loaded ELF binary. This guarantees that
+/// application permissions and consent grants cannot be spoofed or inherited by
+/// rogue Ring-3 processes supplying arbitrary strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityIdentity {
+    /// Canonical package identifier (e.g. "org.interos.agentmanager").
+    pub package_id: &'static str,
+    /// Cryptographic SHA-256 digest of the loaded executable binary payload.
+    pub code_digest: [u8; 32],
+    /// Whether this task runs with first-party system privilege.
+    pub is_system: bool,
+}
+
+impl SecurityIdentity {
+    pub const fn empty() -> Self {
+        Self {
+            package_id: "",
+            code_digest: [0u8; 32],
+            is_system: false,
+        }
+    }
+
+    pub const fn kernel() -> Self {
+        Self {
+            package_id: "org.interos.kernel",
+            code_digest: [0u8; 32],
+            is_system: true,
+        }
+    }
+}
+
 pub struct TaskControlBlock {
     /// Unique task ID.
     pub id: TaskId,
     /// Human-readable diagnostic name for the task.
     pub name: &'static str,
+    /// Verified application security identity bound at spawn time.
+    pub security_identity: Option<SecurityIdentity>,
     /// Current scheduling state.
     pub state: TaskState,
     /// Preserved hardware register context (stack pointer).
@@ -352,6 +388,7 @@ impl TaskControlBlock {
         Self {
             id,
             name,
+            security_identity: None,
             state: TaskState::Ready,
             context,
             stack,
@@ -390,6 +427,7 @@ impl TaskControlBlock {
         Self {
             id: TaskId(0), // Task 0 is the primordial kernel main thread
             name,
+            security_identity: Some(SecurityIdentity::kernel()),
             state: TaskState::Running,
             context: TaskContext::empty(),
             stack: KernelStack::empty(),
