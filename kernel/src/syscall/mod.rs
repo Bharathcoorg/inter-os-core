@@ -1335,7 +1335,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
     // dispatch still never happens in interrupt context. Once a line exists, it
     // is dispatched within one syscall of the task that happens to be running.
     crate::serial::service_serial_commands();
-    match num {
+    let ret: i64 = match num {
         1 => {
             sys_yield();
             0
@@ -3552,7 +3552,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         },
         _ => SyscallResult::UnknownSyscall as i64,
+    };
+
+    // Cooperative stack unwinding gate (RustOS d7e8864):
+    // If the current task has a pending kill request, terminate cleanly before returning to Ring 3.
+    // This guarantees that all kernel stack frames, local variables, and RAII locks unwind
+    // safely in Ring 0 instead of forcibly aborting while holding kernel locks.
+    if crate::task::scheduler::is_current_pending_kill() {
+        crate::task::scheduler::terminate_current();
     }
+
+    ret
 }
 
 

@@ -360,6 +360,8 @@ pub struct TaskControlBlock {
     pub parent_id: TaskId,
     /// Exit code set on termination (only valid in Zombie/Terminated state).
     pub exit_code: i32,
+    /// Whether termination has been requested cooperatively on syscall exit.
+    pub pending_kill: bool,
 }
 
 impl TaskControlBlock {
@@ -409,6 +411,7 @@ impl TaskControlBlock {
             process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,
+            pending_kill: false,
         }
     }
 
@@ -448,6 +451,7 @@ impl TaskControlBlock {
             process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,
+            pending_kill: false,
         }
     }
 

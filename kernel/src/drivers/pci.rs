@@ -51,6 +51,37 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
+    /// Traverses the PCI Capability Linked List to find a capability structure with `target_cap_id`.
+    ///
+    /// Implements bounded traversal (max 48 hops) to guarantee forward progress and prevent infinite
+    /// loops on malformed or corrupted configuration spaces. Returns the configuration space offset
+    /// of the matched capability header if found.
+    pub fn find_capability(&self, target_cap_id: u8) -> Option<u8> {
+        let status = pci_read_u16(self.addr, 0x06);
+        // Bit 4 of Status register indicates whether Capabilities List is supported.
+        if (status & (1 << 4)) == 0 {
+            return None;
+        }
+
+        // Offset 0x34 is the Capabilities Pointer for Standard (0x00) and Bridge (0x01) headers
+        let mut cap_ptr = pci_read_u8(self.addr, 0x34) & 0xFC;
+        let mut hops = 0;
+
+        while cap_ptr >= 0x40 && hops < 48 {
+            let id = pci_read_u8(self.addr, cap_ptr);
+            if id == target_cap_id {
+                return Some(cap_ptr);
+            }
+            let next = pci_read_u8(self.addr, cap_ptr + 1) & 0xFC;
+            if next == 0 || next == cap_ptr {
+                break;
+            }
+            cap_ptr = next;
+            hops += 1;
+        }
+        None
+    }
+
     /// Enables PCI memory-space and bus-mastering for a DMA-capable device.
     pub fn enable_memory_and_bus_master(&self) {
         let mut command = pci_read_u16(self.addr, 0x04);
@@ -305,5 +336,21 @@ pub fn init() {
     match initialize_e1000_network() {
         Ok(()) => serial_println!("[OK] PCI Ethernet controller attached to canonical network device."),
         Err(e) => serial_println!("[WARN] E1000 network attachment unavailable: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pci_address_config_address() {
+        let addr = PciAddress::new(0, 3, 0);
+        let cfg = addr.config_address(0x10);
+        assert_eq!(cfg & (1 << 31), 1 << 31);
+        assert_eq!((cfg >> 16) & 0xFF, 0);
+        assert_eq!((cfg >> 11) & 0x1F, 3);
+        assert_eq!((cfg >> 8) & 0x7, 0);
+        assert_eq!(cfg & 0xFC, 0x10);
     }
 }

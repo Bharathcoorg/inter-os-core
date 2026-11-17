@@ -1050,6 +1050,7 @@ def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=
         raise ValueError("duplicate capability permissions are not allowed")
     if len(caps) > 1024:
         raise ValueError("too many capabilities")
+    caps.sort()
     pkg = manifest_data["id"].encode("utf-8")
     if not pkg or len(pkg) > 32:
         raise ValueError("package id must be 1..32 UTF-8 bytes")
@@ -1095,7 +1096,7 @@ def _rapp_intent_table(manifest_data):
         values = intents.get(kind, []) or []
         if not isinstance(values, list):
             raise ValueError(f"intents.{kind} must be a list")
-        for value in values:
+        for value in sorted(values):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"intents.{kind} entries must be non-empty strings")
             encoded = value.encode("utf-8")
@@ -1130,6 +1131,7 @@ def _rapp_v4_encode(manifest_data, publisher_key, signature, payload, arch_name=
         raise ValueError("duplicate capability permissions are not allowed")
     if len(caps) > 1024:
         raise ValueError("too many capabilities")
+    caps.sort()
     pkg = manifest_data["id"].encode("utf-8")
     if not pkg or len(pkg) > 32:
         raise ValueError("package id must be 1..32 UTF-8 bytes")
@@ -1172,12 +1174,27 @@ def cmd_pack(args):
     except Exception as e:
         log_error(f"Invalid JSON in manifest.json: {e}")
         return 1
-    for field in ["id", "name", "version", "entrypoint", "permissions"]:
+    # Harmonize schema differences across manifest formats (app_id/id, entry_point/entrypoint, capabilities/permissions)
+    if "id" not in manifest_data and "app_id" in manifest_data:
+        manifest_data["id"] = manifest_data["app_id"]
+    if "permissions" not in manifest_data and "capabilities" in manifest_data:
+        manifest_data["permissions"] = manifest_data["capabilities"]
+    if "entrypoint" not in manifest_data and "entry_point" in manifest_data:
+        manifest_data["entrypoint"] = manifest_data["entry_point"]
+
+    for field in ["id", "name", "version", "permissions"]:
         if field not in manifest_data:
             log_error(f"Manifest missing required field: {field}")
             return 1
     bin_dir = app_dir / "bin"
-    entrypoint = manifest_data.get("entrypoint", f"{app_name}.elf")
+    raw_ep = manifest_data.get("entrypoint", f"{app_name}.elf")
+    if isinstance(raw_ep, dict):
+        ep_name = raw_ep.get("backend") or raw_ep.get("binary") or raw_ep.get("elf") or f"{app_name}.elf"
+        entrypoint = Path(ep_name).name
+    elif isinstance(raw_ep, str):
+        entrypoint = Path(raw_ep).name
+    else:
+        entrypoint = f"{app_name}.elf"
     target_elf = bin_dir / entrypoint
     if not target_elf.exists():
         build_ret = cmd_build(argparse.Namespace(name=app_name, target=None, arch="x86_64-unknown-none"))

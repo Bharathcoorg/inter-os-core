@@ -907,6 +907,20 @@ impl Scheduler {
         self.terminate_task(child_id, exit_code)
     }
 
+    /// Marks a task for cooperative termination on syscall return or next scheduling point.
+    /// Allows in-flight syscalls to cleanly unwind kernel stack frames and release spinlocks.
+    pub fn request_kill(&mut self, id: TaskId, exit_code: i32) -> Result<(), &'static str> {
+        let task = self.tasks.iter_mut().find(|task| task.id == id).ok_or("task not found")?;
+        task.pending_kill = true;
+        task.exit_code = exit_code;
+        Ok(())
+    }
+
+    /// Checks whether the currently executing task has a pending kill request.
+    pub fn is_current_pending_kill(&self) -> bool {
+        self.current_task().map_or(false, |t| t.pending_kill)
+    }
+
     /// Reaps a terminated child owned by `parent_id`, returning its exit code.
     ///
     /// Success means both sides are gone: the task control block and whatever the
@@ -1093,6 +1107,11 @@ pub fn terminate_current() -> ! {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+/// Returns whether the current task has a pending kill request waiting to be processed.
+pub fn is_current_pending_kill() -> bool {
+    SCHEDULER.try_lock().map_or(false, |s| s.is_current_pending_kill())
 }
 
 #[cfg(test)]
@@ -1585,6 +1604,22 @@ mod tests {
         let bg_task = sched.get_task(app_id).unwrap();
         assert_eq!(bg_task.sched_class, crate::task::SchedulingClass::Normal);
         assert_eq!(bg_task.priority, PRIORITY_APP);
+    }
+
+    #[test]
+    fn test_cooperative_pending_kill_flag() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let victim_id = sched.spawn("victim", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        assert!(!sched.get_task(victim_id).unwrap().pending_kill);
+
+        // Request kill cooperatively
+        sched.request_kill(victim_id, -15).expect("request kill");
+        let task = sched.get_task(victim_id).unwrap();
+        assert!(task.pending_kill);
+        assert_eq!(task.exit_code, -15);
     }
 }
 

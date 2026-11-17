@@ -460,6 +460,7 @@ impl CapHandle {
 pub struct CapSlot {
     pub cap: Option<Capability>,
     pub generation: u32,
+    pub is_reserved: bool,
     pub access_count: AtomicU64,
     pub last_access_ticks: AtomicU64,
 }
@@ -469,6 +470,7 @@ impl Clone for CapSlot {
         Self {
             cap: self.cap.clone(),
             generation: self.generation,
+            is_reserved: self.is_reserved,
             access_count: AtomicU64::new(self.access_count.load(Ordering::Relaxed)),
             last_access_ticks: AtomicU64::new(self.last_access_ticks.load(Ordering::Relaxed)),
         }
@@ -479,6 +481,7 @@ impl PartialEq for CapSlot {
     fn eq(&self, other: &Self) -> bool {
         self.cap == other.cap
             && self.generation == other.generation
+            && self.is_reserved == other.is_reserved
             && self.access_count.load(Ordering::Relaxed)
                 == other.access_count.load(Ordering::Relaxed)
             && self.last_access_ticks.load(Ordering::Relaxed)
@@ -493,6 +496,7 @@ impl CapSlot {
         Self {
             cap: None,
             generation: 1,
+            is_reserved: false,
             access_count: AtomicU64::new(0),
             last_access_ticks: AtomicU64::new(0),
         }
@@ -612,7 +616,7 @@ impl CapabilityTable {
     /// Inserts a new capability into the first available slot, returning the generation-counted handle.
     pub fn insert(&mut self, cap: Capability) -> Result<usize, CapError> {
         for (idx, slot) in self.slots.iter_mut().enumerate() {
-            if slot.cap.is_none() {
+            if slot.cap.is_none() && !slot.is_reserved {
                 slot.cap = Some(cap);
                 return Ok(idx);
             }
@@ -623,12 +627,51 @@ impl CapabilityTable {
     /// Inserts a capability and returns an unforgeable, generation-counted `CapHandle`.
     pub fn insert_handle(&mut self, cap: Capability) -> Result<CapHandle, CapError> {
         for (idx, slot) in self.slots.iter_mut().enumerate() {
-            if slot.cap.is_none() {
+            if slot.cap.is_none() && !slot.is_reserved {
                 slot.cap = Some(cap);
                 return Ok(CapHandle::new(idx as u32, slot.generation));
             }
         }
         Err(CapError::TableFull)
+    }
+
+    /// Reserves a slot in the capability table for an impending capability transfer or grant.
+    ///
+    /// The reserved slot cannot be occupied by normal insertions until committed or released.
+    pub fn reserve_slot(&mut self) -> Result<usize, CapError> {
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            if slot.cap.is_none() && !slot.is_reserved {
+                slot.is_reserved = true;
+                return Ok(idx);
+            }
+        }
+        Err(CapError::TableFull)
+    }
+
+    /// Commits a capability into a previously reserved slot, returning the generation-counted `CapHandle`.
+    pub fn commit_reserved_slot(&mut self, slot_idx: usize, cap: Capability) -> Result<CapHandle, CapError> {
+        let slot = self.slots.get_mut(slot_idx).ok_or(CapError::InvalidSlot)?;
+        if !slot.is_reserved || slot.cap.is_some() {
+            return Err(CapError::InvalidSlot);
+        }
+        slot.cap = Some(cap);
+        slot.is_reserved = false;
+        Ok(CapHandle::new(slot_idx as u32, slot.generation))
+    }
+
+    /// Releases a previously reserved slot if the operation is aborted before commitment.
+    pub fn release_reserved_slot(&mut self, slot_idx: usize) -> Result<(), CapError> {
+        let slot = self.slots.get_mut(slot_idx).ok_or(CapError::InvalidSlot)?;
+        if !slot.is_reserved {
+            return Err(CapError::InvalidSlot);
+        }
+        slot.is_reserved = false;
+        Ok(())
+    }
+
+    /// Returns whether the specified slot is currently reserved.
+    pub fn is_slot_reserved(&self, slot_idx: usize) -> bool {
+        self.slots.get(slot_idx).map_or(false, |s| s.is_reserved)
     }
 
     /// Returns the raw capability in `slot_idx` without access recording or revocation checks.
@@ -1180,6 +1223,7 @@ impl CapabilityTable {
     pub fn revoke_all(&mut self) -> usize {
         let mut revoked = 0usize;
         for slot in self.slots.iter_mut() {
+            slot.is_reserved = false;
             if let Some(cap) = slot.cap.take() {
                 slot.generation = slot.generation.wrapping_add(1);
                 revocation::revoke(cap.id);
@@ -1906,6 +1950,52 @@ mod tests {
         delegation::revoke_lease(5002);
         assert!(!table2.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
         assert!(!table2.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE));
+    }
+
+    #[test]
+    fn test_two_phase_capability_reservation() {
+        let mut table = CapabilityTable::new(2);
+
+        // 1. Reserve first slot
+        let slot0 = table.reserve_slot().expect("reserve slot 0");
+        assert_eq!(slot0, 0);
+        assert!(table.is_slot_reserved(0));
+
+        // 2. Insert into next slot should pick slot 1, not slot 0
+        let cap1 = Capability {
+            id: CapabilityId(9001),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        };
+        let slot1 = table.insert(cap1).expect("insert into free slot");
+        assert_eq!(slot1, 1);
+
+        // 3. Table is now full (slot 0 reserved, slot 1 occupied)
+        let cap_extra = Capability {
+            id: CapabilityId(9002),
+            cap_type: CapabilityType::TimerTickRead,
+            rights: Rights::READ,
+            object_id: 0,
+        };
+        assert_eq!(table.insert(cap_extra.clone()), Err(CapError::TableFull));
+        assert_eq!(table.reserve_slot(), Err(CapError::TableFull));
+
+        // 4. Release reservation on slot 0
+        table.release_reserved_slot(slot0).expect("release reserved slot");
+        assert!(!table.is_slot_reserved(0));
+
+        // 5. Reserve again and commit capability
+        let re_reserved = table.reserve_slot().expect("re-reserve slot 0");
+        assert_eq!(re_reserved, 0);
+        let handle = table.commit_reserved_slot(re_reserved, cap_extra).expect("commit capability");
+        assert_eq!(handle.slot(), 0);
+        assert!(!table.is_slot_reserved(0));
+
+        // 6. Access committed capability
+        let retrieved = table.get_by_handle(handle).expect("retrieve committed capability");
+        assert_eq!(retrieved.id, CapabilityId(9002));
+        assert_eq!(retrieved.cap_type, CapabilityType::TimerTickRead);
     }
 }
 

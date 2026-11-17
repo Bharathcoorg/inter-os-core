@@ -187,18 +187,21 @@ fn panic(_info: &PanicInfo) -> ! {{
     (src_dir / "main.rs").write_text(main_content, encoding="utf-8")
 
     # 4. Generate manifest.json
+    if args.template == "audio":
+        permissions_list = '[\n    "CAP_LOGGING",\n    "CAP_WINDOW_FOCUS",\n    "CAP_AUDIO_STREAM"\n  ]'
+    elif args.template == "sensor":
+        permissions_list = '[\n    "CAP_LOGGING",\n    "CAP_WINDOW_FOCUS",\n    "CAP_SENSOR_ACCEL",\n    "CAP_SENSOR_GYRO",\n    "CAP_SENSOR_HR"\n  ]'
+    else:
+        permissions_list = '[\n    "CAP_LOGGING",\n    "CAP_WINDOW_FOCUS"\n  ]'
+
     manifest_content = f"""{{
-  "app_id": "org.interos.{app_name}",
+  "id": "org.interos.{app_name}",
   "name": "{app_name.replace('_', ' ').title()}",
   "version": "1.0.0",
+  "category": "utility",
   "author": "InterOS Community",
-  "entry_point": "src/main.rs",
-  "capabilities": [
-    "cap:audio",
-    "cap:ipc",
-    "cap:keystore",
-    "cap:ring3_sandbox"
-  ],
+  "entrypoint": "bin/{app_name}.elf",
+  "permissions": {permissions_list},
   "sandbox_ring": 3,
   "icon": "📱"
 }}
