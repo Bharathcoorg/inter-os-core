@@ -2193,13 +2193,58 @@ fn run_installed_generation(
     let mut generated_ids = alloc::vec::Vec::new();
     let mut decode_buf = [0u8; 32];
 
+    let is_cancelled = || {
+        if CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        let mut poll_buf = [0u8; 1024];
+        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut poll_buf) {
+            if msg_type == std::ai::MSG_TYPE_CANCEL
+                || (len >= 4 && &poll_buf[..4] == b"CANC")
+            {
+                if sender == 0 || sender == sender_task_id {
+                    CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+                    let _ = std::log("[aid] cancellation requested via IPC during generation");
+                    let mut cancel_tx = [0u8; 1024];
+                    emit_inference_response(
+                        sender,
+                        std::ai::STATUS_SUCCESS,
+                        b"[Cancellation acknowledged]",
+                        &mut cancel_tx,
+                    );
+                    return true;
+                } else {
+                    let mut rej_tx = [0u8; 1024];
+                    emit_inference_response(
+                        sender,
+                        std::ai::STATUS_ERROR,
+                        b"[Cancellation rejected: sender does not own active session]",
+                        &mut rej_tx,
+                    );
+                }
+            } else if msg_type == MSG_TYPE_GENERATE
+                || msg_type == MSG_TYPE_GENERATE_ALT
+                || (len >= 4 && (&poll_buf[..4] == b"GENR" || &poll_buf[..4] == b"GEN:"))
+            {
+                let mut busy_tx = [0u8; 1024];
+                emit_inference_response(
+                    sender,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Inference service busy: active generation in progress",
+                    &mut busy_tx,
+                );
+            }
+        }
+        false
+    };
+
     let ran = weights::run_generative_model(
         &mut reader,
         &config,
         tokens,
         max_new_tokens,
         temperature,
-        &|| CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed),
+        &is_cancelled,
         |token_id| {
             generated_ids.push(token_id);
             if let Ok(tokenizer) = get_or_build_resident_tokenizer(path) {
@@ -2221,6 +2266,10 @@ fn run_installed_generation(
                 b"Model generated tokens successfully from loaded weights."
             };
             reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, reply_data, tx_buf);
+            true
+        }
+        Err(weights::LoadError::Graph(crate::inference::InferenceError::Cancelled)) => {
+            let _ = std::log("[aid] generation cancelled; resources reclaimed.");
             true
         }
         _ => false,
@@ -2533,6 +2582,17 @@ pub fn handle_ipc_inference_query(
             return;
         }
 
+        let current_active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::Relaxed);
+        if current_active != 0 && current_active != sender_task_id {
+            emit_inference_response(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Inference service busy: active generation in progress",
+                tx_buf,
+            );
+            return;
+        }
+
         ACTIVE_GENERATION_TASK.store(sender_task_id, core::sync::atomic::Ordering::Relaxed);
         CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
 
@@ -2540,6 +2600,7 @@ pub fn handle_ipc_inference_query(
         impl Drop for ActiveTaskGuard {
             fn drop(&mut self) {
                 ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
+                CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
             }
         }
         let _task_guard = ActiveTaskGuard;
@@ -3587,6 +3648,50 @@ mod tests {
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[No active inference session to cancel]");
         assert!(!CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_handle_ipc_generate_busy_rejection() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        let mut tx_buf = [0u8; 1024];
+        let empty_models = gguf::ProbedModels::empty();
+
+        // Active task 42 is currently generating
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::Relaxed);
+        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+
+        // Sender 99 requests generation while service is busy
+        let req = std::ai::AiInferenceRequest {
+            model_id: 2,
+            target_dim: 0,
+            input_len: 4,
+            flags: 0,
+            input_offset: core::mem::size_of::<std::ai::AiInferenceRequest>() as u64,
+        };
+        let mut req_buf = [0u8; 128];
+        let req_hdr_len = core::mem::size_of::<std::ai::AiInferenceRequest>();
+        let req_bytes = unsafe {
+            core::slice::from_raw_parts(&req as *const _ as *const u8, req_hdr_len)
+        };
+        req_buf[..req_hdr_len].copy_from_slice(req_bytes);
+        req_buf[req_hdr_len..req_hdr_len + 4].copy_from_slice(b"test");
+
+        handle_ipc_inference_query(
+            99,
+            MSG_TYPE_GENERATE,
+            &req_buf[..req_hdr_len + 4],
+            &empty_models,
+            &mut tx_buf,
+        );
+
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, std::ai::STATUS_UNAVAILABLE);
+        let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
+        assert_eq!(payload, b"Inference service busy: active generation in progress");
+
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// A file that states the architecture the notice can quote it; one that does
