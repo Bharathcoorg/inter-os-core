@@ -634,7 +634,7 @@ pub const BLOCK_NORMS: &[&str] = &[
 /// The slot is the peak this loader reports: at the published file's Q8_0 geometry
 /// it holds 4,490,220 bytes of matrices and 17,920 bytes of norms, and it is emptied
 /// before the next block is read, so 24 blocks never coexist.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BlockSlot {
     attn_norm: Vec<f32>,
     attn_q_norm: Vec<f32>,
@@ -950,6 +950,55 @@ impl<S: PositionRead> WeightReader<S> {
     /// whether a run may answer with a next token.
     pub fn has_output_head(&self) -> bool {
         self.table.find(TENSOR_OUTPUT_HEAD.as_bytes()).is_some()
+    }
+
+    /// Reads `output.weight`, the projection from the residual stream back to logits.
+    pub fn load_output_head(&mut self) -> Result<(Vec<u8>, u32), LoadError> {
+        let handle = self
+            .table
+            .locate(TENSOR_OUTPUT_HEAD.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_OUTPUT_HEAD, None))?;
+        let raw = self.read_raw_tensor(TENSOR_OUTPUT_HEAD, handle)?;
+        Ok((raw, handle.dtype))
+    }
+
+    /// Reads the full `token_embd.weight` table into an owned buffer.
+    pub fn load_embedding_table(
+        &mut self,
+        vocab_size: usize,
+        hidden_dim: usize,
+    ) -> Result<(Vec<u8>, u32), LoadError> {
+        let handle = self
+            .table
+            .locate(TENSOR_TOKEN_EMBD.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_TOKEN_EMBD, None))?;
+        let row_bytes = quantised_row_bytes(handle.dtype, hidden_dim)
+            .ok_or(LoadError::UnsupportedDtype(TENSOR_TOKEN_EMBD, handle.dtype))?;
+        let expected_bytes = vocab_size
+            .checked_mul(row_bytes)
+            .ok_or(LoadError::Arithmetic)?;
+        if (handle.byte_len as usize) < expected_bytes {
+            return Err(LoadError::BadShape(
+                TENSOR_TOKEN_EMBD,
+                handle.byte_len,
+                expected_bytes as u64,
+            ));
+        }
+        let raw = self.read_raw_tensor(TENSOR_TOKEN_EMBD, handle)?;
+        Ok((raw, handle.dtype))
+    }
+
+    /// Loads all blocks into memory, returning an owned `Vec<BlockSlot>`.
+    pub fn load_all_blocks(&mut self, num_layers: usize) -> Result<Vec<BlockSlot>, LoadError> {
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(num_layers)
+            .map_err(|_| LoadError::Arithmetic)?;
+        for block in 0..num_layers {
+            self.load_block(block)?;
+            blocks.push(self.slot.clone());
+        }
+        Ok(blocks)
     }
 
     /// Whether the file holds the pooling head the published embedding model ships.
@@ -1341,6 +1390,65 @@ pub fn run_streamed_embedding<S: PositionRead>(
 /// A widening that cannot silently become a smaller number in a report.
 fn bytes_read_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Runs autoregressive generative inference on the installed model weights.
+///
+/// Strictly `#![no_std]`. Reads weights from `reader`, initializes scratch and KV cache
+/// bounded by the model's budget, executes the prompt pre-fill, and then executes the
+/// autoregressive token generation loop, invoking `on_token` for each generated token
+/// until EOS or `max_new_tokens` is reached.
+pub fn run_generative_model<S: PositionRead>(
+    reader: &mut WeightReader<S>,
+    config: &ModelConfig,
+    prompt_tokens: &[u32],
+    max_new_tokens: usize,
+    temperature: f32,
+    is_cancelled: &impl Fn() -> bool,
+    mut on_token: impl FnMut(u32) -> bool,
+) -> Result<usize, LoadError> {
+    if !reader.has_output_head() {
+        return Err(InferenceError::ModelDeclaration("output.weight", None, 0).into());
+    }
+    config.check_scratch_budget()?;
+
+    let final_norm = reader.load_final_norm(config.hidden_dim)?;
+    let (output_weight, output_dtype) = reader.load_output_head()?;
+    let (embd_bytes, embd_dtype) =
+        reader.load_embedding_table(config.vocab_size, config.hidden_dim)?;
+
+    let blocks = reader.load_all_blocks(config.num_layers)?;
+    let mut layer_views = Vec::new();
+    layer_views
+        .try_reserve_exact(config.num_layers)
+        .map_err(|_| LoadError::Arithmetic)?;
+    for slot in &blocks {
+        layer_views.push(Some(slot.weights()));
+    }
+
+    let model = crate::inference::ModelWeights {
+        token_embd: crate::inference::TokenEmbedding::Table {
+            bytes: &embd_bytes,
+            rows: config.vocab_size,
+            dtype: embd_dtype,
+        },
+        layers: &layer_views,
+        final_norm: &final_norm,
+        output_weight: Some(&output_weight),
+        output_weight_type: output_dtype,
+    };
+
+    let generated = crate::inference::generate(
+        prompt_tokens,
+        &model,
+        config,
+        max_new_tokens,
+        temperature,
+        is_cancelled,
+        &mut on_token,
+    )?;
+
+    Ok(generated)
 }
 
 #[cfg(test)]
@@ -2248,6 +2356,68 @@ pub mod tests {
                  means the run pooled a previous request's residual stream into this one"
             );
             assert_eq!(report_again.positions, reports[0].positions);
+        }
+    }
+
+    #[test]
+    fn test_the_physical_gemma_tiny_generative_model_loads_and_generates_tokens() {
+        let path = "../../target/verify/models/gemma-tiny-f32.gguf";
+        if !rust_std::path::Path::new(path).exists() {
+            return;
+        }
+
+        let (table, prefix, _prefix_bytes) = walk_the_installed_table(path)
+            .expect("descriptor table of gemma-tiny-f32.gguf must walk");
+        let file = rust_std::fs::File::open(path).expect("open gemma-tiny-f32.gguf");
+        let source = BoundedFileSource {
+            file,
+            requests: 0,
+            widest: 0,
+        };
+
+        let mut info_stream = crate::gguf::GgufStream::from_slice(&prefix);
+        let info = crate::gguf::read_model_info_stream(&mut info_stream)
+            .expect("read_model_info_stream on gemma-tiny-f32");
+        let config = ModelConfig::from_gguf(&info).expect("config from gemma-tiny-f32");
+        assert_eq!(config.num_layers, 2);
+        assert_eq!(config.hidden_dim, 64);
+        assert_eq!(config.vocab_size, 290);
+
+        let mut reader = WeightReader::new(table, source);
+        assert!(reader.has_output_head());
+
+        // 1. Verify cancellation stops execution
+        let cancelled_run = run_generative_model(
+            &mut reader,
+            &config,
+            &[1, 2, 3],
+            8,
+            0.0,
+            &|| true,
+            |_| true,
+        );
+        assert!(cancelled_run.is_err());
+
+        // 2. Real execution over loaded physical model weights
+        let mut tokens_out = Vec::new();
+        let prompt = [1u32, 5u32, 10u32];
+        let ran = run_generative_model(
+            &mut reader,
+            &config,
+            &prompt,
+            8,
+            0.0,
+            &|| false,
+            |token| {
+                tokens_out.push(token);
+                true
+            },
+        );
+        let count = ran.expect("run_generative_model must succeed");
+        assert_eq!(count, 8);
+        assert_eq!(tokens_out.len(), 8);
+        for &tok in &tokens_out {
+            assert!((tok as usize) < config.vocab_size);
         }
     }
 
