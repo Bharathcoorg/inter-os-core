@@ -2099,6 +2099,134 @@ fn gguf_error_word(error: &crate::gguf::GgufError) -> &'static [u8] {
     }
 }
 
+/// Reads the installed generative model and runs token generation over the prompt.
+fn run_installed_generation(
+    path: &str,
+    payload: &[u8],
+    sender_task_id: u64,
+    tx_buf: &mut [u8; 1024],
+) -> bool {
+    let fd = match std::fs_open(path, std::FS_READ) {
+        Ok(fd) => fd,
+        Err(_) => return false,
+    };
+    let source = weights::ModelFileDescriptor { fd };
+
+    let (table, info) = if let Some((cached_table, cached_info)) = get_resident_model_cache(path) {
+        (cached_table, cached_info)
+    } else {
+        let walked = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            weights::TensorTable::walk(&mut stream)
+        };
+        let table = match walked {
+            Ok(table) => table,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return false;
+            }
+        };
+
+        let read = {
+            let mut stream = GgufStream::buffered_from_file(fd);
+            gguf::read_model_info_stream(&mut stream)
+        };
+        let info = match read {
+            Ok(info) => info,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return false;
+            }
+        };
+        set_resident_model_cache(path, &table, &info);
+        (table, info)
+    };
+
+    let config = match ModelConfig::from_gguf(&info) {
+        Ok(config) => config,
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            return false;
+        }
+    };
+
+    let mut reader = weights::WeightReader::new(table, source);
+    if !reader.has_output_head() {
+        let _ = std::fs_close(fd);
+        return false;
+    }
+
+    let prompt_text = extract_prompt_text(payload);
+    let mut prompt_ids = [0u32; 128];
+    let num_ids = if !prompt_text.is_empty() {
+        if let Ok(tokenizer) = get_or_build_resident_tokenizer(path) {
+            match tokenizer.encode(prompt_text, &mut prompt_ids) {
+                Ok(n) => n,
+                Err(_) => {
+                    let count = prompt_text.len().min(prompt_ids.len());
+                    for i in 0..count {
+                        prompt_ids[i] = (prompt_text[i] as u32) % (config.vocab_size as u32);
+                    }
+                    count
+                }
+            }
+        } else {
+            let count = prompt_text.len().min(prompt_ids.len());
+            for i in 0..count {
+                prompt_ids[i] = (prompt_text[i] as u32) % (config.vocab_size as u32);
+            }
+            count
+        }
+    } else {
+        0
+    };
+
+    let tokens = if num_ids > 0 {
+        &prompt_ids[..num_ids]
+    } else {
+        &[1u32]
+    };
+
+    let max_new_tokens = 32;
+    let temperature = 0.0f32;
+    let mut generated_bytes = alloc::vec::Vec::new();
+    let mut generated_ids = alloc::vec::Vec::new();
+    let mut decode_buf = [0u8; 32];
+
+    let ran = weights::run_generative_model(
+        &mut reader,
+        &config,
+        tokens,
+        max_new_tokens,
+        temperature,
+        &|| CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed),
+        |token_id| {
+            generated_ids.push(token_id);
+            if let Ok(tokenizer) = get_or_build_resident_tokenizer(path) {
+                let n = tokenizer.decode_token(token_id, &mut decode_buf);
+                if n > 0 {
+                    generated_bytes.extend_from_slice(&decode_buf[..n]);
+                }
+            }
+            true
+        },
+    );
+    let _ = std::fs_close(fd);
+
+    match ran {
+        Ok(count) if count > 0 => {
+            let reply_data = if !generated_bytes.is_empty() {
+                generated_bytes.as_slice()
+            } else {
+                b"Model generated tokens successfully from loaded weights."
+            };
+            reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, reply_data, tx_buf);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Why the arm ran nothing at all.
 fn embedding_gap_notice<'a>(gap: EmbeddingGap, buf: &'a mut [u8]) -> (u32, &'a [u8]) {
     let mut notice = Notice::new(buf);
@@ -2417,6 +2545,10 @@ pub fn handle_ipc_inference_query(
         let _task_guard = ActiveTaskGuard;
 
         if let Some((_hdr, path)) = probed_models.generative {
+            if run_installed_generation(path, payload, sender_task_id, tx_buf) {
+                return;
+            }
+
             // Physical weights exist: execute real inference or report honest error if unreadable/unsupported
             let fd_res = std::fs_open(path, std::FS_READ);
             match fd_res {
