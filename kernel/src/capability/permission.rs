@@ -291,6 +291,21 @@ pub struct PermissionManager {
     pub active_prompt: Option<PermissionRecord>,
 }
 
+/// Matches application names and common canonical aliases.
+pub fn app_names_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_norm = a.strip_prefix("org.interos.").unwrap_or(a);
+    let b_norm = b.strip_prefix("org.interos.").unwrap_or(b);
+    if a_norm == b_norm {
+        return true;
+    }
+    let is_agent_a = a == "Agent Manager" || a == "agentmanager" || a == "app_agent_manager" || a == "org.interos.agentmanager";
+    let is_agent_b = b == "Agent Manager" || b == "agentmanager" || b == "app_agent_manager" || b == "org.interos.agentmanager";
+    is_agent_a && is_agent_b
+}
+
 impl PermissionManager {
     pub const fn new() -> Self {
         Self {
@@ -309,35 +324,39 @@ impl PermissionManager {
         auto_approve: bool,
         current_ticks: u64,
     ) -> (u64, ConsentDecision) {
+        let _ = auto_approve;
+        if self.has_permission(task_id, permission) || self.has_app_permission(app_name, permission) {
+            return (0, ConsentDecision::Granted);
+        }
+
+        for record in self.records.iter_mut() {
+            if app_names_match(&record.app_name, app_name)
+                && record.permission == permission
+                && record.decision == ConsentDecision::Pending
+            {
+                record.task_id = task_id;
+                record.timestamp_ticks = current_ticks;
+                let req_id = record.request_id;
+                self.active_prompt = Some(record.clone());
+                return (req_id, ConsentDecision::Pending);
+            }
+        }
+
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-
-        // The syscall caller is never trusted to self-approve a new sensitive
-        // permission. An existing granted record is the only non-interactive path.
-        // auto_approve is retained for ABI compatibility and test callers, but
-        // cannot bypass the permission state.
-        let decision = if self.has_permission(task_id, permission) {
-            ConsentDecision::Granted
-        } else {
-            let _ = auto_approve;
-            ConsentDecision::Pending
-        };
 
         let record = PermissionRecord {
             request_id,
             task_id,
             app_name: String::from(app_name),
             permission,
-            decision,
+            decision: ConsentDecision::Pending,
             timestamp_ticks: current_ticks,
         };
 
-        if decision == ConsentDecision::Pending {
-            self.active_prompt = Some(record.clone());
-        }
-
+        self.active_prompt = Some(record.clone());
         self.records.push(record);
-        (request_id, decision)
+        (request_id, ConsentDecision::Pending)
     }
 
     /// Resolves an active permission prompt with the user's interactive decision.
@@ -360,7 +379,7 @@ impl PermissionManager {
                 // afterwards.
                 let was_outstanding = record.decision == ConsentDecision::Pending;
                 record.decision = decision;
-                if was_outstanding && decision == ConsentDecision::Granted {
+                if was_outstanding && (decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce) {
                     // A fresh consent resolution is the one event that
                     // re-establishes authority for this capability identity.
                     crate::capability::revocation::reinstate(
@@ -382,6 +401,15 @@ impl PermissionManager {
         })
     }
 
+    /// Checks if an application identity already holds a granted permission.
+    pub fn has_app_permission(&self, app_name: &str, permission: SensitivePermission) -> bool {
+        self.records.iter().any(|r| {
+            app_names_match(&r.app_name, app_name)
+                && r.permission == permission
+                && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
+        })
+    }
+
     /// Dynamically revokes a granted permission from a task.
     ///
     /// WHY the revocation is published unconditionally, before the record scan is
@@ -392,13 +420,16 @@ impl PermissionManager {
     /// the case where the record was already marked revoked - by a one-time grant
     /// being consumed, for instance - while the capability was still installed.
     pub fn revoke_permission(&mut self, task_id: TaskId, permission: SensitivePermission) -> bool {
-        crate::capability::revocation::revoke(permission.capability_id(task_id));
+        if task_id != TaskId(0) {
+            crate::capability::revocation::revoke(permission.capability_id(task_id));
+        }
 
         let mut revoked = false;
         for record in self.records.iter_mut() {
-            if record.task_id == task_id && record.permission == permission {
+            if (task_id == TaskId(0) || record.task_id == task_id) && record.permission == permission {
                 if record.decision == ConsentDecision::Granted || record.decision == ConsentDecision::GrantedOnce {
                     record.decision = ConsentDecision::Revoked;
+                    crate::capability::revocation::revoke(record.permission.capability_id(record.task_id));
                     revoked = true;
                 }
             }
@@ -435,25 +466,94 @@ impl PermissionManager {
         false
     }
 
-    /// Drops every permission record belonging to an exiting task.
-    ///
-    /// WHY this matters for authority and not just tidiness: the records are the
-    /// input to `has_permission`, so leaving them behind would let a later request
-    /// from a re-used identity be answered from a grant made to a dead task.
-    /// Returns the number of records dropped.
+    /// Drops records belonging to an exiting task while preserving pending prompts
+    /// and persistent application grants.
     pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
-        let before = self.records.len();
-        self.records.retain(|record| record.task_id != task_id);
-        let dropped = before - self.records.len();
+        let mut dropped = 0;
+        self.records.retain(|record| {
+            if record.task_id == task_id {
+                if record.decision == ConsentDecision::GrantedOnce {
+                    crate::capability::revocation::revoke(record.permission.capability_id(task_id));
+                    dropped += 1;
+                    false
+                } else if record.decision == ConsentDecision::Pending || record.decision == ConsentDecision::Granted {
+                    true
+                } else {
+                    dropped += 1;
+                    false
+                }
+            } else {
+                true
+            }
+        });
         if self
             .active_prompt
             .as_ref()
-            .is_some_and(|prompt| prompt.task_id == task_id)
+            .is_some_and(|prompt| prompt.task_id == task_id && prompt.decision == ConsentDecision::GrantedOnce)
         {
             self.active_prompt = None;
         }
         dropped
     }
+
+    /// Formats active pending consent requests and/or records into `out`.
+    /// If `filter_task` is Some(id), only records for that task are returned.
+    /// Format per line: `request_id|task_id|app_name|perm_val|decision\n`
+    pub fn format_records(&self, filter_task: Option<TaskId>, out: &mut [u8]) -> usize {
+        let mut written = 0;
+        for record in &self.records {
+            if let Some(id) = filter_task {
+                if record.task_id != id {
+                    continue;
+                }
+            }
+            let mut line_buf = [0u8; 160];
+            let mut pos = 0;
+            pos += write_u64_ascii(record.request_id, &mut line_buf[pos..]);
+            if pos < line_buf.len() { line_buf[pos] = b'|'; pos += 1; }
+            pos += write_u64_ascii(record.task_id.0 as u64, &mut line_buf[pos..]);
+            if pos < line_buf.len() { line_buf[pos] = b'|'; pos += 1; }
+            let name_bytes = record.app_name.as_bytes();
+            let n = name_bytes.len().min(line_buf.len().saturating_sub(pos + 10));
+            line_buf[pos..pos + n].copy_from_slice(&name_bytes[..n]);
+            pos += n;
+            if pos < line_buf.len() { line_buf[pos] = b'|'; pos += 1; }
+            pos += write_u64_ascii(record.permission as u64, &mut line_buf[pos..]);
+            if pos < line_buf.len() { line_buf[pos] = b'|'; pos += 1; }
+            pos += write_u64_ascii(record.decision as u64, &mut line_buf[pos..]);
+            if pos < line_buf.len() { line_buf[pos] = b'\n'; pos += 1; }
+
+            if written + pos <= out.len() {
+                out[written..written + pos].copy_from_slice(&line_buf[..pos]);
+                written += pos;
+            } else {
+                break;
+            }
+        }
+        written
+    }
+}
+
+fn write_u64_ascii(mut val: u64, buf: &mut [u8]) -> usize {
+    if val == 0 {
+        if !buf.is_empty() {
+            buf[0] = b'0';
+            return 1;
+        }
+        return 0;
+    }
+    let mut digits = [0u8; 20];
+    let mut len = 0;
+    while val > 0 && len < digits.len() {
+        digits[len] = b'0' + (val % 10) as u8;
+        val /= 10;
+        len += 1;
+    }
+    let take = len.min(buf.len());
+    for i in 0..take {
+        buf[i] = digits[len - 1 - i];
+    }
+    take
 }
 
 pub static PERMISSION_MANAGER: Mutex<PermissionManager> = Mutex::new(PermissionManager::new());

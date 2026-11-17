@@ -271,6 +271,8 @@ pub enum SyscallNumber {
     TlsTrustRead = 163,
     /// Reads bytes from a named position of an open file, leaving its cursor.
     FsReadAt = 164,
+    /// Queries active and pending consent requests from the Permission Manager.
+    ConsentQuery = 165,
 }
 
 // -----------------------------------------------------------------------------
@@ -3107,6 +3109,49 @@ pub fn cap_request_consent(
     } else {
         Err(ret)
     }
+}
+
+/// Queries the kernel Permission Manager for active or pending consent records.
+/// If task_id == 0, queries all records (requires SystemControl), or returns caller's records.
+pub fn consent_query(task_id: u64, out: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::ConsentQuery,
+            task_id,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Resolves an interactive user consent request in the kernel.
+/// Requires SystemControl or ProcessSpawn capability.
+/// decision: 1 = Granted (session), 2 = Denied, 3 = GrantedOnce.
+pub fn consent_resolve(request_id: u64, decision: u32) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::ConsentResolve,
+            request_id,
+            decision as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Dynamically revokes a granted permission from a task.
+/// A task can always revoke its own permissions (task_id == caller).
+/// Revoking other tasks requires SystemControl.
+pub fn revoke_permission(task_id: u64, perm: SensitivePermission) -> Result<(), i64> {
+    permission_revoke(task_id, perm as u32)
 }
 
 /// Dispatches a share transaction to a recipient app or triggers the interactive share drawer.

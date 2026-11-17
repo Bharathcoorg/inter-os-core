@@ -1008,12 +1008,18 @@ pub extern "C" fn app_settings_trampoline() -> ! {
 
 /// Spawns the native Sovereign Settings App in Ring 3.
 pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(15);
+    let mut caps = CapabilityTable::new(20);
     caps.insert(Capability {
         id: CapabilityId(1701),
         cap_type: CapabilityType::SerialOutput,
         rights: Rights::WRITE,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1715),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::GLOBAL_SYSTEM_CONTROL_OBJECT,
     }).ok();
     caps.insert(Capability {
         id: CapabilityId(1702),
@@ -2270,6 +2276,17 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+
+    // If the sovereign user already granted agent tool execution permission in Settings,
+    // install the AgentTask capability into the newly spawned process.
+    if crate::capability::permission::PERMISSION_MANAGER.lock().has_app_permission("app_agent_manager", crate::capability::permission::SensitivePermission::AgentTask) {
+        caps.insert(Capability {
+            id: CapabilityId(2925),
+            cap_type: CapabilityType::AgentTask,
+            rights: Rights::INVOKE,
+            object_id: 0,
+        }).ok();
+    }
 
     let id = spawn_user_process_with_parent(
         "app_agent_manager",

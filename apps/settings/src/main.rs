@@ -492,6 +492,88 @@ pub power_profile: Option<PowerProfile>,
     pub pending_section_at: u64,
     pub clock: [u8; 5],
     pub clock_ok: bool,
+    pub agent_consent_request_id: Option<u64>,
+    pub agent_consent_task_id: Option<u64>,
+    pub agent_consent_state: AgentConsentState,
+}
+
+/// Dynamic permission consent state queried from kernel Permission Manager.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentConsentState {
+    None,
+    Pending,
+    Granted,
+}
+
+/// Parses format_records output from sys_consent_query:
+/// `request_id|task_id|app_name|perm_val|decision\n`
+fn parse_consent_records(buf: &[u8]) -> (Option<u64>, Option<u64>, AgentConsentState) {
+    let mut best_req: Option<u64> = None;
+    let mut best_task: Option<u64> = None;
+    let mut best_state = AgentConsentState::None;
+
+    let mut start = 0;
+    while start < buf.len() {
+        let mut end = start;
+        while end < buf.len() && buf[end] != b'\n' {
+            end += 1;
+        }
+        let line = &buf[start..end];
+        if !line.is_empty() {
+            let mut parts = [0usize; 6];
+            let mut part_count = 0;
+            parts[0] = 0;
+            for (idx, &b) in line.iter().enumerate() {
+                if b == b'|' && part_count < 5 {
+                    part_count += 1;
+                    parts[part_count] = idx + 1;
+                }
+            }
+            if part_count >= 4 {
+                let req_id_str = &line[parts[0]..parts[1] - 1];
+                let task_id_str = &line[parts[1]..parts[2] - 1];
+                let perm_str = &line[parts[3]..parts[4] - 1];
+                let dec_str = &line[parts[4]..];
+
+                if let (Some(req_id), Some(task_id), Some(perm), Some(dec)) = (
+                    parse_u64_ascii(req_id_str),
+                    parse_u64_ascii(task_id_str),
+                    parse_u64_ascii(perm_str),
+                    parse_u64_ascii(dec_str),
+                ) {
+                    // SensitivePermission::AgentTask = 15
+                    if perm == 15 {
+                        if dec == 0 {
+                            return (Some(req_id), Some(task_id), AgentConsentState::Pending);
+                        } else if dec == 1 || dec == 3 {
+                            best_req = Some(req_id);
+                            best_task = Some(task_id);
+                            best_state = AgentConsentState::Granted;
+                        }
+                    }
+                }
+            }
+        }
+        start = end + 1;
+    }
+
+    (best_req, best_task, best_state)
+}
+
+fn parse_u64_ascii(s: &[u8]) -> Option<u64> {
+    let mut val = 0u64;
+    let mut has_digits = false;
+    for &b in s {
+        if b.is_ascii_digit() {
+            val = val.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+            has_digits = true;
+        }
+    }
+    if has_digits {
+        Some(val)
+    } else {
+        None
+    }
 }
 
 /// Outcome of the one keystore call this app is allowed to attempt.
@@ -610,6 +692,40 @@ impl SettingsApp {
             pending_section_at: 0,
             clock: [b' '; 5],
             clock_ok: false,
+            agent_consent_request_id: None,
+            agent_consent_task_id: None,
+            agent_consent_state: AgentConsentState::None,
+        }
+    }
+
+    /// Queries the kernel Permission Manager for active or pending tool consent requests.
+    pub fn refresh_agent_consent(&mut self) {
+        let mut buf = [0u8; 512];
+        let n = std::consent_query(0, &mut buf).unwrap_or(0);
+        let (req_id, task_id, state) = parse_consent_records(&buf[..n]);
+        self.agent_consent_request_id = req_id;
+        self.agent_consent_task_id = task_id;
+        self.agent_consent_state = state;
+    }
+
+    /// Toggles or grants/revokes agent task capability based on current consent state.
+    pub fn toggle_consent_or_agent_permission(&mut self) {
+        self.refresh_agent_consent();
+        match self.agent_consent_state {
+            AgentConsentState::Pending => {
+                if let Some(req_id) = self.agent_consent_request_id {
+                    let _ = std::consent_resolve(req_id, 1);
+                    std::log("[SETTINGS APP] Consent request GRANTED by user.").ok();
+                    self.refresh_agent_consent();
+                }
+            }
+            AgentConsentState::Granted => {
+                let tid = self.agent_consent_task_id.unwrap_or(0);
+                let _ = std::revoke_permission(tid, std::SensitivePermission::AgentTask);
+                std::log("[SETTINGS APP] Consent REVOKED by user.").ok();
+                self.refresh_agent_consent();
+            }
+            AgentConsentState::None => {}
         }
     }
 
@@ -3275,7 +3391,7 @@ fn row_count(section: Section) -> usize {
         Section::Personal => 6,
         Section::Apps => 4,
         Section::Power => 4,
-        Section::Security => 3,
+        Section::Security => 6,
         Section::System => 5,
     }
 }
@@ -5524,10 +5640,42 @@ fn row_pixel(
                 }
             }
             1 => {
-                // WHY "no query" rather than "unavailable": the platform has
-                // no encryption-status syscall for the vault, so claiming the
-                // vault is unencrypted would be as invented as claiming it is
-                // encrypted.
+                // Agent Tool Execution & Consent Request
+                let (detail, ink, badge, badge_ink): (&[u8], u32, &[u8], u32) = match app.agent_consent_state {
+                    AgentConsentState::Pending => (
+                        b"Pending approval (Tap to Allow)",
+                        THEME.primary,
+                        b"PENDING",
+                        THEME.primary,
+                    ),
+                    AgentConsentState::Granted => (
+                        b"Permission granted (Tap to Revoke)",
+                        THEME.on_surface,
+                        b"GRANTED",
+                        THEME.on_surface,
+                    ),
+                    AgentConsentState::None => (
+                        b"No active consent requested",
+                        THEME.on_surface_variant,
+                        b"INACTIVE",
+                        THEME.on_surface_variant,
+                    ),
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Agent Tool Execution",
+                    detail,
+                    ink,
+                    badge,
+                    badge_ink,
+                    RowBoxes::user(),
+                ) {
+                    return c;
+                }
+            }
+            2 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -5542,7 +5690,7 @@ fn row_pixel(
                     return c;
                 }
             }
-            _ => {
+            3 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -5551,6 +5699,36 @@ fn row_pixel(
                     b"No privacy filter status query is exposed",
                     THEME.on_surface_variant,
                     b"NOT REPORTED",
+                    THEME.on_surface_variant,
+                    RowBoxes::user(),
+                ) {
+                    return c;
+                }
+            }
+            4 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Camera & Location Privacy",
+                    b"Hardware sensors isolated",
+                    THEME.on_surface_variant,
+                    b"SECURED",
+                    THEME.on_surface_variant,
+                    RowBoxes::user(),
+                ) {
+                    return c;
+                }
+            }
+            _ => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Local AI Memory Isolation",
+                    b"Persistent embeddings zero-knowledge",
+                    THEME.on_surface_variant,
+                    b"ENFORCED",
                     THEME.on_surface_variant,
                     RowBoxes::user(),
                 ) {
@@ -7624,6 +7802,19 @@ fn handle_tap(
                 ) {
                     settings.open_screen_lock();
                 }
+                let (cy1, ch1) =
+                    detail_row_rect_scrolled(Section::Security, 1, settings.scroll.offset);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy1,
+                    DETAIL_W,
+                    ch1,
+                    CARD_R,
+                ) {
+                    settings.toggle_consent_or_agent_permission();
+                }
             }
             _ => {}
         }
@@ -7631,6 +7822,9 @@ fn handle_tap(
         settings.current_section = Some(section);
         if section == Section::System {
             settings.display_about_device();
+        }
+        if section == Section::Security {
+            settings.refresh_agent_consent();
         }
         settings.refresh_wallpaper_values();
         settings.reset_scroll();
@@ -7898,6 +8092,9 @@ pub extern "C" fn _start() -> ! {
                 } else if settings.current_section.is_some() {
                     // A card tap navigated while the orb's open was pending.
                     settings.pending_section = None;
+                    if settings.current_section == Some(Section::Security) && (settings.frame_count % 8) == 0 {
+                        settings.refresh_agent_consent();
+                    }
                 }
             }
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {

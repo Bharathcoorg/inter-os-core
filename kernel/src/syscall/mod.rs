@@ -319,6 +319,8 @@ pub enum SyscallNumber {
     TlsTrustRead = 163,
     /// Reads bytes from a named position of an open file, leaving its cursor.
     FsReadAt = 164,
+    /// Queries active and pending consent requests from the Permission Manager.
+    ConsentQuery = 165,
 }
 
 /// System call result status codes.
@@ -642,6 +644,8 @@ pub(crate) fn is_privileged_system_identity(task_id: TaskId, name: &str) -> bool
     task_id == TaskId(0)
         || task_id == TaskId(1)
         || name.starts_with("org.interos.")
+        || name == "app_settings"
+        || name == "settings"
 }
 
 /// Authorizes a `SystemControl|INVOKE` against a specific administration object.
@@ -1524,6 +1528,24 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 }
             }
             done as i64
+        }
+        165 => {
+            // ConsentQuery: a1 = filter_task_id, a2 = out_buf_ptr, a3 = out_buf_len
+            let filter_task_id = a1;
+            let out_len = a3 as usize;
+            if out_len == 0 || out_len > 4096 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; 4096];
+            match sys_consent_query(filter_task_id, &mut kbuf[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a2, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
         }
         10 => {
             // FsWrite: a1 = cap_slot, a2 = fd, a3 = buf_ptr, a4 = buf_len
@@ -3493,12 +3515,21 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let mut pm = crate::capability::permission::PERMISSION_MANAGER.lock();
             if pm.revoke_permission(task_id, perm) {
                 let mut sched = SCHEDULER.lock();
-                if let Some(task) = sched.get_task_mut(task_id) {
-                    // WHY the shared helper instead of re-deriving the identity here:
-                    // a second hand-written copy of the id expression is exactly how
-                    // revocation ends up targeting a capability that was never minted,
-                    // while reporting success.
-                    task.cap_table.revoke_by_id(perm.capability_id(task_id));
+                if task_id != TaskId(0) {
+                    if let Some(task) = sched.get_task_mut(task_id) {
+                        // WHY the shared helper instead of re-deriving the identity here:
+                        // a second hand-written copy of the id expression is exactly how
+                        // revocation ends up targeting a capability that was never minted,
+                        // while reporting success.
+                        task.cap_table.revoke_by_id(perm.capability_id(task_id));
+                    }
+                } else {
+                    let task_ids: alloc::vec::Vec<TaskId> = sched.tasks_iter().map(|t| t.id).collect();
+                    for tid in task_ids {
+                        if let Some(task) = sched.get_task_mut(tid) {
+                            task.cap_table.revoke_by_id(perm.capability_id(tid));
+                        }
+                    }
                 }
                 SyscallResult::Success as i64
             } else {
@@ -6138,7 +6169,12 @@ pub fn sys_cap_request_consent(
     if decision == ConsentDecision::Granted {
         let target = sched.get_task_mut(current_id).ok_or(SyscallResult::TargetNotFound)?;
         let cap = perm.to_capability(current_id);
-        let slot = target.cap_table.insert(cap).map_err(|_| SyscallResult::InvalidSlot)?;
+        let slot = match target.cap_table.insert(cap.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                target.cap_table.find_slot_object(cap.cap_type, cap.rights, cap.object_id).unwrap_or(0)
+            }
+        };
         drop(sched);
 
         serial_println!(
@@ -6190,19 +6226,33 @@ pub fn sys_consent_resolve(request_id: u64, decision_val: u32) -> Result<usize, 
 
     if decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce {
         let mut sched = SCHEDULER.lock();
-        let target = sched.get_task_mut(record.task_id).ok_or(SyscallResult::TargetNotFound)?;
-        let cap = record.permission.to_capability(record.task_id);
-        let slot = target.cap_table.insert(cap).map_err(|_| SyscallResult::InvalidSlot)?;
-        drop(sched);
+        if let Some(target) = sched.get_task_mut(record.task_id) {
+            let cap = record.permission.to_capability(record.task_id);
+            let slot = match target.cap_table.insert(cap.clone()) {
+                Ok(s) => s,
+                Err(_) => {
+                    target.cap_table.find_slot_object(cap.cap_type, cap.rights, cap.object_id).unwrap_or(0)
+                }
+            };
+            drop(sched);
 
-        serial_println!(
-            "[CONSENT] Task {} ({}) GRANTED permission '{}' -> Cap slot {}.",
-            record.task_id.0,
-            record.app_name,
-            record.permission.name(),
-            slot,
-        );
-        Ok(slot)
+            serial_println!(
+                "[CONSENT] Task {} ({}) GRANTED permission '{}' -> Cap slot {}.",
+                record.task_id.0,
+                record.app_name,
+                record.permission.name(),
+                slot,
+            );
+            Ok(slot)
+        } else {
+            drop(sched);
+            serial_println!(
+                "[CONSENT] App '{}' GRANTED permission '{}' by user.",
+                record.app_name,
+                record.permission.name(),
+            );
+            Ok(0)
+        }
     } else {
         serial_println!(
             "[CONSENT] Task {} ({}) DENIED permission '{}'.",
@@ -6212,6 +6262,31 @@ pub fn sys_consent_resolve(request_id: u64, decision_val: u32) -> Result<usize, 
         );
         Ok(0)
     }
+}
+
+/// Queries active and pending permission consent requests from the Permission Manager.
+pub fn sys_consent_query(filter_task_id: u64, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let caller = {
+        let sched = SCHEDULER.lock();
+        sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?
+    };
+    if filter_task_id != 0 && filter_task_id != caller.0 as u64 {
+        if require_system_control().is_err() {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+    let pm = crate::capability::permission::PERMISSION_MANAGER.lock();
+    let filter = if filter_task_id == 0 {
+        if require_system_control().is_ok() {
+            None
+        } else {
+            Some(caller)
+        }
+    } else {
+        Some(crate::task::TaskId(filter_task_id))
+    };
+    let written = pm.format_records(filter, out_buf);
+    Ok(written)
 }
 
 /// Dispatches a cross-application share request via the Sovereign Share Sheet Bus.

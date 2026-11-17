@@ -1130,6 +1130,10 @@ pub enum Action {
     ClearChat,
     /// Go to the conversation.
     OpenChat,
+    /// Revoke bounded agent tools authority.
+    RevokeTools,
+    /// Clear AI memory.
+    ClearMemory,
 }
 
 /// A bottom action bar button.
@@ -1347,6 +1351,7 @@ impl AgentManagerApp {
     /// the only party that can mint the agent-task capability, and a tool that
     /// ran without it would be the app deciding on its own that it may.
     pub fn run_tools(&mut self) {
+        std::log("[AGENT_MGR] run_tools invoked.").ok();
         self.tool_consent = ToolAuthority::request();
         let authority = ToolAuthority::probe();
         self.tool_authority = authority;
@@ -1363,7 +1368,7 @@ impl AgentManagerApp {
             }
             ConsentOutcome::Pending => {
                 self.set_action(
-                    b"Consent requested: the platform is waiting for your decision.",
+                    b"Consent requested: approve in Settings -> Security & Privacy.",
                     Tone::Muted,
                 );
             }
@@ -1377,6 +1382,55 @@ impl AgentManagerApp {
         if self.tool_consent == ConsentOutcome::Refused {
             record_tool_refusal_bubble(&mut self.chat, None);
         }
+        self.rebuild();
+    }
+
+    /// Runs a single bounded agent tool independently by its index (0..5).
+    pub fn run_single_tool(&mut self, index: usize) {
+        if index >= 5 {
+            return;
+        }
+        std::log("[AGENT_MGR] run_single_tool invoked.").ok();
+        let authority = ToolAuthority::probe();
+        self.tool_authority = authority;
+        let tool = match index {
+            0 => AgentTool::Calculator,
+            1 => AgentTool::CalendarClock,
+            2 => AgentTool::StorageStats,
+            3 => AgentTool::SettingsQuery,
+            _ => AgentTool::CapabilityCheck,
+        };
+        self.agent_tools[index] = AgentToolOutcome::execute_with_authority(tool, &authority);
+        if self.agent_tools[index].ok {
+            self.set_action(b"Tool executed successfully under granted capability.", Tone::Good);
+        } else {
+            self.set_action(b"Tool execution refused: agent-task capability not held.", Tone::Bad);
+        }
+        self.rebuild();
+    }
+
+    /// Dynamically revokes the agent-task permission from this task.
+    pub fn revoke_tools(&mut self) {
+        std::log("[AGENT_MGR] revoke_tools invoked.").ok();
+        let task_id = std::get_task_id();
+        let _ = std::revoke_permission(task_id, std::SensitivePermission::AgentTask);
+        self.tool_authority = ToolAuthority::probe();
+        self.tool_consent = ConsentOutcome::Refused;
+        self.agent_tools = [
+            AgentToolOutcome::refused(AgentTool::Calculator),
+            AgentToolOutcome::refused(AgentTool::CalendarClock),
+            AgentToolOutcome::refused(AgentTool::StorageStats),
+            AgentToolOutcome::refused(AgentTool::SettingsQuery),
+            AgentToolOutcome::refused(AgentTool::CapabilityCheck),
+        ];
+        self.set_action(b"Tool authority revoked by task.", Tone::Muted);
+        self.rebuild();
+    }
+
+    /// Clears persistent AI memory files.
+    pub fn clear_ai_memory(&mut self) {
+        let _ = std::fs_unlink("/data/agent_memory.bin");
+        self.set_action(b"AI memory cleared.", Tone::Good);
         self.rebuild();
     }
 
@@ -3444,6 +3498,45 @@ impl AgentManagerApp {
 
     /// Builds the self-test surface.
     fn build_test(&mut self) {
+        self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
+        // WHY the chip reports the platform's answer and not the app's own
+        // setting: the app has no setting to report. What it holds is the
+        // kernel's answer, and a chip that said "active" while the kernel
+        // held nothing would be a claim the screen cannot back up.
+        self.add_chip(
+            b"Tool authority",
+            if self.tool_authority.is_granted() {
+                b"[Granted]"
+            } else {
+                b"[Not held]"
+            },
+            if self.tool_authority.is_granted() {
+                Tone::Good
+            } else {
+                Tone::Unavailable
+            },
+        );
+        if self.tool_consent == ConsentOutcome::Pending {
+            self.add_wide(
+                b"Consent request pending: Awaiting user approval in Settings -> Security & Privacy.",
+                Tone::Accent,
+            );
+        }
+        for i in 0..self.agent_tools.len() {
+            let outcome = self.agent_tools[i];
+            self.add_selectable_chip(
+                outcome.tool.name().as_bytes(),
+                if outcome.ok { b"OK" } else { b"UNAVAILABLE" },
+                if outcome.ok { Tone::Good } else { Tone::Unavailable },
+                i as i8,
+            );
+            self.add_line(outcome.tool.description().as_bytes(), outcome.text().as_bytes(), Tone::Plain);
+        }
+        self.add_wide(
+            b"Tools run bounded execution calling real platform APIs with zero ambient authority.",
+            Tone::Muted,
+        );
+
         // WHY the rows are copied out: the builder mutates the body while it
         // walks the rows, and the rows belong to the app.
         let test = self.self_test;
@@ -3510,38 +3603,6 @@ impl AgentManagerApp {
             put(&mut line, &mut n, b".");
             self.add_wide(&line[..n], Tone::Muted);
         }
-
-        self.begin_card(b"Agent tools (bounded runtime)", Tone::Plain);
-        // WHY the chip reports the platform's answer and not the app's own
-        // setting: the app has no setting to report. What it holds is the
-        // kernel's answer, and a chip that said "active" while the kernel
-        // held nothing would be a claim the screen cannot back up.
-        self.add_chip(
-            b"Tool authority",
-            if self.tool_authority.is_granted() {
-                b"[Granted]"
-            } else {
-                b"[Not held]"
-            },
-            if self.tool_authority.is_granted() {
-                Tone::Good
-            } else {
-                Tone::Unavailable
-            },
-        );
-        for i in 0..self.agent_tools.len() {
-            let outcome = self.agent_tools[i];
-            self.add_chip(
-                outcome.tool.name().as_bytes(),
-                if outcome.ok { b"OK" } else { b"UNAVAILABLE" },
-                if outcome.ok { Tone::Good } else { Tone::Unavailable },
-            );
-            self.add_line(outcome.tool.description().as_bytes(), outcome.text().as_bytes(), Tone::Plain);
-        }
-        self.add_wide(
-            b"Tools run bounded execution calling real platform APIs with zero ambient authority.",
-            Tone::Muted,
-        );
     }
 
     /// The bottom action bar's buttons for the current surface.
@@ -3572,14 +3633,14 @@ impl AgentManagerApp {
                     enabled: true,
                 },
                 ActionButton {
-                    label: "REFRESH",
-                    action: Action::Refresh,
+                    label: "REQUEST CONSENT",
+                    action: Action::RunTools,
                     enabled: true,
                 },
                 ActionButton {
-                    label: "",
-                    action: Action::Refresh,
-                    enabled: false,
+                    label: if self.tool_authority.is_granted() { "REVOKE" } else { "" },
+                    action: if self.tool_authority.is_granted() { Action::RevokeTools } else { Action::Refresh },
+                    enabled: self.tool_authority.is_granted(),
                 },
             ],
             Surface::Runtime => [
@@ -3633,9 +3694,9 @@ impl AgentManagerApp {
                     enabled: true,
                 },
                 ActionButton {
-                    label: "",
-                    action: Action::Refresh,
-                    enabled: false,
+                    label: if self.tool_authority.is_granted() { "REVOKE" } else { "" },
+                    action: if self.tool_authority.is_granted() { Action::RevokeTools } else { Action::Refresh },
+                    enabled: self.tool_authority.is_granted(),
                 },
             ],
             Surface::Chat => [
@@ -4164,11 +4225,12 @@ const SHEET_PAD: usize = 8;
 /// WHY the sheet holds the actions and not the surfaces: the surfaces are
 /// already in the segmented control, and a sheet that repeats them is a
 /// sheet with nothing in it.
-const SHEET_ROWS: [(Icon, &str, Action); 4] = [
+const SHEET_ROWS: [(Icon, &str, Action); 5] = [
     (Icon::Refresh, "Re-measure device", Action::Refresh),
     (Icon::Activity, "Run self-test", Action::RunTest),
     (Icon::Send, "Open chat", Action::OpenChat),
     (Icon::Close, "Clear conversation", Action::ClearChat),
+    (Icon::Trash, "Clear AI memory", Action::ClearMemory),
 ];
 
 /// The sheet's rectangle.
@@ -4971,6 +5033,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                         app.rebuild();
                     }
                     Action::ClearChat => app.clear_chat(),
+                    Action::ClearMemory => app.clear_ai_memory(),
                     _ => {}
                 }
                 return Tap::Redraw;
@@ -5008,6 +5071,14 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                 app.surface = surface;
                 app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                 app.rebuild();
+                match surface {
+                    Surface::Models => std::log("[AGENT_MGR] Tab switched to Models.").ok(),
+                    Surface::Access => std::log("[AGENT_MGR] Tab switched to Access.").ok(),
+                    Surface::Runtime => std::log("[AGENT_MGR] Tab switched to Runtime.").ok(),
+                    Surface::Search => std::log("[AGENT_MGR] Tab switched to Search.").ok(),
+                    Surface::Test => std::log("[AGENT_MGR] Tab switched to Test.").ok(),
+                    Surface::Chat => std::log("[AGENT_MGR] Tab switched to Chat.").ok(),
+                };
                 return Tap::Redraw;
             }
         }
@@ -5048,6 +5119,8 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                 app.scroll = ScrollState::new(app.content_height as usize, band_height(), 0);
                 app.rebuild();
             }
+            Action::RevokeTools => app.revoke_tools(),
+            Action::ClearMemory => app.clear_ai_memory(),
         }
         return Tap::Redraw;
     }
@@ -5075,6 +5148,7 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
             if ux >= GUTTER && ux < field_right {
                 app.keyboard.show();
                 app.rebuild();
+                std::log("[AGENT_MGR] Composer field focused.").ok();
                 return Tap::Redraw;
             }
             return Tap::None;
@@ -5101,7 +5175,11 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
     // The body.
     if uy >= body_top() && uy < app.body_bottom() {
         if let Some(action) = hit_body(app, ux, uy) {
-            app.select_provider(action as usize);
+            if app.surface == Surface::Models {
+                app.select_provider(action as usize);
+            } else if app.surface == Surface::Test {
+                app.run_single_tool(action as usize);
+            }
             return Tap::Redraw;
         }
         return Tap::None;
@@ -5288,6 +5366,7 @@ pub extern "C" fn _start() -> ! {
         if dirty == Dirty::All {
             repaint(surface, &app);
             let _ = std::surface_flip();
+            std::log("[AGENT_MGR] Frame presented to scanout.").ok();
         } else if clock_moved {
             repaint_band(surface, &app);
             let _ = std::surface_flip();
