@@ -6,11 +6,12 @@
 End-to-End Native Local AI Inference Acceptance & Memory Safety Verification in QEMU.
 
 Validates the full vertical slice of native on-device AI in InterOS Core:
-1. Boots QEMU with provisioned model data disk (/data/models/gemma4-mobile-lite.gguf).
+1. Boots QEMU with provisioned model data disk (/data/models/gemma4-mobile-lite.gguf holding
+   the synthetic Gemma test fixture: 128K parameters, F32, 2 transformer layers, 521,536 bytes).
 2. Verifies VFS block-device discovery and import of provisioned model.
 3. Verifies userspace AI inference daemon (aid) startup, model probing, and physical weight validation.
 4. Unlocks the device and launches Agent Manager from the App Drawer.
-5. Verifies Agent Manager Models tab truthfully reports physical generative weights as PRESENT.
+5. Verifies Agent Manager Models tab reports physical generative weights as PRESENT.
 6. Switches to Agent Manager Chat tab, opens virtual soft keyboard, and types prompt.
 7. Dispatches inference generation request over IPC to aid.
 8. Verifies real guest token generation, streaming chunks, and assistant chat bubble rendering.
@@ -111,12 +112,12 @@ def run_inference_acceptance_test():
         print("[ACCEPTANCE TEST] [OK] VFS provisioned model imported successfully.")
 
         aid_weights_ok = reader.wait_for(
-            "[aid] verified physical Gemma 4 2B weights in storage.",
+            "[aid] verified physical synthetic Gemma test fixture weights in storage.",
             timeout=30.0,
-            print_keywords=["aid", "Gemma", "storage"],
+            print_keywords=["aid", "synthetic", "storage", "weights"],
         )
-        assert aid_weights_ok, "aid failed to verify physical Gemma 4 weights in storage"
-        print("[ACCEPTANCE TEST] [OK] aid verified physical Gemma 4 2B weights.")
+        assert aid_weights_ok, "aid failed to truthfully verify physical model fixture weights in storage"
+        print("[ACCEPTANCE TEST] [OK] aid verified physical synthetic Gemma test fixture weights.")
 
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
@@ -254,24 +255,43 @@ def run_inference_acceptance_test():
         time.sleep(1.0)
         reader.send(b"TAP 645 1388\n")  # Enter key
 
-        # Wait for aid to receive generation query and execute native local model
+        # Wait for aid to receive generation query over IPC
         gen_started = reader.wait_for(
             "[aid] received inference / embedding query over IPC",
             timeout=25.0,
             print_keywords=["aid", "inference", "query", "IPC", "weights"],
         )
-        assert gen_started, "aid did not receive generation query"
+        assert gen_started, "aid did not receive generation query over IPC"
         print("[ACCEPTANCE TEST] [OK] aid received inference generation query over IPC.")
 
-        # Wait for generation completion notice or streaming chunks
-        gen_completed = reader.wait_for(
-            "Generation requested: waiting for the platform's answer.",
-            timeout=20.0,
-            print_keywords=["AGENT_MGR", "aid", "Generation", "stream"],
+        # Require real autoregressive transformer execution in the guest
+        trans_exec_ok = reader.wait_for(
+            "[aid] native transformer execution generated new tokens.",
+            timeout=35.0,
+            print_keywords=["aid", "transformer", "tokens", "generated"],
         )
-        print(f"[ACCEPTANCE TEST] Generation request status in flight: {gen_completed}")
+        assert trans_exec_ok, "aid failed to execute real transformer blocks or generate tokens in guest"
+        print("[ACCEPTANCE TEST] [OK] Real autoregressive transformer execution verified.")
 
-        time.sleep(2.0)
+        # Require zero-copy DMA streaming of generated response
+        dma_stream_ok = reader.wait_for(
+            "streamed 4 bytes via Zero-Copy DMA Pipe",
+            timeout=20.0,
+            print_keywords=["SHM PIPE", "streamed", "DMA", "CRC"],
+        )
+        assert dma_stream_ok, "Guest failed to deliver generated tokens through zero-copy DMA pipe"
+        print("[ACCEPTANCE TEST] [OK] Generated tokens delivered via Zero-Copy DMA Pipe.")
+
+        # Require Agent Manager to present updated frame rendering the response
+        frame_presented = reader.wait_for(
+            "[AGENT_MGR] Frame presented to scanout.",
+            timeout=20.0,
+            print_keywords=["AGENT_MGR", "Frame presented", "scanout"],
+        )
+        assert frame_presented, "Agent Manager failed to render generated token response to scanout"
+        print("[ACCEPTANCE TEST] [OK] Agent Manager rendered generated token bubble to scanout.")
+
+        time.sleep(1.0)
         if monitor_sock:
             ppm_gen = os.path.join(workspace, "target", "test_inference_08_generation_complete.ppm")
             _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_gen}")
@@ -291,14 +311,19 @@ def run_inference_acceptance_test():
         # Tap Enter again or tap Cancel button to cancel active generation
         reader.send(b"TAP 645 1388\n")  # In streaming mode, Enter cancels streaming!
         cancel_seen = reader.wait_for(
-            "[AGENT_MGR] Cancellation requested.",
-            timeout=15.0,
+            "[aid] cancellation requested via IPC during generation",
+            timeout=20.0,
             print_keywords=["AGENT_MGR", "cancellation", "aid", "reclaimed"],
         )
-        if not cancel_seen:
-            # Also check if aid reported cancellation
-            cancel_seen = any("cancellation" in log.lower() or "reclaimed" in log.lower() for log in reader.captured_logs)
-        print(f"[ACCEPTANCE TEST] [OK] Cancellation handling verified (observed: {cancel_seen}).")
+        assert cancel_seen, "Cancellation was not observed by aid during generation"
+
+        reclaimed_seen = reader.wait_for(
+            "[aid] generation cancelled; resources reclaimed.",
+            timeout=20.0,
+            print_keywords=["aid", "reclaimed", "resources"],
+        )
+        assert reclaimed_seen, "Inference service failed to reclaim resources after cancellation"
+        print("[ACCEPTANCE TEST] [OK] Request cancellation and resource reclamation verified.")
 
         if monitor_sock:
             ppm_cancel = os.path.join(workspace, "target", "test_inference_09_cancelled.ppm")

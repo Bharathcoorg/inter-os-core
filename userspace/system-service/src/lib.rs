@@ -457,10 +457,14 @@ pub fn run_ai() -> ! {
     } else {
         let _ = std::log("[aid] physical EmbeddingGemma 2 weights absent; lexical baseline active.");
     }
-    if let Some((_hdr, _path)) = probed_models.generative {
-        let _ = std::log("[aid] verified physical Gemma 4 2B weights in storage.");
+    if let Some((_hdr, path)) = probed_models.generative {
+        if path.contains("lite") || path.contains("tiny") {
+            let _ = std::log("[aid] verified physical synthetic Gemma test fixture weights in storage.");
+        } else {
+            let _ = std::log("[aid] verified physical generative model weights in storage.");
+        }
     } else {
-        let _ = std::log("[aid] physical Gemma 4 2B weights absent; generative queries will report unavailable honestly.");
+        let _ = std::log("[aid] physical generative model weights absent; generative queries will report unavailable honestly.");
     }
 
     // Stack-allocated scratch buffer for non-allocating IPC reception (zero heap allocation)
@@ -1128,8 +1132,56 @@ fn reply_with_answer(
     }
 }
 
+static NEXT_GENERATION_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+static ACTIVE_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static ACTIVE_GENERATION_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static CANCEL_REQUESTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static ACTIVE_SESSION_CANCELLED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Deferred IPC message arriving while generative inference is active.
+#[derive(Clone, Copy)]
+pub struct DeferredIpcEntry {
+    pub sender: u64,
+    pub msg_type: u32,
+    pub len: usize,
+    pub payload: [u8; 1024],
+}
+
+pub static DEFERRED_IPC_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static mut DEFERRED_IPC_QUEUE: [Option<DeferredIpcEntry>; 16] = [None; 16];
+
+pub fn push_deferred_ipc(sender: u64, msg_type: u32, data: &[u8]) -> bool {
+    let count = DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if count >= 16 {
+        return false;
+    }
+    let mut entry = DeferredIpcEntry {
+        sender,
+        msg_type,
+        len: data.len().min(1024),
+        payload: [0u8; 1024],
+    };
+    entry.payload[..entry.len].copy_from_slice(&data[..entry.len]);
+    unsafe {
+        DEFERRED_IPC_QUEUE[count] = Some(entry);
+    }
+    DEFERRED_IPC_COUNT.store(count + 1, core::sync::atomic::Ordering::Relaxed);
+    true
+}
+
+pub fn pop_deferred_ipc() -> Option<DeferredIpcEntry> {
+    let count = DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if count == 0 {
+        return None;
+    }
+    unsafe {
+        let item = DEFERRED_IPC_QUEUE[0].take();
+        for i in 1..count {
+            DEFERRED_IPC_QUEUE[i - 1] = DEFERRED_IPC_QUEUE[i].take();
+        }
+        DEFERRED_IPC_COUNT.store(count - 1, core::sync::atomic::Ordering::Relaxed);
+        item
+    }
+}
 
 /// Set when a model file has reached the model namespace since the last probe.
 ///
@@ -2104,6 +2156,7 @@ fn run_installed_generation(
     path: &str,
     payload: &[u8],
     sender_task_id: u64,
+    session_id: u64,
     tx_buf: &mut [u8; 1024],
 ) -> bool {
     let fd = match std::fs_open(path, std::FS_READ) {
@@ -2194,16 +2247,16 @@ fn run_installed_generation(
     let mut decode_buf = [0u8; 32];
 
     let is_cancelled = || {
-        if CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed) {
+        if ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst) == session_id {
             return true;
         }
         let mut poll_buf = [0u8; 1024];
-        if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut poll_buf) {
+        while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut poll_buf) {
             if msg_type == std::ai::MSG_TYPE_CANCEL
                 || (len >= 4 && &poll_buf[..4] == b"CANC")
             {
-                if sender == 0 || sender == sender_task_id {
-                    CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+                if sender == sender_task_id || sender == 1 {
+                    ACTIVE_SESSION_CANCELLED.store(session_id, core::sync::atomic::Ordering::SeqCst);
                     let _ = std::log("[aid] cancellation requested via IPC during generation");
                     let mut cancel_tx = [0u8; 1024];
                     emit_inference_response(
@@ -2233,6 +2286,9 @@ fn run_installed_generation(
                     b"Inference service busy: active generation in progress",
                     &mut busy_tx,
                 );
+            } else if len > 0 {
+                // Preserve unrelated IPC message in the deferred queue so it is not dropped
+                push_deferred_ipc(sender, msg_type, &poll_buf[..len]);
             }
         }
         false
@@ -2260,6 +2316,7 @@ fn run_installed_generation(
 
     match ran {
         Ok(count) if count > 0 => {
+            let _ = std::log("[aid] native transformer execution generated new tokens.");
             let reply_data = if !generated_bytes.is_empty() {
                 generated_bytes.as_slice()
             } else {
@@ -2485,20 +2542,21 @@ pub fn handle_ipc_inference_query(
         return;
     }
     if msg_type == std::ai::MSG_TYPE_CANCEL || (payload.len() >= 4 && &payload[..4] == b"CANC") {
-        let active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::Relaxed);
-        if active != 0 && (sender_task_id == 0 || sender_task_id == active) {
-            CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
-            emit_inference_response(
-                sender_task_id,
-                std::ai::STATUS_SUCCESS,
-                b"[Cancellation acknowledged]",
-                tx_buf,
-            );
-        } else if active == 0 {
+        let active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::SeqCst);
+        let active_sess = ACTIVE_SESSION_ID.load(core::sync::atomic::Ordering::SeqCst);
+        if active == 0 || active_sess == 0 {
             emit_inference_response(
                 sender_task_id,
                 std::ai::STATUS_SUCCESS,
                 b"[No active inference session to cancel]",
+                tx_buf,
+            );
+        } else if sender_task_id == active || sender_task_id == 1 {
+            ACTIVE_SESSION_CANCELLED.store(active_sess, core::sync::atomic::Ordering::SeqCst);
+            emit_inference_response(
+                sender_task_id,
+                std::ai::STATUS_SUCCESS,
+                b"[Cancellation acknowledged]",
                 tx_buf,
             );
         } else {
@@ -2582,8 +2640,8 @@ pub fn handle_ipc_inference_query(
             return;
         }
 
-        let current_active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::Relaxed);
-        if current_active != 0 && current_active != sender_task_id {
+        let new_session_id = NEXT_GENERATION_SESSION_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        if ACTIVE_SESSION_ID.compare_exchange(0, new_session_id, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
             emit_inference_response(
                 sender_task_id,
                 std::ai::STATUS_UNAVAILABLE,
@@ -2593,20 +2651,21 @@ pub fn handle_ipc_inference_query(
             return;
         }
 
-        ACTIVE_GENERATION_TASK.store(sender_task_id, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_GENERATION_TASK.store(sender_task_id, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
         struct ActiveTaskGuard;
         impl Drop for ActiveTaskGuard {
             fn drop(&mut self) {
-                ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
-                CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+                ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+                ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+                ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
             }
         }
         let _task_guard = ActiveTaskGuard;
 
         if let Some((_hdr, path)) = probed_models.generative {
-            if run_installed_generation(path, payload, sender_task_id, tx_buf) {
+            if run_installed_generation(path, payload, sender_task_id, new_session_id, tx_buf) {
                 return;
             }
 
@@ -3505,8 +3564,9 @@ mod tests {
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
 
-        ACTIVE_GENERATION_TASK.store(1, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(50, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(1, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
         // 1. By msg_type
         handle_ipc_inference_query(
@@ -3522,11 +3582,11 @@ mod tests {
         assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[Cancellation acknowledged]");
-        assert!(CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 50);
 
         // 2. By ASCII "CANC" prefix in payload
         tx_buf.fill(0);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
         handle_ipc_inference_query(
             1,
             0,
@@ -3540,9 +3600,11 @@ mod tests {
         assert_eq!(resp2.status, std::ai::STATUS_SUCCESS);
         let payload2 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp2.output_dim as usize];
         assert_eq!(payload2, b"[Cancellation acknowledged]");
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 50);
 
-        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]
@@ -3551,9 +3613,9 @@ mod tests {
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
 
-        // Matching sender task
-        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(100, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
         handle_ipc_inference_query(
             42,
@@ -3568,28 +3630,27 @@ mod tests {
         assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[Cancellation acknowledged]");
-        assert!(CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 100);
 
-        // Direct / unassigned sender_task_id == 0 matches active generation
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        // System init (task 1) also has authority to cancel active generation
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
         tx_buf.fill(0);
         handle_ipc_inference_query(
-            0,
+            1,
             MSG_TYPE_CANCEL,
             b"",
             &empty_models,
             &mut tx_buf,
         );
-        let resp0 = unsafe {
+        let resp1 = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp0.status, std::ai::STATUS_SUCCESS);
-        let payload0 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp0.output_dim as usize];
-        assert_eq!(payload0, b"[Cancellation acknowledged]");
-        assert!(CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(resp1.status, std::ai::STATUS_SUCCESS);
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 100);
 
-        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]
@@ -3598,9 +3659,10 @@ mod tests {
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
 
-        // Active task is 42, but sender is 99
-        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        // Active task is 42, active session is 101, but sender is 99
+        ACTIVE_SESSION_ID.store(101, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
         handle_ipc_inference_query(
             99,
@@ -3618,10 +3680,10 @@ mod tests {
             payload,
             b"[Cancellation rejected: sender does not own active session]"
         );
-        assert!(!CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 0);
 
-        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]
@@ -3631,8 +3693,9 @@ mod tests {
         let empty_models = gguf::ProbedModels::empty();
 
         // No active task
-        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
         handle_ipc_inference_query(
             15,
@@ -3647,20 +3710,20 @@ mod tests {
         assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[No active inference session to cancel]");
-        assert!(!CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Relaxed));
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn test_handle_ipc_generate_busy_rejection() {
+    fn test_handle_ipc_generate_busy_rejection_different_and_same_sender() {
         let _lock = TEST_CANCEL_LOCK.lock().unwrap();
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
 
-        // Active task 42 is currently generating
-        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::Relaxed);
-        CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Relaxed);
+        // Active task 42 is currently generating in session 200
+        ACTIVE_SESSION_ID.store(200, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
 
-        // Sender 99 requests generation while service is busy
         let req = std::ai::AiInferenceRequest {
             model_id: 2,
             target_dim: 0,
@@ -3676,6 +3739,7 @@ mod tests {
         req_buf[..req_hdr_len].copy_from_slice(req_bytes);
         req_buf[req_hdr_len..req_hdr_len + 4].copy_from_slice(b"test");
 
+        // 1. Different sender 99 requests generation while service is busy -> STATUS_UNAVAILABLE
         handle_ipc_inference_query(
             99,
             MSG_TYPE_GENERATE,
@@ -3683,15 +3747,65 @@ mod tests {
             &empty_models,
             &mut tx_buf,
         );
-
-        let resp = unsafe {
+        let resp1 = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp.status, std::ai::STATUS_UNAVAILABLE);
-        let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
-        assert_eq!(payload, b"Inference service busy: active generation in progress");
+        assert_eq!(resp1.status, std::ai::STATUS_UNAVAILABLE);
+        let payload1 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp1.output_dim as usize];
+        assert_eq!(payload1, b"Inference service busy: active generation in progress");
 
-        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::Relaxed);
+        // 2. Same sender 42 duplicate request while active -> also STATUS_UNAVAILABLE (cannot overwrite active run)
+        tx_buf.fill(0);
+        handle_ipc_inference_query(
+            42,
+            MSG_TYPE_GENERATE,
+            &req_buf[..req_hdr_len + 4],
+            &empty_models,
+            &mut tx_buf,
+        );
+        let resp2 = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp2.status, std::ai::STATUS_UNAVAILABLE);
+        let payload2 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp2.output_dim as usize];
+        assert_eq!(payload2, b"Inference service busy: active generation in progress");
+
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_handle_ipc_deferred_queue_unrelated_messages() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+
+        // Drain any existing deferred messages
+        while pop_deferred_ipc().is_some() {}
+
+        // Push 3 unrelated messages during generation
+        assert!(push_deferred_ipc(10, 0x1234, b"heartbeat_alpha"));
+        assert!(push_deferred_ipc(11, 0x5678, b"admin_ping_beta"));
+        assert!(push_deferred_ipc(12, 0x9ABC, b"sensor_tick_gamma"));
+
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed), 3);
+
+        // Pop in FIFO order
+        let m1 = pop_deferred_ipc().expect("msg 1");
+        assert_eq!(m1.sender, 10);
+        assert_eq!(m1.msg_type, 0x1234);
+        assert_eq!(&m1.payload[..m1.len], b"heartbeat_alpha");
+
+        let m2 = pop_deferred_ipc().expect("msg 2");
+        assert_eq!(m2.sender, 11);
+        assert_eq!(m2.msg_type, 0x5678);
+        assert_eq!(&m2.payload[..m2.len], b"admin_ping_beta");
+
+        let m3 = pop_deferred_ipc().expect("msg 3");
+        assert_eq!(m3.sender, 12);
+        assert_eq!(m3.msg_type, 0x9ABC);
+        assert_eq!(&m3.payload[..m3.len], b"sensor_tick_gamma");
+
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed), 0);
+        assert!(pop_deferred_ipc().is_none());
     }
 
     /// A file that states the architecture the notice can quote it; one that does
