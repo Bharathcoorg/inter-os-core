@@ -1186,6 +1186,13 @@ def cmd_pack(args):
         if field not in manifest_data:
             log_error(f"Manifest missing required field: {field}")
             return 1
+    if not isinstance(manifest_data.get("permissions"), list):
+        log_error("Manifest field 'permissions' must be a list")
+        return 1
+    for s_field in ["id", "name", "version"]:
+        if not isinstance(manifest_data.get(s_field), str):
+            log_error(f"Manifest field '{s_field}' must be a string")
+            return 1
     bin_dir = app_dir / "bin"
     raw_ep = manifest_data.get("entrypoint", f"{app_name}.elf")
     if isinstance(raw_ep, dict):

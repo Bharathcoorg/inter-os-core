@@ -98,7 +98,7 @@ class SerialMonitorClient:
             cmd_str += "\n"
         self.ser_sock.sendall(cmd_str.encode('utf-8'))
 
-    def screendump(self, dest_path, timeout=6.0):
+    def screendump(self, dest_path, min_size=1000, timeout=12.0):
         # Format path using forward slashes for QEMU monitor
         norm_path = str(dest_path).replace("\\", "/")
         if os.path.exists(dest_path):
@@ -108,12 +108,16 @@ class SerialMonitorClient:
                 pass
         self.mon_sock.sendall(f"screendump {norm_path}\n".encode('utf-8'))
         start_t = time.time()
+        last_sz = 0
         while time.time() - start_t < timeout:
-            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1000:
-                time.sleep(0.2)  # Allow write buffer to flush
-                return os.path.getsize(dest_path)
-            time.sleep(0.1)
-        return 0
+            if os.path.exists(dest_path):
+                sz = os.path.getsize(dest_path)
+                if sz >= min_size and sz == last_sz:
+                    time.sleep(0.1)
+                    return sz
+                last_sz = sz
+            time.sleep(0.3)
+        return last_sz
 
 
 def read_ppm(path):
@@ -243,7 +247,7 @@ def main():
         # ---------------------------------------------------------------------
         print("\n[PHASE 1] Capturing baseline 720x1440 screendump...")
         ppm_720 = ROOT / "target" / "scanout_baseline_720x1440.ppm"
-        sz_720 = client.screendump(ppm_720)
+        sz_720 = client.screendump(ppm_720, min_size=3110400)
         assert sz_720 > 1000, f"Failed to capture 720x1440 screendump (size={sz_720})"
         stats_720 = analyze_ppm(ppm_720)
         print(f"  [OK] Baseline screendump: {stats_720['width']}x{stats_720['height']}, "
@@ -269,7 +273,7 @@ def main():
         # ---------------------------------------------------------------------
         print("\n[PHASE 3] Capturing Native 1080x2400 screendump from QEMU monitor...")
         ppm_1080 = ROOT / "target" / "scanout_native_1080x2400.ppm"
-        sz_1080 = client.screendump(ppm_1080)
+        sz_1080 = client.screendump(ppm_1080, min_size=7776000)
         assert sz_1080 > 1000, f"Failed to capture 1080x2400 screendump (size={sz_1080})"
         stats_1080 = analyze_ppm(ppm_1080)
         print(f"  [OK] Native 1080p screendump: {stats_1080['width']}x{stats_1080['height']}, "

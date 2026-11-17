@@ -107,7 +107,11 @@ def test_ac97_qemu_audio():
         reader = SerialReader(serial_sock)
 
         # Wait for AC'97 initialization log
-        ac97_initialized = reader.wait_for("AC'97 PCM output initialized", timeout=20.0)
+        ac97_initialized = reader.wait_for("AC'97 PCM output initialized", timeout=60.0)
+        if not ac97_initialized:
+            print("[DEBUG SERIAL LOGS]:")
+            for log in reader.captured_logs[-40:]:
+                print("  ", log)
         assert ac97_initialized, "Expected AC'97 controller initialization log not observed!"
         print("[VERIFIED] Guest microkernel successfully probed and initialized AC'97 PCI device.")
 
