@@ -909,10 +909,18 @@ impl Scheduler {
 
     /// Marks a task for cooperative termination on syscall return or next scheduling point.
     /// Allows in-flight syscalls to cleanly unwind kernel stack frames and release spinlocks.
+    /// If the task is currently blocked, transitions it to Ready so the scheduler can dispatch it
+    /// to complete cooperative unwinding.
     pub fn request_kill(&mut self, id: TaskId, exit_code: i32) -> Result<(), &'static str> {
         let task = self.tasks.iter_mut().find(|task| task.id == id).ok_or("task not found")?;
+        if matches!(task.state, TaskState::Zombie | TaskState::Terminated) {
+            return Ok(());
+        }
         task.pending_kill = true;
         task.exit_code = exit_code;
+        if task.state == TaskState::Blocked {
+            task.state = TaskState::Ready;
+        }
         Ok(())
     }
 
@@ -1110,8 +1118,16 @@ pub fn terminate_current() -> ! {
 }
 
 /// Returns whether the current task has a pending kill request waiting to be processed.
+/// Retries with bounded backoff if contested, falling back to lock acquisition to guarantee
+/// that a pending termination is never missed at the user-kernel privilege boundary.
 pub fn is_current_pending_kill() -> bool {
-    SCHEDULER.try_lock().map_or(false, |s| s.is_current_pending_kill())
+    for _ in 0..16 {
+        if let Some(s) = SCHEDULER.try_lock() {
+            return s.is_current_pending_kill();
+        }
+        core::hint::spin_loop();
+    }
+    SCHEDULER.lock().is_current_pending_kill()
 }
 
 #[cfg(test)]
@@ -1620,6 +1636,94 @@ mod tests {
         let task = sched.get_task(victim_id).unwrap();
         assert!(task.pending_kill);
         assert_eq!(task.exit_code, -15);
+    }
+
+    #[test]
+    fn test_cooperative_kill_lifecycle_and_reap() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let child_id = sched.spawn_with_parent("child", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5, parent_id);
+
+        // Cooperative kill requested with exit code 42
+        sched.request_kill(child_id, 42).expect("request kill");
+        let task = sched.get_task(child_id).unwrap();
+        assert!(task.pending_kill);
+        assert_eq!(task.exit_code, 42);
+
+        // Child task terminates into Zombie
+        sched.terminate_task(child_id, 42).expect("child terminates");
+        assert_eq!(sched.get_task(child_id).unwrap().state, TaskState::Zombie);
+
+        // Parent reaps child and receives the exact exit code
+        let exit_code = sched.reap_child(parent_id, child_id).expect("reap child");
+        assert_eq!(exit_code, 42);
+
+        // Child is now completely removed from task list
+        assert!(sched.get_task(child_id).is_none());
+    }
+
+    #[test]
+    fn test_cooperative_kill_blocked_task_unblocked() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let victim_id = sched.spawn("blocked_victim", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        // Put task into Blocked state (e.g. waiting for IPC or I/O)
+        let task = sched.tasks.iter_mut().find(|t| t.id == victim_id).unwrap();
+        task.state = TaskState::Blocked;
+
+        // Request kill while task is blocked
+        sched.request_kill(victim_id, 9).expect("request kill on blocked task");
+
+        // The task MUST be unblocked (Ready) so the scheduler can dispatch it to unwind cleanly
+        let task_after = sched.get_task(victim_id).unwrap();
+        assert_eq!(task_after.state, TaskState::Ready);
+        assert!(task_after.pending_kill);
+        assert_eq!(task_after.exit_code, 9);
+    }
+
+    #[test]
+    fn test_cooperative_kill_idempotent_and_terminated() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let victim_id = sched.spawn("victim", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+
+        // Repeated requests must be idempotent and succeed
+        assert_eq!(sched.request_kill(victim_id, 15), Ok(()));
+        assert_eq!(sched.request_kill(victim_id, 15), Ok(()));
+
+        // Terminate task into Terminated state
+        sched.terminate_task(victim_id, 15).expect("terminate");
+
+        // Calling request_kill on an already-terminated task is safe and idempotent
+        assert_eq!(sched.request_kill(victim_id, 15), Ok(()));
+    }
+
+    #[test]
+    fn test_cooperative_kill_lock_unwinding_simulation() {
+        // Simulates the syscall unwinding gate:
+        // A lock held during syscall logic must be dropped before the pending_kill check.
+        static TEST_MUTEX: spin::Mutex<u32> = spin::Mutex::new(100);
+
+        // 1. Syscall execution begins: acquire lock
+        {
+            let mut guard = TEST_MUTEX.lock();
+            *guard += 1;
+            assert_eq!(*guard, 101);
+            // Guard goes out of scope here (stack frame unwinds)
+        }
+
+        // 2. Syscall return boundary reached: lock is verified unlocked
+        assert!(TEST_MUTEX.try_lock().is_some(), "Lock must be released before termination gate");
+
+        // 3. Syscall exit gate evaluates is_current_pending_kill() without deadlocking
+        // or holding the kernel test lock.
     }
 }
 

@@ -63,16 +63,25 @@ impl PciDevice {
             return None;
         }
 
-        // Offset 0x34 is the Capabilities Pointer for Standard (0x00) and Bridge (0x01) headers
-        let mut cap_ptr = pci_read_u8(self.addr, 0x34) & 0xFC;
+        let cap_ptr_raw = pci_read_u8(self.addr, 0x34);
+        Self::find_capability_in_space(target_cap_id, cap_ptr_raw, |offset| pci_read_u8(self.addr, offset))
+    }
+
+    /// Pure bounded traversal algorithm over PCI configuration space.
+    pub fn find_capability_in_space<F: Fn(u8) -> u8>(
+        target_cap_id: u8,
+        initial_cap_ptr: u8,
+        read_u8: F,
+    ) -> Option<u8> {
+        let mut cap_ptr = initial_cap_ptr & 0xFC;
         let mut hops = 0;
 
         while cap_ptr >= 0x40 && hops < 48 {
-            let id = pci_read_u8(self.addr, cap_ptr);
+            let id = read_u8(cap_ptr);
             if id == target_cap_id {
                 return Some(cap_ptr);
             }
-            let next = pci_read_u8(self.addr, cap_ptr + 1) & 0xFC;
+            let next = read_u8(cap_ptr.saturating_add(1)) & 0xFC;
             if next == 0 || next == cap_ptr {
                 break;
             }
@@ -352,5 +361,113 @@ mod tests {
         assert_eq!((cfg >> 11) & 0x1F, 3);
         assert_eq!((cfg >> 8) & 0x7, 0);
         assert_eq!(cfg & 0xFC, 0x10);
+    }
+
+    #[test]
+    fn test_pci_find_capability_at_first_valid_offset() {
+        // Offset 0x40: ID = 0x05 (MSI), Next = 0x00
+        let found = PciDevice::find_capability_in_space(0x05, 0x40, |offset| {
+            match offset {
+                0x40 => 0x05,
+                0x41 => 0x00,
+                _ => 0,
+            }
+        });
+        assert_eq!(found, Some(0x40));
+    }
+
+    #[test]
+    fn test_pci_find_capability_at_final_valid_offset() {
+        // Offset 0x40 -> 0xFC: ID = 0x10 (PCI Express)
+        let found = PciDevice::find_capability_in_space(0x10, 0x40, |offset| {
+            match offset {
+                0x40 => 0x01, // Power Management
+                0x41 => 0xFC, // Next -> 0xFC
+                0xFC => 0x10, // Target PCIe
+                0xFD => 0x00, // End of list
+                _ => 0,
+            }
+        });
+        assert_eq!(found, Some(0xFC));
+    }
+
+    #[test]
+    fn test_pci_find_capability_unaligned_pointer() {
+        // Initial pointer 0x43 should be aligned to 0x40 (& 0xFC)
+        let found = PciDevice::find_capability_in_space(0x09, 0x43, |offset| {
+            match offset {
+                0x40 => 0x09,
+                0x41 => 0x00,
+                _ => 0,
+            }
+        });
+        assert_eq!(found, Some(0x40));
+    }
+
+    #[test]
+    fn test_pci_find_capability_invalid_pointer() {
+        // Initial pointer < 0x40 is invalid for standard capabilities
+        let found = PciDevice::find_capability_in_space(0x05, 0x30, |_| 0x05);
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_pci_find_capability_self_loop() {
+        // Offset 0x50 has Next = 0x50 (direct self-loop)
+        let found = PciDevice::find_capability_in_space(0x99, 0x50, |offset| {
+            match offset {
+                0x50 => 0x01,
+                0x51 => 0x50, // Self-loop
+                _ => 0,
+            }
+        });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_pci_find_capability_multi_node_cycle() {
+        // Cycle: 0x40 -> 0x50 -> 0x60 -> 0x40
+        let found = PciDevice::find_capability_in_space(0x99, 0x40, |offset| {
+            match offset {
+                0x40 => 0x01,
+                0x41 => 0x50,
+                0x50 => 0x02,
+                0x51 => 0x60,
+                0x60 => 0x03,
+                0x61 => 0x40, // Back to 0x40
+                _ => 0,
+            }
+        });
+        // Must safely terminate after 48 hops without hanging
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_pci_find_capability_malformed_list() {
+        // 0x40 has Next pointing to 0x20 (invalid offset < 0x40)
+        let found = PciDevice::find_capability_in_space(0x05, 0x40, |offset| {
+            match offset {
+                0x40 => 0x01,
+                0x41 => 0x20, // Invalid next pointer
+                _ => 0,
+            }
+        });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_pci_find_capability_max_traversal_bound() {
+        // Chain of 50 nodes where target (0xEE) is placed at node 49 (which exceeds 48 hops)
+        let found = PciDevice::find_capability_in_space(0xEE, 0x40, |offset| {
+            let hop = (offset.saturating_sub(0x40)) / 4;
+            if offset % 2 == 0 {
+                if hop == 49 { 0xEE } else { 0x01 }
+            } else {
+                // Next pointer: next node (simulate chain by wrapping offset)
+                0x40u8.wrapping_add(((hop + 1) * 4) as u8)
+            }
+        });
+        // Max 48 hops must terminate before reaching hop 49
+        assert_eq!(found, None);
     }
 }
