@@ -282,6 +282,28 @@ def run_inference_acceptance_test():
         assert dma_stream_ok, "Guest failed to deliver generated tokens through zero-copy DMA pipe"
         print("[ACCEPTANCE TEST] [OK] Generated tokens delivered via Zero-Copy DMA Pipe.")
 
+        # Require Agent Manager to consume the DMA stream
+        dma_consumed_ok = reader.wait_for(
+            "consumed 4 bytes from Zero-Copy DMA Pipe",
+            timeout=20.0,
+            print_keywords=["SHM PIPE", "consumed", "DMA"],
+        )
+        assert dma_consumed_ok, "Agent Manager failed to consume generated tokens from Zero-Copy DMA Pipe"
+        print("[ACCEPTANCE TEST] [OK] Generated tokens consumed by Agent Manager from Zero-Copy DMA Pipe.")
+
+        # Verify exact shared-memory pipe bytes, sequence tracking, and CRC correctness
+        dma_stream_logs = [l for l in reader.captured_logs if "streamed 4 bytes via Zero-Copy DMA Pipe" in l]
+        assert len(dma_stream_logs) > 0, "No DMA stream record in serial output"
+        stream_log = dma_stream_logs[-1]
+        assert "CRC: 0x" in stream_log, f"DMA stream log missing CRC field: {stream_log}"
+        assert "Seq: " in stream_log, f"DMA stream log missing Seq field: {stream_log}"
+        print(f"[ACCEPTANCE TEST] [OK] Verified DMA pipe transfer integrity: {stream_log}")
+
+        dma_consumed_logs = [l for l in reader.captured_logs if "consumed 4 bytes from Zero-Copy DMA Pipe" in l]
+        assert len(dma_consumed_logs) > 0, "No DMA consumption record in serial output"
+        consumed_log = dma_consumed_logs[-1]
+        print(f"[ACCEPTANCE TEST] [OK] Verified DMA pipe consumer delivery: {consumed_log}")
+
         # Require Agent Manager to present updated frame rendering the response
         frame_presented = reader.wait_for(
             "[AGENT_MGR] Frame presented to scanout.",
@@ -297,6 +319,11 @@ def run_inference_acceptance_test():
             _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_gen}")
             wait_for_screendump(ppm_gen)
             print(f"[ACCEPTANCE TEST] Captured generation screendump: {ppm_gen}")
+            if os.path.exists(ppm_gen):
+                with open(ppm_gen, "rb") as f:
+                    ppm_bytes = f.read()
+                assert len(ppm_bytes) > 1000, "Screendump file is corrupt or truncated"
+                print(f"[ACCEPTANCE TEST] [OK] Generation screendump verified ({len(ppm_bytes)} bytes).")
 
         # 8. Test Request Cancellation
         print("[ACCEPTANCE TEST] Phase 8: Testing Request Cancellation during generation...")
@@ -330,6 +357,51 @@ def run_inference_acceptance_test():
             _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_cancel}")
             wait_for_screendump(ppm_cancel)
             print(f"[ACCEPTANCE TEST] Captured cancellation screendump: {ppm_cancel}")
+
+        # 8b. Subsequent Generation Acceptance: verify that subsequent generation succeeds cleanly after cancellation
+        print("[ACCEPTANCE TEST] Phase 8b: Testing subsequent generation after cancellation...")
+        time.sleep(1.0)
+        reader.send(b"TAP 300 970\n")  # focus composer
+        time.sleep(0.5)
+        reader.send(b"TAP 430 1224\n")  # 'h'
+        time.sleep(0.5)
+        reader.send(b"TAP 645 1388\n")  # Enter to submit
+
+        subseq_gen_started = reader.wait_for(
+            "[aid] received inference / embedding query over IPC",
+            timeout=25.0,
+            print_keywords=["aid", "inference", "query", "IPC"],
+        )
+        assert subseq_gen_started, "aid failed to receive subsequent generation query after cancellation"
+
+        subseq_exec_ok = reader.wait_for(
+            "[aid] native transformer execution generated new tokens.",
+            timeout=35.0,
+            print_keywords=["aid", "transformer", "tokens", "generated"],
+        )
+        assert subseq_exec_ok, "aid failed to execute transformer on subsequent generation"
+
+        subseq_dma_ok = reader.wait_for(
+            "streamed 4 bytes via Zero-Copy DMA Pipe",
+            timeout=20.0,
+            print_keywords=["SHM PIPE", "streamed", "DMA", "CRC"],
+        )
+        assert subseq_dma_ok, "Subsequent generation failed to stream tokens via DMA pipe"
+        print("[ACCEPTANCE TEST] [OK] Subsequent generation streamed via DMA pipe.")
+
+        subseq_consumed_ok = reader.wait_for(
+            "consumed 4 bytes from Zero-Copy DMA Pipe",
+            timeout=20.0,
+            print_keywords=["SHM PIPE", "consumed", "DMA"],
+        )
+        assert subseq_consumed_ok, "Agent Manager failed to consume subsequent tokens from DMA Pipe"
+        print("[ACCEPTANCE TEST] [OK] Subsequent generation consumed by Agent Manager.")
+
+        if monitor_sock:
+            ppm_subseq = os.path.join(workspace, "target", "test_inference_09b_subsequent.ppm")
+            _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_subseq.replace(os.sep, '/')}")
+            wait_for_screendump(ppm_subseq)
+            print(f"[ACCEPTANCE TEST] Captured subsequent generation screendump: {ppm_subseq}")
 
         # 9. Return to HomeScreen via App Bar Back Button (48, 80)
         print("[ACCEPTANCE TEST] Phase 9: Exiting Agent Manager via Back Button (x=48, y=80)...")

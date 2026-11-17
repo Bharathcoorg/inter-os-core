@@ -458,13 +458,23 @@ impl CapHandle {
 /// An unforgeable, monotonic token representing a reserved slot in the capability table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReservationToken {
-    pub slot_idx: u32,
-    pub reservation_id: u32,
+    slot_idx: u32,
+    reservation_id: u32,
 }
 
 impl ReservationToken {
-    pub const fn new(slot_idx: u32, reservation_id: u32) -> Self {
+    pub(crate) const fn new(slot_idx: u32, reservation_id: u32) -> Self {
         Self { slot_idx, reservation_id }
+    }
+
+    #[inline]
+    pub fn slot(&self) -> usize {
+        self.slot_idx as usize
+    }
+
+    #[inline]
+    pub fn reservation_id(&self) -> u32 {
+        self.reservation_id
     }
 }
 
@@ -547,6 +557,8 @@ pub enum CapError {
     TableFull,
     /// The reservation token is invalid, stale, or already committed/released.
     StaleReservation,
+    /// Generation counter has reached maximum value and cannot be advanced.
+    GenerationExhausted,
 }
 
 /// Base tag for the per-launch-instance capability id space.
@@ -662,11 +674,12 @@ impl CapabilityTable {
     pub fn reserve_slot(&mut self) -> Result<ReservationToken, CapError> {
         for (idx, slot) in self.slots.iter_mut().enumerate() {
             if slot.cap.is_none() && !slot.is_reserved {
-                slot.is_reserved = true;
-                slot.reservation_id = slot.reservation_id.wrapping_add(1);
-                if slot.reservation_id == 0 {
-                    slot.reservation_id = 1;
+                if slot.reservation_id == u32::MAX {
+                    return Err(CapError::GenerationExhausted);
                 }
+                slot.is_reserved = true;
+                slot.reservation_id = slot.reservation_id.checked_add(1)
+                    .ok_or(CapError::GenerationExhausted)?;
                 return Ok(ReservationToken::new(idx as u32, slot.reservation_id));
             }
         }
@@ -694,22 +707,24 @@ impl CapabilityTable {
 
     /// Commits a capability into a previously reserved slot, validating the reservation token.
     pub fn commit_reserved_slot(&mut self, token: ReservationToken, cap: Capability) -> Result<CapHandle, CapError> {
-        let slot = self.slots.get_mut(token.slot_idx as usize).ok_or(CapError::InvalidSlot)?;
-        if !slot.is_reserved || slot.reservation_id != token.reservation_id || slot.cap.is_some() {
+        let slot = self.slots.get_mut(token.slot()).ok_or(CapError::InvalidSlot)?;
+        if !slot.is_reserved || slot.reservation_id != token.reservation_id() || slot.cap.is_some() {
             return Err(CapError::StaleReservation);
         }
         slot.cap = Some(cap);
         slot.is_reserved = false;
-        Ok(CapHandle::new(token.slot_idx, slot.generation))
+        slot.reservation_id = slot.reservation_id.saturating_add(1);
+        Ok(CapHandle::new(token.slot() as u32, slot.generation))
     }
 
     /// Releases a previously reserved slot, validating the reservation token.
     pub fn release_reserved_slot(&mut self, token: ReservationToken) -> Result<(), CapError> {
-        let slot = self.slots.get_mut(token.slot_idx as usize).ok_or(CapError::InvalidSlot)?;
-        if !slot.is_reserved || slot.reservation_id != token.reservation_id {
+        let slot = self.slots.get_mut(token.slot()).ok_or(CapError::InvalidSlot)?;
+        if !slot.is_reserved || slot.reservation_id != token.reservation_id() {
             return Err(CapError::StaleReservation);
         }
         slot.is_reserved = false;
+        slot.reservation_id = slot.reservation_id.saturating_add(1);
         Ok(())
     }
 
@@ -1215,10 +1230,13 @@ impl CapabilityTable {
         if slot_idx >= self.slots.len() {
             return Err(CapError::InvalidSlot);
         }
-        let Some(cap) = self.slots[slot_idx].cap.take() else {
+        let slot = &mut self.slots[slot_idx];
+        slot.is_reserved = false;
+        slot.reservation_id = slot.reservation_id.saturating_add(1);
+        let Some(cap) = slot.cap.take() else {
             return Err(CapError::InvalidSlot);
         };
-        self.slots[slot_idx].generation = self.slots[slot_idx].generation.wrapping_add(1);
+        slot.generation = slot.generation.wrapping_add(1);
         revocation::revoke(cap.id);
         Ok(())
     }
@@ -1250,6 +1268,8 @@ impl CapabilityTable {
         for slot in self.slots.iter_mut() {
             if slot.cap.as_ref().map(|cap| cap.id) == Some(cap_id) {
                 slot.cap = None;
+                slot.is_reserved = false;
+                slot.reservation_id = slot.reservation_id.saturating_add(1);
                 slot.generation = slot.generation.wrapping_add(1);
                 held = true;
             }
@@ -1268,7 +1288,7 @@ impl CapabilityTable {
         let mut revoked = 0usize;
         for slot in self.slots.iter_mut() {
             slot.is_reserved = false;
-            slot.reservation_id = slot.reservation_id.wrapping_add(1);
+            slot.reservation_id = slot.reservation_id.saturating_add(1);
             if let Some(cap) = slot.cap.take() {
                 slot.generation = slot.generation.wrapping_add(1);
                 revocation::revoke(cap.id);
@@ -2003,7 +2023,7 @@ mod tests {
 
         // 1. Reserve first slot
         let token0 = table.reserve_slot().expect("reserve slot 0");
-        assert_eq!(token0.slot_idx, 0);
+        assert_eq!(token0.slot(), 0);
         assert!(table.is_slot_reserved(0));
 
         // 2. Insert into next slot should pick slot 1, not slot 0
@@ -2032,8 +2052,8 @@ mod tests {
 
         // 5. Reserve again and commit capability
         let re_reserved = table.reserve_slot().expect("re-reserve slot 0");
-        assert_eq!(re_reserved.slot_idx, 0);
-        assert_ne!(re_reserved.reservation_id, token0.reservation_id);
+        assert_eq!(re_reserved.slot(), 0);
+        assert_ne!(re_reserved.reservation_id(), token0.reservation_id());
         let handle = table.commit_reserved_slot(re_reserved, cap_extra).expect("commit capability");
         assert_eq!(handle.slot(), 0);
         assert!(!table.is_slot_reserved(0));
@@ -2050,15 +2070,15 @@ mod tests {
 
         // Caller A reserves slot 0
         let token_a = table.reserve_slot().expect("caller A reserves slot 0");
-        assert_eq!(token_a.slot_idx, 0);
+        assert_eq!(token_a.slot(), 0);
 
         // Caller A releases slot 0
         table.release_reserved_slot(token_a).expect("caller A releases slot 0");
 
         // Caller B reserves slot 0
         let token_b = table.reserve_slot().expect("caller B reserves slot 0");
-        assert_eq!(token_b.slot_idx, 0);
-        assert_ne!(token_a.reservation_id, token_b.reservation_id);
+        assert_eq!(token_b.slot(), 0);
+        assert_ne!(token_a.reservation_id(), token_b.reservation_id());
 
         let rogue_cap = Capability {
             id: CapabilityId(9099),
@@ -2184,23 +2204,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reservation_wraparound_safety() {
+    fn test_reservation_counter_exhaustion() {
         let mut table = CapabilityTable::new(1);
         table.slots[0].reservation_id = u32::MAX;
 
-        let token = table.reserve_slot().expect("reserve with wraparound");
-        // Monotonic reservation ID must wrap cleanly and never equal 0
-        assert_eq!(token.reservation_id, 1);
-        assert!(table.is_slot_reserved(0));
-
-        let cap = Capability {
-            id: CapabilityId(5555),
-            cap_type: CapabilityType::TimerTickRead,
-            rights: Rights::READ,
-            object_id: 0,
-        };
-        let handle = table.commit_reserved_slot(token, cap).expect("commit wrapped token");
-        assert_eq!(handle.slot(), 0);
+        // Counter exhaustion must return Err(CapError::GenerationExhausted) rather than wrapping silently
+        let res = table.reserve_slot();
+        assert_eq!(res, Err(CapError::GenerationExhausted));
+        assert!(!table.is_slot_reserved(0));
     }
 }
 

@@ -486,6 +486,18 @@ pub fn run_ai() -> ! {
             let _ = std::log("[aid] re-probed the model namespace after an install.");
         }
 
+        // Drain any deferred IPC messages in strict FIFO order
+        while let Some(deferred) = pop_deferred_ipc() {
+            let _ = std::log("[aid] processing deferred IPC message from FIFO queue");
+            handle_ipc_inference_query(
+                deferred.sender,
+                deferred.msg_type,
+                &deferred.payload[..deferred.len],
+                &probed_models,
+                &mut tx_buf,
+            );
+        }
+
         // Non-allocating IPC listener for AI inference and embedding status requests
         if let Some(_) = ipc_slot {
             if let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
@@ -1137,6 +1149,128 @@ static ACTIVE_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 static ACTIVE_GENERATION_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static ACTIVE_SESSION_CANCELLED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Strict FIFO fair spinlock using ticket-based synchronization.
+/// Guarantees that threads acquire the lock in arrival order and eliminates starvation.
+pub struct TicketSpinLock<T> {
+    next_ticket: core::sync::atomic::AtomicUsize,
+    now_serving: core::sync::atomic::AtomicUsize,
+    value: core::cell::UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Sync for TicketSpinLock<T> {}
+unsafe impl<T: Send> Send for TicketSpinLock<T> {}
+
+impl<T> TicketSpinLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            next_ticket: core::sync::atomic::AtomicUsize::new(0),
+            now_serving: core::sync::atomic::AtomicUsize::new(0),
+            value: core::cell::UnsafeCell::new(value),
+        }
+    }
+
+    #[inline]
+    pub fn lock(&self) -> TicketGuard<'_, T> {
+        let ticket = self.next_ticket.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        let mut spins = 0usize;
+        while self.now_serving.load(core::sync::atomic::Ordering::Acquire) != ticket {
+            core::hint::spin_loop();
+            spins = spins.wrapping_add(1);
+            if spins & 0x7F == 0 {
+                #[cfg(not(test))]
+                interos_std::yield_now();
+            }
+        }
+        TicketGuard { lock: self }
+    }
+}
+
+pub struct TicketGuard<'a, T> {
+    lock: &'a TicketSpinLock<T>,
+}
+
+impl<'a, T> core::ops::Deref for TicketGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<'a, T> core::ops::DerefMut for TicketGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<'a, T> Drop for TicketGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.now_serving.fetch_add(1, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Bounded circular ring buffer for deferred IPC messages.
+/// Enforces O(1) FIFO enqueue and dequeue with zero heap allocation.
+pub struct DeferredIpcQueue {
+    head: usize,
+    tail: usize,
+    count: usize,
+    entries: [Option<DeferredIpcEntry>; 16],
+}
+
+impl DeferredIpcQueue {
+    pub const fn new() -> Self {
+        const NONE_ENTRY: Option<DeferredIpcEntry> = None;
+        Self {
+            head: 0,
+            tail: 0,
+            count: 0,
+            entries: [NONE_ENTRY; 16],
+        }
+    }
+
+    pub fn push(&mut self, entry: DeferredIpcEntry) -> bool {
+        if self.count >= 16 {
+            return false;
+        }
+        self.entries[self.tail] = Some(entry);
+        self.tail = (self.tail + 1) % 16;
+        self.count += 1;
+        true
+    }
+
+    pub fn pop(&mut self) -> Option<DeferredIpcEntry> {
+        if self.count == 0 {
+            return None;
+        }
+        let item = self.entries[self.head].take();
+        self.head = (self.head + 1) % 16;
+        self.count -= 1;
+        item
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn clear(&mut self) {
+        for slot in self.entries.iter_mut() {
+            *slot = None;
+        }
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+    }
+}
+
 /// Deferred IPC message arriving while generative inference is active.
 #[derive(Clone, Copy)]
 pub struct DeferredIpcEntry {
@@ -1146,14 +1280,12 @@ pub struct DeferredIpcEntry {
     pub payload: [u8; 1024],
 }
 
-pub static DEFERRED_IPC_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-static mut DEFERRED_IPC_QUEUE: [Option<DeferredIpcEntry>; 16] = [None; 16];
+static DEFERRED_QUEUE: TicketSpinLock<DeferredIpcQueue> =
+    TicketSpinLock::new(DeferredIpcQueue::new());
+pub static DEFERRED_IPC_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 pub fn push_deferred_ipc(sender: u64, msg_type: u32, data: &[u8]) -> bool {
-    let count = DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-    if count >= 16 {
-        return false;
-    }
     let mut entry = DeferredIpcEntry {
         sender,
         msg_type,
@@ -1161,26 +1293,24 @@ pub fn push_deferred_ipc(sender: u64, msg_type: u32, data: &[u8]) -> bool {
         payload: [0u8; 1024],
     };
     entry.payload[..entry.len].copy_from_slice(&data[..entry.len]);
-    unsafe {
-        DEFERRED_IPC_QUEUE[count] = Some(entry);
-    }
-    DEFERRED_IPC_COUNT.store(count + 1, core::sync::atomic::Ordering::Relaxed);
-    true
+
+    let mut q = DEFERRED_QUEUE.lock();
+    let pushed = q.push(entry);
+    DEFERRED_IPC_COUNT.store(q.len(), core::sync::atomic::Ordering::Release);
+    pushed
 }
 
 pub fn pop_deferred_ipc() -> Option<DeferredIpcEntry> {
-    let count = DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-    if count == 0 {
-        return None;
-    }
-    unsafe {
-        let item = DEFERRED_IPC_QUEUE[0].take();
-        for i in 1..count {
-            DEFERRED_IPC_QUEUE[i - 1] = DEFERRED_IPC_QUEUE[i].take();
-        }
-        DEFERRED_IPC_COUNT.store(count - 1, core::sync::atomic::Ordering::Relaxed);
-        item
-    }
+    let mut q = DEFERRED_QUEUE.lock();
+    let item = q.pop();
+    DEFERRED_IPC_COUNT.store(q.len(), core::sync::atomic::Ordering::Release);
+    item
+}
+
+pub fn clear_deferred_ipc() {
+    let mut q = DEFERRED_QUEUE.lock();
+    q.clear();
+    DEFERRED_IPC_COUNT.store(0, core::sync::atomic::Ordering::Release);
 }
 
 /// Set when a model file has reached the model namespace since the last probe.
@@ -3806,6 +3936,90 @@ mod tests {
 
         assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Relaxed), 0);
         assert!(pop_deferred_ipc().is_none());
+    }
+
+    #[test]
+    fn test_deferred_ipc_queue_saturation_bounded() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        clear_deferred_ipc();
+
+        // Push exactly 16 items to fill queue
+        for i in 0..16u64 {
+            let mut payload = [0u8; 8];
+            payload.copy_from_slice(&i.to_le_bytes());
+            assert!(push_deferred_ipc(100 + i, 0x1000 + i as u32, &payload), "item {} must succeed", i);
+        }
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 16);
+
+        // 17th item must be rejected (cannot silently overwrite or drop existing entries)
+        let rejected = push_deferred_ipc(999, 0xFFFF, b"overflow_attempt");
+        assert!(!rejected, "17th item must be rejected when queue is full");
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 16);
+
+        // Pop all 16 in strict FIFO order
+        for i in 0..16u64 {
+            let msg = pop_deferred_ipc().expect("msg must be present");
+            assert_eq!(msg.sender, 100 + i);
+            assert_eq!(msg.msg_type, 0x1000 + i as u32);
+            assert_eq!(&msg.payload[..msg.len], &i.to_le_bytes());
+        }
+
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 0);
+        assert!(pop_deferred_ipc().is_none());
+    }
+
+    #[test]
+    fn test_deferred_ipc_queue_circular_wraparound() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        clear_deferred_ipc();
+
+        // Perform 40 cycles of push 5, pop 5 (200 total messages) across the 16-slot ring buffer
+        for cycle in 0..40u64 {
+            for step in 0..5u64 {
+                let id = cycle * 10 + step;
+                let payload = id.to_le_bytes();
+                assert!(push_deferred_ipc(id, (id & 0xFFFF) as u32, &payload));
+            }
+            assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 5);
+
+            for step in 0..5u64 {
+                let expected_id = cycle * 10 + step;
+                let msg = pop_deferred_ipc().expect("msg expected");
+                assert_eq!(msg.sender, expected_id);
+                assert_eq!(msg.msg_type, (expected_id & 0xFFFF) as u32);
+                assert_eq!(&msg.payload[..msg.len], &expected_id.to_le_bytes());
+            }
+            assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn test_deferred_ipc_multithreaded_stress() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        clear_deferred_ipc();
+
+        let num_threads = 4;
+        let iters_per_thread = 50;
+
+        let handles: alloc::vec::Vec<_> = (0..num_threads).map(|t_idx| {
+            rust_std::thread::spawn(move || {
+                for i in 0..iters_per_thread {
+                    let sender = ((t_idx as u64) << 16) | (i as u64);
+                    let payload = sender.to_le_bytes();
+                    // Interleave pushes and pops
+                    let _ = push_deferred_ipc(sender, 0x4000, &payload);
+                    let _ = pop_deferred_ipc();
+                }
+            })
+        }).collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Clean up any remaining entries safely
+        clear_deferred_ipc();
+        assert_eq!(DEFERRED_IPC_COUNT.load(core::sync::atomic::Ordering::Acquire), 0);
     }
 
     /// A file that states the architecture the notice can quote it; one that does

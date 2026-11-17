@@ -801,6 +801,16 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
     // Preemptive multitasking time slice accounting & rescheduling
     crate::task::on_timer_tick(elapsed);
+
+    // Cooperative task termination gate on timer return to userspace:
+    // If the interrupted execution context is Ring 3 and the task has a pending kill,
+    // terminate cleanly rather than resuming the userspace loop.
+    #[cfg(not(target_os = "windows"))]
+    if _stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
+        && crate::task::scheduler::is_current_pending_kill()
+    {
+        crate::task::terminate_current();
+    }
 }
 
 /// Signature of the task table's *lifecycle* shape.

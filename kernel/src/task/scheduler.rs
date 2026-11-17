@@ -918,7 +918,7 @@ impl Scheduler {
         }
         task.pending_kill = true;
         task.exit_code = exit_code;
-        if task.state == TaskState::Blocked {
+        if matches!(task.state, TaskState::Blocked | TaskState::WaitPid(_)) {
             task.state = TaskState::Ready;
         }
         Ok(())
@@ -1684,6 +1684,37 @@ mod tests {
         assert_eq!(task_after.state, TaskState::Ready);
         assert!(task_after.pending_kill);
         assert_eq!(task_after.exit_code, 9);
+    }
+
+    #[test]
+    fn test_cooperative_kill_waitpid_task_unblocks() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+
+        let parent_id = sched.spawn("parent_waiting", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let child_id = sched.spawn_with_parent("child_running", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5, parent_id);
+
+        // Put parent task into WaitPid state waiting for child
+        {
+            let parent = sched.tasks.iter_mut().find(|t| t.id == parent_id).unwrap();
+            parent.state = TaskState::WaitPid(child_id.0);
+        }
+
+        // Request kill while task is in WaitPid
+        sched.request_kill(parent_id, -9).expect("request kill on waitpid task");
+
+        // The parent MUST be unblocked (Ready) so it can execute the cooperative unwind gate
+        let parent_after = sched.get_task(parent_id).unwrap();
+        assert_eq!(parent_after.state, TaskState::Ready);
+        assert!(parent_after.pending_kill);
+        assert_eq!(parent_after.exit_code, -9);
+
+        // Terminate cleanly to Zombie and verify parent/child cleanup
+        sched.terminate_task(parent_id, -9).expect("terminate unblocked parent");
+        assert_eq!(sched.get_task(parent_id).unwrap().state, TaskState::Zombie);
+        let exit_code = sched.reap_child(TaskId(0), parent_id).expect("reap parent");
+        assert_eq!(exit_code, -9);
     }
 
     #[test]

@@ -68,22 +68,48 @@ impl PciDevice {
     }
 
     /// Pure bounded traversal algorithm over PCI configuration space.
+    /// Rejects unaligned pointers (ptr & 3 != 0) and out-of-range offsets (< 0x40 or > 0xFC).
+    /// Tracks visited DWORD-aligned offsets using a u64 bitmask for O(1) cycle detection.
     pub fn find_capability_in_space<F: Fn(u8) -> u8>(
         target_cap_id: u8,
         initial_cap_ptr: u8,
         read_u8: F,
     ) -> Option<u8> {
-        let mut cap_ptr = initial_cap_ptr & 0xFC;
-        let mut hops = 0;
+        // Capabilities must reside in device-specific config space [0x40, 0xFC] and be DWORD-aligned.
+        if initial_cap_ptr & 3 != 0 || initial_cap_ptr < 0x40 || initial_cap_ptr > 0xFC {
+            return None;
+        }
 
-        while cap_ptr >= 0x40 && hops < 48 {
+        let mut cap_ptr = initial_cap_ptr;
+        let mut hops = 0;
+        let mut visited: u64 = 0;
+
+        while hops < 48 {
+            if cap_ptr & 3 != 0 || cap_ptr < 0x40 || cap_ptr > 0xFC {
+                return None;
+            }
+
+            // Map [0x40, 0xFC] DWORD offsets (steps of 4) into bit index [0, 47]
+            let bit_idx = (cap_ptr >> 2) - 16;
+            let mask = 1u64 << bit_idx;
+            if (visited & mask) != 0 {
+                // Cycle detected in capability chain!
+                return None;
+            }
+            visited |= mask;
+
             let id = read_u8(cap_ptr);
             if id == target_cap_id {
                 return Some(cap_ptr);
             }
-            let next = read_u8(cap_ptr.saturating_add(1)) & 0xFC;
-            if next == 0 || next == cap_ptr {
+
+            let next = read_u8(cap_ptr.saturating_add(1));
+            if next == 0 {
                 break;
+            }
+            if next & 3 != 0 || next < 0x40 || next > 0xFC {
+                // Out-of-range or unaligned next pointer: reject
+                return None;
             }
             cap_ptr = next;
             hops += 1;
@@ -393,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_pci_find_capability_unaligned_pointer() {
-        // Initial pointer 0x43 should be aligned to 0x40 (& 0xFC)
+        // Unaligned initial pointers (ptr & 3 != 0) must be rejected with None
         let found = PciDevice::find_capability_in_space(0x09, 0x43, |offset| {
             match offset {
                 0x40 => 0x09,
@@ -401,14 +427,33 @@ mod tests {
                 _ => 0,
             }
         });
-        assert_eq!(found, Some(0x40));
+        assert_eq!(found, None);
+
+        assert_eq!(PciDevice::find_capability_in_space(0x09, 0x41, |_| 0x09), None);
+        assert_eq!(PciDevice::find_capability_in_space(0x09, 0x42, |_| 0x09), None);
+    }
+
+    #[test]
+    fn test_pci_find_capability_unaligned_next_pointer() {
+        // Unaligned next pointer in chain must be rejected with None
+        let found = PciDevice::find_capability_in_space(0x05, 0x40, |offset| {
+            match offset {
+                0x40 => 0x01,
+                0x41 => 0x51, // Unaligned next pointer (0x51 & 3 != 0)
+                0x51 => 0x05,
+                _ => 0,
+            }
+        });
+        assert_eq!(found, None);
     }
 
     #[test]
     fn test_pci_find_capability_invalid_pointer() {
-        // Initial pointer < 0x40 is invalid for standard capabilities
-        let found = PciDevice::find_capability_in_space(0x05, 0x30, |_| 0x05);
-        assert_eq!(found, None);
+        // Initial pointer < 0x40 or > 0xFC is invalid for standard PCI capabilities
+        assert_eq!(PciDevice::find_capability_in_space(0x05, 0x30, |_| 0x05), None);
+        assert_eq!(PciDevice::find_capability_in_space(0x05, 0x00, |_| 0x05), None);
+        assert_eq!(PciDevice::find_capability_in_space(0x05, 0xFD, |_| 0x05), None);
+        assert_eq!(PciDevice::find_capability_in_space(0x05, 0xFE, |_| 0x05), None);
     }
 
     #[test]
