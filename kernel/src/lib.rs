@@ -46,6 +46,7 @@ pub mod interrupts;
 pub mod ipc;
 pub mod memory;
 pub mod net;
+pub mod ai;
 pub mod notification;
 pub mod package;
 pub mod performance;

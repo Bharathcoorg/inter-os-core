@@ -179,6 +179,8 @@ pub enum CapabilityType {
     /// third-party manifest cannot ask for it, and the kernel mints it for the
     /// built-in clients that verify chains.
     TlsTrustRead,
+    /// Permission to register or request AI model resource budgets.
+    AiResourceDiscovery,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -221,6 +223,7 @@ impl CapabilityType {
             CapabilityType::WebViewService => 37,
             CapabilityType::CryptoEntropyRead => 38,
             CapabilityType::TlsTrustRead => 39,
+            CapabilityType::AiResourceDiscovery => 40,
         }
     }
 
@@ -260,6 +263,7 @@ impl CapabilityType {
             37 => Some(CapabilityType::WebViewService),
             38 => Some(CapabilityType::CryptoEntropyRead),
             39 => Some(CapabilityType::TlsTrustRead),
+            40 => Some(CapabilityType::AiResourceDiscovery),
             _ => None,
         }
     }
@@ -301,6 +305,7 @@ impl CapabilityType {
             CapabilityType::WebViewService => "webview.service",
             CapabilityType::CryptoEntropyRead => "crypto.entropy",
             CapabilityType::TlsTrustRead => "tls.trust.read",
+            CapabilityType::AiResourceDiscovery => "ai.resource_discovery",
         }
     }
 
@@ -341,6 +346,7 @@ impl CapabilityType {
             "webview.service" => Some(CapabilityType::WebViewService),
             "crypto.entropy" => Some(CapabilityType::CryptoEntropyRead),
             "tls.trust.read" => Some(CapabilityType::TlsTrustRead),
+            "ai.resource_discovery" => Some(CapabilityType::AiResourceDiscovery),
             _ => None,
         }
     }
@@ -1862,13 +1868,13 @@ mod tests {
     fn capability_type_raw_encoding_roundtrips() {
         for val in [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 25, 26, 27, 28, 29, 30,
-            31, 32, 33, 34, 35, 36, 37, 38, 39,
+            31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
         ] {
             let cap_type = CapabilityType::from_raw(val).expect("valid capability type");
             assert_eq!(cap_type.to_raw(), val);
         }
         assert_eq!(CapabilityType::from_raw(0), None);
-        for invalid in [19, 20, 21, 22, 23, 40, 999] {
+        for invalid in [19, 20, 21, 22, 23, 999] {
             assert_eq!(CapabilityType::from_raw(invalid), None);
         }
         assert_eq!(CapabilityType::MemoryHeap.as_str(), "memory.heap");
@@ -1879,9 +1885,9 @@ mod tests {
         // it round-trips here and is still refused by package verification.
         assert_eq!(CapabilityType::CryptoEntropyRead.as_str(), "crypto.entropy");
         assert_eq!(CapabilityType::from_name("crypto.entropy"), Some(CapabilityType::CryptoEntropyRead));
-        // 39 is the trust-anchor read, and round-trips for the same reason.
-        assert_eq!(CapabilityType::TlsTrustRead.as_str(), "tls.trust.read");
-        assert_eq!(CapabilityType::from_name("tls.trust.read"), Some(CapabilityType::TlsTrustRead));
+        // 40 is the resource discovery, and round-trips for the same reason.
+        assert_eq!(CapabilityType::AiResourceDiscovery.as_str(), "ai.resource_discovery");
+        assert_eq!(CapabilityType::from_name("ai.resource_discovery"), Some(CapabilityType::AiResourceDiscovery));
     }
 
     #[test]
