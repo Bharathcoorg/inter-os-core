@@ -3210,14 +3210,16 @@ pub fn embedding_row_into(
             }
             Ok(())
         }
-        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K: dequantise the whole row, then scale it. The
-        // three helpers write exactly `raw.len() / block_bytes * block_weights`
+        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K / TQ2_0: dequantise the whole row, then scale it. The
+        // four helpers write exactly `raw.len() / block_bytes * block_weights`
         // floats, which is the row's declared width when the loader sized the buffer.
-        2 | 8 | 12 => {
+        2 | 8 | 12 | 35 => {
             let produced = match dtype {
                 2 => dequantize_q4_0(raw, out)?,
                 8 => dequantize_q8_0(raw, out)?,
-                _ => dequantize_q4_k(raw, out)?,
+                12 => dequantize_q4_k(raw, out)?,
+                35 => dequantize_tq2_0(raw, out)?,
+                _ => unreachable!(),
             };
             if produced != out.len() {
                 return Err(InferenceError::CorruptedWeights);
