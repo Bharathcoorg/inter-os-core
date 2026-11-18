@@ -39,6 +39,27 @@ pub use embedding::{
     compute_embedding_768, compute_text_embedding_dim_f32, compute_text_embedding_f32,
     compute_text_embedding_q7, f32_sqrt, EMBEDDING_DIM, MATRYOSHKA_DIMS,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ResourceManifest {
+    pub peak_scratch_bytes: u64,
+    pub kv_cache_bytes: u64,
+    pub peak_activations_bytes: u64,
+    pub tensor_alignment: u32,
+    pub quantization_format: u32,
+}
+
+pub fn verify_resource_manifest(manifest: &ResourceManifest) -> Result<(), InferenceError> {
+    let total_needed = manifest.peak_scratch_bytes
+        .checked_add(manifest.kv_cache_bytes)
+        .and_then(|t| t.checked_add(manifest.peak_activations_bytes))
+        .ok_or(InferenceError::ScratchTooLarge(0, SCRATCH_BYTE_BUDGET))?;
+    
+    if total_needed > SCRATCH_BYTE_BUDGET as u64 {
+        return Err(InferenceError::ScratchTooLarge(total_needed as usize, SCRATCH_BYTE_BUDGET));
+    }
+    Ok(())
+}
 pub use gguf::{
     find_installable_model, find_metadata_string, find_tensor, find_tensor_stream, listed_size,
     parse_tensor_info, parse_tensor_info_stream, probe_all_models, probe_embedding_model,

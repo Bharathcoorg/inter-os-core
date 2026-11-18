@@ -1121,6 +1121,7 @@ pub struct GgufModelInfo {
     pub sampling_top_p: Option<f32>,
     /// `general.sampling.temp`
     pub sampling_temp: Option<f32>,
+    pub resource_manifest: Option<crate::ResourceManifest>,
 }
 
 impl GgufModelInfo {
@@ -1166,6 +1167,7 @@ impl GgufModelInfo {
             sampling_top_k: None,
             sampling_top_p: None,
             sampling_temp: None,
+            resource_manifest: None,
         }
     }
 
@@ -1549,6 +1551,21 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
                 }
                 b"embedding_length_out" => {
                     info.embedding_length_out = Some(read_count(stream, val_type)?)
+                }
+                b"interos.resource.peak_scratch_bytes" => {
+                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).peak_scratch_bytes = read_count(stream, val_type)?.into();
+                }
+                b"interos.resource.kv_cache_bytes" => {
+                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).kv_cache_bytes = read_count(stream, val_type)?.into();
+                }
+                b"interos.resource.peak_activations_bytes" => {
+                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).peak_activations_bytes = read_count(stream, val_type)?.into();
+                }
+                b"interos.resource.tensor_alignment" => {
+                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).tensor_alignment = read_count(stream, val_type)? as u32;
+                }
+                b"interos.resource.quantization_format" => {
+                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).quantization_format = read_count(stream, val_type)? as u32;
                 }
                 b"final_logit_softcapping" => {
                     info.final_logit_softcapping = Some(read_epsilon(stream, val_type)?)

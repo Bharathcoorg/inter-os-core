@@ -28,10 +28,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "userspace" / "system-service" / "src"
 
-# The five GGML dtype ids `quantised_row_bytes` gives a row layout to. 0 and 8 are
-# the two the published file actually uses; 1, 2 and 12 are read because the same
+# The six GGML dtype ids `quantised_row_bytes` gives a row layout to. 0, 8 and 35 are
+# the three the published file actually uses; 1, 2 and 12 are read because the same
 # code paths answer other files the platform has been handed.
-MAPPED_DTYPES = [0, 1, 2, 8, 12]
+MAPPED_DTYPES = [0, 1, 2, 8, 12, 35]
 
 # The thirteen tensors the published file declares inside every one of its 24 blocks.
 DECLARED_BLOCK_QUANTISED = [
