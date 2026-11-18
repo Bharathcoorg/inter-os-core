@@ -1,3 +1,4 @@
+
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
@@ -8,6 +9,8 @@
 //! Resource Principle #7: Dynamic resource budgeting to prevent RAM/storage exhaustion.
 //! Resource Principle #8: Foreground user workloads have strict priority over
 //! background tasks and state synchronization.
+
+use super::ResourceManifest;
 
 /// Workload priority tiers defined in master architecture specification.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,6 +109,30 @@ impl ResourceManager {
             throttling,
             present: true,
         };
+    }
+
+    /// Evaluates whether an AI inference task described by the ResourceManifest
+    /// is permitted to start, based on current thermal and power constraints.
+    pub fn admit_inference_task(&self, manifest: &ResourceManifest) -> bool {
+        // If thermal throttling is active, only admit small inference models.
+        if self.thermal.throttling {
+            let total_model_bytes = manifest.peak_scratch_bytes
+                .saturating_add(manifest.kv_cache_bytes)
+                .saturating_add(manifest.peak_activations_bytes);
+            
+            // Limit to 512 KiB during thermal throttling.
+            return total_model_bytes <= 512 * 1024;
+        }
+
+        // Low battery (< 15%) and not charging: pause high-memory inference.
+        if !self.battery.is_charging && self.battery.percent < 15 {
+            let total_model_bytes = manifest.peak_scratch_bytes
+                .saturating_add(manifest.kv_cache_bytes)
+                .saturating_add(manifest.peak_activations_bytes);
+            return total_model_bytes <= 1024 * 1024;
+        }
+
+        true
     }
 
     /// Evaluates whether a workload tier is permitted to execute given current power, thermal, and task priorities.
@@ -230,6 +257,42 @@ mod tests {
         assert_eq!(rm.wasm_memory_allocated_bytes, 512 * 1024);
         rm.free_wasm_memory(1024 * 1024); // Saturating subtraction
         assert_eq!(rm.wasm_memory_allocated_bytes, 0);
+    }
+
+    #[test]
+    fn inference_admission_policy_thermal_and_power() {
+        use crate::resource::ResourceManifest;
+        let mut rm = ResourceManager::new();
+        rm.update_battery(85, false);
+        
+        let small_model = ResourceManifest {
+            peak_scratch_bytes: 100 * 1024,
+            kv_cache_bytes: 100 * 1024,
+            peak_activations_bytes: 100 * 1024,
+            ..Default::default()
+        };
+        
+        let large_model = ResourceManifest {
+            peak_scratch_bytes: 500 * 1024,
+            kv_cache_bytes: 500 * 1024,
+            peak_activations_bytes: 500 * 1024,
+            ..Default::default()
+        };
+
+        // Nominal: all admitted
+        assert!(rm.admit_inference_task(&small_model));
+        assert!(rm.admit_inference_task(&large_model));
+
+        // Thermal throttling: large model denied
+        rm.update_thermal(80);
+        assert!(rm.admit_inference_task(&small_model));
+        assert!(!rm.admit_inference_task(&large_model));
+        
+        // Low battery: large model denied
+        rm.update_thermal(30);
+        rm.update_battery(10, false);
+        assert!(rm.admit_inference_task(&small_model));
+        assert!(!rm.admit_inference_task(&large_model));
     }
 }
 
