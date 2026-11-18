@@ -6363,8 +6363,9 @@ fn handle_appmcp_request(dialer: &mut DialerApp, raw: &[u8], sender: u64, msg_ty
         return false;
     };
 
-    // Zero ambient authority check: caller must present a non-zero capability token
-    if req.cap_handle == 0 {
+    // Zero ambient authority: the kernel verifies the sender's own capability
+    // table. A non-zero integer in `cap_handle` proves nothing on its own.
+    if !std::appmcp::authorize_tool_sender(sender, req.cap_handle) {
         let resp = std::appmcp::AppMcpResponse::error(
             std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
             req.tool_id,

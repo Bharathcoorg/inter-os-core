@@ -320,10 +320,17 @@ BYTE_LITERAL = re.compile(r'b"([^"\\]*)"')
 PLAIN_LITERAL = re.compile(r'"([^"\\]*)"')
 
 #: Byte literals that reach storage or the keypad instead of the glass: the
-#: marker the identity file is compared against, the PIN the unlock path
-#: accepts, the digits and edit glyphs printed on the keypad discs.
+#: marker the identity file is compared against, and the digits and edit glyphs
+#: printed on the keypad discs.
+#:
+#: WHY "1234" is no longer here: it was listed as "the PIN the unlock path
+#: accepts", and that was a universal bypass -- a hardcoded literal OR'd beside
+#: the platform's own credential check, so it opened every vault whatever PIN
+#: the owner had set. The literal is gone from the app, and a set that still
+#: excused it would hide its return. `test_no_pin_literal_bypasses_the_credential`
+#: below pins its absence instead.
 NON_GLASS_LITERALS = frozenset(
-    {"DID:", "1234", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    {"DID:", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
      "CLR", "DEL", "0123456789abcdef"}
 )
 
@@ -774,4 +781,170 @@ def test_the_randomness_row_answers_the_question_it_was_asked():
             f"the tally still reads {word!r}, which is an abbreviation of the "
             "app's own operation names"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. A PIN literal is not a credential
+#
+# WHAT THIS SECTION IS FOR: the unlock condition carried
+# `|| entered_pin == b"1234"` at both of its sites. That is a universal bypass,
+# not a default PIN: it opened the credential list for anyone who typed those
+# four digits, whatever secret the owner had actually stored. A default PIN is
+# only legitimate as a *stored credential*, and a stored credential is compared
+# by the platform's own unlock call -- so the normal path already accepts it and
+# no literal is needed beside it.
+#
+# WHAT THESE ASSERTIONS ARE: source-level pins. The decision itself is a syscall
+# result, so whether the platform accepts a given secret cannot be exercised
+# from a host test. The policy that combines the platform's answers is a real
+# production function in `apps/vault/src/lib.rs` and is unit-tested there
+# (`a_refused_pin_never_opens_the_vault_at_any_length` and its neighbours).
+# These pins guard the part a unit test cannot reach: that the app hands the
+# platform's verdict to that policy, and that no literal survives beside it.
+# ---------------------------------------------------------------------------
+
+#: A PIN compared against a literal instead of against the stored credential.
+PIN_LITERAL_ARM = re.compile(r'entered_pin\s*==\s*b"([^"\\]*)"')
+
+#: The single policy both unlock sites must call.
+PIN_POLICY_CALL = "pin_unlocks("
+
+
+def test_no_pin_literal_bypasses_the_credential():
+    """The bypass itself, in the form it was written and in any renamed form."""
+    source = strip_comments(vault_main())
+    match = PIN_LITERAL_ARM.search(source)
+    assert match is None, (
+        f"the unlock path accepts the literal {match.group(1)!r} beside the "
+        "platform's credential check. That opens every vault on the device "
+        "whatever PIN the owner set."
+    )
+    assert 'b"1234"' not in source, (
+        "the universal bypass PIN is back in the vault app"
+    )
+
+
+def test_both_unlock_sites_ask_the_one_pin_policy():
+    """Two copies of a decision is how one of them kept the backdoor.
+
+    Both the keypad's auto-submit and the UNLOCK button must reach the same
+    named policy, and must feed it the platform's own unlock verdict.
+    """
+    source = strip_comments(vault_main())
+    calls = source.count(PIN_POLICY_CALL)
+    assert calls == 2, (
+        f"expected the keypad and the UNLOCK button to call {PIN_POLICY_CALL} "
+        f"once each, found {calls}"
+    )
+    assert source.count("std::user_unlock(0, entered_pin).is_ok()") == 2, (
+        "an unlock site no longer asks the platform to verify the entered secret"
+    )
+
+    policy = strip_comments(read("apps/vault/src/lib.rs"))
+    at = policy.index("pub fn pin_unlocks(")
+    signature = policy[at:policy.index("{", at)]
+    assert "verified: bool" in signature, (
+        "the policy no longer takes the platform's verdict"
+    )
+    # WHY the digits are not an argument: a policy that never receives the
+    # entered secret cannot be swayed by any value of it, which is the property
+    # the removed literal violated.
+    assert "entered_pin" not in signature and "&[u8]" not in signature, (
+        "the pin policy takes the secret itself, so a literal arm could return"
+    )
+
+
+def test_the_pin_prompt_does_not_advertise_a_default_pin():
+    """The glass used to say "Enter 4-8 digit PIN (default 1234)."
+
+    With the literal gone that sentence promised a way in the app does not
+    offer. The prompt must describe what the reader has to do, not a bypass.
+    """
+    for text in painted_literals():
+        assert "1234" not in text, (
+            f"the screen still advertises the bypass PIN: {text!r}"
+        )
+        assert not re.search(r"\bdefault\b", text, re.IGNORECASE), (
+            f"the screen claims a default PIN the app does not have: {text!r}"
+        )
+
+
+def test_the_entered_pin_is_wiped_not_just_uncounted():
+    """`pin_len = 0` leaves the digits in the buffer for the life of the process.
+
+    This pins that the app overwrites them. It is not a claim of perfect
+    zeroization: the wipe reaches the bytes this app holds, not copies the
+    platform made inside the unlock syscall.
+    """
+    source = strip_comments(vault_main())
+    assert "wipe_secret(&mut vault.pin_buf)" in source, (
+        "the PIN buffer is never overwritten"
+    )
+    assert source.count("clear_pin(vault)") >= 4, (
+        "a path that drops the PIN does not wipe it"
+    )
+    assert "fn clear_pin(vault: &mut VaultApp)" in source
+    clear = body_after(source, "fn clear_pin")
+    assert "wipe_secret(&mut vault.pin_buf);" in clear
+    assert "vault.pin_len = 0;" in clear
+
+    lib = strip_comments(read("apps/vault/src/lib.rs"))
+    wipe = body_after(lib, "pub fn wipe_secret")
+    assert "write_volatile" in wipe, (
+        "a plain store to a buffer nothing reads again is a dead store the "
+        "optimiser may delete"
+    )
+    assert "compiler_fence" in wipe
+
+
+def test_a_failed_auto_submit_still_lets_a_longer_pin_be_typed():
+    """Wiping on failure would make every 5-8 digit PIN unenterable.
+
+    The keypad submits by itself at four digits. A person whose PIN is longer
+    reaches it by typing past that failed attempt, so the entry has to survive
+    it; the wipe belongs to the success branch and to the explicit UNLOCK
+    button, which is a final submit. This pins the placement, not the syscall.
+    """
+    code = strip_comments(vault_main())
+    touch = body_after(code, "fn handle_vault_touch")
+    keypad = body_after(touch, "if let Some(key) = hit_test_pin_disc")
+    digit = body_after(keypad, "b'0'..=b'9' =>")
+
+    assert "vault.pin_buf[vault.pin_len] = key;" in digit
+    assert "vault.pin_len += 1;" in digit
+    assert "if vault.pin_len < 8" in digit, "the 4-8 digit entry window is gone"
+    assert PIN_POLICY_CALL in digit
+
+    success = body_after(digit, "if unlock_ok")
+    assert "clear_pin(vault)" in success, (
+        "a successful unlock must not leave the PIN readable in the buffer"
+    )
+    outside = digit.replace(success, " " * len(success))
+    assert "clear_pin(vault)" not in outside, (
+        "the keypad wipes a failed four-digit attempt, so the digits can never "
+        "accumulate past four and a longer PIN cannot be entered at all"
+    )
+    assert "wipe_secret(" not in outside
+
+
+def main() -> int:
+    tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
+    failures = 0
+    for test in tests:
+        try:
+            test()
+        except AssertionError as error:
+            failures += 1
+            print(f"FAIL {test.__name__}: {error}")
+        except Exception as error:  # noqa: BLE001 - the report must name it
+            failures += 1
+            print(f"ERROR {test.__name__}: {error}")
+        else:
+            print(f"ok   {test.__name__}")
+    print(f"{len(tests) - failures} passed; {failures} failed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 

@@ -1403,6 +1403,112 @@ def test_tool_path_does_not_drain_unowned_answer_pipes():
         )
 
 
+def _send_prompt_persist_faults(send: str) -> list:
+    """Every way a prompt still reaches storage before the service gate.
+
+    WHY the gate's position is measured and not a spelling pinned: the fault
+    was a `persist_chat` between the prompt's push and the availability
+    check, so a refused prompt was written to disk. The first persistence
+    has to sit after the gate, and the refusal arm has to hold none at all.
+    """
+    faults = []
+    gate_at = send.find("resolve_inference_service")
+    if gate_at < 0:
+        faults.append("send_prompt no longer asks the service registry")
+        return faults
+    first_persist = send.find("persist_chat")
+    if 0 <= first_persist < gate_at:
+        faults.append("a prompt is persisted before the inference service gate")
+    arm_at = send.find("if !availability.is_available()")
+    if arm_at >= 0:
+        else_at = send.find("} else {", arm_at)
+        refusal_arm = send[arm_at : else_at if else_at >= 0 else len(send)]
+        if "persist_chat" in refusal_arm:
+            faults.append("the refused-prompt arm persists the exchange")
+    return faults
+
+
+def test_transcript_persistence_requires_explicit_consent():
+    """No transcript byte is written or read without the person's consent.
+
+    The app used to persist the conversation automatically at every turn,
+    load it back at construction, and write the prompt even when the
+    inference service refused it -- plaintext, with no consent and no
+    opt-out. Keeping conversations is now an explicit setting, refused by
+    default, and the storage gates refuse before any open. The erase
+    control survives, and withdrawing the consent erases what was kept.
+    """
+    for path, (lib, main, _theme) in SOURCES.items():
+        # The gates refuse before the storage operation runs.
+        for gate in ("fn persist_transcript", "fn restore_transcript"):
+            body = _body(lib, gate)
+            assert re.search(
+                r"if\s+!consent\s*\{\s*return\s+Err\(TRANSCRIPT_CONSENT_REFUSED\)",
+                body,
+            ), f"{path}: {gate} does not refuse before the storage operation"
+
+        # Default deny: an absent or unreadable record is a refusal, and
+        # only a whole, current, explicit grant record reads as consent.
+        load = _body(lib, "fn load_chat_consent")
+        assert "parse_chat_consent_record" in load, (
+            f"{path} does not read the consent record through its parser"
+        )
+        assert load.strip().endswith("false"), (
+            f"{path} does not default to refusal when no record can be read"
+        )
+        parser = _body(lib, "fn parse_chat_consent_record")
+        for piece in ('b"AGCC"', "buf[4] == 1", "buf[5] == 1"):
+            assert piece in parser, (
+                f"{path}'s consent parser does not require {piece}"
+            )
+
+        # Every production write goes through the gated persist, and the
+        # construction-time read goes through the gated restore.
+        persist = _body(main, "fn persist_chat")
+        assert "persist_transcript" in persist and "self.chat_consent" in persist, (
+            f"{path} persists the transcript outside the consent gate"
+        )
+        new = _body(main, "fn new")
+        assert "load_chat_consent" in new, (
+            f"{path} does not read the consent state at construction"
+        )
+        assert "restore_transcript" in new and "app.chat_consent" in new, (
+            f"{path} restores the transcript outside the consent gate"
+        )
+        assert not re.search(
+            r"let\s+_\s*=\s*app\.chat\.load_from_storage", new
+        ), f"{path} reads a stored conversation directly at construction"
+
+        # A refused prompt is never written.
+        faults = _send_prompt_persist_faults(_body(main, "fn send_prompt"))
+        assert not faults, f"{path}: {faults}"
+
+        # The erase control survives, and revocation erases what was kept.
+        clear = _body(main, "fn clear_chat")
+        assert re.search(
+            r"fs_unlink\(\s*agent_manager::CHAT_STORAGE_PATH", clear
+        ), f"{path} lost the transcript erase control"
+        toggle = _body(main, "fn toggle_chat_consent")
+        assert "save_chat_consent" in toggle, (
+            f"{path} does not write the consent decision through its record"
+        )
+        assert re.search(
+            r"fs_unlink\(\s*agent_manager::CHAT_STORAGE_PATH", toggle
+        ), f"{path} does not erase the stored transcript when consent is withdrawn"
+
+        # The person can reach the control, and the screen is honest about
+        # what keeping conversations means: plaintext in the app sandbox.
+        assert "Keep conversations" in _code(main), (
+            f"{path} shows no consent control"
+        )
+        assert "toggle_chat_consent" in _body(main, "fn handle_tap"), (
+            f"{path}'s consent control is not wired to a tap"
+        )
+        assert "plaintext in this app's sandbox" in main, (
+            f"{path} does not say the stored transcript is plaintext"
+        )
+
+
 # -----------------------------------------------------------------------------
 # The contract has to be able to fail
 # -----------------------------------------------------------------------------
@@ -1472,6 +1578,49 @@ def test_the_contract_can_fail():
             "    let _ = std::ipc::receive_any(&mut rx);\n    false\n}\n",
             lambda source: "MSG_TYPE_INSTALL_CHUNK"
             not in _body(source, "fn step_install_reply"),
+        ),
+        (
+            "a persistence gate that writes without consent",
+            "fn persist_transcript<F>(path: &str, consent: bool, save: F) -> Result<(), i64>\n"
+            "where F: FnOnce(&str) -> Result<(), i64> {\n    save(path)\n}\n",
+            lambda source: not re.search(
+                r"if\s+!consent\s*\{\s*return\s+Err\(TRANSCRIPT_CONSENT_REFUSED\)",
+                _body(source, "fn persist_transcript"),
+            ),
+        ),
+        (
+            "a restore gate that reads without consent",
+            "fn restore_transcript<F>(path: &str, consent: bool, load: F) -> Result<usize, i64>\n"
+            "where F: FnOnce(&str) -> Result<usize, i64> {\n    load(path)\n}\n",
+            lambda source: not re.search(
+                r"if\s+!consent\s*\{\s*return\s+Err\(TRANSCRIPT_CONSENT_REFUSED\)",
+                _body(source, "fn restore_transcript"),
+            ),
+        ),
+        (
+            "a send that persists the prompt before the service gate",
+            "fn send_prompt(&mut self) {\n"
+            "    self.chat.push(ChatRole::User, p);\n"
+            "    self.persist_chat();\n"
+            "    let availability = resolve_inference_service(&s);\n"
+            "    if !availability.is_available() {\n        return;\n    } else {\n"
+            "        self.persist_chat();\n    }\n}\n",
+            lambda source: bool(
+                _send_prompt_persist_faults(_body(source, "fn send_prompt"))
+            ),
+        ),
+        (
+            "a send that persists the refused exchange",
+            "fn send_prompt(&mut self) {\n"
+            "    self.chat.push(ChatRole::User, p);\n"
+            "    let availability = resolve_inference_service(&s);\n"
+            "    if !availability.is_available() {\n"
+            "        self.chat.push(ChatRole::Notice, r);\n"
+            "        self.persist_chat();\n        return;\n    } else {\n"
+            "        self.persist_chat();\n    }\n}\n",
+            lambda source: bool(
+                _send_prompt_persist_faults(_body(source, "fn send_prompt"))
+            ),
         ),
     ]
     for label, synthetic, fired in faulty_sources:

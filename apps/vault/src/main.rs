@@ -40,9 +40,9 @@ use interos_std as std;
 use interos_std::design::{components, outline_text};
 use vault::theme::{spacing, type_scale, THEME};
 use vault::{
-    fletcher32, hex_decode, hex_encode, hit_test_pin_disc, key_material_row, BackupState,
-    EntropyProbe, IdentityState, KeyProbe, VaultSectorType, PIN_COLS, PIN_DISC_RADIUS,
-    PIN_ROWS,
+    fletcher32, hex_decode, hex_encode, hit_test_pin_disc, key_material_row, pin_unlocks,
+    wipe_secret, BackupState, EntropyProbe, IdentityState, KeyProbe, VaultSectorType, PIN_COLS,
+    PIN_DISC_RADIUS, PIN_ROWS,
 };
 
 const W: usize = 720;
@@ -880,7 +880,7 @@ fn pin_modal_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         let desc: &[u8] = if vault.pin_error {
             b"Incorrect PIN. Please re-enter code."
         } else {
-            b"Enter 4-8 digit PIN (default 1234)."
+            b"Enter the 4-8 digit PIN you set."
         };
         if let Some(c) = metric_row(x, y, MARGIN, PROMPT_Y + 48, CARD_W, b"Authentication", verdict, ink, desc) {
             return c;
@@ -2313,6 +2313,15 @@ fn repaint(surface: u32, vault: &VaultApp, dirty: Dirty) {
     }
 }
 
+/// Drops the entered PIN: the bytes are overwritten, not just uncounted.
+///
+/// WHY the length alone is not enough: `pin_len = 0` leaves the digits in
+/// `pin_buf`, where they stay readable for the life of the process.
+fn clear_pin(vault: &mut VaultApp) {
+    wipe_secret(&mut vault.pin_buf);
+    vault.pin_len = 0;
+}
+
 /// Resolves one touch against the controls that are actually drawn and runs it.
 ///
 /// Every branch that moves the model reports the region it moved (see `Dirty`);
@@ -2335,7 +2344,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     if std::design::back_button::contains(x, y) || std::design::home_band::contains(x, y) {
         if vault.pin_modal_open {
             vault.pin_modal_open = false;
-            vault.pin_len = 0;
+            clear_pin(vault);
             vault.pin_error = false;
             status(vault, b"PIN authentication cancelled");
             return Tap::Redraw(Dirty::All);
@@ -2360,10 +2369,17 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                     std::audio_haptic_click().ok();
                     if vault.pin_len == 4 {
                         let entered_pin = &vault.pin_buf[..vault.pin_len];
-                        let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
-                            || entered_pin == b"1234"
-                            || (std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized) && vault.pin_len >= 4);
+                        let unlock_ok = pin_unlocks(
+                            std::user_unlock(0, entered_pin).is_ok(),
+                            std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized),
+                            vault.pin_len,
+                        );
+                        // WHY only on success: a failed 4-digit auto-submit must
+                        // leave the entry intact, because a person whose PIN is
+                        // 5-8 digits long reaches it by typing past this attempt.
+                        // Clearing here would make every longer PIN unenterable.
                         if unlock_ok {
+                            clear_pin(vault);
                             vault.is_authenticated = true;
                             vault.pin_modal_open = false;
                             vault.show_credentials = true;
@@ -2375,7 +2391,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                     return Tap::Redraw(Dirty::All);
                 }
                 b'C' => {
-                    vault.pin_len = 0;
+                    clear_pin(vault);
                     vault.pin_error = false;
                     status(vault, b"PIN cleared");
                     std::audio_haptic_click().ok();
@@ -2384,6 +2400,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                 b'B' => {
                     if vault.pin_len > 0 {
                         vault.pin_len -= 1;
+                        wipe_secret(&mut vault.pin_buf[vault.pin_len..]);
                     }
                     vault.pin_error = false;
                     status(vault, b"PIN digit deleted");
@@ -2396,9 +2413,12 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
 
         if in_round(x, y, MARGIN, UNLOCK_BTN_Y, CARD_W, UNLOCK_BTN_H, 14) {
             let entered_pin = &vault.pin_buf[..vault.pin_len];
-            let unlock_ok = std::user_unlock(0, entered_pin).is_ok()
-                || entered_pin == b"1234"
-                || (std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized) && vault.pin_len >= 4);
+            let unlock_ok = pin_unlocks(
+                std::user_unlock(0, entered_pin).is_ok(),
+                std::user_get_lock_state(0) == Ok(std::UserLockState::Uninitialized),
+                vault.pin_len,
+            );
+            clear_pin(vault);
             if unlock_ok {
                 vault.is_authenticated = true;
                 vault.pin_modal_open = false;
@@ -2408,7 +2428,6 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
                 std::log("[VAULT] Sovereign identity authenticated. Vault unlocked.").ok();
             } else {
                 vault.pin_error = true;
-                vault.pin_len = 0;
                 status(vault, b"authentication failed: invalid PIN");
                 std::log("[VAULT] Sovereign authentication failed: invalid PIN.").ok();
             }
@@ -2443,7 +2462,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
             vault.show_credentials = true;
         } else {
             vault.pin_modal_open = true;
-            vault.pin_len = 0;
+            clear_pin(vault);
             vault.pin_error = false;
         }
         std::audio_haptic_click().ok();

@@ -4992,7 +4992,9 @@ fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_typ
     let Some(req) = std::appmcp::AppMcpRequest::from_bytes(raw) else {
         return false;
     };
-    if req.cap_handle == 0 {
+    // Zero ambient authority: the kernel verifies the sender's own capability
+    // table. A non-zero integer in `cap_handle` proves nothing on its own.
+    if !std::appmcp::authorize_tool_sender(sender, req.cap_handle) {
         let resp = std::appmcp::AppMcpResponse::error(
             std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
             req.tool_id,

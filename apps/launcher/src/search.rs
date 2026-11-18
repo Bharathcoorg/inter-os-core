@@ -334,6 +334,144 @@ impl SemanticRanker {
     }
 }
 
+/// The wire lengths of the search protocol's fixed headers, read byte-for-byte
+/// from the SDK's `repr(C)` layouts.
+const SEARCH_REQUEST_HDR: usize = core::mem::size_of::<interos_std::ai::AiSearchRequest>();
+const SEARCH_REPLY_HDR: usize = core::mem::size_of::<interos_std::ai::AiInferenceResponse>();
+const SEARCH_HIT_LEN: usize = core::mem::size_of::<interos_std::ai::AiSearchHit>();
+
+/// The most hits one reply can carry: the service ranks into a fixed eight-slot
+/// match array, so a larger `top_k` cannot produce more frames than this.
+const SEARCH_MAX_HITS: usize = 8;
+/// The longest source path and snippet a hit frame may name, per the service's
+/// document bounds (`MAX_DOC_PATH_LEN`, `MAX_CHUNK_TEXT_LEN`).
+const SEARCH_PATH_MAX: usize = 64;
+const SEARCH_SNIPPET_MAX: usize = 192;
+/// The frame buffer sized from those bounds: a reply header plus every hit the
+/// service can return, each with its path and snippet. A frame that arrives
+/// larger is parsed only as far as it reached and then refused, never overflowed.
+const SEARCH_FRAME_MAX: usize =
+    SEARCH_REPLY_HDR + SEARCH_MAX_HITS * (SEARCH_HIT_LEN + SEARCH_PATH_MAX + SEARCH_SNIPPET_MAX);
+
+/// The Matryoshka width the query asks for, matching the lexical fallback's 128-D
+/// projection so a service score and a lexical score share one scale.
+const SEARCH_TARGET_DIM: u32 = 128;
+/// The cooperative wait, in kernel ticks, for the service's reply to land before
+/// the ranking falls back to the lexical path.
+const SEARCH_REPLY_POLL_TICKS: u32 = 50;
+
+/// Frames a real `AiSearchRequest` -- the four-field header the service parses,
+/// then the query bytes -- into `out`, returning the length written.
+///
+/// WHY a header and not a bare query: the service reads the first sixteen bytes
+/// as `AiSearchRequest` whenever the payload is at least that long, so a bare
+/// query is misread as a request whose `top_k` and `query_len` are whatever the
+/// query's first words happen to spell. The query is cut to the room the mailbox
+/// leaves after the header (`IPC_MAX_PAYLOAD` is sixty-four bytes); a cut query
+/// is still a honestly-framed one.
+pub fn frame_search_request(query: &[u8], out: &mut [u8]) -> usize {
+    if out.len() < SEARCH_REQUEST_HDR {
+        return 0;
+    }
+    let query_len = query.len().min(out.len() - SEARCH_REQUEST_HDR);
+    let req = interos_std::ai::AiSearchRequest {
+        target_dim: SEARCH_TARGET_DIM,
+        top_k: SEARCH_MAX_HITS as u32,
+        min_confidence: 0,
+        query_len: query_len as u32,
+    };
+    out[0..4].copy_from_slice(&req.target_dim.to_le_bytes());
+    out[4..8].copy_from_slice(&req.top_k.to_le_bytes());
+    out[8..12].copy_from_slice(&req.min_confidence.to_le_bytes());
+    out[12..16].copy_from_slice(&req.query_len.to_le_bytes());
+    out[SEARCH_REQUEST_HDR..SEARCH_REQUEST_HDR + query_len]
+        .copy_from_slice(&query[..query_len]);
+    SEARCH_REQUEST_HDR + query_len
+}
+
+/// The real per-entry similarity the service reported for `entry`, or `None`.
+///
+/// Walks the framed reply -- an `AiInferenceResponse` header counting the hits,
+/// then each `AiSearchHit` followed by its path and snippet -- and returns the
+/// `score_q15` of the hit whose source path is exactly the entry's target. That
+/// join is the honest one: the service scored a document, and only the row that
+/// opens that document may claim its score. A reply that is unavailable, empty,
+/// malformed, truncated, or simply names no hit for this entry yields `None`, so
+/// the caller falls back to the labelled lexical path rather than inventing a
+/// number. Every read is bounds-checked against the bytes that actually arrived.
+pub fn service_hit_score(frame: &[u8], entry: &Entry) -> Option<i16> {
+    if frame.len() < SEARCH_REPLY_HDR {
+        return None;
+    }
+    let resp = unsafe {
+        core::ptr::read_unaligned(frame.as_ptr() as *const interos_std::ai::AiInferenceResponse)
+    };
+    if resp.status != interos_std::ai::STATUS_SUCCESS {
+        return None;
+    }
+    let target = entry.target();
+    let count = (resp.output_dim as usize).min(SEARCH_MAX_HITS);
+    let mut cursor = SEARCH_REPLY_HDR;
+    for _ in 0..count {
+        if cursor + SEARCH_HIT_LEN > frame.len() {
+            return None;
+        }
+        let hit = unsafe {
+            core::ptr::read_unaligned(
+                frame[cursor..].as_ptr() as *const interos_std::ai::AiSearchHit,
+            )
+        };
+        cursor += SEARCH_HIT_LEN;
+        let path_len = hit.path_len as usize;
+        let snippet_len = hit.snippet_len as usize;
+        if cursor + path_len + snippet_len > frame.len() {
+            return None;
+        }
+        let path = &frame[cursor..cursor + path_len];
+        cursor += path_len + snippet_len;
+        if path == target {
+            return Some(hit.score_q15);
+        }
+    }
+    None
+}
+
+/// The ranking arithmetic: a positive similarity adds a bounded boost to the
+/// lexical base, or admits a strong semantic candidate on its own.
+///
+/// WHY this is a function of its own: the scale (`400 / 32767`), the candidate
+/// threshold (`8000`) and the candidate base (`250`) are the ranking's existing
+/// bounds, and splitting them out lets a host test drive the exact arithmetic a
+/// real per-entry score feeds, without a device or a running service.
+pub fn semantic_score(base: Option<u32>, sim: i16) -> Option<u32> {
+    if sim > 0 {
+        let sim_boost = (sim as u32 * 400) / 32767;
+        if let Some(base) = base {
+            Some(base.saturating_add(sim_boost))
+        } else if sim > 8000 {
+            Some(250 + sim_boost)
+        } else {
+            None
+        }
+    } else {
+        base
+    }
+}
+
+/// The labelled lexical similarity of query and entry title.
+///
+/// Platform Truth Contract: `compute_text_embedding_q7` is a lexical n-gram hash
+/// projection into 128-D space, not a neural embedding from weights. This is the
+/// deterministic fallback the ranking uses whenever the service reports no
+/// per-entry score; it is never presented as a model's answer.
+pub fn lexical_similarity(query: &[u8], entry: &Entry) -> i16 {
+    let mut query_vec = [0i8; 128];
+    let mut entry_vec = [0i8; 128];
+    interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
+    interos_std::ai::compute_text_embedding_q7(entry.title(), &mut entry_vec);
+    interos_std::ai::cosine_similarity_q7(&query_vec, &entry_vec)
+}
+
 impl Ranker for SemanticRanker {
     fn score(&self, query: &[u8], entry: &Entry) -> Option<u32> {
         let base_score = self.exact.score(query, entry);
@@ -344,61 +482,91 @@ impl Ranker for SemanticRanker {
             return base_score;
         }
 
-        // Platform Truth Contract: `compute_text_embedding_q7` is a lexical n-gram hash
-        // projection into 128-D space, not a neural embedding from weights. True neural
-        // retrieval requires IPC vector query to `aid` (`0xFFFF_000C`). When AI status
-        // is marked available, this attempts IPC query to `aid` and calculates similarity
-        // with fallback to the deterministic n-gram projection.
-        let mut sim = 0i16;
-        let mut ipc_matched = false;
-
-        let mut req_buf = [0u8; 64];
-        let req_len = query.len().min(req_buf.len());
-        req_buf[..req_len].copy_from_slice(&query[..req_len]);
-
-        if interos_std::ipc_send(
-            interos_std::ai::SERVICE_INFERENCE_TASK_ID,
-            interos_std::ai::MSG_TYPE_SEARCH,
-            &req_buf[..req_len],
-        ).is_ok() {
-            let mut rx_buf = [0u8; 128];
-            if let Ok(rx_len) = interos_std::ipc_recv(&mut rx_buf) {
-                if rx_len >= core::mem::size_of::<interos_std::ai::AiInferenceResponse>() {
-                    let resp = unsafe {
-                        core::ptr::read_unaligned(
-                            rx_buf.as_ptr() as *const interos_std::ai::AiInferenceResponse,
-                        )
-                    };
-                    if resp.status == interos_std::ai::STATUS_SUCCESS && resp.output_dim > 0 {
-                        sim = 16384;
-                        ipc_matched = true;
-                    }
-                }
-            }
-        }
-
-        if !ipc_matched {
-            let mut query_vec = [0i8; 128];
-            let mut entry_vec = [0i8; 128];
-            interos_std::ai::compute_text_embedding_q7(query, &mut query_vec);
-            interos_std::ai::compute_text_embedding_q7(entry.title(), &mut entry_vec);
-            sim = interos_std::ai::cosine_similarity_q7(&query_vec, &entry_vec);
-        }
-
-        if sim > 0 {
-            let sim_boost = (sim as u32 * 400) / 32767;
-            if let Some(base) = base_score {
-                Some(base.saturating_add(sim_boost))
-            } else if sim > 8000 {
-                // Semantic candidate hit for semantically close query
-                Some(250 + sim_boost)
-            } else {
-                None
-            }
-        } else {
-            base_score
-        }
+        // Ask the inference service for a real retrieval and use the score it
+        // reported for THIS entry. Only a per-entry score that actually arrived
+        // counts; everything else -- no service, no reply, no matching hit, a
+        // truncated frame -- falls back to the labelled lexical projection.
+        let sim = match query_service_similarity(query, entry) {
+            Some(sim) => sim,
+            None => lexical_similarity(query, entry),
+        };
+        semantic_score(base_score, sim)
     }
+}
+
+/// Sends a framed search query to `aid` and returns the service's real score for
+/// `entry`, or `None` when no per-entry score arrived.
+///
+/// WHY the reply is taken by sender and type: the mailbox carries whatever the
+/// platform posted, so an untargeted read could interpret an unrelated message
+/// as the answer. `receive_any` reports the router-stamped sender and the message
+/// type, and only the inference service's search reply is accepted.
+///
+/// WHY two routes are read: the service streams a multi-hit frame over a shared
+/// memory channel and posts a sixteen-byte `AiStreamNotice` (`MSG_TYPE_SEARCH_CHUNK`);
+/// when no channel is free it falls back to an inline `MSG_TYPE_SEARCH` reply the
+/// mailbox cuts at sixty-four bytes. The streamed frame is drained slot by slot
+/// into a buffer sized from the protocol bounds; the inline frame is parsed as far
+/// as it reached. Either way the parser, not the transport, decides what is whole.
+fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
+    let mut req_buf = [0u8; 64];
+    let req_len = frame_search_request(query, &mut req_buf);
+    if req_len == 0 {
+        return None;
+    }
+    if interos_std::ipc_send(
+        interos_std::ai::SERVICE_INFERENCE_TASK_ID,
+        interos_std::ai::MSG_TYPE_SEARCH,
+        &req_buf[..req_len],
+    )
+    .is_err()
+    {
+        return None;
+    }
+
+    // Give the service a bounded moment to answer; the wait is cooperative and
+    // returns at once when the platform reports no event (as on a host test).
+    let _ = interos_std::event_poll(
+        interos_std::EVENT_IPC_MSG | interos_std::EVENT_SHM_READABLE,
+        SEARCH_REPLY_POLL_TICKS,
+    );
+
+    let mut rx_buf = [0u8; 64];
+    let (sender, msg_type, rx_len) = interos_std::ipc::receive_any(&mut rx_buf).ok()?;
+    if sender != interos_std::ai::SERVICE_INFERENCE_TASK_ID {
+        return None;
+    }
+
+    let mut frame = [0u8; SEARCH_FRAME_MAX];
+    let frame_len = if msg_type == interos_std::ai::MSG_TYPE_SEARCH_CHUNK {
+        let notice = interos_std::ai::AiStreamNotice::from_bytes(&rx_buf[..rx_len])?;
+        if notice.status != interos_std::ai::STATUS_SUCCESS {
+            return None;
+        }
+        let want = (notice.streamed_len as usize)
+            .min(notice.total_len as usize)
+            .min(frame.len());
+        let mut collected = 0usize;
+        while collected < want {
+            let cap = (want - collected).min(interos_std::ai::ANSWER_SLOT_BYTES);
+            match interos_std::shm_pipe_receive(
+                notice.pipe_id,
+                &mut frame[collected..collected + cap],
+            ) {
+                Ok(read) if read > 0 => collected += read.min(cap),
+                _ => break,
+            }
+        }
+        collected
+    } else if msg_type == interos_std::ai::MSG_TYPE_SEARCH {
+        let take = rx_len.min(frame.len());
+        frame[..take].copy_from_slice(&rx_buf[..take]);
+        take
+    } else {
+        return None;
+    };
+
+    service_hit_score(&frame[..frame_len], entry)
 }
 
 /// Compares two byte runs without regard to case.

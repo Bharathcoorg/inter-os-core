@@ -1193,6 +1193,9 @@ pub struct AgentManagerApp {
     pub tool_authority: ToolAuthority,
     /// What the platform said the last time this app asked for that authority.
     pub tool_consent: ConsentOutcome,
+    /// Whether the person has allowed keeping conversations in this app's
+    /// sandbox storage. Refused until the consent record says otherwise.
+    pub chat_consent: bool,
     /// Bounded agent tool execution outcomes.
     pub agent_tools: [AgentToolOutcome; 5],
     /// Physical memory diagnostics from microkernel.
@@ -1283,6 +1286,7 @@ impl AgentManagerApp {
             storage_bytes: std::storage_query().ok(),
             tool_authority: authority,
             tool_consent: ConsentOutcome::Refused,
+            chat_consent: agent_manager::load_chat_consent(),
             agent_tools: [
                 AgentToolOutcome::execute_with_authority(AgentTool::Calculator, &authority),
                 AgentToolOutcome::execute_with_authority(AgentTool::CalendarClock, &authority),
@@ -1299,15 +1303,24 @@ impl AgentManagerApp {
             probe: EmbedProbe::new(),
             keyboard: AgentKeyboard::new(),
         };
-        let _ = app.chat.load_from_storage(agent_manager::CHAT_STORAGE_PATH);
+        let _ = agent_manager::restore_transcript(
+            agent_manager::CHAT_STORAGE_PATH,
+            app.chat_consent,
+            |path| app.chat.load_from_storage(path),
+        );
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
         app.rebuild();
         app
     }
 
-    /// Persists the active conversation transcript to the sandboxed application storage.
+    /// Persists the active conversation transcript, and only under the
+    /// person's explicit consent to keep conversations.
     pub fn persist_chat(&self) {
-        let _ = self.chat.save_to_storage(agent_manager::CHAT_STORAGE_PATH);
+        let _ = agent_manager::persist_transcript(
+            agent_manager::CHAT_STORAGE_PATH,
+            self.chat_consent,
+            |path| self.chat.save_to_storage(path),
+        );
     }
 
     /// Records the result of the last action.
@@ -1424,6 +1437,50 @@ impl AgentManagerApp {
             AgentToolOutcome::refused(AgentTool::CapabilityCheck),
         ];
         self.set_action(b"Tool authority revoked by task.", Tone::Muted);
+        self.rebuild();
+    }
+
+    /// Allows or stops keeping conversations, on the person's explicit tap.
+    ///
+    /// WHY stopping erases what was kept: the consent is about the platform
+    /// holding the person's words, and withdrawing it while the words stay
+    /// on disk would be a consent in name only. The erase is the same
+    /// unlink the CLEAR control uses, and its result is reported as the
+    /// platform answered it.
+    pub fn toggle_chat_consent(&mut self) {
+        let granted = !self.chat_consent;
+        if !agent_manager::save_chat_consent(granted) {
+            self.set_action(
+                b"Conversation storage setting not saved: the platform refused the write.",
+                Tone::Unavailable,
+            );
+            self.rebuild();
+            return;
+        }
+        self.chat_consent = granted;
+        if granted {
+            // WHY a stored transcript is read back only here: the person
+            // has just agreed to keep conversations, and only an empty
+            // session takes the old one so two exchanges never interleave.
+            if self.chat.is_empty() {
+                let _ = self.chat.load_from_storage(agent_manager::CHAT_STORAGE_PATH);
+            }
+            self.set_action(
+                b"Keeping conversations allowed. Transcripts are plaintext in this app's sandbox.",
+                Tone::Good,
+            );
+        } else {
+            match interos_std::fs_unlink(agent_manager::CHAT_STORAGE_PATH) {
+                Ok(()) => self.set_action(
+                    b"Keeping conversations stopped. Stored transcript erased.",
+                    Tone::Muted,
+                ),
+                Err(_) => self.set_action(
+                    b"Keeping conversations stopped. Erase not confirmed by the platform.",
+                    Tone::Muted,
+                ),
+            }
+        }
         self.rebuild();
     }
 
@@ -2203,6 +2260,23 @@ impl AgentManagerApp {
 
     /// Builds the permissions surface.
     fn build_access(&mut self) {
+        self.begin_card(b"Conversation storage", Tone::Plain);
+        self.add_selectable_chip(
+            b"Keep conversations",
+            if self.chat_consent { b"ON" } else { b"OFF" },
+            if self.chat_consent { Tone::Good } else { Tone::Plain },
+            0,
+        );
+        self.add_wide(
+            b"Off by default. While off, no transcript byte is written to storage and none is read back.",
+            Tone::Muted,
+        );
+        self.add_wide(
+            b"Kept transcripts are plaintext in this app's sandbox, not encrypted. Turning this off erases what was kept.",
+            Tone::Muted,
+        );
+        self.add_wide(b"Tap the row above to allow or stop keeping conversations.", Tone::Muted);
+
         // WHY the grants are copied out: the builder mutates the body while
         // it walks the list, and the list belongs to the app.
         let grants = self.grants;
@@ -2877,6 +2951,21 @@ impl AgentManagerApp {
         );
         self.add_wide(availability.reason().as_bytes(), Tone::Muted);
 
+        self.begin_card(b"Conversation storage", Tone::Plain);
+        self.add_chip(
+            b"Keep chats",
+            if self.chat_consent { b"ON" } else { b"OFF" },
+            if self.chat_consent { Tone::Good } else { Tone::Plain },
+        );
+        self.add_wide(
+            if self.chat_consent {
+                b"Transcripts are kept as plaintext in this app's sandbox. The Access tab can stop this and erase them."
+            } else {
+                b"No conversation is written or read. The Access tab can allow keeping chats."
+            },
+            Tone::Muted,
+        );
+
         if self.chat.is_empty() {
             // WHY an empty conversation still says something: a screen that
             // is blank tells the reader nothing, and the honest thing to
@@ -2927,7 +3016,6 @@ impl AgentManagerApp {
         prompt[..len].copy_from_slice(&self.chat.prompt_text()[..len]);
         self.chat.push(ChatRole::User, &prompt[..len]);
         self.chat.clear_prompt();
-        self.persist_chat();
 
         let availability = resolve_inference_service(&self.device.services);
         if !availability.is_available() {
@@ -2935,9 +3023,13 @@ impl AgentManagerApp {
             // the honest answer to a prompt is the reason there is no
             // answer. The platform's own words, not a sentence invented
             // here.
+            //
+            // WHY nothing is persisted on this arm: the exchange never
+            // passed the service gate, and a refused prompt is not a
+            // conversation the platform kept. It stays on screen, in
+            // memory, for as long as the app holds it.
             self.chat
                 .push(ChatRole::Notice, availability.reason().as_bytes());
-            self.persist_chat();
             self.set_action(availability.reason().as_bytes(), Tone::Unavailable);
             self.rebuild();
             return;
@@ -2974,6 +3066,10 @@ impl AgentManagerApp {
         // reads it once the platform says a message is waiting.
         self.chat.start_stream(&prompt[..len]);
         self.answer_deadline = t1.saturating_add(ANSWER_TIMEOUT_TICKS);
+        // WHY persistence sits here: the exchange has passed the service
+        // gate, so the prompt is part of a conversation the platform took.
+        // Whether it is written at all is still the person's consent.
+        self.persist_chat();
         self.rebuild();
     }
 
@@ -5179,6 +5275,8 @@ fn handle_tap(app: &mut AgentManagerApp, x: u32, y: u32) -> Tap {
                 app.select_provider(action as usize);
             } else if app.surface == Surface::Test {
                 app.run_single_tool(action as usize);
+            } else if app.surface == Surface::Access && action == 0 {
+                app.toggle_chat_consent();
             }
             return Tap::Redraw;
         }

@@ -934,19 +934,208 @@ fn semantic_ranker_falls_back_to_exact_and_token_prefix_matching() {
 }
 
 #[test]
-fn semantic_ranker_cosine_similarity_ranking_when_available() {
-    use crate::search::{AiEmbeddingStatus, SemanticRanker};
+fn semantic_ranker_without_a_reachable_service_uses_the_labelled_lexical_path() {
+    use crate::search::{lexical_similarity, semantic_score, AiEmbeddingStatus, SemanticRanker};
 
     let ranker = SemanticRanker::new(AiEmbeddingStatus::Available { abi_version: 1 });
     let mut index = search::Index::new();
     index.push(Entry::new(SearchKind::App, b"Settings", b"Tools", b"org.interos.settings"));
     index.push(Entry::new(SearchKind::App, b"Camera", b"Media", b"org.interos.camera"));
 
-    // Prefix query "set" matches Settings with a score boosted by cosine similarity
+    // No service reply is reachable from a host test, so the ranking must fall
+    // back to the labelled lexical projection -- not stamp a fabricated uniform
+    // offset on every entry. The score is pinned to the exact lexical arithmetic.
     let results = index.search(b"set", &ranker);
     assert_eq!(results.count, 1);
     let hit = results.hit(0).expect("hit");
-    assert!(hit.score > 800, "score {} must include semantic similarity boost", hit.score);
+    let entry = index.get(hit.index as usize).expect("entry");
+    assert_eq!(entry.title(), b"Settings");
+    let base = search::ExactMatch.score(b"set", entry);
+    let expected = semantic_score(base, lexical_similarity(b"set", entry));
+    assert_eq!(
+        Some(hit.score), expected,
+        "the score must be the real lexical boost, not an invented constant"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The semantic search wire path: a real per-entry score, or an honest fallback
+// ---------------------------------------------------------------------------
+
+/// Builds a framed search reply -- an `AiInferenceResponse` header counting the
+/// hits, then each `AiSearchHit` followed by its source path -- using the SDK's
+/// own `repr(C)` layouts so the test reads the bytes the service writes.
+fn search_reply_frame(hits: &[(&[u8], i16)]) -> ([u8; 1024], usize) {
+    use interos_std::ai::{AiInferenceResponse, AiSearchHit, STATUS_SUCCESS};
+    let mut buf = [0u8; 1024];
+    let hdr = AiInferenceResponse {
+        status: STATUS_SUCCESS,
+        output_dim: hits.len() as u32,
+        latency_micros: 0,
+        output_offset: core::mem::size_of::<AiInferenceResponse>() as u64,
+    };
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &hdr as *const _ as *const u8,
+            core::mem::size_of::<AiInferenceResponse>(),
+        )
+    };
+    buf[..hdr_bytes.len()].copy_from_slice(hdr_bytes);
+    let mut at = hdr_bytes.len();
+    for (index, (path, score)) in hits.iter().enumerate() {
+        let hit = AiSearchHit {
+            chunk_id: index as u64,
+            start_offset: 0,
+            end_offset: 0,
+            score_q15: *score,
+            confidence_percent: 0,
+            is_neural: 0,
+            path_len: path.len() as u16,
+            snippet_len: 0,
+        };
+        let hit_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &hit as *const _ as *const u8,
+                core::mem::size_of::<AiSearchHit>(),
+            )
+        };
+        buf[at..at + hit_bytes.len()].copy_from_slice(hit_bytes);
+        at += hit_bytes.len();
+        buf[at..at + path.len()].copy_from_slice(path);
+        at += path.len();
+    }
+    (buf, at)
+}
+
+#[test]
+fn a_search_reply_boosts_each_entry_by_its_own_hit_score() {
+    use crate::search::{semantic_score, service_hit_score};
+
+    // Two hits carrying DIFFERENT real scores for two different documents.
+    let (frame, len) = search_reply_frame(&[
+        (b"/storage/alpha.txt", 20000),
+        (b"/storage/beta.txt", 4000),
+    ]);
+    let frame = &frame[..len];
+    let alpha = Entry::new(SearchKind::File, b"alpha.txt", b"", b"/storage/alpha.txt");
+    let beta = Entry::new(SearchKind::File, b"beta.txt", b"", b"/storage/beta.txt");
+
+    let sim_alpha = service_hit_score(frame, &alpha).expect("a hit for alpha");
+    let sim_beta = service_hit_score(frame, &beta).expect("a hit for beta");
+    assert_eq!(sim_alpha, 20000, "the entry's own hit score must be read");
+    assert_eq!(sim_beta, 4000, "the entry's own hit score must be read");
+
+    let score_alpha = semantic_score(Some(400), sim_alpha).expect("a score");
+    let score_beta = semantic_score(Some(400), sim_beta).expect("a score");
+    // 20000 * 400 / 32767 = 244 ; 4000 * 400 / 32767 = 48
+    assert_eq!(score_alpha, 400 + 244);
+    assert_eq!(score_beta, 400 + 48);
+    assert_ne!(
+        score_alpha, score_beta,
+        "different per-hit scores must produce different boosts, not one constant offset"
+    );
+}
+
+#[test]
+fn a_reply_with_no_per_entry_score_falls_back_to_lexical_not_a_constant() {
+    use crate::search::{lexical_similarity, semantic_score, service_hit_score, AiEmbeddingStatus, SemanticRanker};
+
+    let entry = Entry::new(SearchKind::File, b"alpha.txt", b"", b"/storage/alpha.txt");
+
+    // A successful reply that names a different document carries no score for
+    // this entry, and a zero-hit reply carries none at all.
+    let (other, other_len) = search_reply_frame(&[(b"/storage/other.txt", 20000)]);
+    assert_eq!(service_hit_score(&other[..other_len], &entry), None);
+    let (empty, empty_len) = search_reply_frame(&[]);
+    assert_eq!(service_hit_score(&empty[..empty_len], &entry), None);
+
+    // The fallback the ranker then uses is the labelled lexical projection,
+    // which differs per entry rather than stamping one number on everything.
+    let settings = Entry::new(SearchKind::App, b"Settings", b"Tools", b"org.interos.settings");
+    let camera = Entry::new(SearchKind::App, b"Camera", b"Media", b"org.interos.camera");
+    let sim_settings = lexical_similarity(b"set", &settings);
+    let sim_camera = lexical_similarity(b"set", &camera);
+    assert_ne!(
+        sim_settings, sim_camera,
+        "the lexical fallback is a per-entry similarity, not a uniform constant"
+    );
+
+    // With the service marked available but unreachable (as on a host), the
+    // ranker's score is exactly the lexical arithmetic, never a fabricated boost.
+    let ranker = SemanticRanker::new(AiEmbeddingStatus::Available { abi_version: 1 });
+    let base = search::ExactMatch.score(b"set", &settings);
+    assert_eq!(
+        ranker.score(b"set", &settings),
+        semantic_score(base, sim_settings)
+    );
+}
+
+#[test]
+fn the_search_request_carries_a_real_header() {
+    use crate::search::frame_search_request;
+    use interos_std::ai::AiSearchRequest;
+
+    let mut buf = [0u8; 64];
+    let len = frame_search_request(b"holiday", &mut buf);
+    assert_eq!(len, core::mem::size_of::<AiSearchRequest>() + 7);
+    let req = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const AiSearchRequest) };
+    assert_eq!(req.target_dim, 128);
+    assert_eq!(req.top_k, 8);
+    assert_eq!(req.query_len, 7);
+    assert_eq!(&buf[core::mem::size_of::<AiSearchRequest>()..len], b"holiday");
+
+    // A query longer than the mailbox room is cut, but the header still names
+    // the cut length honestly rather than the length the caller wished for.
+    let long = [b'x'; 200];
+    let cut = frame_search_request(&long, &mut buf);
+    assert_eq!(cut, 64);
+    let req = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const AiSearchRequest) };
+    assert_eq!(req.query_len, 48);
+}
+
+#[test]
+fn a_truncated_search_reply_is_refused_rather_than_guessed() {
+    use crate::search::service_hit_score;
+
+    let (frame, len) = search_reply_frame(&[(b"/storage/alpha.txt", 20000)]);
+    let entry = Entry::new(SearchKind::File, b"alpha.txt", b"", b"/storage/alpha.txt");
+    assert_eq!(service_hit_score(&frame[..len], &entry), Some(20000));
+    // Cut inside the path: the hit's bytes did not all arrive, so no score is
+    // claimed from a fragment.
+    assert_eq!(service_hit_score(&frame[..len - 1], &entry), None);
+    // Cut inside the reply header.
+    assert_eq!(service_hit_score(&frame[..8], &entry), None);
+}
+
+#[test]
+fn a_non_success_search_reply_is_not_scored() {
+    use crate::search::service_hit_score;
+    use interos_std::ai::{AiInferenceResponse, STATUS_UNAVAILABLE};
+
+    let mut frame = [0u8; 64];
+    let hdr = AiInferenceResponse {
+        status: STATUS_UNAVAILABLE,
+        output_dim: 1,
+        latency_micros: 0,
+        output_offset: 24,
+    };
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &hdr as *const _ as *const u8,
+            core::mem::size_of::<AiInferenceResponse>(),
+        )
+    };
+    frame[..hdr_bytes.len()].copy_from_slice(hdr_bytes);
+    let entry = Entry::new(SearchKind::File, b"alpha.txt", b"", b"/storage/alpha.txt");
+    assert_eq!(service_hit_score(&frame, &entry), None);
+}
+
+#[test]
+fn the_search_wire_layouts_match_the_sdk() {
+    use interos_std::ai::{AiInferenceResponse, AiSearchHit, AiSearchRequest};
+    assert_eq!(core::mem::size_of::<AiSearchRequest>(), 16);
+    assert_eq!(core::mem::size_of::<AiInferenceResponse>(), 24);
+    assert_eq!(core::mem::size_of::<AiSearchHit>(), 24);
 }
 
 #[test]

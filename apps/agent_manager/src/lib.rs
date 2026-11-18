@@ -219,6 +219,101 @@ pub const CHAT_MAX_MESSAGES: usize = 10;
 /// The default relative path inside the application sandbox for persistent chat transcript.
 pub const CHAT_STORAGE_PATH: &str = "data/transcript.bin";
 
+/// The consent record for keeping conversations, in the app's private settings
+/// storage beside the provider preference.
+///
+/// WHY a record the person writes and not a kernel capability: the platform's
+/// permission broker mints capabilities for the categories it knows, and none
+/// of them is "keep this app's conversation on disk". The decision is the
+/// person's about their own words, so it is an explicit setting in the same
+/// private storage the provider preference already uses, and it is refused
+/// until the record says otherwise.
+pub const CHAT_CONSENT_PATH: &str = "chat_consent.bin";
+
+/// The refusal code for a transcript storage operation attempted without consent.
+///
+/// WHY it spells the record's magic: a platform errno could collide with a
+/// small number, and a test that tells "the gate refused" from "the storage
+/// syscall failed" needs a code the storage path cannot produce.
+pub const TRANSCRIPT_CONSENT_REFUSED: i64 = -0x4147_4343;
+
+/// Reads the consent record's bytes as the decision they carry.
+///
+/// WHY every malformed record is a refusal: the record is the only witness
+/// that the person allowed keeping conversations, and a witness that cannot
+/// be read has said nothing. Default deny.
+pub fn parse_chat_consent_record(buf: &[u8]) -> bool {
+    buf.len() >= 6 && &buf[..4] == b"AGCC" && buf[4] == 1 && buf[5] == 1
+}
+
+/// Whether the person has allowed this app to keep conversations.
+///
+/// WHY absence is refusal: a fresh install holds no record, and the default
+/// must be that no transcript byte is written or read until the person says
+/// so. A storage read that fails is the same answer: nothing was witnessed.
+pub fn load_chat_consent() -> bool {
+    let mut buf = [0u8; 6];
+    if let Ok(fd) = interos_std::app_storage_open(CHAT_CONSENT_PATH, interos_std::FS_READ) {
+        let read = interos_std::fs_read(fd, &mut buf);
+        let _ = interos_std::fs_close(fd);
+        if let Ok(n) = read {
+            return parse_chat_consent_record(&buf[..n]);
+        }
+    }
+    false
+}
+
+/// Writes the person's decision about keeping conversations, and reports
+/// whether the record now carries it.
+///
+/// WHY the answer is read back: a setting the storage refused to hold is not
+/// a setting, and a screen that said "on" over a record that was never
+/// written would claim a consent the next launch cannot find. Revocation
+/// removes the record, because absence is the refused state.
+pub fn save_chat_consent(granted: bool) -> bool {
+    if !granted {
+        let _ = interos_std::fs_unlink(CHAT_CONSENT_PATH);
+        return !load_chat_consent();
+    }
+    let buf = [b'A', b'G', b'C', b'C', 1u8, 1u8];
+    if let Ok(fd) = interos_std::app_storage_open(CHAT_CONSENT_PATH, interos_std::FS_WRITE) {
+        let _ = interos_std::fs_write(fd, &buf);
+        let _ = interos_std::fs_fsync(fd);
+        let _ = interos_std::fs_close(fd);
+    }
+    load_chat_consent()
+}
+
+/// Persists the transcript only under the person's explicit consent.
+///
+/// WHY the storage operation is an argument: the gate is the security
+/// property, and a gate buried in a syscall wrapper cannot be exercised by
+/// a host test. Split here, the refusal is observable without a device --
+/// the same shape `transact_package_install` uses for the install syscall.
+pub fn persist_transcript<F>(path: &str, consent: bool, save: F) -> Result<(), i64>
+where
+    F: FnOnce(&str) -> Result<(), i64>,
+{
+    if !consent {
+        return Err(TRANSCRIPT_CONSENT_REFUSED);
+    }
+    save(path)
+}
+
+/// Restores a stored transcript only under the person's explicit consent.
+///
+/// WHY reading is gated too: a conversation the person has not agreed to
+/// keep must not be silently read back into the app either.
+pub fn restore_transcript<F>(path: &str, consent: bool, load: F) -> Result<usize, i64>
+where
+    F: FnOnce(&str) -> Result<usize, i64>,
+{
+    if !consent {
+        return Err(TRANSCRIPT_CONSENT_REFUSED);
+    }
+    load(path)
+}
+
 /// One message in the conversation.
 #[derive(Clone, Copy)]
 pub struct ChatMessage {
@@ -4552,6 +4647,94 @@ mod tests {
         assert_eq!(chat.message_at(0).unwrap().text[..5], *b"first");
         assert_eq!(chat.message_at(1).unwrap().text[..6], *b"second");
         assert!(chat.message_at(2).is_none());
+    }
+
+    #[test]
+    fn persistence_without_consent_opens_no_storage() {
+        // WHY this matters: the defect this pins is a transcript written to
+        // disk with nobody's agreement. The injected save stands for the
+        // storage open and write; if the gate is removed it runs, and this
+        // test fails on the witnessed call rather than on a spelling.
+        use core::cell::Cell;
+        let opened = Cell::new(false);
+        let result = persist_transcript(CHAT_STORAGE_PATH, false, |path| {
+            opened.set(true);
+            assert_eq!(path, CHAT_STORAGE_PATH);
+            Ok(())
+        });
+        assert_eq!(result, Err(TRANSCRIPT_CONSENT_REFUSED));
+        assert!(!opened.get(), "storage was opened without consent");
+    }
+
+    #[test]
+    fn persistence_with_consent_saves_the_transcript_once() {
+        use core::cell::Cell;
+        let calls = Cell::new(0u8);
+        let result = persist_transcript(CHAT_STORAGE_PATH, true, |path| {
+            calls.set(calls.get() + 1);
+            assert_eq!(path, CHAT_STORAGE_PATH);
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn persistence_with_consent_reports_the_storage_answer() {
+        let result = persist_transcript(CHAT_STORAGE_PATH, true, |_| Err(-5));
+        assert_eq!(result, Err(-5));
+    }
+
+    #[test]
+    fn restore_without_consent_reads_no_storage() {
+        use core::cell::Cell;
+        let opened = Cell::new(false);
+        let result = restore_transcript(CHAT_STORAGE_PATH, false, |path| {
+            opened.set(true);
+            assert_eq!(path, CHAT_STORAGE_PATH);
+            Ok(3)
+        });
+        assert_eq!(result, Err(TRANSCRIPT_CONSENT_REFUSED));
+        assert!(!opened.get(), "a stored conversation was read without consent");
+    }
+
+    #[test]
+    fn restore_with_consent_loads_the_stored_transcript() {
+        use core::cell::Cell;
+        let calls = Cell::new(0u8);
+        let result = restore_transcript(CHAT_STORAGE_PATH, true, |path| {
+            calls.set(calls.get() + 1);
+            assert_eq!(path, CHAT_STORAGE_PATH);
+            Ok(3)
+        });
+        assert_eq!(result, Ok(3));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn the_consent_record_defaults_to_refused() {
+        assert!(!parse_chat_consent_record(&[]));
+        assert!(!parse_chat_consent_record(b"AGCC"));
+        assert!(!parse_chat_consent_record(b"AGCC\x01"));
+        assert!(!parse_chat_consent_record(b"AGCC\x01\x00"));
+        assert!(!parse_chat_consent_record(b"XXXX\x01\x01"));
+        assert!(!parse_chat_consent_record(b"AGCC\x02\x01"));
+        assert!(parse_chat_consent_record(b"AGCC\x01\x01"));
+    }
+
+    #[test]
+    fn consent_is_refused_when_no_record_can_be_read() {
+        // On the test host the storage syscall refuses, which is the same
+        // answer an absent record gives: the default is deny, and a read
+        // that failed witnesses nothing.
+        assert!(!load_chat_consent());
+    }
+
+    #[test]
+    fn a_grant_the_storage_cannot_hold_is_not_reported_as_saved() {
+        // The host's storage syscall refuses, so the read-back cannot find
+        // the record; the answer must be that the setting was not saved.
+        assert!(!save_chat_consent(true));
     }
 
     #[test]

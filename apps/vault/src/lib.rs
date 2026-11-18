@@ -257,6 +257,46 @@ pub fn hit_test_pin_disc(x: usize, y: usize) -> Option<u8> {
     None
 }
 
+/// The shortest PIN the pad accepts.
+pub const PIN_MIN_LEN: usize = 4;
+
+/// Whether a PIN attempt may open the credential list.
+///
+/// `verified` is the platform's own answer to `user_unlock` for the entered
+/// secret, which compares it against the credential stored for the account.
+/// `uninitialized` is whether that account has no credential at all yet.
+///
+/// WHY there is no third arm: a PIN literal accepted here would open every
+/// vault on the device whatever credential the owner set, which is a universal
+/// bypass rather than a default. A default PIN is only ever legitimate as a
+/// stored credential, and a stored credential is verified by `verified` -- so
+/// the normal path already accepts it and no literal is needed. The
+/// uninitialized arm is the kernel's own first-boot semantics for an account
+/// with no credential, not a way past a stored one.
+pub fn pin_unlocks(verified: bool, uninitialized: bool, pin_len: usize) -> bool {
+    verified || (uninitialized && pin_len >= PIN_MIN_LEN)
+}
+
+/// Overwrites a secret buffer so the bytes do not outlive their use.
+///
+/// WHY volatile writes, a fence and a `black_box`: a plain store to a buffer
+/// nothing reads again is a dead store the optimiser may delete, which would
+/// leave the secret in memory while the source claimed it was cleared. This is
+/// the shape the kernel's `crypto::zeroize_slice` uses.
+///
+/// WHAT THIS DOES NOT CLAIM: it clears the bytes this app holds. It cannot
+/// reach copies the platform made inside the unlock syscall, nor anything a
+/// register or a stack spill retained, so it is not perfect zeroization.
+pub fn wipe_secret(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(byte, 0);
+        }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    core::hint::black_box(buf.as_mut_ptr());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +986,86 @@ mod tests {
                 "the verdict {v:?} no longer fits its tile"
             );
         }
+    }
+
+    /// The bug this pins: the unlock condition used to carry a hardcoded
+    /// `|| entered_pin == b"1234"`, which opened every vault on the device
+    /// whatever credential the owner had set.
+    ///
+    /// WHAT THIS EXERCISES: the decision function both production unlock sites
+    /// call. It is handed the platform's verdict, not the digits, so no entered
+    /// value can reach it -- the exhaustive sweep below is the whole input
+    /// space, and a refusal stays a refusal at every length the pad accepts.
+    ///
+    /// WHAT IT CANNOT EXERCISE: `user_unlock` itself is a syscall, so whether
+    /// the platform accepts a given secret is decided by the kernel's stored
+    /// credential comparison and is not reachable from a host unit test.
+    #[test]
+    fn a_refused_pin_never_opens_the_vault_at_any_length() {
+        for len in 0..=8 {
+            assert!(
+                !pin_unlocks(false, false, len),
+                "a PIN the platform refused opened the vault at length {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_platforms_acceptance_is_what_opens_the_vault() {
+        assert!(pin_unlocks(true, false, 4));
+        assert!(pin_unlocks(true, false, 8));
+    }
+
+    /// An account with no credential yet is the kernel's own first-boot case.
+    /// It must not become a way past a stored credential: the moment a
+    /// credential exists the account is no longer uninitialized, and the sweep
+    /// above covers that state.
+    #[test]
+    fn a_credential_less_account_opens_only_on_a_long_enough_entry() {
+        assert!(pin_unlocks(false, true, PIN_MIN_LEN));
+        assert!(pin_unlocks(false, true, 8));
+        assert!(!pin_unlocks(false, true, PIN_MIN_LEN - 1));
+        assert!(!pin_unlocks(false, true, 0));
+    }
+
+    /// The whole input space, so no combination of the three arguments can
+    /// produce an answer the policy above does not describe.
+    #[test]
+    fn the_pin_policy_is_exactly_the_two_documented_arms() {
+        for verified in [false, true] {
+            for uninitialized in [false, true] {
+                for len in 0..=16 {
+                    assert_eq!(
+                        pin_unlocks(verified, uninitialized, len),
+                        verified || (uninitialized && len >= PIN_MIN_LEN),
+                        "verified={verified} uninitialized={uninitialized} len={len}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wiping_a_secret_leaves_no_digit_behind() {
+        let mut pin = *b"12345678";
+        wipe_secret(&mut pin);
+        assert_eq!(pin, [0u8; 8]);
+    }
+
+    /// The backspace path wipes only the digits it removed, so the tail of the
+    /// buffer cannot hold a digit the pad no longer counts.
+    #[test]
+    fn wiping_a_tail_clears_the_removed_digits_only() {
+        let mut pin = *b"12345678";
+        wipe_secret(&mut pin[3..]);
+        assert_eq!(&pin[..3], b"123");
+        assert_eq!(&pin[3..], &[0u8; 5]);
+    }
+
+    #[test]
+    fn wiping_an_empty_buffer_is_harmless() {
+        let mut empty: [u8; 0] = [];
+        wipe_secret(&mut empty);
     }
 }
 
