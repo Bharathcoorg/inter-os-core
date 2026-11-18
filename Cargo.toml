@@ -35,6 +35,7 @@ resolver = "2"
 [profile.dev]
 opt-level = 3
 panic = "abort"
+incremental = false
 
 [profile.release]
 panic = "abort"

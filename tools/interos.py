@@ -651,6 +651,9 @@ def cmd_build(args):
         env = dict(os.environ)
         if arch_target == "x86_64-unknown-none":
             env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
+        elif arch_target == "aarch64-unknown-none":
+            # NOTE: Entry point _start is required for no_main
+            env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x80000000"
         res = subprocess.run([
             "cargo", "build", "--locked", "--manifest-path", str(app_dir / "Cargo.toml"),
             "--target", arch_target
