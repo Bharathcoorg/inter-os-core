@@ -2387,7 +2387,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     if not os.path.exists(img_path):
         return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'.", launch_info
     default_data_disk = "inter-os-data-master.img" if arch == "x86_64" else f"interos-data-{arch}.img"
-    data_disk_path = os.environ.get("DATA_DISK_PATH", os.path.join(WORKSPACE_ROOT, "target", default_data_disk))
+    data_disk_path = os.environ.get("DATA_DISK_PATH", os.path.join(WORKSPACE_ROOT, "target", "verify", "correctly_provisioned_data.img"))
     if not os.path.isabs(data_disk_path) and ".." in data_disk_path:
         return False, "Security violation: Invalid data disk path traversal detected.", launch_info
 
@@ -2523,6 +2523,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         cmd.extend([
             "-drive", f"format=raw,file={data_disk_path},if=none,id=datad",
             "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
+            "-drive", f"format=raw,file={data_disk_path},if=none,id=modeld",
+            "-device", "ide-hd,bus=ide.1,unit=0,drive=modeld",
         ])
         # A real E1000 NIC on user-mode networking. Without one the guest has no
         # network hardware at all and every packet stays on the kernel loopback
